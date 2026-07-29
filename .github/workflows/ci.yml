@@ -139,40 +139,60 @@ jobs:
         run: |
           set -euo pipefail
           eval $(opam env)
-          # Measured 2026-07-28 on this file: 8 proved, 0 violated, 28 skipped
-          # (unreflectable-predicate 1, solver-undecided 27). Lower is better —
-          # this is a CEILING on skips, so it may only ever be revised DOWN.
+          # This ratchet is two INDEPENDENT bounds, read from two different
+          # files, because no single file was a good source for both:
+          #
+          #   CEILING (skips must not rise) — read from the whole-program
+          #   (`user + stdlib`) slice of stdlib/list.march. Measured
+          #   2026-07-29: 8 proved, 0 violated, 28 skipped (unreflectable-
+          #   predicate 1, solver-undecided 27). Lower is better — this bound
+          #   may only ever be revised DOWN. This is the check that is
+          #   actually sensitive to the pass checking less than it used to:
+          #   if the walk still descends into the file but proves fewer of
+          #   the obligations it raises, skips rises and this fires.
+          #
+          #   FLOOR (proved must not fall) — a ceiling alone is not a ratchet:
+          #   if the walk stopped descending into a file ENTIRELY, it raises
+          #   zero obligations there and reports 0 skipped, satisfying the
+          #   ceiling trivially. stdlib/list.march cannot host this floor:
+          #   its OWN (`user code`) slice is 0 proved / 0 violated / 5 skipped
+          #   — every one of its 8 "proved" obligations comes from the
+          #   prepended stdlib prelude, not from the file, so an empty file
+          #   reports the same 8 and the floor would defend nothing. Instead
+          #   read the `user code` slice of a small fixture that itself
+          #   proves something: specs/lang/types/accept/t118_refine_length_
+          #   guard_discharges.march, whose `user code` slice is 1 proved /
+          #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
+          #   — this bound may only ever be revised UP.
           baseline=28
-          # A ceiling alone is not a ratchet: if the pass stopped raising
-          # obligations at all, `skipped` would be 0 and the ceiling would be
-          # satisfied by a checker that checks nothing. So pin a FLOOR on the
-          # proved count too. Higher is better — it may only ever be revised UP.
-          proved_floor=8
+          proved_floor=1
+          floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe
           # A `--check` whose sources hash to an artifact already in the CAS
           # exits BEFORE parsing (bin/main.ml, the `do_check` lookup), so the
           # report never runs and the command prints nothing while exiting 0.
           # `--refine-report` is not part of the cache key, so a plain `--check`
-          # from an earlier step is enough to poison this one. Clear the check
-          # artifacts so the measurement is always real. NOTE this is
+          # from an earlier step (or from the other measurement below) is
+          # enough to poison the next one. Clear the check artifacts before
+          # EACH measurement so both are always real. NOTE this is
           # artifacts-v2, not `.march/cas/vc` — vc holds solver verdicts and has
           # no bearing on whether the report prints.
+
           rm -rf .march/cas/artifacts-v2
-          ./_build/default/bin/main.exe --check --refine-report stdlib/list.march \
-            > /tmp/refine.txt 2>&1 || true
-          cat /tmp/refine.txt
-          # Read the whole-program slice specifically. `--refine-report` prints
-          # two labelled lines (user code, and user + stdlib, because the driver
-          # prepends the entire standard library); a bare `grep -o '[0-9]* skipped'`
-          # would match both and silently compare the wrong one.
-          skipped=$(sed -n \
-            's/^refinement obligations (user + stdlib):.*, \([0-9][0-9]*\) skipped$/\1/p' \
-            /tmp/refine.txt)
+          ./_build/default/bin/main.exe --check --refine-report "$floor_fixture" \
+            > /tmp/refine_floor.txt 2>&1 || true
+          cat /tmp/refine_floor.txt
+          # Read the file's OWN (`user code`) slice specifically. `--refine-
+          # report` prints two labelled lines (user code, and user + stdlib,
+          # because the driver prepends the entire standard library); a bare
+          # `grep -o '[0-9]* proved'` would match both and silently read the
+          # wrong one.
           proved=$(sed -n \
-            's/^refinement obligations (user + stdlib): \([0-9][0-9]*\) proved,.*/\1/p' \
-            /tmp/refine.txt)
-          if [ -z "$skipped" ] || [ -z "$proved" ]; then
-            echo "FAIL: could not find the 'user + stdlib' line in --refine-report output."
+            's/^refinement obligations (user code): \([0-9][0-9]*\) proved,.*/\1/p' \
+            /tmp/refine_floor.txt)
+          if [ -z "$proved" ]; then
+            echo "FAIL: could not find the 'user code' line in --refine-report output"
+            echo "for $floor_fixture."
             echo "Three things produce that, in order of likelihood:"
             echo "  a. the run hit the --check CAS and short-circuited before the"
             echo "     report — clear .march/cas/artifacts-v2 (the rm above should"
@@ -182,12 +202,14 @@ jobs:
             echo "This step must never pass vacuously."
             exit 1
           fi
-          echo "proved=$proved (floor: $proved_floor)  skipped=$skipped (ceiling: $baseline)"
+          echo "proved=$proved (floor: $proved_floor), read from $floor_fixture's user code slice"
           if [ "$proved" -lt "$proved_floor" ]; then
             echo ""
-            echo "FAIL: refinement obligations PROVED fell from $proved_floor to $proved."
-            echo "The ceiling on skips cannot catch this: a pass that raises no"
-            echo "obligations at all reports 0 skipped and would sail through it."
+            echo "FAIL: refinement obligations PROVED fell from $proved_floor to $proved"
+            echo "on $floor_fixture's own (user code) slice."
+            echo "The ceiling on skips (measured on a different file, below) cannot"
+            echo "catch this: a pass that stopped descending into a file entirely"
+            echo "reports 0 skipped there too and would sail through it."
             echo "Fewer proofs means contracts that were enforced no longer are."
             echo ""
             echo "The most common cause is a measure alias being withdrawn too"
@@ -198,6 +220,28 @@ jobs:
             echo "into 'solver-undecided' skips is that signature."
             exit 1
           fi
+
+          rm -rf .march/cas/artifacts-v2
+          ./_build/default/bin/main.exe --check --refine-report stdlib/list.march \
+            > /tmp/refine_ceiling.txt 2>&1 || true
+          cat /tmp/refine_ceiling.txt
+          # Read the whole-program slice specifically, same reasoning as above.
+          skipped=$(sed -n \
+            's/^refinement obligations (user + stdlib):.*, \([0-9][0-9]*\) skipped$/\1/p' \
+            /tmp/refine_ceiling.txt)
+          if [ -z "$skipped" ]; then
+            echo "FAIL: could not find the 'user + stdlib' line in --refine-report output"
+            echo "for stdlib/list.march."
+            echo "Three things produce that, in order of likelihood:"
+            echo "  a. the run hit the --check CAS and short-circuited before the"
+            echo "     report — clear .march/cas/artifacts-v2 (the rm above should"
+            echo "     already do this; check it did not get dropped);"
+            echo "  b. the compiler errored before printing;"
+            echo "  c. the report's format changed — update the sed above."
+            echo "This step must never pass vacuously."
+            exit 1
+          fi
+          echo "skipped=$skipped (ceiling: $baseline), read from stdlib/list.march's user + stdlib slice"
           if [ "$skipped" -gt "$baseline" ]; then
             echo ""
             echo "FAIL: refinement obligation skips rose from $baseline to $skipped."

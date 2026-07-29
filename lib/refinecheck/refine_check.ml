@@ -167,7 +167,8 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.IsCtor (_, a) -> m a
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
   | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b)
+  | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
@@ -192,8 +193,8 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Not a -> w a
   | Smt.Neg a | Smt.MulLit (_, a) -> int_side a
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
-  | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Lt (a, b)
+  | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
   (* Floats and `$Str` are disjoint sorts; an `fp.*` term is well-sorted here
      exactly when neither operand drags a string in.  Whether its operands are
      genuinely FLOATS is [float_wellsorted]'s job, not this guard's. *)
@@ -240,6 +241,7 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.IntLit _ | Smt.BoolLit _ -> false
   | Smt.App (_, args) -> List.exists m args
   | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
+  | Smt.Mul (a, b)
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
@@ -291,7 +293,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
   | Smt.App _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
-  | Smt.MulLit _ | Smt.Neg _ -> false
+  | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _ -> false
 
 (* How a return refinement's predicate relates to the callee's parameters.
 
@@ -500,6 +502,33 @@ let string_byte_length_is_builtin : bool ref = ref false
    definition is the stdlib's and the alias is withdrawn the moment any
    `List.length` is in scope. *)
 let stdlib_source_files : string list ref = ref []
+
+(* ── Why an alias was withdrawn ────────────────────────────────────────────
+   The three gates above are unit-global, syntactic, and default to
+   SUPPRESSING — all correct, and none of it changes here.  What a withdrawal
+   costs under the default stance is a missed proof, i.e. silence.  Under
+   `cap verified` a skipped obligation is a hard ERROR, and then the withdrawal
+   becomes invisible in the worst way: the author wrote exactly the guard the
+   feature asks for, the alias silently did not apply, and the error text
+   blames the solver and the predicate.  Both remedies it offers are ones the
+   author already took.
+
+   So record, at the point a gate withdraws, WHICH spelling went and WHERE the
+   competing binding is.  This is observation only: nothing here is consulted
+   by [measure_alias], and suppression is bit-for-bit what it was. *)
+type withdrawal = {
+  wd_spelling : string;      (* the spelling whose alias was withdrawn *)
+  wd_measure : string;       (* the measure it would have aliased to *)
+  (* Which KIND of subject the spelling measures.  All three spellings route to
+     the single measure name `len`, so [wd_measure] alone cannot tell a list
+     length from a string byte length — and without this a withdrawn
+     `List.length` was blamed for an undischarged `{String | len(_) > 0}`,
+     naming a list definition that had nothing to do with it. *)
+  wd_str : bool;
+  wd_span : A.span option;   (* the binding that caused it, when identified *)
+}
+
+let withdrawals : withdrawal list ref = ref []
 
 (* All three route to the single name `len`.  Whether `len` then resolves to a
    `len$x` constant or to `($strlen t)` is decided downstream by
@@ -1851,38 +1880,112 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
    bare call that resolves to a non-refined sibling must NOT fall through to a
    refined function of the same name in an enclosing module — that would check
    the wrong predicate (a false positive). *)
+let sig_of_fn (fd : A.fn_def) : fn_sig =
+  let base =
+    match fd.A.fn_clauses with
+    | c :: _ -> sig_of_clause c
+    | [] ->
+      { param_names = []; param_str = []; param_scalar = []; refined = []
+      ; ret = None; ret_sort = None }
+  in
+  match return_refine_sorted fd with
+  | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
+  | None -> { base with ret = None; ret_sort = None }
+
+(* Record the signature when EITHER side carries a refinement: a function with
+   only a refined *return* must be resolvable so its postcondition reaches call
+   sites, even though it has no refined params of its own to check. *)
+let entry_of_sig (sg : fn_sig) : fn_sig option =
+  if sg.refined <> [] || Option.is_some sg.ret then Some sg else None
+
+(* ── Which `impl` method contracts may be trusted ──────────────────────────
+   An `impl` method is callable under the enclosing module's spelling exactly
+   like a `fn`, and [visit_decl] now walks its BODY and would ASSUME its
+   parameter refinements as facts.  A predicate assumed inside a body but never
+   demanded of any caller is assume-without-check: `fn run(b, k : {Int|k != 0})`
+   made `m / k` dischargeable under `cap no_panic` while `run(Box(4), 0)` was
+   accepted, and the program divided by zero at run time.  Registering the
+   contract in [collect_all_defs] is what obliges the caller.
+
+   But a name only denotes ONE contract when it is unambiguous.  It is not when
+
+     - a `fn` in the same decl list already owns the name (a module with both
+       `fn map` and `impl Functor(T) do fn map`), or
+     - two impls define the method (`impl Show(Int)` / `impl Show(String)` both
+       give `show`),
+
+   because a call resolved by NAME cannot tell which contract applies, and
+   checking correct code against a predicate it never touches is the one
+   failure this subsystem must never have.  So: adoptable names get their
+   contract registered (callers obliged, body may assume); the rest are
+   registered nowhere AND have their bodies walked with parameter refinements
+   STRIPPED.  Unenforced means unusable in BOTH directions.
+
+   This function is the single definition of that rule.  [division_safety]
+   consults it too, so the two passes cannot drift apart. *)
+let adoptable_impl_methods (decls : A.decl list) : string list =
+  let fns = Hashtbl.create 16 in
+  let counts = Hashtbl.create 16 in
+  List.iter
+    (function
+      | A.DFn (fd, _) -> Hashtbl.replace fns fd.A.fn_name.A.txt ()
+      | A.DImpl (idf, _) ->
+        List.iter
+          (fun ((mn : A.name), _) ->
+            Hashtbl.replace counts mn.A.txt
+              (1 + Option.value ~default:0 (Hashtbl.find_opt counts mn.A.txt)))
+          idf.A.impl_methods
+      | _ -> ())
+    decls;
+  Hashtbl.fold
+    (fun name n acc -> if n = 1 && not (Hashtbl.mem fns name) then name :: acc else acc)
+    counts []
+
 let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   let tbl = Hashtbl.create 128 in
+  let qualify prefix n = if prefix = "" then n else prefix ^ "." ^ n in
   let rec go prefix decls =
+    let adoptable = adoptable_impl_methods decls in
     List.iter
       (function
         | A.DFn (fd, _) ->
-          let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
-          let base =
-            match fd.A.fn_clauses with
-            | c :: _ -> sig_of_clause c
-            | [] ->
-              { param_names = []; param_str = []; param_scalar = []; refined = []
-              ; ret = None; ret_sort = None }
-          in
-          let sg =
-            match return_refine_sorted fd with
-            | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
-            | None -> { base with ret = None; ret_sort = None }
-          in
-          (* Record the signature when EITHER side carries a refinement: a
-             function with only a refined *return* must be resolvable so its
-             postcondition reaches call sites, even though it has no refined
-             params of its own to check. *)
-          Hashtbl.replace tbl key
-            (if sg.refined <> [] || Option.is_some sg.ret then Some sg else None)
-        | A.DMod (name, _, ds, _) ->
-          go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
+          Hashtbl.replace tbl (qualify prefix fd.A.fn_name.A.txt) (entry_of_sig (sig_of_fn fd))
+        | A.DImpl (idf, _) ->
+          List.iter
+            (fun ((mn : A.name), (fd : A.fn_def)) ->
+              if List.mem mn.A.txt adoptable then
+                Hashtbl.replace tbl (qualify prefix mn.A.txt) (entry_of_sig (sig_of_fn fd)))
+            idf.A.impl_methods
+        | A.DMod (name, _, ds, _) -> go (qualify prefix name.A.txt) ds
         | _ -> ())
       decls
   in
   go "" decls;
   tbl
+
+(* Erase parameter refinements from [fd], leaving the return refinement alone.
+   A stripped parameter contributes no fact to [scope], so a body checked with
+   it can discharge nothing from a predicate no caller was obliged to
+   establish.  The return refinement is CHECKED rather than assumed, so it
+   stays: dropping it would lose a real check, and checking it against the
+   original (unstripped) parameters is what [visit_fn] keeps doing. *)
+let strip_param_refinements (fd : A.fn_def) : A.fn_def =
+  let rec strip = function
+    | A.TyRefine (t, _, _) -> strip t
+    | A.TyLinear (l, t) -> A.TyLinear (l, strip t)
+    | t -> t
+  in
+  let param (p : A.param) = { p with A.param_ty = Option.map strip p.A.param_ty } in
+  let fp = function
+    | A.FPNamed p -> A.FPNamed (param p)
+    | A.FPDefault (p, e) -> A.FPDefault (param p, e)
+    | A.FPPat _ as x -> x
+  in
+  { fd with
+    A.fn_clauses =
+      List.map
+        (fun (c : A.fn_clause) -> { c with A.fc_params = List.map fp c.A.fc_params })
+        fd.A.fn_clauses }
 
 (* ── Use/alias-aware call resolution ───────────────────────────────────────
    Resolve a call name the way the typechecker does: a bare name binds to the
@@ -1986,6 +2089,16 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
              in
              if imported then lookup (qualify m fname) else None)
            ctx.uses)
+
+(* True iff a call written as the bare [name] from inside [ctx]'s module
+   resolves to exactly [sg] — i.e. the contract every caller is obliged to
+   establish IS this definition's.  Used to decide whether an `impl` method's
+   parameter refinements may be assumed while walking its body; see
+   [collect_all_defs]'s merge step for the cases where it is false. *)
+let contract_is_enforced (ctx : rctx) defs (name : string) (sg : fn_sig) : bool =
+  match resolve_call ctx defs name with
+  | Some (Some found) -> found.refined = sg.refined
+  | _ -> false
 
 (* Populate [cbenv] from a LOCAL ALIAS of a named refined function (Task 2):
    only a bare-variable RHS that [resolve_call] resolves to a refined function
@@ -2339,6 +2452,107 @@ let sort_of_ctor (ctor : string) : string option =
        module strict the moment one user module asked for verification. *)
 let strict_verified = ref false
 
+(* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
+   mention (`let f = List.length`) is not a guard, and counting it would let an
+   unrelated line decide what a call site is told. *)
+let expr_applies (name : string) (e : A.expr) : bool =
+  let found = ref false in
+  iter_all
+    (fun e ->
+      match e with
+      | A.EApp (A.EVar n, _, _) when n.A.txt = name -> found := true
+      | _ -> ())
+    e;
+  !found
+
+(* Does [e] apply [name] TO THE VARIABLE [subject]?  Stricter than
+   [expr_applies] on purpose — see condition 3 of [alias_withdrawal_cause]: a
+   guard on some OTHER list says nothing about this call's argument, so
+   `List.length(zs) > 0` guarding `head(ys)` must not be read as a guard on
+   `ys`.  Compared by NAME rather than structurally, because the same variable
+   read at two source positions carries two different spans and would never
+   compare equal. *)
+let expr_applies_to (name : string) (subject : string) (e : A.expr) : bool =
+  let found = ref false in
+  iter_all
+    (fun e ->
+      match e with
+      | A.EApp (A.EVar n, args, _) when n.A.txt = name ->
+        if List.exists (function A.EVar v -> v.A.txt = subject | _ -> false) args then
+          found := true
+      | _ -> ())
+    e;
+  !found
+
+(* ── Attributing a skip to a withdrawn alias ───────────────────────────────
+   A withdrawn alias is only ONE of the reasons an obligation can go
+   undischarged, and a wrong attribution is worse than a vague one: it sends
+   the author to rename a binding that had nothing to do with their problem,
+   and it hides the real cause.  So this is deliberately conjunctive — all
+   four conditions, or we keep the honest general message:
+
+   1. the reason is [Solver_undecided].  A withdrawal cannot cause any other
+      skip: it removes an ASSUMPTION, so the VC is still built, still
+      well-sorted, and still reaches the solver — it just arrives without the
+      fact that would have discharged it.  An unreflectable predicate or a sort
+      conflict failed strictly earlier, for reasons the alias cannot touch.
+   2. the predicate actually mentions the measure the alias routes to.  A
+      withdrawn `len` alias is irrelevant to `{Int | _ != 0}`.
+   3. a POSITIVE path condition applies the withdrawn spelling TO THIS
+      OBLIGATION'S OWN SUBJECT.  Each half of that is load-bearing, and the
+      first version of this test had neither:
+
+        - "to this subject", because `if List.length(zs) > 0 do head(ys) …`
+          is not a guard on `ys`.  Delete the competing binding and that
+          program is STILL undischarged — which is the proof that the
+          withdrawal was not the cause.  Blaming it sends the author to rename
+          something irrelevant, while the general message's "guard the call"
+          is the correct advice.
+        - "positive", because in `if List.length(ys) > 0 do 0 else head(ys) end`
+          the guard does not fail to prove the predicate — it DISPROVES it.
+          With the binding removed that program reports a real refinement
+          violation, so "the guard proved nothing" would dress a genuine bug in
+          the user's code up as a story about a nested module.  We cannot
+          report the violation ourselves (the alias is withdrawn, so nothing
+          reflects either way), but we can decline to misdescribe it.
+
+      Without this conjunct the attribution would also fire on every unguarded
+      call in a module that merely CONTAINS a competing definition — the
+      relabel-everything failure this fix must not become.
+   4. the withdrawn spelling measures the same KIND of thing as the subject:
+      `List.length` for a list subject, `String.byte_size` /
+      `string_byte_length` for a String one.  All three route to the single
+      name `len`, so condition 2 cannot separate them on its own, and a
+      withdrawn `List.length` was being blamed for an undischarged
+      `{String | len(_) > 0}` — naming a list definition that could not
+      possibly have mattered.
+
+   Note the asymmetry with the gates themselves: THEY resolve doubt by
+   suppressing (silence is safe).  This resolves doubt by staying general,
+   because the thing being chosen here is a sentence, and an over-confident
+   sentence is a lie.  The cost is coverage: a guard laundered through a local
+   (`let n = List.length(ys)`), applied to a non-variable actual, or
+   established in a caller, falls back to the general message.  That is the
+   right trade — this reason exists to explain one specific confusion, not to
+   claim every skip. *)
+let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
+    ~(subject_is_str : bool) ~(path : (A.expr * bool) list) (r : Obligation.reason) :
+    withdrawal option =
+  match (r, subject) with
+  | Obligation.Solver_undecided, Some (A.EVar sn) ->
+    List.find_opt
+      (fun w ->
+        w.wd_str = subject_is_str
+        && expr_applies w.wd_measure pred
+        && List.exists
+             (fun (cond, negated) ->
+               (not negated) && expr_applies_to w.wd_spelling sn.A.txt cond)
+             path)
+      !withdrawals
+  (* A non-variable actual (`head(f(xs))`) carries no name a guard could be
+     matched against, so we cannot show the guard was about THIS value. *)
+  | _ -> None
+
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
@@ -2384,6 +2598,25 @@ let check_call ~root errctx ~span ~(callee : string)
      contract that checks nothing is distinguishable from one that passes.
      Recording is observation-only — it must never alter control flow. *)
   let note verdict =
+    (* Re-attribute BEFORE recording, not just in the error text: the ledger is
+       what `--refine-report` prints, and a ledger that disagrees with the
+       diagnostic is a second thing to be confused by. *)
+    let verdict, cause =
+      match verdict with
+      | Obligation.Skipped r ->
+        (* The obligation's own SUBJECT — the actual passed at [rp.idx].  Read
+           here rather than taken from the enclosing [self_actual] because
+           [note] is in scope before that binding, and because a missing
+           argument must simply mean "no attribution". *)
+        (match
+           alias_withdrawal_cause ~pred:rp.pred
+             ~subject:(List.nth_opt args rp.idx)
+             ~subject_is_str:(rp_is_str rp) ~path r
+         with
+         | Some w -> (Obligation.Skipped (Obligation.Alias_withdrawn w.wd_spelling), w.wd_span)
+         | None -> (verdict, None))
+      | _ -> (verdict, None)
+    in
     Obligation.record
       { Obligation.span; callee; predicate = pred_str rp.pred; verdict };
     (* …except inside a `cap verified` module, where a skip is the very thing
@@ -2391,16 +2624,39 @@ let check_call ~root errctx ~span ~(callee : string)
        `Violated` are unaffected: the latter already reported itself. *)
     match verdict with
     | Obligation.Skipped r when !strict_verified ->
+      (* The remedy depends on the reason.  The generic advice below is worse
+         than useless for a withdrawn alias — "guard the call" is what the
+         author already did — so that case gets its own note, naming the
+         binding to rename and, when we found it, where it is. *)
+      let remedy =
+        match r with
+        | Obligation.Alias_withdrawn spelling ->
+          let where =
+            match cause with
+            | Some (sp : A.span) when sp.A.file <> "" ->
+              Printf.sprintf " (%s:%d)" sp.A.file sp.A.start_line
+            | Some (sp : A.span) -> Printf.sprintf " (line %d)" sp.A.start_line
+            | None -> ""
+          in
+          Printf.sprintf
+            "note: at least one binding of `%s` in this compilation unit%s \
+             withdrew the alias for the WHOLE unit, including this call — the \
+             gate is unit-global and syntactic, so it does not matter whether \
+             that binding could ever win here.  There may be others: renaming \
+             or moving every one of them out of this unit restores the alias, \
+             and restating the fact as a refinement avoids the guard entirely"
+            spelling where
+        | _ ->
+          "note: guard the call or strengthen what is known here, rewrite the \
+           predicate into the fragment the checker supports, or remove `cap \
+           verified` from this module — it asks for every obligation to be \
+           discharged"
+      in
       Err.error errctx ~span
         (Printf.sprintf
-           "`cap verified` module: cannot verify precondition `%s` on `%s` \
-            (%s: %s)\n\
-            note: guard the call or strengthen what is known here, rewrite the \
-            predicate into the fragment the checker supports, or remove `cap \
-            verified` from this module — it asks for every obligation to be \
-            discharged"
+           "`cap verified` module: cannot verify precondition `%s` on `%s` (%s: %s)\n%s"
            (pred_str rp.pred) callee (Obligation.reason_name r)
-           (Obligation.reason_detail r))
+           (Obligation.reason_detail r) remedy)
     | _ -> ()
   in
   match List.nth_opt args rp.idx with
@@ -4231,27 +4487,70 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   | A.EAssert (e, _) -> ge e
   | A.ESigil (_, e, _) -> ge e
 
+(* Exhaustive over [A.decl], for the same reason the obligation walks are: the
+   `| _ -> ()` this replaced meant the "not a measure or known predicate"
+   warning never fired for a refinement written on an `impl` or `interface`
+   method — precisely where the widened checks now CONSUME such predicates, so
+   an unrecognized one there was both unchecked and unmentioned. *)
 let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
+  let warn_fn (fd : A.fn_def) =
+    Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
+    List.iter
+      (fun (c : A.fn_clause) ->
+        List.iter
+          (function
+            | A.FPNamed p | A.FPDefault (p, _) ->
+              Option.iter (warn_predicate_ty errctx) p.A.param_ty
+            | A.FPPat _ -> ())
+          c.A.fc_params;
+        warn_predicate_expr_tys errctx c.A.fc_body)
+      fd.A.fn_clauses
+  in
+  let expr = warn_predicate_expr_tys errctx in
   List.iter
     (function
-      | A.DFn (fd, _) ->
-        Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
+      | A.DFn (fd, _) -> warn_fn fd
+      | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> warn_predicate_decls errctx ds
+      | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> warn_fn fd) idf.A.impl_methods
+      | A.DInterface (idf, _) ->
         List.iter
-          (fun (c : A.fn_clause) ->
-            List.iter
-              (function
-                | A.FPNamed p | A.FPDefault (p, _) ->
-                  Option.iter (warn_predicate_ty errctx) p.A.param_ty
-                | A.FPPat _ -> ())
-              c.A.fc_params;
-            warn_predicate_expr_tys errctx c.A.fc_body)
-          fd.A.fn_clauses
-      | A.DMod (_, _, ds, _) -> warn_predicate_decls errctx ds
-      | _ -> ())
+          (fun (m : A.method_decl) ->
+            warn_predicate_ty errctx m.A.md_ty;
+            Option.iter expr m.A.md_default)
+          idf.A.iface_methods
+      | A.DLet (_, b, _) ->
+        Option.iter (warn_predicate_ty errctx) b.A.bind_ty;
+        expr b.A.bind_expr
+      | A.DActor (_, _, ad, _) ->
+        expr ad.A.actor_init;
+        List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) ad.A.actor_handlers;
+        Option.iter expr ad.A.actor_invariant
+      | A.DApp (app, _) ->
+        expr app.A.app_body;
+        Option.iter expr app.A.app_on_start;
+        Option.iter expr app.A.app_on_stop
+      | A.DTest (t, _) -> expr t.A.test_body
+      | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
+      (* ── Inert: no type annotation or expression that can carry a
+         refinement predicate.  Named so a new decl form breaks the build. ── *)
+      | A.DType _ | A.DAlwaysLinearType _  (* refinements in a type DEFINITION
+                                              are checked where they are used *)
+      | A.DSig _ | A.DProtocol _ | A.DTransitions _ | A.DExtern _
+      | A.DNeeds _ | A.DProofCap _ | A.DOpts _
+      | A.DDeriving _ | A.DSatisfy _       (* desugared into DImpl before this *)
+      | A.DUse _ | A.DAlias _ -> ())
     decls
 
-let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
+(* [assume_params:false] walks the body with the parameter refinements erased,
+   so none of them can discharge anything.  Used for an `impl` method whose
+   contract [collect_all_defs] could not adopt unambiguously: with no caller
+   obliged to establish the predicate, assuming it inside the body would be
+   assume-without-check.  The POSTcondition check still sees the original
+   [fd] — a return refinement is verified, not assumed, and verifying it
+   against the declared parameters is exactly right. *)
+let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_def) : unit =
   check_fn_post ~root errctx fd;
+  let walked = if assume_params then fd else strip_param_refinements fd in
   List.iter
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
@@ -4262,7 +4561,7 @@ let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
       let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
       visit ~root errctx defs ctx path sc re cb c.A.fc_body)
-    fd.A.fn_clauses
+    walked.A.fn_clauses
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
   (* Gather this scope's aliases/uses first so every function in the module sees
@@ -4285,14 +4584,86 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
       (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
       decls;
   Fun.protect ~finally:(fun () -> strict_verified := saved_strict) (fun () ->
+    List.iter (visit_decl ~root errctx defs ctx) decls)
+
+(* One declaration.  Every constructor of [A.decl] is named — there is NO
+   wildcard, deliberately: for years this walk descended only into [DFn] and
+   [DMod] and ended in `| _ -> ()`, so `cap no_panic` said nothing about a
+   division inside an `impl` method, a top-level `let`, or an actor handler,
+   and accepted programs that divided by zero at runtime.  With the match
+   exhaustive, a 25th decl form is a COMPILE ERROR here rather than a silent
+   hole — the same guarantee [stdlib_member_defs_ok] already gives. *)
+and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
+  (* A bare expression that is not a function clause: no parameters, no guard,
+     hence empty scope/recenv/cbenv and an empty path condition. *)
+  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] e in
+  (* Decls that merely group other decls (`describe`) must NOT go through
+     [visit_decls]: that would re-derive [strict_verified] from the inner list,
+     which carries no `cap` directive of its own, and so would silently drop
+     the enclosing module's capability.  A `describe` block is part of its
+     module's scope, so it inherits. *)
+  let visit_group ds = List.iter (visit_decl ~root errctx defs ctx) ds in
+  match d with
+  | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
+  | A.DMod (name, _, ds, _) ->
+    let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
+    visit_decls ~root errctx defs { ctx with modpath } ds
+  (* Each method body is an ordinary function body — but its parameter
+     refinements may be assumed ONLY if callers are obliged to establish them,
+     i.e. only if [collect_all_defs] adopted this method's contract under the
+     name a caller would write.  When it could not (a `fn` owns the name, or
+     two impls of the same interface define the method), the body is walked
+     with the refinements stripped rather than silently trusted. *)
+  | A.DImpl (idf, _) ->
     List.iter
-      (function
-        | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
-        | A.DMod (name, _, ds, _) ->
-          let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
-          visit_decls ~root errctx defs { ctx with modpath } ds
-        | _ -> ())
-      decls)
+      (fun ((mn : A.name), (fd : A.fn_def)) ->
+        let assume_params = contract_is_enforced ctx defs mn.A.txt (sig_of_fn fd) in
+        visit_fn ~root errctx defs ~assume_params ctx fd)
+      idf.A.impl_methods
+  (* An interface's DEFAULT method body is real code; the signatures are not. *)
+  | A.DInterface (idf, _) ->
+    List.iter
+      (fun (m : A.method_decl) -> Option.iter visit_expr m.A.md_default)
+      idf.A.iface_methods
+  | A.DLet (_, b, _) -> visit_expr b.A.bind_expr
+  | A.DActor (_, _, ad, _) ->
+    visit_expr ad.A.actor_init;
+    List.iter
+      (fun (h : A.actor_handler) ->
+        (* Handler parameters bind exactly like named function parameters, so
+           their refinements must be in scope for the body. *)
+        let ps = List.map (fun p -> A.FPNamed p) h.A.ah_params in
+        let sc = List.fold_left scope_add_fnparam [] ps in
+        let re = List.fold_left recenv_add_fnparam [] ps in
+        let cb = List.fold_left cb_add_fnparam [] ps in
+        let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
+        visit ~root errctx defs ctx [] sc re cb h.A.ah_body)
+      ad.A.actor_handlers;
+    (* The @invariant predicate is evaluated at run time like any other
+       expression, so obligations inside it count. *)
+    Option.iter visit_expr ad.A.actor_invariant
+  | A.DApp (app, _) ->
+    visit_expr app.A.app_body;
+    Option.iter visit_expr app.A.app_on_start;
+    Option.iter visit_expr app.A.app_on_stop
+  | A.DTest (t, _) -> visit_expr t.A.test_body
+  | A.DSetup (e, _) | A.DSetupAll (e, _) -> visit_expr e
+  | A.DDescribe (_, ds, _) -> visit_group ds
+  (* ── Inert: these decl forms carry no expression an obligation can arise in.
+     Named individually so adding a 25th form breaks the build here. ────── *)
+  | A.DType _                (* type definitions: types only, no terms *)
+  | A.DAlwaysLinearType _    (* likewise, plus a linearity marker *)
+  | A.DSig _                 (* module signature: names and types only *)
+  | A.DProtocol _            (* session type: message types, no bodies *)
+  | A.DTransitions _         (* state-machine edges: names of fns declared elsewhere *)
+  | A.DExtern _              (* FFI declarations: signatures, bodies live in C *)
+  | A.DNeeds _               (* capability manifest: capability paths *)
+  | A.DProofCap _            (* proof-capability declaration: a name *)
+  | A.DOpts _                (* the `cap` directive itself, read above *)
+  | A.DDeriving _            (* desugared into DImpl before this pass runs *)
+  | A.DSatisfy _             (* likewise desugared into DImpl *)
+  | A.DUse _                 (* import: read into [ctx.uses] above *)
+  | A.DAlias _ -> ()         (* alias: read into [ctx.aliases] above *)
 
 (** Register ADT/record sorts for a list of declarations without running the full
     VC pass.  Called by [--check-migration] mode to prime the type tables before
@@ -4367,6 +4738,87 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
    someone else's function, so either withdraws the alias too. *)
 let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
 
+(* ── Glob imports: LOOK instead of assuming ────────────────────────────────
+   `import X` / `use X.*` can only make a spelling denote something else if X
+   actually PROVIDES the competing member.  An earlier revision of both gates
+   below withdrew on the mere presence of a glob, on the reasoning that it
+   might carry anything.  That is not merely coarse, it is fatal: bin/main.ml
+   prepends the whole stdlib into every compilation unit and both gates are
+   unit-global, so the single `import Process` in `stdlib/system.march`
+   withdrew every alias for EVERY March program ever compiled — the feature
+   was inert in production, and only a REJECT witness could notice (a skip
+   exits 0, exactly like a proof).
+
+   So resolve the glob's target and ask.  Resolution is purely syntactic over
+   the declarations of the compilation unit that was handed to us, which is
+   all the module structure this pass has; whenever it cannot answer — the
+   path names a module not present in the unit, or the search runs out of fuel
+   — the answer is `true`, i.e. WITHDRAW, exactly as before.  Precision is
+   only ever added where the contents are actually in hand.
+
+   Direction of doubt is unchanged and non-negotiable: over-suppressing costs
+   a missed proof (silence); under-suppressing puts a wrong fact in the
+   assumption set, which makes violations EASIER to prove and reports correct
+   code — a false positive, this pass's cardinal sin. *)
+
+(* Walk [path] down through nested `mod` declarations from [root]. *)
+let find_module_decls (root : A.decl list) (path : A.name list) : A.decl list option =
+  let rec descend ds = function
+    | [] -> Some ds
+    | (seg : A.name) :: rest ->
+      let rec search = function
+        | [] -> None
+        | A.DMod (n, _, ds', _) :: _ when n.A.txt = seg.A.txt -> descend ds' rest
+        | _ :: tl -> search tl
+      in
+      search ds
+  in
+  match path with [] -> None | _ -> descend root path
+
+(* Does a glob import of the module at [path] bring a competitor into scope?
+
+   [binds_decl] recognises a NON-`use` declaration of the target module that
+   provides the thing (a nested `mod List`, a `fn string_byte_length`, …).
+   [names_it] answers whether an explicit selector list names it, and
+   [single_binds] whether a bare `use A.B` (no selector) binds it under its
+   last segment.  A `use` INSIDE the target is followed transitively, since we
+   cannot be sure March does not re-export it; [fuel] bounds that walk and its
+   exhaustion, like any other unresolved case, withdraws. *)
+let glob_import_competes ~(root : A.decl list) ~(unit_name : string)
+    ~(binds_decl : A.decl -> bool) ~(names_it : A.name list -> bool)
+    ~(single_binds : A.name list -> bool) (path : A.name list) : bool =
+  (* A path may be written relative to the unit's own module (`import
+     System.Process` from inside `mod System`), whose declarations ARE the
+     root list rather than a `DMod` within it. *)
+  let resolve p =
+    match find_module_decls root p with
+    | Some ds -> Some ds
+    | None -> (
+      match p with
+      | (hd : A.name) :: tl when hd.A.txt = unit_name -> find_module_decls root tl
+      | _ -> None)
+  in
+  let rec provides fuel ds =
+    List.exists
+      (fun d ->
+        binds_decl d
+        ||
+        match d with
+        | A.DDescribe (_, ds', _) -> provides fuel ds'
+        | A.DUse (u, _) -> (
+          match u.A.use_sel with
+          | A.UseSingle -> single_binds u.A.use_path
+          | A.UseNames xs -> names_it xs
+          | A.UseExcept xs -> (not (names_it xs)) && glob fuel u.A.use_path
+          | A.UseAll -> glob fuel u.A.use_path)
+        | _ -> false)
+      ds
+  and glob fuel p =
+    if fuel <= 0 then true
+    else match resolve p with Some ds -> provides (fuel - 1) ds | None -> true
+  in
+  glob 4 path
+
 (* Is the qualified spelling `<md>.<fn>` still the standard library's own?
    Parameterised over the pair so the `List.length` and `String.byte_size`
    aliases share one gate rather than two that can drift apart.
@@ -4396,18 +4848,53 @@ let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
    `mod List do fn length …` defines `List.length` with nothing nested to see.
    Starting the walk with `in_mod = true` when the names match closes that.
 
+   That walk start is PINNED by `specs/lang/types/accept/t126_entry_module_
+   shadows_list_length.march` (and `t127…string_byte_size` for the other
+   alias), not by any unit fixture here — a string-parsed module has an empty
+   [stdlib_source_files], so nothing in it can be told apart from the stdlib's
+   own definitions.  The witness declares `length` in an `extern` block on
+   purpose: desugar's [strip_entry_self_qual] rewrites `List.length` to bare
+   `length` when the entry module declares `length` as a `fn` or a `let`, so
+   only the decl forms it does not rewrite (`extern`, `impl`, `interface`)
+   leave a qualified call site for this gate to matter at.  Revert this to
+   `go false` and the corpus rejects `t126` with a false `len(ys) = 0`.
+
    Direction of doubt is always to SUPPRESS: a missed proof is silence, the
-   status quo ante; a wrong fact in the assumption set is a false positive. *)
+   status quo ante; a wrong fact in the assumption set is a false positive.
+
+   Returns the verdict PLUS the span of the first competing declaration found,
+   so a withdrawal can point at its cause instead of leaving the user to search
+   the unit (which, with `MARCH_LIB_PATH`, may not even be their own code).
+   The span is diagnostic-only — the boolean is computed exactly as before. *)
 let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
-    (decls : A.decl list) : bool =
+    (decls : A.decl list) : bool * A.span option =
   let foreign = ref false in
   let rebound = ref false in
+  let cause = ref None in
+  let blame (sp : A.span) = if !cause = None then cause := Some sp in
   (* A member definition only competes if it did NOT come from the standard
      library's own sources — see [is_stdlib_source_file]. *)
   let defines in_mod (sp : A.span) b =
-    if in_mod && b && not (is_stdlib_source_file sp.A.file) then foreign := true
+    if in_mod && b && not (is_stdlib_source_file sp.A.file) then begin
+      foreign := true;
+      blame sp
+    end
   in
   let mentions_md xs = List.exists (fun (n : A.name) -> n.A.txt = md) xs in
+  (* Does glob-importing the module at [path] put some other module under the
+     bare name `<md>`?  A nested `mod <md>` or an `alias … as <md>` inside the
+     target does; nothing else in it can. *)
+  let glob_competes path =
+    glob_import_competes ~root:decls ~unit_name:mod_name
+      ~binds_decl:(function
+        | A.DMod (n, _, _, _) -> n.A.txt = md
+        | A.DAlias (a, _) -> a.A.alias_name.A.txt = md
+        | _ -> false)
+      ~names_it:mentions_md
+      ~single_binds:(fun p ->
+        match List.rev p with last :: _ -> last.A.txt = md | [] -> false)
+      path
+  in
   (* A `use`/`alias` competes for the bare name `<md>` on the same terms a
      member definition does: only when it is the PROGRAM's, not the standard
      library's.  Without this the exclusion was asymmetric — [defines] already
@@ -4415,19 +4902,36 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
      alias for every program compiled with that stdlib.
 
      That happened: #112 added `import Process` to stdlib/system.march to
-     dedupe System.ProcessResult.  It is a glob (`UseAll`), which this scan
-     treats as "could carry a nested module named List", so `List.length`
-     stopped being recognised as the stdlib's and every
-     `{List(a) | len(_) > 0}` contract silently stopped being enforced —
+     dedupe System.ProcessResult.  It is a glob (`UseAll`), which an earlier
+     revision of this scan treated as "could carry a nested module named
+     List", so `List.length` stopped being recognised as the stdlib's and
+     every `{List(a) | len(_) > 0}` contract silently stopped being enforced —
      caught only by specs/lang/types/reject/t117, whose whole purpose is to
      notice the alias going missing.
 
      Scoping makes this sound beyond the stdlib case: an import inside
      `mod System` binds names in System's body, not in the module being
      checked.  This stays conservative for user code and only stops the
-     stdlib's own internals from speaking for the program. *)
+     stdlib's own internals from speaking for the program.
+
+     ── WHY THIS COMPOSES WITH [glob_competes] ─────────────────────────────
+     The two guards were written independently for the same bug and are kept
+     BOTH, conjoined: a glob withdraws only when it is the program's own AND
+     its target provably provides a competitor.  That is sound for the reason
+     any intersection of over-approximations is.  Write C for "this
+     declaration really can make `<md>` denote a non-stdlib module".  The
+     span rule is sound, i.e. C ⟹ ¬is_stdlib_source_file; the resolution rule
+     is sound, i.e. C ⟹ glob_competes (unresolvable answers `true`).  Hence
+     C ⟹ both, so anything that really competes still withdraws, and the two
+     only ever subtract cases where at least one of them has a proof that
+     nothing competes.  Neither can license the other into missing a genuine
+     competitor, because neither weakens the other's test — they are ANDed,
+     not substituted. *)
   let rebinds (sp : A.span) b =
-    if b && not (is_stdlib_source_file sp.A.file) then rebound := true
+    if b && not (is_stdlib_source_file sp.A.file) then begin
+      rebound := true;
+      blame sp
+    end
   in
   let rec go in_mod ds =
     List.iter
@@ -4469,8 +4973,13 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
                 | last :: _ :: _ -> last.A.txt = md
                 | _ -> false)
            | A.UseNames xs -> rebinds sp (mentions_md xs)
-           | A.UseExcept xs -> rebinds sp (not (mentions_md xs))
-           | A.UseAll -> rebinds sp true)
+           (* The two glob forms RESOLVE their target and look for a module
+              named `<md>` rather than assuming one — see
+              [glob_import_competes].  Unresolvable ⇒ withdraw, as before.
+              [rebinds] then adds the stdlib-span exclusion on top. *)
+           | A.UseExcept xs ->
+             rebinds sp ((not (mentions_md xs)) && glob_competes u.A.use_path)
+           | A.UseAll -> rebinds sp (glob_competes u.A.use_path))
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
         (* A `describe` block does not open a module scope of its own, so its
@@ -4492,12 +5001,13 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
       ds
   in
   go (mod_name = md) decls;
-  (not !foreign) && not !rebound
+  (((not !foreign) && not !rebound), !cause)
 
-let list_length_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+let list_length_defs_ok ~(mod_name : string) (decls : A.decl list) : bool * A.span option =
   stdlib_member_defs_ok ~md:"List" ~fn:"length" ~mod_name decls
 
-let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) :
+    bool * A.span option =
   stdlib_member_defs_ok ~md:"String" ~fn:"byte_size" ~mod_name decls
 
 (* Does any binding construct inside [e] bind [name]?  BINDER positions only —
@@ -4507,28 +5017,44 @@ let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
 
    [iter_all] supplies the structure-agnostic descent, so a new expression form
    is covered as soon as it appears in [children]; this match only has to name
-   the forms that BIND. *)
-let expr_binds_name (name : string) (e : A.expr) : bool =
-  let found = ref false in
+   the forms that BIND.
+
+   Returns the SPAN of the first binder found rather than a bare boolean: the
+   `cap verified` diagnostic points the user at the binding that withdrew the
+   alias, and "somewhere in this unit" is not actionable when the unit spans a
+   `MARCH_LIB_PATH` dependency.  The predicate [expr_binds_name] below is this
+   function's `<> None`, so the two cannot drift. *)
+let expr_binder_span (name : string) (e : A.expr) : A.span option =
+  let found = ref None in
   let is n = n = name in
   let param (p : A.param) = is p.A.param_name.A.txt in
   iter_all
     (fun e ->
-      let here =
-        match e with
-        | A.ELam (ps, _, _) -> List.exists param ps
-        | A.ELetFn (n, ps, _, _, _) -> is n.A.txt || List.exists param ps
-        | A.ELet (b, _) -> List.exists is (pat_binders b.A.bind_pat)
-        | A.ELetQ (p, _, _, _) -> List.exists is (pat_binders p)
-        | A.EMatch (_, brs, _) ->
-          List.exists
-            (fun (br : A.branch) -> List.exists is (pat_binders br.A.branch_pat))
-            brs
-        | _ -> false
-      in
-      if here then found := true)
+      if !found = None then
+        let here =
+          match e with
+          | A.ELam (ps, _, sp) -> if List.exists param ps then Some sp else None
+          | A.ELetFn (n, ps, _, _, sp) ->
+            if is n.A.txt || List.exists param ps then Some sp else None
+          | A.ELet (b, sp) ->
+            if List.exists is (pat_binders b.A.bind_pat) then Some sp else None
+          | A.ELetQ (p, _, _, sp) ->
+            if List.exists is (pat_binders p) then Some sp else None
+          | A.EMatch (_, brs, sp) ->
+            if
+              List.exists
+                (fun (br : A.branch) -> List.exists is (pat_binders br.A.branch_pat))
+                brs
+            then Some sp
+            else None
+          | _ -> None
+        in
+        if here <> None then found := here)
     e;
   !found
+
+let expr_binds_name (name : string) (e : A.expr) : bool =
+  expr_binder_span name e <> None
 
 (* Is the BARE name [name] still the compiler builtin?  There is no stdlib
    March definition of `string_byte_length` to identify (it is an intrinsic),
@@ -4564,62 +5090,99 @@ let expr_binds_name (name : string) (e : A.expr) : bool =
    declaration form is a compile error here rather than a silent hole (round
    2).  The arms that do nothing say so by name, and each is a claim that that
    form cannot bind a bare value name; check it rather than trusting it. *)
-let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
+let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list) :
+    bool * A.span option =
   let taken = ref false in
-  let take b = if b then taken := true in
+  let cause = ref None in
+  (* [sp] is the best location we have for this binder; the FIRST one recorded
+     wins, so the reported cause is stable under list order. *)
+  let take (sp : A.span) b =
+    if b then begin
+      taken := true;
+      if !cause = None then cause := Some sp
+    end
+  in
+  (* A binder found INSIDE an expression knows its own span, which is far more
+     useful than the enclosing declaration's. *)
+  let take_in (sp : A.span) e =
+    match expr_binder_span name e with Some s -> take s true | None -> ignore sp
+  in
   let named xs = List.exists (fun (n : A.name) -> n.A.txt = name) xs in
-  let fn_def_takes (fd : A.fn_def) =
-    take (fd.A.fn_name.A.txt = name);
+  (* Does glob-importing the module at [path] bring a member called [name]
+     into scope?  Only a value DECLARATION of that name in the target does —
+     a nested module's members are not glob-imported along with it. *)
+  let glob_competes path =
+    glob_import_competes ~root:decls ~unit_name:mod_name
+      ~binds_decl:(function
+        | A.DFn (fd, _) -> fd.A.fn_name.A.txt = name
+        | A.DLet (_, b, _) -> List.mem name (pat_binders b.A.bind_pat)
+        | A.DExtern (ed, _) ->
+          List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns
+        | A.DInterface (idf, _) ->
+          List.exists
+            (fun (m : A.method_decl) -> m.A.md_name.A.txt = name)
+            idf.A.iface_methods
+        | A.DImpl (idf, _) ->
+          List.exists (fun ((mn : A.name), _) -> mn.A.txt = name) idf.A.impl_methods
+        | _ -> false)
+      ~names_it:named
+      ~single_binds:(fun _ -> false)
+      path
+  in
+  let fn_def_takes (sp : A.span) (fd : A.fn_def) =
+    take fd.A.fn_name.A.span (fd.A.fn_name.A.txt = name);
     List.iter
       (fun (c : A.fn_clause) ->
-        take (List.mem name (List.concat_map fnparam_binders c.A.fc_params));
+        take sp (List.mem name (List.concat_map fnparam_binders c.A.fc_params));
         (* A default-value expression is a binder site too (it can carry a
            lambda), and [fc_params] holds it outside the body. *)
         List.iter
           (function
-            | A.FPDefault (_, d) -> take (expr_binds_name name d)
+            | A.FPDefault (_, d) -> take_in sp d
             | A.FPNamed _ | A.FPPat _ -> ())
           c.A.fc_params;
-        (match c.A.fc_guard with Some g -> take (expr_binds_name name g) | None -> ());
-        take (expr_binds_name name c.A.fc_body))
+        (match c.A.fc_guard with Some g -> take_in sp g | None -> ());
+        take_in sp c.A.fc_body)
       fd.A.fn_clauses
   in
   let rec go ds =
     List.iter
       (function
         (* ── Binds a bare value name ─────────────────────────────────────── *)
-        | A.DFn (fd, _) -> fn_def_takes fd
+        | A.DFn (fd, sp) -> fn_def_takes sp fd
         (* A module-level `let` is never descended into by [visit_decls], yet it
            binds the name for every sibling `DFn` body — the round-2 hole. *)
-        | A.DLet (_, b, _) ->
-          take (List.mem name (pat_binders b.A.bind_pat));
-          take (expr_binds_name name b.A.bind_expr)
+        | A.DLet (_, b, sp) ->
+          take sp (List.mem name (pat_binders b.A.bind_pat));
+          take_in sp b.A.bind_expr
         (* An `extern` block declares its functions under their bare names. *)
-        | A.DExtern (ed, _) ->
-          take (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns)
+        | A.DExtern (ed, sp) ->
+          take sp
+            (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns)
         (* Interface METHODS are called by bare name and dispatched on the
            argument's type, so a method of this name takes the spelling; a
            default body is a binder site as well. *)
-        | A.DInterface (idf, _) ->
+        | A.DInterface (idf, sp) ->
           List.iter
             (fun (m : A.method_decl) ->
-              take (m.A.md_name.A.txt = name);
-              match m.A.md_default with
-              | Some d -> take (expr_binds_name name d)
-              | None -> ())
+              take m.A.md_name.A.span (m.A.md_name.A.txt = name);
+              match m.A.md_default with Some d -> take_in sp d | None -> ())
             idf.A.iface_methods
-        | A.DImpl (idf, _) ->
+        | A.DImpl (idf, sp) ->
           List.iter
             (fun ((mn : A.name), (fd : A.fn_def)) ->
-              take (mn.A.txt = name);
-              fn_def_takes fd)
+              take mn.A.span (mn.A.txt = name);
+              fn_def_takes sp fd)
             idf.A.impl_methods
-        | A.DAlias (a, _) -> take (a.A.alias_name.A.txt = name)
-        | A.DUse (u, _) ->
+        | A.DAlias (a, sp) -> take sp (a.A.alias_name.A.txt = name)
+        | A.DUse (u, sp) ->
           (match u.A.use_sel with
-           | A.UseAll -> taken := true
-           | A.UseExcept xs -> take (not (named xs))
-           | A.UseNames xs -> take (named xs)
+           (* A glob takes the name only if its target actually defines it —
+              see [glob_import_competes].  Unresolvable ⇒ take, as before. *)
+           | A.UseAll -> take sp (glob_competes u.A.use_path)
+           | A.UseExcept xs -> take sp ((not (named xs)) && glob_competes u.A.use_path)
+           | A.UseNames xs -> take sp (named xs)
+           (* `use A.B` binds the MODULE `B`, never a bare value name. *)
            | A.UseSingle -> ())
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
@@ -4640,7 +5203,7 @@ let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
       ds
   in
   go decls;
-  not !taken
+  (not !taken, !cause)
 
 (* [measure_axioms] (default true) gates the whole measure-axiom machinery —
    datatype modelling, recursion-equation axioms, AND the M-b soundness gate (the
@@ -4682,9 +5245,26 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   strict_verified := false;
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
-  list_length_is_stdlib := list_length_defs_ok ~mod_name m.A.mod_decls;
-  string_byte_size_is_stdlib := string_byte_size_defs_ok ~mod_name m.A.mod_decls;
-  string_byte_length_is_builtin := bare_builtin_undefined "string_byte_length" m.A.mod_decls;
+  (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,
+     and the withdrawal is what a `cap verified` diagnostic must be able to
+     name.  The boolean stored is exactly the gate's own answer — this records
+     alongside it, it does not decide anything. *)
+  withdrawals := [];
+  let gate spelling measure ~str (ok, cause) =
+    if not ok then
+      withdrawals :=
+        { wd_spelling = spelling; wd_measure = measure; wd_str = str; wd_span = cause }
+        :: !withdrawals;
+    ok
+  in
+  list_length_is_stdlib :=
+    gate "List.length" "len" ~str:false (list_length_defs_ok ~mod_name m.A.mod_decls);
+  string_byte_size_is_stdlib :=
+    gate "String.byte_size" "len" ~str:true
+      (string_byte_size_defs_ok ~mod_name m.A.mod_decls);
+  string_byte_length_is_builtin :=
+    gate "string_byte_length" "len" ~str:true
+      (bare_builtin_undefined ~mod_name "string_byte_length" m.A.mod_decls);
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending

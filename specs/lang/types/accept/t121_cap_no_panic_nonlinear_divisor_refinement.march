@@ -1,0 +1,34 @@
+-- Refinement types, `cap no_panic` DIVISION SAFETY (2026-07-29). The accept
+-- side of the pair with reject/t122. Both divisors carry a NON-LINEAR
+-- refinement; the difference is whether the predicate actually entails
+-- `d != 0`.
+--
+-- `v * v > 0` is exactly `v != 0` over the integers, and z3 decides it
+-- instantly — but division_safety's own reflection refused any product without
+-- a literal factor, and the arm that rejects an unreflectable refinement then
+-- reported this program. `scale` pins the widened reflection.
+--
+-- `guarded` pins the other half: on the ELSE side of `if d == 0` the fact in
+-- scope is `not (d == 0)`, which discharges the obligation on its own. The
+-- syntactic path fallback used to drop negated conditions entirely, so this
+-- was reported even though the guard makes the division unreachable with zero.
+--
+-- Exit 0 here means nothing on its own — a checker that accepted every
+-- refinement it could not decide would also pass. reject/t122 is the twin that
+-- gives this file its content: `v * v >= 0` is just as non-linear, just as
+-- reflectable, and true of EVERY integer, so it must still be rejected.
+mod NonlinearDivisor do
+  cap no_panic
+
+  fn scale(d : {v : Int | v * v > 0}) : Int do
+    10 / d
+  end
+
+  fn guarded(d : {v : Int | v * v > 0}) : Int do
+    if d == 0 do 0 else 10 / d end
+  end
+
+  fn main() do
+    println(int_to_string(scale(2) + guarded(5)))
+  end
+end

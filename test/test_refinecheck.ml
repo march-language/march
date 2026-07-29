@@ -68,6 +68,35 @@ let refine_error_count src =
          d.March_errors.Errors.severity = March_errors.Errors.Error)
        ctx.March_errors.Errors.diagnostics)
 
+(* The text of every ERROR the refinement pass reports on [src], concatenated.
+   DESUGARED, for the same reason [has_refine_error_d] is: a qualified guard
+   like `List.length(ys)` is an `EField` chain until desugar flattens it, so a
+   fixture checked without desugaring exercises a different program than the
+   compiler does — and an assertion about the message would then pass or fail
+   for reasons unrelated to what it claims to test.
+
+   A boolean cannot distinguish "reported for the right reason" from "reported
+   for a different one", which is exactly what the attribution of a skip is
+   about; only the text can. *)
+let refine_error_text_d src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  String.concat "\n"
+    (List.filter_map
+       (fun (d : March_errors.Errors.diagnostic) ->
+         if d.March_errors.Errors.severity = March_errors.Errors.Error then
+           Some d.March_errors.Errors.message
+         else None)
+       ctx.March_errors.Errors.diagnostics)
+
+(* Substring search — [String.contains] is over CHARACTERS, and there is no
+   substring predicate in the OCaml stdlib. *)
+let contains (hay : string) (needle : string) : bool =
+  let n = String.length needle and h = String.length hay in
+  let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+  n = 0 || at 0
+
 (* True iff the refinement pass reports at least one WARNING on [src].
    [has_refine_error] only sees Errors, so vocabulary diagnostics need this. *)
 let has_refine_warning src =
@@ -78,10 +107,27 @@ let has_refine_warning src =
       d.March_errors.Errors.severity = March_errors.Errors.Warning)
     ctx.March_errors.Errors.diagnostics
 
+(* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
+   it must NOT do is report those cases as PASSING.  [gated] used to print a
+   "[skip]" line and then return unit, which alcotest scores as `[OK]`: on a
+   machine without z3 the entire gated corpus went green and the exit code said
+   nothing at all — a developer could "run the refinement tests" and learn
+   precisely zero.  [Alcotest.skip] raises instead, so those cases are reported
+   as `[SKIP]` and counted as skipped in the summary line.
+
+   RESIDUAL HAZARD, stated plainly because it cannot be removed from here:
+   alcotest still EXITS 0 when every test skipped, so a green exit code is not
+   by itself evidence that anything was verified.  Read the summary line — it
+   distinguishes "N tests run" from "N skipped".  CI installs z3 (see
+   .github/actions/march-setup/action.yml), so on CI nothing here is skipped;
+   this is a developer-local hazard.  Cases that do NOT need a solver are
+   deliberately built with a plain [Alcotest.test_case] rather than [gated] —
+   see [cap_verified_suite], [reason_suite] and [divsafety_hole_suite] — since
+   gating a test whose subject is fail-closed behaviour would disable it
+   exactly when verification is unavailable. *)
 let gated name f =
   Alcotest.test_case name `Quick (fun () ->
-      if z3_available () then f ()
-      else Printf.printf "\n[skip] %s: no z3 on PATH\n" name)
+      if z3_available () then f () else Alcotest.skip ())
 
 let decl n =
   Printf.sprintf
@@ -3080,17 +3126,30 @@ let float_suite =
    was SKIPPED, which from outside is indistinguishable from proved.  Only a
    guard that must FIRE proves the two symbols actually meet. *)
 let length_alias_suite =
+  (* Asserts the LEDGER, not silence.  Silence is what a SKIP looks like too, so
+     `check bool "no error" false` here passed with the alias deleted — the very
+     confusion the obligation ledger exists to end.  `1 proved, 0 skipped` is a
+     claim only a working alias can satisfy.
+     Mutation that fails this: make [measure_alias] return [None] always
+     (lib/refinecheck/refine_check.ml) — proved drops 1→0, skipped 0→1. *)
   [ gated "a List.length guard discharges a len obligation" (fun () ->
-        Alcotest.(check bool) "no error" false
-          (has_refine_error_d
-             {|
+        let src =
+          {|
 mod L1 do
   fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
   fn go(ys : List(Int)) : Int do
     if List.length(ys) > 0 do head(ys) else 0 end
   end
   fn main() : Int do go([1]) end
-end|}));
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
 
     gated "a contradictory List.length guard IS a violation" (fun () ->
         Alcotest.(check bool) "error" true
@@ -3188,9 +3247,18 @@ end|}));
        HONESTY NOTE: unlike its four neighbours, this case passes against the
        PRE-fix gate too, so it does not by itself discriminate the hole — a
        string-parsed fixture has no stdlib prepended, and the discriminating
-       shape needs bin/main.ml's prepend-and-strip.  It is kept because the
-       property it asserts (silence) is the one that must hold, not because it
-       is a witness. *)
+       shape needs bin/main.ml's real driver.  It is kept because the property
+       it asserts (silence) is the one that must hold, not because it is a
+       witness.  The WITNESS that discriminates the walk start is
+       `specs/lang/types/accept/t126_entry_module_shadows_list_length.march`
+       (and `t127…string_byte_size` for the other alias): it declares `length`
+       in an `extern` block — a decl form `strip_entry_self_qual` does not
+       rewrite, so the call site really does reach refinecheck spelled
+       `List.length` — and with the walk start reverted to `go false` the
+       corpus rejects it with a FALSE `len(ys) = 0`.  Note `fn length` as
+       written below could NOT be that witness even through the real driver:
+       desugar strips `List.length` to bare `length` whenever the entry module
+       declares `length` as a `fn` or a `let`. *)
     gated "an entry module named List defining `length` is NOT aliased" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error_d
@@ -3222,11 +3290,80 @@ mod QIN do
   fn main() : Int do go([1]) end
 end|}));
 
-    gated "a glob `import X` withdraws the alias" (fun () ->
+    (* `Shim` is not declared in this unit, so the glob's contents cannot be
+       resolved — the unresolvable case, which still withdraws. *)
+    gated "a glob `import X` of an UNRESOLVABLE X withdraws the alias" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error_d
              {|
 mod QGlob do
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* ── The glob pair: LOOK, don't assume ─────────────────────────────────
+       A glob used to withdraw unconditionally.  Because bin/main.ml prepends
+       the whole stdlib and this gate is unit-global, the single `import
+       Process` in `stdlib/system.march` therefore withdrew the alias for
+       EVERY March program — the feature was inert in production, and no
+       ACCEPT witness could see it (a skip exits 0 exactly like a proof).
+
+       These two fixtures are the same program, differing ONLY in whether the
+       glob's target actually carries a competing `List.length`.  The second
+       is the one that discriminates the fix (it FAILS pre-fix, silently); the
+       first is the one that guards the soundness boundary — trading a dead
+       feature for a false positive would show up here. *)
+    gated "a glob whose target DOES define List.length withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QGComp do
+  mod Shim do
+    mod List do
+      fn length(xs : List(Int)) : Int do 0 end
+    end
+  end
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "a glob whose target has NO List keeps the alias" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QGClean do
+  mod Shim do
+    fn helper(x : Int) : Int do x end
+  end
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* An `alias … as List` inside the glob's target is a competitor too. *)
+    gated "a glob whose target aliases something to `List` withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QGAlias do
+  mod Other do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  mod Shim do
+    alias Other as List
+  end
   import Shim
   fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
   fn go(ys : List(Int)) : Int do
@@ -3348,17 +3485,27 @@ end|}
    proved.  Desugared throughout — `String.byte_size(t)` is an `EField` chain
    until desugar flattens it to a dotted `EVar`. *)
 let string_alias_suite =
+  (* Ledger, not silence — see the note on [length_alias_suite]'s first case.
+     Mutation that fails this: make [measure_alias] return [None] always;
+     proved drops 1→0 and the obligation reappears as a skip. *)
   [ gated "a String.byte_size guard discharges a String len obligation" (fun () ->
-        Alcotest.(check bool) "no error" false
-          (has_refine_error_d
-             {|
+        let src =
+          {|
 mod S1 do
   fn slug(s : {String | len(_) > 0}) : Int do 1 end
   fn go(t : String) : Int do
     if String.byte_size(t) > 0 do slug(t) else 0 end
   end
   fn main() : Int do go("a") end
-end|}));
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
 
     gated "a contradictory String.byte_size guard IS a violation" (fun () ->
         Alcotest.(check bool) "error" true
@@ -3472,7 +3619,9 @@ mod QSExt do
   fn main() : Int do go("a") end
 end|}));
 
-    (* Same shape, same honesty note, as the list-side entry-module case. *)
+    (* Same shape, same honesty note, as the list-side entry-module case — the
+       discriminating witness for this half is
+       `specs/lang/types/accept/t127_entry_module_shadows_string_byte_size.march`. *)
     gated "an entry module named String defining `byte_size` is NOT aliased" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error_d
@@ -3497,6 +3646,79 @@ mod QSIN do
   fn slug(s : {String | len(_) > 0}) : Int do 1 end
   fn go(t : String) : Int do
     if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The glob pair, string side — the two gates are one parameterised
+       function, so both spellings are pinned symmetrically.  See the list
+       side for why the second case is the one that discriminates the fix. *)
+    gated "a glob whose target DOES define String.byte_size withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSGComp do
+  mod Shim do
+    mod String do
+      fn byte_size(s : String) : Int do 0 end
+    end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "a glob whose target has NO String keeps the alias" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QSGClean do
+  mod Shim do
+    fn helper(x : Int) : Int do x end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* And the bare-builtin gate, which shares the same glob resolution: a
+       glob takes `string_byte_length` only if its target declares one. *)
+    gated "a glob whose target DEFINES string_byte_length withdraws the bare alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QBGComp do
+  mod Shim do
+    fn string_byte_length(s : String) : Int do 99 end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "a glob whose target lacks string_byte_length keeps the bare alias" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QBGClean do
+  mod Shim do
+    fn helper(x : Int) : Int do x end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
   end
   fn main() : Int do go("a") end
 end|}));
@@ -3693,6 +3915,145 @@ let obligation_suite =
           (List.fold_left (fun a (_, n) -> a + n) 0 skips))
   ]
 
+(* ── Reason CLASSIFICATION ─────────────────────────────────────────────────
+   [obligation_suite] above counts skips; these pin WHICH reason each skip is
+   filed under.  A count cannot tell the difference, and the difference is the
+   whole reason several of these constructors exist: [Unreflectable_subject]
+   was split out of [Unreflectable_predicate] precisely so a record-typed
+   SUBJECT that failed to reflect is not reported as an unreflectable
+   PREDICATE — a user with a perfectly ordinary predicate would otherwise be
+   told to rewrite it and sent after the wrong thing.  Nothing checked that
+   split ever fired, so the two could have been silently re-conflated (or
+   swapped) with the suite still green.
+
+   Gating: only the [Solver_undecided] case reaches the solver.  The other
+   three are decided at reflection / sort-gate time, BEFORE [Refine.discharge],
+   so gating them would disable them on a z3-less machine for no reason — and
+   worse, [Solver_undecided] is the fallthrough every obligation lands in when
+   there is no solver, so an ungated reason test would pass by accident there.
+   Verified empirically with z3 off PATH. *)
+let skip_reasons src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.filter_map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Skipped r ->
+        Some (March_refinecheck.Obligation.reason_name r)
+      | _ -> None)
+    (March_refinecheck.Obligation.all ())
+
+let reason_suite =
+  [ (* A RECORD subject whose actual cannot be reflected: `mk()` is a call, so
+       [record_self] finds no term for it and no goal is built at all.  The
+       predicate `v.port >= 1` is entirely reflectable — which is the point:
+       blaming it would be a lie.
+       Mutation that fails this: in refine_check.ml, change the `\`Skip` arm of
+       the reason match to [Unreflectable_predicate] (i.e. undo the split). *)
+    Alcotest.test_case "an unreflectable SUBJECT is not blamed on the predicate"
+      `Quick (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS1 do
+  type Config = { port : Int }
+  fn mk() : Config do { port: 1 } end
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f() : Int do serve(mk()) end
+end|}
+        in
+        Alcotest.(check (list string)) "unreflectable-subject"
+          [ "unreflectable-subject" ] rs);
+
+    (* Reflection SUCCEEDS here — `_ > "a"` builds a term — but it compares the
+       `$Str`-sorted subject with an Int-sorted side, which [wellsorted]
+       rejects before any VC is sent.  Sending it would put an `(error …)` line
+       on the shared `z3 -in` channel.
+       Mutation that fails this: make [sort_conflict] return [false] always,
+       or make [wellsorted] return [true] always — the obligation then reaches
+       the solver and is filed [solver-undecided] instead. *)
+    Alcotest.test_case "a Str/Int sort clash is filed as sort-conflict" `Quick
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS2 do
+  fn f(s : {String | _ > "a"}) : Int do 1 end
+  fn go(t : String) : Int do f(t) end
+end|}
+        in
+        Alcotest.(check (list string)) "sort-conflict" [ "sort-conflict" ] rs);
+
+    (* `_ > 0` on a Float subject: [fp_rewrite] declines (only one side is
+       float-sorted), so the term still mentions a float outside an `fp.*`
+       comparison and [float_wellsorted] abandons the VC.
+       Mutation that fails this: make [float_wellsorted] return [true] always —
+       the goal is emitted, the solver runs, and the reason becomes
+       [solver-undecided]. *)
+    Alcotest.test_case "a Float/Int comparison is filed as float-sort-gate" `Quick
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS3 do
+  fn f(x : {Float | _ > 0}) : Float do x end
+  fn go(y : Float) : Float do f(y) end
+end|}
+        in
+        Alcotest.(check (list string)) "float-sort-gate" [ "float-sort-gate" ] rs);
+
+    (* The genuine solver outcome, with a CONTROL.  Without the control this
+       test would pass on a z3-less machine for the wrong reason: with no
+       solver EVERY obligation falls through to [Solver_undecided].  The
+       control — the same call under a guard that discharges it — can only be
+       [Proved] when a solver actually ran and decided, so the pair together
+       says "z3 ran, and on the unguarded call it declined".
+       Mutation that fails this: replace the final `| _ -> note (Skipped
+       Solver_undecided)` arm with any other reason. *)
+    gated "a genuinely undecided obligation is filed as solver-undecided" (fun () ->
+        let control =
+          {|mod RS4b do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "the control is decided, not skipped" []
+          (skip_reasons control);
+        let rs =
+          skip_reasons
+            {|mod RS4 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check (list string)) "solver-undecided" [ "solver-undecided" ] rs);
+
+    (* [Alias_withdrawn] is checked in [alias_attribution_suite] through the
+       `cap verified` MESSAGE text, which is the user-facing surface.  It is
+       also re-attributed in the LEDGER (see [note] in refine_check.ml), and
+       `--refine-report` prints the ledger, so a ledger that disagreed with the
+       diagnostic would be a second thing to be confused by.  Pin the ledger
+       side directly, including that it is not left as [solver-undecided].
+       Mutation that fails this: move the re-attribution in [note] to after
+       [Obligation.record], so only the message is re-attributed. *)
+    gated "a withdrawn alias is re-attributed in the LEDGER, not just the message"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS5 do
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "alias-withdrawn" [ "alias-withdrawn" ] rs)
+  ]
+
 (* ── `cap verified`: an obligation the checker SKIPS becomes an error ─────
    The default stance reports only definite failures; `cap verified` inverts
    that for the module that asks for it.  The load-bearing test is the third
@@ -3708,8 +4069,23 @@ let refine_error_texts src =
       else None)
     ctx.March_errors.Errors.diagnostics
 
+(* NOTE ON GATING (same reasoning as [divsafety_hole_suite] below): five of these
+   six cases never reach the solver, so gating them on z3 would DISABLE the
+   fail-closed tests exactly on the machine where verification is unavailable —
+   the one place fail-closed behaviour matters most.  `is_prime` fails at
+   REFLECTION ([smt_of] returns None) and the escalation happens in that `None`
+   arm, before [Refine.discharge] is ever called; the two scoping cases and the
+   message case ride the same arm.
+   The one genuine exception is "a PROVED obligation stays silent": with no
+   solver every obligation falls through to [Solver_undecided], which under
+   `cap verified` escalates to an error, so that case asserts silence that only
+   a real solver can produce.  It stays [gated].
+   Verified empirically by running this group with z3 removed from PATH:
+     env PATH=/usr/bin:/bin ./_build/default/test/test_refinecheck.exe \
+       test cap-verified -e *)
 let cap_verified_suite =
-  [ gated "cap verified: an unreflectable predicate is an ERROR" (fun () ->
+  [ Alcotest.test_case "cap verified: an unreflectable predicate is an ERROR" `Quick
+      (fun () ->
         Alcotest.(check bool) "error" true
           (has_refine_error
              "mod V1 do\n\
@@ -3728,7 +4104,8 @@ let cap_verified_suite =
               end\n"));
 
     (* THE test.  Same skip, no `cap verified` — must stay silent. *)
-    gated "WITHOUT cap verified the same skip stays silent" (fun () ->
+    Alcotest.test_case "WITHOUT cap verified the same skip stays silent" `Quick
+      (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
              "mod V3 do\n\
@@ -3740,7 +4117,8 @@ let cap_verified_suite =
        does NOT inherit strictness.  In production bin/main.ml prepends the
        whole standard library as sibling `DMod`s of the entry module's decls,
        so inheritance would make every stdlib module strict. *)
-    gated "cap verified does NOT reach into a nested ordinary module" (fun () ->
+    Alcotest.test_case "cap verified does NOT reach into a nested ordinary module"
+      `Quick (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
              "mod V4 do\n\
@@ -3754,7 +4132,8 @@ let cap_verified_suite =
 
     (* Scoping, inward: a nested module may opt in on its own, and doing so
        must not leave strict mode on for its siblings. *)
-    gated "a nested cap verified module opts in without leaking to siblings" (fun () ->
+    Alcotest.test_case "a nested cap verified module opts in without leaking to siblings"
+      `Quick (fun () ->
         let errs =
           refine_error_texts
             "mod V5 do\n\
@@ -3771,7 +4150,8 @@ let cap_verified_suite =
 
     (* The message must name the obligation and say why it could not be
        discharged — the whole point is legibility. *)
-    gated "the cap verified error names the predicate, the callee and the reason"
+    Alcotest.test_case
+      "the cap verified error names the predicate, the callee and the reason" `Quick
       (fun () ->
         let errs =
           refine_error_texts
@@ -3923,6 +4303,695 @@ let divsafety_hole_suite =
               end\n"))
   ]
 
+(* ── Division-safety: discharge before rejecting ───────────────────────────
+   Closing the unreflectable-refinement hole (above) over-corrected: the new
+   arm rejected predicates that DO entail `d != 0` and that z3 decides
+   instantly, because [division_safety]'s own [smt_of] refused non-literal
+   multiplication.  It also fell back to a syntactic path check that ignored
+   NEGATED path conditions, while the reflectable arm beside it handled them.
+   These pin both fixes — and, critically, the control that neither fix
+   reopens the hole.
+
+   GATING: the first case genuinely needs z3 (nothing syntactic decides
+   `v * v > 0`), so it is [gated].  The other two must NOT be: the control has
+   to fail closed precisely when there is no solver, and the negated-guard case
+   is decided by [path_proves_nonzero] with no VC built at all. *)
+let divsafety_entailment_suite =
+  [ gated "a non-linear refinement that entails d != 0 is accepted" (fun () ->
+        (* v*v > 0  <=>  v != 0 over the integers. Z3 decides this instantly;
+           only division_safety's own linear smt_of refused it. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error {|
+mod D1 do
+  cap no_panic
+  fn scale(d : {v : Int | v * v > 0}) : Int do 10 / d end
+end|}))
+  ; Alcotest.test_case "an unreflectable refinement that proves NOTHING still errors" `Quick
+      (fun () ->
+        (* The control. Widening must not reopen the hole PR #105 closed. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error {|
+mod D2 do
+  cap no_panic
+  fn f(n : Int, d : {Int | is_prime(_)}) : Int do n / d end
+end|}))
+  ; Alcotest.test_case "a negated path condition discharges too" `Quick (fun () ->
+      (* The `Some assumption` branch reflects negated path conditions via
+         smt_of; the None arm's `path_proves_nonzero` fallback dropped the
+         else-branch. The guard alone makes this division unreachable with
+         zero. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod D3 do
+  cap no_panic
+  fn f(d : {v : Int | v * v > 0}) : Int do
+    if d == 0 do 0 else 10 / d end
+  end
+end|}))
+  ]
+
+(* ── Division-safety: a rebound name retires the fact about it ─────────────
+   Every channel this pass reads keys on a bare variable NAME — a path
+   condition (`d != 0`), a refined parameter (`d : {Int | …}`), a `let` value
+   (`let d = …`) — so none of them survives that name being rebound.  The walk
+   did not retire ANY of them, and the negated-path fix above doubled the reach
+   of that omission: each program below passed `--check` with exit 0 and then
+   panicked at run time with "division by zero".
+
+   The `then`-side witness was already broken before that fix; it is the same
+   one-line discipline, so it is closed here too rather than left as a known
+   hole in a capability that promises the division cannot panic.
+
+   NOT gated: every case is decided before any VC is built (the guard fact is
+   retired, so the divisor reaches the unrefined branch and errors), and the
+   whole point is fail-closed behaviour — gating would disable these exactly
+   where verification is unavailable. *)
+let divsafety_shadowing_suite =
+  let errors name src = Alcotest.(check bool) name true (has_divsafety_error src) in
+  [ Alcotest.test_case "a `let` rebinding the guarded name retires the guard (else side)"
+      `Quick (fun () ->
+        errors "error" {|
+mod S1 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d == 0 do 0 else
+      let d = 0
+      10 / d
+    end
+  end
+end|})
+  ; Alcotest.test_case "a `let` rebinding the guarded name retires the guard (then side)"
+      `Quick (fun () ->
+        (* Pre-existing, not a regression of the negated-path fix — the same
+           discipline closes it, so leaving it open would mean `cap no_panic`
+           still accepts a literal division by zero. *)
+        errors "error" {|
+mod S2 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d != 0 do
+      let d = 0
+      10 / d
+    else 0 end
+  end
+end|})
+  ; Alcotest.test_case "a lambda parameter shadowing the guarded name retires the guard"
+      `Quick (fun () ->
+        errors "error" {|
+mod S3 do
+  cap no_panic
+  fn ap(g : (Int) -> Int) : Int do g(0) end
+  fn f(d : Int) : Int do
+    if d == 0 do 0 else ap(fn d -> 10 / d) end
+  end
+end|})
+  ; Alcotest.test_case "a match binder shadowing the guarded name retires the guard"
+      `Quick (fun () ->
+        errors "error" {|
+mod S4 do
+  cap no_panic
+  fn f(d : Int, o : Option(Int)) : Int do
+    if d == 0 do 0 else
+      match o do
+        Some(d) -> 10 / d
+        None -> 0
+      end
+    end
+  end
+end|})
+  ; Alcotest.test_case "a lambda parameter shadowing a REFINED parameter retires it"
+      `Quick (fun () ->
+        (* The parameter channel has the identical hole as the path channel:
+           the refinement is about the outer `d`, not the lambda's. *)
+        errors "error" {|
+mod S5 do
+  cap no_panic
+  fn ap(g : (Int) -> Int) : Int do g(0) end
+  fn f(d : {Int | _ != 0}) : Int do ap(fn d -> 10 / d) end
+end|})
+  ; Alcotest.test_case "a `let` rebinding a REFINED parameter to zero is caught"
+      `Quick (fun () ->
+        errors "error" {|
+mod S6 do
+  cap no_panic
+  fn f(d : {Int | _ != 0}) : Int do
+    let d = 0
+    10 / d
+  end
+end|})
+  ; Alcotest.test_case "an ordinary `let` divisor is still accepted" `Quick (fun () ->
+      (* The control: retirement must not swallow the `let` value channel it
+         replaces.  `let d = 5` retires the OUTER `d` and records 5 in its
+         place, so this stays silent. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod S7 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    let d = 5
+    10 / d
+  end
+end|}))
+  ; Alcotest.test_case "a guard on an unshadowed name still discharges" `Quick (fun () ->
+      (* The other control: retirement is per-NAME, so an unrelated binder
+         must not retire the guard. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod S8 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d == 0 do 0 else
+      let k = 3
+      k / d
+    end
+  end
+end|}))
+  ]
+
+(* ── Decl-walk coverage ────────────────────────────────────────────────────
+   Both obligation-raising walks used to descend only into [DFn] and [DMod] and
+   end in `| _ -> ()`, so a capability directive said nothing about code living
+   in any other decl form: an `impl` method, a top-level `let`, an actor
+   handler, a `test` body.  `cap no_panic` accepted a division by zero that
+   crashed at runtime.  These pin the widened walk; the fourth is the control
+   that the widening does not make ORDINARY modules noisier. *)
+let walk_coverage_suite =
+  [ Alcotest.test_case "cap no_panic sees a division inside an impl body" `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod NP do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+      Box(n) -> 100 / n
+      end
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in a top-level let" `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod NP2 do
+  cap no_panic
+  fn zero() : Int do 0 end
+  let boom = 100 / zero()
+end|}))
+    (* NOTE ON THE CONTRACT USED HERE.  The obvious fixture — an impl body
+       calling `List.head(xs)` — cannot work: a string fixture prepends no
+       standard library, so `List.head` resolves to nothing, carries no
+       contract, and raises no obligation no matter how wide the walk is.  It
+       would pass before AND after the fix.  The obligation has to come from a
+       contract the fixture itself declares, hence module-level `weird`, whose
+       `is_prime` predicate is outside the checkable fragment and therefore
+       SKIPS — which `cap verified` must escalate to an error. *)
+  ; gated "cap verified sees an obligation inside an impl body" (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_refine_error_d {|
+mod CV do
+  cap verified
+  type Box = Box(Int)
+  fn weird(k : {Int | is_prime(_)}) : Int do k end
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+      Box(n) -> weird(n)
+      end
+    end
+  end
+end|}))
+  ; gated "an ordinary module is unaffected by the wider walk" (fun () ->
+      (* The control. Widening the walk must not make a NON-capability module
+         report anything it did not report before: the same skip, without the
+         `cap verified` directive, stays silent. *)
+      Alcotest.(check bool) "no error" false
+        (has_refine_error_d {|
+mod Plain do
+  type Box = Box(Int)
+  fn weird(k : {Int | is_prime(_)}) : Int do k end
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+      Box(n) -> weird(n)
+      end
+    end
+  end
+end|}))
+
+    (* ── Assume-without-check: a contract nothing enforces ────────────────
+       Widening the walk made both passes ASSUME an impl method's parameter
+       refinements, while [collect_all_defs] still registered only `fn`s — so
+       no caller was obliged to establish them.  `--check` exited 0 on the
+       program below and it divided by zero at run time.  The predicate must
+       either bind the CALLER (when the method name unambiguously denotes this
+       contract) or bind NOBODY (when it does not) — never only the body. *)
+  ; gated "an impl method's contract obliges its callers" (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_refine_error_d {|
+mod HIC do
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|}))
+  ; gated "the same call satisfying the impl contract stays silent" (fun () ->
+      (* Negative control for the case above: registering impl contracts must
+         not reject a call that DOES satisfy them. *)
+      Alcotest.(check bool) "no error" false
+        (has_refine_error_d {|
+mod HICOK do
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 2))) end
+end|}))
+  ; Alcotest.test_case
+      "an AMBIGUOUS impl method's refinement is assumed by nobody" `Quick (fun () ->
+      (* Two impls define `run`, so a call resolved by NAME cannot tell their
+         contracts apart and neither is adopted — which must NOT leave the
+         bodies free to assume them.  Fail closed: the divisor refinement is
+         stripped and `m / k` must prove itself some other way, so
+         `cap no_panic` reports it.  Without the strip this exits silently
+         while nothing anywhere enforces `k != 0`. *)
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod AMB do
+  cap no_panic
+  type Box = Box(Int)
+  type Cup = Cup(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+  impl Runner(Cup) do
+    fn run(c, k : {Int | k != 0}) : Int do match c do Cup(m) -> m / k end end
+  end
+end|}))
+  ; Alcotest.test_case
+      "an UNAMBIGUOUS impl method's refinement still discharges its division"
+      `Quick (fun () ->
+      (* Negative control for the strip: when the contract IS adopted (one impl,
+         no `fn` of that name), the divisor refinement is enforced at call sites
+         and may therefore be assumed in the body.  Without this, the case above
+         could be satisfied by stripping unconditionally. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod UNAMB do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+end|}))
+
+    (* ── Self-module-qualified callee inside an impl body ─────────────────
+       `strip_entry_self_qual` had its own `| d -> d` wildcard, so `M.g(...)`
+       written inside an `impl` method of the entry module `M` survived
+       unstripped and resolved to nothing — silently raising no obligation,
+       while the identical call in a sibling `fn` was reported. *)
+  ; gated "a self-module-qualified call inside an impl body is checked" (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_refine_error_d {|
+mod OuterB do
+  fn g(k : {Int | k > 0}) : Int do k end
+  type Box = Box(Int)
+  interface I(a) do fn run : a -> Int end
+  impl I(Box) do
+    fn run(_b) : Int do OuterB.g(0 - 9) end
+  end
+end|}))
+
+    (* ── One case per descended declaration form ──────────────────────────
+       Exhaustiveness over [A.decl] protects against a 25th CONSTRUCTOR; it
+       protects nothing against someone deleting an arm's body or "correcting"
+       [DDescribe] to recurse through [visit_decls].  Each case below pairs a
+       firing program with the same program minus `cap no_panic`, so a test can
+       only pass if the arm both walks the body AND respects the capability
+       scope. *)
+  ; Alcotest.test_case "cap no_panic sees a division in a describe block" `Quick (fun () ->
+      (* THE case for the deliberate departure from the brief: a `describe`
+         block carries no `cap` directive of its own, so recursing through
+         [visit_decls]/[check_decls] would re-derive the flag from the inner
+         decl list and silently disable checking inside every describe. *)
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod DSC do
+  cap no_panic
+  fn zero() : Int do 0 end
+  describe "arith" do
+    test "divides" do
+      let d = zero()
+      println(int_to_string(100 / d))
+    end
+  end
+end|}))
+  ; Alcotest.test_case "a describe block in an ordinary module stays silent" `Quick (fun () ->
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod DSC2 do
+  fn zero() : Int do 0 end
+  describe "arith" do
+    test "divides" do
+      let d = zero()
+      println(int_to_string(100 / d))
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in a test body" `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod TST do
+  cap no_panic
+  fn zero() : Int do 0 end
+  test "divides" do
+    let d = zero()
+    println(int_to_string(100 / d))
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in setup and setup_all" `Quick (fun () ->
+      Alcotest.(check int) "both reported" 2
+        (List.length
+           (divsafety_error_texts {|
+mod STP do
+  cap no_panic
+  fn zero() : Int do 0 end
+  setup do
+    println(int_to_string(100 / zero()))
+  end
+  setup_all do
+    println(int_to_string(200 / zero()))
+  end
+end|})))
+  ; Alcotest.test_case "cap no_panic sees a division in an actor handler and init" `Quick
+      (fun () ->
+      Alcotest.(check int) "both reported" 2
+        (List.length
+           (divsafety_error_texts {|
+mod ACT do
+  cap no_panic
+  fn zero() : Int do 0 end
+  actor Counter do
+    state { value : Int }
+    init { value: 100 / zero() }
+
+    on Bump(d : Int) do
+      { state with value: 200 / d }
+    end
+  end
+end|})))
+  ; Alcotest.test_case "an actor in an ordinary module stays silent" `Quick (fun () ->
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod ACT2 do
+  fn zero() : Int do 0 end
+  actor Counter do
+    state { value : Int }
+    init { value: 100 / zero() }
+
+    on Bump(d : Int) do
+      { state with value: 200 / d }
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in an interface default body"
+      `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod IFD do
+  cap no_panic
+  fn zero() : Int do 0 end
+  interface Runner(a) do
+    fn run : a -> Int do
+      100 / zero()
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in every app hook" `Quick (fun () ->
+      Alcotest.(check int) "all three reported" 3
+        (List.length
+           (divsafety_error_texts {|
+mod APP do
+  cap no_panic
+  fn zero() : Int do 0 end
+  app Main do
+    on_start do
+      200 / zero()
+    end
+    on_stop do
+      300 / zero()
+    end
+    100 / zero()
+  end
+end|})))
+  ]
+
+(* ── A withdrawn measure alias must explain itself ──────────────────────────
+   The `List.length` / `String.byte_size` / `string_byte_length` gates are
+   unit-global and syntactic BY DESIGN: they resolve doubt by withdrawing the
+   alias, which under the default stance costs only a missed proof.  Under
+   `cap verified` a missed proof is a hard ERROR, and the error used to read
+   "solver-undecided: the solver proved neither the predicate nor its
+   negation" — pointing at z3 and at the predicate when the cause was a
+   name-shadowing decision taken elsewhere in the unit, possibly in a
+   `MARCH_LIB_PATH` dependency the author never opened.  Every remedy that text
+   offered ("guard the call", "rewrite the predicate") was one the author had
+   already applied.
+
+   These tests pin the ATTRIBUTION, not the suppression: the gates still
+   withdraw exactly as before (see [length_alias_suite] / [string_alias_suite]),
+   and the last two cases are the ones that matter most — they are what stops
+   the fix from relabelling every undischarged obligation as an alias problem. *)
+let alias_attribution_suite =
+  [ gated "a nested `mod List do fn length` names itself in the cap verified error"
+      (fun () ->
+        (* Reachable only as `Ver3.Internal.List.length`, and it does NOT win at
+           runtime — but the gate is syntactic, so the alias goes anyway. *)
+        let msg =
+          refine_error_text_d
+            {|mod Ver3 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "an unrelated Int local named string_byte_length names itself"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod Ver4 do
+  cap verified
+  fn first(s : {String | len(_) > 0}) : Int do 0 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) > 0 do first(t) else 0 end
+  end
+  fn unrelated(n : Int) : Int do
+    let string_byte_length = n + 1
+    string_byte_length
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "string_byte_length"));
+    (* ── THE CONTROLS ─────────────────────────────────────────────────────
+       A skip with no withdrawn alias behind it, and a skip in a module that
+       DOES have a withdrawn alias but at a call the alias could not have
+       helped, must both keep the general message.  Without these, "never says
+       solver-undecided" would pass trivially. *)
+    gated "a genuinely undecided obligation still says solver-undecided"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod CtlA do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "still says solver-undecided" true
+          (contains msg "solver-undecided"));
+    gated "a withdrawn alias is not blamed for an UNGUARDED call"
+      (fun () ->
+        (* Same competing `mod List` as the first case, so the alias IS
+           withdrawn — but this call site never mentions the spelling, so the
+           withdrawal cannot be what stopped the proof and must not be named. *)
+        let msg =
+          refine_error_text_d
+            {|mod CtlB do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "still says solver-undecided" true
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "does not name the alias" false
+          (contains msg "alias-withdrawn"));
+    (* ── RELEVANCE, not merely presence ───────────────────────────────────
+       The controls above only vary "is there a guard at all", and an earlier
+       version of this attribution passed them while still blaming a withdrawal
+       that was provably not the cause.  Each case below pairs a witness with a
+       CONTROL that deletes only the competing binding: if the control is still
+       undischarged, the withdrawal cannot have been what stopped the proof,
+       and naming it would send the author to rename something irrelevant. *)
+    gated "a guard on a DIFFERENT variable is not this obligation's guard"
+      (fun () ->
+        let prog competing =
+          Printf.sprintf
+            {|mod WA do
+  cap verified
+%s
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    if List.length(zs) > 0 do head(ys) else 0 end
+  end
+end|}
+            competing
+        in
+        let competing =
+          {|  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end|}
+        in
+        let control = refine_error_text_d (prog "") in
+        let witness = refine_error_text_d (prog competing) in
+        (* The control proves causal irrelevance: with the alias fully active
+           the call is undischarged all the same. *)
+        Alcotest.(check bool)
+          "control is undischarged too" true
+          (contains control "solver-undecided");
+        Alcotest.(check bool)
+          "so the withdrawal is not blamed" false
+          (contains witness "alias-withdrawn");
+        Alcotest.(check bool)
+          "and the honest message stands" true
+          (contains witness "solver-undecided"));
+    gated "a withdrawn LIST alias is not blamed for a STRING obligation"
+      (fun () ->
+        (* All three spellings route to the single measure name `len`, so
+           mentioning `len` in the predicate cannot distinguish a list length
+           from a string byte length.  The String aliases were never withdrawn
+           here; nothing about `List.length` is relevant. *)
+        let msg =
+          refine_error_text_d
+            {|mod WB do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn first(s : {String | len(_) > 0}) : Int do 0 end
+  fn go(t : String, zs : List(Int)) : Int do
+    if List.length(zs) > 0 do first(t) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not name the list alias" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a NEGATED guard is not read as a guard that proved nothing"
+      (fun () ->
+        (* `if List.length(ys) > 0 do 0 else head(ys) end` — the guard does not
+           fail to prove the predicate, it DISPROVES it.  The control shows the
+           genuine bug underneath; the witness must not dress that up as a
+           story about a nested module. *)
+        let prog competing =
+          Printf.sprintf
+            {|mod WC do
+  cap verified
+%s
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do 0 else head(ys) end
+  end
+end|}
+            competing
+        in
+        let control =
+          refine_error_text_d (prog "")
+        in
+        let witness =
+          refine_error_text_d
+            (prog
+               {|  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end|})
+        in
+        Alcotest.(check bool)
+          "the control finds a real violation" true
+          (contains control "refinement violation");
+        Alcotest.(check bool)
+          "so the withdrawal is not blamed" false
+          (contains witness "alias-withdrawn"));
+    (* Suppression itself is untouched: with nothing competing, the same guarded
+       call still PROVES and reports nothing at all. *)
+    gated "the guarded call still proves when no alias was withdrawn" (fun () ->
+        Alcotest.(check string)
+          "silent" ""
+          (refine_error_text_d
+             {|mod Ok1 do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -3957,5 +5026,10 @@ let () =
       ("length-alias", length_alias_suite);
       ("string-alias", string_alias_suite);
       ("obligations", obligation_suite);
+      ("obligation-reasons", reason_suite);
       ("cap-verified", cap_verified_suite);
-      ("divsafety-hole", divsafety_hole_suite) ]
+      ("alias-attribution", alias_attribution_suite);
+      ("divsafety-hole", divsafety_hole_suite);
+      ("divsafety-entailment", divsafety_entailment_suite);
+      ("divsafety-shadowing", divsafety_shadowing_suite);
+      ("walk-coverage", walk_coverage_suite) ]
