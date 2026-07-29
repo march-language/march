@@ -9336,6 +9336,75 @@ let test_lambda_static_closure_materialization_no_leak_compiled () =
        grow with the iteration count)"
       "BOUNDED" run_out
 
+(* CAPTURING closures — the shape the two static-closure tests above cannot
+   reach.  A lambda that captures a variable cannot be a static global: each
+   materialization is a genuine `march_alloc` holding the captured values.
+   Before the $clo ownership drop (lib/tir/perceus.ml
+   [insert_apply_fn_clo_drop], sound only alongside the apply-fn param-0 pin
+   in lib/tir/borrow.ml [infer_module]) NOTHING released it — the caller side
+   deferred to the callee and the callee never dropped, so a 4,000,000-
+   iteration loop allocated 4,000,000 closures and freed none (~125 MB peak
+   RSS versus ~2.9 MB for the capture-free control).
+
+   Same growth-assertion shape as the two tests above, and deliberately so:
+   this one FAILS on a build with only the callee drop and no pin (the
+   closure is freed while the caller still holds it — a double-free, not a
+   leak) and equally on a build with neither. *)
+let test_capturing_closure_materialization_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_capcloleak"
+    "mod CapCloLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  pfn materialize_loop(i : Int, n : Int, k : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+     -- `fn x -> x * k` captures k, so this allocates a real closure struct\n\
+     -- every iteration; it can never be routed to a static global.\n\
+    \      materialize_loop(i + 1, n, k, acc + apply_it(fn x -> x * k, i))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let warm = materialize_loop(0, 100, 2, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = materialize_loop(0, 20000, 2, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "capcloleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a CAPTURING lambda materialized in a loop must release each closure \
+       struct: the live-object count must not grow with the iteration count"
+      "BOUNDED" run_out
+
+(* NOTE — the companion invariant, "the $clo drop must NOT be emitted for a
+   CAPTURE-FREE apply function", is pinned by this suite's existing
+   "stdlib List.length via precompile" JIT test rather than by a test added
+   here, and deliberately so: native measurement cannot observe it at all.
+   [Llvm_emit.static_closure_ok] is `not ctx.repl && ..`, so natively a
+   capture-free closure is the immortal global where a decrement is a no-op —
+   but under the REPL/JIT it is a real `march_alloc` with rc = 1, and an
+   unguarded drop frees it on the first call.  The next dispatch then jumps
+   through the zeroed apply-fn slot: EXC_BAD_ACCESS at address 0x0 with
+   frame #0 = 0x0 — a jump to a null code pointer, not a data
+   use-after-free.  Removing the `prefix_has_fv_extraction` guard in
+   [Perceus.insert_apply_fn_clo_drop] reproduces that SIGSEGV there while
+   every native program in the corpus stays green. *)
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -12353,6 +12422,8 @@ let codegen_suites =
             test_static_closure_materialization_no_leak_compiled;
           Alcotest.test_case "compiled capture-free lambda materialization does not leak per use" `Quick
             test_lambda_static_closure_materialization_no_leak_compiled;
+          Alcotest.test_case "compiled capturing lambda materialization does not leak per use" `Quick
+            test_capturing_closure_materialization_no_leak_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick

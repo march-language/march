@@ -3,8 +3,8 @@ closure $Clo_$lam2$0(Ptr(Unit), Int)
 -- fns (4) --
 ## $lam2$apply$0
 fn $lam2$apply$0($clo : Ptr(Unit), x : Int) : Int =
-  let n : Int = inc_rc $clo;
-$clo.$fv1 in
+  let n : Int = $clo.$fv1 in
+dec_rc $clo;
 +(x, n)
 
 ## apply_twice

@@ -140,6 +140,7 @@ $clo in
 let step : Int = inc_rc $clo;
 $clo.$fv1 in
 let stop : Int = $clo.$fv2 in
+dec_rc $clo;
 let $t20 : '_ = >(step, 0) in
 case $t20 of
   True() -> dec_rc $t20;
@@ -170,6 +171,7 @@ fn go$apply$0($clo : Ptr(Unit), i : Int, acc : List(Int)) : List(Int) =
   let go : (Int, List(Int)) -> List(Int) = inc_rc $clo;
 $clo in
 let start : Int = $clo.$fv1 in
+dec_rc $clo;
 let $t15 : '_ = inc_rc i;
 <(i, start) in
 case $t15 of

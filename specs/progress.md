@@ -1,5 +1,48 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, capturing-closure ownership: the $clo drop)
+
+**Capturing closures are released instead of leaked.** A lambda capturing a free
+variable allocates a closure struct per materialization; nothing ever freed it.
+The root cause was two independent notions of "$clo is borrowed" that disagreed:
+`Borrow.infer_module`'s map (what CALLERS consult in Perceus's `EApp` case, at the
+`callee_is_apply` exclusion) and the per-function `borrowed` set in `perceus`
+(what suppresses the CALLEE's own drop). `$clo : TPtr TUnit` is `borrow_eligible`,
+and an apply fn's only use of it is `EField` extraction while `owned_in`'s EField
+case returns false — so the fixpoint never flipped it, the caller deferred to the
+callee, the callee deferred to the map, and nobody released the allocation.
+
+Fixed by pinning apply-fn param 0 to owned in `infer_module`'s `init` (NOT the
+post-fixpoint extern seed — `owned_in` consults `is_borrowed` during iteration)
+plus a callee-side `EDecRC $clo` spliced after `lift_lambda`'s fv-extraction
+prefix, as a post-pass on already-RC-inserted TIR. Both halves are required: a
+prior callee-only attempt produced 3 genuine double-frees plus 8 stdlib crashes,
+because the caller was still filtering `$clo` out of `non_borrowed_args` and
+emitting no `EIncRC` for a closure live after the call.
+
+Measured: 4M-iteration loop 4,000,000 allocations / ~125 MB peak RSS → ~2.9 MB
+floor; a 15-shape closure corpus all exit 0 with correct output at the floor,
+including the three shapes that double-freed under the prior attempt. Suites:
+compiler 614, eval 256, codegen 509 (+1 new), stdlib 825, snapshots 33 — 4 perceus
+snapshots regenerated, all four diffs being exactly the ownership drop.
+
+Two things the native corpus could not show, both recorded in code:
+- The drop must NOT fire for a **capture-free** apply fn. Natively its closure is
+  the immortal static global where a decrement is a no-op, but
+  `static_closure_ok` is `not ctx.repl && ..`, so under the REPL/JIT it is a real
+  `march_alloc` — dropping it made `run_codegen`'s "stdlib List.length via
+  precompile" jump through a zeroed apply-fn slot (EXC_BAD_ACCESS at 0x0, frame
+  #0 = 0x0, a null code pointer, not a data UAF) while every native program
+  stayed green.
+- `scripts/run-tests.sh` reported `825 tests / 1 failure` while `run_codegen` was
+  exiting **139**. Read each binary's `$?` individually; the script's summary
+  masks a segfaulting suite.
+
+**Residual, still open:** a self-recursive capturing closure still leaks one
+reference per materialization — its self-binding hands an alias a reference
+consumed only on the recursive path, so the base-case branch drops nothing. That
+is an independent dead-alias gap in `ECase` branch handling.
+
 ## Current State (as of 2026-07-28, purity oracle: monomorphized builtin names)
 
 **Fixed a latent purity-oracle defect and the vacuous test it caused.**

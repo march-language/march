@@ -8,8 +8,8 @@ fn $jp1$apply$1($clo : Ptr(Unit)) : '_ =
 
 ## $jp6$apply$0
 fn $jp6$apply$0($clo : Ptr(Unit)) : '_ =
-  let x : Int = inc_rc $clo;
-$clo.$fv1 in
+  let x : Int = $clo.$fv1 in
+dec_rc $clo;
 let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$1($jp1$apply$1) in
 let n : Int = x in
 let $guard3 : Bool = <(n, 0) in

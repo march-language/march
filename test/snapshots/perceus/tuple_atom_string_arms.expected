@@ -26,8 +26,8 @@ fn $jp3$apply$3($clo : Ptr(Unit)) : '_ =
 fn $jp7$apply$0($clo : Ptr(Unit)) : '_ =
   let $f1 : '_ = inc_rc $clo;
 $clo.$fv1 in
-let $f2 : '_ = inc_rc $clo;
-$clo.$fv2 in
+let $f2 : '_ = $clo.$fv2 in
+dec_rc $clo;
 let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$1($jp3$apply$1) in
 dec_rc $jp_clo4;
 let y : Int = inc_rc $f2;
@@ -38,8 +38,8 @@ $f1 in
 
 ## $jp9$apply$2
 fn $jp9$apply$2($clo : Ptr(Unit)) : '_ =
-  let $jp_clo8 : () -> '_ = inc_rc $clo;
-$clo.$fv1 in
+  let $jp_clo8 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
 inc_rc $jp_clo8;
 call_ptr $jp_clo8()
 
