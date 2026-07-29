@@ -1837,6 +1837,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps native_static_closure_no_leak.out native/static_closure_no_leak.expected)
  (action (diff native/static_closure_no_leak.expected native_static_closure_no_leak.out)))
 
+(rule
+ (targets native_deep_drop_shared_child native_deep_drop_shared_child.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/deep_drop_shared_child.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_deep_drop_shared_child
+         native/deep_drop_shared_child.march)
+    (with-stdout-to native_deep_drop_shared_child.out
+         (system "./native_deep_drop_shared_child"))))))
+
+(rule
+ (alias runtest)
+ (deps native_deep_drop_shared_child.out native/deep_drop_shared_child.expected)
+ (action (diff native/deep_drop_shared_child.expected native_deep_drop_shared_child.out)))
+
 ; ── Static capture-free closures, function-value semantics: repeated        ──
 ; ── materialization of one fn, two distinct fns (must not collide on one   ──
 ; ── static global), nested HOF threading, a multi-arg fn value, and fn     ──

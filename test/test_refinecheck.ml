@@ -3268,6 +3268,56 @@ end|}
          Alcotest.(check bool) "error" true
            (has_refine_error_from ~stdlib_files:[ file ] ~file src)));
 
+    (* ── A stdlib `import` must not withdraw the alias ────────────────────
+       The REBINDING half of this gate treats a glob `import X` as "could
+       carry a nested module named List", and — unlike the DEFINITION half,
+       which has always ignored stdlib spans — applied that to the standard
+       library's own sources.  One import added inside stdlib therefore
+       withdrew `List.length` -> `len` for every program compiled with it.
+
+       Not hypothetical: #112 added `import Process` to stdlib/system.march
+       to dedupe System.ProcessResult, and every `{List(a) | len(_) > 0}`
+       contract stopped being enforced.  Nothing failed except
+       specs/lang/types/reject/t117, which exists to notice exactly this — a
+       withdrawn alias is silent by construction, since refinement checking
+       only speaks when a predicate can NEVER hold.  So the contradictory
+       guard here must still FIRE for the test to mean anything. *)
+    (let src =
+       {|
+mod SysLike do
+  import Process
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}
+     in
+     let file = "/opt/march/share/march/system.march" in
+     gated "a glob import in a STDLIB file does not withdraw the alias" (fun () ->
+         Alcotest.(check bool) "violation still reported" true
+           (has_refine_error_from ~stdlib_files:[ file ] ~file src)));
+
+    (* Control: the same glob import in the PROGRAM's own file still
+       withdraws it — a user's `import X` genuinely can put another module
+       under the bare name `List`, and suppressing is the safe direction. *)
+    (let src =
+       {|
+mod UserMod do
+  import Process
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}
+     in
+     gated "...while the same import in USER code still withdraws it" (fun () ->
+         Alcotest.(check bool) "no error" false
+           (has_refine_error_from
+              ~stdlib_files:[ "/opt/march/share/march/list.march" ]
+              ~file:"/home/u/proj/main.march" src)));
+
     (let src =
        {|
 mod S do
