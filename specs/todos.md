@@ -1,5 +1,6 @@
 # March — TODO List
 
+**Last updated:** 2026-07-29 (`cap no_panic` now retires every fact about a name a `let`/lambda/`match`/local-`fn` rebinds — `if d == 0 do 0 else (let d = 0; 10 / d) end` passed `--check` and then panicked; earlier the same day: a withdrawn measure alias explains itself, `cap no_panic` discharges a divisor refinement before rejecting it, capability walks exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-29 (a withdrawn measure alias now explains itself: a `cap verified` module no longer says `solver-undecided` when the real cause is that a `List.length`/`String.byte_size`/`string_byte_length` binding elsewhere in the unit withdrew the alias — suppression unchanged, only the attribution; earlier the same day: `cap no_panic` discharges a divisor refinement before rejecting it, and the capability walks made exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-29 (`cap no_panic` now DISCHARGES a divisor refinement before rejecting it — `{v : Int | v * v > 0}` is a complete proof of `v != 0` and was being reported as unreflectable — and reads negated path conditions on both routes; earlier the same day: capability walks made exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-28 (refinement legibility: `--refine-report` obligation counts, `List.length`/`String.byte_size` aliased to the `len` measure, `cap verified`, and a `cap no_panic` unreflectable-divisor fix; earlier: non-empty-collection contracts + measure-over-self binder spellings; `Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
@@ -7,6 +8,39 @@
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value AND per capture-free lambda value, removing a per-materialization leak in both cases; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## `cap no_panic` read a guard about a name that had been REBOUND (FIXED 2026-07-29)
+
+All three of `division_safety`'s fact channels key on a bare variable name — a
+path condition `(d == 0, negated)`, a refined parameter `("d", binder, pred)`, a
+`let` value `("d", rhs)` — and `iter_div_sites` retired none of them at a
+binding construct, so a fact about the OUTER `d` was read as though it were
+about an inner one. All four of these passed `--check` with exit 0 and then
+panicked with "division by zero":
+
+```march
+if d == 0 do 0 else (let d = 0; 10 / d) end     -- else side
+if d != 0 do (let d = 0; 10 / d) else 0 end     -- then side
+if d == 0 do 0 else ap(fn d -> 10 / d) end      -- lambda parameter
+if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
+```
+
+The first three were a regression of the negated-path dualisation below (the
+old `if negated then false` was the only thing holding the else side closed);
+the then side predates it and is closed here too. `iter_div_sites` now threads a
+`dctx` record and retires every name a construct binds — `ELam` params, `ELetFn`
+name + params, `ELetQ` pattern, `EMatch` pattern binders, `EBlock` `let` /
+local `fn` for the rest of the block — reusing `Refine_check.path_shadow` and
+`pat_binders` rather than a fourth binder walker. The `let` channel is threaded
+rather than pre-collected, so `let d = 5; 10 / d` stays silent (the binding
+replaces the fact) while `let d = 0; 10 / d` reports. Also fixed: `param_assumes`
+is filtered through `consts_declared` like `path_assumes`.
+
+Refinecheck 310 tests (new ungated `divsafety-shadowing` group of 8, including
+two controls), corpus 223/223 with `reject/t123` running the witness through the
+real `--check` driver, stdlib sweep empty.
 
 ---
 

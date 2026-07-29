@@ -1,0 +1,39 @@
+-- EXPECT-ERROR: division by zero literal in `cap no_panic` module
+-- Refinement types, `cap no_panic` NAME SHADOWING (2026-07-29). This program
+-- passed `--check` with exit 0 and then panicked at run time with "division by
+-- zero" — the failure `cap no_panic` exists to prevent.
+--
+-- Every channel the division checker reads keys on a bare variable NAME: the
+-- path condition is `(d == 0, negated)`, a refined parameter is `("d", …)`, a
+-- `let` value is `("d", rhs)`. None of them survives that name being rebound,
+-- but the walk retired none of them at a binding construct, so the fact
+-- `not (d == 0)` — which is about the PARAMETER — was read as though it were
+-- about the inner `let d = 0`.
+--
+-- The same omission was reachable through a lambda parameter
+-- (`ap(fn d -> 10 / d)`), a match binder (`Some(d) -> 10 / d`), and the `then`
+-- side of the guard; all four are pinned in `test_refinecheck.ml`'s
+-- `divsafety-shadowing` group. This one is in the corpus because the group
+-- calls `Division_safety.check_module` directly, whereas the sweep runs the
+-- real `--check` driver end to end.
+--
+-- There is no accept twin: the point is not that some shape is discharged but
+-- that a rebound name discharges NOTHING. `accept/t121`'s `guarded` function
+-- is the nearest thing — the same `if` guard, with the name NOT rebound, which
+-- must keep exiting 0 so the retirement is not simply "distrust every guard".
+mod ShadowedGuard do
+  cap no_panic
+
+  fn f(d : Int) : Int do
+    if d == 0 do
+      0
+    else
+      let d = 0
+      10 / d
+    end
+  end
+
+  fn main() do
+    println(int_to_string(f(5)))
+  end
+end

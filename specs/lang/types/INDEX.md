@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t121 accept, t01–t122 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (110 accept, 112 reject; see the Result line below) -->
+# Typing corpus index (t01–t121 accept, t01–t123 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (110 accept, 113 reject; see the Result line below) -->
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 222/222 — 110 accept, 112
+Exit 0 iff every program behaves as declared (currently 223/223 — 110 accept, 113
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -510,8 +510,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t117_refine_length_guard_contradiction` | **a contradictory `List.length` guard is a definite failure (§2.14)** — `if List.length(ys) == 0 do head_of(ys)`. Under `len(ys) == 0` the predicate `len(ys) > 0` can never hold. This is the file that proves the `List.length`→`len` alias is load-bearing: its accept companion `t118` exits 0 whether the guard is read or the obligation is merely skipped | `refinement violation` |
 | `t120_cap_no_panic_impl_body_division` | **DECL-WALK COVERAGE — `cap no_panic` must see a division inside an `impl` method body (2026-07-29)** — `Box(n) -> 100 / n`. Before the walks became exhaustive over `A.decl` this exact program passed `--check` with exit 0 and then panicked at run time with "division by zero"; the same division inside a plain `fn` was always rejected, so this was coverage, not solver weakness. Accept companion `t119` | `` division by `n` in `cap no_panic` module may be by zero `` |
 | `t122_cap_no_panic_nonlinear_divisor_proves_nothing` | **DIVISION SAFETY — a non-linear refinement that proves NOTHING is still rejected (2026-07-29)** — `{v : Int \| v * v >= 0}` holds for every integer, zero included, yet is exactly as non-linear and as reflectable as `t121`'s `v * v > 0`. The control on widening `division_safety`'s reflection: the change is "try harder to discharge", never "accept what we cannot decide". z3 refutes this goal; an `unknown` answer would reject it too, since `cap no_panic` is a guarantee and every outcome short of `Verified` is an error. Accept companion `t121` | `refinement does not rule out zero` |
+| `t123_cap_no_panic_shadowed_guard` | **NAME SHADOWING — a rebound divisor name must retire the guard about it (2026-07-29)** — `if d == 0 do 0 else (let d = 0; 10 / d) end`. Every channel the division checker reads keys on a bare variable NAME (path condition, refined parameter, `let` value) and the walk retired none of them at a binding construct, so `not (d == 0)` — a fact about the PARAMETER — was read as though it were about the inner `let`. `--check` exited 0 and the program then panicked with "division by zero". Reachable identically through a lambda parameter, a match binder and the `then` side; all four pinned in `test_refinecheck.ml`'s `divsafety-shadowing`, this one in the corpus because that group bypasses the real `--check` driver. No accept twin — a rebound name discharges NOTHING; `accept/t121`'s `guarded` is the control that the retirement does not simply distrust every guard | `` division by zero literal in `cap no_panic` module `` |
 
-**Result: 222 / 222 (110 accept, 112 reject).**
+**Result: 223 / 223 (110 accept, 113 reject).**
 | `t91_choice_tail_step_required` | **(post-`choose` tail projection, 2026-07-24)** — `project_steps`' `ProtoChoice` arm now projects each branch with the steps that FOLLOW the choice block (`rest_ty ()`) instead of the outer continuation. Pre-fix the trailing `Client -> Server : String` vanished from both roles' projections and closing early was wrongly ACCEPTED | `` Chan.close: channel is at `` |
 | `t93_steps_after_loop_unreachable` | **(session types, `loop` µ-type recursion, 2026-07-24)** — a `loop` block's projection is `Rec X. S[X]`, which never exits, so any step written after a `loop` at the same nesting level can never run. `DProtocol` validation now walks `proto_steps` and rejects a non-empty tail after a top-level (or choice-branch) `loop`. Accept twin `t92` | `can never run` |
 | `t94_chan_new_multiparty_protocol` | **(session types, `Chan.new` role-count guard, 2026-07-24)** — `Chan.new` is the BINARY channel constructor; its `infer_expr` arm had a silent `(* 3+ roles: just return first two as a pair *)` fallback that handed back two projections which are not duals of each other, with no diagnostic. Now errors and points at `MPST.new` for multi-party protocols | ``Chan.new: protocol `Tri` has 3 roles`` |

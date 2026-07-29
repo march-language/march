@@ -1,5 +1,66 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, `cap no_panic` retires facts about a rebound name)
+
+**A guard or refinement was carrying over to a DIFFERENT variable of the same
+name, and the module then panicked at run time.** `division_safety` identifies
+the divisor by bare name, and all three of its fact channels are keyed the same
+way — a path condition `(d == 0, negated)`, a refined parameter
+`("d", binder, pred)`, a `let` value `("d", rhs)`. `iter_div_sites` retired none
+of them at a binding construct, so a fact about the OUTER `d` was read as though
+it were about an inner one. Each of these passed `--check` with exit 0 and then
+died with "division by zero":
+
+```march
+if d == 0 do 0 else (let d = 0; 10 / d) end     -- else side
+if d != 0 do (let d = 0; 10 / d) else 0 end     -- then side
+if d == 0 do 0 else ap(fn d -> 10 / d) end      -- lambda parameter
+if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
+```
+
+The first three were a REGRESSION of the negated-path dualisation in the entry
+below: `path_proves_nonzero`'s old `if negated then false` was the only thing
+holding the else side closed, so extending name-matching there roughly doubled
+the reach of the missing discipline — in the one place where over-acceptance
+breaks a guarantee the user opted into. The then-side witness predates it and is
+fixed here too rather than left as a known hole.
+
+`iter_div_sites` now threads a `dctx` record (`path`, `shadowed`, `lets`) and
+retires every name a construct binds: `ELam` params, `ELetFn` name + params,
+`ELetQ` pattern, `EMatch` pattern binders (in scope for the guard as well as the
+body), and `EBlock` `let` / local `fn` for the REST of the block. Path
+retirement reuses `Refine_check.path_shadow` and `Refine_check.pat_binders`
+rather than a fourth binder walker, and is exhaustive over the binding forms
+rather than enumerating the witnesses. The `let` channel is THREADED rather than
+pre-collected: a block `let n = rhs` retires the outer `n` everywhere and records
+`rhs` in its place, which is what keeps `let d = 5; 10 / d` silent while
+`let d = 0; 10 / d` reports. A side effect is that only the `let`s actually
+PRECEDING a division are visible to it; `collect_let_values` used to offer the
+whole block, bindings written after the division site included.
+
+Worth stating at the type, and stated there: the error direction is INVERTED
+from the refinement pass's. There, dropping a fact is silence and keeping a
+stale one is a false positive; here, dropping a fact is an ERROR and keeping a
+stale one is a division that panics inside a module that promised it could not.
+Over-approximating `shadowed` is still the safe direction, for the opposite
+reason.
+
+Also corrected here: `param_assumes` is now filtered through `consts_declared`
+exactly as `path_assumes` already was (a sibling parameter refined against an
+undeclared symbol poisoned the divisor's query into `Unverified`), and the
+comment's rationale for that filter, which was factually wrong. z3's reply to an
+ill-sorted assertion is an `(error …)` that `Solver.read_verdict` consumes and
+`Solver.check` maps to `Unknown` (the resync fix in `lib/refine/solver.ml`); no
+exception is raised, so `Refine.try_check` never reaps the child. The filter
+converts a FORCED `Unknown` into an answerable query — it does not prevent a
+solver restart.
+
+Measured: refinecheck 310 tests (new `divsafety-shadowing` group of 8, all
+ungated — each case is decided before a VC is built and the point is fail-closed
+behaviour), `run_compiler` 612, typing corpus 223/223, stdlib sweep empty.
+`reject/t123` carries the witness through the real `--check` driver, which the
+test group bypasses.
+
 ## Current State (as of 2026-07-29, a withdrawn measure alias explains itself)
 
 **A `cap verified` module rejected correct code and blamed the solver.** The

@@ -159,6 +159,28 @@ git log is authoritative for exact commits.
   negated path conditions were previously dropped by the syntactic fallback
   while the solver route handled them. Witnessed by
   `specs/lang/types/{accept/t121,reject/t122}`.
+
+- **`cap no_panic`: a guard or refinement no longer carries over to a *different*
+  variable that happens to share its name.** The check identified the divisor by
+  name alone, so rebinding that name inside the guarded branch left the outer
+  fact in force. All four of these passed `--check` with exit 0 and then panicked
+  at run time with "division by zero" — the failure the capability exists to
+  prevent:
+
+  ```march
+  if d == 0 do 0 else (let d = 0; 10 / d) end     -- else side
+  if d != 0 do (let d = 0; 10 / d) else 0 end     -- then side
+  if d == 0 do 0 else ap(fn d -> 10 / d) end      -- lambda parameter
+  if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
+  ```
+
+  A name rebound by a `let`, a local `fn`, a lambda parameter, a `let?` pattern
+  or a `match` pattern now retires everything known about the outer variable of
+  that name — its guard, its refinement, and its `let` value. Correct programs
+  are unaffected: `let d = 5` followed by `10 / d` is still accepted (the new
+  binding replaces the old fact rather than merely erasing it), and a binder
+  with a different name does not disturb the guard. Witnessed by
+  `specs/lang/types/reject/t123` and the `divsafety-shadowing` test group.
 - **A program that repeatedly passes a capture-free lambda (an anonymous
   function that reads no outer variables, e.g. `fn x -> x * 2`) as a value
   no longer grows memory without bound.** This extends the fix below for

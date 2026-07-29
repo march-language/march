@@ -966,6 +966,16 @@ span; an unguarded call in the same module still reports `solver-undecided`).
   their negations on both routes, so the `else` side of `if d == 0` discharges
   the obligation exactly as `if d != 0` does on the `then` side. Bracketed by
   `accept/t121` and `reject/t122`.
+- **Every fact `cap no_panic`'s divisor check reads is retired when its name is
+  REBOUND** (since 2026-07-29). The divisor is identified by bare name, and so
+  are all three channels — the path condition, the refined parameter, the `let`
+  value — so a `let`, a lambda parameter, a `match` binder, a `let?` pattern or
+  a local `fn` that rebinds that name drops everything known about the outer
+  variable. Without it, `if d == 0 do 0 else (let d = 0; 10 / d) end` passed
+  `--check` and then panicked. Note the direction: unlike the refinement pass,
+  where dropping a fact means silence, dropping one here means an ERROR, so the
+  retirement is deliberately over-approximate — a guard is re-established by
+  re-stating it inside the rebinding scope. `reject/t123`.
 - **There is no `@[trusted]` escape hatch yet.** The only way to accept an
   obligation the checker cannot discharge is `assert`, or removing
   `cap verified` from the module. Until an escape hatch exists, `cap verified`
