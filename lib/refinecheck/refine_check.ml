@@ -4420,23 +4420,58 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   | A.EAssert (e, _) -> ge e
   | A.ESigil (_, e, _) -> ge e
 
+(* Exhaustive over [A.decl], for the same reason the obligation walks are: the
+   `| _ -> ()` this replaced meant the "not a measure or known predicate"
+   warning never fired for a refinement written on an `impl` or `interface`
+   method — precisely where the widened checks now CONSUME such predicates, so
+   an unrecognized one there was both unchecked and unmentioned. *)
 let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
+  let warn_fn (fd : A.fn_def) =
+    Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
+    List.iter
+      (fun (c : A.fn_clause) ->
+        List.iter
+          (function
+            | A.FPNamed p | A.FPDefault (p, _) ->
+              Option.iter (warn_predicate_ty errctx) p.A.param_ty
+            | A.FPPat _ -> ())
+          c.A.fc_params;
+        warn_predicate_expr_tys errctx c.A.fc_body)
+      fd.A.fn_clauses
+  in
+  let expr = warn_predicate_expr_tys errctx in
   List.iter
     (function
-      | A.DFn (fd, _) ->
-        Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
+      | A.DFn (fd, _) -> warn_fn fd
+      | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> warn_predicate_decls errctx ds
+      | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> warn_fn fd) idf.A.impl_methods
+      | A.DInterface (idf, _) ->
         List.iter
-          (fun (c : A.fn_clause) ->
-            List.iter
-              (function
-                | A.FPNamed p | A.FPDefault (p, _) ->
-                  Option.iter (warn_predicate_ty errctx) p.A.param_ty
-                | A.FPPat _ -> ())
-              c.A.fc_params;
-            warn_predicate_expr_tys errctx c.A.fc_body)
-          fd.A.fn_clauses
-      | A.DMod (_, _, ds, _) -> warn_predicate_decls errctx ds
-      | _ -> ())
+          (fun (m : A.method_decl) ->
+            warn_predicate_ty errctx m.A.md_ty;
+            Option.iter expr m.A.md_default)
+          idf.A.iface_methods
+      | A.DLet (_, b, _) ->
+        Option.iter (warn_predicate_ty errctx) b.A.bind_ty;
+        expr b.A.bind_expr
+      | A.DActor (_, _, ad, _) ->
+        expr ad.A.actor_init;
+        List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) ad.A.actor_handlers;
+        Option.iter expr ad.A.actor_invariant
+      | A.DApp (app, _) ->
+        expr app.A.app_body;
+        Option.iter expr app.A.app_on_start;
+        Option.iter expr app.A.app_on_stop
+      | A.DTest (t, _) -> expr t.A.test_body
+      | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
+      (* ── Inert: no type annotation or expression that can carry a
+         refinement predicate.  Named so a new decl form breaks the build. ── *)
+      | A.DType _ | A.DAlwaysLinearType _  (* refinements in a type DEFINITION
+                                              are checked where they are used *)
+      | A.DSig _ | A.DProtocol _ | A.DTransitions _ | A.DExtern _
+      | A.DNeeds _ | A.DProofCap _ | A.DOpts _
+      | A.DDeriving _ | A.DSatisfy _       (* desugared into DImpl before this *)
+      | A.DUse _ | A.DAlias _ -> ())
     decls
 
 (* [assume_params:false] walks the body with the parameter refinements erased,

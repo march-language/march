@@ -26,9 +26,13 @@ git log is authoritative for exact commits.
   not make the callee's module strict, and nested modules do not inherit the
   capability. Modules that do not declare it behave exactly as before.
 
-  Two limits worth knowing before relying on it: return refinements go through
+  Three limits worth knowing before relying on it: return refinements go through
   a separate path that files no record, so an undischarged **postcondition** is
-  neither reported nor escalated; and there is **no
+  neither reported nor escalated; a refinement written on an **`interface`
+  method's signature** is not enforced at call sites (put it on the `impl`
+  method's parameter, where it is — see the 2026-07-29 entries below), and an
+  `impl` method's own parameter refinement is adopted only when its name
+  unambiguously denotes one contract; and there is **no
   `@[trusted]` escape hatch yet** — the only ways to accept an obligation the
   checker cannot discharge are an `assert` or removing `cap verified` from the
   module. It is therefore a tool for small, deliberately-verified modules rather
@@ -105,8 +109,41 @@ git log is authoritative for exact commits.
   `test` / `setup` / `setup_all` bodies (`describe` blocks recurse and inherit
   the enclosing module's capability). Both walks are now exhaustive over the
   declaration type with no wildcard, so a future declaration form is a compile
-  error rather than a new silent hole. Modules that declare no capability are
-  unaffected. Witnessed by `specs/lang/types/{accept/t119,reject/t120}`.
+  error rather than a new silent hole.
+
+  **This can newly fail a build that has no `cap` directive at all.** A
+  *provably violated* obligation is reported regardless of any capability, so a
+  call that definitely breaks a precondition — inside an `impl` method body or a
+  top-level `let` — is now an error where it used to be silence. Those are true
+  positives and the intended outcome, but they are a real behaviour change for
+  ordinary modules, not just for capability-declaring ones. (The standard
+  library is unchanged: its `--check` output is byte-identical before and
+  after.) Witnessed by `specs/lang/types/{accept/t119,reject/t120}`.
+
+- **A refinement on an `impl` method's parameter now obliges its callers — or
+  binds nobody.** Widening the walk above created a subtler bug: the checker
+  *assumed* an impl method's parameter refinements while walking its body, but
+  the table of known contracts still recorded only `fn`s, so no caller was ever
+  required to establish them. `fn run(b, k : {Int | k != 0})` made `m / k`
+  provable inside a `cap no_panic` module while `run(Box(4), 0)` compiled
+  cleanly and divided by zero at run time. Impl-method signatures are now
+  registered, so the obligation lands on the call site. Registration is
+  deliberately conservative — a method name is adopted only when no `fn` in the
+  same module owns it and only one `impl` defines it, because a call resolved by
+  name cannot tell two impls' contracts apart. When the name is ambiguous the
+  refinement is stripped from the body as well, so it is never assumed by a body
+  that no caller answers for. A refinement written in the **`interface`'s** own
+  method signature is still not enforced at call sites; put it on the `impl`
+  method's parameter.
+
+- **A self-module-qualified call is checked wherever it appears.** `desugar`'s
+  entry-module self-qualification stripper (`M.f(...)` → `f(...)` inside `mod M`)
+  had its own wildcard and handled only `fn`, `let`, `actor` and `mod`, so
+  `OuterB.g(-9)` written inside an `impl` method of entry module `OuterB`
+  survived unstripped, resolved to nothing, and silently raised no obligation —
+  while the identical call in a sibling `fn` was reported. That match is now
+  exhaustive too, and also covers `interface` defaults, `app` hooks, `test`,
+  `setup`/`setup_all`, `describe` and actor `@invariant` expressions.
 
 - **`cap verified`: a length guard that "silently stopped counting" now says so,
   instead of blaming the solver.** The `List.length` / `String.byte_size` /

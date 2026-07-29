@@ -4146,6 +4146,221 @@ mod Plain do
     end
   end
 end|}))
+
+    (* ── Assume-without-check: a contract nothing enforces ────────────────
+       Widening the walk made both passes ASSUME an impl method's parameter
+       refinements, while [collect_all_defs] still registered only `fn`s — so
+       no caller was obliged to establish them.  `--check` exited 0 on the
+       program below and it divided by zero at run time.  The predicate must
+       either bind the CALLER (when the method name unambiguously denotes this
+       contract) or bind NOBODY (when it does not) — never only the body. *)
+  ; gated "an impl method's contract obliges its callers" (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_refine_error_d {|
+mod HIC do
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|}))
+  ; gated "the same call satisfying the impl contract stays silent" (fun () ->
+      (* Negative control for the case above: registering impl contracts must
+         not reject a call that DOES satisfy them. *)
+      Alcotest.(check bool) "no error" false
+        (has_refine_error_d {|
+mod HICOK do
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 2))) end
+end|}))
+  ; Alcotest.test_case
+      "an AMBIGUOUS impl method's refinement is assumed by nobody" `Quick (fun () ->
+      (* Two impls define `run`, so a call resolved by NAME cannot tell their
+         contracts apart and neither is adopted — which must NOT leave the
+         bodies free to assume them.  Fail closed: the divisor refinement is
+         stripped and `m / k` must prove itself some other way, so
+         `cap no_panic` reports it.  Without the strip this exits silently
+         while nothing anywhere enforces `k != 0`. *)
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod AMB do
+  cap no_panic
+  type Box = Box(Int)
+  type Cup = Cup(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+  impl Runner(Cup) do
+    fn run(c, k : {Int | k != 0}) : Int do match c do Cup(m) -> m / k end end
+  end
+end|}))
+  ; Alcotest.test_case
+      "an UNAMBIGUOUS impl method's refinement still discharges its division"
+      `Quick (fun () ->
+      (* Negative control for the strip: when the contract IS adopted (one impl,
+         no `fn` of that name), the divisor refinement is enforced at call sites
+         and may therefore be assumed in the body.  Without this, the case above
+         could be satisfied by stripping unconditionally. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod UNAMB do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+end|}))
+
+    (* ── Self-module-qualified callee inside an impl body ─────────────────
+       `strip_entry_self_qual` had its own `| d -> d` wildcard, so `M.g(...)`
+       written inside an `impl` method of the entry module `M` survived
+       unstripped and resolved to nothing — silently raising no obligation,
+       while the identical call in a sibling `fn` was reported. *)
+  ; gated "a self-module-qualified call inside an impl body is checked" (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_refine_error_d {|
+mod OuterB do
+  fn g(k : {Int | k > 0}) : Int do k end
+  type Box = Box(Int)
+  interface I(a) do fn run : a -> Int end
+  impl I(Box) do
+    fn run(_b) : Int do OuterB.g(0 - 9) end
+  end
+end|}))
+
+    (* ── One case per descended declaration form ──────────────────────────
+       Exhaustiveness over [A.decl] protects against a 25th CONSTRUCTOR; it
+       protects nothing against someone deleting an arm's body or "correcting"
+       [DDescribe] to recurse through [visit_decls].  Each case below pairs a
+       firing program with the same program minus `cap no_panic`, so a test can
+       only pass if the arm both walks the body AND respects the capability
+       scope. *)
+  ; Alcotest.test_case "cap no_panic sees a division in a describe block" `Quick (fun () ->
+      (* THE case for the deliberate departure from the brief: a `describe`
+         block carries no `cap` directive of its own, so recursing through
+         [visit_decls]/[check_decls] would re-derive the flag from the inner
+         decl list and silently disable checking inside every describe. *)
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod DSC do
+  cap no_panic
+  fn zero() : Int do 0 end
+  describe "arith" do
+    test "divides" do
+      let d = zero()
+      println(int_to_string(100 / d))
+    end
+  end
+end|}))
+  ; Alcotest.test_case "a describe block in an ordinary module stays silent" `Quick (fun () ->
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod DSC2 do
+  fn zero() : Int do 0 end
+  describe "arith" do
+    test "divides" do
+      let d = zero()
+      println(int_to_string(100 / d))
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in a test body" `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod TST do
+  cap no_panic
+  fn zero() : Int do 0 end
+  test "divides" do
+    let d = zero()
+    println(int_to_string(100 / d))
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in setup and setup_all" `Quick (fun () ->
+      Alcotest.(check int) "both reported" 2
+        (List.length
+           (divsafety_error_texts {|
+mod STP do
+  cap no_panic
+  fn zero() : Int do 0 end
+  setup do
+    println(int_to_string(100 / zero()))
+  end
+  setup_all do
+    println(int_to_string(200 / zero()))
+  end
+end|})))
+  ; Alcotest.test_case "cap no_panic sees a division in an actor handler and init" `Quick
+      (fun () ->
+      Alcotest.(check int) "both reported" 2
+        (List.length
+           (divsafety_error_texts {|
+mod ACT do
+  cap no_panic
+  fn zero() : Int do 0 end
+  actor Counter do
+    state { value : Int }
+    init { value: 100 / zero() }
+
+    on Bump(d : Int) do
+      { state with value: 200 / d }
+    end
+  end
+end|})))
+  ; Alcotest.test_case "an actor in an ordinary module stays silent" `Quick (fun () ->
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod ACT2 do
+  fn zero() : Int do 0 end
+  actor Counter do
+    state { value : Int }
+    init { value: 100 / zero() }
+
+    on Bump(d : Int) do
+      { state with value: 200 / d }
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in an interface default body"
+      `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod IFD do
+  cap no_panic
+  fn zero() : Int do 0 end
+  interface Runner(a) do
+    fn run : a -> Int do
+      100 / zero()
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in every app hook" `Quick (fun () ->
+      Alcotest.(check int) "all three reported" 3
+        (List.length
+           (divsafety_error_texts {|
+mod APP do
+  cap no_panic
+  fn zero() : Int do 0 end
+  app Main do
+    on_start do
+      200 / zero()
+    end
+    on_stop do
+      300 / zero()
+    end
+    100 / zero()
+  end
+end|})))
   ]
 
 (* ── A withdrawn measure alias must explain itself ──────────────────────────

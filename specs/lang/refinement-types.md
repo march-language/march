@@ -946,7 +946,7 @@ span; an unguarded call in the same module still reports `solver-undecided`).
 - **Precondition obligations at call sites only.** Same ledger as
   `--refine-report`: a postcondition the checker cannot discharge is neither
   recorded nor escalated.
-- **Every declaration form is covered** (since 2026-07-29). The pass once walked
+- **Every declaration form is walked** (since 2026-07-29). The pass once walked
   only `DFn` and nested `DMod` and ended in a `| _ -> ()` wildcard, so calls
   inside an `impl` method, an `interface` default body, a top-level `let`, an
   actor handler or a `test` raised no obligation and could not escalate. Both
@@ -954,6 +954,29 @@ span; an unguarded call in the same module still reports `solver-undecided`).
   with no wildcard, so a new declaration form is a compile error rather than a
   silent hole. A `describe` block recurses and inherits the enclosing module's
   capability; a nested `mod` still re-derives its own.
+
+  **What "walked" does and does not buy you.** Walking a body means obligations
+  *raised inside it* are reported. Whether a **refinement written on an `impl`
+  method's own parameter** is enforced is a separate question, and the answer is
+  deliberately conditional:
+
+  - The contract is adopted — registered so every caller must establish it —
+    only when the method name unambiguously denotes it: no `fn` in the same
+    module owns the name, and only one `impl` defines the method. A call
+    resolved by NAME cannot tell two impls' contracts apart, and checking
+    correct code against a predicate it never touches is the failure this
+    subsystem must never have.
+  - When the name is ambiguous the refinement binds **nobody**: the body is
+    walked with it stripped, so it cannot discharge anything either. Unenforced
+    means unusable in both directions — never "assumed in the body but demanded
+    of no caller", which is how `fn run(b, k : {Int | k != 0})` once made
+    `m / k` provable under `cap no_panic` while `run(Box(4), 0)` compiled and
+    then divided by zero.
+  - A refinement written in the **`interface`'s own method signature**
+    (`fn run : a -> {Int | _ > 0} -> Int`) is still **not** enforced at call
+    sites. Nothing assumes it either, so it is a missing check rather than an
+    unsound one, but do not rely on it. Put the refinement on the `impl`
+    method's parameter instead.
 - **`cap no_panic`'s divisor check tries to DISCHARGE before it rejects**
   (since 2026-07-29). Every outcome short of `Refine.Verified` is an error —
   that is what the capability promises — but "we could not reflect the
