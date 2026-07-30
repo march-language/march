@@ -7,9 +7,9 @@ specification, assembled and versioned from the seven incremental slices
 the deferred set (§6) is still real and is now exactly the roadmap's Phase-2/3
 queue.
 **Depends on:** the language-specification roadmap design spec
-(`specs/2026-07-04-language-specification-roadmap-design.md`), which framed this
+(`specs/archive/2026-07-04-language-specification-roadmap-design.md`), which framed this
 document as its Phase-1 first artifact, and the Phase-1 task plan
-(`specs/plans/2026-07-05-core-march-phase1-plan.md`) that Tasks 1–9 executed.
+(`specs/plans/archive/2026-07-05-core-march-phase1-plan.md`) that Tasks 1–9 executed.
 
 ---
 
@@ -1272,7 +1272,7 @@ interface — even for two DIFFERENT types — would have whichever one was
 registered LAST silently clobber the earlier binding in `ρ`, with no
 reference at all to the call's actual argument type. That was accurate for
 the interpreter as it stood on 2026-07-06, but it was subsequently identified
-as a real correctness bug (`specs/plans/2026-07-17-interface-impl-coherence.md`)
+as a real correctness bug (`specs/plans/archive/2026-07-17-interface-impl-coherence.md`)
 and fixed as part of the impl-coherence / FQN-dispatch-identity work
 (2026-07-17 → 2026-07-21, `specs/todos.md`'s "impl-coherence" and "FQN
 dispatch-identity" entries). `DImpl`'s eval handler (still two copies kept in
@@ -1379,7 +1379,7 @@ document an open, deliberately-unfixed cross-backend divergence — two
 overlapping impls both typechecked silently, and the interpreter and
 compiled backend picked different winners at runtime. That divergence was
 resolved by adding a genuine impl-coherence check, landed in two stages
-(`specs/plans/2026-07-17-interface-impl-coherence.md`, Stage 1+2, 2026-07-17;
+(`specs/plans/archive/2026-07-17-interface-impl-coherence.md`, Stage 1+2, 2026-07-17;
 `specs/todos.md`'s "impl-coherence" entries).** The design decision
 `core-march-types.md` §2.3's `(T-ImplMatch)` discussion and the original
 version of this subsection both flagged as unmade — "add a coherence check

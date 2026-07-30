@@ -171,7 +171,7 @@ against generic code**: the raw bits are even and in the canonical range,
 so `IS_HEAP_PTR` accepts them — a generic RC op writes into `*(3.5)`
 (SIGSEGV) and a generic `<=` integer-compares the bits (correct for
 positive floats by IEEE coincidence, backwards for negatives). The fix
-(`specs/plans/2026-07-13-float-boxing-design.md`) is to **box** a Float
+(`specs/plans/archive/2026-07-13-float-boxing-design.md`) is to **box** a Float
 crossing an erasure boundary in a `MARCH_FLOAT_TAG` (-3) heap cell — making
 a UNIFORM slot uniformly heap-or-tagged and `needs_rc (TVar _)` genuinely
 sound. The runtime box API (`march_alloc_float`/`march_unbox_float`,

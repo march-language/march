@@ -26,7 +26,7 @@ Provides rich editor support built on the March compiler's parse, desugar, and t
 | **UTF-16 position encoding** | ✅ Correct on non-ASCII lines (advertises `positionEncoding`) |
 | **Standalone CLI** | ✅ `march-lsp query …` — one-shot JSON queries for scripts/LLMs (see [docs/editors.md](docs/editors.md)) |
 
-See [`docs/editors.md`](docs/editors.md) for editor setup (Neovim, Helix, Zed, Emacs, VS Code) and the standalone CLI reference, and `../specs/plans/2026-06-13-lsp-best-in-class.md` for the best-in-class roadmap.
+See [`docs/editors.md`](docs/editors.md) for editor setup (Neovim, Helix, Zed, Emacs, VS Code) and the standalone CLI reference, and `../specs/plans/archive/2026-06-13-lsp-best-in-class.md` for the best-in-class roadmap.
 
 ### March-specific highlights
 

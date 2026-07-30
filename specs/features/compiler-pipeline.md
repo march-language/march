@@ -163,6 +163,26 @@ end
 3. **Module member access desugaring** (lines 135-141):
    - `Mod.fn(...)` → `EVar "Mod.fn"` (qualified names as single atoms)
 
+4. **Intra-module bare-name qualification** (`qualify_module_refs`,
+   `collect_direct_names`, `qualify_expr`): a bare call inside a module body
+   (`connect(host, port)` written inside `mod Socket do ... end`) is
+   otherwise indistinguishable in the AST from a reference to some unrelated
+   top-level `connect` — `EVar "connect"` either way. Left unresolved, three
+   downstream passes (eval's `base_env` stdlib isolation, typecheck's
+   `pre_env` shadowing, and TIR's `rename_tir_vars`) each had to
+   independently guess the right binding, which meant a refactor touching
+   any one of them could silently re-expose a footgun where a user-defined
+   top-level function of the same name shadows a module's own. This pass
+   closes the ambiguity at the source: after ordinary desugaring, it walks
+   the declaration tree with an accumulated module-path prefix and rewrites
+   every bare `EVar` that resolves to a name declared **directly** in the
+   enclosing module (not shadowed by a closer binder, not already qualified,
+   not brought in via `use`/`DUse` import) to its fully-qualified form
+   (`EVar "Socket.connect"`) before typecheck, eval, or TIR ever see it. The
+   three downstream protections still run as defense-in-depth for cases this
+   pass doesn't cover (`DUse` aliasing, module-level `DLet` values), but they
+   are no longer the primary line of defense.
+
 ### Data Structures
 
 - `fresh_arg_name` (lines 48-51): Generates `__arg0`, `__arg1`, ... to avoid user shadowing

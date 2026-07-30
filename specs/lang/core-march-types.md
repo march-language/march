@@ -8,7 +8,7 @@ for the per-task provenance) and consolidated into this single reference by
 Task 7 — assembly + versioning only, no new typing rules were added in this pass.
 **Companion:** `specs/lang/core-march.md` (operational semantics — "what programs
 mean"). This document is "which programs are well-typed."
-**Depends on:** `specs/2026-07-04-language-specification-roadmap-design.md` §4.3.
+**Depends on:** `specs/archive/2026-07-04-language-specification-roadmap-design.md` §4.3.
 
 ---
 
@@ -4450,7 +4450,7 @@ producing proof caps.)
 
 Everything in this section was live-verified against the checker on
 2026-07-10 (20-probe survey; see
-`specs/plans/2026-07-10-widening-linear-types-plan.md` for the survey
+`specs/plans/archive/2026-07-10-widening-linear-types-plan.md` for the survey
 record). Enforcement is **purely static** — the interpreter performs no
 use-accounting and the compiled runtime never re-checks (see `core-march.md`
 §4.12 for the operational account). All `typecheck.ml` line numbers drift;
@@ -4577,7 +4577,7 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
   metadata — it feeds ONLY this diagnostic, not codegen/mangling/dispatch (the
   `.ll` goldens are byte-identical), and it is the first metadata slice of the
   module-qualified constructor identity
-  (`specs/plans/2026-07-17-fqn-type-ctor-identity.md`, Stage 4). A genuine
+  (`specs/plans/archive/2026-07-17-fqn-type-ctor-identity.md`, Stage 4). A genuine
   cross-module ctor clash where NEITHER type is local still merges (conservative,
   pending the full resolver).
 - **L7** — FIXED 2026-07-10: escape analysis stack-promoted erased-repr
@@ -5865,7 +5865,7 @@ exit 0.
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 
 This document is **Level-1 for the Core March fragment's type system**
-(`specs/2026-07-04-language-specification-roadmap-design.md` §2's "descriptive
+(`specs/archive/2026-07-04-language-specification-roadmap-design.md` §2's "descriptive
 reference, kept honest by tests" — the level `core-march.md` already reached
 operationally). What is explicitly OUT of scope for this document, and where
 each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):

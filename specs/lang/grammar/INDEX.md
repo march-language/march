@@ -125,7 +125,7 @@ reachability gap, added p30/p31 and retired r02/r07 — the same pass, adding
 or-patterns, added p32 (the binding-rejection witness is a type error, not a
 parse error, so it lives in `specs/lang/types/reject/t82` instead) —
 45 programs total (33 `parse/`, 12 `reject/`). See
-`specs/plans/2026-07-06-resolved-grammar-plan.md` for the task-by-task
+`specs/plans/archive/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan
 tasks. CI-wired as the `grammar-check` dune alias (`test/dune`), mirroring

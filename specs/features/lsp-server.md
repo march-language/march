@@ -12,7 +12,7 @@ Because it is built on the real compiler pipeline (parse → desugar → typeche
 
 Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/main.exe` or the installed `march-lsp`). Transport: `linol`/`linol-lwt` over stdio.
 
-**Best-in-class plan `specs/plans/2026-06-13-lsp-best-in-class.md` — Phases 0–5 are implemented and merged**, plus document formatting, navigation extras, logging, and completion-depth improvements:
+**Best-in-class plan `specs/plans/archive/2026-06-13-lsp-best-in-class.md` — Phases 0–5 are implemented and merged**, plus document formatting, navigation extras, logging, and completion-depth improvements:
 
 - **Phase 0** — UTF-16 position correctness end-to-end (`utf16.ml` line index + boundary remap; advertises `positionEncoding`); removed dead `bin/march_lsp.ml`.
 - **Phase 1** — stdlib parse/desugar memoized (`stdlib_cache.ml`); error-resilient analysis (`analyse_resilient`); version-guarded + crash-isolated background TIR fiber.
@@ -28,7 +28,7 @@ Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/
 - **Logging** — `window/logMessage` on document open (first editor-visible observability).
 - **Completion depth** — scope-precise local bindings (`collect_scoped` records a scope span per binder) offered first via `sortText` ranking.
 
-**Remaining (Phase 5):** a per-def in-file typecheck firewall (AST-level `sig_hash`/`impl_hash` for the user file's own defs — deferred; requires canonical serialization of the full surface AST, and the dominant cost is already removed by caching the stdlib+deps prefix; see the deferred "Increment G" in `specs/plans/2026-06-13-lsp-incremental-engine.md`); module-qualified precision for cross-file references (currently name-based); richer completion (auto-import, qualified `Module.`, postfix). A separate **compiler-side** issue: user `type` declarations are shadowed by same-named stdlib types in the typecheck environment (the type-level analogue of the def_map collision the LSP already fixes) — fixable only in the typechecker.
+**Remaining (Phase 5):** a per-def in-file typecheck firewall (AST-level `sig_hash`/`impl_hash` for the user file's own defs — deferred; requires canonical serialization of the full surface AST, and the dominant cost is already removed by caching the stdlib+deps prefix; see the deferred "Increment G" in `specs/plans/archive/2026-06-13-lsp-incremental-engine.md`); module-qualified precision for cross-file references (currently name-based); richer completion (auto-import, qualified `Module.`, postfix). A separate **compiler-side** issue: user `type` declarations are shadowed by same-named stdlib types in the typecheck environment (the type-level analogue of the def_map collision the LSP already fixes) — fixable only in the typechecker.
 
 ## Features
 
@@ -104,6 +104,6 @@ Editor configuration snippets (Neovim, Helix, Zed, Emacs, VS Code) live in `lsp/
 
 ## Related
 
-- `specs/plans/2026-06-13-lsp-best-in-class.md` — best-in-class roadmap (master plan)
-- `specs/plans/2026-06-13-lsp-symbol-identity.md`, `…-lsp-completion.md`, `…-lsp-workspace.md` — phase sub-plans
+- `specs/plans/archive/2026-06-13-lsp-best-in-class.md` — best-in-class roadmap (master plan)
+- `specs/plans/archive/2026-06-13-lsp-symbol-identity.md`, `specs/plans/archive/2026-06-13-lsp-completion.md`, `specs/plans/archive/2026-06-13-lsp-workspace.md` — phase sub-plans
 - `specs/features/zed-extension.md` / `tree-sitter-march/` — Tree-sitter grammar (separate from LSP)

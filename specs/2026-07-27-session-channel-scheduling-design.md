@@ -7,7 +7,7 @@ by this document; nothing here has been implemented.
 **Resolves:** finding **F6** (`specs/lang/core-march.md` §4.11.6; `specs/todos.md:1259`)
 **Explicitly not about:** protocol *conformance*. Static session checking is
 thorough and was just hardened — see `CHANGELOG.md` `[Unreleased]` and
-`specs/plans/2026-07-24-session-types-fixes.md`. This document is entirely about
+`specs/plans/archive/2026-07-24-session-types-fixes.md`. This document is entirely about
 the runtime execution model.
 
 **Depends on / touches:**

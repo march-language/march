@@ -446,8 +446,8 @@ than inventing ad-hoc smoke tests.
 ## Related work / dependencies
 
 Builds directly on the **differential oracle + executable language spec** landed
-on main (`specs/2026-07-04-differential-oracle-design.md`,
-`specs/2026-07-04-language-specification-roadmap-design.md`, `test/test_oracle.ml`,
+on main (`specs/archive/2026-07-04-differential-oracle-design.md`,
+`specs/archive/2026-07-04-language-specification-roadmap-design.md`, `test/test_oracle.ml`,
 `specs/lang/`). This feature's primary test gate is a third oracle executor (see
 Testing); conversely, extending the oracle to cross-compiled binaries stresses the
 corpus on real arch diversity and feeds the language-spec conformance effort.

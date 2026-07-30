@@ -1314,6 +1314,37 @@ edges:
     what the caller's own declared type or a resolvable alias already states;
   - dispatch through an `interface`/`impl` — which concrete implementation
     runs is not resolved by this pass, so no refinement travels through it.
+- **Why general higher-order/polymorphic flow is structurally out of reach —
+  the architectural ceiling.** `TRefine` (the internal type-carry for `{T |
+  p}`) is deliberately **transparent to unification**: `repr` strips it to the
+  base type, which is what keeps refinements invisible to `occurs`,
+  generalization, instantiation, and the rest of the ~35 sites that canonicalise
+  through `repr` — only 8 sites needed bespoke handling. But the same
+  transparency means a refinement survives only where it is *not unified*,
+  i.e. on a function's own declared parameters at a direct call. The moment a
+  refined function's type is unified against a polymorphic slot (`apply(f, x)`
+  with `apply(f, x) = f(x)`), unification strips the predicate before the
+  callee's body ever sees it — so `apply(take_n, -3)` typechecks even though
+  `take_n : {Int | _ >= 0} -> Int`. This is not a missing case to fill in; it
+  is what transparent-`repr` `TRefine` means. The only known route past it is
+  making refinements *participate* in unification as a subtyping relation
+  (`{T | p} <: {T | q}` discharged as a real SMT obligation instead of
+  stripped) — a fundamentally larger change to the bidirectional core, since it
+  also requires threading a path/assumption context through `infer_expr`/
+  `check_expr` that does not exist today, and it flips the soundness contract
+  from "report only definite failure" to "prove or reject," which reopens the
+  false-positive risk the current design was built to avoid. That path
+  (internally "Path 2: refinement subtyping in unification") was explored and
+  explicitly **shelved** as a separate future project rather than pursued now:
+  it is a multi-month, quarter-scale core-typechecker effort with real
+  abandonment risk, while the shipped direct-call/path-sensitive checker
+  already delivers most of the practical value (preconditions, bounds, path
+  sensitivity, postconditions) at a fraction of the cost. If it is ever
+  revisited, the plan is to validate the subtyping judgment's soundness in
+  March's Lean 4 mechanization track first, and to keep it independent of the
+  `apply`-style `infer_app` precondition emission that was also considered and
+  rejected (it would regress path sensitivity without adding higher-order
+  checking).
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.

@@ -1,7 +1,7 @@
 # C FFI — Known gaps & limitations
 
 **Status:** living document. Tracks what the FFI does *not* yet do, as of the
-end of Phase 4. Companion to the design spec (`specs/2026-06-19-c-ffi-abi-design.md`).
+end of Phase 4. Companion to the design spec (`specs/archive/2026-06-19-c-ffi-abi-design.md`).
 
 Phases 1–4 are done and on `main`: ABI core + primitives, strings/bytes +
 Option/Result + the RC-leak gauge + borrow-default ownership, resources +

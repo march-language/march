@@ -1,7 +1,7 @@
 # Follow-on: HTTP handlers as green threads (B1)
 
 **Status:** filed, not started. Prereq work (foreign-thread actor bridge)
-landed 2026-07 — see specs/plans/2026-07-09-foreign-thread-actor-bridge.md.
+landed 2026-07 — see specs/plans/archive/2026-07-09-foreign-thread-actor-bridge.md.
 
 Today `march_http_evloop.c` calls the March pipeline inline on evloop
 pthreads (evloop_run -> fn(pipeline, conn)); the bridge makes actor ops
