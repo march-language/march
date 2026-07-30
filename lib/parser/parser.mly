@@ -211,6 +211,13 @@
 %token <string> INTERP_MID
 %token <string> INTERP_END
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
+(* [LPAREN_STMT] is a `(` that opens a NEW statement: the token filter emits it
+   in place of [LPAREN] when a newline separates the `(` from a value-ending
+   token (grammar §7.3 — `f(1)⏎(g(2))` is two statements, not a curried call).
+   It is accepted only by the group/tuple/unit rules in [expr_atom], never by
+   the call rule, so a `(`-led line can no longer be glommed onto the previous
+   line's trailing expression as an argument list. *)
+%token LPAREN_STMT
 %token AT INVARIANT
 %token ARROW PIPE_ARROW
 %token EQUALS COLON COMMA PIPE DOT
@@ -1405,6 +1412,13 @@ expr_atom:
   | LPAREN; e = expr; COMMA; es = separated_nonempty_list(COMMA, expr); RPAREN
     { ETuple (e :: es, mk_span ($loc)) }
   | LPAREN; RPAREN { ETuple ([], mk_span ($loc)) }
+  (* Same three forms opened by a statement-leading `(` (see [LPAREN_STMT]).
+     Deliberately absent from the call rule above: that is what stops
+     `let _ = a`⏎`()` from parsing as the single binding `let _ = a()`. *)
+  | LPAREN_STMT; e = expr; RPAREN { e }
+  | LPAREN_STMT; e = expr; COMMA; es = separated_nonempty_list(COMMA, expr); RPAREN
+    { ETuple (e :: es, mk_span ($loc)) }
+  | LPAREN_STMT; RPAREN { ETuple ([], mk_span ($loc)) }
   | DO; body = block_body; END { body }
   (* List comprehension: [expr for pat in expr] or [expr for pat in expr, pred] *)
   | LBRACKET; body = expr; FOR; pat = pattern; IN; src = expr; RBRACKET
@@ -1548,6 +1562,14 @@ simple_pattern:
   | b = BOOL { PatLit (LitBool b, mk_span ($loc)) }
   | LPAREN; p = pattern; RPAREN { p }
   | LPAREN; p = pattern; COMMA; ps = separated_nonempty_list(COMMA, pattern); RPAREN
+    { PatTuple (p :: ps, mk_span ($loc)) }
+  (* A match arm may begin on a fresh line with a parenthesised/tuple pattern,
+     in which case the token filter has already retagged the `(` as
+     [LPAREN_STMT] (the previous arm's body ended in a value-ending token).
+     Patterns have no call form, so accepting both spellings here is
+     unambiguous. *)
+  | LPAREN_STMT; p = pattern; RPAREN { p }
+  | LPAREN_STMT; p = pattern; COMMA; ps = separated_nonempty_list(COMMA, pattern); RPAREN
     { PatTuple (p :: ps, mk_span ($loc)) }
   (* List literal patterns: []  →  Nil,  [a, b]  →  Cons(a, Cons(b, Nil)) *)
   | LBRACKET; RBRACKET

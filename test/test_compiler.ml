@@ -278,6 +278,108 @@ let test_parse_underscore_param () =
     Alcotest.(check int) "1 clause" 1 (List.length def.fn_clauses)
   | _ -> Alcotest.fail "expected single DFn with underscore param"
 
+(* ── A `(`-led statement must not glom onto the previous line ─────────────
+   `let _ = a` followed by a line that is just `()` used to parse as the single
+   binding `let _ = a()` — the block's newline is swallowed inside a block
+   context, so the parser saw `a` `(` `)` adjacent and applied the call rule.
+   The parameter was then *invoked*: for a String argument the compiled binary
+   loaded offset 16 of the string as a function pointer and jumped to it
+   (EXC_BAD_ACCESS, exit 138).  Grammar §7.3 already says a newline before `(`
+   signals two statements (`f(1)⏎(g(2))`); the token filter now marks such a
+   `(` so only the group/tuple/unit rules — never the call rule — accept it. *)
+
+(* Return the block_exprs of the single fn's single clause body. *)
+let single_fn_body_exprs src =
+  let lexbuf = Lexing.from_string src in
+  let m =
+    March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.March_ast.Ast.fn_clauses with
+     | [clause] ->
+       (match clause.March_ast.Ast.fc_body with
+        | March_ast.Ast.EBlock (es, _) -> es
+        | e -> [e])
+     | _ -> Alcotest.fail "expected single clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_parse_unit_stmt_not_call_of_prev_line () =
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(a) do
+      let _ = a
+      ()
+    end
+  end|} in
+  Alcotest.(check int) "two block exprs: the let, then the unit" 2 (List.length es);
+  (match es with
+   | [March_ast.Ast.ELet (b, _); tail] ->
+     (* The binding RHS must be the bare variable `a`, NOT a call `a()`. *)
+     (match b.March_ast.Ast.bind_expr with
+      | March_ast.Ast.EVar n ->
+        Alcotest.(check string) "binding RHS is the bare param" "a"
+          n.March_ast.Ast.txt
+      | March_ast.Ast.EApp _ ->
+        Alcotest.fail "`let _ = a` glommed the next line's `()` into a call"
+      | _ -> Alcotest.fail "unexpected binding RHS");
+     (match tail with
+      | March_ast.Ast.ETuple ([], _) -> ()
+      | _ -> Alcotest.fail "expected the tail expr to be the unit literal `()`")
+   | _ -> Alcotest.fail "expected [ELet; unit]")
+
+let test_parse_tuple_stmt_not_call_of_prev_line () =
+  (* Same shape with a non-empty tuple, and with the previous line ending in
+     `)` rather than an identifier. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(a) do
+      let _ = g(a)
+      (1, 2)
+    end
+  end|} in
+  Alcotest.(check int) "two block exprs" 2 (List.length es);
+  (match es with
+   | [March_ast.Ast.ELet _; March_ast.Ast.ETuple ([_; _], _)] -> ()
+   | _ -> Alcotest.fail "`(1, 2)` on its own line must be a separate statement")
+
+let test_parse_same_line_call_still_works () =
+  (* The guard must key on the NEWLINE, not on the paren: a call whose `(` is on
+     the same line as its callee is still a call. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(a) do
+      let _ = a()
+      ()
+    end
+  end|} in
+  Alcotest.(check int) "two block exprs" 2 (List.length es);
+  (match es with
+   | [March_ast.Ast.ELet (b, _); _] ->
+     (match b.March_ast.Ast.bind_expr with
+      | March_ast.Ast.EApp _ -> ()
+      | _ -> Alcotest.fail "`a()` on one line must still parse as a call")
+   | _ -> Alcotest.fail "expected [ELet; unit]")
+
+let test_parse_multiline_call_args_still_work () =
+  (* A call whose ARGS span lines is unaffected — the `(` follows the callee
+     directly; only the arguments are on later lines. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(a) do
+      let _ = g(
+        a,
+        (1, 2)
+      )
+      ()
+    end
+  end|} in
+  Alcotest.(check int) "two block exprs" 2 (List.length es);
+  (match es with
+   | [March_ast.Ast.ELet (b, _); _] ->
+     (match b.March_ast.Ast.bind_expr with
+      | March_ast.Ast.EApp (_, args, _) ->
+        Alcotest.(check int) "two args" 2 (List.length args)
+      | _ -> Alcotest.fail "multi-line arg list must still parse as a call")
+   | _ -> Alcotest.fail "expected [ELet; unit]")
+
 (* ── `with ... else` multi-arm parsing (token-filter arm separators) ────── *)
 
 (* Parse a module whose single fn body is a `with ... else ... end` and return
@@ -10294,6 +10396,14 @@ let compiler_suites =
           Alcotest.test_case "single fn" `Quick test_parse_module_single_fn;
           Alcotest.test_case "dotted module name parse" `Quick test_parse_dotted_module_name;
           Alcotest.test_case "underscore-prefixed param" `Quick test_parse_underscore_param;
+          Alcotest.test_case "`()` on its own line is a statement, not a call"
+            `Quick test_parse_unit_stmt_not_call_of_prev_line;
+          Alcotest.test_case "`(1, 2)` on its own line is a statement, not a call"
+            `Quick test_parse_tuple_stmt_not_call_of_prev_line;
+          Alcotest.test_case "same-line call still parses as a call"
+            `Quick test_parse_same_line_call_still_works;
+          Alcotest.test_case "multi-line call arg list still parses as a call"
+            `Quick test_parse_multiline_call_args_still_work;
         ] );
       ( "keywords",
         [
