@@ -3929,10 +3929,43 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
      caller, so only the emitting (reporting) run ever records, and the same
      postcondition is never counted twice. *)
   let note verdict =
+    (* `@[trusted]` accepts a SKIP as an assertion rather than escalating it —
+       mirrors [check_call]'s [note] exactly, including running before the
+       verdict is recorded/escalated, so the ledger and the diagnostic agree.
+       A [Violated] is untouched: a predicate the solver proved can never hold
+       is a bug in the annotation, not an incompleteness [@[trusted]] waves
+       through. *)
+    let verdict =
+      match verdict with
+      | Obligation.Skipped _ when !trusted_fn -> Obligation.Trusted
+      | _ -> verdict
+    in
     if record then
       Obligation.record
         { Obligation.span; callee = Option.value ~default:"" fn_name
-        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition }
+        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition };
+    (* `cap verified` escalates an undischarged POSTCONDITION exactly as
+       [check_call] escalates an undischarged precondition — the last place a
+       fact was granted without obliging anyone.  Gated on [record] (which
+       [check_fn_post_verdict] threads as [~record:emit]) so only the emitting
+       run escalates: the [gate_unverified_posts] pre-pass calls this with
+       [~record:false] purely to decide propagation, and must never also
+       report — that would print the same contract's failure twice. *)
+    match verdict with
+    | Obligation.Skipped r when !strict_verified && record ->
+      let fn_label = match fn_name with Some n -> n | None -> "<anonymous>" in
+      let remedy =
+        "note: strengthen the return expression so the checker can see it \
+         satisfies this contract, rewrite the predicate into the fragment the \
+         checker supports, or remove `cap verified` from this module — it asks \
+         for every obligation to be discharged"
+      in
+      Err.error errctx ~span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify return type constraint `%s` on `%s` (%s: %s)\n%s"
+           (pred_str ret_pred) fn_label (Obligation.reason_name r)
+           (Obligation.reason_detail r) remedy)
+    | _ -> ()
   in
   let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in

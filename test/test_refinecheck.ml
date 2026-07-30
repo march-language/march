@@ -5749,6 +5749,49 @@ mod TR5 do
 end|}))
   ]
 
+let postcond_strict_suite =
+  [ gated "cap verified escalates an undischarged postcondition" (fun () ->
+        (* PRE-FIX: exit 0 — silently permitted. This is the last place a fact
+           is granted without obliging anyone. *)
+        Alcotest.(check bool) "errors" true
+          (has_refine_error_d {|
+mod PS1 do
+  cap verified
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|}))
+
+  ; gated "a PROVED postcondition under cap verified stays silent" (fun () ->
+        (* The false-positive control. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod PS2 do
+  cap verified
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do mk() end
+end|}))
+
+  ; gated "@[trusted] rescues an undischarged postcondition" (fun () ->
+        (* Arc A's payoff: the escape hatch has to reach the newly-strict
+           obligations, or Task 3 makes cap verified less adoptable. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod PS3 do
+  cap verified
+  @[trusted]
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|}))
+
+  ; gated "a non-cap-verified module is unaffected" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod PS4 do
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5795,4 +5838,5 @@ let () =
       ("compose-tag", compose_tag_suite);
       ("let-annotation", let_annotation_suite);
       ("postcond-ledger", postcond_ledger_suite);
-      ("trusted", trusted_suite) ]
+      ("trusted", trusted_suite);
+      ("postcond-strict", postcond_strict_suite) ]

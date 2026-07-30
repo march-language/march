@@ -175,23 +175,26 @@ git log is authoritative for exact commits.
   not make the callee's module strict, and nested modules do not inherit the
   capability. Modules that do not declare it behave exactly as before.
 
-  Two limits worth knowing before relying on it: an undischarged **postcondition**
-  (a return-type refinement) is now recorded and reported by `--refine-report`
-  (see the Fixed entry below), but `cap verified` does not yet escalate it —
-  `@[trusted]` (see below) only suppresses escalation on the precondition
-  side; and a refinement written on an **`interface` method's signature** is
-  not enforced at call sites (put it on the `impl` method's parameter, where
-  it is — see the 2026-07-29 entries below), and an `impl` method's own
-  parameter refinement is adopted only when its name unambiguously denotes one
-  contract.
+  `cap verified` now also escalates an undischarged **postcondition** (a
+  function's own return-type refinement), not just a call-site precondition —
+  the last place a fact was granted without obliging anyone. A return
+  refinement the checker can neither prove nor refute is reported the same
+  way a precondition is, naming the function, the predicate, and the reason;
+  `@[trusted]` (see below) suppresses it there too. One limit worth knowing
+  before relying on `cap verified`: a refinement written on an **`interface`
+  method's signature** is not enforced at call sites (put it on the `impl`
+  method's parameter, where it is — see the 2026-07-29 entries below), and an
+  `impl` method's own parameter refinement is adopted only when its name
+  unambiguously denotes one contract.
 
 - **`@[trusted]`: a per-function escape hatch from `cap verified`.** `cap
   verified` used to be all-or-nothing — one obligation the checker could not
   discharge anywhere in the module forced dropping the capability entirely, or
   restating the fact with `assert`. Annotating a single function `@[trusted]`
   now accepts, as an assertion, any obligation *inside that function* the
-  checker could not otherwise discharge, without disarming `cap verified` for
-  the rest of the module. It never suppresses a *definite violation* — a
+  checker could not otherwise discharge — both a call-site precondition and
+  the function's own return-type postcondition — without disarming
+  `cap verified` for the rest of the module. It never suppresses a *definite violation* — a
   predicate the solver has proved can never hold is a bug in the annotation,
   not an incompleteness to wave through, so that case is still reported
   exactly as before — and it is scoped strictly to the annotated function: an

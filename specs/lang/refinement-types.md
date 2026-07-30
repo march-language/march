@@ -1177,11 +1177,19 @@ violation inside a `@[trusted]` function is still reported).
   entire standard library as sibling module declarations, so an inherited flag
   would turn every stdlib module strict the moment one user module asked for
   verification.
-- **Precondition obligations at call sites only, for now.** The ledger records
-  both kinds (see `--refine-report` above), but `cap verified` still escalates
-  only a precondition obligation raised at a call site; an undischarged
-  postcondition is recorded as skipped and printed by `--refine-report`, but
-  does not (yet) become a compile error under `cap verified`.
+- **Both preconditions and postconditions escalate (since 2026-07-30).** The
+  ledger records both kinds (see `--refine-report` above), and `cap verified`
+  now escalates a `Skipped` obligation raised at a call site *or* on a
+  function's own return refinement — an undischarged postcondition is a
+  compile error under `cap verified`, exactly like an undischarged
+  precondition. This is the last place a fact was granted without obliging
+  anyone; `cap verified`'s promise — "if it compiles, it is proved" — now
+  covers return refinements too. `@[trusted]` reaches this escalation the same
+  way it reaches `check_call`'s. Bracketed by
+  `reject/t134_refine_postcondition_strict_undischarged` (an undecidable
+  return refinement under `cap verified`) and
+  `accept/t135_refine_postcondition_strict_trusted` (the same function rescued
+  by `@[trusted]`).
 - **Every declaration form is walked** (since 2026-07-29). The pass once walked
   only `DFn` and nested `DMod` and ended in a `| _ -> ()` wildcard, so calls
   inside an `impl` method, an `interface` default body, a top-level `let`, an
@@ -1256,18 +1264,18 @@ sense; each is a check that does not happen.
    `string_byte_length` as measure aliases for the entire program. Under the
    default stance that is silence; under `cap verified` it is a build failure,
    which is why the `alias-withdrawn` reason exists.
-3. **Postconditions are in the ledger, but not yet escalated.** `check_post` now
-   records an obligation at every exit (proved, violated, or skipped with a
-   reason), so `--refine-report` counts return refinements too — but a
-   `cap verified` module still silently permits an undischarged **return**
-   refinement, since escalation reads only precondition obligations raised at
-   call sites. The 2026-07-29 composition work is confined to `check_call` for
-   the same reason: a parameter's promise composes into a *call* in the body,
-   but `check_post` composes no list or ADT measure through a **postcondition**.
-4. **`@[trusted]` exists but is scoped to preconditions only.** It suppresses
-   the escalation `check_call`'s `note` performs; `check_post` does not (yet)
-   escalate anything under `cap verified` (see item 3), so `@[trusted]` on a
-   function has nothing to do there yet either.
+3. **Postconditions are in the ledger and escalated (since 2026-07-30).**
+   `check_post` records an obligation at every exit (proved, violated, or
+   skipped with a reason), so `--refine-report` counts return refinements too,
+   and `cap verified` now escalates an undischarged **return** refinement
+   exactly as it already escalated an undischarged precondition. The
+   2026-07-29 composition work remains confined to `check_call`, though: a
+   parameter's promise composes into a *call* in the body, but `check_post`
+   still composes no list or ADT measure through a **postcondition** — that is
+   a separate, still-open gap from escalation.
+4. **`@[trusted]` now reaches postconditions too (since 2026-07-30).** It
+   suppresses the escalation both `check_call`'s and `check_post`'s `note`
+   perform, scoped to the one function that carries the attribute.
 5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
    wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified
    spellings `strip_entry_self_qual` rewrites, so an entry module that declares
