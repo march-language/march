@@ -102,6 +102,35 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A statement starting with `(` is no longer glued onto the previous line as
+  a call.** A block line holding only `()` — or any parenthesised/tuple
+  expression — following a line that ended in a value (an identifier, a `)`, a
+  `]`) was parsed as that value's argument list. The common shape was a
+  function that discards a parameter and returns unit:
+
+  ```march
+  fn f(a) do
+    let _ = a
+    ()          -- parsed as `let _ = a()`
+  end
+  ```
+
+  which silently *invoked* the parameter. Interpreted this raised "applied
+  non-function value"; compiled it was worse — codegen emitted the closure-ABI
+  indirect call (load the function pointer from offset 16 of the receiver, then
+  call through it), but the receiver was whatever value was passed in, so the
+  binary jumped into a `String`'s character payload and died with
+  `EXC_BAD_ACCESS` (exit 138) or `SIGSEGV` (exit 139) before running a line of
+  user code. Both conditions were needed to trigger it, which is why it read as
+  a codegen bug: without the discard there was no trailing identifier for the
+  `(` to attach to, and with any other tail expression (`None`, `0`, a call)
+  there was no leading `(` on the next line.
+
+  The newline-separates-statements rule was already specified for the
+  `f(1)`⏎`(g(2))` case; it now applies after *any* value-ending token. A call
+  whose `(` is on the same line as its callee, and a call whose argument list
+  spans several lines, are unaffected.
+
 - **A refinement whose predicate measures the refined value itself is now
   enforced for user ADTs.** A contract like `{Tree | size(_) > 0}`, where `size`
   is a user `@[measure]` over `Tree`, checked *nothing*: the argument being

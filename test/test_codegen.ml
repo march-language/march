@@ -9105,6 +9105,64 @@ let test_float_lit_match_arm_compiled () =
        interpreter (not silently falling through to a later/wildcard arm)"
       "two-and-a-half" run_out
 
+(* ── `()` on its own line must not become a call of the previous line ─────
+   `let _ = a` followed by a line holding just `()` parsed as the single
+   binding `let _ = a()` (the block's newline is swallowed, so the parser saw
+   `a` `(` `)` adjacent and applied the call rule). The parameter was then
+   *invoked*: codegen emitted the closure-ABI indirect call — load the fn_ptr
+   from offset 16 of the receiver, then `call ptr (ptr)` through it — but the
+   receiver was a String, so offset 16 is its character payload. The binary
+   jumped to a garbage address and died with EXC_BAD_ACCESS (exit 138 / 139).
+   Fixed in the token filter + grammar (LPAREN_STMT); see token_filter.ml.
+
+   Asserted two ways: the IR must contain no indirect `call ptr (ptr)` for
+   this program (the mis-lowering's fingerprint), and the binary must run. *)
+let unit_tail_discard_src =
+  "mod UnitTail do\n\
+  \  fn f(a) do\n\
+  \    let _ = a\n\
+  \    ()\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    f(\"x\")\n\
+  \    println(\"ok\")\n\
+  \  end\n\
+   end\n"
+
+let test_unit_tail_discard_no_indirect_call_ir () =
+  let ir = emit_actor_ir unit_tail_discard_src in
+  (* The closure-ABI indirect call: `%fv = load ptr, ptr %fp` off `+16`, then
+     `call ptr (ptr) %fv(...)`. Nothing in this program is a closure, so a
+     known top-level callee must be called directly. *)
+  Alcotest.(check int)
+    "no closure-style indirect call is emitted for a known top-level callee"
+    0 (ir_count ir "call ptr (ptr)");
+  Alcotest.(check bool)
+    "no fn_ptr load off offset 16 of a non-closure value"
+    false (ir_contains ir "getelementptr i8, ptr %sl");
+  (* Non-vacuity: the program really did compile to something. *)
+  Alcotest.(check bool) "march_main was emitted" true
+    (ir_contains ir "define ptr @march_main")
+
+let test_unit_tail_discard_runs_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_unittail" unit_tail_discard_src in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter prints ok" "ok" interp_out;
+  let bin = Filename.concat tmp "unittailbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output
+      (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "compiled binary prints ok and exits 0 (pre-fix: EXC_BAD_ACCESS, exit 138)"
+      "ok\nEXIT:0" run_out
+
 (** Float arm with NO wildcard: a non-exhaustive float match must panic (the
     Task 1 / B3 `nonexhaustive_panic` fallback), not silently fall through to
     LLVM `unreachable` (undefined behaviour — observed, pre-fix, to print a
@@ -12709,6 +12767,12 @@ let codegen_suites =
       ( "check_diagnostic_determinism", [
           Alcotest.test_case "repeated --check has byte-identical diagnostics" `Quick
             test_check_diagnostic_display_deterministic;
+        ] );
+      ( "unit_tail_discard_codegen", [
+          Alcotest.test_case "`()` tail after a discard emits no indirect call" `Quick
+            test_unit_tail_discard_no_indirect_call_ir;
+          Alcotest.test_case "`()` tail after a discard runs compiled (exit 0)" `Quick
+            test_unit_tail_discard_runs_compiled;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
