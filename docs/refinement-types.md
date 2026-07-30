@@ -638,9 +638,11 @@ once shipped enforcing nothing while every test stayed green.
 $ march --check --refine-report stdlib/list.march
 refinement obligations (user code): 0 proved, 0 violated, 5 skipped
   skipped (solver-undecided): 5
+  by kind: 5 precondition, 0 postcondition
 refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
   skipped (unreflectable-predicate): 1
   skipped (solver-undecided): 27
+  by kind: 36 precondition, 0 postcondition
 ```
 
 One wrinkle to know before you run it: clear `.march/cas/artifacts-v2` first. A
@@ -671,9 +673,12 @@ Every skip says *why*: the predicate uses vocabulary the checker can't translate
 measure alias the guard relied on had been withdrawn (`alias-withdrawn` — see below),
 or the solver simply didn't decide (`solver-undecided`).
 
-One thing the numbers don't include: they count **preconditions checked at call
-sites**. Return refinements go through a different path that doesn't file a record, so
-a postcondition the checker couldn't discharge won't show up here.
+The counts include both **preconditions checked at call sites** and
+**postconditions** — a function's own return value checked against its declared
+return type. Each obligation is tagged with its kind, shown as a `by kind`
+breakdown line under each slice; a proved postcondition still counts toward the
+same "proved" headline as a proved precondition. `cap verified` (below) still
+only escalates preconditions.
 
 ---
 
@@ -770,11 +775,12 @@ error in the compiler rather than a new silent hole.
 
 Three things it still doesn't do, and you should know all three before trusting it:
 
-- **Postconditions are outside the ledger entirely.** A refined *return* type goes
-  down a separate path that files no record, so `cap verified` neither reports nor
-  escalates a return refinement it couldn't discharge — and `--refine-report`
-  undercounts by exactly that much. `cap verified` is a guarantee about preconditions
-  at call sites, full stop.
+- **Postconditions are recorded, but `cap verified` doesn't escalate them yet.** A
+  refined *return* type now files an obligation (proved, violated, or skipped)
+  just like a precondition does, so `--refine-report` counts it — but
+  `cap verified` still escalates only a precondition obligation raised at a
+  call site, so an undischarged return refinement stays silent under
+  `cap verified` today.
 - **A refinement in an `interface`'s own method signature isn't enforced.** Write
   `fn run : a -> {Int | _ > 0} -> Int` in the interface and no call site is obliged by
   it. Nothing assumes it either, so it's a missing check rather than an unsound one —

@@ -923,9 +923,11 @@ passes look identical from outside.
 $ march --check --refine-report stdlib/list.march
 refinement obligations (user code): 0 proved, 0 violated, 5 skipped
   skipped (solver-undecided): 5
+  by kind: 5 precondition, 0 postcondition
 refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
   skipped (unreflectable-predicate): 1
   skipped (solver-undecided): 27
+  by kind: 36 precondition, 0 postcondition
 ```
 
 > **Clear `.march/cas/artifacts-v2` first.** A `--check` run whose sources hash to
@@ -973,9 +975,13 @@ have discharged it. It is reported separately because the *action* differs — t
 call is already guarded, and what has to change is a name binding elsewhere in
 the unit. See [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 
-The ledger records **precondition obligations raised at call sites**. Return
-refinements go through a separate path that does not file a record, so a
-postcondition the checker could not discharge does not appear in these counts.
+The ledger records both **precondition obligations raised at call sites** and
+**postcondition obligations** — a function's own return value checked against
+its declared return refinement. Each obligation carries a `kind` (precondition
+or postcondition), printed as a `by kind` breakdown line under each slice's
+headline; the headline totals themselves do not distinguish kinds; a proved
+postcondition is a proved obligation like any other. `cap verified` still
+escalates precondition obligations only — see below.
 
 ---
 
@@ -1113,9 +1119,11 @@ control with the competing binding deleted).
   entire standard library as sibling module declarations, so an inherited flag
   would turn every stdlib module strict the moment one user module asked for
   verification.
-- **Precondition obligations at call sites only.** Same ledger as
-  `--refine-report`: a postcondition the checker cannot discharge is neither
-  recorded nor escalated.
+- **Precondition obligations at call sites only, for now.** The ledger records
+  both kinds (see `--refine-report` above), but `cap verified` still escalates
+  only a precondition obligation raised at a call site; an undischarged
+  postcondition is recorded as skipped and printed by `--refine-report`, but
+  does not (yet) become a compile error under `cap verified`.
 - **Every declaration form is walked** (since 2026-07-29). The pass once walked
   only `DFn` and nested `DMod` and ended in a `| _ -> ()` wildcard, so calls
   inside an `impl` method, an `interface` default body, a top-level `let`, an
@@ -1191,14 +1199,14 @@ sense; each is a check that does not happen.
    `string_byte_length` as measure aliases for the entire program. Under the
    default stance that is silence; under `cap verified` it is a build failure,
    which is why the `alias-withdrawn` reason exists.
-3. **Postconditions are outside the ledger.** `check_post` neither records an
-   obligation nor escalates one, so `--refine-report` *undercounts* by every
-   return refinement it could not discharge, and a `cap verified` module
-   silently permits an undischarged **return** refinement. `cap verified` is a
-   guarantee about preconditions at call sites only. The 2026-07-29 composition
-   work is confined to `check_call` for the same reason: a parameter's promise
-   composes into a *call* in the body, but `check_post` composes no list or ADT
-   measure through a **postcondition**.
+3. **Postconditions are in the ledger, but not yet escalated.** `check_post` now
+   records an obligation at every exit (proved, violated, or skipped with a
+   reason), so `--refine-report` counts return refinements too — but a
+   `cap verified` module still silently permits an undischarged **return**
+   refinement, since escalation reads only precondition obligations raised at
+   call sites. The 2026-07-29 composition work is confined to `check_call` for
+   the same reason: a parameter's promise composes into a *call* in the body,
+   but `check_post` composes no list or ADT measure through a **postcondition**.
 4. **There is no `@[trusted]`.**
 5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
    wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified

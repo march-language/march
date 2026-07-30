@@ -175,9 +175,10 @@ git log is authoritative for exact commits.
   not make the callee's module strict, and nested modules do not inherit the
   capability. Modules that do not declare it behave exactly as before.
 
-  Three limits worth knowing before relying on it: return refinements go through
-  a separate path that files no record, so an undischarged **postcondition** is
-  neither reported nor escalated; a refinement written on an **`interface`
+  Three limits worth knowing before relying on it: an undischarged **postcondition**
+  (a return-type refinement) is now recorded and reported by `--refine-report`
+  (see the Fixed entry below), but `cap verified` does not yet escalate it; a
+  refinement written on an **`interface`
   method's signature** is not enforced at call sites (put it on the `impl`
   method's parameter, where it is — see the 2026-07-29 entries below), and an
   `impl` method's own parameter refinement is adopted only when its name
@@ -203,9 +204,9 @@ git log is authoritative for exact commits.
   from the **user-code** slice of a fixture whose single obligation is actually
   *proved*, so it falls to zero the moment that proof stops happening; a
   whole-program proof count would not have moved. So a change that quietly stops
-  checking things fails the build. Counts cover precondition obligations raised
-  at call sites; postconditions are not in the ledger, so the report undercounts
-  by every undischarged return refinement.
+  checking things fails the build. Counts cover both precondition obligations
+  raised at call sites and postcondition obligations (a function's own return
+  refinement) — see the Fixed entry below.
 
 - **A `List.length` guard now discharges a `len` refinement obligation.** The
   refinement checker treats `List.length` as an alias of the `len` measure, so
@@ -324,6 +325,21 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **`--refine-report` now counts return-type refinements, not just call-site
+  preconditions.** A function's own return refinement (`fn mk() : {Int | _ > 0}
+  do 100 end`) previously went through `check_post`, which discharged the
+  obligation (proving it, reporting a violation, or silently giving up) without
+  ever recording it — so `--refine-report` undercounted by every return
+  refinement in the program, and a function whose *entire* contract was its
+  return type was invisible to the report. `check_post` now files an obligation
+  at every exit — proved, violated, or skipped with a reason (unreflectable
+  predicate, sort conflict, float-sort gate, or solver-undecided) — tagged with
+  a new `kind` (precondition vs. postcondition) so the two can be told apart;
+  `--refine-report` prints a `by kind` breakdown line under each slice's
+  headline. Behaviour-neutral: nothing newly errors, and `cap verified` still
+  escalates only precondition obligations (postcondition escalation is a
+  separate follow-up). `stdlib/list.march`'s `--refine-report` ceiling is
+  unchanged at 28 skipped (it has no refined return types).
 
 - **A refined annotation on a `let` is now checked against the expression it
   annotates, instead of being believed.** `let ys : {List(Int) | len(_) > 0} =
