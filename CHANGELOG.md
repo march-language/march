@@ -102,6 +102,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`forge test` now resolves transitive dependencies.** `forge build` and
+  `forge check` walk the dependency graph transitively — if your project depends
+  on `B` and `B` depends on `C`, then `C`'s `lib/` is on `MARCH_LIB_PATH`.
+  `forge test` built its own path from the *direct* deps only, so a test calling
+  into a transitive dependency's module failed with "Unknown module ..." even
+  though the identical call in `lib/` typechecked. `forge test` now uses the same
+  transitive walk (with the same nearest-wins shadowing for same-named deps),
+  applied to the test scope: `deps` + `dev-deps` + `test-deps`.
+
 - **A refinement whose predicate measures the refined value itself is now
   enforced for user ADTs.** A contract like `{Tree | size(_) > 0}`, where `size`
   is a user `@[measure]` over `Tree`, checked *nothing*: the argument being
