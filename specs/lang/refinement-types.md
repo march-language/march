@@ -327,7 +327,21 @@ warning text together with a false-positive control that the bare spelling
 stays quiet.
 
 The same reasoning covers the other qualified measures: write `len(_)`, not
-`String.byte_size(_)`, inside a predicate.
+`String.byte_size(_)`, inside a predicate. The advice stays `len` even in a unit
+that has [withdrawn the alias](#listlength-is-an-alias-of-the-len-measure) by
+defining its own competing `List.length` — a withdrawn alias is a separate
+problem, and the bare measure is still what the predicate needs.
+
+Two limits worth stating, since the warning is narrower than "any call that
+enforces nothing":
+
+- It fires on a **qualified module path** (`List.length`, `M.N.f`), the shape
+  desugar would have flattened. A record **field** call — `{Cfg | c.cb(1) > 0}`
+  — enforces nothing either, but it is not a qualified call and is not reported
+  as one; calling it that, and offering the field name as a "bare spelling",
+  would be a false explanation.
+- A receiver that is itself a call (`f(x).g(y)`) is not rendered as a path and
+  stays silent.
 
 ---
 

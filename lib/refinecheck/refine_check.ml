@@ -4883,22 +4883,41 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
-(* Render a dotted-access chain (`List.length`, `M.N.f`, …) back to a string,
-   or [None] once anything other than a bare `EVar`/`EField` receiver is
-   found.  Mirrors what desugar's dotted-EVar flattening recognizes, so this
-   only fires on the shapes desugar WOULD have flattened had it run over the
-   predicate. *)
+(* Render a dotted MODULE path (`List.length`, `M.N.f`, …) back to a string, or
+   [None] for anything else.  Mirrors [desugar_expr]'s [flatten_module_path]
+   (`lib/desugar/desugar.ml`) exactly, which is the ground truth for what the
+   parser produces for a dotted reference: an uppercase module segment parses
+   as a zero-arg `A.ECon`, and the chain BOTTOMS OUT there.
+
+   A bare `A.EVar` receiver is deliberately NOT accepted. `c.cb(1)` is a record
+   FIELD call on a value, not a qualified call on a module; flattening it would
+   report it as "a qualified call" and suggest the field name as a "bare
+   spelling", both of which are false. It enforces nothing either way (`smt_of`
+   has no arm for an applied field access), but a wrong explanation costs more
+   than silence here. *)
 let rec qualified_name (e : A.expr) : string option =
   match e with
-  | A.EVar { A.txt; _ } -> Some txt
-  (* An uppercase module segment (`List`, `String`, …) parses as a
-     zero-arg `ECon`, not an `EVar` — mirrors [desugar_expr]'s
-     [flatten_module_path], which is the ground truth for what the parser
-     produces for a dotted reference like `List.length`. *)
   | A.ECon (mod_name, [], _) -> Some mod_name.A.txt
   | A.EField (r, { A.txt = n; _ }, _) ->
     Option.map (fun base -> base ^ "." ^ n) (qualified_name r)
   | _ -> None
+
+(* The bare measure a QUALIFIED spelling should be rewritten to, independent of
+   whether that alias is currently withdrawn.
+
+   Deliberately NOT [measure_alias]: that function is gated on the
+   stdlib-ownership refs ([list_length_is_stdlib] &c), so it answers "does this
+   spelling alias `len` right now". The question here is the different one
+   "what should the author write instead", whose answer is `len` either way —
+   a withdrawn alias is a separate problem with its own attribution machinery
+   ([withdrawals]), not a reason to send the author somewhere else.
+
+   Deriving the suggestion from the last dotted segment instead — the obvious
+   shortcut — hands back `length`, which is not predicate vocabulary: following
+   that advice merely swaps this warning for the unknown-name one, and the
+   contract still enforces nothing. *)
+let qualified_measure_spelling (qname : string) : string option =
+  match qname with "List.length" | "String.byte_size" -> Some "len" | _ -> None
 
 (* ── Predicate-vocabulary warning ──────────────────────────────────────────
    A refinement predicate that calls a name [known_predicate_fn] does not
@@ -4932,20 +4951,19 @@ let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
     | A.EApp ((A.EField _ as fhd), args, span) ->
       (match qualified_name fhd with
        | Some qname ->
-         let bare =
-           match measure_alias qname with
-           | Some m -> m
+         let remedy =
+           match qualified_measure_spelling qname with
+           | Some bare -> Printf.sprintf " Use the bare spelling `%s` instead." bare
            | None ->
-             (match String.rindex_opt qname '.' with
-              | Some i -> String.sub qname (i + 1) (String.length qname - i - 1)
-              | None -> qname)
+             " A predicate can only call the bare measure vocabulary — `len`, or an \
+              `@[measure]` function by its bare name."
          in
          Err.warning errctx ~span
            (Printf.sprintf
               "`%s` is a qualified call inside a refinement predicate. Predicates are \
                not desugared, so this is never reflected and the refinement enforces \
-               nothing. Use the bare spelling `%s` instead."
-              qname bare)
+               nothing.%s"
+              qname remedy)
        | None -> ());
       go fhd;
       List.iter go args

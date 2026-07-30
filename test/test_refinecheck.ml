@@ -5812,10 +5812,16 @@ mod QP1 do
   fn main() : Int do inner([1]) end
 end|}));
         let msgs = ctx.March_errors.Errors.diagnostics in
+        (* Pin the SUGGESTION, not just the spelling. `contains m "len"` would
+           be vacuous here — "len" is a substring of "List.length", so that
+           conjunct is implied by the first and the test would stay green if
+           the remedy said `length`, or said nothing at all. Match the whole
+           remedy clause instead. *)
         Alcotest.(check bool) "warns about the qualified spelling" true
           (List.exists (fun (d : March_errors.Errors.diagnostic) ->
              let m = d.March_errors.Errors.message in
-             contains m "List.length" && contains m "len") msgs))
+             contains m "List.length"
+             && contains m "Use the bare spelling `len` instead") msgs))
 
   ; gated "the bare spelling does NOT warn" (fun () ->
         (* The false-positive control: the supported spelling must stay quiet. *)
@@ -5828,6 +5834,66 @@ mod QP2 do
 end|}));
         Alcotest.(check int) "no diagnostics" 0
           (List.length (ctx.March_errors.Errors.diagnostics)))
+
+  ; gated "a WITHDRAWN alias still suggests `len`, not the last segment" (fun () ->
+        (* A competing `List.length` withdraws the alias, so `measure_alias`
+           returns None. Deriving the suggestion from the last dotted segment
+           there yields `length` — NOT predicate vocabulary, so following the
+           advice just swaps this warning for the unknown-name one and the
+           contract still enforces nothing. The remedy must not depend on
+           whether the alias is currently withdrawn. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP3 do
+  mod List do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
+  fn main() : Int do inner([1]) end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        let qualified_warnings =
+          List.filter
+            (fun (d : March_errors.Errors.diagnostic) ->
+              contains d.March_errors.Errors.message "qualified call")
+            msgs
+        in
+        Alcotest.(check bool) "still suggests `len`" true
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               contains d.March_errors.Errors.message
+                 "Use the bare spelling `len` instead")
+             qualified_warnings);
+        Alcotest.(check bool) "never suggests `length`" false
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               contains d.March_errors.Errors.message
+                 "Use the bare spelling `length` instead")
+             qualified_warnings))
+
+  ; gated "a record FIELD call is not reported as a qualified call" (fun () ->
+        (* `c.cb(1)` is a field call on a value, not a qualified call on a
+           module. It enforces nothing either way (`smt_of` has no arm for an
+           applied field access), but calling it "qualified" and offering the
+           field name as a "bare spelling" is wrong on both counts — a false
+           explanation costs more than silence. `qualified_name` therefore
+           mirrors desugar's `flatten_module_path`, which bottoms out at an
+           uppercase `ECon` and never at a bare `EVar`. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP4 do
+  type Cfg = { port : Int, cb : (Int) -> Int }
+  fn ok(c : {Cfg | c.cb(1) > 0}) : Int do c.port end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no qualified-call warning" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  contains d.March_errors.Errors.message "qualified call")
+                ctx.March_errors.Errors.diagnostics)))
   ]
 
 let () =
