@@ -126,4 +126,4 @@ Decision: keep axioms **on by default** — non-measure code is unaffected, meas
 | VC cache key (must cover the axiom preamble) | `lib/refine/vc_cache.ml` |
 | Structural-recursion info (the soundness gate) | `lib/typecheck/typecheck.ml` |
 | ADT declarations (source of `declare-datatypes`) | `lib/ast/ast.ml` (`type_def`, `variant`) |
-| State of the feature | `specs/2026-06-21-refinement-types-state-and-forward-design.md` |
+| State of the feature | `specs/archive/2026-06-21-refinement-types-state-and-forward-design.md` |

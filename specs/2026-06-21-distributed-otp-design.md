@@ -5,7 +5,7 @@
 **Depends on:**
 - CAS (`lib/cas/` — `cas.ml`, `pipeline.ml`, `scc.ml`, `hash.ml`, `serialize.ml`)
 - Hot Code Reloading (`specs/hot-code-reload.md`) — **shares the CAS prerequisite (HCR Part 1) and the mixed-version schema-evolution machinery (HCR Part 6)**
-- Distributed-algorithms stdlib (`specs/2026-06-20-distributed-algorithms-design.md` — `vector_clock`, `crdt`, `merkle`, `consistent_hash`, `deque`; the `CRDT(t)` and `Hashable(a)` interfaces)
+- Distributed-algorithms stdlib (`specs/archive/2026-06-20-distributed-algorithms-design.md` — `vector_clock`, `crdt`, `merkle`, `consistent_hash`, `deque`; the `CRDT(t)` and `Hashable(a)` interfaces)
 - Actor/task runtime (`stdlib/actor.march`, `stdlib/task.march`; `runtime/march_runtime.c`, `march_scheduler.c`, `march_message.c`)
 - Networking (`runtime/march_http.c`, `stdlib/socket.march`, TLS)
 - Serialization (`stdlib/msgpack.march`, `stdlib/json.march`)

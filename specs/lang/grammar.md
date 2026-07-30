@@ -17,7 +17,7 @@ by a 35-program parse/reject conformance corpus wired into CI
 findings" below for the issues this chapter's corpus work surfaced along
 the way.
 
-**Depends on:** `specs/plans/2026-07-06-resolved-grammar-plan.md` (the
+**Depends on:** `specs/plans/archive/2026-07-06-resolved-grammar-plan.md` (the
 implementation plan this chapter was built task-by-task from).
 **Companions:** [`core-march.md`](core-march.md) (operational semantics),
 [`core-march-types.md`](core-march-types.md) (static semantics),

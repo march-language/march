@@ -1,7 +1,7 @@
 # The `march` Rust FFI layer (the Rustler analog)
 
 **Status:** built 2026-06-21, extended 2026-06-22 — all five pieces working
-end-to-end. Implements `specs/2026-06-19-c-ffi-abi-design.md` §16. Supersedes
+end-to-end. Implements `specs/archive/2026-06-19-c-ffi-abi-design.md` §16. Supersedes
 the manual `extern "C"` path documented in `specs/c-ffi-rust-manual.md` (which
 still works and needs no `march` crate).
 

@@ -246,5 +246,5 @@ it as a plain function pointer. Args use the **native slot representation** (raw
   implemented; it needs a C-header parser (libclang).
 
 The full ABI is documented in `runtime/march_ffi.h`; the design rationale lives
-in `specs/2026-06-19-c-ffi-abi-design.md` and the Rust layer in
+in `specs/archive/2026-06-19-c-ffi-abi-design.md` and the Rust layer in
 `specs/c-ffi-rust-layer.md`.

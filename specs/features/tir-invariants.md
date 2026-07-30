@@ -387,3 +387,68 @@ future reader of either side finds the other. The contract itself is
 unchanged; the two sides were already correct and already coupled — this
 closes the "documented only from the TIR side" gap the deep-review program
 flagged for the actor layout specifically.
+
+---
+
+## 7. Lessons from fixed compiler bugs (postmortem digest)
+
+Each entry below is the compressed root cause of a real, now-fixed bug, kept
+here so the same bug class doesn't get re-discovered from scratch. Full
+investigation history for each lived in a dated `specs/` postmortem, now
+archived (`specs/archive/`); this digest is the durable takeaway.
+
+**Option repr must agree across module boundaries.** A generic function
+whose return type includes `Option('a)` decides its `Boxed`-vs-`Niche`
+representation from the type-argument concreteness visible *in its own
+compilation unit*. `lib/tir/mono.ml`'s `refine_field_types` (added to close
+an earlier intra-unit gap: a projected record field carrying a polymorphic
+type var was retyped to the field's concrete type so the callee specialized
+consistently) only operates within a single monomorphized unit. When the
+generic function is instead defined in a **separately-compiled** dependency
+(a stdlib module, a `MARCH_LIB_PATH` package), its `Option` can be emitted
+`Boxed` there while a concrete caller in a different unit reads the same
+value `Niche` — the box pointer gets dereferenced as if it were the unwrapped
+payload. Symptom is a near-zero/corrupt pointer SIGSEGV at the first use of
+the "unwrapped" value, several calls away from the actual mismatch. Any
+representation decision that depends on type concreteness must either be
+forced deterministic independent of instantiation, or the concrete type must
+be propagated across the compilation-unit boundary, not just within one.
+
+**TCO loop bodies must not grow the stack per iteration.** A self-tail-call
+compiled as a back-edge loop (`entry → br loop; loop: ...; br loop`)
+correctly eliminates call-frame growth, but ordinary `alloca`s emitted by the
+loop *body* (case-branch bindings, tuple construction, closure environments)
+are not automatically hoisted out of the loop — LLVM's `alloca` allocates
+fresh stack space on every dynamic execution, and that space is normally only
+reclaimed at `ret`, never at a loop back-edge. The fix is `llvm.stacksave()`
+once at the loop header and `llvm.stackrestore()` immediately before every
+back-edge. Separately, Perceus's TCO-detection only matched the
+`ELet(tmp, EApp(self,args), body)` shape; a self-call immediately followed by
+a trivial dec-chain with no `ELet` wrapper (`ESeq(EApp(self,args), decs)` —
+arising when a matched constructor wildcards a field so Perceus has nothing
+to bind) fell through to an ordinary non-tail call, silently losing TCO and
+the stack-bound guarantee for that shape. Any change to tail-call detection
+must check both the `ELet`-wrapped and the bare-`ESeq`-with-dec-chain shapes.
+
+**A field projected from a row-polymorphic value must have its concrete type
+propagated to its uses, not just to the containing binding.** A generic
+helper like `get_req_header(conn, name) = lookup(conn.hdrs, name)` types
+`conn` as a bare row-polymorphic var, so `conn.hdrs` gets a fresh, unrelated
+type var; monomorphizing the call site makes `conn`'s type concrete but
+leaves that projection's type var — and everything downstream of it, like
+`lookup`'s value type — unresolved. An abstract `Option('V)` is then emitted
+`Boxed` while a concrete caller elsewhere reads the same value `Niche`,
+dereferencing the `Some`-box pointer as if it were the unwrapped payload:
+SIGSEGV several calls away from the actual mismatch. Fixed in `lib/tir/mono.ml`
+by `refine_field_types`, run after `subst_fn_def` and before `rewrite_calls`:
+for every `let v = a.fld` where `a` resolves to a concrete record, retype `v`
+to the field's concrete type and propagate it to `v`'s uses; `match_ty` also
+needed a `TRecord` case (previously only `TTuple`/`TCon`/`TFn` bound a type
+var visible through the parameter) so a record-typed parameter carrying a
+type var in a field binds it too. (The investigation initially suspected a
+Perceus RC under-count from the `--` string-concat symptom; the actual
+mismatch was two calls upstream, in what `boundary`'s argument actually
+pointed at — worth remembering that a symptom in one pass's output doesn't
+localize the bug to that pass.) This intra-unit fix is the precursor to the
+cross-module case above — the same representation-must-be-deterministic-or-
+propagated principle, but scoped to a single compilation unit.

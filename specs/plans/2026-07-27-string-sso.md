@@ -317,7 +317,7 @@ reaches 3× with 15–22 bytes of inline capacity, not 7.
 ### Task 4: The FFI boundary
 
 **Files:**
-- Modify: `runtime/march_ffi.c`, `specs/2026-06-19-c-ffi-abi-design.md`
+- Modify: `runtime/march_ffi.c`, `specs/archive/2026-06-19-c-ffi-abi-design.md`
 
 An `extern` C function receiving a March `String` gets a pointer it will
 dereference. An inline string is not a pointer.
