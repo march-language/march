@@ -1811,6 +1811,106 @@ let test_repl_jit_topfn_first_class_value () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(* REPL/JIT counterpart of [test_lambda_static_closure_materialization_no_leak_
+   compiled].  Natively a capture-free closure is one immortal global
+   ([Llvm_ctx.intern_static_closure]), so nothing needs to release it; under the
+   REPL/JIT [Llvm_emit.static_closure_ok] is [not ctx.repl && ..], so the very
+   same lambda falls back to a fresh [march_alloc] per materialization — and
+   before the capture-free arm of [Perceus.insert_apply_fn_clo_drop] nothing
+   ever released THAT.  One leaked allocation per materialization.
+
+   Measured the way the native tests measure it, but with the gauge read from
+   OCaml (dlsym'ing [march_live_allocs] out of the JIT's own runtime .so)
+   rather than through a March extern, so the fragments under test stay
+   ordinary REPL input.  Warm the materialization site in one fragment, sample
+   the gauge, then run the same site 2,000 more times in a second fragment: a
+   leak makes the growth scale with the iteration count (~2,000), a correct
+   build leaves only the second fragment's own fixed compilation overhead. *)
+let test_repl_jit_capture_free_closure_no_leak () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let live_allocs =
+      let h = March_jit.Jit.dlopen runtime_so in
+      let sym = March_jit.Jit.dlsym h "march_live_allocs" in
+      fun () -> Int64.to_int (March_jit.Jit.call_void_to_int sym)
+    in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let desugared_decl src = match parse_repl src with
+         | March_ast.Ast.ReplDecl d -> March_desugar.Desugar.desugar_decl d
+         | _ -> failwith "expected ReplDecl" in
+       (* `fn x -> x * 2` captures nothing, so each materialization is the
+          capture-free shape; `apply_it` forces it to be materialized as a
+          real first-class value rather than inlined into a direct call. *)
+       let fn_decls = [
+         desugared_decl "fn apply_it(f, n) do f(n) end";
+         desugared_decl
+           "fn materialize_loop(i, n, acc) do\n\
+           \  if i >= n do acc\n\
+           \  else materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i)) end\n\
+            end";
+         desugared_decl "fn double(x) do x * 2 end";
+         desugared_decl
+           "fn materialize_loop2(i, n, acc) do\n\
+           \  if i >= n do acc\n\
+           \  else materialize_loop2(i + 1, n, acc + apply_it(double, i)) end\n\
+            end";
+       ] in
+       let make_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
+           fn_clauses = [clause]; fn_bounds = [] } in
+         { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+           mod_decls = fn_decls @ [DFn (main_def, s)] }
+       in
+       let run src = match parse_repl src with
+         | March_ast.Ast.ReplExpr e ->
+           let e' = March_desugar.Desugar.desugar_expr e in
+           let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env (make_mod e') in
+           result
+         | _ -> failwith "expected ReplExpr"
+       in
+       (* Warm: compiles the fragment shape and settles any one-off allocation. *)
+       let warm = run "materialize_loop(0, 100, 0)" in
+       Alcotest.(check string) "warm loop result" "9900" warm;
+       let base = live_allocs () in
+       let bulk = run "materialize_loop(0, 2000, 0)" in
+       Alcotest.(check string) "bulk loop result" "3998000" bulk;
+       let grew = live_allocs () - base in
+       (* A leaking build grows by ~2,000 here (one closure per iteration).  The
+          bound is generous because a second REPL fragment legitimately allocates
+          a fixed amount of its own; it just must not scale with the loop. *)
+       if grew > 200 then
+         Alcotest.failf
+           "capture-free LAMBDA materialized 2,000 times in a REPL fragment \
+            leaked: march_live_allocs grew by %d (expected bounded, <= 200)" grew;
+       (* Second shape, and a genuinely independent mechanism: a top-level
+          function used as a value materializes an @<fn>$clo_wrap trampoline
+          closure, which is synthesized at LLVM emission and has no TIR apply fn
+          for Perceus to touch.  It leaked exactly the same 1-per-materialization
+          way until [clo_wrap_define ~drop_clo] was added, and it stayed leaking
+          after the Perceus-side fix alone — so it needs its own assertion. *)
+       let warm2 = run "materialize_loop2(0, 100, 0)" in
+       Alcotest.(check string) "warm top-level-fn loop result" "9900" warm2;
+       let base2 = live_allocs () in
+       let bulk2 = run "materialize_loop2(0, 2000, 0)" in
+       Alcotest.(check string) "bulk top-level-fn loop result" "3998000" bulk2;
+       let grew2 = live_allocs () - base2 in
+       if grew2 > 200 then
+         Alcotest.failf
+           "capture-free TOP-LEVEL FN value materialized 2,000 times in a REPL \
+            fragment leaked: march_live_allocs grew by %d (expected bounded, \
+            <= 200)" grew2;
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (** Test: List.length works correctly in JIT REPL with stdlib precompile.
 
     This is a regression test for the defun TVar bug: when the stdlib is
@@ -12175,6 +12275,7 @@ let codegen_suites =
         Alcotest.test_case "B11: stored closure returns untagged Int" `Quick test_repl_jit_stored_closure_returns_untagged_int;
         Alcotest.test_case "B11: self-referencing fn no duplicate clo_wrap" `Quick test_repl_jit_selfref_fn_no_duplicate_wrapper;
         Alcotest.test_case "top-level fn as first-class value" `Quick test_repl_jit_topfn_first_class_value;
+        Alcotest.test_case "capture-free closure materialization does not leak" `Quick test_repl_jit_capture_free_closure_no_leak;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
         Alcotest.test_case "B12: niche ADT cross-fragment (:load DMod then match)" `Quick test_repl_jit_niche_adt_cross_fragment;
       ];

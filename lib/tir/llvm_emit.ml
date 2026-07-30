@@ -413,7 +413,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          concrete forwarding call (boxing/unboxing Float params + return). *)
       let param_tys = List.map llvm_ty ps_tirs in
       Buffer.add_string ctx.extra_fns
-        (clo_wrap_define wrap_name param_tys target_ret fn_name)
+        (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     if static_closure_ok ctx v.Tir.v_name then
@@ -532,7 +532,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          let target_ret  = llvm_ret_ty ret_tir in
          let param_tys   = List.map llvm_ty ps in
          Buffer.add_string ctx.extra_fns
-           (clo_wrap_define wrap_name param_tys target_ret fn_name)
+           (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name)
        end;
        if static_closure_ok ctx resolved then
          ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)

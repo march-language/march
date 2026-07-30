@@ -102,6 +102,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A capture-free closure used repeatedly in the REPL no longer leaks an
+  allocation per use.** Passing a lambda that captures nothing — or a
+  top-level function used as a value — to something that calls it (a
+  higher-order function, `task_spawn`) allocated a fresh closure object on
+  every materialization and never freed any of them, so a loop at the REPL
+  prompt grew the live-object count in lockstep with its iteration count.
+  Compiled programs were never affected: there, such a closure is a single
+  immortal object shared by the whole program. Both capture-free shapes are
+  now released, and compiled output is byte-for-byte unchanged.
+
 - **`forge test` now resolves transitive dependencies.** `forge build` and
   `forge check` walk the dependency graph transitively — if your project depends
   on `B` and `B` depends on `C`, then `C`'s `lib/` is on `MARCH_LIB_PATH`.
