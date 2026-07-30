@@ -147,7 +147,8 @@ case $t20 of
 let $t21 : '_ = inc_rc i;
 >=(i, stop) in
 case $t21 of
-  True() -> dec_rc $t21;
+  True() -> dec_rc $clo;
+dec_rc $t21;
 List.reverse(acc)
   _ -> dec_rc $t21;
 let $t22 : '_ = inc_rc i;
@@ -158,7 +159,8 @@ call_ptr build($t22, $t23)
 let $t24 : '_ = inc_rc i;
 <=(i, stop) in
 case $t24 of
-  True() -> dec_rc $t24;
+  True() -> dec_rc $clo;
+dec_rc $t24;
 List.reverse(acc)
   _ -> dec_rc $t24;
 let $t25 : '_ = inc_rc i;
@@ -175,7 +177,8 @@ dec_rc $clo;
 let $t15 : '_ = inc_rc i;
 <(i, start) in
 case $t15 of
-  True() -> dec_rc $t15;
+  True() -> dec_rc $clo;
+dec_rc $t15;
 acc
   _ -> dec_rc $t15;
 let $t16 : '_ = inc_rc i;

@@ -1487,11 +1487,106 @@ let insert_apply_fn_clo_drop (body : Tir.expr) : Tir.expr =
       when String.equal src.Tir.v_name clo -> is_clo_source inner
     | _ -> false
   in
-  let rec splice (e : Tir.expr) : Tir.expr =
+  (* A SELF-BINDING is a prefix let whose RHS resolves to plain [$clo] (via
+     [is_clo_source]'s EAtom/ESeq-unwrap arms) rather than an [EField]
+     projection — i.e. [lift_lambda]'s `let fn_name = $clo` alias for a
+     recursive lambda's own name, not a captured-variable extraction.
+     Distinguishing it from an fv-extraction is what lets [insert_dec_
+     on_dead_paths] below single out the one case that needs path-sensitive
+     handling instead of the unconditional drop. *)
+  let rec is_self_binding_source (e : Tir.expr) : bool =
     match e with
+    | Tir.EAtom (Tir.AVar src) -> String.equal src.Tir.v_name clo
+    | Tir.EField (Tir.AVar _, _) -> false
+    | Tir.ESeq ((Tir.EIncRC (Tir.AVar src) | Tir.EAtomicIncRC (Tir.AVar src)), inner)
+      when String.equal src.Tir.v_name clo -> is_self_binding_source inner
+    | _ -> false
+  in
+  (* For a SELF-RECURSIVE capturing closure, the unconditional early drop
+     below is not enough: the self-binding alias (e.g. `let helper = $clo`)
+     is genuinely live on the recursive path (its reference flows onward,
+     unincremented, into the tail [ECallPtr helper(...)] call — ordinary
+     dead-after-argument semantics) but genuinely DEAD on any base-case path
+     that never uses it. A single drop placed before the branch either
+     double-frees the recursive path or (as the unconditional early-drop
+     version did) never fires a SECOND drop on the dead path, leaking one
+     reference per top-level materialization of the closure — confirmed:
+     an `outer(k, n)` that materializes a self-recursive capturing `helper`
+     and calls it once, looped 20,000 times, reported exactly `LEAKED
+     20000` with the unconditional drop, `BOUNDED` with this fix.
+
+     Walks the body looking for points where [self_name] is no longer free
+     (via [Dce.free_vars], already correctly capture-aware for ELet/ECase
+     shadowing) and inserts a drop exactly there, leaving live paths
+     untouched so the existing dead-after-argument transfer keeps working.
+     Falls back to leaving an expression alone wherever [self_name] occurs
+     in a shape not explicitly walked into (e.g. inside an [ELetRec]) --
+     conservative in the sense that it cannot introduce a NEW double-free,
+     only fail to plug a leak in some exotic future shape. *)
+  let rec insert_dec_on_dead_paths (self_name : string) (e : Tir.expr) : Tir.expr =
+    if not (StringSet.mem self_name (Dce.free_vars e)) then
+      Tir.ESeq (Tir.EDecRC (Tir.AVar clo_var), e)
+    else
+      match e with
+      | Tir.ECase (scrut, branches, default) ->
+        Tir.ECase
+          ( scrut,
+            List.map
+              (fun br ->
+                 if List.exists (fun v -> String.equal v.Tir.v_name self_name) br.Tir.br_vars
+                 then br  (* shadowed in this branch: leave alone, safe fallback *)
+                 else { br with Tir.br_body = insert_dec_on_dead_paths self_name br.Tir.br_body })
+              branches,
+            Option.map (insert_dec_on_dead_paths self_name) default )
+      | Tir.ELet (v, e1, e2) when not (String.equal v.Tir.v_name self_name) ->
+        (* [self_name] occurs somewhere in [e] (checked above), but which
+           half depends on where: e.g. the recursive call itself lives in
+           the RHS here (`let $t = ... call_ptr helper(...) in +($t, k)`),
+           not the tail. Recursing into the tail unconditionally — the
+           first version of this fix did exactly that — inserts a SECOND,
+           WRONG drop on a live path once the RHS's own consuming call has
+           already accounted for [self_name]'s lifetime: confirmed via TIR,
+           `_ -> let $t = ...call_ptr helper($t2) in dec_rc $clo; +($t, k)`,
+           a double-free waiting to happen the moment rc actually reaches 0
+           on that path. Recurse into whichever half actually contains the
+           occurrence and leave the other COMPLETELY alone — it plays no
+           part in [self_name]'s consumption either way. *)
+        if StringSet.mem self_name (Dce.free_vars e1) then
+          Tir.ELet (v, insert_dec_on_dead_paths self_name e1, e2)
+        else
+          Tir.ELet (v, e1, insert_dec_on_dead_paths self_name e2)
+      | Tir.ESeq (e1, e2) ->
+        if StringSet.mem self_name (Dce.free_vars e1) then
+          Tir.ESeq (insert_dec_on_dead_paths self_name e1, e2)
+        else
+          Tir.ESeq (e1, insert_dec_on_dead_paths self_name e2)
+      | _ -> e
+  in
+  let rec splice (self_name : string option) (e : Tir.expr) : Tir.expr =
+    match e with
+    | Tir.ELet (v, e1, rest) when is_self_binding_source e1 ->
+      Tir.ELet (v, e1, splice (Some v.Tir.v_name) rest)
     | Tir.ELet (v, e1, rest) when is_clo_source e1 ->
-      Tir.ELet (v, e1, splice rest)
-    | _ -> Tir.ESeq (Tir.EDecRC (Tir.AVar clo_var), e)
+      Tir.ELet (v, e1, splice self_name rest)
+    | _ ->
+      (* The unconditional early drop ALWAYS fires here, self-binding or
+         not — it is what cancels the self-binding's own protective
+         [inc_rc $clo] (a transient bump-then-unbump around the fv-extraction
+         reads, net zero) and is already sufficient on its own for the
+         non-recursive case, where nothing else ever touches $clo again.
+         For a self-recursive closure this is NOT a substitute for the extra
+         per-dead-path drop below, only a prerequisite for it — dropping the
+         `insert_dec_on_dead_paths` walk in favour of this alone (an earlier
+         version of this fix) leaves the protective inc canceled but the
+         ACTUAL transferred reference never released at the dead end;
+         dropping THIS unconditional drop in favour of only the walk (a
+         different earlier, also-broken version) leaves the protective inc
+         permanently uncanceled on every live (recursive) path instead. Both
+         are required, in this order. *)
+      let dropped = Tir.ESeq (Tir.EDecRC (Tir.AVar clo_var), e) in
+      (match self_name with
+       | Some name -> insert_dec_on_dead_paths name dropped
+       | None -> dropped)
   in
   (* Splice ONLY when the prefix actually extracts a capture ($clo.$fvN).
      Two independent reasons, and the second is a hard correctness constraint:
@@ -1537,7 +1632,7 @@ let insert_apply_fn_clo_drop (body : Tir.expr) : Tir.expr =
   in
   match body with
   | Tir.ELet (_, e1, _) when is_clo_source e1 && prefix_has_fv_extraction body ->
-    splice body
+    splice None body
   | _ -> body
 
 (** [insert_rc ~module_env ~borrowed fn] runs Phase 2 (RC insertion) over one

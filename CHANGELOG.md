@@ -116,10 +116,16 @@ git log is authoritative for exact commits.
   Capture-free closures are unaffected — they were already routed to a single
   immortal global per site and are deliberately left alone.
 
-  One case still leaks: a **self-recursive** capturing closure. Its self-binding
-  hands an alias a reference that is consumed only on the recursive path, so the
-  base-case branch drops nothing. That is an independent dead-alias gap rather
-  than part of this ownership protocol, and it is unchanged here.
+  A **self-recursive** capturing closure no longer leaks either: its self-binding
+  hands an alias a reference that used to be consumed only on the recursive
+  path, so a base case that stopped using the alias dropped nothing. Fixed by
+  releasing that reference explicitly wherever the self-binding goes dead,
+  leaving the recursive path's existing transfer untouched.
+
+  Not fixed: a genuinely capture-free closure (no captured variables at all)
+  still leaks when materialized repeatedly from inside the REPL/JIT — natively
+  such a closure is a single shared immortal object, but the REPL compiles each
+  fragment as its own module and cannot safely share one.
 
   The ownership change above also required four fixes at the C-runtime
   boundary, since several places call a closure's apply function directly

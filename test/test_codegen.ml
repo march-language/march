@@ -9391,6 +9391,121 @@ let test_capturing_closure_materialization_no_leak_compiled () =
        struct: the live-object count must not grow with the iteration count"
       "BOUNDED" run_out
 
+(* SELF-RECURSIVE capturing closures — the residual leak the PR that fixed
+   the two tests above shipped with, then fixed here.
+
+   [insert_apply_fn_clo_drop]'s unconditional early drop (right after the
+   fv-extraction prefix) cancels the self-binding's own protective
+   [inc_rc $clo] (`let helper = inc_rc $clo; $clo in ...`, a transient
+   bump-then-unbump) and is the WHOLE story for a non-recursive capturing
+   closure, where nothing else ever touches $clo again. For a self-recursive
+   one it is necessary but not sufficient: the self-binding alias is used
+   again on the recursive path (transferred onward via ordinary
+   dead-after-argument [ECallPtr] semantics, no separate rc touch needed
+   there) but never used at all on a base-case path — and nothing released
+   the one genuinely-transferred reference there, leaking one allocation per
+   top-level MATERIALIZATION of the closure (not per recursive call — the
+   whole recursion reuses one heap object via the alias, so a loop with
+   d.eep recursion inside ONE materialization stays flat; only calling the
+   materializing scope repeatedly shows growth).
+
+   Fixed with a second, path-sensitive pass (also in
+   [insert_apply_fn_clo_drop]): walk the body via [Dce.free_vars] and insert
+   an ADDITIONAL drop at exactly the points where the self-binding is no
+   longer free — leaving the live (recursive) path alone. Two earlier,
+   broken attempts at this fix are documented inline in perceus.ml: dropping
+   the unconditional early drop in favour of only the path-sensitive walk
+   left the protective inc permanently uncanceled on the recursive path
+   (rc grows without bound); doing the path-sensitive walk with a plain
+   "recurse into the let's tail" rule (rather than checking which half of an
+   [ELet]'s RHS/tail actually contains the occurrence) inserted a SECOND,
+   spurious drop on the live path itself — a double-free waiting to happen,
+   not a leak. *)
+let test_self_recursive_capturing_closure_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccap"
+    "mod SelfRecCap do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  fn outer(k : Int, n : Int) : Int do\n\
+    \    fn helper(x : Int) : Int do\n\
+    \      if x <= 0 do 0 else helper(x - 1) + k end\n\
+    \    end\n\
+    \    apply_it(helper, n)\n\
+    \  end\n\
+    \  pfn materialize_loop(i : Int, acc : Int, k : Int) : Int do\n\
+    \    if i >= 20000 do acc\n\
+    \    else materialize_loop(i + 1, acc + outer(k, 5), k) end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let warm = materialize_loop(0, 0, 2)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = materialize_loop(0, 0, 2)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "selfreccapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a self-recursive capturing closure materialized in a loop must release \
+       each closure struct at the base case: the live-object count must not \
+       grow with the materialization count"
+      "BOUNDED" run_out
+
+(* Same shape, verifying CORRECTNESS (not just leak-freedom): a double
+   recursive call within one branch (fib-shaped) and negative/zero/large
+   inputs, checked against the interpreter. The leak fix above touches every
+   base-case branch of a self-recursive apply fn, so an over-eager extra
+   drop (a double-free, not a leak) would show up here as a wrong value or a
+   crash rather than as unbounded growth. *)
+let test_self_recursive_capturing_closure_correct_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccapcorrect"
+    "mod SelfRecCapCorrect do\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  fn outer(k : Int, n : Int) : Int do\n\
+    \    fn helper(x : Int) : Int do\n\
+    \      if x <= 0 do k\n\
+    \      else if x == 1 do helper(x - 1) * 2\n\
+    \      else helper(x - 1) + helper(x - 2) end\n\
+    \      end\n\
+    \    end\n\
+    \    apply_it(helper, n)\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    println(int_to_string(outer(1, 0)))\n\
+    \    println(int_to_string(outer(1, 1)))\n\
+    \    println(int_to_string(outer(1, 6)))\n\
+    \    println(int_to_string(outer(-3, 10)))\n\
+    \  end\n\
+     end\n"
+  in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted self-recursive capturing closure"
+    "1\n2\n21\n-432" interp_out;
+  let bin = Filename.concat tmp "selfreccapcorrectbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let compiled_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string) "compiled matches interpreted" "1\n2\n21\n-432" compiled_out
+
 (* NOTE — the companion invariant, "the $clo drop must NOT be emitted for a
    CAPTURE-FREE apply function", is pinned by this suite's existing
    "stdlib List.length via precompile" JIT test rather than by a test added
@@ -12610,6 +12725,10 @@ let codegen_suites =
             test_lambda_static_closure_materialization_no_leak_compiled;
           Alcotest.test_case "compiled capturing lambda materialization does not leak per use" `Quick
             test_capturing_closure_materialization_no_leak_compiled;
+          Alcotest.test_case "compiled self-recursive capturing closure materialization does not leak per use" `Quick
+            test_self_recursive_capturing_closure_no_leak_compiled;
+          Alcotest.test_case "compiled self-recursive capturing closure: correct values (fib-shaped, double recursive call)" `Quick
+            test_self_recursive_capturing_closure_correct_compiled;
         ] );
       ( "try_call_capture_ownership_codegen", [
           Alcotest.test_case "single-capture __try_call thunk: no double-free (30x)" `Quick
