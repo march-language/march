@@ -563,7 +563,14 @@ let withdrawals : withdrawal list ref = ref []
    [resolve_measure], on the DECLARED BASE TYPE of the argument — so the String
    spellings need no separate reflection path, and a `String.byte_size` applied
    to something the checker does not see as a String simply fails to reflect
-   (skipped) rather than asserting a list fact. *)
+   (skipped) rather than asserting a list fact.
+
+   ADDING A QUALIFIED (dotted) SPELLING HERE?  Mirror it in
+   [qualified_measure_spelling] too, or the predicate warning silently drops to
+   its generic remedy for that spelling — degraded advice, not wrong advice,
+   but the two lists are meant to agree.  A bare spelling like
+   [string_byte_length] needs no mirror: that warning only fires on dotted
+   paths. *)
 let measure_alias (m : string) : string option =
   match m with
   | "List.length" when !list_length_is_stdlib -> Some "len"
