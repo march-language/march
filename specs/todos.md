@@ -2085,7 +2085,53 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
   ```
   **Fixed** by recognizing this shape at LLVM emission with no `defun.ml` change needed — the discriminator is derivable purely at the emission site: `defun.ml` lifts every lambda to `EAlloc (TCon (clo_name, []), fn_ptr_atom :: fv_atoms)`, so a lambda that captures nothing leaves `fv_atoms = []`, i.e. the `EAlloc` carries **exactly one** argument (the lifted apply function's address, `Tir_names.is_clo_struct tcon_name` confirms it's a closure struct). That shape routes to the same `intern_static_closure` interning path a top-level function value uses. No `$clo_wrap` trampoline is generated for the lambda case (unlike the earlier bug where `clo_wrap_define` mattered) — the lifted apply function defunctionalization produces already has the `(clo_ptr, params…)` closure-call ABI, so field 0 can point straight at it. **Gated** the same way as the named-function case for REPL/JIT (`not ctx.repl`), but *more conservatively* for hot-reload: rather than resolving the defunctionalized closure's synthetic type name (`"$Clo_" ^ fn_name ^ "$" ^ uid`, not always unambiguously demangled — it may itself embed `$`) back to an owning module via `Hot_reload.is_reloadable`, static lambdas are disabled outright whenever `ctx.hr_config` is set at all. **Measured** (`MARCH_STRING_STATS=1`, `--opt 2`, 4,000,000 iterations of `apply_it(fn x -> x * 2, i)`): `obj_allocs` 4,000,000 → 0, peak RSS ~131.5 MB → ~2.99 MB. Compiled and interpreted output byte-identical before and after (no observable-behavior change, only the allocation strategy). No wall-clock speedup is claimed beyond the allocation/RSS elimination — this was not benchmarked for wall-clock. **Still does NOT cover capturing closures** — see the next open item; a capturing lambda's `EAlloc` always carries 2+ arguments (code pointer plus at least one captured free variable) and so never matches this single-argument shape, by design, since its contents differ per instance and cannot be a module-lifetime static object. Verified non-vacuous (disabling the new arm reproduces `LEAKED 20000`-shaped unbounded growth; restoring it gives bounded growth) via `test_lambda_static_closure_materialization_no_leak_compiled` (`test/test_codegen.ml`, "compiled capture-free lambda materialization does not leak per use") plus a native golden `test/native/static_lambda_no_leak.march` covering two distinct capture-free lambdas (4 distinct `$static_clo` globals confirmed, none shared) and a capture-free lambda alongside a capturing one in the same function, confirming the discriminator separates the two cases correctly at runtime.
 
-- ⏳ **Capturing closures leak one allocation per materialization (compiled) — OPEN, found 2026-07-28 during the static-closure work, deliberately NOT fixed there.** A closure that captures a free variable is allocated and never released, even when it never escapes. Minimal repro, compiled `--opt 2`:
+- ✅ **Capturing closures leak one allocation per materialization (compiled) — FIXED 2026-07-29** (`lib/tir/borrow.ml` `infer_module`'s `init` pins apply-fn param 0 to owned; `lib/tir/perceus.ml` `insert_apply_fn_clo_drop` emits the matching callee-side release). Root cause: TWO independent notions of "$clo is borrowed" — the borrow map (what callers consult in Perceus's `EApp` case) and the per-function `borrowed` set (what suppresses the callee's drop) — disagreed, so the caller deferred to the callee and the callee deferred to the borrow map. A prior callee-only attempt produced 3 double-frees plus 8 stdlib crashes precisely because it flipped only the second. Measured: 4M-iteration loop 4,000,000 allocations / ~125 MB peak RSS → ~2.9 MB floor; `live_allocs` growth over 20,000 materializations 20,000 → bounded (`test_capturing_closure_materialization_no_leak_compiled`, verified non-vacuous against origin/main which reports `LEAKED 20000`). The drop is deliberately NOT emitted for capture-free apply fns: natively their closure is the immortal static global where a decrement is a no-op, but under the REPL/JIT (`static_closure_ok` is `not ctx.repl && ..`) it is a real allocation, and dropping it made `run_codegen`'s "stdlib List.length via precompile" jump through a zeroed apply-fn slot (EXC_BAD_ACCESS at 0x0, frame #0 = 0x0) while every native program stayed green. **Residual — FIXED 2026-07-29 (same-day follow-up).** A SELF-RECURSIVE capturing
+closure leaked one allocation per top-level MATERIALIZATION (not per recursion
+level — the whole recursion reuses one heap object via the self-binding alias).
+`insert_apply_fn_clo_drop`'s single unconditional early drop cancels the
+self-binding's protective `inc_rc $clo` (net zero) but never releases the
+actual transferred reference, which flows unchanged through the recursion and
+is abandoned at any base-case branch that never uses the self-binding again.
+Fixed with a SECOND, path-sensitive pass (`insert_dec_on_dead_paths`, same
+function): walks the body via `Dce.free_vars` and inserts an additional drop
+exactly where the self-binding becomes dead, leaving live (recursive) paths
+untouched. Both the unconditional early drop and the path-sensitive walk are
+required — two intermediate versions were each broken a different way: the
+walk alone left the protective inc permanently uncanceled on the recursive
+path (rc grows unbounded); a naive "recurse into the let's tail" version of
+the walk inserted a spurious SECOND drop on the live path when the consuming
+call lived in the let's RHS rather than its tail (`let $t = ...call_ptr
+helper(...) in +($t,k)`) — a double-free waiting to happen, not merely a
+missed leak. Measured: `outer()` materializing a self-recursive `helper`
+capturing `k`, looped 20,000 times, `LEAKED 20000` before, `BOUNDED` after.
+Verified non-vacuous (via a `DUNE_CACHE=disabled` rebuild of the pre-fix file —
+`--force` alone was insufficient, dune's shared cache served a stale artifact
+on the first attempt). Two new regression tests in `test/test_codegen.ml`'s
+`string_literal_codegen` group: the leak-bound assertion, and a fib-shaped
+double-recursive-call correctness check (compiled vs. interpreted parity) to
+catch an over-eager drop as a wrong value or crash rather than growth.
+
+Investigated as a related follow-up but NOT fixed: extending this same
+capture-free-under-REPL gap (the note above) by threading an `is_repl` flag
+into `insert_apply_fn_clo_drop` reintroduced the EXACT SIGSEGV the guard
+exists to prevent (`repl_jit_cross_line` test 7, "stdlib List.length via
+precompile") — reverted. `task_spawn`-ing a genuinely capture-free closure
+from a REPL fragment still leaks one allocation per materialization; needs
+deeper investigation into the REPL closure lifecycle (likely a `$clo_wrap`
+trampoline interaction distinct from the `lift_lambda` self-binding pattern
+this whole mechanism assumes) before attempting again. Original report
+follows.
+
+  **Follow-up audit (2026-07-29, same day): the $clo drop is only sound because every C-runtime call site that invokes a closure's apply function now agrees on the calling convention — and four distinct families of call sites did not, each fixed in `runtime/march_runtime.c` / `lib/tir/llvm_emit.ml`:**
+  - `__try_call`/`__try_call_val` (runtime/march_runtime.c) called their thunk once then explicitly `march_decrc`'d it — a second consumption of the reference the thunk's own apply function already released. Flaky, not deterministic (6/30 crashes on a single-capture thunk before the fix, 0/30 after) — freed memory frequently still looked valid enough not to crash immediately. `__try_call` is directly user-callable (`tir_names.ml` documents this) and one of `test/imports/erased_clo_native`'s dune-rule golden tests hit this exact shape, which is how it was traced after CI stayed red past the first (task_spawn) fix.
+  - `march_typed_array_map`/`_fold` and `native_int_arr_map`/`map2`/`native_float_arr_map`/`map2` call the SAME closure once per array element without transferring ownership per call — fixed with `march_incrc` before each call plus one `march_decrc` after the loop, since the closure arrives as exactly one transferred reference (confirmed via TIR: `inc_rc closure; NativeArray.map_int(a1, closure)` is emitted only when the closure is still live afterward).
+  - A parallel, LLVM-IR-level inline fast path for the same builtins (`lib/tir/llvm_emit.ml`'s `emit_native_map_inline_loop`/`emit_native_map2_inline_loop`, P10 Phase 2c) bypasses the C runtime entirely and needed the identical incrc-per-call-plus-final-decrc fix at the IR-emission level — this is why `test/native/native_arr_map_inline_capture.march` and 4 sibling goldens kept crashing even after the C-runtime functions were fixed.
+  - `march_signal_drain` calls a registered watcher closure repeatedly, once per signal delivery, for the program's entire lifetime, without transferring ownership on any call — fixed with `march_incrc` before each `apply()` call and (unlike the array builtins) no matching decrc, since the watcher table's one held reference persists across drains and is released only by the existing replace/unwatch path. Deterministic, not flaky: a capturing watcher raised twice crashed on delivery 2 every run before the fix.
+  - The actor message-dispatch loop (`runtime/march_runtime.c`'s `actor_green_thread`) has the identical shape — a long-lived closure invoked once per inbound message — and received the same defensive fix, though whether today's actor lowering can actually produce a CAPTURING dispatch closure (as opposed to always capture-free) was not independently confirmed; applied given the severity of the failure mode and the exact shape match with the confirmed Signal.watch bug.
+
+  All four were caught by running `dune build @runtest` (the full CI-equivalent suite, including every dune-rule golden/native test) — `scripts/run-tests.sh` and the four alcotest binaries alone never exercise dune-rule tests and reported fully green while `test/imports/erased_clo_native` and 5 native array-map goldens were failing in CI. New alcotest regressions in `test/test_codegen.ml`'s `try_call_capture_ownership_codegen` group cover all four shapes (single-capture `__try_call`/`__try_call_val`, the panic/longjmp path, a closure reused after `NativeArray.map_int`, and a Signal.watch handler delivered 3 times), each run 15–30x since several of these are heap-timing-dependent rather than deterministic.
+
+- ⏳ **(original report, retained)**  A closure that captures a free variable is allocated and never released, even when it never escapes. Minimal repro, compiled `--opt 2`:
   ```march
   fn go(i : Int, acc : Int, k : Int) : Int do
     if i <= 0 do acc

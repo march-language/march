@@ -193,6 +193,135 @@ reported — this pass propagates no local `let`'s value into a later goal for a
 type, and the `Int` and `List` analogues behave identically. What matters there
 is that the retired fact does not leak into a false proof, which is pinned by an
 obligation-count assertion rather than a boolean.
+## Current State (as of 2026-07-29, self-recursive capturing closure leak fixed)
+
+**The self-recursive capturing closure leak (residual from the $clo drop
+work, two entries above) is fixed.** One allocation leaked per top-level
+MATERIALIZATION of a self-recursive capturing closure — not per recursion
+level, since the whole recursion reuses one heap object via the self-binding
+alias. `insert_apply_fn_clo_drop`'s unconditional early drop only cancels
+the self-binding's own protective `inc_rc $clo` (a net-zero bump-then-unbump)
+and says nothing about the actual transferred reference, which is simply
+abandoned at any base-case branch that stops using the self-binding.
+
+Fixed with a second, path-sensitive pass (`insert_dec_on_dead_paths`) that
+walks the body via `Dce.free_vars`, inserting an additional drop exactly
+where the self-binding becomes dead. Two intermediate attempts were each
+broken a different way, both instructive: the walk alone (dropping the
+unconditional early drop) left the protective inc permanently uncanceled on
+the live/recursive path — unbounded rc growth, not a fix; a naive version of
+the walk that always recursed into an `ELet`'s tail inserted a spurious
+SECOND drop when the actual consuming call lived in the let's RHS instead —
+a double-free, not fewer leaks caught. Measured: `LEAKED 20000` -> `BOUNDED`
+for a self-recursive `helper` capturing a free variable, materialized in a
+20,000-iteration loop.
+
+Verified via `DUNE_CACHE=disabled dune build --root . @runtest` (the full
+CI-equivalent suite) clean except the pre-existing environmental ASAN
+failure — 517 codegen tests (+2 new), 4179 conformance, 825 stdlib. Hit
+dune's shared-cache poisoning again while confirming the new tests were
+non-vacuous (`--force` alone served a stale cached artifact; needed
+`DUNE_CACHE=disabled` too).
+
+**Investigated, not fixed:** extending the same fix to cover capture-free
+closures leaking under the REPL/JIT (a separate, narrower, already-documented
+gap) by threading an `is_repl` flag into the drop-insertion pass. Reverted —
+it reintroduced the exact SIGSEGV the pass's existing guard was written to
+prevent (`run_codegen`'s "stdlib List.length via precompile" test, a jump
+through a zeroed apply-fn slot). The REPL capture-free leak remains open.
+
+Also settled: the actor-dispatch `march_incrc` fix from the closure-call-site
+audit (two entries below) is confirmed UNREACHABLE today, not merely
+defensive — traced through `lower_actor.ml`: the actor's dispatch closure
+always references a TOP-LEVEL function (never a `lift_lambda`-produced
+closure with free-variable captures), so `insert_apply_fn_clo_drop`'s
+fv-extraction guard can never fire for it, and natively it is `llvm_emit`'s
+immortal static global regardless. Left in place as cheap, harmless
+defense-in-depth against a future actor-lowering change; comment updated
+with the full trace so a future change doesn't need to rediscover this.
+
+## Current State (as of 2026-07-29, closure-call-site RC audit: four more fixes)
+
+**The $clo ownership drop (previous entry) was correct at the TIR level but
+incomplete at the runtime boundary.** The drop assumes every apply-fn call is
+a one-shot, ownership-transferring call — true for ordinary March-compiled
+call sites, false for several places the C runtime invokes a closure's apply
+function directly. Found via `dune build @runtest` after PR CI stayed red
+past the first (task_spawn) runtime fix; `scripts/run-tests.sh` and the four
+alcotest binaries never exercise dune-rule golden tests and were fully green
+throughout.
+
+Four more sites fixed, two shapes:
+
+- **One call + an explicit runtime `decrc`** (`__try_call`/`__try_call_val`,
+  `runtime/march_runtime.c`): the thunk's own apply function already
+  released $clo, so the runtime's decrc was a second consumption. Flaky, not
+  deterministic — 6/30 crashes on a single-capture thunk before the fix,
+  0/30 after; freed memory often still looked valid enough not to crash
+  immediately. `__try_call` is directly user-callable, and
+  `test/imports/erased_clo_native`'s dune-rule golden hit this exact shape.
+- **N calls to the same closure without transferring ownership per call**
+  (`march_signal_drain`, the array-map/fold builtins, and their LLVM-IR-level
+  inline fast path in `lib/tir/llvm_emit.ml`): fixed with `march_incrc`
+  before each call. The array builtins additionally need one `march_decrc`
+  after the loop (the closure arrives as one transferred reference, per TIR:
+  `inc_rc closure` is emitted only when still live after the call);
+  `march_signal_drain` does not (the watcher table's held reference persists
+  across drains, released only by the existing replace/unwatch path). The
+  actor message-dispatch loop got the same defensive fix by shape-match,
+  though whether a capturing dispatch closure is actually producible from
+  user-level actor syntax today was not independently confirmed.
+
+Verified: full `dune build @runtest` clean except the pre-existing
+environmental ASAN failure. 5 new `test_codegen.ml` regressions
+(`try_call_capture_ownership_codegen`), each run 15–30x since several of
+these are heap-timing-dependent. All previously-failing goldens
+(`erased_clo_native`, `native_arr_map_inline_{vectorize,capture,
+float_box_reuse,unboxed}`, `native_arr_map2_inline`) confirmed clean and
+output-correct (diffed against `.expected`).
+
+## Current State (as of 2026-07-29, capturing-closure ownership: the $clo drop)
+
+**Capturing closures are released instead of leaked.** A lambda capturing a free
+variable allocates a closure struct per materialization; nothing ever freed it.
+The root cause was two independent notions of "$clo is borrowed" that disagreed:
+`Borrow.infer_module`'s map (what CALLERS consult in Perceus's `EApp` case, at the
+`callee_is_apply` exclusion) and the per-function `borrowed` set in `perceus`
+(what suppresses the CALLEE's own drop). `$clo : TPtr TUnit` is `borrow_eligible`,
+and an apply fn's only use of it is `EField` extraction while `owned_in`'s EField
+case returns false — so the fixpoint never flipped it, the caller deferred to the
+callee, the callee deferred to the map, and nobody released the allocation.
+
+Fixed by pinning apply-fn param 0 to owned in `infer_module`'s `init` (NOT the
+post-fixpoint extern seed — `owned_in` consults `is_borrowed` during iteration)
+plus a callee-side `EDecRC $clo` spliced after `lift_lambda`'s fv-extraction
+prefix, as a post-pass on already-RC-inserted TIR. Both halves are required: a
+prior callee-only attempt produced 3 genuine double-frees plus 8 stdlib crashes,
+because the caller was still filtering `$clo` out of `non_borrowed_args` and
+emitting no `EIncRC` for a closure live after the call.
+
+Measured: 4M-iteration loop 4,000,000 allocations / ~125 MB peak RSS → ~2.9 MB
+floor; a 15-shape closure corpus all exit 0 with correct output at the floor,
+including the three shapes that double-freed under the prior attempt. Suites:
+compiler 614, eval 256, codegen 509 (+1 new), stdlib 825, snapshots 33 — 4 perceus
+snapshots regenerated, all four diffs being exactly the ownership drop.
+
+Two things the native corpus could not show, both recorded in code:
+- The drop must NOT fire for a **capture-free** apply fn. Natively its closure is
+  the immortal static global where a decrement is a no-op, but
+  `static_closure_ok` is `not ctx.repl && ..`, so under the REPL/JIT it is a real
+  `march_alloc` — dropping it made `run_codegen`'s "stdlib List.length via
+  precompile" jump through a zeroed apply-fn slot (EXC_BAD_ACCESS at 0x0, frame
+  #0 = 0x0, a null code pointer, not a data UAF) while every native program
+  stayed green.
+- `scripts/run-tests.sh` reported `825 tests / 1 failure` while `run_codegen` was
+  exiting **139**. Read each binary's `$?` individually; the script's summary
+  masks a segfaulting suite.
+
+**Residual, still open:** a self-recursive capturing closure still leaks one
+reference per materialization — its self-binding hands an alias a reference
+consumed only on the recursive path, so the base-case branch drops nothing. That
+is an independent dead-alias gap in `ECase` branch handling.
 
 ## Current State (as of 2026-07-29, the refinement-guarantee sweep is closed and documented)
 

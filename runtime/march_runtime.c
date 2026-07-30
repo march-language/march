@@ -1363,12 +1363,21 @@ void *__try_call(void *thunk) {
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
 
-    /* Release our reference to the thunk.  On the success path it may have
-       RC>1 if the caller kept a reference; we only release ours.  On the
-       panic path the apply function did not return, so any RC increments it
-       would have made are skipped — that may leak captured heap values on
-       panic, which is acceptable (panics are rare and terminate the test). */
-    march_decrc(thunk);
+    /* No march_decrc(thunk) here. Like the task_spawn trampoline (see its
+     * comment), a CAPTURING thunk's own apply function now releases its one
+     * reference to $clo internally — and it does so as the FIRST thing the
+     * function does, immediately after extracting its captures and before
+     * any of the actual body runs (lib/tir/perceus.ml's
+     * insert_apply_fn_clo_drop splices right after the fv-extraction
+     * prefix). That means the drop has already fired by the time apply()
+     * either returns normally OR longjmps out via a panic — both paths are
+     * covered by the same unconditional removal, no panicked/!panicked
+     * split needed. Decrementing again here double-consumed that reference;
+     * confirmed flaky (heap-layout-dependent) with a single-capture thunk:
+     * "RC underflow" on 6/30 runs before this fix, 0/30 after. A
+     * CAPTURE-FREE thunk's apply function does not drop $clo at all (see
+     * the fv-extraction guard in insert_apply_fn_clo_drop), so removing
+     * this decrc is inert for that case exactly as for task_spawn. */
 
     /* Build Result(a, String): 16-byte header + 8-byte field. */
     char      *result = (char *)march_alloc(24);
@@ -1444,7 +1453,7 @@ void *__try_call_val(void *thunk) {
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
 
-    march_decrc(thunk);
+    /* No march_decrc(thunk) — see the identical comment in __try_call above. */
 
     char      *result = (char *)march_alloc(24);
     march_hdr *hdr    = (march_hdr *)result;
@@ -1828,10 +1837,47 @@ static void actor_green_thread(void *arg) {
             memcpy(&dispatch_fn, &fn_raw, sizeof(dispatch_fn));
             dispatch_fn(actor, msg);
         } else {
-            /* Regular actor: indirect via closure wrapper (3-arg: closure, actor, msg). */
+            /* Regular actor: indirect via closure wrapper (3-arg: closure, actor, msg).
+             *
+             * RC contract: a[2] is a LONG-LIVED reference held by the actor's
+             * own fields, called once per inbound message for the actor's
+             * entire lifetime — never transferred per-call, matching
+             * march_signal_drain's watcher contract (see its comment) rather
+             * than the map/fold builtins' transfer-once-consume-once one.
+             * If this closure wrapper ever captured a free variable,
+             * insert_apply_fn_clo_drop (lib/tir/perceus.ml) would make it
+             * release its $clo reference on the FIRST message and every
+             * later message would dispatch through freed memory.
+             * march_incrc(closure) would balance that per-call drop the same
+             * way march_signal_drain's incrc does.
+             *
+             * CONFIRMED UNREACHABLE today, not just defensive: a[2] is always
+             * populated by lower_actor.ml's spawn function via
+             * EAlloc(Name_Actor, [AVar dispatch_fn_ptr_var, ...]), where
+             * dispatch_fn_ptr_var references dispatch_fn — a fn_def declared
+             * at the SAME top level as the spawn function, never nested
+             * inside another function's scope. A top-level function
+             * referenced as a value can have no free variables to capture by
+             * construction (it isn't a lift_lambda-produced closure at all),
+             * so insert_apply_fn_clo_drop's fv-extraction guard can never
+             * fire for it — there is no drop for this incrc to balance.
+             * Natively it doesn't even reach this incrc as a real
+             * allocation: a top-level function materialized as a value is
+             * exactly llvm_emit.ml's [intern_static_closure] shape, so a[2]
+             * is the immortal `@Name_dispatch$static_clo` global, on which
+             * march_incrc is unconditionally a no-op by design (see
+             * MARCH_RC_IMMORTAL).
+             *
+             * Left in place as cheap (IS_HEAP_PTR-guarded, one branch)
+             * defense-in-depth against a FUTURE actor-lowering change that
+             * introduces genuine closures over local scope (e.g. a
+             * parameterized/nested actor definition) — if that ever happens,
+             * this comment is the pointer back to why it matters, rather
+             * than requiring the bug to be rediscovered from a crash. */
             typedef void (*closure_fn_t)(void *, void *, void *);
             char *closure = (char *)(uintptr_t)a[2];
             closure_fn_t fn = *(closure_fn_t *)(closure + 16);
+            march_incrc(closure);
             fn((void *)(uintptr_t)a[2], actor, msg);
         }
 
@@ -2338,7 +2384,21 @@ static void march_thunk_trampoline(void *arg) {
          * If the caller still holds the handle, this drops RC from 2 → 1. */
         march_decrc(task);
     }
-    march_decrc(clo);   /* release the reference taken at spawn time */
+    /* No march_decrc(clo) here. lib/tir/perceus.ml's insert_apply_fn_clo_drop
+     * (see lib/tir/borrow.ml's $clo-ownership pin) now makes a CAPTURING
+     * thunk's own apply function release its one reference to $clo
+     * internally, as the last thing it does before returning. Decrementing
+     * it again here double-consumed that single reference — confirmed via a
+     * single-capture task_spawn thunk called through this trampoline,
+     * SIGABRT("RC underflow") on every run before this fix, clean after.
+     * A CAPTURE-FREE thunk's apply function does NOT drop $clo (see the
+     * fv-extraction guard in insert_apply_fn_clo_drop) because natively its
+     * closure is llvm_emit's immortal static global, where a decrement was
+     * always a no-op — so removing this decrc changes nothing for that case
+     * either. (Under the REPL/JIT a capture-free closure is a real
+     * allocation and this removal does leave it unreleased when spawned via
+     * task_spawn from a fragment — a narrow, documented leak, not a crash;
+     * see specs/todos.md.) */
     march_sched_exit();
 }
 
@@ -4561,9 +4621,27 @@ void march_signal_drain(void) {
                  * ptr lives at byte offset +16 and takes (closure, int64 arg).
                  * The watcher is a 1-arg discard thunk, so the arg is a dummy.
                  * Calling does not consume the closure — the watcher stays
-                 * registered for the next delivery. */
+                 * registered for the next delivery.
+                 *
+                 * RC contract: this is DIFFERENT from the map/fold builtins'
+                 * transfer-once-consume-once contract (native_int_arr_map et
+                 * al.) — [clo] is a LONG-LIVED reference held in
+                 * g_signal_handlers, called an unbounded number of times
+                 * (once per delivery, across the program's whole lifetime),
+                 * and released only by march_signal_watch's replace/unwatch
+                 * decrc, never here. But since insert_apply_fn_clo_drop
+                 * (lib/tir/perceus.ml) makes a CAPTURING watcher's apply
+                 * function release its $clo reference on every call, this
+                 * call would free the closure on the FIRST delivery and the
+                 * table would hold a dangling pointer for the second —
+                 * reproduced with a watcher closing over a captured value,
+                 * raised twice: clean SIGSEGV on delivery 2, every run.
+                 * march_incrc balances that per-call drop, leaving the
+                 * table's one held reference untouched no matter how many
+                 * times this fires. */
                 typedef void *(*apply_fn_t)(void *, int64_t);
                 apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
+                march_incrc(clo);
                 apply(clo, (int64_t)0);
             }
         }
@@ -4668,14 +4746,33 @@ void *march_typed_array_create(int64_t len, void *default_val) {
     return arr;
 }
 
+/* RC contract: [f] arrives as ONE transferred (owned) reference — Perceus
+ * inserts an EIncRC at the March call site iff the caller still needs [f]
+ * afterward (confirmed via TIR: `inc_rc closure; NativeArray.map_int(a1,
+ * closure)` when `closure` is called again later), meaning a last-use call
+ * site transfers its only reference here with no extra protection.
+ *
+ * But [f]'s apply function is called ONCE PER ELEMENT here, and — since
+ * lib/tir/perceus.ml's insert_apply_fn_clo_drop — a CAPTURING closure's
+ * apply function releases $clo internally on every single call.  Without
+ * the march_incrc below, element 0's call already frees [f] (if the
+ * caller's reference was the only one) and every subsequent element calls
+ * through freed memory: SIGABRT/SIGTRAP, reproduced by
+ * test/native/native_arr_map_inline_capture.march.  march_incrc(f) before
+ * each call balances that call's internal drop, and the final
+ * march_decrc(f) releases the one reference this function was transferred
+ * — net effect over the whole loop is identical to the pre-drop behaviour,
+ * where calling never touched f's rc at all. */
 void *march_typed_array_map(void *arr, void *f) {
     int64_t len = march_typed_array_length(arr);
     void *new_arr = typed_array_alloc(len);
     for (int64_t i = 0; i < len; i++) {
         void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        march_incrc(f);
         void *result = call_closure_1(f, elem);
         *(void **)((char *)new_arr + TYPED_ARRAY_HDR_SIZE + i * 8) = result;
     }
+    march_decrc(f);
     return new_arr;
 }
 
@@ -4708,13 +4805,19 @@ void *march_typed_array_filter(void *arr, void *mask) {
     return new_arr;
 }
 
+/* RC contract identical to march_typed_array_map above: [f] is one
+ * transferred reference, called once per element, march_incrc before each
+ * call balances that call's internal $clo drop, final march_decrc releases
+ * the transferred reference. */
 void *march_typed_array_fold(void *arr, void *acc, void *f) {
     int64_t len = march_typed_array_length(arr);
     void *result = acc;
     for (int64_t i = 0; i < len; i++) {
         void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        march_incrc(f);
         result = call_closure_2(f, result, elem);
     }
+    march_decrc(f);
     return result;
 }
 
@@ -4857,13 +4960,22 @@ double native_int_arr_sumsq_dev(void *arr, double mean) {
     return s;
 }
 
+/* RC contract: see march_typed_array_map's doc comment — [f] is one
+ * transferred reference, march_incrc before each per-element call balances
+ * that call's internal $clo drop (insert_apply_fn_clo_drop,
+ * lib/tir/perceus.ml), final march_decrc releases the transferred
+ * reference. Without this, a capturing closure map callback frees itself on
+ * the first element and every later element calls through freed memory —
+ * reproduced by test/native/native_arr_map_inline_capture.march. */
 void *native_int_arr_map(void *arr, void *f) {
     int64_t len = native_int_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        march_incrc(f);
         *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = clo_call_int_int(f, x);
     }
+    march_decrc(f);
     return new_arr;
 }
 
@@ -4873,6 +4985,7 @@ void *native_int_arr_map(void *arr, void *f) {
  * mismatch here is a genuine caller bug (both callers already validate),
  * so it's an assert rather than a Result -- matching native_int_arr_min/max's
  * "caller guarantees" convention above, not a new error-handling contract. */
+/* RC contract identical to native_int_arr_map above. */
 void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
     int64_t len = native_int_arr_length(arr1);
     if (len != native_int_arr_length(arr2)) {
@@ -4882,8 +4995,10 @@ void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr1 + NATIVE_ARR_HDR + i * 8);
         int64_t y = *(int64_t *)((char *)arr2 + NATIVE_ARR_HDR + i * 8);
+        march_incrc(f);
         *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = clo_call_int_int_int(f, x, y);
     }
+    march_decrc(f);
     return new_arr;
 }
 
@@ -5019,14 +5134,17 @@ double native_float_arr_sumsq_dev(void *arr, double mean) {
     return s;
 }
 
+/* RC contract identical to native_int_arr_map above. */
 void *native_float_arr_map(void *arr, void *f) {
     int64_t len = native_float_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
     for (int64_t i = 0; i < len; i++) {
         double x; memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        march_incrc(f);
         double r = clo_call_dbl_dbl(f, x);
         memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &r, 8);
     }
+    march_decrc(f);
     return new_arr;
 }
 
@@ -5034,6 +5152,7 @@ void *native_float_arr_map(void *arr, void *f) {
  * native_int_arr_map2's doc comment (same two-array shape, Float instead
  * of Int). Both sides must already be Float; col_add_col's mixed-type
  * cases widen the Int side via native_int_arr_to_float_arr first. */
+/* RC contract identical to native_int_arr_map above. */
 void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
     int64_t len = native_float_arr_length(arr1);
     if (len != native_float_arr_length(arr2)) {
@@ -5044,9 +5163,11 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
         double x, y;
         memcpy(&x, (char *)arr1 + NATIVE_ARR_HDR + i * 8, 8);
         memcpy(&y, (char *)arr2 + NATIVE_ARR_HDR + i * 8, 8);
+        march_incrc(f);
         double r = clo_call_dbl_dbl_dbl(f, x, y);
         memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &r, 8);
     }
+    march_decrc(f);
     return new_arr;
 }
 
