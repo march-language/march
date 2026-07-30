@@ -373,7 +373,8 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
   if not (Hashtbl.mem ctx.Llvm_ctx.emitted_wraps wrap_name) then begin
     Hashtbl.add ctx.Llvm_ctx.emitted_wraps wrap_name ();
     Buffer.add_string ctx.Llvm_ctx.extra_fns
-      (Llvm_calls.clo_wrap_define wrap_name param_tys target_ret fn_llvm_name)
+      (Llvm_calls.clo_wrap_define ~drop_clo:ctx.Llvm_ctx.repl wrap_name param_tys
+         target_ret fn_llvm_name)
   end;
   (* Init function: allocate closure {header(16), fn_ptr} and store in the slot *)
   let init_name = Printf.sprintf "repl_%d_init" n in

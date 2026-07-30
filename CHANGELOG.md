@@ -131,6 +131,25 @@ git log is authoritative for exact commits.
   `specs/lang/types/accept/t130_refine_let_annotation_checked_and_composes` and
   `specs/lang/types/reject/t131_refine_let_annotation_false`.
 
+- **A capture-free closure used repeatedly in the REPL no longer leaks an
+  allocation per use.** Passing a lambda that captures nothing — or a
+  top-level function used as a value — to something that calls it (a
+  higher-order function, `task_spawn`) allocated a fresh closure object on
+  every materialization and never freed any of them, so a loop at the REPL
+  prompt grew the live-object count in lockstep with its iteration count.
+  Compiled programs were never affected: there, such a closure is a single
+  immortal object shared by the whole program. Both capture-free shapes are
+  now released, and compiled output is byte-for-byte unchanged.
+
+- **`forge test` now resolves transitive dependencies.** `forge build` and
+  `forge check` walk the dependency graph transitively — if your project depends
+  on `B` and `B` depends on `C`, then `C`'s `lib/` is on `MARCH_LIB_PATH`.
+  `forge test` built its own path from the *direct* deps only, so a test calling
+  into a transitive dependency's module failed with "Unknown module ..." even
+  though the identical call in `lib/` typechecked. `forge test` now uses the same
+  transitive walk (with the same nearest-wins shadowing for same-named deps),
+  applied to the test scope: `deps` + `dev-deps` + `test-deps`.
+
 - **A refinement whose predicate measures the refined value itself is now
   enforced for user ADTs.** A contract like `{Tree | size(_) > 0}`, where `size`
   is a user `@[measure]` over `Tree`, checked *nothing*: the argument being
