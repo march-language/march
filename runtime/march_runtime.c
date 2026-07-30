@@ -1844,19 +1844,36 @@ static void actor_green_thread(void *arg) {
              * entire lifetime — never transferred per-call, matching
              * march_signal_drain's watcher contract (see its comment) rather
              * than the map/fold builtins' transfer-once-consume-once one.
-             * If this closure wrapper ever captures a free variable,
+             * If this closure wrapper ever captured a free variable,
              * insert_apply_fn_clo_drop (lib/tir/perceus.ml) would make it
              * release its $clo reference on the FIRST message and every
              * later message would dispatch through freed memory.
-             * march_incrc(closure) balances that per-call drop the same way
-             * march_signal_drain's incrc does; guarded by IS_HEAP_PTR inside
-             * march_incrc, so this is a safe no-op if a[2] is ever something
-             * other than a normal heap closure. Whether today's actor
-             * lowering can actually produce a CAPTURING closure wrapper
-             * (as opposed to always a closure over zero free variables) was
-             * not independently confirmed — applied defensively given the
-             * severity of the failure mode and the identical shape of the
-             * Signal.watch bug this mirrors. */
+             * march_incrc(closure) would balance that per-call drop the same
+             * way march_signal_drain's incrc does.
+             *
+             * CONFIRMED UNREACHABLE today, not just defensive: a[2] is always
+             * populated by lower_actor.ml's spawn function via
+             * EAlloc(Name_Actor, [AVar dispatch_fn_ptr_var, ...]), where
+             * dispatch_fn_ptr_var references dispatch_fn — a fn_def declared
+             * at the SAME top level as the spawn function, never nested
+             * inside another function's scope. A top-level function
+             * referenced as a value can have no free variables to capture by
+             * construction (it isn't a lift_lambda-produced closure at all),
+             * so insert_apply_fn_clo_drop's fv-extraction guard can never
+             * fire for it — there is no drop for this incrc to balance.
+             * Natively it doesn't even reach this incrc as a real
+             * allocation: a top-level function materialized as a value is
+             * exactly llvm_emit.ml's [intern_static_closure] shape, so a[2]
+             * is the immortal `@Name_dispatch$static_clo` global, on which
+             * march_incrc is unconditionally a no-op by design (see
+             * MARCH_RC_IMMORTAL).
+             *
+             * Left in place as cheap (IS_HEAP_PTR-guarded, one branch)
+             * defense-in-depth against a FUTURE actor-lowering change that
+             * introduces genuine closures over local scope (e.g. a
+             * parameterized/nested actor definition) — if that ever happens,
+             * this comment is the pointer back to why it matters, rather
+             * than requiring the bug to be rediscovered from a crash. */
             typedef void (*closure_fn_t)(void *, void *, void *);
             char *closure = (char *)(uintptr_t)a[2];
             closure_fn_t fn = *(closure_fn_t *)(closure + 16);

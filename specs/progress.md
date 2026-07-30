@@ -1,5 +1,52 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, self-recursive capturing closure leak fixed)
+
+**The self-recursive capturing closure leak (residual from the $clo drop
+work, two entries above) is fixed.** One allocation leaked per top-level
+MATERIALIZATION of a self-recursive capturing closure — not per recursion
+level, since the whole recursion reuses one heap object via the self-binding
+alias. `insert_apply_fn_clo_drop`'s unconditional early drop only cancels
+the self-binding's own protective `inc_rc $clo` (a net-zero bump-then-unbump)
+and says nothing about the actual transferred reference, which is simply
+abandoned at any base-case branch that stops using the self-binding.
+
+Fixed with a second, path-sensitive pass (`insert_dec_on_dead_paths`) that
+walks the body via `Dce.free_vars`, inserting an additional drop exactly
+where the self-binding becomes dead. Two intermediate attempts were each
+broken a different way, both instructive: the walk alone (dropping the
+unconditional early drop) left the protective inc permanently uncanceled on
+the live/recursive path — unbounded rc growth, not a fix; a naive version of
+the walk that always recursed into an `ELet`'s tail inserted a spurious
+SECOND drop when the actual consuming call lived in the let's RHS instead —
+a double-free, not fewer leaks caught. Measured: `LEAKED 20000` -> `BOUNDED`
+for a self-recursive `helper` capturing a free variable, materialized in a
+20,000-iteration loop.
+
+Verified via `DUNE_CACHE=disabled dune build --root . @runtest` (the full
+CI-equivalent suite) clean except the pre-existing environmental ASAN
+failure — 517 codegen tests (+2 new), 4179 conformance, 825 stdlib. Hit
+dune's shared-cache poisoning again while confirming the new tests were
+non-vacuous (`--force` alone served a stale cached artifact; needed
+`DUNE_CACHE=disabled` too).
+
+**Investigated, not fixed:** extending the same fix to cover capture-free
+closures leaking under the REPL/JIT (a separate, narrower, already-documented
+gap) by threading an `is_repl` flag into the drop-insertion pass. Reverted —
+it reintroduced the exact SIGSEGV the pass's existing guard was written to
+prevent (`run_codegen`'s "stdlib List.length via precompile" test, a jump
+through a zeroed apply-fn slot). The REPL capture-free leak remains open.
+
+Also settled: the actor-dispatch `march_incrc` fix from the closure-call-site
+audit (two entries below) is confirmed UNREACHABLE today, not merely
+defensive — traced through `lower_actor.ml`: the actor's dispatch closure
+always references a TOP-LEVEL function (never a `lift_lambda`-produced
+closure with free-variable captures), so `insert_apply_fn_clo_drop`'s
+fv-extraction guard can never fire for it, and natively it is `llvm_emit`'s
+immortal static global regardless. Left in place as cheap, harmless
+defense-in-depth against a future actor-lowering change; comment updated
+with the full trace so a future change doesn't need to rediscover this.
+
 ## Current State (as of 2026-07-29, closure-call-site RC audit: four more fixes)
 
 **The $clo ownership drop (previous entry) was correct at the TIR level but
