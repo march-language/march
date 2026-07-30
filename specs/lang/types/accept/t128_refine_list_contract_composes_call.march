@@ -1,0 +1,41 @@
+-- A refined `List` contract COMPOSES across a call boundary: a function that
+-- requires `{List(Int) | len(_) > 0}` may pass that very parameter on to
+-- another function with the identical requirement, and the callee's
+-- obligation is PROVED using the caller's own declared contract alone -- no
+-- runtime guard needed at either call site.
+--
+-- Before 2026-07-29 a `List`/ADT refinement was not admitted to the refined
+-- scope channel AT ALL: `refined_scope_ty` accepted only Int, String and
+-- record parameters, so `outer`'s promise about `ys` produced no scope entry
+-- anywhere -- there was no fact in `scope_facts` or in any other channel for
+-- the compositional check to miss. `check_call`'s call-site resolver simply
+-- had nothing to consult, and `len$ys` was an unconstrained integer. The
+-- result was silent: `inner(ys)` inside `outer`'s body was SKIPPED rather than proved,
+-- while `outer(ys)` from `main` still proved fine on its own -- so the
+-- program looked identical (exit 0) whether the inner call composed or was
+-- simply ignored.
+--
+-- That is exactly why this file is bracketed by the rejecting
+-- `reject/t129_refine_weaker_contract_composition_still_fails`: it shows the
+-- SAME two-hop shape does NOT let a weaker caller contract launder a
+-- stronger callee requirement, so exit 0 here cannot be explained away as
+-- "the checker accepts everything it cannot disprove". Composition only
+-- fires when the caller's own promise already entails the callee's.
+--
+-- See specs/lang/refinement-types.md, "Path Sensitivity" and the `len`
+-- composition tests in `test/test_refinecheck.ml`'s `compose` suite.
+mod T128 do
+
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do
+    0
+  end
+
+  fn outer(ys : {List(Int) | len(_) > 0}) : Int do
+    inner(ys)
+  end
+
+  fn main() : Int do
+    outer([1])
+  end
+
+end

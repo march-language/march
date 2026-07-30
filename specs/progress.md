@@ -1,5 +1,198 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, the PARAMETER-NAME spelling composes too)
+
+**Counts:** `test_refinecheck` 352 (was 348), typing corpus 229/229,
+`check-docs.sh` exit 0, stdlib false-positive sweep EMPTY.
+
+Whole-branch review fix wave for the refinement-contract-composition branch.
+
+**The fix.** The refined value a caller's own contract talks about has three
+spellings — the anonymous `_`, the annotation's declared binder, and the
+parameter's OWN name — and all three must resolve to the same value. The new
+ASSUMPTION side (`load_scope_measure_facts` in
+`lib/refinecheck/refine_check.ml`) accepted only the first two: its measure
+resolver guarded on `n = b || n = "_"`, where `b` is the scope entry's binder
+and `binder_name None = "_"`. So `fn outer(ys : {List(Int) | len(ys) > 0}) do
+inner(ys) end` stayed `1 proved, 1 skipped` while the other two spellings proved
+both calls. The guard now also accepts the scope entry's own name, mirroring
+what the GOAL side has done since 2026-07-27 (`is_self` plus `actual_of_name`).
+The same guard is shared by both measure classes, so the axiom-measure
+equivalent (`{Tree | size(u) > 0}` on the caller's own parameter `u`) was
+broken and is fixed by the same line.
+
+**This is the third time this spelling class has shipped broken in this file**
+(goal side 2026-07-27; assumption side now). The direction is a strict widening
+— it can only turn a skip into a proof — so the tests that matter are the
+false-positive controls: a WEAKER contract in the parameter-name spelling
+(`len(ys) >= 0`, `size(u) >= 0`) must still skip, and both are pinned.
++4 tests (348 → 352): positive and control, for `len` and for an axiomatised
+`@[measure]`.
+
+**Two doc corrections.** `refined_scope_ty`'s docstring now names the ADT
+measure-only marker this branch added (it previously listed only Int/String/
+record and told consumers to check against `str_sort` alone). And
+`accept/t128`'s header no longer claims the missing fact "lived in
+`scope_facts`, which the compositional check never read" — `refined_scope_ty`
+did not admit `List` at all before this branch, so no scope entry existed
+anywhere and `check_call`'s resolver simply had nothing to consult.
+
+**Two findings filed, not fixed** (both pre-existing, both out of scope for a
+composition bug-fix branch): a refined `let` annotation is TRUSTED rather than
+checked against its RHS — `let ys : {List(Int) | len(_) > 0} = []` falsely
+proves a downstream call even under `cap verified` — filed as an OPEN section in
+`specs/todos.md` plus a Limitations bullet; and a caller contract that
+contradicts its own guard makes the guarded branch vacuously provable, which is
+expected safe-direction behaviour and is now documented in Limitations.
+
+## Current State (as of 2026-07-29, the refinement docs are re-verified against the built compiler)
+
+**Counts:** unchanged — `test_refinecheck` 348, `run_compiler` 615, `run_eval`
+256, typing corpus 229/229, `check-docs.sh` exit 0, stdlib false-positive sweep
+EMPTY. Documentation only; no compiler code touched.
+
+Task 4 (final) of the refinement-contract-composition plan. Every March snippet
+that changed or was newly written was run through
+`./_build/default/bin/main.exe --check --refine-report` on a cold
+`.march/cas/artifacts-v2` (a warm artifact cache exits before refinecheck and
+prints nothing, which reads identically to "nothing to report"); 19 snippets in
+all, each judged by exit code and by its `user code` obligation counts rather
+than by exit code alone, since a skip and a proof both exit 0.
+
+**The stale limitation is retired in all three places** it was filed — the
+`specs/todos.md` follow-up (struck through with a dated `CLOSED` note, per the
+file's convention) plus both `specs/lang/refinement-types.md` and
+`docs/refinement-types.md`. Each gained a section on the mechanism, and the
+distinction the docs previously had no reason to draw is now explicit and
+load-bearing: a caller-established runtime **guard** (`if List.length(ys) > 0 do
+…`, the `len`-alias mechanism of 2026-07-28) and a caller's **declared
+contract** are two different things, and only the second is what composes. A
+reader needs to know which shape they have to know which machinery they get.
+
+**Measured scope of composition, since the two shipped fixes were scoped to
+different types and neither report stated the combined picture.** Every refined
+form composes at `2 proved, 0 violated, 0 skipped` — `Int`, `Float`, `Bool`,
+`String` `len`, a record field, the built-in list `len`, and a user
+`@[measure]` over an ADT — with exactly one exception: a **constructor-tag**
+refinement (`{Option(Int) | is_Some(_)}`) forwarded to a callee with the
+identical contract still measures `1 proved, 1 skipped`, the proof being the
+outer literal. That is now stated as a limitation on both pages rather than
+left to be inferred. The headline practical case is also pinned:
+`List.head(xs)` inside `fn head_of(xs : {List(Int) | len(_) > 0})` measures
+`2 proved, 0 violated, 0 skipped` and exits 0 **under `cap verified`** with no
+guard — the exact program the retired todo item named as the ceiling on
+threading these contracts through the stdlib.
+
+**A doc claim that the Task 2 fix silently falsified.** The spec chapter's
+Limitations section asserted, with a 2026-07-27 re-verification date, that "an
+AXIOMATISED measure applied to the refined value itself is reasoned about by
+axiom, not evaluated on a literal" — specifically that `big(Leaf)` against
+`{v : Tree | size(v) > 2}` "stays silent". Run against HEAD it is **reported**
+(exit 1, `0 proved, 1 violated`), because that documented limitation *was* the
+pre-existing bug Task 2 fixed. The bullet is rewritten to say so, keeping the
+history visible, and re-verified in all four directions: `inner(Leaf)` against
+`{Tree(Int) | size(_) > 0}` reported, `inner(Node(Leaf, 5, Leaf))` proved,
+`big(Leaf)` against `size(v) > 2` reported, and `{v : Tree(Int) | size(v) < 0}`
+still caught for an opaque argument from the non-negativity axiom alone. What
+genuinely remains is narrower and is stated as such: the unconstrained
+placeholder survives only as the fallback where there is nothing to reflect.
+The site page gained a worked `Leaf`/`Node` example for this shape, flagged as
+formerly-silent, since any doc example of that shape needed re-running.
+
+**Newly documented, and not fixed by this plan:** a caller's fact does not
+propagate through a local `let` for **any** type — `let u = 5` then
+`take_pos(u)` against `{Int | _ > 0}` measures `0 proved, 1 skipped`, and the
+`List` analogue is identical. Pre-existing and general; it is also the reason
+rebinding a refined parameter leaves the call skipped rather than reported.
+Filed as an open follow-up alongside tag forwarding. Postconditions remaining
+outside the ledger, the unit-global alias gates, and the absent `@[trusted]`
+are each restated as pre-existing and untouched by this plan, so that nobody
+reads a combined guarantee out of two adjacent CHANGELOG entries.
+
+**Stale counts corrected in the spec chapter's Conformance status:** typing
+corpus 218 → 229 programs (114 accept / 115 reject) and `test_refinecheck` 245
+→ 348, with the 8 new composition tests and the `accept/t128` / `reject/t129`
+bracketing named. The two existing CHANGELOG entries were extended rather than
+duplicated: the ADT-measure entry now warns that a program which used to
+compile can now fail (a previously-skipped call in that position is now
+decided), and the list entry now carries the combined composition picture,
+the guard-versus-contract distinction, and the preconditions-only scope.
+
+## Current State (as of 2026-07-29, call-boundary composition gets its corpus witnesses)
+
+**Counts:** `test_refinecheck` 348 (unchanged — this task adds no OCaml code),
+typing corpus 229/229 (114 accept / 115 reject, up from 227/227), full corpus
+run via `check_types.sh` clean, `check-docs.sh` exit 0. No known failures
+introduced.
+
+Task 3 of the refinement-contract-composition plan closes it out with corpus
+witnesses for the two composition fixes (Tasks 1 and 2, above): a runtime
+`List(Int)` non-empty contract now composes across a call boundary, and the
+same holds for an axiomatised user `@[measure]`. `accept/t128_refine_list_contract_composes_call`
+pins the positive case (`outer(ys : {List(Int) | len(_) > 0}) do inner(ys) end`
+— both `outer`'s own call from `main` and the inner `inner(ys)` call are now
+PROVED). Its reject companion, `reject/t129_refine_weaker_contract_composition_still_fails`,
+is the load-bearing half: an accept-only witness cannot distinguish "composed"
+from "merely skipped" since both exit 0 — the exact gap that let the
+`List.length`/`len` alias go silently dead in production earlier the same day
+(see the `import Process` entry in `specs/todos.md`). It reuses the
+WEAKER-caller-contract shape from Task 1's own test suite (`outer`'s
+`{List(Int) | len(_) >= 0}` proves nothing about `inner`'s `len(_) > 0`, so
+that call alone is SKIPPED, not violated) and pairs it with a `List.length(ys)
+== 0` runtime guard (the `t117`/`t118` mechanism) to produce a genuine,
+independently-derived violation — proving composition does not launder a
+weaker contract into a false proof.
+
+The CI obligation ratchet (`.github/workflows/ci.yml`, "Refinement obligation
+coverage ratchet" step) was re-measured on a cold `.march/cas/artifacts-v2`
+cache: the floor fixture (`accept/t118_refine_length_guard_discharges.march`)
+still measures exactly `1 proved, 0 violated, 0 skipped` on its `user code`
+slice, and `stdlib/list.march` still measures `8 proved, 0 violated, 28
+skipped` (user + stdlib). Both match the ratchet's existing `proved_floor=1`
+and `baseline=28` exactly — neither bound moved, and neither needed to: the
+composition fix's own regression tests live in `test_refinecheck.ml`'s
+`compose`/`compose-adt` suites, not in these two measurement fixtures.
+
+## Current State (as of 2026-07-29, a measure over the refined ADT value itself is enforced and composes)
+
+**Counts:** `test_refinecheck` 348 (was 344), typing corpus 113 accept / 114
+reject all as expected, stdlib violation sweep empty across all 111 modules,
+`run_compiler` / `run_eval` / `run_codegen` / `run_stdlib` green (`-q`). No known
+failures introduced.
+
+**The composition question answered a different question first.** Task 2 of the
+refinement-contract-composition plan asked whether Task 1's caller-scope fact
+resolver (which made `{List(Int) | len(_) > 0}` compose across a call) also
+covered an axiomatised user `@[measure]`. It did not — but the reason it could
+not was upstream of composition: in `check_call`'s `resolve_measure`, the
+**axiomatised** branch resolved the refined value's own binder spellings (`_`,
+the named binder) to an *unconstrained* datatype constant `$self`, discarding
+the actual argument entirely. So `{Tree | size(_) > 0}` was decided against an
+arbitrary tree and enforced nothing at all: `inner(Node(Leaf, 5, Leaf))` was not
+proved, and `inner(Leaf)` — a genuine violation — was not reported. The same
+measure over a *different* parameter (`{Int | _ < size(t)}`, the shape the
+existing `axioms-ma` suite covers) already reflected the actual and worked, which
+is why the hole was invisible: a skip exits 0 exactly as a proof does. This is
+the same accept-only-witness failure mode recorded for the non-axiomatised
+spellings on 2026-07-27, in the sibling branch of the same `if`.
+
+Both spellings now resolve against the same actual the named-parameter path does,
+via `reflect_dt` — which also *is* the composition fix, because for an `EVar x`
+actual `reflect_dt` yields `Const x` at the ADT sort, exactly the term Task 1's
+`load_scope_measure_facts` can phrase a caller-scope assumption over. That
+resolver gained an axiomatised arm emitting `(m x)` and setting `check_call`'s own
+`uses_axiom` ref, so the quantified-axiom preamble is attached to the VC that
+needs it — and only to that VC: a plain-`Int` group (`bounds-a2`, 6 tests) still
+runs in 0.06s, while the 4 new measure-bound cases cost ~3.8s each.
+
+Deliberately still out of scope, and verified to have stayed out: `check_post`
+(postcondition composition of an ADT measure) and `scope_facts` are untouched;
+every hunk is inside `check_call`. Also confirmed architectural, not a
+regression: a rebind (`let u = Leaf`) makes the following call *skipped*, not
+reported — this pass propagates no local `let`'s value into a later goal for any
+type, and the `Int` and `List` analogues behave identically. What matters there
+is that the retired fact does not leak into a false proof, which is pinned by an
+obligation-count assertion rather than a boolean.
 ## Current State (as of 2026-07-29, self-recursive capturing closure leak fixed)
 
 **The self-recursive capturing closure leak (residual from the $clo drop
