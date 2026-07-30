@@ -1474,7 +1474,7 @@ let rec dup_field_results (e : Tir.expr) : Tir.expr =
     dead-binding cleanup does.  One wrinkle: a prefix binding's RHS may be
     wrapped in a protective [EIncRC]/[EAtomicIncRC], so [is_clo_source] must
     see through that wrap. *)
-let insert_apply_fn_clo_drop (body : Tir.expr) : Tir.expr =
+let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
   let clo = Tir_names.clo_param_name in
   let clo_var =
     { Tir.v_name = clo; Tir.v_ty = Tir.TPtr Tir.TUnit; Tir.v_lin = Tir.Unr }
@@ -1601,18 +1601,48 @@ let insert_apply_fn_clo_drop (body : Tir.expr) : Tir.expr =
         (verified: `fn x -> x + 1` in a 100,000-iteration loop went from
         obj_allocs 0 to obj_allocs 100000 without a guard here).
 
-     2. A capture-FREE apply fn that does mention $clo (a recursive one, whose
-        only $clo use is the self-binding) has no captured ownership unit to
-        release, and dropping it is unsound under the JIT.  [static_closure_ok]
-        is [not ctx.repl && ...]: natively such a closure is the immortal
-        global, where a decrement is a no-op by construction, but in the
-        REPL/JIT it is a REAL [march_alloc] with rc = 1.  The drop then frees
-        it on the first call and the next dispatch jumps through the zeroed
-        apply-fn slot — observed as EXC_BAD_ACCESS at address 0x0, frame #0 =
-        0x0, in run_codegen's "stdlib List.length via precompile" (a jump to a
-        null code pointer, NOT a data use-after-free).  Native stayed green
-        throughout precisely because the immortal global masked it, so this
-        guard cannot be justified from native measurements alone. *)
+     2. A capture-FREE apply fn that DOES mention $clo — a self-recursive one,
+        whose only $clo use is [lift_lambda]'s `let go = $clo` self-binding —
+        must NOT get a drop here, and this is a hard correctness constraint,
+        not a conservatism.  Ordinary RC insertion already releases that
+        reference through the alias: the self-binding is an ordinary owned
+        local, so [insert_rc_expr] emits `dec_rc go` on every path where the
+        alias is dead and transfers it into the recursive `call_ptr go(..)` on
+        the paths where it is live.  Confirmed in the emitted TIR for
+        List.length's inner `go`:
+
+          fn go$apply($clo, lst, acc) =
+            let go = $clo in
+            case lst of
+              Nil()          -> dec_rc go; dec_rc lst; acc
+              Cons($f, $t)   -> ... call_ptr go(t, $t2)
+
+        Adding an unconditional drop on top of that is a SECOND release of the
+        same reference: rc reaches 0 on the first call, the closure is freed,
+        and the recursive dispatch reads a zeroed apply-fn slot.  That is the
+        exact crash two prior attempts at this hit — EXC_BAD_ACCESS at address
+        0x0, frame #0 = 0x0, in run_codegen's "stdlib List.length via
+        precompile", whose stack is `List.length$List_Int -> go$apply$218 ->
+        0x0` (a jump through a null code pointer, NOT a data use-after-free).
+        Native stayed green throughout because [static_closure_ok] routes the
+        native build to the immortal global, where the over-release is a no-op
+        by construction; only the JIT (where it is a real [march_alloc] with
+        rc = 1) exposes it.
+
+     3. A capture-free apply fn that mentions $clo NOWHERE — a non-recursive
+        capture-free lambda, the case in (1) — is the one that genuinely
+        leaks, and only under the REPL/JIT.  Nothing in its body ever names
+        $clo, so ordinary RC insertion has nothing to release, while the
+        apply-fn param-0 pin in [Borrow.infer_module] means every caller
+        transfers a reference in.  Natively that is fine (the immortal global
+        absorbs it); under [ctx.repl] it is a fresh [march_alloc] per
+        materialization that nobody frees — one leaked allocation per use,
+        measured at exactly 2,000 over a 2,000-iteration REPL fragment.  Hence
+        the [repl]-gated arm at the bottom of this function: it fires for
+        exactly this shape, which is also why it cannot regress (1) — a body
+        that never mentions $clo cannot acquire a $clo reference that would
+        defeat the static-closure optimization, and the arm is off natively
+        regardless. *)
   (* Mirrors [is_clo_source]'s unwrapping: a prefix binding's RHS may be
      wrapped in a protective EIncRC, so a bare [EField] match would miss it
      and misclassify a capturing apply fn as capture-free. *)
@@ -1633,7 +1663,15 @@ let insert_apply_fn_clo_drop (body : Tir.expr) : Tir.expr =
   match body with
   | Tir.ELet (_, e1, _) when is_clo_source e1 && prefix_has_fv_extraction body ->
     splice None body
-  | _ -> body
+  | _ ->
+    (* Case (3) above: under the REPL/JIT only, and only for an apply fn whose
+       body never mentions $clo at all.  The [not (mem clo ..)] test is what
+       separates this from case (2): a self-recursive capture-free apply fn
+       DOES mention $clo (its self-binding alias) and already releases the
+       reference through that alias, so it must fall through untouched. *)
+    if repl && not (StringSet.mem clo (Dce.free_vars body)) then
+      Tir.ESeq (Tir.EDecRC (Tir.AVar clo_var), body)
+    else body
 
 (** [insert_rc ~module_env ~borrowed fn] runs Phase 2 (RC insertion) over one
     function.  [module_env] carries the module-scoped fields (borrow_map,
@@ -1646,7 +1684,7 @@ let insert_apply_fn_clo_drop (body : Tir.expr) : Tir.expr =
     value here (rather than mutating shared refs), no restore step is needed
     afterward: the caller ([perceus]'s [List.map]) never sees this function's
     env — it only sees the returned [fn_def]. *)
-let insert_rc ~(module_env : env) ?(borrowed = StringSet.empty)
+let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
     (fn : Tir.fn_def) : Tir.fn_def =
   (* Rename ELet/ECase-bound variables that shadow borrowed parameters before
      RC insertion.  See [rename_borrowed_shadows] for the full rationale. *)
@@ -1693,7 +1731,7 @@ let insert_rc ~(module_env : env) ?(borrowed = StringSet.empty)
   let body'' =
     if Tir_names.is_apply_fn fn.Tir.fn_name
        && not (Borrow.is_borrowed module_env.borrow_map fn.Tir.fn_name 0)
-    then insert_apply_fn_clo_drop body'
+    then insert_apply_fn_clo_drop ~repl body'
     else body'
   in
   { fn' with Tir.fn_body = body'' }
@@ -1809,7 +1847,8 @@ let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_cou
     - Caller: EIncRC is skipped for args at borrowed positions that are still
       live after the call; a post-call EDecRC is emitted instead when the arg
       is the caller's last use. *)
-let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_module =
+let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
+    (m : Tir.tir_module) : Tir.tir_module =
   (* Reset the fresh-name counter per module so that compiling the same module
      twice produces identical IR.  A monotonic counter that survives across
      modules makes IR diffs unstable and causes spurious churn in test
@@ -1849,7 +1888,7 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
              else s
            ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
          in
-         insert_rc ~module_env ~borrowed fn)
+         insert_rc ~module_env ~repl ~borrowed fn)
   in
   let fns' =
     fns_after_insert

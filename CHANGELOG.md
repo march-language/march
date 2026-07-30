@@ -130,6 +130,24 @@ git log is authoritative for exact commits.
   `f(1)`⏎`(g(2))` case; it now applies after *any* value-ending token. A call
   whose `(` is on the same line as its callee, and a call whose argument list
   spans several lines, are unaffected.
+- **A capture-free closure used repeatedly in the REPL no longer leaks an
+  allocation per use.** Passing a lambda that captures nothing — or a
+  top-level function used as a value — to something that calls it (a
+  higher-order function, `task_spawn`) allocated a fresh closure object on
+  every materialization and never freed any of them, so a loop at the REPL
+  prompt grew the live-object count in lockstep with its iteration count.
+  Compiled programs were never affected: there, such a closure is a single
+  immortal object shared by the whole program. Both capture-free shapes are
+  now released, and compiled output is byte-for-byte unchanged.
+
+- **`forge test` now resolves transitive dependencies.** `forge build` and
+  `forge check` walk the dependency graph transitively — if your project depends
+  on `B` and `B` depends on `C`, then `C`'s `lib/` is on `MARCH_LIB_PATH`.
+  `forge test` built its own path from the *direct* deps only, so a test calling
+  into a transitive dependency's module failed with "Unknown module ..." even
+  though the identical call in `lib/` typechecked. `forge test` now uses the same
+  transitive walk (with the same nearest-wins shadowing for same-named deps),
+  applied to the test scope: `deps` + `dev-deps` + `test-deps`.
 
 - **A refinement whose predicate measures the refined value itself is now
   enforced for user ADTs.** A contract like `{Tree | size(_) > 0}`, where `size`
@@ -148,6 +166,22 @@ git log is authoritative for exact commits.
   not: a call the checker previously skipped in this position is now decided, so
   a genuine violation like `inner(Leaf)` becomes a compile error.
 
+- **A refined parameter's own constructor-tag promise now holds inside its own
+  body.** A function whose parameter is `{Option(Int) | is_Some(_)}` could not
+  pass that very value to another function requiring the same thing: the inner
+  call's obligation was *skipped* rather than proved, because a caller-scope
+  variable was always reflected as a fresh, unconstrained datatype value. The
+  identically shaped *measure* contract (`{Tree | size(_) > 0}`) composed, so
+  the difference was invisible — a skip produces no diagnostic. The caller's own
+  tag promise is now loaded as an assumption over the same SMT term the
+  obligation uses, for all **three spellings** of the refined value (`_`, a
+  declared binder, the parameter's own name). Only the exact promised
+  constructor is loaded: a caller promising `is_None(_)` still does not
+  discharge a callee wanting `is_Some(_)` (the call stays skipped), and
+  rebinding or shadowing the name retires the fact. As with the other
+  composition fixes, a call the checker previously skipped in this position is
+  now decided, so a genuine violation there becomes a compile error.
+
 - **A refined list parameter's own promise now holds inside its own body.** A
   function whose parameter is `{List(Int) | len(_) > 0}` could not pass that very
   list to another function requiring the same thing: the inner call's obligation
@@ -165,12 +199,10 @@ git log is authoritative for exact commits.
   (`{List(Int) | len(ys) > 0}`) — so renaming a binder cannot silently unwire a
   working contract.
 
-  With the ADT-measure fix above, this closes composition for every refinement
-  shape but one: `Int`, `Float`, `Bool`, `String` `len`, record fields, the
-  built-in list `len`, and a user `@[measure]` over an ADT all compose, while a
-  **constructor-tag** refinement (`{Option(Int) | is_Some(_)}`) still does not —
-  tag facts are established at the call site by a literal or a `match`, not
-  carried by a binding. This is a distinct mechanism from a caller-established
+  With the ADT-measure fix above and the constructor-tag fix below, this closes
+  composition for every refinement shape: `Int`, `Float`, `Bool`, `String`
+  `len`, record fields, the built-in list `len`, a user `@[measure]` over an
+  ADT, and a constructor tag all compose. This is a distinct mechanism from a caller-established
   runtime **guard** (`if List.length(ys) > 0 do …`), which is unchanged: a guard
   is a test you write, a contract is a promise the caller already kept. It
   applies to **preconditions** only — a parameter's promise reaches calls in the

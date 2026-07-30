@@ -56,6 +56,81 @@ staged-runtime trap (`_build/default/runtime` is not refreshed by a targeted
 `dune build bin/main.exe`). `dune build @install` + `@test/cas-runtime-dir`
 cleared all five.
 
+## Current State (as of 2026-07-30, the REPL capture-free closure leak is closed)
+
+**Counts:** `run_codegen` 518 tests (was 517 — one new
+`repl_jit_cross_line` regression), `run_eval` / `run_compiler` /
+`run_stdlib` unchanged. Known failure: `adversarial-regressions` 39
+(`MARCH_SANITIZE` 30s timeout) — pre-existing and environmental, reproduced
+on a base tree with these changes reverted.
+
+**A capture-free closure materialized under the REPL/JIT no longer leaks one
+allocation per materialization.** Natively such a closure is a single
+immortal global (`Llvm_ctx.intern_static_closure`), so nothing needs to
+release it; `Llvm_emit.static_closure_ok` is `not ctx.repl && ..`, so under
+the REPL the very same closure falls back to a fresh `march_alloc` per
+materialization — and nothing ever released THAT.
+
+Two prior attempts at this both crashed with `EXC_BAD_ACCESS` at `0x0`,
+frame #0 = `0x0`, in `repl_jit_cross_line`'s "stdlib List.length via
+precompile", and both diagnosed the crash by pattern-matching rather than by
+looking. An actual `lldb` backtrace named it immediately:
+`List.length$List_Int -> go$apply$218 -> 0x0`. `go` is `List.length`'s inner
+**self-recursive** helper — capture-free, hence caught by a blanket
+"drop capture-free apply fns" rule, but it already releases its own
+reference through `lift_lambda`'s self-binding alias under completely
+ordinary RC insertion (`let go = $clo in case .. of Nil -> dec_rc go; ..`).
+The added drop was a second release of the same reference: freed on call 1,
+the recursive dispatch then read a zeroed apply-fn slot.
+
+**Fixed in two places, one per capture-free shape** — the second found by
+measurement after the first was already green, and independent of it:
+
+- `Perceus.insert_apply_fn_clo_drop ~repl` (threaded via `insert_rc` ←
+  `perceus ~repl` ← `Repl_jit.lower_module`, which passes `~repl:true` so
+  the flag tracks `ctx.repl` exactly) drops `$clo` for an apply fn whose
+  body mentions `$clo` **nowhere**. That test is what excludes the
+  self-recursive case above. Covers capture-free lambdas.
+- `Llvm_calls.clo_wrap_define ~drop_clo` (`~drop_clo:ctx.repl` at all three
+  emission sites) covers capture-free top-level function values, whose
+  `@<fn>$clo_wrap` trampoline is synthesized at LLVM emission and has no TIR
+  apply fn for Perceus to reach. Sound alongside the slot-read `incrc` from
+  the "REPL variable slots now RC-correct" entry below.
+
+Measured over 2,000 materializations in a REPL fragment: `march_live_allocs`
+grew by exactly 2,000 before and 0 after, for each shape independently.
+Native output is unchanged and provably so — a program exercising both
+shapes plus `List.length` emits byte-identical `--emit-llvm --opt 2` IR
+before and after. `repl_jit_cross_line` green 20/20 consecutive runs.
+
+## Current State (as of 2026-07-30, `forge test` resolves transitive deps)
+
+**`forge test` built `MARCH_LIB_PATH` from DIRECT deps only**, while
+`forge build`/`forge check` walk the graph transitively. `Cmd_build.lib_path_env`
+(`forge/lib/cmd_build.ml:244`) calls `collect_transitive_deps` — a breadth-first,
+nearest-wins walk that pulls in each dep's own prod `deps` recursively —
+but `Cmd_test.project_env` (`forge/lib/cmd_test.ml:105`) mapped
+`dep_to_lib_paths` straight over `deps @ dev_deps @ test_deps`. Consequence: a
+project depending on `B`, where `B` depends on `C`, saw `C`'s modules from
+`lib/` under `forge check` and NOT from `test/` under `forge test` — the test
+compile failed with "Unknown module ..." for a call that typechecks two
+directories away. This is the same class of bug as the earlier
+`scroll`→`bastion`→`depot` failure, just on the one code path that never got
+the fix.
+
+`project_env` now uses `Cmd_build.collect_transitive_deps` over the test scope
+(`deps` + `dev-deps` + `test-deps`, still excluding `dev-only-deps`), so it
+inherits the same breadth-first nearest-wins shadowing — a project's own direct
+path dep still beats a same-named dep reached through a sibling.
+
+Pinned by a new unit regression in `forge/test/test_build_check.ml`
+("project_env walks transitive path deps"): A path-deps `midb`, `midb`
+path-deps `leafc`, assert `leafc/lib` is in `project_env`'s returned lib paths.
+Fails on the old code, passes on the new. All seven other forge suites green
+(242 tests); `test_build_check` has one PRE-EXISTING unrelated failure
+("check: stdlib shadow does not corrupt an unrelated module"), confirmed by
+reverting the change and reproducing it.
+
 ## Current State (as of 2026-07-30, REPL variable slots now RC-correct)
 
 **A real, independent bug found while chasing the still-open REPL
@@ -96,6 +171,54 @@ this fix alone, including the two shapes that actually exercise repeated
 slot access ("var redefinition", "P0: List.length x3 successive
 fragments"). Full `dune build @runtest` clean except the pre-existing
 environmental ASAN failure.
+
+## Current State (as of 2026-07-29, a CONSTRUCTOR-TAG contract composes too)
+
+**Counts:** `test_refinecheck` 358 (was 352), typing corpus 231/231 (was
+229/229), `check-docs.sh` exit 0, stdlib false-positive sweep EMPTY.
+
+The last refined form that did not compose across a call boundary now does.
+
+**The gap.** `fn inner(o : {Option(Int) | is_Some(_)})` called with a caller's
+own parameter `p : {Option(Int) | is_Some(_)}` reported `1 proved, 1 skipped` —
+the proof being `main`'s literal call, the skip being `inner(p)` inside
+`outer`'s body — while the identically-shaped MEASURE contract
+(`{Tree | size(_) > 0}`) composed. `refined_scope_ty` admits every registered
+ADT, `Option` included, so the scope entry carrying `p`'s promise DID exist; the
+gap was downstream, in `reflect_dt`'s `EVar` arm, which declares a bare
+caller-scope name as a FRESH, UNCONSTRAINED datatype constant and never
+consulted the scope channel. The VC was therefore satisfiable both ways. Same
+shape of gap `measure_of_var` had before the measure fix earlier the same day.
+
+**The fix.** `load_scope_tester_facts` in `lib/refinecheck/refine_check.ml`,
+the tester analogue of `load_scope_measure_facts`, wired into `check_call`'s
+`resolve_tester` immediately before it reflects the subject (load-before-reflect,
+mirroring the measure side). It fires only when the actual is a bare name whose
+measure-only ADT scope entry's predicate is EXACTLY a bare tester over its own
+refined value — all three spellings accepted (`_`, the declared binder, the
+parameter's own name) — for the SAME constructor the goal tests and at the same
+datatype sort. It then asserts that tester over `Const x`, the very term the
+goal side builds, so assumption and goal meet on one symbol; both sides emit the
+same `(x, SData adt)` declaration and the VC builder's existing (name, sort)
+dedup covers it, with a per-(name, sort, ctor) memo keeping the assumption from
+being asserted twice.
+
+**Deliberately narrow.** A caller promising `is_None(_)` into a callee wanting
+`is_Some(_)` loads NOTHING and stays skipped. Assuming the caller's promise
+verbatim there would also be sound — and, the two testers being exclusive on
+`Option`, would turn the call into a reported violation — but it is a strictly
+wider claim than "the caller already promised the goal", and a missed report
+costs nothing while a wrong fact is the failure this subsystem exists to
+prevent. Compound predicates, negations and conjunctions likewise load nothing.
+
+**+6 tests (352 → 358)**, a new `compose-tag` group asserting obligation COUNTS
+rather than absence of a diagnostic: the three spellings compose (2 proved,
+0 skipped each — all three were `1 proved, 1 skipped` pre-fix, verified against
+a file-copy-swapped pre-fix binary), and the different-constructor, `let`-rebind
+and `match`-shadow cases must not (1 proved, 1 skipped each — the cardinal-sin
+controls). Bracketed in the corpus by `accept/t129_refine_tag_contract_composes_call`
+and `reject/t130_refine_tag_composition_narrowed_violation`, the latter pinning
+that a real failure through the same non-composing shape is still reported.
 
 ## Current State (as of 2026-07-29, the PARAMETER-NAME spelling composes too)
 

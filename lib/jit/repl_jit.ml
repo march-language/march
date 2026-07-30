@@ -292,7 +292,12 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
     Printf.eprintf "Error: %s\n\n" msg
   ) violations;
   let tir = March_tir.Defun.defunctionalize tir in
-  let tir = March_tir.Perceus.perceus ~repl_vars tir in
+  (* [~repl:true] must track [Llvm_emit]'s [ctx.repl] exactly (every emission
+     path in this file passes [~repl:true]): it is what tells Perceus that a
+     capture-free closure is a real per-materialization [march_alloc] here
+     rather than the immortal static global [static_closure_ok] gives the
+     native build, and therefore needs a callee-side release. *)
+  let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars tir in
   let tir = March_tir.Escape.escape_analysis tir in
   tir
 

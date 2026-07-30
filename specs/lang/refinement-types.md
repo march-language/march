@@ -329,15 +329,15 @@ end
 
 That program exits 0 under `cap verified` (`2 proved, 0 violated, 0 skipped`).
 
-**Every refined form composes except a constructor tag.** All verified
-2026-07-29 at `2 proved, 0 violated, 0 skipped`: `Int` (`{Int | _ > 0}`),
-`Float`, `Bool`, `String` (`{String | len(_) > 0}`), a record field
-(`{v : Config | v.port >= 1}`), the built-in list `len`, and a user
-`@[measure]` over an ADT (`{Tree(Int) | size(_) > 0}`). A **tag** refinement
-still does not forward — `{Option(Int) | is_Some(_)}` passed on to a callee
-with the identical contract stays skipped (`1 proved, 1 skipped`), because tag
-facts are established at the call site by a literal or a `match`, not carried
-by a binding. See [Limitations](#limitations).
+**Every refined form composes.** All verified 2026-07-29 at
+`2 proved, 0 violated, 0 skipped`: `Int` (`{Int | _ > 0}`), `Float`, `Bool`,
+`String` (`{String | len(_) > 0}`), a record field
+(`{v : Config | v.port >= 1}`), the built-in list `len`, a user `@[measure]`
+over an ADT (`{Tree(Int) | size(_) > 0}`), and a **constructor tag**
+(`{Option(Int) | is_Some(_)}`). The tag form composes only for the constructor
+the caller actually promised: a caller declaring `is_None(_)` does not
+discharge a callee wanting `is_Some(_)` — that call stays skipped. See
+[Limitations](#limitations).
 
 **Only the caller's own promise is loaded, and only what it actually entails.**
 A *weaker* declared contract does not launder a stronger requirement: with
@@ -1237,14 +1237,15 @@ edges:
   (`is_Some(_)`), never the payload: `{Option(Int) | is_Some(_)}` is checkable,
   a predicate about the `Int` inside is not. Refinements over other types
   aren't supported.
-- **A tag refinement is discharged at the call site, not carried through a
-  binding — and it is the one refined form that does not compose.** A
-  constructor literal or a `match` narrowing establishes the fact where the call
-  is written. Forwarding a `{Option(Int) | is_Some(_)}` *parameter* to another
-  function expecting the identical contract is still not recognized: the checker
-  stays silent rather than assuming it (re-verified 2026-07-29 —
-  `1 proved, 1 skipped`, the proof being the outer literal). Every other form
-  does compose; see [A Parameter's Own Contract Is a Fact Inside Its
+- **A tag refinement composes only for the constructor the caller promised.**
+  A constructor literal or a `match` narrowing establishes the fact where the
+  call is written, and — since 2026-07-29 — so does the caller's own parameter
+  contract: forwarding a `{Option(Int) | is_Some(_)}` *parameter* to a function
+  expecting the identical contract is proved (`2 proved, 0 skipped`). A
+  *different* constructor is deliberately not assumed: with
+  `outer(p : {Option(Int) | is_None(_)})`, the call `inner(p)` against
+  `is_Some(_)` stays **skipped** rather than reported, even though the two
+  testers are exclusive. See [A Parameter's Own Contract Is a Fact Inside Its
   Body](#a-parameters-own-contract-is-a-fact-inside-its-body).
 - **A refined `let` annotation is trusted, not verified against the bound
   expression.** Writing `let ys : {List(Int) | len(_) > 0} = []` makes the

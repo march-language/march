@@ -111,12 +111,28 @@ accept/reject corpus witnesses in both directions. Documented meanwhile in
   list or ADT measure through a return refinement, and files no obligation.
 - **The measure-alias gates are still unit-global.**
 - **There is still no `@[trusted]`.**
-- **A tag refinement still does not forward.** `{Option(Int) | is_Some(_)}`
+
+**Follow-ups.**
+- ~~**A tag refinement still does not forward.** `{Option(Int) | is_Some(_)}`
   passed on to a callee with the identical contract stays skipped
   (`1 proved, 1 skipped`, the proof being the outer literal). Tag facts are
   established at the call site by a constructor literal or a `match` narrowing,
   not carried by a binding, so this is the one refined form composition does not
-  cover.
+  cover.~~
+  **CLOSED 2026-07-29** — `load_scope_tester_facts` (`lib/refinecheck/refine_check.ml`,
+  the tester analogue of `load_scope_measure_facts`, wired into `check_call`'s
+  `resolve_tester` before it reflects the actual) loads the caller's own tag
+  promise over the same `Const x` datatype term the goal side builds, so
+  `fn outer(p : {Option(Int) | is_Some(_)}) do inner(p) end` now reports
+  `2 proved, 0 violated, 0 skipped`. All three spellings of the refined value
+  compose (`_`, a declared binder, the parameter's own name). Deliberately
+  narrow: the loader fires only when the caller promises the SAME constructor
+  the goal tests — a caller promising `is_None(_)` into a callee wanting
+  `is_Some(_)` loads nothing and stays skipped (assuming it verbatim would also
+  be sound and would report the call, but it is a wider claim than "the caller
+  already promised the goal"). Rebinding (`let p = None`) or a `match`-arm
+  binder of the same name retires the fact. Bracketed by `accept/t129` /
+  `reject/t130`; +6 refinecheck tests (352 → 358).
 - **No local `let` carries a value forward into a later goal, for ANY type.**
   `let u = 5` then `take_pos(u)` against `{Int | _ > 0}` is skipped, and the
   `List` analogue behaves identically. Pre-existing and general (it is also why
@@ -593,12 +609,13 @@ on the first attempt). Two new regression tests in `test/test_codegen.ml`'s
 double-recursive-call correctness check (compiled vs. interpreted parity) to
 catch an over-eager drop as a wrong value or crash rather than growth.
 
-Investigated as a related follow-up but NOT fixed: extending this same
-capture-free-under-REPL gap (the note above) by threading an `is_repl` flag
-into `insert_apply_fn_clo_drop` reintroduced the EXACT SIGSEGV the guard
-exists to prevent (`repl_jit_cross_line` test 7, "stdlib List.length via
-precompile") — reverted. `task_spawn`-ing a genuinely capture-free closure
-from a REPL fragment still leaks one allocation per materialization.
+Investigated as a related follow-up but NOT fixed at the time (since FIXED —
+see "Third attempt" below): extending this same capture-free-under-REPL gap
+(the note above) by threading an `is_repl` flag into
+`insert_apply_fn_clo_drop` reintroduced the EXACT SIGSEGV the guard exists to
+prevent (`repl_jit_cross_line` test 7, "stdlib List.length via precompile") —
+reverted. `task_spawn`-ing a genuinely capture-free closure from a REPL
+fragment still leaked one allocation per materialization.
 
 **Second attempt (2026-07-30), one real bug fixed, the leak still open.**
 Traced the crash to a genuine, independent gap: `lib/tir/llvm_repl.ml`'s
@@ -643,11 +660,87 @@ understood. Reverted the `is_repl` threading again (verified via
 **kept** the slot RC fix, since it is a real, independent correctness fix
 regardless of whether the capture-free leak is ever closed.
 
-`task_spawn`-ing a genuinely capture-free closure from a REPL fragment
-still leaks one allocation per materialization. Needs a proper stack trace
-or bisection through the stdlib-precompile path (not slots) before
-attempting `is_repl` a third time — guessing at the second mechanism from
-here would cost more than it's worth. Original report follows.
+**Third attempt (2026-07-30) — FIXED, and the crash the first two attempts
+kept hitting was never the mechanism either of them guessed at.**
+
+Diagnosed from an actual stack trace this time (`lldb -b` on
+`_build/default/test/run_codegen.exe -e repl_jit_cross_line`, with the drop
+forced on via a temporary env-var hack), which neither prior attempt took:
+
+```
+frame #0: 0x0000000000000000
+frame #1: repl_0.so`go$apply$218 + 432
+frame #2: repl_0.so`List.length$List_Int + 68
+```
+
+The crashing closure is `go`, the inner **self-recursive** helper of
+`List.length` — and it is capture-free, which is exactly why a blanket
+"drop capture-free apply fns under REPL" hit it. The over-release is
+straightforward once the frame is visible: a self-recursive capture-free
+apply fn ALREADY releases its own reference, through `lift_lambda`'s
+self-binding alias, via completely ordinary RC insertion. Confirmed in the
+emitted TIR (`MARCH_DUMP_TXT=perceus`):
+
+```
+fn go$apply($clo, lst, acc) =
+  let go = $clo in
+  case lst of
+    Nil()        -> dec_rc go; dec_rc lst; acc
+    Cons($f,$t)  -> ... call_ptr go(t, $t2)
+```
+
+`dec_rc go` on the dead path, transfer into `call_ptr go(..)` on the live
+one — the alias is an ordinary owned local and Perceus handles it correctly
+with no help. Adding an unconditional entry drop on top is a SECOND release
+of the same reference: rc hits 0 on the first call, the closure is freed,
+and the recursive dispatch reads a zeroed apply-fn slot. Hence frame #0 =
+0x0. Native never showed it because `static_closure_ok` routes native builds
+to the immortal global, where the over-release cannot reach 0.
+
+**The fix, and the third mechanism.** Two changes, each covering one of the
+two capture-free shapes; the second was found by measurement AFTER the first
+was green, and is genuinely independent:
+
+1. `lib/tir/perceus.ml` `insert_apply_fn_clo_drop ~repl` (threaded through
+   `insert_rc` ← `perceus ~repl` ← `lib/jit/repl_jit.ml`'s `lower_module`,
+   which passes `~repl:true` to match `Llvm_emit`'s `ctx.repl` exactly).
+   Under REPL only, an apply fn whose body mentions `$clo` **nowhere** gets
+   an entry `dec_rc $clo`. The `not (mem $clo (free_vars body))` test is the
+   whole correctness story: it is precisely what excludes the self-recursive
+   case above, which mentions `$clo` via its self-binding and must stay
+   untouched. Covers capture-free **lambdas**.
+
+2. `lib/tir/llvm_calls.ml` `clo_wrap_define ~drop_clo` (passed
+   `~drop_clo:ctx.repl` at all three emission sites — two in
+   `lib/tir/llvm_emit.ml`'s `emit_atom`, one in `lib/tir/llvm_repl.ml`'s
+   `emit_repl_fn_with_closure_slot`). Covers capture-free **top-level
+   function values**, which materialize an `@<fn>$clo_wrap` trampoline that
+   is synthesized at LLVM emission and has no TIR apply fn at all — so
+   Perceus can never reach it, and change (1) alone left it leaking at the
+   full pre-fix rate. This is sound alongside PR #123's slot-read `incrc`:
+   a slot-held closure now hands out a fresh reference per read, which the
+   wrapper's drop balances.
+
+**Measured** (new `test/test_codegen.ml` regression,
+`repl_jit_cross_line` "capture-free closure materialization does not leak",
+reading `march_live_allocs` via `dlsym` out of the JIT's own runtime `.so`
+so the fragments under test stay ordinary REPL input): over 2,000
+materializations in a REPL fragment, both shapes grew by exactly **2,000**
+before and **0** after. Each half is pinned independently — with only (1)
+applied, the lambda phase reports 0 and the top-level-fn phase still
+reports 2,000.
+
+**Native impact: none, and proven rather than argued.** Both arms are gated
+on `repl`/`ctx.repl`, and a program exercising both closure shapes plus
+`List.length` emits **byte-identical** `--emit-llvm --opt 2` IR before and
+after (928 lines, `diff` clean), with identical program output.
+
+Verified: `repl_jit_cross_line` fully green (10/10 including the new test)
+and re-run 20x for the flakiness this area has a history of (0 failures);
+full `dune build --root . @runtest` green apart from
+`adversarial-regressions` 39 (`MARCH_SANITIZE` 30s timeout), confirmed
+**pre-existing** by reverting the five source files to base via file-copy
+swap (never `git stash` in a march worktree) and reproducing it there.
 
   **Follow-up audit (2026-07-29, same day): the $clo drop is only sound because every C-runtime call site that invokes a closure's apply function now agrees on the calling convention — and four distinct families of call sites did not, each fixed in `runtime/march_runtime.c` / `lib/tir/llvm_emit.ml`:**
   - `__try_call`/`__try_call_val` (runtime/march_runtime.c) called their thunk once then explicitly `march_decrc`'d it — a second consumption of the reference the thunk's own apply function already released. Flaky, not deterministic (6/30 crashes on a single-capture thunk before the fix, 0/30 after) — freed memory frequently still looked valid enough not to crash immediately. `__try_call` is directly user-callable (`tir_names.ml` documents this) and one of `test/imports/erased_clo_native`'s dune-rule golden tests hit this exact shape, which is how it was traced after CI stayed red past the first (task_spawn) fix.

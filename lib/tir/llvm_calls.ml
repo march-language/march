@@ -135,8 +135,22 @@ let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
     misread a concrete `i64`/`double` return (e.g. a Bool-returning predicate
     passed to List.filter, read back tagged and inverted).  Scalars are tagged
     `(n<<1)|1` and floats bitcast into the ptr slot; the consumer untags via the
-    usual ptr->scalar coerce.  void wrappers carry no value (ret ptr null). *)
-let clo_wrap_define wrap_name (param_ltys : string list) target_ret fn_name =
+    usual ptr->scalar coerce.  void wrappers carry no value (ret ptr null).
+
+    [~drop_clo:true] adds the callee-side release of the closure the caller
+    transferred in — the same ownership contract every TIR apply fn follows via
+    [Perceus.insert_apply_fn_clo_drop] and the param-0 pin in
+    [Borrow.infer_module].  A `$clo_wrap` is NOT a TIR function (it is
+    synthesized here, at emission), so Perceus can never reach it and the drop
+    has to be emitted by hand.  Set only under the REPL/JIT: natively
+    [Llvm_emit.static_closure_ok] routes a top-level function value to one
+    immortal global that must never be released, whereas under [ctx.repl] each
+    materialization is a real [march_alloc] that otherwise leaks (measured at
+    exactly one leaked object per materialization).  Dropping at entry is safe
+    because the wrapper never reads [%_clo] again — it captures nothing, and
+    the dispatch already loaded the code pointer before the call. *)
+let clo_wrap_define ?(drop_clo = false) wrap_name (param_ltys : string list)
+    target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
   (* Closure dispatch uses a uniform ptr ABI (see is_apply_fn / the ECallPtr
      call site).  A `double` param would land in an FP register while the
@@ -173,7 +187,10 @@ let clo_wrap_define wrap_name (param_ltys : string list) target_ret fn_name =
         end else target_ty ^ " " ^ name)
       param_ltys arg_names in
   let call_args = String.concat ", " call_arg_strs in
-  let pro = Buffer.contents prologue in
+  let pro =
+    (if drop_clo then "  call void @march_decrc(ptr %_clo)\n" else "")
+    ^ Buffer.contents prologue
+  in
   if target_ret = "void" then
     Printf.sprintf
       "define ptr @%s(%s) alwaysinline {\nentry:\n%s  call void @%s(%s)\n  ret ptr null\n}\n\n"
