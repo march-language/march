@@ -2,8 +2,8 @@
 
 ## Current State (as of 2026-07-30, a `(`-led statement no longer glues onto the previous line)
 
-**Counts:** `run_compiler` 619 (was 615, +4 parse tests), `run_codegen` 519
-(+2), `run_eval` 256, `run_snapshots` 33 (unchanged — Perceus/borrow behaviour
+**Counts:** `run_compiler` 619 (was 615, +4 parse tests), `run_codegen` 520
+(was 518, +2), `run_eval` 256, `run_snapshots` 33 (unchanged — Perceus/borrow behaviour
 did not shift), `run_stdlib` 826 with only the pre-existing environmental
 `MARCH_SANITIZE` failure, grammar corpus 45/45, `dune build @runtest` clean.
 
