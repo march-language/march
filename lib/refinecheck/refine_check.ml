@@ -1622,10 +1622,13 @@ let scalar_sort_of_param_ty (t : A.ty option) : Smt.sort =
   | _ -> Smt.SInt
 
 (* Like refined_param_ty but for the refined-LOCAL scope: admits Int, String
-   ([str_sort]) and record TyCon params, reporting the SMT sort name — Some
-   "M_…" for a record, Some [str_sort] for a String, None for an Int.  NOTE for
-   consumers: `Some _` does NOT mean "record" — check against [str_sort] before
-   taking a record-specific path. *)
+   ([str_sort]), record TyCon params and — since 2026-07-29 — any other
+   registered ADT (`List(Int)`, a user `Tree`) at the MEASURE-ONLY marker
+   ([meas_sort_name], see the arm below), reporting the SMT sort name — Some
+   "M_…" for a record, Some [str_sort] for a String, Some "$Meas:…" for an ADT,
+   None for an Int.  NOTE for consumers: `Some _` does NOT mean "record" —
+   check against [str_sort], and against [is_meas_sort], before taking a
+   record-specific path. *)
 let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = function
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
@@ -3089,10 +3092,23 @@ let check_call ~root errctx ~span ~(callee : string)
        ([meas_sort_prefix]), reflect that entry's own predicate as an assumption.
        Three restrictions keep this from guessing:
 
-         - the predicate's measures must apply to the entry's OWN binder (`_` or
-           its declared name).  A measure over any other name is a different
-           value; returning None there drops the whole predicate rather than
-           mis-attributing it.
+         - the predicate's measures must apply to the entry's OWN refined value.
+           That value has THREE spellings, all of which denote it and all of
+           which must resolve identically: the anonymous `_`, the annotation's
+           declared binder `v` (`{v : List(Int) | len(v) > 0}`), and the
+           parameter's OWN name `ys` (`{List(Int) | len(ys) > 0}`).  A measure
+           over any OTHER name is a different value; returning None there drops
+           the whole predicate rather than mis-attributing it.
+
+           Accepting only the first two (as this did until 2026-07-29) is the
+           same spelling-class bug the GOAL side carried until 2026-07-27, in
+           this same file: the third spelling silently composed nothing, so
+           `fn outer(ys : {List(Int) | len(ys) > 0}) do inner(ys) end` stayed
+           `1 proved, 1 skipped` while the other two spellings proved both
+           calls.  A skip emits no diagnostic, so renaming a binder into the
+           parameter's own name silently unwired composition.  All three
+           spellings are now pinned by tests in BOTH directions (the positive
+           case AND a weaker `len(ys) >= 0` control that must still skip).
          - the fact must be phrased over the SAME symbol the goal side uses for
            this value, which differs by measure class:
              · a NON-axiomatised measure (list `len`, a plain user measure) is a
@@ -3124,8 +3140,13 @@ let check_call ~root errctx ~span ~(callee : string)
         match List.assoc_opt x sc with
         | Some (b, q, Some s) when is_meas_sort s ->
           let rv _ = None in
+          (* All three spellings of the refined value — `_`, the declared binder
+             [b], and the scope entry's own name [x] — denote it.  See the note
+             above; the goal side's [is_self]/[actual_of_name] pair already
+             accepts the same three. *)
+          let is_self_spelling n = n = b || n = "_" || n = x in
           let rm m' n =
-            if not (n = b || n = "_") then None
+            if not (is_self_spelling n) then None
             else if is_axiom_measure m' then begin
               (* Gate the quantified-axiom preamble on the SHARED per-VC ref, so
                  `(m x)` here and `(m x)` in the goal are interpreted by the same

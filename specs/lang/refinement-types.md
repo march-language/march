@@ -1246,6 +1246,21 @@ edges:
   `1 proved, 1 skipped`, the proof being the outer literal). Every other form
   does compose; see [A Parameter's Own Contract Is a Fact Inside Its
   Body](#a-parameters-own-contract-is-a-fact-inside-its-body).
+- **A refined `let` annotation is trusted, not verified against the bound
+  expression.** Writing `let ys : {List(Int) | len(_) > 0} = []` makes the
+  checker *assume* the annotation at later call sites without ever checking it
+  against the `[]` it is attached to, so a call needing a non-empty list is
+  reported as proved. This is pre-existing and type-independent (`let n : {Int |
+  _ > 0} = 0 - 5` behaves the same) and is tracked as an open follow-up in
+  `specs/todos.md`; until it is closed, an annotation on a `let` is a promise
+  the author makes, not one the checker validates.
+- **A contract that contradicts its own guard makes the guarded branch
+  vacuously provable.** In `fn outer(ys : {List(Int) | len(_) > 0}) do if
+  List.length(ys) == 0 do inner(ys) else 0 end end` the guarded call *proves*:
+  the caller's promise and the guard cannot both hold, so the branch is dead
+  code and its obligation is discharged against an unsatisfiable path. This is
+  expected and safe-direction — the call can never execute with a violating
+  value — not a gap in checking.
 - **A local `let` does not carry a fact forward, for any type.** The pass
   propagates no local binding's value into a later goal, so `let u = 5` then
   `take_pos(u)` against `{Int | _ > 0}` is skipped, and the `List` analogue

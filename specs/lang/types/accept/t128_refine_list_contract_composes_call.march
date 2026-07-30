@@ -4,11 +4,13 @@
 -- obligation is PROVED using the caller's own declared contract alone -- no
 -- runtime guard needed at either call site.
 --
--- Before 2026-07-29 `check_call` only consulted a caller's own PRECONDITION
--- table for the call it was itself checking; the fact that `outer`'s
--- parameter promise also satisfies `inner`'s requirement lived in
--- `scope_facts`, which the compositional check never read. The result was
--- silent: `inner(ys)` inside `outer`'s body was SKIPPED rather than proved,
+-- Before 2026-07-29 a `List`/ADT refinement was not admitted to the refined
+-- scope channel AT ALL: `refined_scope_ty` accepted only Int, String and
+-- record parameters, so `outer`'s promise about `ys` produced no scope entry
+-- anywhere -- there was no fact in `scope_facts` or in any other channel for
+-- the compositional check to miss. `check_call`'s call-site resolver simply
+-- had nothing to consult, and `len$ys` was an unconstrained integer. The
+-- result was silent: `inner(ys)` inside `outer`'s body was SKIPPED rather than proved,
 -- while `outer(ys)` from `main` still proved fine on its own -- so the
 -- program looked identical (exit 0) whether the inner call composed or was
 -- simply ignored.

@@ -1,5 +1,50 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, the PARAMETER-NAME spelling composes too)
+
+**Counts:** `test_refinecheck` 352 (was 348), typing corpus 229/229,
+`check-docs.sh` exit 0, stdlib false-positive sweep EMPTY.
+
+Whole-branch review fix wave for the refinement-contract-composition branch.
+
+**The fix.** The refined value a caller's own contract talks about has three
+spellings — the anonymous `_`, the annotation's declared binder, and the
+parameter's OWN name — and all three must resolve to the same value. The new
+ASSUMPTION side (`load_scope_measure_facts` in
+`lib/refinecheck/refine_check.ml`) accepted only the first two: its measure
+resolver guarded on `n = b || n = "_"`, where `b` is the scope entry's binder
+and `binder_name None = "_"`. So `fn outer(ys : {List(Int) | len(ys) > 0}) do
+inner(ys) end` stayed `1 proved, 1 skipped` while the other two spellings proved
+both calls. The guard now also accepts the scope entry's own name, mirroring
+what the GOAL side has done since 2026-07-27 (`is_self` plus `actual_of_name`).
+The same guard is shared by both measure classes, so the axiom-measure
+equivalent (`{Tree | size(u) > 0}` on the caller's own parameter `u`) was
+broken and is fixed by the same line.
+
+**This is the third time this spelling class has shipped broken in this file**
+(goal side 2026-07-27; assumption side now). The direction is a strict widening
+— it can only turn a skip into a proof — so the tests that matter are the
+false-positive controls: a WEAKER contract in the parameter-name spelling
+(`len(ys) >= 0`, `size(u) >= 0`) must still skip, and both are pinned.
++4 tests (348 → 352): positive and control, for `len` and for an axiomatised
+`@[measure]`.
+
+**Two doc corrections.** `refined_scope_ty`'s docstring now names the ADT
+measure-only marker this branch added (it previously listed only Int/String/
+record and told consumers to check against `str_sort` alone). And
+`accept/t128`'s header no longer claims the missing fact "lived in
+`scope_facts`, which the compositional check never read" — `refined_scope_ty`
+did not admit `List` at all before this branch, so no scope entry existed
+anywhere and `check_call`'s resolver simply had nothing to consult.
+
+**Two findings filed, not fixed** (both pre-existing, both out of scope for a
+composition bug-fix branch): a refined `let` annotation is TRUSTED rather than
+checked against its RHS — `let ys : {List(Int) | len(_) > 0} = []` falsely
+proves a downstream call even under `cap verified` — filed as an OPEN section in
+`specs/todos.md` plus a Limitations bullet; and a caller contract that
+contradicts its own guard makes the guarded branch vacuously provable, which is
+expected safe-direction behaviour and is now documented in Limitations.
+
 ## Current State (as of 2026-07-29, the refinement docs are re-verified against the built compiler)
 
 **Counts:** unchanged — `test_refinecheck` 348, `run_compiler` 615, `run_eval`

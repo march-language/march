@@ -416,6 +416,54 @@ enforcing nothing while the suite stayed green.
 
 ---
 
+## A refined `let` annotation is TRUSTED, never checked against its RHS (OPEN, 2026-07-29)
+
+**Repro.**
+
+```march
+mod X do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer() : Int do
+    let ys : {List(Int) | len(_) > 0} = []
+    inner(ys)
+  end
+  fn main() : Int do outer() end
+end
+```
+
+`--check --refine-report` reports `1 proved, 0 violated, 0 skipped`. The
+`inner(ys)` call is **falsely proved**: `ys` is the empty list, whose length is
+0, but the annotation on the `let` is loaded as a fact without ever being
+checked against the expression it annotates.
+
+**Pre-existing, and widened — not introduced — by the composition branch.** The
+identical shape at `Int` (`let n : {Int | _ > 0} = 0 - 5` then a call needing
+`{Int | _ > 0}`) behaves the same way at the current HEAD, and that code path is
+untouched by this branch. What the branch changed is only *which base types* can
+reach the trusted-annotation path: `List`/ADT now joins `Int`, `String` and
+records, because `refined_scope_ty` admits them. The mechanism, and the bug, are
+older than this work.
+
+**Why this is the sharpest version of the problem under `cap verified`.** That
+mode's entire premise is "if it compiles, it is proved". A `let` annotation that
+is trusted rather than verified is a hole punched straight through that premise
+by ordinary, non-adversarial code: an author writes an annotation to *document*
+an invariant and instead silently manufactures it, and the mode reports success.
+An unchecked assumption a program can state about itself is worse than a skip,
+because a skip at least declines to claim anything.
+
+**The design question, deliberately deferred.** Should a refined `let`
+annotation be *checked* against the bound expression (the obvious answer, and
+what every other refined position does), or is there a case for a trusted
+ascription — and if so it needs to be spelled differently and gated out of
+`cap verified`. Either way it is a semantics change to the annotation form, not
+a bug fix in the composition path, and it belongs in its own branch with its own
+accept/reject corpus witnesses in both directions. Documented meanwhile in
+`specs/lang/refinement-types.md`'s Limitations.
+
+---
+
 ## Refinement contract composition across a call boundary (DONE 2026-07-29)
 
 **Problem.** A refined parameter's own predicate was not an assumption inside

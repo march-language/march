@@ -5036,6 +5036,51 @@ end|});
         Alcotest.(check int) "not proved by the weak fact" 1 proved;
         Alcotest.(check int) "violated" 0 violated)
 
+  ; gated "the PARAMETER-NAME spelling of the caller's contract composes too"
+      (fun () ->
+        (* The third spelling of the refined value: not `_`, not a declared
+           binder, but the parameter's OWN name.  All three denote the same
+           list, so all three must compose identically.  Until 2026-07-29 the
+           assumption side's guard accepted only `_` and the declared binder,
+           so this stayed "1 proved, 1 skipped" while the other two spellings
+           proved both calls — and a skip emits no diagnostic, so renaming a
+           binder to the parameter's name silently unwired composition.  This
+           is the third time this exact spelling class has shipped broken in
+           this file; the GOAL side was fixed for it on 2026-07-27. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LP do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer(ys : {List(Int) | len(ys) > 0}) : Int do inner(ys) end
+  fn main() : Int do outer([1]) end
+end|});
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 2 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
+  ; gated "a WEAKER contract in the parameter-name spelling still does not compose"
+      (fun () ->
+        (* The false-positive control for the case above, and the one that
+           proves the widening did not overshoot: the same third spelling, but
+           the caller promises only `len(ys) >= 0`, true of every list.  It
+           entails nothing about `len > 0`, so the inner call must still be
+           SKIPPED — 1 proved, main's `outer([1])` alone.  A proof here would
+           mean the loaded fact is not the caller's actual promise. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LPW do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer(ys : {List(Int) | len(ys) >= 0}) : Int do inner(ys) end
+  fn main() : Int do outer([1]) end
+end|});
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not proved by the weak fact" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "still skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
   ; gated "rebinding the name retires the list fact" (fun () ->
         (* THE CARDINAL-SIN TEST. `ys` inside the body is a different list after
            the let; the caller's promise says nothing about it. If the outer
@@ -5093,6 +5138,59 @@ end|});
         let proved, violated, _ = March_refinecheck.Obligation.summary () in
         Alcotest.(check int) "proved" 2 proved;
         Alcotest.(check int) "violated" 0 violated)
+
+  ; gated "an ADT measure in the PARAMETER-NAME spelling composes too" (fun () ->
+        (* The axiom-measure equivalent of the list case: the assumption side's
+           spelling guard is SHARED between the two measure classes, so the same
+           2026-07-29 omission skipped this too.  Pinned separately because an
+           axiomatised measure travels a different reflection path (an
+           `Smt.SData` datatype term plus the quantified-axiom preamble), so the
+           list case passing is not evidence that this one does. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TP do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+  fn inner(t : {Tree | size(_) > 0}) : Int do 1 end
+  fn outer(u : {Tree | size(u) > 0}) : Int do inner(u) end
+  fn main() : Int do outer(Node(Leaf, 5, Leaf)) end
+end|});
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 2 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
+  ; gated "a WEAKER ADT contract in the parameter-name spelling still skips"
+      (fun () ->
+        (* Direction control for the case above: `size(u) >= 0` is true of every
+           tree and must not discharge `size(_) > 0`. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TPW do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+  fn inner(t : {Tree | size(_) > 0}) : Int do 1 end
+  fn outer(u : {Tree | size(u) >= 0}) : Int do inner(u) end
+  fn main() : Int do outer(Node(Leaf, 5, Leaf)) end
+end|});
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not proved by the weak fact" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "still skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
 
   ; gated "a user ADT fact is retired on rebind, not proved falsely" (fun () ->
         (* THE CARDINAL-SIN TEST.  `let u = Leaf` makes the call genuinely

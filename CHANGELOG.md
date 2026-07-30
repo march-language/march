@@ -130,7 +130,11 @@ git log is authoritative for exact commits.
   across a call boundary for `len`-shaped list refinements the same way they
   already did for scalars. Only the *caller's* promise is loaded, so a weaker
   contract (`len(_) >= 0`) still does not discharge a stronger callee, and
-  rebinding or shadowing the name retires the fact.
+  rebinding or shadowing the name retires the fact. All **three spellings** of
+  the refined value compose identically — the anonymous `_`, a declared binder
+  (`{v : List(Int) | len(v) > 0}`), and the parameter's own name
+  (`{List(Int) | len(ys) > 0}`) — so renaming a binder cannot silently unwire a
+  working contract.
 
   With the ADT-measure fix above, this closes composition for every refinement
   shape but one: `Int`, `Float`, `Bool`, `String` `len`, record fields, the
