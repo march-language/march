@@ -71,6 +71,24 @@ let emit_prev_slot_bridges ctx (prev_slots : repl_slot_info list) =
       | _ ->
         let pt = Llvm_ctx.fresh ctx "pv" in
         Printf.bprintf ctx.Llvm_ctx.buf "  %s = inttoptr i64 %s to ptr\n" pt raw;
+        (* RC contract: a slot is a LONG-LIVED reference, read an unbounded
+           number of times across an unbounded number of later fragments for
+           the rest of the REPL session — the same shape as
+           march_signal_drain's watcher table (runtime/march_runtime.c), not
+           the map/fold builtins' transfer-once-consume-once one. march_repl_get
+           itself does no RC bookkeeping (it is untyped at the C level and
+           cannot tell a heap pointer from a raw Int/Bool/Float bit pattern —
+           slots store scalars UNTAGGED, unlike March's usual tagged-immediate
+           convention, so a blind IS_HEAP_PTR-gated incrc inside the C
+           function would misfire on an ordinary integer whose bit pattern
+           happens to look pointer-shaped). The incrc belongs here instead,
+           where the static [Tir.ty] is known and this branch is reached only
+           for genuinely heap-typed slots. Hands the reader its OWN reference
+           so the fragment's own Perceus-inserted decrefs balance correctly
+           without disturbing the slot's permanent hold — mirrors
+           march_signal_drain's per-delivery incrc before calling through a
+           long-held watcher closure. *)
+        Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_incrc(ptr %s)\n" pt;
         pt
     in
     Printf.bprintf ctx.Llvm_ctx.buf "  store %s %s, ptr %%%s.addr\n" llty converted si.rs_bare;
@@ -87,6 +105,30 @@ let emit_store_to_slot ctx (slot_idx : int) (result : string) (tir_ty : Tir.ty) 
       Printf.bprintf ctx.Llvm_ctx.buf "  %s = bitcast double %s to i64\n" bt result;
       bt
     | _ ->
+      (* This slot is genuinely OVERWRITTEN, not merely first-written, for the
+         "v" magic slot (the last-expression-value binding, reused across
+         every subsequent REPL expression per repl_jit.ml's alloc_slot logic)
+         — each new expression's result replaces whatever "v" held before,
+         and that old value needs releasing or it is retained forever with
+         no name left pointing at it. march_repl_get/@march_repl_set
+         themselves stay untyped and RC-blind (see emit_prev_slot_bridges'
+         doc comment on why the incrc/decrc calls live at these call sites
+         instead of inside the C functions); march_decrc is IS_HEAP_PTR-
+         guarded, so this is a safe no-op for a slot that starts at 0 (the
+         C array's static zero-init) or otherwise never held a heap value.
+
+         A plain `let x = ...` binding gets a FRESH slot per repl_jit.ml's
+         alloc_slot (never reused across distinct declarations), so this
+         decrc is a harmless no-op there — but see the note filed in
+         specs/todos.md: REBINDING a name (`let x = 5` then later
+         `let x = "hi"`) abandons the OLD slot's heap value with nothing
+         ever releasing it, a separate, pre-existing leak this fix does not
+         address. *)
+      let old_raw = Llvm_ctx.fresh ctx "slot_old" in
+      Printf.bprintf ctx.Llvm_ctx.buf "  %s = call i64 @march_repl_get(i64 %d)\n" old_raw slot_idx;
+      let old_pt = Llvm_ctx.fresh ctx "slot_oldp" in
+      Printf.bprintf ctx.Llvm_ctx.buf "  %s = inttoptr i64 %s to ptr\n" old_pt old_raw;
+      Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_decrc(ptr %s)\n" old_pt;
       let pt = Llvm_ctx.fresh ctx "pb" in
       Printf.bprintf ctx.Llvm_ctx.buf "  %s = ptrtoint ptr %s to i64\n" pt result;
       pt
@@ -112,7 +154,13 @@ let emit_slot_loader_fns ctx (prev_slots : repl_slot_info list) =
       let (conv_instr, retval) = match ty with
         | Tir.TInt | Tir.TBool -> ("", "%raw")
         | Tir.TFloat -> ("  %fv = bitcast i64 %raw to double\n", "%fv")
-        | _ -> ("  %pv = inttoptr i64 %raw to ptr\n", "%pv")
+        | _ ->
+          (* Same RC contract as emit_prev_slot_bridges' heap-typed branch
+             above — this is a SEPARATE read site for the same slot (a prior
+             REPL binding referenced from inside a later fragment's function
+             body, as a zero-arg call, rather than bridged directly into the
+             fragment's entry block), so it needs its own incrc. *)
+          ("  %pv = inttoptr i64 %raw to ptr\n  call void @march_incrc(ptr %pv)\n", "%pv")
       in
       Printf.bprintf ctx.Llvm_ctx.buf
         "\ndefine %s @%s() {\nentry:\n  %%raw = call i64 @march_repl_get(i64 %d)\n%s  ret %s %s\n}\n"
