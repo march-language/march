@@ -484,33 +484,48 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
      intervening newline. *)
   let emit lexbuf =
     let tok = next lexbuf in
-    (match tok with
-     | Parser.LPAREN ->
-       (* Guard: `<call>)( ...` on one line is a curried-call juxtaposition. *)
-       if !prev_significant = Some Parser.RPAREN
-          && not !saw_nl_since_significant
-          && !last_closed_call
-       then
-         raise (March_errors.Errors.ParseError
-           ("`f(...)(...)` is not a chained call — March functions are not \
-             curried.",
-            Some "Write `f(a, b)` for a multi-argument call, or put the second \
-                  call on its own line if you meant two separate statements.",
-            lexbuf.Lexing.lex_start_p));
-       (* Classify this paren: a CALL's arg list iff the preceding significant
-          token is value-ending (`f(`/`Con(`/`g()(`/`xs[i](`), else a group.
-          [prev_significant] still holds the token before this LPAREN — it is
-          not updated until the bottom of [emit]. *)
-       let is_call =
-         match !prev_significant with
-         | Some t -> is_value_ending t
-         | None -> false
-       in
-       Stack.push is_call paren_kinds
-     | Parser.RPAREN ->
-       last_closed_call :=
-         (if Stack.is_empty paren_kinds then false else Stack.pop paren_kinds)
-     | _ -> ());
+    let tok =
+      match tok with
+      | Parser.LPAREN ->
+        (* Guard: `<call>)( ...` on one line is a curried-call juxtaposition. *)
+        if !prev_significant = Some Parser.RPAREN
+           && not !saw_nl_since_significant
+           && !last_closed_call
+        then
+          raise (March_errors.Errors.ParseError
+            ("`f(...)(...)` is not a chained call — March functions are not \
+              curried.",
+             Some "Write `f(a, b)` for a multi-argument call, or put the second \
+                   call on its own line if you meant two separate statements.",
+             lexbuf.Lexing.lex_start_p));
+        (* Classify this paren: a CALL's arg list (`f(`/`Con(`/`g()(`/`xs[i](`)
+           iff the preceding significant token is value-ending AND on the SAME
+           LINE; otherwise a group/tuple/unit. [prev_significant] still holds
+           the token before this LPAREN — it is not updated until the bottom of
+           [emit].
+
+           The same-line requirement is what makes a `(`-led line its own
+           statement (grammar §7.3 — `f(1)⏎(g(2))` is two statements). Inside a
+           block the NL is swallowed, so without the retag below the parser saw
+           the two adjacent and applied the call rule: `let _ = a`⏎`()` parsed
+           as `let _ = a()`, silently INVOKING the parameter — a
+           control-transfer crash once compiled. [LPAREN_STMT] is accepted only
+           by the group/tuple/unit rules (and, for a match arm opening on a
+           fresh line, the pattern rules), never by the call rule. *)
+        let value_ending_prev =
+          match !prev_significant with
+          | Some t -> is_value_ending t
+          | None -> false
+        in
+        let starts_statement = value_ending_prev && !saw_nl_since_significant in
+        Stack.push (value_ending_prev && not starts_statement) paren_kinds;
+        if starts_statement then Parser.LPAREN_STMT else tok
+      | Parser.RPAREN ->
+        last_closed_call :=
+          (if Stack.is_empty paren_kinds then false else Stack.pop paren_kinds);
+        tok
+      | _ -> tok
+    in
     (match tok with
      | Parser.NL -> ()  (* keep saw_nl set; prev_significant unchanged *)
      | _ ->

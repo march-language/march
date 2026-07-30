@@ -1,0 +1,28 @@
+mod P33ParenStmtAfterBareIdent do
+  -- §7.3 — the two-statement reading of a `(`-led line is NOT limited to a
+  -- preceding call's `)` (p24). It applies to ANY value-ending token, and the
+  -- bare-identifier case is the one that used to break: `let _ = a` followed by
+  -- a line holding only `()` parsed as the single binding `let _ = a()`,
+  -- silently INVOKING the parameter. The interpreter reported "applied
+  -- non-function value"; compiled, codegen emitted the closure-ABI indirect
+  -- call (fn_ptr loaded from offset 16 of the receiver) and jumped into the
+  -- String's character payload — EXC_BAD_ACCESS, exit 138.
+  --
+  -- `discard` must return unit having done nothing, and `main` must print `ok`.
+  fn discard(a) do
+    let _ = a
+    ()
+  end
+
+  -- Same shape with a non-empty tuple on the following line.
+  fn pair(a) do
+    let _ = a
+    (1, 2)
+  end
+
+  fn main() do
+    discard("x")
+    let _ = pair("y")
+    IO.puts("ok")
+  end
+end
