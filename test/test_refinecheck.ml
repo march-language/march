@@ -5792,6 +5792,44 @@ mod PS4 do
 end|}))
   ]
 
+(* Task 4: a QUALIFIED spelling inside a predicate (`List.length(_)`) parses
+   and typechecks, but predicates are never desugared, so `List.length` stays
+   an `EField` chain rather than the dotted `EVar` the measure alias keys on
+   — the contract enforces NOTHING, silently.  This suite pins a WARNING
+   (not an error — the module still compiles) naming both the qualified
+   spelling found and the bare spelling that would actually work. *)
+let qualified_pred_suite =
+  [ gated "a qualified spelling in a predicate warns" (fun () ->
+        (* PRE-FIX: silent. The contract parses, typechecks, and enforces
+           NOTHING, because predicates are never desugared so List.length
+           stays an EField chain rather than the dotted EVar the alias keys
+           on. Looks like it works; doesn't. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP1 do
+  fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
+  fn main() : Int do inner([1]) end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "warns about the qualified spelling" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             let m = d.March_errors.Errors.message in
+             contains m "List.length" && contains m "len") msgs))
+
+  ; gated "the bare spelling does NOT warn" (fun () ->
+        (* The false-positive control: the supported spelling must stay quiet. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP2 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn main() : Int do inner([1]) end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length (ctx.March_errors.Errors.diagnostics)))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5839,4 +5877,5 @@ let () =
       ("let-annotation", let_annotation_suite);
       ("postcond-ledger", postcond_ledger_suite);
       ("trusted", trusted_suite);
-      ("postcond-strict", postcond_strict_suite) ]
+      ("postcond-strict", postcond_strict_suite);
+      ("qualified-predicate", qualified_pred_suite) ]

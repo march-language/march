@@ -342,6 +342,21 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **A qualified spelling inside a refinement predicate no longer enforces
+  nothing silently.** `{List(Int) | List.length(_) > 0}` parses, typechecks,
+  and checks nothing: the `List.length`→`len` alias keys on the dotted variable
+  the *desugarer* produces, but refinement predicates are never run through the
+  expression desugarer, so inside a predicate the name stays a field-access
+  chain, the alias never fires, and the obligation is skipped — invisibly,
+  since skipping is silence by default. The contract reads as working and does
+  not work. It now warns, naming both the spelling found and the bare measure
+  that does work (`len`); the same applies to `String.byte_size`. This is a
+  warning rather than an error on purpose: the shape compiles today, so
+  promoting it would break working builds, and the defect is the silence, not a
+  missing capability — the bare spelling `len(_) > 0` has always enforced the
+  contract. Desugaring predicates so the qualified spelling means what it reads
+  as remains open.
+
 - **`--refine-report` now counts return-type refinements, not just call-site
   preconditions.** A function's own return refinement (`fn mk() : {Int | _ > 0}
   do 100 end`) previously went through `check_post`, which discharged the

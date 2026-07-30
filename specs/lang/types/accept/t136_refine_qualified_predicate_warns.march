@@ -1,0 +1,37 @@
+-- A QUALIFIED spelling inside a refinement predicate -- `List.length(_)`
+-- rather than the bare `len(_)` -- parses, typechecks, and enforces NOTHING.
+-- Refinement predicates are never run through the expression desugarer
+-- (`Desugar.respan_ty` is the only place that touches `A.TyRefine`, and it
+-- only respans), so `List.length` stays an `EField` chain rather than the
+-- dotted `EVar` the measure alias keys on. The obligation this contract
+-- looks like it generates is silently skipped.
+--
+-- Until Task 4 of the 2026-07-30 refinement backlog that was SILENT: the
+-- contract read as working and did nothing. It now emits a WARNING naming
+-- both the qualified spelling found and the bare spelling that works.
+--
+-- This is an `accept/` witness on purpose, and its exit code is the point.
+-- A warning does not change `--check`'s exit status, so this program must
+-- stay exit 0: turning the qualified spelling into a hard ERROR is a
+-- separate decision (it would break code that compiles today), and this
+-- witness is the regression guard against making it one by accident. The
+-- warning TEXT is pinned in `test/test_refinecheck.ml`'s `qualified-predicate`
+-- suite instead -- `check_types.sh` asserts only exit 0 for `accept/`, and
+-- pins substrings for `reject/` alone.
+--
+-- The bare spelling that DOES enforce is already witnessed by t115-t118,
+-- t128 and t130; this program is the negative-space companion to those.
+--
+-- See specs/lang/refinement-types.md, "A qualified spelling in a predicate
+-- enforces nothing".
+mod T136 do
+
+  fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do
+    List.length(xs)
+  end
+
+  fn main() : Int do
+    inner([1])
+  end
+
+end

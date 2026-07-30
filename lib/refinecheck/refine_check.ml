@@ -4883,6 +4883,23 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
+(* Render a dotted-access chain (`List.length`, `M.N.f`, …) back to a string,
+   or [None] once anything other than a bare `EVar`/`EField` receiver is
+   found.  Mirrors what desugar's dotted-EVar flattening recognizes, so this
+   only fires on the shapes desugar WOULD have flattened had it run over the
+   predicate. *)
+let rec qualified_name (e : A.expr) : string option =
+  match e with
+  | A.EVar { A.txt; _ } -> Some txt
+  (* An uppercase module segment (`List`, `String`, …) parses as a
+     zero-arg `ECon`, not an `EVar` — mirrors [desugar_expr]'s
+     [flatten_module_path], which is the ground truth for what the parser
+     produces for a dotted reference like `List.length`. *)
+  | A.ECon (mod_name, [], _) -> Some mod_name.A.txt
+  | A.EField (r, { A.txt = n; _ }, _) ->
+    Option.map (fun base -> base ^ "." ^ n) (qualified_name r)
+  | _ -> None
+
 (* ── Predicate-vocabulary warning ──────────────────────────────────────────
    A refinement predicate that calls a name [known_predicate_fn] does not
    recognize is never reflected into an SMT query — the definite-failure
@@ -4903,6 +4920,34 @@ let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
              "`%s` is not a measure or known predicate, so this refinement is not checked. \
               Annotate the function `@[measure]`, or use a supported predicate."
              f);
+      List.iter go args
+    (* A QUALIFIED call in call position (`List.length(_)`) is never desugared
+       here — [Desugar.respan_ty] is the only place that touches `A.TyRefine`
+       and it never rewrites the predicate — so it stays an `EField` chain
+       rather than the dotted `EVar` [measure_alias] keys
+       on, and the obligation this predicate should generate is silently
+       skipped instead.  The contract parses and typechecks and looks like it
+       works; it enforces nothing.  Warn once, naming the qualified spelling
+       found and the bare spelling that IS recognized. *)
+    | A.EApp ((A.EField _ as fhd), args, span) ->
+      (match qualified_name fhd with
+       | Some qname ->
+         let bare =
+           match measure_alias qname with
+           | Some m -> m
+           | None ->
+             (match String.rindex_opt qname '.' with
+              | Some i -> String.sub qname (i + 1) (String.length qname - i - 1)
+              | None -> qname)
+         in
+         Err.warning errctx ~span
+           (Printf.sprintf
+              "`%s` is a qualified call inside a refinement predicate. Predicates are \
+               not desugared, so this is never reflected and the refinement enforces \
+               nothing. Use the bare spelling `%s` instead."
+              qname bare)
+       | None -> ());
+      go fhd;
       List.iter go args
     | A.EApp (f, args, _) -> go f; List.iter go args
     | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es

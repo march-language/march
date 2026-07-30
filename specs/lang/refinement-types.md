@@ -290,6 +290,45 @@ Use `assert` as the escape hatch for facts the checker can't derive on its own
 A guard may also read a **record field** (`if c.port >= 1 do serve(c)`) — see
 [Refining a record over its fields](#refining-a-record-over-its-fields).
 
+### A qualified spelling in a predicate enforces nothing
+
+The alias above holds in a **guard** — ordinary code the desugarer rewrites.
+It does **not** hold inside a **predicate**, the `{T | … }` itself:
+
+```march
+fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do …   -- enforces NOTHING
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do …           -- enforces the contract
+```
+
+Refinement predicates are never run through the expression desugarer —
+`Desugar.respan_ty` is the only place that touches `A.TyRefine`, and it only
+respans — so inside a predicate `List.length` stays a field-access chain
+rather than the dotted variable the alias keys on. The obligation the contract
+looks like it generates is simply skipped, and skipping is silent by default.
+The contract parses, typechecks, reads as working, and checks nothing.
+
+Since 2026-07-30 this **warns**, naming both the spelling found and the bare
+measure that works:
+
+```
+`List.length` is a qualified call inside a refinement predicate. Predicates
+are not desugared, so this is never reflected and the refinement enforces
+nothing. Use the bare spelling `len` instead.
+```
+
+It is a warning rather than an error on purpose: this shape compiles today, so
+promoting it would break working builds, and the defect being fixed is the
+*silence*, not the lack of capability — the bare spelling has always worked.
+Desugaring predicates properly, so the qualified spelling means what it reads
+as, is a genuine follow-up and a much larger change with its own regression
+surface. Witnessed by `accept/t136` (which pins that the program stays exit 0)
+and by `test_refinecheck.ml`'s `qualified-predicate` suite, which pins the
+warning text together with a false-positive control that the bare spelling
+stays quiet.
+
+The same reasoning covers the other qualified measures: write `len(_)`, not
+`String.byte_size(_)`, inside a predicate.
+
 ---
 
 ## A Parameter's Own Contract Is a Fact Inside Its Body
