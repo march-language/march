@@ -2635,16 +2635,61 @@ let rec march_headers_to_string = function
     n ^ ": " ^ v ^ "\r\n" ^ march_headers_to_string rest
   | _ -> ""
 
-(** Send all bytes in [data] to [sock], ignoring short writes. *)
+(* ── Cooperative blocking for WebSocket-owned sockets ───────────────── *)
+(* A WebSocket connection's March handler (e.g. a `ws_loop` that calls
+   WebSocket.recv in a loop) is written in ordinary blocking style: recv
+   must not return until a frame arrives. Running that inline on the
+   single-threaded HTTP event loop would stall EVERY other connection for
+   the WS connection's entire lifetime — one idle browser tab holding a
+   socket open would block all further page loads.
+
+   So a WS-owned socket stays non-blocking, and every recv/send that would
+   block performs [Ws_block] instead. [run_http_event_loop] installs an
+   effect handler that captures the continuation, parks it against the fd,
+   and resumes it once select reports that fd ready. That's the same
+   cooperative discipline the HTTP request/response phases already use —
+   but here the suspension point is deep inside the *interpreted* handler,
+   which is precisely what an effect continuation can capture and a
+   hand-rolled state machine cannot (we do not control the shape of the
+   user's ws_loop).
+
+   Callers with no handler installed — the blocking spawn_n accept loop,
+   or any genuinely blocking socket — get [Effect.Unhandled] and fall back
+   to a blocking select, preserving the previous behavior exactly. *)
+type ws_wait_dir = Ws_wait_read | Ws_wait_write
+
+type _ Effect.t +=
+  Ws_block : (Unix.file_descr * ws_wait_dir) -> unit Effect.t
+
+let ws_wait_ready (sock : Unix.file_descr) (dir : ws_wait_dir) : unit =
+  try Effect.perform (Ws_block (sock, dir))
+  with Effect.Unhandled _ ->
+    (* No event loop driving us: wait synchronously, as before. *)
+    (try
+       match dir with
+       | Ws_wait_read  -> ignore (Unix.select [sock] [] [] (-1.0))
+       | Ws_wait_write -> ignore (Unix.select [] [sock] [] (-1.0))
+     with _ -> ())
+
+(** Send all bytes in [data] to [sock], ignoring short writes.
+    On a non-blocking socket an EAGAIN is a "not yet", never an error:
+    yield until writable and resume, or the response would be silently
+    truncated (the pre-existing [with Unix_error _ -> ()] below would
+    otherwise swallow it). *)
 let tcp_send_all sock data =
   let buf   = Bytes.of_string data in
   let total = Bytes.length buf in
   let off   = ref 0 in
   (try
      while !off < total do
-       let n = Unix.send sock buf !off (total - !off) [] in
-       if n = 0 then off := total
-       else off := !off + n
+       match
+         (try `Sent (Unix.send sock buf !off (total - !off) [])
+          with Unix.Unix_error
+                 ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINTR), _, _) -> `Again)
+       with
+       | `Again  -> ws_wait_ready sock Ws_wait_write
+       | `Sent 0 -> off := total
+       | `Sent n -> off := !off + n
      done
    with Unix.Unix_error _ -> ())
 
@@ -2872,9 +2917,19 @@ let ws_recv_exact sock (buf : bytes) off n =
   let got = ref 0 in
   let ok  = ref true in
   while !ok && !got < n do
-    let r = Unix.recv sock buf (off + !got) (n - !got) [] in
-    if r = 0 then ok := false
-    else got := !got + r
+    (* EAGAIN on a WS-owned (non-blocking) socket means "no bytes yet", not
+       end-of-stream: yield to the event loop and resume mid-frame. [got]
+       is captured by the continuation, so a frame split across several
+       readiness events reassembles correctly. Without this the caller's
+       catch-all would misread EAGAIN as the peer hanging up. *)
+    match
+      (try `Got (Unix.recv sock buf (off + !got) (n - !got) [])
+       with Unix.Unix_error
+              ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINTR), _, _) -> `Again)
+    with
+    | `Again -> ws_wait_ready sock Ws_wait_read
+    | `Got 0 -> ok := false
+    | `Got r -> got := !got + r
   done;
   !ok
 
@@ -3181,19 +3236,27 @@ let http_try_parse_request (raw : string) :
     if available_body < content_length then None  (* body not fully arrived yet *)
     else Some (meth, full_path, headers_raw, String.sub raw header_end content_length)
 
-(** Run the pipeline for a fully-received request and produce the response
-    bytes to write (or detect a WebSocket upgrade, returning [None] since
-    there is no ordinary HTTP response to queue in that case). This part is
-    pure in-memory computation (no blocking I/O) except for the WS handshake
-    write and handoff, which — like the prior blocking implementation —
-    intentionally takes over the socket for the lifetime of the WS
-    connection (matching the documented, unchanged semantics of
-    WebSocketUpgrade / handler_fn: once upgraded, this one connection is
-    WS-owned and blocking, exactly as before this fix). *)
+(** What the event loop should do with a connection once its request has
+    been run through the pipeline. *)
+type http_outcome =
+  | HttpRespond of string  (* queue these response bytes for writing *)
+  | HttpWsUpgrade of value (* 101 sent; [value] is the WS handler closure *)
+  | HttpDrop               (* nothing to send — close the connection *)
+
+(** Run the pipeline for a fully-received request and decide the outcome.
+    This is pure in-memory computation (no blocking I/O) apart from the WS
+    handshake write.
+
+    On a WebSocket upgrade the socket is NOT taken over here. The 101 is
+    written and the handler closure is handed back to the event loop, which
+    runs it as a cooperative fiber ([Ws_block] / [ws_wait_ready]) so the WS
+    connection cannot stall the other connections. It also deliberately
+    leaves the socket in non-blocking mode: the fiber depends on recv/send
+    reporting EAGAIN in order to yield. *)
 let http_run_pipeline_and_respond
     (sock : Unix.file_descr) (pipeline_fn : value)
     (meth : string) (full_path : string)
-    (headers_raw : (string * string) list) (body : string) : string option =
+    (headers_raw : (string * string) list) (body : string) : http_outcome =
   let conn_val = build_conn_value
       ~fd:(Obj.magic sock : int)
       ~method_str:meth ~full_path ~headers_raw ~body () in
@@ -3210,7 +3273,7 @@ let http_run_pipeline_and_respond
     in
     (match ws_key_opt with
      | None ->
-       Some "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+       HttpRespond "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
      | Some (_, key) ->
        let accept = ws_accept_key (String.trim key) in
        let handshake =
@@ -3219,22 +3282,10 @@ let http_run_pipeline_and_respond
          "Connection: Upgrade\r\n" ^
          "Sec-WebSocket-Accept: " ^ accept ^ "\r\n\r\n"
        in
-       (* The handshake + subsequent WS frames are written/read with the
-          same blocking helpers the old implementation used: this one
-          connection becomes WS-owned for its lifetime, same as before.
-          The accept loop above put this socket in non-blocking mode for
-          its own multiplexed select() bookkeeping; that flag is still set
-          here and must be cleared before handing off, or ws_recv_frame's
-          blocking-style Unix.recv calls raise EAGAIN/EWOULDBLOCK the
-          moment the client goes idle (even on the very first read, if it
-          races ahead of the client's next frame), which ws_recv_frame's
-          catch-all then misreports as the peer closing the connection. *)
-       (try Unix.clear_nonblock sock with _ -> ());
+       (* Socket stays non-blocking (the accept loop set that): the WS fiber
+          needs EAGAIN to know when to yield. *)
        tcp_send_all sock handshake;
-       let fd_int = (Obj.magic sock : int) in
-       let ws_sock = VCon ("WsSocket", [VInt fd_int]) in
-       (try ignore (!apply_hook handler_fn [ws_sock]) with _ -> ());
-       None)
+       HttpWsUpgrade handler_fn)
   | _ ->
     let (status, resp_headers, resp_body) = extract_conn_response result_conn in
     let effective_status = if status = 0 then 200 else status in
@@ -3247,14 +3298,19 @@ let http_run_pipeline_and_respond
         (String.length resp_body)
         resp_body
     in
-    Some response
+    HttpRespond response
 
 (** Non-blocking multiplexed HTTP accept/serve loop.
     Tracks every open connection (not just the listening socket) and
     [Unix.select]s across all of them each iteration, so a connection that
     is idle/slow/partially-written never blocks progress on any other
     connection. Each connection is driven forward only when [select]
-    reports it ready for the operation it is currently waiting on. *)
+    reports it ready for the operation it is currently waiting on.
+
+    Upgraded WebSocket connections are multiplexed the same way: each runs
+    as an effect-handler fiber that parks on [Ws_block] whenever its recv/
+    send would block, so a long-lived (usually idle) WS connection costs one
+    parked continuation rather than the whole loop. See [ws_wait_ready]. *)
 let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : unit =
   let open Unix in
   set_nonblock server_sock;
@@ -3263,6 +3319,48 @@ let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : 
   let close_conn (c : http_conn_state) =
     Hashtbl.remove conns c.hc_sock;
     (try close c.hc_sock with _ -> ())
+  in
+  (* Upgraded WS connections, parked mid-handler waiting on readiness.
+     A fiber is present here only while suspended; while it runs it owns
+     the (single) thread of control, exactly like an HTTP phase callback. *)
+  let ws_parked :
+    (Unix.file_descr,
+     (unit, unit) Effect.Deep.continuation * ws_wait_dir) Hashtbl.t =
+    Hashtbl.create 8
+  in
+  let close_ws (fd : Unix.file_descr) =
+    Hashtbl.remove ws_parked fd;
+    (try close fd with _ -> ())
+  in
+  (* Deep handler: persists across every [continue], so the fiber can park
+     and resume any number of times over the connection's lifetime. *)
+  let ws_fiber_handler fd : (unit, unit) Effect.Deep.handler =
+    { Effect.Deep.retc = (fun () -> close_ws fd)
+    ; Effect.Deep.exnc = (fun _ -> close_ws fd)
+    ; Effect.Deep.effc =
+        (fun (type a) (eff : a Effect.t) ->
+           match eff with
+           | Ws_block (bfd, dir) ->
+             Some (fun (k : (a, unit) Effect.Deep.continuation) ->
+                 Hashtbl.replace ws_parked bfd (k, dir))
+           | _ -> None)
+    }
+  in
+  let start_ws_fiber fd handler_fn =
+    let ws_sock = VCon ("WsSocket", [VInt (Obj.magic fd : int)]) in
+    Effect.Deep.match_with
+      (fun () -> ignore (!apply_hook handler_fn [ws_sock]))
+      ()
+      (ws_fiber_handler fd)
+  in
+  let resume_ws fd =
+    match Hashtbl.find_opt ws_parked fd with
+    | None -> ()
+    | Some (k, _dir) ->
+      (* Remove before resuming: the fiber will re-park itself (fresh
+         continuation) if it blocks again. *)
+      Hashtbl.remove ws_parked fd;
+      Effect.Deep.continue k ()
   in
   (* Try to make forward progress reading a request on [c]. Called only
      after select reports the socket readable. *)
@@ -3283,26 +3381,31 @@ let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : 
       (match http_try_parse_request (Buffer.contents c.hc_in_buf) with
        | None -> ()  (* need more bytes; keep waiting on this socket *)
        | Some (meth, full_path, headers_raw, body) ->
-         (* Run the (in-memory, non-blocking) pipeline now. This may take
-            over the socket for a WebSocket upgrade — matching the prior
-            blocking implementation's semantics exactly — in which case
-            there is no HTTP response to queue and the connection is
-            simply closed out from the event loop's perspective. *)
+         (* Run the (in-memory, non-blocking) pipeline now. A WebSocket
+            upgrade hands the socket to a cooperative fiber instead of
+            queueing a response. *)
          (match
             (try http_run_pipeline_and_respond c.hc_sock pipeline_fn
                    meth full_path headers_raw body
              with
              | Eval_error msg ->
                Printf.eprintf "[http handler error] %s\n%!" msg;
-               Some "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
-             | Unix.Unix_error _ -> None
-             | _ -> None)
+               HttpRespond
+                 "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+             | Unix.Unix_error _ -> HttpDrop
+             | _ -> HttpDrop)
           with
-          | None -> close_conn c
-          | Some response ->
+          | HttpDrop -> close_conn c
+          | HttpRespond response ->
             c.hc_out_buf <- response;
             c.hc_out_off <- 0;
-            c.hc_phase <- HCWriting))
+            c.hc_phase <- HCWriting
+          | HttpWsUpgrade handler_fn ->
+            (* No longer an HTTP connection: the fiber owns the fd (and
+               closes it via the handler's retc/exnc). Drop it from [conns]
+               WITHOUT closing, then run until it first parks. *)
+            Hashtbl.remove conns c.hc_sock;
+            start_ws_fiber c.hc_sock handler_fn))
   in
   (* Try to make forward progress writing the queued response on [c].
      Called only after select reports the socket writable. *)
@@ -3328,14 +3431,20 @@ let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : 
      while not !shutdown_requested do
        let read_fds =
          server_sock ::
-         Hashtbl.fold (fun _ c acc ->
-             if c.hc_phase = HCReadingRequest then c.hc_sock :: acc else acc)
-           conns []
+         Hashtbl.fold (fun fd (_, dir) acc ->
+             if dir = Ws_wait_read then fd :: acc else acc)
+           ws_parked
+           (Hashtbl.fold (fun _ c acc ->
+                if c.hc_phase = HCReadingRequest then c.hc_sock :: acc else acc)
+              conns [])
        in
        let write_fds =
-         Hashtbl.fold (fun _ c acc ->
-             if c.hc_phase = HCWriting then c.hc_sock :: acc else acc)
-           conns []
+         Hashtbl.fold (fun fd (_, dir) acc ->
+             if dir = Ws_wait_write then fd :: acc else acc)
+           ws_parked
+           (Hashtbl.fold (fun _ c acc ->
+                if c.hc_phase = HCWriting then c.hc_sock :: acc else acc)
+              conns [])
        in
        let (readable, writable, _) =
          try select read_fds write_fds [] 1.0
@@ -3364,24 +3473,30 @@ let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : 
            done
          end;
          (* Drive every connection ready for its current phase. Snapshot
-            first since advance_read/advance_write may remove entries. *)
+            first since advance_read/advance_write may remove entries.
+            A parked WS fiber and an HTTP conn can never share an fd, so
+            the [conns] lookup failing means "try the WS table". *)
          List.iter (fun fd ->
              match Hashtbl.find_opt conns fd with
              | Some c when c.hc_phase = HCReadingRequest -> advance_read c
-             | _ -> ())
+             | Some _ -> ()
+             | None -> resume_ws fd)
            readable;
          List.iter (fun fd ->
              match Hashtbl.find_opt conns fd with
              | Some c when c.hc_phase = HCWriting -> advance_write c
-             | _ -> ())
+             | Some _ -> ()
+             | None -> resume_ws fd)
            writable
        end
      done;
      Printf.eprintf "march: Shutting down...\n%!"
    with exn ->
      Hashtbl.iter (fun _ c -> try close c.hc_sock with _ -> ()) conns;
+     Hashtbl.iter (fun fd _ -> try close fd with _ -> ()) ws_parked;
      raise exn);
-  Hashtbl.iter (fun _ c -> try close c.hc_sock with _ -> ()) conns
+  Hashtbl.iter (fun _ c -> try close c.hc_sock with _ -> ()) conns;
+  Hashtbl.iter (fun fd _ -> try close fd with _ -> ()) ws_parked
 
 (* ------------------------------------------------------------------ *)
 (* Session-typed channel runtime                                       *)
