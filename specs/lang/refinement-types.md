@@ -292,6 +292,92 @@ A guard may also read a **record field** (`if c.port >= 1 do serve(c)`) — see
 
 ---
 
+## A Parameter's Own Contract Is a Fact Inside Its Body
+
+A **guard** and a **declared contract** are two different ways to establish the
+same fact, and it matters which one you have. The section above is about the
+guard: a runtime test you write (`if List.length(ys) > 0 do …`) becomes an
+assumption for the branch it dominates. This section is about the other one: a
+parameter whose *declared type* carries a refinement is a promise the caller
+already had to keep, and since 2026-07-29 that promise is an assumption inside
+the function's own body. So contracts **compose** across a call boundary — a
+function that requires a property can pass its own parameter on to another
+function requiring the same property, with no guard at either site:
+
+```march
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+fn outer(ys : {List(Int) | len(_) > 0}) : Int do inner(ys) end
+fn main() : Int do outer([1]) end
+```
+
+Both call sites are **proved** — `--refine-report` on that program reports
+`2 proved, 0 violated, 0 skipped` for user code (verified 2026-07-29). Before
+this, `outer([1])` proved on the literal while `inner(ys)` was silently
+*skipped*, so the practical ceiling was that a non-empty contract could not be
+threaded any further than one hop. The stdlib's own contracts now compose the
+same way, which is what makes them usable rather than decorative:
+
+```march
+mod Y do
+  cap verified
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
+    List.head(xs)          -- proved from `head_of`'s own contract; no guard
+  end
+  fn main() : Int do head_of([1, 2]) end
+end
+```
+
+That program exits 0 under `cap verified` (`2 proved, 0 violated, 0 skipped`).
+
+**Every refined form composes except a constructor tag.** All verified
+2026-07-29 at `2 proved, 0 violated, 0 skipped`: `Int` (`{Int | _ > 0}`),
+`Float`, `Bool`, `String` (`{String | len(_) > 0}`), a record field
+(`{v : Config | v.port >= 1}`), the built-in list `len`, and a user
+`@[measure]` over an ADT (`{Tree(Int) | size(_) > 0}`). A **tag** refinement
+still does not forward — `{Option(Int) | is_Some(_)}` passed on to a callee
+with the identical contract stays skipped (`1 proved, 1 skipped`), because tag
+facts are established at the call site by a literal or a `match`, not carried
+by a binding. See [Limitations](#limitations).
+
+**Only the caller's own promise is loaded, and only what it actually entails.**
+A *weaker* declared contract does not launder a stronger requirement: with
+`outer(ys : {List(Int) | len(_) >= 0})` — true of every list — the same
+`inner(ys)` is **skipped**, not proved and not reported
+(`1 proved, 1 skipped`). This is the definite-failure stance holding, and it is
+the false positive that matters most in this area, so the corpus brackets the
+feature from both sides: `accept/t128` shows the composition, and
+`reject/t129` shows the weak contract failing to launder while a genuine
+violation on the same shape is still caught.
+
+**The fact is retired the moment the name is rebound.** The promise belongs to
+the parameter, not to the spelling, so shadowing it drops the assumption rather
+than leaking it onto a different value:
+
+```march
+fn outer(ys : {List(Int) | len(_) > 0}) : Int do
+  let ys = List.tail(ys)   -- this call IS proved from ys's own contract
+  inner(ys)                -- skipped: the new `ys` promises nothing
+end
+```
+
+A `match`-arm binder of the same name (`Cons(_, ys) -> inner(ys)`) retires it
+identically. Both leave the call **skipped**, never falsely proved and never
+falsely reported.
+
+**A caller's fact does not travel through a local `let`, for any type.** This
+is a separate, pre-existing limitation of the pass and is unchanged: it
+propagates no local binding's value into a later goal, so
+
+```march
+let u = 5
+take_pos(u)      -- skipped, even though `5` satisfies `{Int | _ > 0}`
+```
+
+is skipped, and the `List` analogue (`let u = [1, 2]` then `inner(u)`) behaves
+identically. Pass the value directly, or restate the fact with `assert`.
+
+---
+
 ## Postconditions
 
 A refined return type is checked on **every return path** of the function,
@@ -395,6 +481,12 @@ Verified 2026-07-28 (`accept/t118`, `reject/t117`). See
 [`List.length` is an alias of the `len` measure](#listlength-is-an-alias-of-the-len-measure)
 for the exact conditions under which the alias applies — and for when it is
 withdrawn, in which case the obligation returns to being skipped.
+
+A runtime **guard** is not the only way to discharge this. If the *enclosing
+function* already declares the same contract on the parameter, no guard is
+needed at all — the promise composes into the call. That is a different
+mechanism from the guard above; see [A Parameter's Own Contract Is a Fact
+Inside Its Body](#a-parameters-own-contract-is-a-fact-inside-its-body).
 
 ### Refining a record over its fields
 
@@ -1103,7 +1195,10 @@ sense; each is a check that does not happen.
    obligation nor escalates one, so `--refine-report` *undercounts* by every
    return refinement it could not discharge, and a `cap verified` module
    silently permits an undischarged **return** refinement. `cap verified` is a
-   guarantee about preconditions at call sites only.
+   guarantee about preconditions at call sites only. The 2026-07-29 composition
+   work is confined to `check_call` for the same reason: a parameter's promise
+   composes into a *call* in the body, but `check_post` composes no list or ADT
+   measure through a **postcondition**.
 4. **There is no `@[trusted]`.**
 5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
    wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified
@@ -1143,10 +1238,34 @@ edges:
   a predicate about the `Int` inside is not. Refinements over other types
   aren't supported.
 - **A tag refinement is discharged at the call site, not carried through a
-  binding.** A constructor literal or a `match` narrowing establishes the fact
-  where the call is written. Forwarding a `{Option(Int) | is_Some(_)}`
-  *parameter* to another function expecting the same contract is not yet
-  recognized — the checker stays silent rather than assuming it.
+  binding — and it is the one refined form that does not compose.** A
+  constructor literal or a `match` narrowing establishes the fact where the call
+  is written. Forwarding a `{Option(Int) | is_Some(_)}` *parameter* to another
+  function expecting the identical contract is still not recognized: the checker
+  stays silent rather than assuming it (re-verified 2026-07-29 —
+  `1 proved, 1 skipped`, the proof being the outer literal). Every other form
+  does compose; see [A Parameter's Own Contract Is a Fact Inside Its
+  Body](#a-parameters-own-contract-is-a-fact-inside-its-body).
+- **A refined `let` annotation is trusted, not verified against the bound
+  expression.** Writing `let ys : {List(Int) | len(_) > 0} = []` makes the
+  checker *assume* the annotation at later call sites without ever checking it
+  against the `[]` it is attached to, so a call needing a non-empty list is
+  reported as proved. This is pre-existing and type-independent (`let n : {Int |
+  _ > 0} = 0 - 5` behaves the same) and is tracked as an open follow-up in
+  `specs/todos.md`; until it is closed, an annotation on a `let` is a promise
+  the author makes, not one the checker validates.
+- **A contract that contradicts its own guard makes the guarded branch
+  vacuously provable.** In `fn outer(ys : {List(Int) | len(_) > 0}) do if
+  List.length(ys) == 0 do inner(ys) else 0 end end` the guarded call *proves*:
+  the caller's promise and the guard cannot both hold, so the branch is dead
+  code and its obligation is discharged against an unsatisfiable path. This is
+  expected and safe-direction — the call can never execute with a violating
+  value — not a gap in checking.
+- **A local `let` does not carry a fact forward, for any type.** The pass
+  propagates no local binding's value into a later goal, so `let u = 5` then
+  `take_pos(u)` against `{Int | _ > 0}` is skipped, and the `List` analogue
+  behaves identically. Pre-existing and unchanged; pass the value directly or
+  restate the fact with `assert`.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
@@ -1275,21 +1394,30 @@ edges:
   cannot write a predicate that says "not NaN"; see
   [Float Refinements](#float-refinements) for why NaN nevertheless never causes
   a false report.
-- **An AXIOMATISED measure applied to the refined value itself is reasoned
-  about by axiom, not evaluated on a literal.** `{v : Tree | size(v) < 0}` is
-  caught for any argument (it contradicts the non-negativity axiom), but
-  `{v : Tree | size(v) > 2}` applied to `Leaf` is NOT — the checker does not
-  concretely evaluate `size(Leaf) = 0` in that position. A measure applied to a
-  *different* parameter IS evaluated concretely, which is why the
-  `get(Node(Leaf, 5, Leaf), 3)` example above works.
+- **An AXIOMATISED measure applied to the refined value itself is now
+  enforced against the actual argument** (fixed 2026-07-29 — this bullet
+  previously documented the opposite as a limitation, and that limitation was a
+  *bug*). The axiomatised resolver discarded the actual and reasoned about an
+  unconstrained placeholder tree instead, so a `{Tree | size(_) > 0}` contract
+  checked nothing at all: `inner(Leaf)` was accepted and
+  `inner(Node(Leaf, 5, Leaf))` was not proved — both merely skipped, and a skip
+  exits 0 exactly as a proof does. Re-verified 2026-07-29 in every direction:
+  `inner(Leaf)` against `{Tree(Int) | size(_) > 0}` is **reported** (exit 1),
+  `inner(Node(Leaf, 5, Leaf))` is **proved** (exit 0, `1 proved`), `big(Leaf)`
+  against `{v : Tree(Int) | size(v) > 2}` is now **reported** rather than
+  silent, and `{v : Tree(Int) | size(v) < 0}` is still caught for any argument
+  from the non-negativity axiom alone. So a constructor literal in this
+  position has its measure computed from the recursion equations, exactly as a
+  measure applied to a *different* parameter always did (`get(Node(Leaf, 5,
+  Leaf), 3)` above), and exactly as the built-in list `len` does for `head([])`
+  against `{List(a) | len(_) > 0}`. The same fix is what lets an ADT measure
+  contract compose across a call boundary — see [A Parameter's Own Contract Is
+  a Fact Inside Its Body](#a-parameters-own-contract-is-a-fact-inside-its-body).
 
-  This limit is specific to `@[measure]`-axiomatised measures over an ADT.
-  The built-in list `len` applied to the refined value **is** folded on a
-  literal, which is what makes `head([])` against `{List(a) | len(_) > 0}` a
-  reported violation — see [Refining a collection over its own
-  length](#refining-a-collection-over-its-own-length). Both re-verified
-  2026-07-27: `big(Leaf)` against `{v : Tree | size(v) > 2}` stays silent,
-  `head([])` against `{List(Int) | len(_) > 0}` is reported.
+  What genuinely stays out of reach is the shape with nothing to reflect: where
+  the argument is neither a constructor literal nor a variable the pass can
+  name, the unconstrained placeholder is still the fallback and the obligation
+  is skipped.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
@@ -1360,9 +1488,9 @@ footprint property this transparency implies: a program whose obligations
 all provably hold at `--check` time runs byte-identically interpreted and
 compiled, since neither backend inserts any runtime predicate check.
 
-Two higher-order call shapes have since been closed (245 refinecheck tests —
-16 covering Tier 2 structural induction, and the latest 9 covering `Bool` and
-`Float` refinements):
+Two higher-order call shapes have since been closed (348 refinecheck tests as
+of 2026-07-29 — 16 covering Tier 2 structural induction, 9 covering `Bool` and
+`Float` refinements, and 8 covering call-boundary contract composition):
 a call through a refined function-typed *parameter*, and a call through a
 *local alias* of a named refined function — both previously fell through
 `resolve_call`'s named-callee-only resolution and were silently skipped.
@@ -1372,7 +1500,7 @@ fact of the corpus: its `apply`'s callback parameter is declared `Int -> Int`
 reach — a caller's own contract is only enforced when it is actually
 declared refined, never inferred from what the callback happens to point to.
 
-The typing corpus now stands at **218 programs (108 accept, 110 reject)**, with
+The typing corpus now stands at **229 programs (114 accept, 115 reject)**, with
 each refinement feature bracketed from BOTH sides. That pairing is deliberate
 and load-bearing: an accept-only witness cannot distinguish a working contract
 from one that silently checks nothing, which is exactly how the `_` and
@@ -1382,8 +1510,14 @@ additionally pins that a contract declared in a *stdlib* signature reaches a
 user call site at all). The `List.length` → `len` alias added 2026-07-28 is
 bracketed the same way (`accept/t118`, `reject/t117`): the accept file exits 0
 whether the guard is read or the obligation is merely skipped, so only the
-reject file shows the alias is load-bearing. Two witnesses pin soundness rather
-than a feature:
+reject file shows the alias is load-bearing. Call-boundary **composition**
+(2026-07-29) is bracketed the same way and for the same reason
+(`accept/t128`, `reject/t129`): the accept file exits 0 whether the inner call
+composed or was silently skipped, so only the reject file — where a
+deliberately weaker caller contract must NOT launder the stronger callee
+requirement, while a real violation on the same shape is still caught — shows
+that composition fires exactly where it should and nowhere else. Two witnesses
+pin soundness rather than a feature:
 `accept/t110` (an unproven postcondition must not propagate) and `accept/t113`
 (a NaN-only `Float` predicate must stay satisfiable — it fails the moment
 anyone re-encodes floats as reals).

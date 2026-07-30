@@ -236,6 +236,78 @@ Use `assert` as the escape hatch for facts the checker can't derive on its own
 
 ---
 
+## Contracts Compose — A Parameter's Promise Holds Inside Its Body
+
+There are two different ways a fact gets established, and it's worth keeping them
+apart in your head:
+
+- a **guard** — a runtime test you wrote, like `if List.length(ys) > 0 do …`, which
+  is what the section above is about; and
+- a **declared contract** — a refinement on a parameter's *type*, which the caller
+  already had to satisfy before the function could be entered.
+
+The second one is a promise you were handed, so you shouldn't have to check it again.
+And you don't: a refined parameter's own predicate is a fact inside the function's
+body. Which means contracts **compose** — a function that requires something can pass
+its own parameter straight on to another function requiring the same thing, no guard
+anywhere:
+
+```march
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+fn outer(ys : {List(Int) | len(_) > 0}) : Int do inner(ys) end
+fn main() : Int do outer([1]) end
+```
+
+Both calls are *proved* — `--refine-report` says `2 proved, 0 violated, 0 skipped`.
+Until 2026-07-29 only the outer one was; `inner(ys)` was silently skipped, so a
+contract couldn't be threaded further than a single hop and you had to re-guard a
+list you'd already promised was non-empty. That's what makes the standard library's
+contracts worth having:
+
+```march
+mod Y do
+  cap verified
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
+    List.head(xs)          -- proved from head_of's own contract
+  end
+  fn main() : Int do head_of([1, 2]) end
+end
+```
+
+`List.head` wants a non-empty list; `head_of` already promised one; done. That
+compiles clean even under `cap verified`, which is the strict setting that turns
+every undischarged obligation into an error.
+
+This works for every refinement shape except one: `Int`, `Float`, `Bool`, `String`
+lengths, record fields, list `len`, and your own `@[measure]` over a tree all
+compose. A **constructor-tag** refinement (`{Option(Int) | is_Some(_)}`) does not —
+tag facts come from a literal or a `match` where the call is written, and aren't
+carried along by a binding. See [Limitations](#limitations).
+
+Two things it deliberately won't do for you. First, a **weaker** promise can't
+launder a stronger requirement. Declare `outer(ys : {List(Int) | len(_) >= 0})` —
+which is true of every list and therefore says nothing — and the inner call goes back
+to being *skipped*: not proved, and not reported either, because nothing here is
+definitely wrong. Second, **rebinding the name drops the fact**, since the promise
+belongs to the value, not the spelling:
+
+```march
+fn outer(ys : {List(Int) | len(_) > 0}) : Int do
+  let ys = List.tail(ys)   -- this call is fine: proved from ys's contract
+  inner(ys)                -- skipped: the new ys promises nothing
+end
+```
+
+A `match` arm that binds the same name (`Cons(_, ys) -> inner(ys)`) behaves the same.
+Both leave the call quiet rather than flagged — the checker never guesses.
+
+One related gap, which predates all of this and is easy to trip over: a fact does
+**not** travel through a local `let`, for any type at all. `let u = 5` followed by
+`take_pos(u)` against `{Int | _ > 0}` is skipped, even though `5` obviously satisfies
+it. Pass the value directly, or state the fact with `assert`.
+
+---
+
 ## Postconditions
 
 A refined return type is checked on **every return path** of the function,
@@ -335,6 +407,24 @@ contracts bite on a list you checked at runtime and not just on literals — see
 [the solver really does connect `List.length` to
 `len`](#the-solver-really-does-connect-listlength-to-len) for exactly when that
 connection applies, and the (narrow) circumstances in which it's dropped.
+
+And you don't need a guard at all when the *enclosing* function already declares the
+same contract — that's a separate mechanism, and it's what
+[Contracts Compose](#contracts-compose--a-parameters-promise-holds-inside-its-body)
+is about.
+
+Your own measures work in this position too, not just the built-in `len`:
+
+```march
+fn inner(t : {Tree(Int) | size(_) > 0}) : Int do 0 end
+
+inner(Leaf)                  -- error: size(Leaf) is 0
+inner(Node(Leaf, 5, Leaf))   -- fine: size is 1
+```
+
+Worth flagging because this shape used to be a silent no-op: through 2026-07-29 the
+checker threw away the actual argument here and reasoned about an arbitrary tree
+instead, so `inner(Leaf)` compiled clean. Both directions are now checked.
 
 ### The measure soundness gate
 
@@ -784,6 +874,20 @@ dependent typing. Know the edges:
   name, an ambiguous constructor name, and any rebinding of the name inside the
   arm all leave the call *unchecked* rather than reported. See
   [Facts from a `match`](#facts-from-a-match).
+- **A tag refinement is the one shape that doesn't compose.** Passing a
+  `{Option(Int) | is_Some(_)}` parameter on to a callee wanting the same thing is
+  skipped, not proved — tag facts are established where the call is written, by a
+  literal or a `match`, and don't ride along on a binding. Everything else does
+  compose; see [Contracts
+  Compose](#contracts-compose--a-parameters-promise-holds-inside-its-body).
+- **A fact doesn't survive a local `let`, for any type.** `let u = 5` then
+  `take_pos(u)` against `{Int | _ > 0}` is skipped. Pass the value directly, or
+  restate it with `assert`. (This is also why rebinding a refined parameter drops
+  its promise.)
+- **Only preconditions compose.** A parameter's promise reaches *calls* in the
+  body; it does not flow into a refined **return** type, which goes down a
+  separate path. Postconditions are also absent from `--refine-report` and from
+  what `cap verified` escalates.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return

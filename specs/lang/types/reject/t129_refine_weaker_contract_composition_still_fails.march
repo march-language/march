@@ -1,0 +1,44 @@
+-- EXPECT-ERROR: refinement violation
+-- The composition proved by
+-- `accept/t128_refine_list_contract_composes_call` has a limit: it fires only
+-- when the caller's OWN contract already entails the callee's. Weakening
+-- `outer`'s parameter to `{List(Int) | len(_) >= 0}` -- true of every list,
+-- so it establishes nothing about `len(_) > 0` -- makes the plain `inner(ys)`
+-- call SKIPPED, not proved: composition legitimately does not apply, and
+-- exit 0 there would mean either "proved" or "silently ignored", exactly the
+-- ambiguity an accept-only witness cannot resolve.
+--
+-- This file pins the case that matters: even through that same
+-- uselessly-weak declared contract, the checker must still catch a REAL
+-- failure once one exists. `List.length(ys) == 0` narrows `ys` to the empty
+-- list via the ordinary runtime-guard alias (`t118`/`t117`'s mechanism),
+-- independently of what `outer`'s own weak parameter refinement promises, so
+-- the guarded `inner(ys)` is a DEFINITE failure and must be reported.
+--
+-- If this file ever starts exiting 0, either the weaker contract has begun
+-- laundering the stronger requirement (composition applying where it must
+-- not -- the false-positive risk `test_refinecheck.ml` calls "the false
+-- positive that matters most"), or the `List.length` guard has stopped being
+-- read inside a caller that itself carries a refined, but weaker, parameter.
+mod T129 do
+
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil        -> panic("empty")
+    end
+  end
+
+  fn outer(ys : {List(Int) | len(_) >= 0}) : Int do
+    if List.length(ys) == 0 do
+      inner(ys)
+    else
+      0
+    end
+  end
+
+  fn main() : Int do
+    outer([1, 2, 3])
+  end
+
+end

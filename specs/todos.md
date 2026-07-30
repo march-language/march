@@ -387,7 +387,7 @@ enforcing nothing while the suite stayed green.
   WARN on an unreflectable qualified call in a predicate; the fuller fix is to
   desugar predicate expressions the way bodies are. (The supported spelling is
   the bare measure, `len(_) > 0`.)
-- **A refined parameter's own predicate is not an assumption inside its body.**
+- ~~**A refined parameter's own predicate is not an assumption inside its body.**
   Inside `fn head_of(xs : {List(Int) | len(_) > 0}) …`, a call to
   `List.head(xs)` — whose own precondition is the same `len(_) > 0` — is still
   solver-undecided, because the caller-supplied predicate never enters the
@@ -395,7 +395,125 @@ enforcing nothing while the suite stayed green.
   a function that requires non-emptiness cannot pass its argument on to another
   function that requires the same thing without re-guarding it. This is the
   practical ceiling on how far the non-empty contracts added in this branch can
-  be threaded through the stdlib.
+  be threaded through the stdlib.~~
+  **CLOSED 2026-07-29** — contracts now compose across a call boundary. The
+  exact program above is now proved: `List.head(xs)` inside
+  `fn head_of(xs : {List(Int) | len(_) > 0})` reports
+  `2 proved, 0 violated, 0 skipped` and exits 0 even under `cap verified`, with
+  no guard. Every refined form composes except a constructor-tag refinement
+  (`Int`, `Float`, `Bool`, `String` `len`, record fields, built-in list `len`,
+  and a user `@[measure]` over an ADT — each measured at `2 proved, 0 skipped`).
+  A **weaker** caller contract (`len(_) >= 0`) correctly does NOT discharge a
+  stronger callee requirement — it stays skipped, never falsely proved — and
+  rebinding the name (a `let`, or a `match`-arm binder of the same name) retires
+  the fact rather than leaking it. Bracketed by `accept/t128` /
+  `reject/t129`; +8 refinecheck tests (340 → 348). Note this is a distinct
+  mechanism from a caller-established runtime **guard**
+  (`if List.length(ys) > 0 do …`), which already worked and is unchanged. Two
+  narrower items remain and are filed separately below: tag-refinement
+  forwarding, and the fact that no local `let` carries a value forward into a
+  later goal for any type. See "Refinement contract composition" below.
+
+---
+
+## A refined `let` annotation is TRUSTED, never checked against its RHS (OPEN, 2026-07-29)
+
+**Repro.**
+
+```march
+mod X do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer() : Int do
+    let ys : {List(Int) | len(_) > 0} = []
+    inner(ys)
+  end
+  fn main() : Int do outer() end
+end
+```
+
+`--check --refine-report` reports `1 proved, 0 violated, 0 skipped`. The
+`inner(ys)` call is **falsely proved**: `ys` is the empty list, whose length is
+0, but the annotation on the `let` is loaded as a fact without ever being
+checked against the expression it annotates.
+
+**Pre-existing, and widened — not introduced — by the composition branch.** The
+identical shape at `Int` (`let n : {Int | _ > 0} = 0 - 5` then a call needing
+`{Int | _ > 0}`) behaves the same way at the current HEAD, and that code path is
+untouched by this branch. What the branch changed is only *which base types* can
+reach the trusted-annotation path: `List`/ADT now joins `Int`, `String` and
+records, because `refined_scope_ty` admits them. The mechanism, and the bug, are
+older than this work.
+
+**Why this is the sharpest version of the problem under `cap verified`.** That
+mode's entire premise is "if it compiles, it is proved". A `let` annotation that
+is trusted rather than verified is a hole punched straight through that premise
+by ordinary, non-adversarial code: an author writes an annotation to *document*
+an invariant and instead silently manufactures it, and the mode reports success.
+An unchecked assumption a program can state about itself is worse than a skip,
+because a skip at least declines to claim anything.
+
+**The design question, deliberately deferred.** Should a refined `let`
+annotation be *checked* against the bound expression (the obvious answer, and
+what every other refined position does), or is there a case for a trusted
+ascription — and if so it needs to be spelled differently and gated out of
+`cap verified`. Either way it is a semantics change to the annotation form, not
+a bug fix in the composition path, and it belongs in its own branch with its own
+accept/reject corpus witnesses in both directions. Documented meanwhile in
+`specs/lang/refinement-types.md`'s Limitations.
+
+---
+
+## Refinement contract composition across a call boundary (DONE 2026-07-29)
+
+**Problem.** A refined parameter's own predicate was not an assumption inside
+the function's body, so a contract could not be threaded past one hop: a
+function requiring non-emptiness had to *re-guard* before passing its own
+argument to another function requiring the same thing. Worse, the failure was
+invisible — a skipped obligation exits 0 exactly as a proved one does.
+
+**Shipped.**
+- A refined parameter's declared promise now composes into calls inside its own
+  body, for every refined form except a constructor tag: `Int`, `Float`, `Bool`,
+  `String` `len`, record fields, the built-in list `len`, and a user
+  `@[measure]` over an ADT. Fixed in `check_call`'s measure resolver (the
+  function actually consulted at a call site), not `scope_facts`; the
+  per-`(measure, name)` memo keeps a repeated occurrence from declaring the
+  same constant twice.
+- **A pre-existing, separate bug fixed on the way:** the axiom-measure-over-self
+  resolver discarded the actual argument and reasoned about an unconstrained
+  placeholder, so `{Tree | size(_) > 0}` checked *nothing at all* even applied
+  directly — `inner(Leaf)` was silently accepted. Now correctly rejected, with
+  `inner(Node(Leaf, 5, Leaf))` still accepted. Same class as the `len(_)`
+  spelling fix of 2026-07-27, in the sibling (axiomatised) branch of the same
+  conditional.
+- Corpus `accept/t128` + `reject/t129` (229 programs); +8 refinecheck tests
+  (340 → 348). The CI obligation ratchet was re-measured on a cold CAS and is
+  unchanged (proved floor 1 at `t118`, skip ceiling 28 at `stdlib/list.march`).
+
+**Explicitly NOT addressed by this work** (each pre-existing and unrelated):
+- **A caller-established runtime GUARD is a different mechanism** from a
+  caller's declared contract. `if List.length(ys) > 0 do head(ys)` already
+  worked (the `len` alias, 2026-07-28) and is untouched. Which shape you have
+  decides which machinery you get.
+- **Postconditions are still outside the ledger** — `check_post` composes no
+  list or ADT measure through a return refinement, and files no obligation.
+- **The measure-alias gates are still unit-global.**
+- **There is still no `@[trusted]`.**
+
+**Follow-ups (OPEN).**
+- **A tag refinement still does not forward.** `{Option(Int) | is_Some(_)}`
+  passed on to a callee with the identical contract stays skipped
+  (`1 proved, 1 skipped`, the proof being the outer literal). Tag facts are
+  established at the call site by a constructor literal or a `match` narrowing,
+  not carried by a binding, so this is the one refined form composition does not
+  cover.
+- **No local `let` carries a value forward into a later goal, for ANY type.**
+  `let u = 5` then `take_pos(u)` against `{Int | _ > 0}` is skipped, and the
+  `List` analogue behaves identically. Pre-existing and general (it is also why
+  rebinding a refined parameter leaves the call skipped rather than reported);
+  the workarounds are to pass the value directly or restate the fact with
+  `assert`.
 
 ---
 

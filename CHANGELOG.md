@@ -102,6 +102,52 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refinement whose predicate measures the refined value itself is now
+  enforced for user ADTs.** A contract like `{Tree | size(_) > 0}`, where `size`
+  is a user `@[measure]` over `Tree`, checked *nothing*: the argument being
+  passed was discarded and the predicate decided against an arbitrary tree
+  instead, so `inner(Node(Leaf, 5, Leaf))` was not proved and `inner(Leaf)` — a
+  real violation — was not reported. Both are now decided by the measure's own
+  recursion axioms. The same measure applied to a *different* parameter
+  (`{Int | _ < size(t)}`) worked all along, so the gap was invisible: a skip
+  produces no diagnostic. Such contracts also now compose across a call
+  boundary, like `len`-shaped list refinements: a caller whose parameter is
+  `{Tree | size(_) > 0}` can pass that very tree on. Only the caller's own
+  promise is loaded, so a weaker contract (`size(_) >= 0`) still does not
+  discharge a stronger callee, and rebinding or shadowing the name retires the
+  fact. Note this can turn a program that used to compile into one that does
+  not: a call the checker previously skipped in this position is now decided, so
+  a genuine violation like `inner(Leaf)` becomes a compile error.
+
+- **A refined list parameter's own promise now holds inside its own body.** A
+  function whose parameter is `{List(Int) | len(_) > 0}` could not pass that very
+  list to another function requiring the same thing: the inner call's obligation
+  was *skipped* rather than proved, because a measure over a caller-scope
+  variable was always reflected as a fresh unconstrained symbol. The identically
+  shaped `Int` version composed all along, so the difference was invisible —
+  a skip produces no diagnostic. The caller's own predicate is now loaded as an
+  assumption over the same SMT symbol the obligation uses, so contracts compose
+  across a call boundary for `len`-shaped list refinements the same way they
+  already did for scalars. Only the *caller's* promise is loaded, so a weaker
+  contract (`len(_) >= 0`) still does not discharge a stronger callee, and
+  rebinding or shadowing the name retires the fact. All **three spellings** of
+  the refined value compose identically — the anonymous `_`, a declared binder
+  (`{v : List(Int) | len(v) > 0}`), and the parameter's own name
+  (`{List(Int) | len(ys) > 0}`) — so renaming a binder cannot silently unwire a
+  working contract.
+
+  With the ADT-measure fix above, this closes composition for every refinement
+  shape but one: `Int`, `Float`, `Bool`, `String` `len`, record fields, the
+  built-in list `len`, and a user `@[measure]` over an ADT all compose, while a
+  **constructor-tag** refinement (`{Option(Int) | is_Some(_)}`) still does not —
+  tag facts are established at the call site by a literal or a `match`, not
+  carried by a binding. This is a distinct mechanism from a caller-established
+  runtime **guard** (`if List.length(ys) > 0 do …`), which is unchanged: a guard
+  is a test you write, a contract is a promise the caller already kept. It
+  applies to **preconditions** only — a parameter's promise reaches calls in the
+  body, not a refined return type. And a fact still does not survive a local
+  `let` (`let u = 5` then `take_pos(u)` against `{Int | _ > 0}` is skipped), a
+  pre-existing limitation for every type that this work does not change.
 - **Capturing closures are no longer leaked, one allocation per
   materialization.** A lambda that captures a variable (`fn x -> x * k`)
   allocates a closure struct holding the captured values; nothing ever released
