@@ -5665,6 +5665,90 @@ end|});
         Alcotest.(check int) "violated" 0 violated)
   ]
 
+(* ── `@[trusted]` (Task 2) ──────────────────────────────────────────────────
+   A per-function escape hatch from `cap verified`'s escalation: an obligation
+   the checker cannot discharge inside a `@[trusted]` function is accepted as
+   an ASSERTION, recorded as its own [Trusted] verdict, rather than forcing the
+   author to drop `cap verified` for the whole module.  Deliberately loud (see
+   [Obligation.Trusted]) and deliberately narrow: it must never suppress a
+   [Violated] and must never leak to a sibling function. *)
+let trusted_suite =
+  let summary_full () = March_refinecheck.Obligation.all () in
+  let count_trusted () =
+    List.length (List.filter (fun (o : March_refinecheck.Obligation.t) ->
+      o.verdict = March_refinecheck.Obligation.Trusted) (summary_full ()))
+  in
+  [ gated "@[trusted] suppresses a cap-verified skip" (fun () ->
+        (* PRE-FIX: exit 1 — the skip is escalated and there is no way out
+           short of dropping cap verified for the whole module. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod TR1 do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn go(zs : List(Int)) : Int do inner(zs) end
+  fn main() : Int do go([1]) end
+end|}))
+
+  ; gated "a trusted obligation is NOT counted as proved" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TR2 do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn go(zs : List(Int)) : Int do inner(zs) end
+  fn main() : Int do go([1]) end
+end|});
+        let proved, _, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not laundered into proved" 0 proved;
+        Alcotest.(check int) "counted as trusted" 1 (count_trusted ()))
+
+  ; gated "@[trusted] does NOT suppress a definite violation" (fun () ->
+        (* The load-bearing limit. A predicate that can never hold is a bug in
+           the annotation; waving it through would make @[trusted] a way to
+           ship known-false contracts. *)
+        Alcotest.(check bool) "still errors" true
+          (has_refine_error_d {|
+mod TR3 do
+  cap verified
+  fn inner(n : {Int | _ > 0}) : Int do n end
+  @[trusted]
+  fn go() : Int do inner(0 - 5) end
+  fn main() : Int do go() end
+end|}))
+
+  ; gated "@[trusted] is scoped to its own function" (fun () ->
+        (* A sibling function in the same cap verified module must still be
+           strict — otherwise one annotation silently disarms the module. *)
+        Alcotest.(check bool) "sibling still errors" true
+          (has_refine_error_d {|
+mod TR4 do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn ok(zs : List(Int)) : Int do inner(zs) end
+  fn not_ok(ws : List(Int)) : Int do inner(ws) end
+  fn main() : Int do ok([1]) + not_ok([1]) end
+end|}))
+
+  ; (* Step 5: an attribute that silently does nothing is exactly the failure
+       mode this subsystem keeps producing (Tasks 4/5). No solver needed —
+       this fires before any obligation is even checked — so unlike the four
+       cases above this one is NOT gated on z3. *)
+    Alcotest.test_case "@[trusted] without cap verified warns that it does nothing"
+      `Quick (fun () ->
+        Alcotest.(check bool) "warns" true
+          (has_refine_warning {|
+mod TR5 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn go(zs : List(Int)) : Int do inner(zs) end
+  fn main() : Int do go([1]) end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5710,4 +5794,5 @@ let () =
       ("compose-adt", compose_adt_suite);
       ("compose-tag", compose_tag_suite);
       ("let-annotation", let_annotation_suite);
-      ("postcond-ledger", postcond_ledger_suite) ]
+      ("postcond-ledger", postcond_ledger_suite);
+      ("trusted", trusted_suite) ]

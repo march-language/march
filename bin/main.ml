@@ -919,17 +919,18 @@ let print_refine_report ~filename ~user_files () =
     f = filename || f = "" || f = "<unknown>" || List.mem f user_files
   in
   let summarize obligations =
-    let proved = ref 0 and violated = ref 0 in
+    let proved = ref 0 and violated = ref 0 and trusted = ref 0 in
     let skips = Hashtbl.create 8 in
     List.iter
       (fun (o : March_refinecheck.Obligation.t) ->
         match o.verdict with
         | March_refinecheck.Obligation.Proved -> incr proved
         | March_refinecheck.Obligation.Violated -> incr violated
+        | March_refinecheck.Obligation.Trusted -> incr trusted
         | March_refinecheck.Obligation.Skipped r ->
           Hashtbl.replace skips r (1 + Option.value ~default:0 (Hashtbl.find_opt skips r)))
       obligations;
-    (!proved, !violated, Hashtbl.fold (fun r n acc -> (r, n) :: acc) skips [])
+    (!proved, !violated, !trusted, Hashtbl.fold (fun r n acc -> (r, n) :: acc) skips [])
   in
   (* A postcondition (a function's own return type) and a precondition (a
      callee's declared param type, checked at the call site) are the same
@@ -941,10 +942,10 @@ let print_refine_report ~filename ~user_files () =
       (List.filter (fun (o : March_refinecheck.Obligation.t) -> o.kind = kind) obligations)
   in
   let print_block label obligations =
-    let proved, violated, skips = summarize obligations in
+    let proved, violated, trusted, skips = summarize obligations in
     let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
-    Printf.eprintf "refinement obligations (%s): %d proved, %d violated, %d skipped\n"
-      label proved violated skipped;
+    Printf.eprintf "refinement obligations (%s): %d proved, %d violated, %d trusted, %d skipped\n"
+      label proved violated trusted skipped;
     List.iter
       (fun (r, n) ->
         Printf.eprintf "  skipped (%s): %d\n" (March_refinecheck.Obligation.reason_name r) n)

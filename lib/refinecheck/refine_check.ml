@@ -2504,6 +2504,12 @@ let sort_of_ctor (ctor : string) : string option =
        module strict the moment one user module asked for verification. *)
 let strict_verified = ref false
 
+(* Scoped exactly like [strict_verified], but to a single `fn` rather than a
+   decl list: true while [visit_fn] is walking a function whose [fn_attrs]
+   carry `@[trusted]`.  Consulted only by [check_call]'s [note] — see there for
+   why [check_post] does not (yet) need to. *)
+let trusted_fn = ref false
+
 (* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
    mention (`let f = List.length`) is not a guard, and counting it would let an
    unrelated line decide what a call site is told. *)
@@ -2685,13 +2691,28 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
          | None -> (verdict, None))
       | _ -> (verdict, None)
     in
+    (* `@[trusted]` accepts a SKIP as an assertion, recorded as its own verdict
+       rather than escalated — see [trusted_fn].  This must run before the
+       verdict is recorded (not just before the escalation match below), or
+       the ledger would say `Skipped` while the diagnostic behaved as if it
+       were `Trusted`.  A [Violated] is deliberately untouched: it never
+       reaches this branch because it is not a [Skipped _] to begin with — a
+       predicate the solver proved can never hold is a bug in the annotation,
+       not an incompleteness `@[trusted]` may wave through. *)
+    let verdict =
+      match verdict with
+      | Obligation.Skipped _ when !trusted_fn -> Obligation.Trusted
+      | _ -> verdict
+    in
     Obligation.record
       { Obligation.span; callee; predicate = pred_str rp.pred; verdict
       ; kind = Obligation.Precondition };
     Option.iter (fun r -> r := Some verdict) verdict_out;
     (* …except inside a `cap verified` module, where a skip is the very thing
        the user asked to be told about (see [strict_verified]).  `Proved` and
-       `Violated` are unaffected: the latter already reported itself. *)
+       `Violated` are unaffected: the latter already reported itself.  A
+       [Skipped] that was just turned into [Trusted] above no longer matches
+       here, which is how `@[trusted]` suppresses the escalation. *)
     match verdict with
     | Obligation.Skipped r when !strict_verified ->
       (* The remedy depends on the reason.  The generic advice below is worse
@@ -4970,19 +4991,38 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
    [fd] — a return refinement is verified, not assumed, and verifying it
    against the declared parameters is exactly right. *)
 let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_def) : unit =
-  check_fn_post ~root errctx fd;
-  let walked = if assume_params then fd else strip_param_refinements fd in
-  List.iter
-    (fun (c : A.fn_clause) ->
-      let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
-      let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
-      let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
-      (* A PARAMETER named like a module-level function shadows it for callee
-         resolution inside this body too — see [local_shadow]. *)
-      let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
-      let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      visit ~root errctx defs ctx path sc re cb c.A.fc_body)
-    walked.A.fn_clauses
+  let is_trusted = List.mem "trusted" fd.A.fn_attrs in
+  (* `@[trusted]` outside `cap verified` changes no behaviour at all — [note]
+     only consults [trusted_fn] inside the [strict_verified] escalation
+     branch.  An attribute that silently does nothing is exactly the failure
+     mode this subsystem keeps producing, so say so. *)
+  if is_trusted && not !strict_verified then
+    Err.warning errctx ~span:fd.A.fn_name.A.span
+      (Printf.sprintf
+         "`@[trusted]` on `%s` has no effect here: this function is not inside \
+          a `cap verified` module, so there is no escalation for it to \
+          suppress. Add `cap verified` to this module, or remove the attribute."
+         fd.A.fn_name.A.txt);
+  (* Scoped to exactly this function, mirroring [strict_verified]'s own
+     save/restore around a decl list — a nested `fn` (there is no such thing
+     in March, but a fresh call into [visit_fn] for a sibling clearly must not
+     inherit this) never sees a stale `true` left behind by a caller. *)
+  let saved_trusted = !trusted_fn in
+  trusted_fn := is_trusted;
+  Fun.protect ~finally:(fun () -> trusted_fn := saved_trusted) (fun () ->
+    check_fn_post ~root errctx fd;
+    let walked = if assume_params then fd else strip_param_refinements fd in
+    List.iter
+      (fun (c : A.fn_clause) ->
+        let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
+        let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
+        let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
+        (* A PARAMETER named like a module-level function shadows it for callee
+           resolution inside this body too — see [local_shadow]. *)
+        let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
+        let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
+        visit ~root errctx defs ctx path sc re cb c.A.fc_body)
+      walked.A.fn_clauses)
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
   (* Gather this scope's aliases/uses first so every function in the module sees
