@@ -1,3 +1,5 @@
+-- EXPECT-ERROR: refinement violation: bound expression does not satisfy type annotation
+--
 -- A refined `let` annotation that its own bound expression VIOLATES is
 -- reported. This is the discriminating half of the pair whose accepting side
 -- is `accept/t130_refine_let_annotation_checked_and_composes`.
