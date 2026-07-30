@@ -1,0 +1,48 @@
+-- A refined `let` annotation that its own bound expression VIOLATES is
+-- reported. This is the discriminating half of the pair whose accepting side
+-- is `accept/t130_refine_let_annotation_checked_and_composes`.
+--
+-- `ys` is annotated `{List(Int) | len(_) > 0}` and bound to `[]`, whose length
+-- is 0. The annotation is false about the very expression it annotates.
+--
+-- Until 2026-07-30 this file EXITED 0. `scope_add_binding` admitted an
+-- annotated `let`'s predicate into the refined scope channel without ever
+-- checking it against `bind_expr`, so `len(ys) > 0` became a fact about `ys`
+-- and `inner(ys)` was reported as PROVED -- a proof manufactured out of an
+-- annotation the author merely asserted. `--refine-report` read
+-- `1 proved, 0 violated, 0 skipped`, and `cap verified`, whose entire premise
+-- is "if it compiles, it is proved", accepted the module.
+--
+-- That made a `let` annotation the one refined position in the language that
+-- was believed rather than verified: every other one (a parameter at a call
+-- site, a return refinement, an `impl` method parameter) obliges somebody.
+-- An unchecked assumption a program states about itself is worse than a skip,
+-- because a skip at least declines to claim anything.
+--
+-- Note the direction of the fix, which the `let-annotation` suite in
+-- `test/test_refinecheck.ml` pins by counts rather than by exit code: an
+-- annotation the checker can neither prove nor refute is SKIPPED and grants
+-- no fact -- it is not reported (that would be a false positive on
+-- undecidable code) and it is not trusted either, so no later goal can be
+-- discharged by a premise this binding failed to establish.
+--
+-- No `cap verified` here on purpose: the violation must be reported on its own
+-- merits, not as a capability escalation of a skip.
+--
+-- See specs/lang/refinement-types.md.
+mod T131 do
+
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do
+    0
+  end
+
+  fn outer() : Int do
+    let ys : {List(Int) | len(_) > 0} = []
+    inner(ys)
+  end
+
+  fn main() : Int do
+    outer()
+  end
+
+end

@@ -102,6 +102,35 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refined annotation on a `let` is now checked against the expression it
+  annotates, instead of being believed.** `let ys : {List(Int) | len(_) > 0} =
+  []` used to compile: the annotation entered the refinement checker's scope
+  unconditionally, so it became a *fact* about `ys`, and a later call needing a
+  non-empty list was reported **proved** — off a premise nothing had
+  established. `cap verified`, whose premise is "if it compiles, it is proved",
+  accepted such a module. This was the one refined position in the language
+  that obliged nobody; every other (a parameter at a call site, a return
+  refinement, an `impl` method parameter) is checked somewhere.
+
+  The obligation is the ordinary one, discharged by the same machinery that
+  checks a call's argument against a parameter's precondition, and it keeps the
+  same definite-failure stance: an annotation the checker can neither prove nor
+  refute is **skipped**, never reported, so correct-but-undecidable code is not
+  newly rejected. An unproven annotation does, however, now **grant no fact** —
+  so `let ys : {List(Int) | len(_) > 0} = zs` for an opaque `zs` leaves both the
+  annotation and any call relying on it skipped, rather than proving the call
+  off an assumption the binding never established. All three spellings of the
+  refined value behave alike (`_`, a declared binder, and the bound name
+  itself); the bound-name spelling at `Int` was previously not resolved at all
+  and is now checked too.
+
+  **This can turn a program that compiled into one that does not** — namely any
+  program carrying a `let` annotation that is actually false, which is the point.
+  No such annotation exists anywhere in the stdlib or the conformance corpus, so
+  nothing in-tree changed behaviour. Bracketed by
+  `specs/lang/types/accept/t130_refine_let_annotation_checked_and_composes` and
+  `specs/lang/types/reject/t131_refine_let_annotation_false`.
+
 - **A refinement whose predicate measures the refined value itself is now
   enforced for user ADTs.** A contract like `{Tree | size(_) > 0}`, where `size`
   is a user `@[measure]` over `Tree`, checked *nothing*: the argument being

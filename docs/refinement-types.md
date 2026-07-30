@@ -307,6 +307,46 @@ One related gap, which predates all of this and is easy to trip over: a fact doe
 `take_pos(u)` against `{Int | _ > 0}` is skipped, even though `5` obviously satisfies
 it. Pass the value directly, or state the fact with `assert`.
 
+### An annotation on a `let` is checked, not assumed
+
+You *can* write a refinement on a local binding, and it carries a fact forward — but
+it has to earn it first:
+
+```march
+fn outer() : Int do
+  let ys : {List(Int) | len(_) > 0} = [1]
+  inner(ys)                                  -- proved: the annotation held
+end
+```
+
+Two things are checked there, not one: the annotation against `[1]`, and then
+`inner`'s precondition against the fact the annotation established. Write something
+false and you get told:
+
+```march
+let ys : {List(Int) | len(_) > 0} = []
+-- refinement violation: bound expression does not satisfy type annotation `len(_) > 0`
+```
+
+Before 2026-07-30 that program compiled. The annotation was believed on sight, so
+`inner(ys)` came back **proved** — off a promise nothing had checked — and even
+`cap verified` accepted it. It was the one refined position in the language that
+obliged nobody.
+
+The usual stance still applies at the other end: an annotation the checker can
+neither prove nor refute is **skipped**, never reported. But it then grants no fact
+either, so it can't quietly prop up a later call:
+
+```march
+fn go(zs : List(Int)) : Int do
+  let ys : {List(Int) | len(_) > 0} = zs    -- skipped: nothing known about zs
+  inner(ys)                                 -- also skipped, not proved
+end
+```
+
+All three spellings of the value work the same way — `_`, a declared binder
+(`{v : List(Int) | len(v) > 0}`), or the bound name itself (`len(ys) > 0`).
+
 ---
 
 ## Postconditions

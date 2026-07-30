@@ -1,0 +1,43 @@
+-- A refined annotation on a LOCAL `let` is a CHECKED obligation, and a TRUE
+-- one still composes into a later call.
+--
+-- `ys` is annotated `{List(Int) | len(_) > 0}` and bound to `[1]`, which
+-- satisfies it. Two obligations are discharged here, not one: the annotation
+-- itself is proved against the expression it annotates, and the proved fact
+-- then discharges `inner(ys)`'s identical precondition through the
+-- contract-composition machinery of
+-- `accept/t128_refine_list_contract_composes_call`.
+--
+-- Before 2026-07-30 only the SECOND of those happened. `scope_add_binding`
+-- admitted an annotated `let`'s predicate into the refined scope channel
+-- unconditionally -- `A.PatVar n, Some r -> (n.A.txt, r) :: sc` -- so the
+-- annotation was a promise the checker simply believed. This file passed then
+-- too, for the wrong reason, which is exactly why an accept-only witness
+-- cannot pin this behaviour: a trusted annotation and a verified one both
+-- exit 0. The discriminating case is its bracket,
+-- `reject/t131_refine_let_annotation_false`, where the annotated expression
+-- plainly violates the annotation and the old checker PROVED the downstream
+-- call off it anyway.
+--
+-- The counted version of this file's claim lives in the `let-annotation`
+-- suite in `test/test_refinecheck.ml`, which asserts 2 proved / 0 violated /
+-- 0 skipped -- the "2" being the assertion with teeth, since the pre-fix
+-- behaviour also produced a passing exit code with 1.
+--
+-- See specs/lang/refinement-types.md.
+mod T130 do
+
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do
+    0
+  end
+
+  fn outer() : Int do
+    let ys : {List(Int) | len(_) > 0} = [1]
+    inner(ys)
+  end
+
+  fn main() : Int do
+    outer()
+  end
+
+end
