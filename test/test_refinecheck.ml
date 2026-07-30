@@ -5590,6 +5590,81 @@ end|});
         Alcotest.(check int) "the false annotation is now caught" 1 violated)
   ]
 
+let postcond_ledger_suite =
+  let summary () = March_refinecheck.Obligation.summary () in
+  let skip_count skips = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+  [ gated "a PROVED postcondition is recorded" (fun () ->
+        (* PRE-FIX: 0 proved, 0 violated, 0 skipped — check_post records
+           nothing at all, so a function whose entire contract is its return
+           type is invisible to --refine-report. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL1 do
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do mk() end
+end|});
+        let proved, violated, _ = summary () in
+        Alcotest.(check int) "the postcondition proves" 1 proved;
+        Alcotest.(check int) "violated" 0 violated)
+
+  ; gated "a VIOLATED postcondition is recorded" (fun () ->
+        (* PRE-FIX: 0 proved, 0 violated, 0 skipped, but exit 1 — the error
+           IS emitted, it just never reaches the ledger. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL2 do
+  fn mk() : {Int | _ > 0} do 0 - 5 end
+  fn main() : Int do mk() end
+end|});
+        let _, violated, _ = summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "an UNDECIDABLE postcondition is recorded as skipped" (fun () ->
+        (* PRE-FIX: 0 proved, 0 violated, 0 skipped, exit 0. This is the case
+           Task 3 will escalate; it must be countable first. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL3 do
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "proved" 0 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 1 (skip_count skips))
+
+  ; gated "a postcondition is recorded ONCE, not twice" (fun () ->
+        (* THE DOUBLE-COUNT GUARD. check_fn_post_verdict runs twice per
+           refined-return function: once from gate_unverified_posts with
+           ~emit:false (the propagation gate pre-pass) and once from
+           check_fn_post during the walk with emit=true. Recording in
+           check_post unconditionally counts every postcondition twice.
+           Without this case that bug ships and only shows up as inflated
+           --refine-report totals nobody cross-checks. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL4 do
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do mk() end
+end|});
+        let proved, _, _ = summary () in
+        Alcotest.(check int) "exactly one record" 1 proved)
+
+  ; gated "a precondition and a postcondition are both counted" (fun () ->
+        (* Interaction: the two paths are independent and must not clobber
+           one another. 2 = mk's return refinement + take_pos's precondition. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL5 do
+  fn take_pos(n : {Int | _ > 0}) : Int do n end
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do take_pos(mk()) end
+end|});
+        let proved, violated, _ = summary () in
+        Alcotest.(check int) "both counted" 2 proved;
+        Alcotest.(check int) "violated" 0 violated)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5634,4 +5709,5 @@ let () =
       ("compose", compose_suite);
       ("compose-adt", compose_adt_suite);
       ("compose-tag", compose_tag_suite);
-      ("let-annotation", let_annotation_suite) ]
+      ("let-annotation", let_annotation_suite);
+      ("postcond-ledger", postcond_ledger_suite) ]

@@ -931,19 +931,32 @@ let print_refine_report ~filename ~user_files () =
       obligations;
     (!proved, !violated, Hashtbl.fold (fun r n acc -> (r, n) :: acc) skips [])
   in
-  let print_block label (proved, violated, skips) =
+  (* A postcondition (a function's own return type) and a precondition (a
+     callee's declared param type, checked at the call site) are the same
+     kind of obligation to the headline totals — a proved postcondition IS a
+     proved obligation — but naming the split is cheap and answers "did my
+     return types get checked at all", which the headline alone cannot. *)
+  let count_kind kind obligations =
+    List.length
+      (List.filter (fun (o : March_refinecheck.Obligation.t) -> o.kind = kind) obligations)
+  in
+  let print_block label obligations =
+    let proved, violated, skips = summarize obligations in
     let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
     Printf.eprintf "refinement obligations (%s): %d proved, %d violated, %d skipped\n"
       label proved violated skipped;
     List.iter
       (fun (r, n) ->
         Printf.eprintf "  skipped (%s): %d\n" (March_refinecheck.Obligation.reason_name r) n)
-      (List.sort compare skips)
+      (List.sort compare skips);
+    Printf.eprintf "  by kind: %d precondition, %d postcondition\n"
+      (count_kind March_refinecheck.Obligation.Precondition obligations)
+      (count_kind March_refinecheck.Obligation.Postcondition obligations)
   in
   let all_obligations = March_refinecheck.Obligation.all () in
   let user_obligations = List.filter (fun (o : March_refinecheck.Obligation.t) -> is_user_span o.span) all_obligations in
-  print_block "user code" (summarize user_obligations);
-  print_block "user + stdlib" (summarize all_obligations)
+  print_block "user code" user_obligations;
+  print_block "user + stdlib" all_obligations
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
 let debug_mode     = ref false

@@ -2686,7 +2686,8 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
       | _ -> (verdict, None)
     in
     Obligation.record
-      { Obligation.span; callee; predicate = pred_str rp.pred; verdict };
+      { Obligation.span; callee; predicate = pred_str rp.pred; verdict
+      ; kind = Obligation.Precondition };
     Option.iter (fun r -> r := Some verdict) verdict_out;
     (* …except inside a `cap verified` module, where a skip is the very thing
        the user asked to be told about (see [strict_verified]).  `Proved` and
@@ -3895,9 +3896,23 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
    would declare `b` at `Int` and use it as a Bool. *)
 let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(scalar_env : (string * Smt.sort) list = [])
-    ?(fn_name : string option = None) ?(emit = true) (sc : scope)
-    (binder : string) (ret_pred : A.expr)
+    ?(fn_name : string option = None) ?(emit = true) ?(record = true)
+    (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
+  (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
+     refinement that checks nothing is distinguishable from one that passes.
+     [record] (NOT [emit]) gates whether this fires at all — [check_fn_post_verdict]
+     is invoked twice per refined-return function, once from the
+     [gate_unverified_posts] pre-pass with [~emit:false] and once from the walk
+     with [emit = true]; both calls are threaded here as [~record:emit] by the
+     caller, so only the emitting (reporting) run ever records, and the same
+     postcondition is never counted twice. *)
+  let note verdict =
+    if record then
+      Obligation.record
+        { Obligation.span; callee = Option.value ~default:"" fn_name
+        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition }
+  in
   let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
   (* Scope names already declared into the `Str` sort by [scope_facts].  Both
@@ -3996,7 +4011,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     | None -> scalar tail_e
   in
   match tail_term_opt with
-  | None -> false
+  | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate); false
   | Some tail_term ->
     let resolve_field = match record_sort with
       | Some sort_name -> make_field_resolver binder sort_name tail_term
@@ -4039,19 +4054,20 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         | None -> ())
       path;
     (match smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
-     | None -> false
+     | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate); false
      | Some goal ->
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
-       if sort_conflict decls then false
+       if sort_conflict decls then (note (Obligation.Skipped Obligation.Sort_conflict); false)
        else
        (* See [check_call] for why the IEEE rewrite runs here, once the
           declarations — and hence which symbols are `Float64` — are final. *)
        let sort_of n = List.assoc_opt n decls in
        let is_float n = sort_of n = Some Smt.SFloat in
        let goal = fp_rewrite is_float goal in
-       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then false
+       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then
+         (note (Obligation.Skipped Obligation.Float_sort_gate); false)
        else
        let assumptions =
          List.filter_map
@@ -4074,7 +4090,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          else ""
        in
        (match Refine.discharge ~root ~preamble vc with
-        | Refine.Verified -> true
+        | Refine.Verified -> note Obligation.Proved; true
         | first ->
           let emit_error () =
             if emit then begin
@@ -4097,16 +4113,23 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
                 ; notes = [hint]; code = None; fix = None }
             end
           in
-          if scope_has_record then
-            (* With concrete record preconditions in scope, a SAT counterexample
-               satisfying those preconditions IS a real violation — report it. *)
-            (match first with Refine.Refuted _ -> emit_error () | _ -> ())
-          else
-            (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
-             | Refine.Verified -> emit_error ()
-             | _ -> ());
+          (* Whether this IS a violation is independent of [emit] — [emit_error]
+             merely gates whether we tell the user; [note] below must still
+             record the true verdict either way. *)
+          let violated =
+            if scope_has_record then
+              (* With concrete record preconditions in scope, a SAT counterexample
+                 satisfying those preconditions IS a real violation — report it. *)
+              (match first with Refine.Refuted _ -> emit_error (); true | _ -> false)
+            else
+              (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
+               | Refine.Verified -> emit_error (); true
+               | _ -> false)
+          in
           (* Not [Verified] on the positive goal ⇒ not proven, whatever the
              refutation attempt said. *)
+          if violated then note Obligation.Violated
+          else note (Obligation.Skipped Obligation.Solver_undecided);
           false))
 
 (* ══ Tier 2: structural induction over a recursive function ═════════════════
@@ -4439,7 +4462,7 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
       && List.fold_left
            (fun acc t ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env
-               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit sc binder ret_pred t
+               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit sc binder ret_pred t
              && acc)
            true ts
     in

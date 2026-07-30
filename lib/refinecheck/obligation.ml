@@ -36,7 +36,21 @@ type reason =
 
 type verdict = Proved | Violated | Skipped of reason
 
-type t = { span : March_ast.Ast.span; callee : string; predicate : string; verdict : verdict }
+(* [Precondition]: an argument checked against a callee's declared param
+   refinement (or a bound expression against a `let` annotation) — [callee]
+   names the callee/annotation site.  [Postcondition]: a function's own
+   return value checked against its declared return refinement — [callee]
+   carries the FUNCTION's own name, since there is no separate callee to
+   name. *)
+type kind = Precondition | Postcondition
+
+type t =
+  { span : March_ast.Ast.span
+  ; callee : string
+  ; predicate : string
+  ; verdict : verdict
+  ; kind : kind
+  }
 
 let log : t list ref = ref []
 let reset () = log := []
