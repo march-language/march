@@ -278,11 +278,12 @@ end
 compiles clean even under `cap verified`, which is the strict setting that turns
 every undischarged obligation into an error.
 
-This works for every refinement shape except one: `Int`, `Float`, `Bool`, `String`
-lengths, record fields, list `len`, and your own `@[measure]` over a tree all
-compose. A **constructor-tag** refinement (`{Option(Int) | is_Some(_)}`) does not —
-tag facts come from a literal or a `match` where the call is written, and aren't
-carried along by a binding. See [Limitations](#limitations).
+This works for every refinement shape: `Int`, `Float`, `Bool`, `String`
+lengths, record fields, list `len`, your own `@[measure]` over a tree, and a
+**constructor tag** (`{Option(Int) | is_Some(_)}`) all compose. The tag shape
+composes only for the constructor you actually promised — promising
+`is_None(_)` does not discharge a callee wanting `is_Some(_)`. See
+[Limitations](#limitations).
 
 Two things it deliberately won't do for you. First, a **weaker** promise can't
 launder a stronger requirement. Declare `outer(ys : {List(Int) | len(_) >= 0})` —
@@ -874,11 +875,11 @@ dependent typing. Know the edges:
   name, an ambiguous constructor name, and any rebinding of the name inside the
   arm all leave the call *unchecked* rather than reported. See
   [Facts from a `match`](#facts-from-a-match).
-- **A tag refinement is the one shape that doesn't compose.** Passing a
+- **A tag refinement composes only for the constructor you promised.** Passing a
   `{Option(Int) | is_Some(_)}` parameter on to a callee wanting the same thing is
-  skipped, not proved — tag facts are established where the call is written, by a
-  literal or a `match`, and don't ride along on a binding. Everything else does
-  compose; see [Contracts
+  proved. A *different* tag is not assumed: with
+  `outer(p : {Option(Int) | is_None(_)})`, a call needing `is_Some(_)` is
+  skipped rather than reported, even though the two are exclusive. See [Contracts
   Compose](#contracts-compose--a-parameters-promise-holds-inside-its-body).
 - **A fact doesn't survive a local `let`, for any type.** `let u = 5` then
   `take_pos(u)` against `{Int | _ > 0}` is skipped. Pass the value directly, or

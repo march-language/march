@@ -1,0 +1,46 @@
+-- A refined CONSTRUCTOR-TAG contract COMPOSES across a call boundary, exactly
+-- as the `len` measure contract of
+-- `accept/t128_refine_list_contract_composes_call` does: a function that
+-- requires `{Option(Int) | is_Some(_)}` may pass that very parameter on to
+-- another function with the identical requirement, and the callee's
+-- obligation is PROVED from the caller's own declared contract alone -- no
+-- `match` narrowing and no runtime guard at either call site.
+--
+-- Before 2026-07-29 the measure shape composed and this one did not, which is
+-- the sort of gap only a counted witness finds. `Option` WAS admitted to the
+-- refined scope channel (`refined_scope_ty` accepts every registered ADT), so
+-- `outer`'s promise about `p` did produce a scope entry -- but nothing
+-- consulted it for a TAG: `reflect_dt`'s `EVar` arm declared `p` as a fresh,
+-- unconstrained datatype constant, so `((_ is Some) p)` was satisfiable both
+-- ways and `inner(p)` inside `outer`'s body was SKIPPED. `outer(Some(1))`
+-- from `main` still proved on its own, so the file exited 0 either way and
+-- the missing half was invisible.
+--
+-- That is why this file is bracketed by the rejecting
+-- `reject/t130_refine_tag_composition_narrowed_violation`: it shows the SAME
+-- two-hop shape does not blind the checker to a real failure once the
+-- caller's body narrows the value against its own contract. Exit 0 here
+-- cannot be explained away as "the checker accepts whatever it cannot
+-- disprove".
+--
+-- See specs/lang/refinement-types.md and the `compose-tag` suite in
+-- `test/test_refinecheck.ml`, which asserts the obligation COUNTS (2 proved,
+-- 0 skipped) that this file's exit code cannot show.
+mod T129 do
+
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do
+    match o do
+      Some(v) -> v
+      None    -> 0
+    end
+  end
+
+  fn outer(p : {Option(Int) | is_Some(_)}) : Int do
+    inner(p)
+  end
+
+  fn main() : Int do
+    outer(Some(1))
+  end
+
+end
