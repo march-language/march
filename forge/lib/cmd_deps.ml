@@ -91,6 +91,50 @@ let resolve_commit path =
   | (0, sha) when String.length sha >= 7 -> Some sha
   | _ -> None
 
+(** Is [dest] an existing git checkout of [url]?
+
+    The CAS keys an install by dep NAME only ([Project.dep_root_dir] maps every
+    non-path dep to ~/.march/cas/deps/<name>), so that directory can hold
+    content from a DIFFERENT source than the manifest now asks for — most
+    easily by switching a dep between `registry = ...` and `git = ...`, but
+    equally by two projects on one machine wanting different URLs.
+
+    A bare [Sys.file_exists dest] then reports "already installed" over, say, a
+    registry tarball, and the next git command fails with `fatal: not a git
+    repository` — with the lockfile recording the git source while the
+    directory holds registry content. Checking the remote before reuse turns
+    that silent mismatch into a re-install.
+
+    Conservative by design: anything we cannot positively confirm as a matching
+    checkout (no .git, git not on PATH, a rewritten remote) reports false, and
+    the caller re-installs. Re-cloning is cheap; serving wrong content is not.
+
+    NOTE this does not fix the underlying sharing problem — two projects
+    needing the same package at different revs still collide on one directory,
+    and the later one re-clones over the earlier. The real fix is to key the
+    CAS path by source, which is an on-disk layout change; see
+    specs/plans/2026-07-30-forge-registry-dep-gaps.md (B3, option 2). *)
+let git_checkout_matches ~url dest =
+  Sys.file_exists (Filename.concat dest ".git")
+  && (let cmd = Printf.sprintf "git -C %s remote get-url origin"
+                  (Filename.quote dest) in
+      match run_cmd cmd with
+      | (0, got) -> String.trim got = String.trim url
+      | _ -> false)
+
+(** Reuse [dest] if it is a matching checkout of [url]; otherwise clear it so
+    the caller's clone starts from a clean directory. Returns true when the
+    existing install can be reused as-is. *)
+let reuse_or_clear_git_dest ~name ~url dest =
+  if not (Sys.file_exists dest) then false
+  else if git_checkout_matches ~url dest then true
+  else begin
+    Printf.printf
+      "  %s: installed copy does not match %s — reinstalling\n%!" name url;
+    ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dest)));
+    false
+  end
+
 (** Compute the content hash for a resolved dep directory.
     Uses the CAS canonical archive hash; falls back to a placeholder if
     the directory doesn't exist yet (e.g. registry deps not yet fetched). *)
@@ -451,7 +495,7 @@ let install_dep name (dep : Project.dep) =
     Ok e
 
   | Project.GitTagDep { url; tag } ->
-    if Sys.file_exists dest then begin
+    if reuse_or_clear_git_dest ~name ~url dest then begin
       Printf.printf "  %s: already installed (tag %s)\n%!" name tag;
       let commit = resolve_commit dest in
       let e = Resolver_lockfile.{ name; version = Some tag;
@@ -482,7 +526,7 @@ let install_dep name (dep : Project.dep) =
     end
 
   | Project.GitBranchDep { url; branch } ->
-    if Sys.file_exists dest then begin
+    if reuse_or_clear_git_dest ~name ~url dest then begin
       Printf.printf "  %s: already installed (branch %s)\n%!" name branch;
       let commit = resolve_commit dest in
       let e = Resolver_lockfile.{ name; version = None;
@@ -505,7 +549,7 @@ let install_dep name (dep : Project.dep) =
     end
 
   | Project.GitRevDep { url; rev } ->
-    if Sys.file_exists dest then begin
+    if reuse_or_clear_git_dest ~name ~url dest then begin
       Printf.printf "  %s: already installed (rev %s)\n%!" name rev;
       let e = Resolver_lockfile.{ name; version = None;
                                    source = "git:" ^ url;
@@ -688,12 +732,10 @@ let run () =
       let visited = Hashtbl.create 16 in
       let reg_acc = ref [] in
       (* Phase 1: install path/git deps via BFS; registry deps (direct AND any
-         found transitively) accumulate in [reg_acc] instead of installing. *)
-      let results = bfs_install visited ~reg_acc ~project_root:proj.Project.root all_deps in
-      let git_errors = List.filter_map (fun (_, r) ->
-          match r with Error e -> Some e | Ok _ -> None) results in
-      let git_entries = List.filter_map (fun (_, r) ->
-          match r with Ok e -> Some e | Error _ -> None) results in
+         found transitively) accumulate in [reg_acc] instead of installing.
+         [results] accumulates across every phase-1 pass, because phase 2 can
+         hand back more path/git deps to install (see [drive] below). *)
+      let results = ref (bfs_install visited ~reg_acc ~project_root:proj.Project.root all_deps) in
       (* Overrides: every non-registry (path/git) dep is pre-resolved and must
          not be version-solved by PubGrub. *)
       let override_deps =
@@ -713,6 +755,25 @@ let run () =
             else begin Hashtbl.add seen_reg name (); true end
           ) (List.rev pairs)
       in
+      (* The two phases alternate to a JOINT fixpoint.
+         [resolve_wave] used to recurse on registry children only:
+
+             List.filter_map (fun (n, d) -> match d with
+               | Project.RegistryDep { version } -> Some (n, version)
+               | _ -> None)                       (* git/path children dropped *)
+
+         so registry → registry recursed but registry → git/path did not, and a
+         registry package's own git dependency was never fetched. Concretely:
+         bastion is a registry package declaring `depot = { git = ... }`; depot
+         never arrived, and bastion's own Depot.Middleware failed to compile
+         with `Module Pool not found`. Now a registry package's non-registry
+         children go back through phase 1 (which may in turn surface more
+         registry constraints into [reg_acc], hence the alternation).
+
+         The existing invariants are preserved: [visited] and [seen_reg] still
+         dedup by dep NAME nearest-wins, so re-entering phase 1 cannot reinstall
+         or re-claim an already-seen dep, and that also terminates the
+         alternation — every pass strictly grows one of the two visited sets. *)
       let rec resolve_wave pending =
         match dedup pending with
         | [] -> ()
@@ -721,24 +782,52 @@ let run () =
            | Error e -> reg_error := Some e
            | Ok es ->
              reg_entries := !reg_entries @ es;
-             (* Discover transitive registry deps from the just-installed set. *)
-             let next = List.concat_map (fun e ->
+             (* Split each just-installed registry package's own deps: registry
+                children continue the phase-2 fixpoint, everything else is
+                handed to phase 1, keyed by the DECLARING package's root so its
+                relative PathDeps resolve correctly. *)
+             let next_reg = ref [] in
+             let next_nonreg = ref [] in
+             List.iter (fun e ->
                  let dep_dir = Filename.concat (cas_deps_dir ()) e.Resolver_lockfile.name in
                  if Sys.file_exists (Filename.concat dep_dir "forge.toml") then
                    match Project.load_from_dir dep_dir with
                    | Ok p ->
-                     List.filter_map (fun (n, d) ->
+                     List.iter (fun (n, d) ->
                          match d with
-                         | Project.RegistryDep { version } -> Some (n, version)
-                         | _ -> None)
+                         | Project.RegistryDep { version } ->
+                           next_reg := (n, version) :: !next_reg
+                         | _ ->
+                           next_nonreg := (dep_dir, (n, d)) :: !next_nonreg)
                        p.Project.deps
-                   | Error _ -> []
-                 else []
-               ) es in
-             resolve_wave next)
+                   | Error _ -> ()
+               ) es;
+             (* Phase 1 over the non-registry children, grouped by declaring
+                root. This may push new constraints into [reg_acc]. *)
+             let by_root = Hashtbl.create 4 in
+             List.iter (fun (root, dep) ->
+                 let existing = try Hashtbl.find by_root root with Not_found -> [] in
+                 Hashtbl.replace by_root root (dep :: existing)
+               ) !next_nonreg;
+             Hashtbl.iter (fun root deps ->
+                 results :=
+                   !results
+                   @ bfs_install visited ~reg_acc ~project_root:root (List.rev deps)
+               ) by_root;
+             (* Anything phase 1 just surfaced joins this wave's registry
+                children for the next pass. *)
+             let carried = !reg_acc in
+             reg_acc := [];
+             resolve_wave (!next_reg @ carried))
         | _ -> ()
       in
-      resolve_wave !reg_acc;
+      let initial_reg = !reg_acc in
+      reg_acc := [];
+      resolve_wave initial_reg;
+      let git_errors = List.filter_map (fun (_, r) ->
+          match r with Error e -> Some e | Ok _ -> None) !results in
+      let git_entries = List.filter_map (fun (_, r) ->
+          match r with Ok e -> Some e | Error _ -> None) !results in
       let errors = git_errors @ (match !reg_error with Some e -> [e] | None -> []) in
       let entries = git_entries @ !reg_entries in
       let mhash = Resolver_lockfile.compute_manifest_hash toml_content in
