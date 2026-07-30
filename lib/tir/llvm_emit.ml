@@ -1243,25 +1243,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ctx.tco_in_tail <- false;
     let result1 = emit_expr ctx e1 in
     ctx.tco_in_tail <- saved_tail;
-    (match e2 with
-     | Tir.EDecRC _ | Tir.EIncRC _
-     | Tir.EAtomicDecRC _ | Tir.EAtomicIncRC _
-     (* A synthesized deep-drop call stands in for exactly the EDecRC above
-        (Drop.run rewrites one into the other), returns Unit, and is likewise
-        evaluated only for effect — so it must propagate e1's value too. See
-        Tir_names.is_drop_fn. *)
-     | Tir.EApp ({ Tir.v_name = _; _ }, _)
-       when (match e2 with
-             | Tir.EApp (f, _) -> Tir_names.is_drop_fn f.Tir.v_name
-             | _ -> false) ->
-       (* e2 is a pure side-effect (no meaningful value). Return e1's value so
-          that ELet(v, ESeq(call, dec_rc), body) binds the call result, not 0.
-          Perceus emits this pattern for borrowed-arg post-call decrements. *)
-       ignore (emit_expr ctx e2);
-       result1
-     | _ ->
-       ignore result1;
-       emit_expr ctx e2)
+    if Llvm_tco.is_trivial_dec_chain e2 then begin
+      (* e2 is purely RC bookkeeping (a single Dec/IncRC/Free/drop-fn call, OR
+         a whole CHAIN of them, e.g. ESeq(dec_rc a, dec_rc b) — Perceus emits
+         multi-op chains whenever a tail call's args require releasing more
+         than one now-dead local). Using is_trivial_dec_chain here (rather than
+         matching e2 against a single cleanup-op shape) is required: the old
+         single-op check only matched when e2 itself was exactly one
+         Dec/IncRC/drop-fn call, so a 2+-op chain fell through to the `else`
+         branch below, discarding e1's value (e.g. a call's real return value)
+         and substituting the last cleanup op's dummy ("i64","0") placeholder
+         instead — corrupting the seq's value into a bogus tagged-int and
+         crashing (or worse, silently misbehaving) any consumer of it. See
+         is_trivial_dec_chain's doc comment for the concrete Perceus shape
+         this recognises. *)
+      ignore (emit_expr ctx e2);
+      result1
+    end else begin
+      ignore result1;
+      emit_expr ctx e2
+    end
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
