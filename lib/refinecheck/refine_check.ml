@@ -3167,6 +3167,73 @@ let check_call ~root errctx ~span ~(callee : string)
         | _ -> ()
       end
     in
+    (* ── A caller-scope refined ADT parameter's own CONSTRUCTOR-TAG promise ───
+       The tester analogue of [load_scope_measure_facts], and the same gap:
+
+         fn inner(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+         fn outer(p : {Option(Int) | is_Some(_)}) : Int do inner(p) end
+
+       The goal for `inner(p)` is `((_ is Some) p)`, and [reflect_dt]'s `EVar`
+       arm declares `p` as a FRESH, UNCONSTRAINED datatype constant — so the VC
+       was satisfiable both ways and the call was SKIPPED, silently, while the
+       measure-shaped version of the very same composition proved.  `outer`'s
+       own signature already promises exactly this tag about exactly this value,
+       so the fact is available; nothing was consulting [sc] for it.
+
+       What fires, and only this:
+
+         - the actual is a bare name [x] carrying a MEASURE-ONLY scope entry
+           ([meas_sort_prefix] — the marker [refined_scope_ty] gives every
+           registered non-record ADT, `Option` included);
+         - that entry's predicate is EXACTLY a bare tester application over the
+           entry's OWN refined value — no conjunction, no negation, no other
+           subject.  All THREE spellings of that value are accepted: the
+           anonymous `_`, the annotation's declared binder [b], and the
+           parameter's own name [x].  Missing one of the three is the spelling
+           class that has shipped broken three times in this file (twice on the
+           measure side, once on the goal side); a skip emits no diagnostic, so
+           the omission is invisible until someone renames a binder;
+         - the tester's constructor is the SAME constructor this goal tests, and
+           belongs to the SAME datatype sort [adt].  A DIFFERENT constructor is
+           deliberately not loaded: `is_None(_)` composing into a callee that
+           wants `is_Some(_)` would be sound to assume (and would turn the call
+           into a reported violation, since the two are exclusive), but it is a
+           strictly wider claim than "the caller already promised the goal", and
+           a missed report costs nothing here while a wrong one is the failure
+           this subsystem exists to prevent.
+
+       The fact is phrased over `Const x` at sort [adt] — the very term
+       [reflect_dt]'s `EVar` arm builds for this actual on the GOAL side — so
+       assumption and goal meet on one symbol.  Both sides also emit the same
+       `(x, SData adt)` declaration; the VC builder deduplicates [decls] by
+       (name, sort) before rendering, and the per-(name, ctor) memo below keeps
+       a repeated occurrence from re-asserting the assumption.
+
+       Sound direction: this only ADDS a hypothesis the caller's own signature
+       already states about this very value.  Shadowing is handled upstream by
+       [scope_shadow], which retires the name from [sc] at every binding
+       construct, so after `let p = None` or a `match` arm binding `p` the
+       lookup finds nothing and no fact is loaded. *)
+    let tester_facts_loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    let load_scope_tester_facts (adt : string) (goal_ctor : string) (x : string) : unit =
+      let key = x ^ "|" ^ adt ^ "|" ^ goal_ctor in
+      if not (Hashtbl.mem tester_facts_loaded key) then begin
+        Hashtbl.replace tester_facts_loaded key ();
+        match List.assoc_opt x sc with
+        | Some (b, q, Some s) when is_meas_sort s -> (
+          match q with
+          | A.EApp (A.EVar { A.txt = t; _ }, [ A.EVar { A.txt = n; _ } ], _)
+            when n = b || n = "_" || n = x -> (
+            match ctor_of_tester t with
+            | Some ctor when ctor = goal_ctor && sort_of_ctor ctor = Some adt ->
+              decls := (x, Smt.SData adt) :: !decls;
+              if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+              assume := Smt.IsCtor (ctor, Smt.Const x) :: !assume
+            | _ -> ())
+          | _ -> ())
+        | _ -> ()
+      end
+    in
     (* Reflect a value into the SMT datatype term an axiomatised measure ranges
        over: a constructor application becomes (ctor …) (so the recursion axioms
        fire); a variable becomes a fresh datatype constant. *)
@@ -3260,6 +3327,13 @@ let check_call ~root errctx ~span ~(callee : string)
             (match actual_of_name x with Some a -> a | None -> arg)
           | _ -> arg
         in
+        (* The subject is a bare caller-scope name: load whatever the CALLER's
+           own signature promises about its TAG first, so the promise and the
+           goal meet on the one `Const x` symbol [reflect_dt] is about to
+           build for it.  Mirrors the measure side's load-before-reflect. *)
+        (match subject with
+         | A.EVar { A.txt = x; _ } -> load_scope_tester_facts adt ctor x
+         | _ -> ());
         (match reflect_dt adt subject with
          | Some t ->
            if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;

@@ -5287,6 +5287,140 @@ end|} arg
           (has_refine_error_d (prog "Leaf")))
   ]
 
+(* ── Composing a CONSTRUCTOR-TAG contract across a call boundary ────────────
+   The tester analogue of [compose_suite]/[compose_adt_suite].  A refined ADT
+   parameter whose contract is a MEASURE composed into its own body once
+   [load_scope_measure_facts] existed; the identically-shaped TAG contract
+   (`{Option(Int) | is_Some(_)}`) did not, because [reflect_dt]'s `EVar` arm
+   declares a fresh UNCONSTRAINED datatype constant for a bare caller-scope
+   name and nothing consulted the scope channel for the tag the caller's own
+   signature already promises.  The result was "1 proved, 1 skipped" — and a
+   skip emits no diagnostic, so it read as success.
+
+   Every case below asserts the obligation COUNTS.  A skip and a proof both
+   compile clean; only the counts tell them apart. *)
+let compose_tag_suite =
+  let summary () = March_refinecheck.Obligation.summary () in
+  let skip_count skips = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+  [ gated "a constructor-tag contract composes into a call in its own body"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TC do
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn outer(p : {Option(Int) | is_Some(_)}) : Int do inner(p) end
+  fn main() : Int do outer(Some(1)) end
+end|});
+        let proved, violated, skips = summary () in
+        (* 2 = main's `outer(Some(1))` AND `inner(p)` inside outer's body. *)
+        Alcotest.(check int) "proved" 2 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0 (skip_count skips))
+
+  ; gated "the NAMED-BINDER spelling of a tag contract composes too" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TCB do
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn outer(p : {v : Option(Int) | is_Some(v)}) : Int do inner(p) end
+  fn main() : Int do outer(Some(1)) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "proved" 2 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0 (skip_count skips))
+
+  ; gated "the PARAMETER-NAME spelling of a tag contract composes too" (fun () ->
+        (* The third spelling of the refined value: not `_`, not a declared
+           binder, but the parameter's OWN name.  All three denote the same
+           value and must compose identically.  This spelling class has shipped
+           broken three separate times in refine_check.ml — twice on the measure
+           assumption side, once on the goal side — and each time the symptom
+           was silence, not a failure. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TCP do
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn outer(p : {Option(Int) | is_Some(p)}) : Int do inner(p) end
+  fn main() : Int do outer(Some(1)) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "proved" 2 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0 (skip_count skips))
+
+  ; gated "a DIFFERENT constructor in the caller's contract does not compose"
+      (fun () ->
+        (* The direction control.  The caller promises `is_None(_)`; the callee
+           wants `is_Some(_)`.  Assuming the caller's own promise verbatim WOULD
+           be sound and would make this a reported violation (the two testers
+           are exclusive on `Option`), but the loader deliberately fires only
+           when the caller already promises the GOAL's constructor: that is the
+           narrowest claim that discharges the goal, and a missed report costs
+           nothing while a wrong fact is the failure this subsystem exists to
+           prevent.  So: 1 proved (main's call alone), 1 skipped — and in
+           particular NOT falsely proved. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TCN do
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn outer(p : {Option(Int) | is_None(_)}) : Int do inner(p) end
+  fn main() : Int do outer(None) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "not proved by the other tag" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "still skipped" 1 (skip_count skips))
+
+  ; gated "rebinding the name retires the tag fact" (fun () ->
+        (* THE CARDINAL-SIN TEST.  After `let p = None` the name denotes a
+           different value and the caller's promise says nothing about it.  If
+           the outer fact survived the rebind this would come back 2 proved —
+           a WRONG proof, of a call that genuinely violates `inner`'s
+           precondition, with nothing surfaced at all.
+
+           The assertion is `proved = 1`, not "the violation is reported":
+           reporting it would need the local `let`'s VALUE propagated into a
+           later goal, which this pass does not do for ANY type (the Int and
+           List analogues are likewise 1 proved / 1 skipped — see the
+           corresponding note in [compose_adt_suite]).  Retiring the fact is
+           the property under test; a skip is its correct outcome. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TCS do
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn outer(p : {Option(Int) | is_Some(_)}) : Int do
+    let p = None
+    inner(p)
+  end
+  fn main() : Int do outer(Some(1)) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "the retired fact proves nothing" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 1 (skip_count skips))
+
+  ; gated "a match binder shadowing the name retires the tag fact" (fun () ->
+        (* Same property through the other binding construct: the arm's `p`
+           is the payload of `q`, not the refined parameter. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TCM do
+  fn inner(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn outer(p : {Option(Int) | is_Some(_)}, q : Option(Option(Int))) : Int do
+    match q do
+      Some(p) -> inner(p)
+      None    -> 0
+    end
+  end
+  fn main() : Int do outer(Some(1), None) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "the shadowed fact proves nothing" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 1 (skip_count skips))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5329,4 +5463,5 @@ let () =
       ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite);
       ("compose", compose_suite);
-      ("compose-adt", compose_adt_suite) ]
+      ("compose-adt", compose_adt_suite);
+      ("compose-tag", compose_tag_suite) ]
