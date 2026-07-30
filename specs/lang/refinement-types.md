@@ -215,7 +215,7 @@ The guard above is a genuine proof, not a skip. The checker treats the
 **qualified** `List.length` as an alias of the `len` measure, so
 `i < List.length(xs)` establishes exactly the fact `i < len(xs)` that `at`'s
 precondition asks for. Verified 2026-07-28: `--refine-report` on that program
-reports `1 proved, 0 violated, 0 skipped` for user code.
+reports `1 proved, 0 violated, 0 trusted, 0 skipped` for user code.
 
 Until 2026-07-28 the two were unconnected symbols and the guarded call was
 silent because it was *skipped*, not because it was verified. That is fixed; the
@@ -311,7 +311,7 @@ fn main() : Int do outer([1]) end
 ```
 
 Both call sites are **proved** — `--refine-report` on that program reports
-`2 proved, 0 violated, 0 skipped` for user code (verified 2026-07-29). Before
+`2 proved, 0 violated, 0 trusted, 0 skipped` for user code (verified 2026-07-29). Before
 this, `outer([1])` proved on the literal while `inner(ys)` was silently
 *skipped*, so the practical ceiling was that a non-empty contract could not be
 threaded any further than one hop. The stdlib's own contracts now compose the
@@ -327,10 +327,10 @@ mod Y do
 end
 ```
 
-That program exits 0 under `cap verified` (`2 proved, 0 violated, 0 skipped`).
+That program exits 0 under `cap verified` (`2 proved, 0 violated, 0 trusted, 0 skipped`).
 
 **Every refined form composes.** All verified 2026-07-29 at
-`2 proved, 0 violated, 0 skipped`: `Int` (`{Int | _ > 0}`), `Float`, `Bool`,
+`2 proved, 0 violated, 0 trusted, 0 skipped`: `Int` (`{Int | _ > 0}`), `Float`, `Bool`,
 `String` (`{String | len(_) > 0}`), a record field
 (`{v : Config | v.port >= 1}`), the built-in list `len`, a user `@[measure]`
 over an ADT (`{Tree(Int) | size(_) > 0}`), and a **constructor tag**
@@ -645,7 +645,7 @@ end
 ```
 
 Verified 2026-07-28: `--refine-report` on that program reports `1 proved,
-0 violated, 0 skipped` for user code. The contradictory `String.byte_size(t) == 0`
+0 violated, 0 trusted, 0 skipped` for user code. The contradictory `String.byte_size(t) == 0`
 form is reported as a violation.
 
 Only byte-valued spellings are aliased, because `len` is a byte count:
@@ -921,10 +921,10 @@ passes look identical from outside.
 
 ```
 $ march --check --refine-report stdlib/list.march
-refinement obligations (user code): 0 proved, 0 violated, 5 skipped
+refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 5 skipped
   skipped (solver-undecided): 5
   by kind: 5 precondition, 0 postcondition
-refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
+refinement obligations (user + stdlib): 8 proved, 0 violated, 0 trusted, 28 skipped
   skipped (unreflectable-predicate): 1
   skipped (solver-undecided): 27
   by kind: 36 precondition, 0 postcondition
@@ -1109,6 +1109,64 @@ span; an unguarded call, a guard on a different variable, a cross-measure guard,
 and a negated guard all still report `solver-undecided`, each matched against a
 control with the competing binding deleted).
 
+### `@[trusted]` — a scoped, loud escape hatch
+
+`cap verified` is all-or-nothing at the module level: one obligation the
+checker cannot discharge forces the author to either rewrite the predicate,
+strengthen what the call site knows, or drop `cap verified` for the *entire*
+module — even if every other function in it verifies cleanly. `@[trusted]` is
+a per-**function** escape hatch: it accepts, as an assertion, whatever the
+checker could not discharge inside that one function, without disarming the
+capability for its siblings.
+
+```march
+mod Trusted1 do
+  cap verified
+
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+
+  @[trusted]
+  fn go(zs : List(Int)) : Int do
+    inner(zs)   -- SKIPPED (nothing here proves len(zs) > 0) --
+                -- accepted as an assertion, not an error, because `go` is trusted
+  end
+
+  fn main() : Int do go([1]) end
+end
+```
+
+Without `@[trusted]` the call inside `go` would be the exact `head_of`-style
+error above. With it, the obligation is still recorded — as its **own**
+verdict, `Trusted`, never folded into `proved` — so `--refine-report` shows
+exactly how much of a module's "verification" is actually an assertion rather
+than a proof:
+
+```
+refinement obligations (user code): 0 proved, 0 violated, 1 trusted, 0 skipped
+```
+
+**This is a deliberate soundness hole, and it is scoped as narrowly as
+possible on purpose:**
+
+- **Only a `Skipped` obligation is eligible.** `@[trusted]` never suppresses a
+  `Violated` — a predicate the solver *proved* can never hold is a bug in the
+  annotation, not an incompleteness to wave through. `go() do inner(0 - 5) end`
+  under `@[trusted]` still reports the refinement violation exactly as it
+  would without the attribute.
+- **Scoped to the one function that carries the attribute.** A sibling
+  function in the same `cap verified` module that is not itself `@[trusted]`
+  is unaffected — one annotation does not silently disarm the module.
+- **A no-op outside `cap verified` warns.** `@[trusted]` only changes anything
+  inside the `strict_verified` escalation path; on a function in a module that
+  never declares `cap verified` it warns that the attribute has no effect,
+  rather than silently doing nothing — the exact failure mode (an attribute
+  that changes no behaviour, mistaken for one that does) this subsystem keeps
+  producing.
+
+Verified 2026-07-30. Corpus: `accept/t132` (an otherwise-undischargeable
+`cap verified` module rescued by `@[trusted]`), `reject/t133` (a definite
+violation inside a `@[trusted]` function is still reported).
+
 **Scope and limits.** State these plainly before relying on it:
 
 - **Strictly opt-in, and scoped to the decl list that declares it.** A
@@ -1177,11 +1235,10 @@ control with the competing binding deleted).
   where dropping a fact means silence, dropping one here means an ERROR, so the
   retirement is deliberately over-approximate — a guard is re-established by
   re-stating it inside the rebinding scope. `reject/t123`.
-- **There is no `@[trusted]` escape hatch yet.** The only way to accept an
-  obligation the checker cannot discharge is `assert`, or removing
-  `cap verified` from the module. Until an escape hatch exists, `cap verified`
-  is a tool for small, deliberately-verified modules rather than a whole-codebase
-  setting.
+- **`@[trusted]` (since 2026-07-30) is a per-function escape hatch.** See
+  [above](#trusted--a-scoped-loud-escape-hatch). It accepts a `Skipped`
+  obligation as an assertion — recorded as its own `Trusted` verdict, never a
+  `Violated` — scoped to the one function that carries the attribute.
 
 ### Open holes, stated as of 2026-07-29
 
@@ -1207,7 +1264,10 @@ sense; each is a check that does not happen.
    call sites. The 2026-07-29 composition work is confined to `check_call` for
    the same reason: a parameter's promise composes into a *call* in the body,
    but `check_post` composes no list or ADT measure through a **postcondition**.
-4. **There is no `@[trusted]`.**
+4. **`@[trusted]` exists but is scoped to preconditions only.** It suppresses
+   the escalation `check_call`'s `note` performs; `check_post` does not (yet)
+   escalate anything under `cap verified` (see item 3), so `@[trusted]` on a
+   function has nothing to do there yet either.
 5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
    wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified
    spellings `strip_entry_self_qual` rewrites, so an entry module that declares

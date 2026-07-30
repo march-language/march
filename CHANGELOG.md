@@ -175,18 +175,32 @@ git log is authoritative for exact commits.
   not make the callee's module strict, and nested modules do not inherit the
   capability. Modules that do not declare it behave exactly as before.
 
-  Three limits worth knowing before relying on it: an undischarged **postcondition**
+  Two limits worth knowing before relying on it: an undischarged **postcondition**
   (a return-type refinement) is now recorded and reported by `--refine-report`
-  (see the Fixed entry below), but `cap verified` does not yet escalate it; a
-  refinement written on an **`interface`
-  method's signature** is not enforced at call sites (put it on the `impl`
-  method's parameter, where it is — see the 2026-07-29 entries below), and an
-  `impl` method's own parameter refinement is adopted only when its name
-  unambiguously denotes one contract; and there is **no
-  `@[trusted]` escape hatch yet** — the only ways to accept an obligation the
-  checker cannot discharge are an `assert` or removing `cap verified` from the
-  module. It is therefore a tool for small, deliberately-verified modules rather
-  than a whole-codebase setting.
+  (see the Fixed entry below), but `cap verified` does not yet escalate it —
+  `@[trusted]` (see below) only suppresses escalation on the precondition
+  side; and a refinement written on an **`interface` method's signature** is
+  not enforced at call sites (put it on the `impl` method's parameter, where
+  it is — see the 2026-07-29 entries below), and an `impl` method's own
+  parameter refinement is adopted only when its name unambiguously denotes one
+  contract.
+
+- **`@[trusted]`: a per-function escape hatch from `cap verified`.** `cap
+  verified` used to be all-or-nothing — one obligation the checker could not
+  discharge anywhere in the module forced dropping the capability entirely, or
+  restating the fact with `assert`. Annotating a single function `@[trusted]`
+  now accepts, as an assertion, any obligation *inside that function* the
+  checker could not otherwise discharge, without disarming `cap verified` for
+  the rest of the module. It never suppresses a *definite violation* — a
+  predicate the solver has proved can never hold is a bug in the annotation,
+  not an incompleteness to wave through, so that case is still reported
+  exactly as before — and it is scoped strictly to the annotated function: an
+  ordinary sibling in the same `cap verified` module still escalates.
+  `--refine-report`'s headline now has a fourth column, `N trusted`, counted
+  separately from `proved` so a reader can tell how much of a module's
+  "verification" is an assertion rather than a proof. Putting `@[trusted]` on
+  a function in a module that does not declare `cap verified` warns, since the
+  attribute would otherwise silently do nothing.
 
 - **`--refine-report`: the checked fraction of your refinements is now a
   number.** `march --check --refine-report file.march` prints how many
