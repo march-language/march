@@ -2608,10 +2608,26 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
-let check_call ~root errctx ~span ~(callee : string)
+(* What the refined value being checked IS, for diagnostics only.  `Argument` is
+   a real call's actual; `Bound_expr` is the right-hand side of an annotated
+   `let`, which reaches this function through a SYNTHESIZED one-parameter
+   [fn_sig] (see [check_let_annotation]).  The obligation itself is identical —
+   "does this expression satisfy this predicate" — but "argument does not
+   satisfy precondition" reads as nonsense at a `let`, where the author called
+   nothing, so the two user-facing messages branch on this. *)
+type check_subject =
+  | Argument
+  | Bound_expr
+
+let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
+    ?(verdict_out : Obligation.verdict option ref option)
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
+  let subject_noun = match subject with Argument -> "argument" | Bound_expr -> "bound expression" in
+  let obligation_noun =
+    match subject with Argument -> "precondition" | Bound_expr -> "type annotation"
+  in
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
      name is declared into the record's datatype sort by [path_resolve_field];
@@ -2671,6 +2687,7 @@ let check_call ~root errctx ~span ~(callee : string)
     in
     Obligation.record
       { Obligation.span; callee; predicate = pred_str rp.pred; verdict };
+    Option.iter (fun r -> r := Some verdict) verdict_out;
     (* …except inside a `cap verified` module, where a skip is the very thing
        the user asked to be told about (see [strict_verified]).  `Proved` and
        `Violated` are unaffected: the latter already reported itself. *)
@@ -2699,15 +2716,21 @@ let check_call ~root errctx ~span ~(callee : string)
              and restating the fact as a refinement avoids the guard entirely"
             spelling where
         | _ ->
-          "note: guard the call or strengthen what is known here, rewrite the \
-           predicate into the fragment the checker supports, or remove `cap \
-           verified` from this module — it asks for every obligation to be \
-           discharged"
+          (match subject with
+           | Argument ->
+             "note: guard the call or strengthen what is known here, rewrite \
+              the predicate into the fragment the checker supports, or remove \
+              `cap verified` from this module — it asks for every obligation \
+              to be discharged"
+           | Bound_expr ->
+             "note: bind an expression the checker can see satisfies this \
+              annotation, weaken the annotation, or remove `cap verified` from \
+              this module — it asks for every obligation to be discharged")
       in
       Err.error errctx ~span
         (Printf.sprintf
-           "`cap verified` module: cannot verify precondition `%s` on `%s` (%s: %s)\n%s"
-           (pred_str rp.pred) callee (Obligation.reason_name r)
+           "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
+           obligation_noun (pred_str rp.pred) callee (Obligation.reason_name r)
            (Obligation.reason_detail r) remedy)
     | _ -> ()
   in
@@ -3712,10 +3735,19 @@ let check_call ~root errctx ~span ~(callee : string)
            | Refine.Verified ->
              note Obligation.Violated;
              Err.error errctx ~span
-               (Printf.sprintf
-                  "refinement violation: argument does not satisfy precondition `%s`%s\n\
-                   note: guard the call (e.g. `if %s do …`) or pass a value known to satisfy it"
-                  (pred_str rp.pred) (format_cx (model_of first)) (pred_str rp.pred))
+               (Printf.sprintf "refinement violation: %s does not satisfy %s `%s`%s\n%s"
+                  subject_noun obligation_noun (pred_str rp.pred)
+                  (format_cx (model_of first))
+                  (match subject with
+                   | Argument ->
+                     Printf.sprintf
+                       "note: guard the call (e.g. `if %s do …`) or pass a value known to \
+                        satisfy it"
+                       (pred_str rp.pred)
+                   | Bound_expr ->
+                     "note: a refined annotation on a `let` is CHECKED against the \
+                      expression it annotates, not assumed — bind a value that satisfies \
+                      it, or weaken the annotation"))
            | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
 
 (* ── Postconditions: a function's return value must satisfy its return
@@ -4462,6 +4494,86 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
   in
   go "" decls
 
+(* ── An annotated `let`'s refinement is an OBLIGATION, not a promise ───────
+
+   `let ys : {List(Int) | len(_) > 0} = []` used to be believed on sight:
+   [scope_add_binding]'s annotated arm admits the predicate into [scope]
+   unconditionally, so the annotation became a fact about `ys` and every later
+   goal that needed it was PROVED off an expression that plainly violates it.
+   Under `cap verified` — whose premise is "if it compiles, it is proved" —
+   that is an unsound hole reachable by ordinary, non-adversarial code: an
+   author writes an annotation to document an invariant and instead silently
+   manufactures it.
+
+   The check is not new machinery.  "Does this expression satisfy this
+   predicate" is exactly what [check_call] answers for a call's actual, so the
+   binding is reflected AS a one-parameter call: the annotation is the
+   precondition, the bound expression is the sole argument.  That inherits the
+   definite-failure stance (report only on a positive proof of ¬goal;
+   unreflectable or solver-unsure stays a [Skipped]) and every resolver
+   [check_call] already has, including the measure and constructor-tag paths
+   added for contract composition.
+
+   Two details that are easy to get wrong and are load-bearing:
+
+   - [param_names] carries the LET NAME, not the refinement's binder.
+     [check_call] resolves the refined value through [actual_of_name], which
+     looks a name up in [param_names]; the binder travels separately in
+     [rparam.binder].  All three spellings of the value must land on the same
+     actual — `_`, a declared binder (`{v : T | p(v)}`), and the bound name
+     itself (`len(ys)`) — and only this arrangement gets the third one.  (This
+     is the difference from [callback_sig_of_ty], whose `$cb_arg` placeholder
+     is safe precisely because a callback's domain has no name a predicate
+     could spell.)
+
+   - The binding's own name is SHADOWED out of all three fact channels first.
+     The predicate's `ys` denotes the value being bound here, never an outer
+     `ys`; leaving a stale entry visible would let an outer value's fact be
+     attributed to this binder, which is the false-positive direction this
+     subsystem must never take.  Retiring a fact can only cost precision (a
+     skip), never soundness.
+
+   Returns [Some true] when the annotation was PROVED, [Some false] when it was
+   violated or left undecided, and [None] when the binding carries no refined
+   annotation at all (so the caller falls through to [scope_add_binding]'s
+   ordinary postcondition-derived handling).
+
+   The caller uses that verdict to decide whether the predicate may enter
+   [scope].  Admitting it on anything but a proof would re-open the hole in a
+   quieter form: a `let ys : {List(Int) | len(_) > 0} = zs` the checker cannot
+   decide would file a Skipped obligation and then STILL hand `len(ys) > 0` to
+   every later goal, so `inner(ys)` would report `Proved` on the strength of a
+   premise nobody established.  A proof that rests on an unverified assumption
+   is exactly what this change exists to remove, so an unproven annotation
+   grants nothing.  That costs precision — an invariant the author knows but
+   the checker cannot see is no longer usable — and the cost lands entirely in
+   the safe direction, as more skips. *)
+let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
+    (sc : scope) (re : recenv) (b : A.binding) : bool option =
+  match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
+  | A.PatVar n, Some (binder, pred, sort) ->
+    let name = n.A.txt in
+    let names = pat_binders b.A.bind_pat in
+    let sg =
+      { param_names = [ name ]
+      ; param_str = [ sort = Some str_sort ]
+      ; param_scalar = [ scalar_sort_or_int sort ]
+      ; refined = [ { idx = 0; binder; pred; sort } ]
+      ; ret = None
+      ; ret_sort = None
+      }
+    in
+    let out = ref None in
+    check_call ~root errctx ~span:n.A.span
+      ~callee:(Printf.sprintf "let %s" name)
+      ~subject:Bound_expr ~verdict_out:out ~postcond:(postcond_of ctx defs) sg
+      [ b.A.bind_expr ]
+      (path_shadow path names)
+      { idx = 0; binder; pred; sort }
+      (scope_shadow sc names) (recenv_shadow re names);
+    Some (!out = Some Obligation.Proved)
+  | _ -> None
+
 (* ── Walk expressions, threading the refined-local scope, the record-typed
    variables ([recenv]) and the path context ─────────────────────────────── *)
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
@@ -4511,6 +4623,16 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
       (List.fold_left
          (fun (ctx, path, sc, re, cb) e ->
            visit ~root errctx defs ctx path sc re cb e;
+           (* An annotated `let`'s refinement is checked against its bound
+              expression HERE, against the scope as it stands BEFORE the
+              binding — exactly as a call's arguments are checked against the
+              caller's pre-call scope.  Doing it after [scope_add_binding]
+              would let the annotation discharge itself. *)
+           let annot_proved =
+             match e with
+             | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path sc re b
+             | _ -> None
+           in
            (* A `let`/local-`fn` binder also retires the name for CALLEE
               RESOLUTION in the statements that follow — see [local_shadow]. *)
            let ctx' =
@@ -4529,6 +4651,11 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
            in
            let sc' =
              match e with
+             (* An annotation that was NOT proved grants no fact — it is
+                retired rather than admitted, so no later goal can be
+                discharged by a premise this binding failed to establish. *)
+             | A.ELet (b, _) when annot_proved = Some false ->
+               scope_shadow sc (pat_binders b.A.bind_pat)
              | A.ELet (b, _) -> scope_add_binding ~postcond:(postcond_of ctx defs) sc b
              | _ -> sc
            in

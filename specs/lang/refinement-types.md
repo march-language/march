@@ -1247,14 +1247,34 @@ edges:
   `is_Some(_)` stays **skipped** rather than reported, even though the two
   testers are exclusive. See [A Parameter's Own Contract Is a Fact Inside Its
   Body](#a-parameters-own-contract-is-a-fact-inside-its-body).
-- **A refined `let` annotation is trusted, not verified against the bound
-  expression.** Writing `let ys : {List(Int) | len(_) > 0} = []` makes the
-  checker *assume* the annotation at later call sites without ever checking it
-  against the `[]` it is attached to, so a call needing a non-empty list is
-  reported as proved. This is pre-existing and type-independent (`let n : {Int |
-  _ > 0} = 0 - 5` behaves the same) and is tracked as an open follow-up in
-  `specs/todos.md`; until it is closed, an annotation on a `let` is a promise
-  the author makes, not one the checker validates.
+- **A refined `let` annotation is CHECKED against its bound expression**
+  (since 2026-07-30). `let ys : {List(Int) | len(_) > 0} = []` is a refinement
+  violation reported at the `let`, not a fact the checker adopts. Until that
+  date the annotation was believed on sight: it entered the scope channel
+  unconditionally, so a later call needing a non-empty list was reported
+  **proved** off a premise nobody had established, and `cap verified` — whose
+  premise is "if it compiles, it is proved" — accepted the module. That made
+  a `let` annotation the one refined position in the language that obliged
+  nobody.
+
+  The obligation is the ordinary one, with the ordinary stance: the annotation
+  is checked exactly as a call's argument is checked against a parameter's
+  precondition, so an expression the checker can neither prove nor refute is
+  **skipped**, never reported. An unproven annotation also **grants no fact** —
+  it is not merely unverified-but-trusted. In
+
+  ```march
+  fn go(zs : List(Int)) : Int do
+    let ys : {List(Int) | len(_) > 0} = zs
+    inner(ys)
+  end
+  ```
+
+  the annotation is undecidable (nothing is known about `zs`), so it is skipped
+  *and* `inner(ys)` is skipped too, rather than proved off an assumption the
+  binding failed to establish. All three spellings of the refined value behave
+  alike — `_`, a declared binder (`{v : List(Int) | len(v) > 0}`), and the bound
+  name itself (`len(ys) > 0`).
 - **A contract that contradicts its own guard makes the guarded branch
   vacuously provable.** In `fn outer(ys : {List(Int) | len(_) > 0}) do if
   List.length(ys) == 0 do inner(ys) else 0 end end` the guarded call *proves*:

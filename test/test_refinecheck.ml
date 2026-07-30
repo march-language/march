@@ -5421,6 +5421,175 @@ end|});
         Alcotest.(check int) "skipped" 1 (skip_count skips))
   ]
 
+(* ── A refined `let` annotation is CHECKED against its bound expression ──────
+
+   Before this suite, [scope_add_binding]'s annotated arm admitted a `let`'s
+   refinement into scope UNCONDITIONALLY — `A.PatVar n, Some r -> (n.A.txt, r)
+   :: sc` — so an annotation was a promise the author made and the checker
+   believed.  `let ys : {List(Int) | len(_) > 0} = []` was not merely unproven,
+   it was PROVED, and the downstream call rode a manufactured fact.  Under
+   `cap verified`, whose whole premise is "if it compiles, it is proved", that
+   is a hole punched through the premise by ordinary non-adversarial code.
+
+   Every case below asserts obligation COUNTS rather than the presence of a
+   diagnostic, and records the count it measured BEFORE the fix.  That is not
+   ceremony: [has_refine_error_d] is true for a `cap verified` escalation of a
+   *skip* exactly as much as for a real violation, so `check bool … true` can
+   pass for precisely the wrong reason — and `check bool … false` cannot tell
+   "correctly skipped now" from "still falsely proved".  Both mistakes were
+   present in this suite's first draft and were caught only by measuring. *)
+let let_annotation_suite =
+  let summary () = March_refinecheck.Obligation.summary () in
+  let skip_count skips = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+  [ gated "a false let annotation is REPORTED, not trusted" (fun () ->
+        (* PRE-FIX: 1 proved, 0 violated, 0 skipped — the `inner(ys)` call
+           falsely proved off the trusted annotation, `--check` exit 0. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LA1 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer() : Int do
+    let ys : {List(Int) | len(_) > 0} = []
+    inner(ys)
+  end
+  fn main() : Int do outer() end
+end|});
+        let _, violated, _ = summary () in
+        Alcotest.(check int) "the false annotation is violated" 1 violated)
+
+  ; gated "a false let annotation at the LET-NAME spelling" (fun () ->
+        (* The same bug with the predicate spelled using the bound name rather
+           than `_`.  PRE-FIX: 1 proved, 0 violated — also falsely proved.
+           This is the spelling the synthesis is most likely to drop, because
+           it is the one that must resolve through [param_names]. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LA1b do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer() : Int do
+    let ys : {List(Int) | len(ys) > 0} = []
+    inner(ys)
+  end
+  fn main() : Int do outer() end
+end|});
+        let _, violated, _ = summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "a false let annotation at the DECLARED-BINDER spelling" (fun () ->
+        (* Third spelling: `{v : T | pred(v)}`.  PRE-FIX: 1 proved, 0 violated.
+           All three spellings denote the same value and must behave
+           identically; this exact spelling class has shipped broken three
+           separate times elsewhere in refine_check.ml, each time silently. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LA1c do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer() : Int do
+    let ys : {v : List(Int) | len(v) > 0} = []
+    inner(ys)
+  end
+  fn main() : Int do outer() end
+end|});
+        let _, violated, _ = summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "a false let annotation at Int, not just List" (fun () ->
+        (* PRE-FIX: 1 proved, 0 violated — falsely proved, exit 0.
+           Deliberately written at `_ > 0`.  Do NOT write this at
+           `{Int | n > 0}` over `let n`: that spelling measures 0 proved,
+           0 violated, 1 skipped and ALREADY exits 1 today via the
+           cap-verified skip escalation, so asserting an error on it would
+           pass before the fix existed and prove nothing. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LA4 do
+  fn inner(n : {Int | _ > 0}) : Int do 0 end
+  fn outer() : Int do
+    let m : {Int | _ > 0} = 0 - 5
+    inner(m)
+  end
+  fn main() : Int do outer() end
+end|});
+        let _, violated, _ = summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "a TRUE let annotation proves, and still composes" (fun () ->
+        (* The false-positive control AND the interaction check with the
+           composition work landed in PR #121/#126.  PRE-FIX: 1 proved (the
+           trusted call alone).  POST-FIX must be 2 — the annotation
+           obligation proving on its own merits, AND the checked fact still
+           composing into `inner(ys)`.  Asserting `proved >= 1` here would be
+           vacuous; exactly 2 is the assertion with teeth. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LA2 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer() : Int do
+    let ys : {List(Int) | len(_) > 0} = [1]
+    inner(ys)
+  end
+  fn main() : Int do outer() end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "both obligations prove" 2 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0 (skip_count skips))
+
+  ; gated "an unreflectable RHS is SKIPPED, never reported" (fun () ->
+        (* THE CARDINAL-SIN CONTROL.  "Cannot prove" must not become "reports
+           a violation": this task adds a new obligation-raising site, so an
+           inverted definite-failure stance would turn every undecidable
+           annotation into a false positive.  PRE-FIX this measures 1 proved
+           (falsely).  POST-FIX: 0 proved, 0 violated, and TWO skips — nothing
+           manufactured, nothing reported.  A bare "no error" assertion cannot
+           separate those two states, which is why this asserts counts.
+
+           Two skips, not one, and the second is the point: the annotation
+           itself is undecidable here, so it grants no fact, so `inner(ys)` —
+           which used to be Proved off that ungranted premise — is now
+           undischarged too.  A proof standing on an unverified assumption is
+           precisely what this change removes. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LA3 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(zs : List(Int)) : Int do
+    let ys : {List(Int) | len(_) > 0} = zs
+    inner(ys)
+  end
+  fn main() : Int do go([1]) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "never reported" 0 violated;
+        Alcotest.(check int) "nothing manufactured" 0 proved;
+        Alcotest.(check int) "both obligations skipped" 2 (skip_count skips))
+
+  ; gated "the named-Int annotation, previously unresolved, is now caught" (fun () ->
+        (* A SECOND, SEPARATE gap that this change CLOSES as a side effect.
+           PRE-FIX `{Int | n > 0}` over `let n` resolved against nothing and
+           was merely skipped (0 proved, 0 violated, 1 skipped) — the sole
+           spelling that was not even trusted, just inert.  Routing the check
+           through [param_names] = [the let name] makes `n` denote the bound
+           value, so `0 - 5` is now seen and the annotation is REPORTED.
+           That is a genuine violation, not a false positive: the annotation
+           claims `n > 0` of the value -5.
+           The trailing skip is the downstream `inner(n)`, which no longer
+           rides the unproven annotation. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LA6 do
+  fn inner(n : {Int | _ > 0}) : Int do 0 end
+  fn outer() : Int do
+    let n : {Int | n > 0} = 0 - 5
+    inner(n)
+  end
+  fn main() : Int do outer() end
+end|});
+        let proved, violated, _ = summary () in
+        Alcotest.(check int) "no false proof" 0 proved;
+        Alcotest.(check int) "the false annotation is now caught" 1 violated)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5464,4 +5633,5 @@ let () =
       ("walk-coverage", walk_coverage_suite);
       ("compose", compose_suite);
       ("compose-adt", compose_adt_suite);
-      ("compose-tag", compose_tag_suite) ]
+      ("compose-tag", compose_tag_suite);
+      ("let-annotation", let_annotation_suite) ]

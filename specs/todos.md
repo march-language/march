@@ -53,51 +53,36 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
-## A refined `let` annotation is TRUSTED, never checked against its RHS (OPEN, 2026-07-29)
+## A refined `let` annotation is checked against its RHS (CLOSED 2026-07-30)
 
-**Repro.**
+`let ys : {List(Int) | len(_) > 0} = []` used to report `1 proved, 0 violated,
+0 skipped` and exit 0 even under `cap verified`: the annotation entered the
+scope channel unconditionally, so `inner(ys)` was **falsely proved** off a
+premise nothing had established. It was the one refined position in the
+language that obliged nobody.
 
-```march
-mod X do
-  cap verified
-  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
-  fn outer() : Int do
-    let ys : {List(Int) | len(_) > 0} = []
-    inner(ys)
-  end
-  fn main() : Int do outer() end
-end
-```
+**Closed** by `check_let_annotation` (`lib/refinecheck/refine_check.ml`), which
+reflects the binding as a synthesized one-parameter call — the annotation is the
+precondition, the bound expression the sole argument — and routes it through
+`check_call`, inheriting every resolver and the definite-failure stance. Two
+details are load-bearing: `param_names` carries the LET NAME (not the
+refinement's binder), which is what makes the `len(ys)` spelling resolve; and
+the bound name is shadowed out of all three fact channels first, so an outer
+value's fact can never be attributed to this binder.
 
-`--check --refine-report` reports `1 proved, 0 violated, 0 skipped`. The
-`inner(ys)` call is **falsely proved**: `ys` is the empty list, whose length is
-0, but the annotation on the `let` is loaded as a fact without ever being
-checked against the expression it annotates.
+An unproven annotation now grants **no fact**, rather than being
+unverified-but-trusted: `let ys : {List(Int) | len(_) > 0} = zs` for an opaque
+`zs` leaves the annotation skipped AND the downstream call skipped, instead of
+proving the call off an assumption the binding failed to establish. A proof
+resting on an unverified premise is precisely what this closes.
 
-**Pre-existing, and widened — not introduced — by the composition branch.** The
-identical shape at `Int` (`let n : {Int | _ > 0} = 0 - 5` then a call needing
-`{Int | _ > 0}`) behaves the same way at the current HEAD, and that code path is
-untouched by this branch. What the branch changed is only *which base types* can
-reach the trusted-annotation path: `List`/ADT now joins `Int`, `String` and
-records, because `refined_scope_ty` admits them. The mechanism, and the bug, are
-older than this work.
-
-**Why this is the sharpest version of the problem under `cap verified`.** That
-mode's entire premise is "if it compiles, it is proved". A `let` annotation that
-is trusted rather than verified is a hole punched straight through that premise
-by ordinary, non-adversarial code: an author writes an annotation to *document*
-an invariant and instead silently manufactures it, and the mode reports success.
-An unchecked assumption a program can state about itself is worse than a skip,
-because a skip at least declines to claim anything.
-
-**The design question, deliberately deferred.** Should a refined `let`
-annotation be *checked* against the bound expression (the obvious answer, and
-what every other refined position does), or is there a case for a trusted
-ascription — and if so it needs to be spelled differently and gated out of
-`cap verified`. Either way it is a semantics change to the annotation form, not
-a bug fix in the composition path, and it belongs in its own branch with its own
-accept/reject corpus witnesses in both directions. Documented meanwhile in
-`specs/lang/refinement-types.md`'s Limitations.
+Side effect: the bound-name spelling at `Int` (`{Int | n > 0}` over `let n`),
+previously not resolved at all and merely skipped, is now checked too. All three
+spellings (`_`, a declared binder, the bound name) behave alike. Bracketed by
+`accept/t130_refine_let_annotation_checked_and_composes` /
+`reject/t131_refine_let_annotation_false`; +7 refinecheck tests (358 → 365).
+Stdlib and corpus contain zero refined `let` annotations, so nothing in-tree
+changed behaviour.
 
 ---
 
