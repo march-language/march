@@ -5896,6 +5896,117 @@ end|}));
                 ctx.March_errors.Errors.diagnostics)))
   ]
 
+let iface_refine_suite =
+  [ gated "a refinement in an interface signature is diagnosed" (fun () ->
+        (* PRE-FIX: silent. It obliges no call site AND assumes nothing, so it
+           is a missing check rather than an unsound one -- but it silently
+           does nothing, which is the failure mode this area keeps producing.
+           The supported spelling is a refinement on the corresponding impl
+           method's OWN SIGNATURE -- stated that way, not as "the impl
+           parameter", because the two positions are enforced under different
+           conditions: a return refinement there is always checked, while a
+           parameter one is enforced only when the method name is unambiguous
+           (adoptable_impl_methods). *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR1 do
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "diagnosed" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "impl") msgs);
+        (* `contains m "impl"` alone is weak — "impl" is a substring of plenty
+           of unrelated prose, so it would stay green if the remedy drifted to
+           something useless. Pin the two clauses that make the advice
+           ACTIONABLE, and the naming of the method. *)
+        Alcotest.(check bool) "names the method" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`run`") msgs);
+        Alcotest.(check bool) "remedy names the impl method's own signature" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message
+               "Write the refinement on the corresponding `impl` method's own signature")
+            msgs);
+        (* The parameter half of the remedy is CONDITIONAL — an impl parameter
+           refinement is only enforced when [adoptable_impl_methods] adopts the
+           name. Stating it unconditionally would send an author with an
+           ambiguous method name from one silent no-op to another, so the
+           caveat is part of the contract this test pins. *)
+        Alcotest.(check bool) "remedy states the adoption caveat" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "when the method name is unambiguous")
+            msgs))
+
+  ; gated "a RETURN-position interface refinement is diagnosed too" (fun () ->
+        (* The return position is as inert as a parameter, and the remedy must
+           still be right for it — which is why the message covers the return
+           type explicitly rather than naming only the impl PARAMETER
+           spelling. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR3 do
+  interface Sizer(a) do
+    fn size : a -> {Int | _ >= 0}
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "diagnosed" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`size`") msgs);
+        Alcotest.(check bool) "remedy covers the return position" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "return type is always checked") msgs))
+
+  ; gated "a refinement on an `impl` method is NOT reported as inert" (fun () ->
+        (* False-positive control, and the sharper half of the pair: the walk
+           must fire on a genuine `interface` method SIGNATURE only. An `impl`
+           method's parameter refinement is the very spelling the warning
+           recommends — warning on it too would be self-contradictory advice.
+           `bump` is adoptable here (one impl defines it, no top-level `fn`
+           owns the name), so the contract really is enforced -- confirmed
+           end-to-end by `specs/lang/types/accept/t137`, whose sibling probe
+           `bump(Box(1), 0 - 5)` is a refinement ERROR. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR4 do
+  interface Bumper(a) do
+    fn bump : a -> Int -> Int
+  end
+  type Box = Box(Int)
+  impl Bumper(Box) do
+    fn bump(_b : Box, n : {Int | _ > 0}) : Int do n end
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no inert-signature warning" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  contains d.March_errors.Errors.message "enforces nothing: an interface")
+                ctx.March_errors.Errors.diagnostics)))
+
+  ; gated "an unrefined interface signature stays quiet" (fun () ->
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR2 do
+  interface Runner(a) do
+    fn run : a -> Int -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length (ctx.March_errors.Errors.diagnostics)))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5944,4 +6055,5 @@ let () =
       ("postcond-ledger", postcond_ledger_suite);
       ("trusted", trusted_suite);
       ("postcond-strict", postcond_strict_suite);
-      ("qualified-predicate", qualified_pred_suite) ]
+      ("qualified-predicate", qualified_pred_suite);
+      ("interface-signature-refinement", iface_refine_suite) ]

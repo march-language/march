@@ -343,6 +343,74 @@ enforces nothing":
 - A receiver that is itself a call (`f(x).g(y)`) is not rendered as a path and
   stays silent.
 
+### A refinement in an interface signature enforces nothing
+
+The predicate above is at least *reached* by the checker. A refinement written
+in an **`interface` method signature** is not reached at all:
+
+```march
+interface Runner(a) do
+  fn run : a -> {Int | _ > 0} -> Int    -- enforces NOTHING
+end
+```
+
+Nothing in `lib/refinecheck` reads a method declaration's type: the pass's
+`interface` arm descends only into a method's **default body**, and the other
+walks that visit an interface read method *names* only. Nor does the front end
+carry the predicate anywhere — when the desugarer injects a default method into
+an `impl`, it synthesises that function with no return annotation and with
+parameters taken from the default lambda, which carry no annotations either. So
+the predicate obliges no call site **and** lets no body assume anything: a
+*missing* check rather than an unsound one, but a silent one, and the contract
+reads exactly like a working one.
+
+Since 2026-07-30 this **warns**, naming the method and the spelling that works:
+
+```
+the interface signature of `run` carries a refinement, which enforces nothing:
+an interface method signature is never read by the refinement checker, so no
+call site is obliged by this predicate and no body may assume it. Write the
+refinement on the corresponding `impl` method's own signature instead — …
+```
+
+The remedy is the `impl` method's own signature, and it is stated for **both
+positions** because they are enforced under different conditions:
+
+```march
+interface Bumper(a) do
+  fn bump : a -> Int -> Int              -- leave the signature unrefined
+end
+
+impl Bumper(Box) do
+  fn bump(_b : Box, n : {Int | _ > 0}) : Int do n end   -- enforced here
+end
+```
+
+- A refinement on the `impl` method's **return type** is always checked — the
+  postcondition check runs on every method body unconditionally.
+- A refinement on a **parameter** is enforced only when the method name is
+  **unambiguous**: exactly one `impl` defines it and no top-level `fn` shares
+  the name. Otherwise a call resolved by name cannot tell which contract
+  applies, so the contract is adopted nowhere and the body is walked with the
+  parameter refinements stripped. (The full adoption rule is under
+  [`@[trusted]` — a scoped, loud escape hatch](#trusted--a-scoped-loud-escape-hatch),
+  in the "What 'walked' does and does not buy you" note.)
+
+The typechecker accepts a refined `impl` parameter against a plain type in the
+interface, so following this advice needs no change to the interface — and the
+resulting contract really is enforced: `bump(Box(1), 0 - 5)` is a refinement
+error.
+
+Like the qualified-spelling warning, this is a warning rather than an error on
+purpose: the shape compiles today, and the defect being fixed is the *silence*.
+Making an interface signature actually enforce — obliging every call dispatched
+through the interface and checking it against every `impl` — is a much larger
+change and stays open in `specs/todos.md`. Witnessed by `accept/t137` (whose
+exit code is the point: it pins that the program stays exit 0) and by
+`test_refinecheck.ml`'s `interface-signature-refinement` suite, which pins the
+warning text, the return-position case, and a false-positive control that a
+refinement on an `impl` method is *not* reported as inert.
+
 ---
 
 ## A Parameter's Own Contract Is a Fact Inside Its Body
@@ -1273,7 +1341,9 @@ violation inside a `@[trusted]` function is still reported).
     (`fn run : a -> {Int | _ > 0} -> Int`) is still **not** enforced at call
     sites. Nothing assumes it either, so it is a missing check rather than an
     unsound one, but do not rely on it. Put the refinement on the `impl`
-    method's parameter instead.
+    method's own signature instead. Since 2026-07-30 the pass **warns** rather
+    than staying silent about it — see
+    [A refinement in an interface signature enforces nothing](#a-refinement-in-an-interface-signature-enforces-nothing).
 - **`cap no_panic`'s divisor check tries to DISCHARGE before it rejects**
   (since 2026-07-29). Every outcome short of `Refine.Verified` is an error —
   that is what the capability promises — but "we could not reflect the

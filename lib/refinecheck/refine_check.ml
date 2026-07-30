@@ -4994,6 +4994,62 @@ let rec warn_predicate_ty (errctx : Err.ctx) (t : A.ty) : unit =
   | A.TyLinear (_, t) -> warn_predicate_ty errctx t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
+(* Does [t] carry a refinement ANYWHERE — either position of an arrow spine
+   (so both a parameter and the return), or nested inside a type argument,
+   tuple, record field or linearity wrapper?  Every one of those positions is
+   equally inert in an interface method signature, so the detector must not be
+   narrowed to the spine.  Mirrors [warn_predicate_ty]'s traversal exactly. *)
+let rec ty_has_refinement (t : A.ty) : bool =
+  match t with
+  | A.TyRefine _ -> true
+  | A.TyCon (_, args) -> List.exists ty_has_refinement args
+  | A.TyArrow (a, b) -> ty_has_refinement a || ty_has_refinement b
+  | A.TyTuple ts -> List.exists ty_has_refinement ts
+  | A.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refinement t) fs
+  | A.TyLinear (_, t) -> ty_has_refinement t
+  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
+
+(* ── Interface-signature refinement warning ────────────────────────────────
+   A refinement written in an `interface` method signature (`A.method_decl`'s
+   [md_ty]) is inert.  NOTHING in this pass reads [md_ty]: [visit_decl]'s
+   `DInterface` arm descends only into [md_default], and the two other walks
+   that touch [iface_methods] ([stdlib_member_defs_ok], [bare_builtin_undefined])
+   read method NAMES only.  Nor does the front end carry it anywhere:
+   [Desugar.inject_defaults] synthesises a default method's `fn_def` with
+   `fn_ret_ty = None` and parameters taken from the default LAMBDA (which
+   carries no `param_ty`), so even the one place an interface signature turns
+   into code drops the predicate on the floor.
+
+   So it obliges no call site AND lets no body assume anything — a missing
+   check, not an unsound one.  The defect is that it is silent: it parses,
+   typechecks, and reads exactly like a working contract.
+
+   The remedy is deliberately stated for BOTH positions, because they are
+   enforced under different conditions and naming only the parameter one would
+   be wrong advice for a return refinement:
+     · a RETURN refinement on an `impl` method is always checked — [visit_fn]
+       calls [check_fn_post] unconditionally;
+     · a PARAMETER refinement is enforced only when [adoptable_impl_methods]
+       adopts the method name (exactly one `impl` defines it and no top-level
+       `fn` owns it); otherwise [visit_decl] walks the body with the parameter
+       refinements STRIPPED and no caller is obliged.
+   Saying "put it on the impl parameter" flatly would send an author with an
+   ambiguous method name from one silent no-op to another.
+
+   Emits unconditionally: the caller has already established
+   [ty_has_refinement m.md_ty] and branches on it. *)
+let warn_iface_method_refinement (errctx : Err.ctx) (m : A.method_decl) : unit =
+  Err.warning errctx ~span:m.A.md_name.A.span
+    (Printf.sprintf
+       "the interface signature of `%s` carries a refinement, which enforces \
+        nothing: an interface method signature is never read by the refinement \
+        checker, so no call site is obliged by this predicate and no body may \
+        assume it. Write the refinement on the corresponding `impl` method's own \
+        signature instead — a refinement on its return type is always checked, \
+        and one on a parameter is enforced when the method name is unambiguous \
+        (exactly one `impl` defines it and no top-level `fn` shares the name)."
+       m.A.md_name.A.txt)
+
 let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   let ge = warn_predicate_expr_tys errctx in
   match e with
@@ -5060,7 +5116,19 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
       | A.DInterface (idf, _) ->
         List.iter
           (fun (m : A.method_decl) ->
-            warn_predicate_ty errctx m.A.md_ty;
+            (* Either the signature carries a refinement — in which case the
+               whole thing is inert and [warn_iface_method_refinement] says so —
+               or it does not, in which case [warn_predicate_ty] has nothing to
+               find.  Running BOTH would append "annotate the function
+               `@[measure]`" to a signature where no annotation can help:
+               following that advice leaves the contract enforcing nothing just
+               the same, and a misleading remedy costs more here than a missing
+               one.  The vocabulary warning still fires once the predicate is
+               moved to the `impl` method, which is where it can act. *)
+            if ty_has_refinement m.A.md_ty then warn_iface_method_refinement errctx m
+            else warn_predicate_ty errctx m.A.md_ty;
+            (* A DEFAULT body is real code; it is walked as such and is not
+               part of the signature this warning is about. *)
             Option.iter expr m.A.md_default)
           idf.A.iface_methods
       | A.DLet (_, b, _) ->

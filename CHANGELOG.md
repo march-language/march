@@ -342,6 +342,23 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **A refinement in an `interface` method signature no longer enforces nothing
+  silently.** `interface Runner(a) do fn run : a -> {Int | _ > 0} -> Int end`
+  parses and typechecks, and the predicate is never read: no call site is
+  obliged by it, and no method body may assume it. Nor does it survive the
+  front end — when a default method is injected into an `impl`, the synthesised
+  function keeps no annotations from the signature. So it is a *missing* check
+  rather than an unsound one, but a silent one, and the contract reads exactly
+  like a working one. It now warns, naming the method and the spelling that
+  works: the refinement belongs on the corresponding `impl` method's own
+  signature, where a return refinement is always checked and a parameter
+  refinement is enforced when the method name is unambiguous (exactly one
+  `impl` defines it and no top-level `fn` shares the name). Following that
+  advice needs no change to the interface — the typechecker accepts a refined
+  `impl` parameter against a plain type in the signature. Making the interface
+  signature itself enforce, so it obliges every call dispatched through the
+  interface, remains open.
+
 - **A qualified spelling inside a refinement predicate no longer enforces
   nothing silently.** `{List(Int) | List.length(_) > 0}` parses, typechecks,
   and checks nothing: the `List.length`→`len` alias keys on the dotted variable
