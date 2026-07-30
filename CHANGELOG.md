@@ -127,6 +127,15 @@ git log is authoritative for exact commits.
   such a closure is a single shared immortal object, but the REPL compiles each
   fragment as its own module and cannot safely share one.
 
+- **REPL variable bindings (`let x = ...`, and the `v` last-expression-value
+  binding) now correctly participate in reference counting.** Reading a
+  heap-typed variable back from a later REPL line, or overwriting one,
+  previously did no reference-count bookkeeping at all — a gap invisible
+  until other fixes in this release started actually relying on it. Fixed;
+  a plain `let`/`fn` at the REPL prompt is unaffected either way, since it
+  gets a fresh slot per declaration, but repeatedly evaluating expressions
+  (which reuses the `v` slot) is now correctly balanced.
+
   The ownership change above also required four fixes at the C-runtime
   boundary, since several places call a closure's apply function directly
   and did not agree with the new convention: `__try_call`/`__try_call_val`

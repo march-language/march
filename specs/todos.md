@@ -1998,11 +1998,56 @@ capture-free-under-REPL gap (the note above) by threading an `is_repl` flag
 into `insert_apply_fn_clo_drop` reintroduced the EXACT SIGSEGV the guard
 exists to prevent (`repl_jit_cross_line` test 7, "stdlib List.length via
 precompile") — reverted. `task_spawn`-ing a genuinely capture-free closure
-from a REPL fragment still leaks one allocation per materialization; needs
-deeper investigation into the REPL closure lifecycle (likely a `$clo_wrap`
-trampoline interaction distinct from the `lift_lambda` self-binding pattern
-this whole mechanism assumes) before attempting again. Original report
-follows.
+from a REPL fragment still leaks one allocation per materialization.
+
+**Second attempt (2026-07-30), one real bug fixed, the leak still open.**
+Traced the crash to a genuine, independent gap: `lib/tir/llvm_repl.ml`'s
+persistent REPL variable slots (`@march_repl_get`/`@march_repl_set`,
+`runtime/march_extras.c`'s `march_repl_slots` array) did **zero RC
+bookkeeping** — every read of a heap-typed slot (a String, a closure, any
+boxed value) handed out the slot's own reference with no dup, and every
+overwrite discarded whatever reference the slot held with no release. A
+capture-free closure bound at the REPL prompt and read back from a later
+fragment was freed on the first call as a direct consequence: the read gave
+the caller the slot's only reference, that reference got consumed, and the
+slot was left holding a dangling pointer for its next read.
+
+Fixed at the LLVM-emission call sites — `emit_prev_slot_bridges` and
+`emit_slot_loader_fns` (two independent read sites for the same slot; a
+prior binding can be referenced either bridged directly into a later
+fragment's entry block or via a generated zero-arg loader function) now
+`march_incrc` a heap-typed slot's value on every read; `emit_store_to_slot`
+`march_decrc`s whatever the slot held before a write replaces it (this
+matters concretely for the `"v"` magic slot — the last-expression-value
+binding, genuinely reused/overwritten across every subsequent REPL
+expression, unlike an ordinary `let` which gets a fresh slot per
+declaration). All three gated on the *static* `Tir.ty` at the LLVM-emission
+call site, deliberately **not** inside `march_repl_get`/`march_repl_set`
+themselves: slots store `Int`/`Bool`/`Float` **UNTAGGED** — unlike March's
+usual `(n<<1)|1` tagged-immediate convention — so a blind
+`IS_HEAP_PTR`-gated incrc/decrc inside the untyped C functions would have
+misfired on an ordinary integer whose raw bit pattern happens to look
+pointer-shaped (caught this before it shipped, via a `git show`-sourced
+diff against the pre-edit file — never actually built or run). Verified:
+all 24 `repl_jit_cross_line`/`repl_jit_regression` tests pass with this fix
+alone, including "var redefinition" and "P0: List.length x3 successive
+fragments" — the shapes that actually exercise repeated slot access.
+
+Re-threading `is_repl` on top of this fix hit the **same** SIGSEGV, in the
+**same** test, at the **same** address (`0x0`, frame `0x0` — a jump through
+a null code pointer). So the slot mechanism was real but not the whole
+story: there is at least one more path, somewhere in how the precompiled
+stdlib passes a capture-free closure around internally, that is not yet
+understood. Reverted the `is_repl` threading again (verified via
+`grep is_repl lib/tir/perceus.ml lib/jit/repl_jit.ml` → no matches);
+**kept** the slot RC fix, since it is a real, independent correctness fix
+regardless of whether the capture-free leak is ever closed.
+
+`task_spawn`-ing a genuinely capture-free closure from a REPL fragment
+still leaks one allocation per materialization. Needs a proper stack trace
+or bisection through the stdlib-precompile path (not slots) before
+attempting `is_repl` a third time — guessing at the second mechanism from
+here would cost more than it's worth. Original report follows.
 
   **Follow-up audit (2026-07-29, same day): the $clo drop is only sound because every C-runtime call site that invokes a closure's apply function now agrees on the calling convention — and four distinct families of call sites did not, each fixed in `runtime/march_runtime.c` / `lib/tir/llvm_emit.ml`:**
   - `__try_call`/`__try_call_val` (runtime/march_runtime.c) called their thunk once then explicitly `march_decrc`'d it — a second consumption of the reference the thunk's own apply function already released. Flaky, not deterministic (6/30 crashes on a single-capture thunk before the fix, 0/30 after) — freed memory frequently still looked valid enough not to crash immediately. `__try_call` is directly user-callable (`tir_names.ml` documents this) and one of `test/imports/erased_clo_native`'s dune-rule golden tests hit this exact shape, which is how it was traced after CI stayed red past the first (task_spawn) fix.
