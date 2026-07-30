@@ -130,6 +130,20 @@ git log is authoritative for exact commits.
   nothing in-tree changed behaviour. Bracketed by
   `specs/lang/types/accept/t130_refine_let_annotation_checked_and_composes` and
   `specs/lang/types/reject/t131_refine_let_annotation_false`.
+- **The `(`-led-statement fix now also applies after a literal.** The initial
+  fix keyed the retag on a *value-ending* token — an identifier, a `)` or a
+  `]` — but the call rule takes an `expr_field`, which a bare literal also
+  reduces to, so `let _ = 1` followed by a line holding only `()` was still
+  glued into `1()`. Unlike the identifier case this never reached the
+  closure-ABI indirect call (a literal has no receiver to load a function
+  pointer from): codegen emitted **invalid LLVM** — `declare ptr @<lit>()` —
+  and clang rejected it with "expected function name", so the build failed
+  with a diagnostic pointing at generated IR rather than at the offending
+  source line. Interpreted, it raised `applied non-function value: 1`. The
+  statement decision now uses a wider "ends an expression" predicate that
+  includes `Int`/`Float`/`String`/`Bool`/atom literals; the narrower
+  value-ending test still drives the curried-call guard's paren
+  classification, so `f(1)(2)` diagnostics are unchanged.
 
 - **A statement starting with `(` is no longer glued onto the previous line as
   a call.** A block line holding only `()` — or any parenthesised/tuple

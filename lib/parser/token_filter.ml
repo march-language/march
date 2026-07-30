@@ -122,6 +122,22 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     | Parser.RPAREN | Parser.RBRACKET -> true
     | _ -> false
   in
+  (* Can this token END an expression?  A superset of [is_value_ending],
+     which stays as-is because it also decides whether a paren is a CALL's
+     arg list for the curried-call guard — a literal never opens one, so
+     `1(` must keep classifying as a group there.
+
+     The statement decision needs the wider notion: the grammar's call rule
+     takes an [expr_field], which a LITERAL also reduces to, so `let _ = 1`
+     ⏎ `()` was still glued into `1()`. Interpreted that raised "applied
+     non-function value: 1"; compiled it reached codegen as a call to a
+     literal and emitted invalid IR — `declare ptr @<lit>()` — which clang
+     rejected with "expected function name". *)
+  let ends_expression = function
+    | Parser.INT _ | Parser.FLOAT _ | Parser.STRING _
+    | Parser.BOOL _ | Parser.ATOM _ -> true
+    | t -> is_value_ending t
+  in
 
   let in_match () =
     not (Stack.is_empty stack) && Stack.top stack = Match
@@ -517,7 +533,15 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
           | Some t -> is_value_ending t
           | None -> false
         in
-        let starts_statement = value_ending_prev && !saw_nl_since_significant in
+        (* Statement decision uses the wider [ends_expression] (literals
+           included — see its comment); the paren-kind push below keeps the
+           narrower [is_value_ending] so the curried-call guard is unchanged. *)
+        let expr_ending_prev =
+          match !prev_significant with
+          | Some t -> ends_expression t
+          | None -> false
+        in
+        let starts_statement = expr_ending_prev && !saw_nl_since_significant in
         Stack.push (value_ending_prev && not starts_statement) paren_kinds;
         if starts_statement then Parser.LPAREN_STMT else tok
       | Parser.RPAREN ->

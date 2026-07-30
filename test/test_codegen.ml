@@ -9263,6 +9263,49 @@ let test_unit_tail_discard_runs_compiled () =
       "compiled binary prints ok and exits 0 (pre-fix: EXC_BAD_ACCESS, exit 138)"
       "ok\nEXIT:0" run_out
 
+(* Same shape after a LITERAL rather than an identifier. The first fix keyed
+   the retag on a "value-ending" token — an identifier, `)` or `]` — but the
+   call rule takes an `expr_field`, which a bare literal also reduces to, so
+   `let _ = 1` ⏎ `()` was still glued into `1()`.
+
+   This one does NOT reach the closure-ABI path: a literal has no receiver to
+   load a fn_ptr from, so codegen emitted a call to a name it never defined
+   and produced INVALID LLVM — `declare ptr @<lit>()` — which clang rejected
+   with "expected function name". The build failed pointing at generated IR
+   rather than at the source line, so assert on a clean compile-and-run. *)
+let unit_tail_literal_discard_src =
+  "mod UnitTailLit do\n\
+  \  fn f() do\n\
+  \    let _ = 1\n\
+  \    ()\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    f()\n\
+  \    println(\"ok\")\n\
+  \  end\n\
+   end\n"
+
+let test_unit_tail_literal_discard_runs_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_unittail_lit" unit_tail_literal_discard_src in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  (* Pre-fix: "applied non-function value: 1". *)
+  Alcotest.(check string) "interpreter prints ok" "ok" interp_out;
+  let bin = Filename.concat tmp "unittaillitbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output
+      (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "compiled binary prints ok and exits 0 (pre-fix: clang rejected \
+       `declare ptr @<lit>()`, so the binary never built)"
+      "ok\nEXIT:0" run_out
+
 (** Float arm with NO wildcard: a non-exhaustive float match must panic (the
     Task 1 / B3 `nonexhaustive_panic` fallback), not silently fall through to
     LLVM `unreachable` (undefined behaviour — observed, pre-fix, to print a
@@ -12874,6 +12917,8 @@ let codegen_suites =
             test_unit_tail_discard_no_indirect_call_ir;
           Alcotest.test_case "`()` tail after a discard runs compiled (exit 0)" `Quick
             test_unit_tail_discard_runs_compiled;
+          Alcotest.test_case "`()` tail after a LITERAL discard runs compiled (exit 0)" `Quick
+            test_unit_tail_literal_discard_runs_compiled;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick

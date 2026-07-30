@@ -1,0 +1,38 @@
+mod P34ParenStmtAfterLiteral do
+  -- §7.3 — companion to p33: the two-statement reading of a `(`-led line
+  -- applies after a LITERAL too, not only after an identifier or a `)`.
+  --
+  -- p33 fixed the token filter to retag a `(` that follows a *value-ending*
+  -- token across a newline, where "value-ending" meant an identifier, `)` or
+  -- `]`. But the call rule takes an `expr_field`, which a bare literal also
+  -- reduces to, so `let _ = 1` followed by a line holding only `()` was still
+  -- glued into `let _ = 1()`. That is a call to an integer: the interpreter
+  -- reported `applied non-function value: 1`, and compiled it reached codegen
+  -- as a call to a literal and emitted invalid LLVM — `declare ptr @<lit>()`
+  -- — which clang rejected with "expected function name", so the build failed
+  -- with a diagnostic pointing at generated IR rather than at the source.
+  --
+  -- Each function below must return unit having done nothing, and `main` must
+  -- print `ok`.
+  fn discard_int() do
+    let _ = 1
+    ()
+  end
+
+  fn discard_string() do
+    let _ = "s"
+    ()
+  end
+
+  fn discard_bool() do
+    let _ = true
+    ()
+  end
+
+  fn main() do
+    discard_int()
+    discard_string()
+    discard_bool()
+    println("ok")
+  end
+end
