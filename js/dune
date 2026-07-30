@@ -21,6 +21,16 @@
   march_typecheck
   march_eval
   js_of_ocaml)
+ ; Effects are left at jsoo's default (disabled), which emits a
+ ; [missing-effects-backend] warning because march_eval contains effect
+ ; handlers (the WS fiber parking in run_http_event_loop — see eval.ml's
+ ; [ws_wait_ready]). That handler is unreachable here by construction: it
+ ; only runs under the HTTP server's accept loop, which needs Unix sockets
+ ; that do not exist in a browser. Enabling --effects=double-translation to
+ ; silence the warning costs ~3.3MB (+16%) on this bundle for a code path
+ ; that can never execute, so the warning is accepted deliberately. If a
+ ; future change makes the browser REPL reach an effect handler, switch to
+ ; --effects=double-translation (NOT cps, which slows all code).
  (js_of_ocaml (flags (:standard)))
  (modes js))
 
@@ -40,5 +50,15 @@
   march_tir
   march_driver
   js_of_ocaml)
+ ; Effects are left at jsoo's default (disabled), which emits a
+ ; [missing-effects-backend] warning because march_eval contains effect
+ ; handlers (the WS fiber parking in run_http_event_loop — see eval.ml's
+ ; [ws_wait_ready]). That handler is unreachable here by construction: it
+ ; only runs under the HTTP server's accept loop, which needs Unix sockets
+ ; that do not exist in a browser. Enabling --effects=double-translation to
+ ; silence the warning costs ~3.3MB (+16%) on this bundle for a code path
+ ; that can never execute, so the warning is accepted deliberately. If a
+ ; future change makes the browser REPL reach an effect handler, switch to
+ ; --effects=double-translation (NOT cps, which slows all code).
  (js_of_ocaml (flags (:standard)))
  (modes js))

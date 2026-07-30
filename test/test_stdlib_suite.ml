@@ -12096,6 +12096,232 @@ let test_interp_http_server_idle_client_does_not_block_others () =
         true (elapsed < 1.0))
   end
 
+(* Regression (sibling of the idle-HTTP-client test above, one layer deeper):
+   the interpreter's event loop multiplexed *HTTP* phases correctly, but an
+   UPGRADED WebSocket connection was then run inline to completion —
+   [http_run_pipeline_and_respond] called the March handler synchronously and
+   only returned once the WS connection closed. Since the event loop is
+   single-threaded, one established-and-idle WebSocket (i.e. any open browser
+   tab sitting on a notebook) blocked every other connection on the server for
+   its entire lifetime: no page load, no asset, no second tab.
+
+   Fixed by running each upgraded connection as an effect-handler fiber that
+   parks on [Ws_block] whenever its recv/send would block, and is resumed by
+   the same select() loop that drives the HTTP phases (see [ws_wait_ready] and
+   [run_http_event_loop] in lib/eval/eval.ml).
+
+   Interpreter-only, like the test above: the compiled/LLVM path already
+   spawns a real thread per WS connection (runtime/march_http_evloop.c).
+
+   Shape: complete a real WS handshake, leave that socket ESTABLISHED and
+   silent, then assert an ordinary GET is still served promptly. Pre-fix, the
+   GET gets no response at all (the loop is parked inside the WS handler's
+   blocking recv); post-fix it returns in milliseconds. *)
+let test_interp_http_server_idle_websocket_does_not_block_others () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no interpreter binary *)
+  else begin
+    let tmp = Filename.temp_file "march_ws_evloop" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let port = 25000 + (Unix.getpid () mod 4000) in
+    let src = Filename.concat tmp "srv.march" in
+    let oc = open_out src in
+    output_string oc (Printf.sprintf
+      "mod Srv do\n\
+      \  fn ws_loop(sock) do\n\
+      \    match WebSocket.recv(sock) do\n\
+      \    TextFrame(m) -> do\n\
+      \      WebSocket.send_frame(sock, TextFrame(m))\n\
+      \      ws_loop(sock)\n\
+      \    end\n\
+      \    _ -> ()\n\
+      \    end\n\
+      \  end\n\
+      \  fn router(conn) do\n\
+      \    if HttpServer.path(conn) == \"/ws\" do\n\
+      \      WebSocket.upgrade(conn, fn s -> ws_loop(s))\n\
+      \    else\n\
+      \      conn |> HttpServer.text(200, \"hello\")\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    HttpServer.new(%d)\n\
+      \    |> HttpServer.plug(router)\n\
+      \    |> HttpServer.listen()\n\
+      \  end\n\
+       end\n" port);
+    close_out oc;
+    let log_path = Filename.concat tmp "srv.log" in
+    let log_fd = Unix.openfile log_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644 in
+    let child_pid =
+      Unix.create_process main_exe [| main_exe; src |] Unix.stdin log_fd log_fd
+    in
+    Unix.close log_fd;
+    let cleanup () =
+      (try Unix.kill child_pid Sys.sigkill with _ -> ());
+      (try ignore (Unix.waitpid [] child_pid) with _ -> ())
+    in
+    Fun.protect ~finally:cleanup (fun () ->
+      let connect_addr = Unix.ADDR_INET (Unix.inet_addr_loopback, port) in
+      let rec wait_for_listen attempts =
+        if attempts <= 0 then
+          Alcotest.fail "interpreted HTTP server never started listening"
+        else
+          let probe = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+          match (try Unix.connect probe connect_addr; `Ok
+                 with Unix.Unix_error _ -> `NotYet)
+          with
+          | `Ok -> (try Unix.close probe with _ -> ())
+          | `NotYet ->
+            (try Unix.close probe with _ -> ());
+            Unix.sleepf 0.1;
+            wait_for_listen (attempts - 1)
+      in
+      wait_for_listen 50;  (* up to ~5s *)
+
+      (* 1. Establish a real WebSocket, then go silent. The handshake must
+            actually complete — an unupgraded socket would only re-test the
+            HTTP-phase multiplexing the sibling test already covers. *)
+      let ws_sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Unix.connect ws_sock connect_addr;
+      let upgrade_req =
+        "GET /ws HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\r\n"
+      in
+      ignore (Unix.write_substring ws_sock upgrade_req 0 (String.length upgrade_req));
+      let ws_reply = Buffer.create 256 in
+      let rec read_handshake deadline =
+        if Unix.gettimeofday () > deadline then ()
+        else match Unix.select [ws_sock] [] [] (deadline -. Unix.gettimeofday ()) with
+          | ([], _, _) -> ()
+          | _ ->
+            let chunk = Bytes.create 1024 in
+            let n = try Unix.read ws_sock chunk 0 1024 with _ -> 0 in
+            if n > 0 then begin
+              Buffer.add_subbytes ws_reply chunk 0 n;
+              (* stop as soon as the header block is complete *)
+              let s = Buffer.contents ws_reply in
+              let len = String.length s in
+              let has_end =
+                let rec scan i =
+                  if i + 3 >= len then false
+                  else if s.[i]='\r' && s.[i+1]='\n' && s.[i+2]='\r' && s.[i+3]='\n'
+                  then true else scan (i+1)
+                in scan 0
+              in
+              if not has_end then read_handshake deadline
+            end
+      in
+      read_handshake (Unix.gettimeofday () +. 2.0);
+      let handshake_resp = Buffer.contents ws_reply in
+      Alcotest.(check bool)
+        "WS handshake returned 101 Switching Protocols"
+        true
+        (String.length handshake_resp >= 12
+         && String.sub handshake_resp 0 12 = "HTTP/1.1 101");
+
+      (* The connection is now an established, idle WebSocket. Give the server
+         a moment to settle into waiting on it — on pre-fix code that means
+         parked inside the handler's blocking recv, which is what must NOT
+         block the request below. *)
+      Unix.sleepf 0.3;
+
+      (* 2. Ordinary HTTP request on a separate connection: must be served
+            promptly despite the idle WS connection still being open. *)
+      let start_time = Unix.gettimeofday () in
+      let client_sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Unix.connect client_sock connect_addr;
+      let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" in
+      ignore (Unix.write_substring client_sock request 0 (String.length request));
+      let deadline = 2.0 in
+      let buf = Buffer.create 256 in
+      let rec read_until_closed_or_deadline () =
+        let elapsed = Unix.gettimeofday () -. start_time in
+        let remaining = deadline -. elapsed in
+        if remaining <= 0.0 then ()
+        else
+          match Unix.select [client_sock] [] [] remaining with
+          | ([], _, _) -> ()
+          | (_, _, _) ->
+            let chunk = Bytes.create 4096 in
+            let n = try Unix.read client_sock chunk 0 4096 with _ -> 0 in
+            if n > 0 then begin
+              Buffer.add_subbytes buf chunk 0 n;
+              read_until_closed_or_deadline ()
+            end
+      in
+      read_until_closed_or_deadline ();
+      let elapsed = Unix.gettimeofday () -. start_time in
+      let response = Buffer.contents buf in
+
+      (* 3. And the WS connection must still be live and functional afterwards
+            — proving the fiber was parked/resumed, not dropped. Send a masked
+            text frame ("hi") and expect the echo back. *)
+      let ws_still_works =
+        let frame = Bytes.create 8 in
+        Bytes.set frame 0 '\x81';                       (* FIN + text *)
+        Bytes.set frame 1 '\x82';                       (* masked, len 2 *)
+        Bytes.set frame 2 '\x00'; Bytes.set frame 3 '\x00';
+        Bytes.set frame 4 '\x00'; Bytes.set frame 5 '\x00';  (* zero mask *)
+        Bytes.set frame 6 'h';   Bytes.set frame 7 'i';
+        match (try ignore (Unix.write ws_sock frame 0 8); true with _ -> false) with
+        | false -> false
+        | true ->
+          (* [ws_send_frame] writes the header and the payload as two separate
+             sends, so the 4 bytes we expect can arrive in more than one read —
+             accumulate rather than assuming a single read sees the whole
+             frame. *)
+          let echo = Buffer.create 16 in
+          let echo_deadline = Unix.gettimeofday () +. 2.0 in
+          let rec read_echo () =
+            if Buffer.length echo >= 4 then ()
+            else
+              let remaining = echo_deadline -. Unix.gettimeofday () in
+              if remaining <= 0.0 then ()
+              else match Unix.select [ws_sock] [] [] remaining with
+                | ([], _, _) -> ()
+                | _ ->
+                  let chunk = Bytes.create 64 in
+                  let n = try Unix.read ws_sock chunk 0 64 with _ -> 0 in
+                  if n > 0 then begin
+                    Buffer.add_subbytes echo chunk 0 n;
+                    read_echo ()
+                  end
+          in
+          read_echo ();
+          let s = Buffer.contents echo in
+          (* server->client frames are never masked: 0x81, len=2, 'h', 'i' *)
+          String.length s >= 4 && s.[0] = '\x81' && String.sub s 2 2 = "hi"
+      in
+
+      (try Unix.close client_sock with _ -> ());
+      (try Unix.close ws_sock with _ -> ());
+
+      Alcotest.(check bool)
+        "HTTP client got a response while a WebSocket was open and idle"
+        true (String.length response > 0);
+      Alcotest.(check bool)
+        "response is 200 OK"
+        true
+        (String.length response >= 15 && String.sub response 0 15 = "HTTP/1.1 200 OK");
+      Alcotest.(check bool)
+        (Printf.sprintf
+           "HTTP client served promptly (%.3fs) despite an open idle WebSocket \
+            — must be well under the %.1fs deadline"
+           elapsed deadline)
+        true (elapsed < 1.0);
+      Alcotest.(check bool)
+        "the parked WebSocket still echoes after the HTTP request \
+         (fiber resumed, not dropped)"
+        true ws_still_works)
+  end
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -13155,5 +13381,7 @@ let stdlib_suites =
           test_concat_chain_values;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
+        Alcotest.test_case "interp http_server_listen: idle upgraded WebSocket does not block other connections (WS fiber fix)" `Slow
+          test_interp_http_server_idle_websocket_does_not_block_others;
       ]);
     ]
