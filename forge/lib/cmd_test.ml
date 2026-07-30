@@ -107,8 +107,16 @@ let project_env proj =
   let config_dir = Filename.concat proj.Project.root "config" in
   let test_scope_deps =
     proj.Project.deps @ proj.Project.dev_deps @ proj.Project.test_deps in
+  (* Walk the graph transitively, exactly as [Cmd_build.lib_path_env] does:
+     a dep's own prod deps must be on MARCH_LIB_PATH too, or a test calling
+     into a transitive dep's module fails with "Unknown module ..." while the
+     identical call in lib/ typechecks under `forge build`/`forge check`. *)
+  let visited = Hashtbl.create 16 in
+  let transitive_deps =
+    Cmd_build.collect_transitive_deps visited (proj.Project.root, test_scope_deps) in
   let dep_lib_paths = List.concat_map
-    (Cmd_build.dep_to_lib_paths ~root:proj.Project.root) test_scope_deps in
+    (fun (root, dep_name, dep) -> Cmd_build.dep_to_lib_paths ~root (dep_name, dep))
+    transitive_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
     dep_lib_paths @ Cmd_build.collect_lib_dirs lib_dir

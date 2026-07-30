@@ -469,6 +469,41 @@ let test_project_env_honors_toolchain_pin () =
             Alcotest.(check bool) "lib_path_env is prefixed with the toolchain PATH override"
               true (contains lib_path_env "versions/0.6.0/bin")))
 
+(** Regression test: `forge test`'s [Cmd_test.project_env] must walk the
+    dependency graph TRANSITIVELY, exactly as [Cmd_build.lib_path_env] does.
+
+    [project_env] used to map [dep_to_lib_paths] over the DIRECT test-scope
+    deps only, so a project depending on B (which itself depends on C) got
+    C's lib/ on MARCH_LIB_PATH under `forge build`/`forge check` but NOT
+    under `forge test` — tests calling a transitive dep's module failed with
+    "Unknown module ..." even though the same call typechecked in lib/. *)
+let test_project_env_walks_transitive_path_deps () =
+  let c_root = make_path_dep_project ~name:"leafc" ~deps:[] in
+  Fun.protect ~finally:(fun () ->
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote c_root)) in ())
+    (fun () ->
+      write_file (Filename.concat c_root (Filename.concat "lib" "leaf.march"))
+        "mod Leaf do\n\n  fn value() : Int do\n    99\n  end\n\nend\n";
+      let b_root = make_path_dep_project ~name:"midb" ~deps:["leafc", c_root] in
+      Fun.protect ~finally:(fun () ->
+          let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote b_root)) in ())
+        (fun () ->
+          write_file (Filename.concat b_root (Filename.concat "lib" "mid.march"))
+            "mod Mid do\n\n  fn value() : Int do\n    1\n  end\n\nend\n";
+          with_project ~project_type:Project.Lib (fun _name root ->
+              let toml_path = Filename.concat root "forge.toml" in
+              let oc = open_out_gen [Open_append] 0o644 toml_path in
+              Printf.fprintf oc "\n[deps.midb]\npath = %S\n" b_root;
+              close_out oc;
+              match Project.load () with
+              | Error m -> Alcotest.fail ("expected project to load: " ^ m)
+              | Ok proj ->
+                let (_env, _output, all_lib_paths, _pfx) = Cmd_test.project_env proj in
+                let c_lib = Filename.concat c_root "lib" in
+                Alcotest.(check bool)
+                  "transitive dep leafc's lib/ is on the test MARCH_LIB_PATH"
+                  true (List.mem c_lib all_lib_paths))))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -501,5 +536,7 @@ let () =
     "forge test", [
       Alcotest.test_case "project_env honors .march-version toolchain pin" `Quick
         test_project_env_honors_toolchain_pin;
+      Alcotest.test_case "project_env walks transitive path deps" `Quick
+        test_project_env_walks_transitive_path_deps;
     ];
   ]
