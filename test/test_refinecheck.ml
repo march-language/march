@@ -5010,6 +5010,63 @@ end|}
         Alcotest.(check bool)
           "names the withdrawn spelling" true
           (contains msg "List.length"));
+    gated "a lambda param COLLIDING with the laundering name is not evidence"
+      (fun () ->
+        (* Review probe PE (2026-07-31): the guard's `n` is the lambda's own
+           parameter — the guard never uses the laundered length at all, so
+           blaming the withdrawal is a WRONG attribution, not a vague one.
+           The discard-only [expr_mentions] counted the param as a mention;
+           the accepting position must use the free-occurrence check. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA7 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_pos(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if any_pos(zs, fn n -> n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "a FREE occurrence under a non-colliding binder still attributes"
+      (fun () ->
+        (* The companion pin: `q > n` inside the lambda is a genuine free use
+           of the laundered length, so the attribution must still fire — the
+           free-occurrence fix must not over-retire. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA8 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_over(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if any_over(zs, fn q -> q > n) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
     gated "a laundered guard on a DIFFERENT collection is not this guard"
       (fun () ->
         (* The laundered analogue of the WA control: the walk must consult

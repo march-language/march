@@ -1459,7 +1459,14 @@ sense; each is a check that does not happen.
    checks that the guard *applies the spelling to the argument*, not that the
    guard would have *discharged* the obligation, so `if List.length(ys) >= 0`
    is attributed to the withdrawal although `len >= 0` proves nothing about
-   `len > 0` — identically in the direct and laundered spellings.
+   `len > 0` — identically in the direct and laundered spellings. On the
+   laundered path, a mention of the laundering name is counted only when it is
+   FREE — a lambda parameter in the guard that merely collides with the name
+   is not evidence (fixed 2026-07-31 after review; `expr_mentions_free`). The
+   DIRECT path retains the mirror-image pre-existing hole: an application
+   under a binder that shadows the subject (`fn ys -> List.length(ys) > 0`
+   passed to a combinator) still counts. Filed in `specs/todos.md`; fixing it
+   changes direct-path behavior that predates the laundering work.
 
 ---
 

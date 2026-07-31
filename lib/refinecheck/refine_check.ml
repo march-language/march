@@ -1735,6 +1735,67 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
 
+(* Does [e] mention [m] FREE — an occurrence not captured by an intervening
+   binder of the same name?
+
+   This exists because [expr_mentions] above is only safe in a DISCARDING
+   position: it counts a lambda parameter (and occurrences under it) as
+   mentions, which over-retires facts — silence, never a lie.  Used in an
+   ACCEPTING position that direction inverts: `if any(ys, fn n -> n > 0)`
+   would count as "the guard mentions `n`" when the guard's `n` is the
+   lambda's own parameter and says nothing about the laundered value.  That
+   shipped once (caught in review, 2026-07-31): the laundered-guard
+   attribution blamed a withdrawal for a guard that never used the length.
+   Anything that CONSUMES a mention as evidence must use this; anything that
+   discards on a mention should keep [expr_mentions]. *)
+let rec expr_mentions_free (m : string) (e : A.expr) : bool =
+  let free = expr_mentions_free m in
+  let any = List.exists free in
+  let binds ps = List.mem m ps in
+  let pbinds ps = List.exists (fun (p : A.param) -> p.A.param_name.A.txt = m) ps in
+  match e with
+  | A.EVar n -> n.A.txt = m
+  | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+  | A.EApp (f, args, _) -> free f || any args
+  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+  | A.ELam (ps, body, _) -> if pbinds ps then false else free body
+  | A.EBlock (es, _) ->
+    (* Sequential: a `let` (or `let fn`) rebinding [m] shadows the REST of the
+       block, but its own RHS still sees the outer [m]. *)
+    let rec go = function
+      | [] -> false
+      | e :: rest ->
+        free e
+        ||
+        (match e with
+         | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
+         | A.ELetFn (n, _, _, _, _) when n.A.txt = m -> false
+         | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+         | _ -> go rest)
+    in
+    go es
+  | A.ELet (b, _) -> free b.A.bind_expr
+  | A.ELetFn (n, ps, _, body, _) ->
+    if n.A.txt = m || pbinds ps then false else free body
+  | A.ELetQ (p, e1, e2, _) -> free e1 || (if binds (pat_binders p) then false else free e2)
+  | A.EMatch (subj, brs, _) ->
+    free subj
+    || List.exists
+         (fun (br : A.branch) ->
+           if binds (pat_binders br.A.branch_pat) then false
+           else
+             (match br.A.branch_guard with Some g -> free g | None -> false)
+             || free br.A.branch_body)
+         brs
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> free v) fs
+  | A.ERecordUpdate (r, fs, _) -> free r || List.exists (fun (_, v) -> free v) fs
+  | A.EField (r, _, _) -> free r
+  | A.EIf (c, t, el, _) -> any [ c; t; el ]
+  | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EDbg (Some e, _) -> free e
+
 (* The path-context companion to [scope_shadow].  A path condition is recorded
    against a VARIABLE NAME (`is_None(x)`, `x < 0`); when an inner scope rebinds
    that name, the fact is about the OUTER value and saying it about the inner
@@ -2687,7 +2748,13 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       expr_applies_to w.wd_spelling sn.A.txt cond
       || List.exists
            (fun (m, rhs) ->
-             expr_mentions [ m ] cond && expr_applies_to w.wd_spelling sn.A.txt rhs)
+             (* FREE mention only: this is an ACCEPTING position, so the
+                discard-only [expr_mentions] is the wrong tool — a lambda
+                parameter in the guard that merely collides with the
+                laundering name must not read as evidence (review 2026-07-31,
+                probe PE). *)
+             expr_mentions_free m cond
+             && expr_applies_to w.wd_spelling sn.A.txt rhs)
            lets
     in
     List.find_opt
