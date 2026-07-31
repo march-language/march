@@ -1327,10 +1327,23 @@ violation inside a `@[trusted]` function is still reported).
 
   - The contract is adopted — registered so every caller must establish it —
     only when the method name unambiguously denotes it: no `fn` in the same
-    module owns the name, and only one `impl` defines the method. A call
+    module owns the name, only one `impl` defines the method, and (since
+    2026-07-30) no `use` in the same declaration list imports the name. A call
     resolved by NAME cannot tell two impls' contracts apart, and checking
     correct code against a predicate it never touches is the failure this
     subsystem must never have.
+  - The `use` half of that test **fails closed on a glob**. `use Other.{run}`
+    is an enumerated import, so only `run` is withdrawn. `use Other.*`,
+    `import Other` (a bare `import` parses to the *same* `UseAll`) and
+    `import Other, except: [f]` name a module this pass cannot see, so whether
+    they bind the method name is undecidable here and **every** `impl` method
+    in that declaration list is withdrawn. `use Other` with no selector binds
+    the module, not any bare name, and withdraws nothing. Failing closed costs
+    silence; failing open would cost a false positive.
+  - The competition is judged over **one declaration list**. A `use` in an
+    *enclosing* module also binds names lexically inside a nested one, and that
+    case is still adopted — a further withdrawal in the same safe direction,
+    deliberately not taken without a witness.
   - When the name is ambiguous the refinement binds **nobody**: the body is
     walked with it stripped, so it cannot discharge anything either. Unenforced
     means unusable in both directions — never "assumed in the body but demanded
@@ -1399,16 +1412,19 @@ sense; each is a check that does not happen.
 4. **`@[trusted]` now reaches postconditions too (since 2026-07-30).** It
    suppresses the escalation both `check_call`'s and `check_post`'s `note`
    perform, scoped to the one function that carries the attribute.
-5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
-   wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified
-   spellings `strip_entry_self_qual` rewrites, so an entry module that declares
-   the name in some other form keeps the qualified spelling — which is what
-   makes `accept/t126` / `t127` discriminating, but is a hole of the same
-   family as the four that were closed.
-6. **Impl-method contract adoption ignores `use`-imported impl methods** when
-   judging whether a method name is ambiguous. The judgement is made over the
-   compilation unit's own declarations; an impl brought in under a `use` is not
-   counted as a competitor for the name.
+5. **`collect_direct_names` in `lib/desugar/desugar.ml` is exhaustive over
+   `A.decl` (since 2026-07-30) but still does not cover `interface`/`impl`
+   METHOD names.** It decides which self-qualified spellings
+   `strip_entry_self_qual` rewrites, so an entry module that declares the name
+   only as a method keeps the qualified spelling — which is what makes
+   `accept/t126` / `t127` discriminating. Whoever closes that residual must
+   re-verify those two by mutation: folding method names in makes the entry
+   module's `List.length(ys)` rewrite to a bare `length(ys)`, and both
+   witnesses would then pass regardless of the behaviour they pin.
+6. **Impl-method contract adoption judges `use` competition per DECLARATION
+   LIST.** A `use` in an *enclosing* module binds names lexically inside a
+   nested one, and that case is still adopted. Since 2026-07-30 a `use` in the
+   *same* declaration list does compete, glob imports failing closed.
 7. **`alias-withdrawn` attribution does not follow a laundered guard.**
    `let n = List.length(ys)` followed by `if n > 0` falls back to the general
    `solver-undecided` message even when a withdrawal really was the cause.

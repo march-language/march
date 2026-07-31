@@ -6007,6 +6007,183 @@ end|}));
           (List.length (ctx.March_errors.Errors.diagnostics)))
   ]
 
+(* ── `use` competes with an impl method for its name ───────────────────────
+   [adoptable_impl_methods] counted only the decls it could SEE defining a
+   name — sibling `fn`s and other `impl`s — so a `use Other.{run}` beside
+   `impl Runner(Box) do fn run` left `run` looking unambiguous and its contract
+   was adopted.  A call the import resolves elsewhere was then checked against
+   a predicate it never touches: the false positive this subsystem must never
+   have.
+
+   EVERY case here asserts obligation COUNTS, not the presence or absence of a
+   diagnostic, because withdrawal is SILENT and so is a satisfied contract.  A
+   withdrawn method registers no signature at all, so the call site raises no
+   obligation and the ledger is EMPTY — that zero is the whole assertion, and
+   `has_refine_error_d` returning false cannot distinguish it from a proof. *)
+let total_obligations () =
+  List.length (March_refinecheck.Obligation.all ())
+
+let use_adoption_suite =
+  [ gated "a `use`-imported name of the same spelling withdraws adoption" (fun () ->
+        (* The `use` binds a bare `run` in exactly the scope the impl method is
+           callable from, so `run(Box(4), 0)` may not denote this contract. No
+           obligation may be raised for it. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UAD do
+  use Other.{run}
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "no obligation raised at all" 0 (total_obligations ()))
+
+  ; gated "the SAME program without the `use` still adopts the contract" (fun () ->
+        (* The non-vacuity anchor for every zero above. Identical source minus
+           one line: the contract IS adopted, the call IS obliged, and the
+           violation IS found. Without this, the tests above could pass because
+           the fixture never produced an obligation in the first place. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADC do
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "a `use` naming SOMETHING ELSE does not withdraw adoption" (fun () ->
+        (* The over-shoot control. Failing closed on an enumerated selector must
+           mean "this name is imported", not "some import exists". If this drops
+           to 0 the rule has become `any DUse withdraws everything`, which would
+           make the withdrawal tests above pass for the wrong reason. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADN do
+  use Other.{helper}
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "still obliged" 1 (total_obligations ()))
+
+  ; gated "a glob `use` withdraws adoption — the import set is unknowable here"
+      (fun () ->
+        (* `use Other.*` names a module this pass cannot see, so whether it
+           binds `run` is undecidable at this point. Fail CLOSED: withdraw. The
+           cost is silence; the alternative is a false positive. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADG do
+  use Other.*
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "no obligation raised at all" 0 (total_obligations ()))
+
+  ; gated "a bare `import Other` withdraws adoption too" (fun () ->
+        (* `import Mod` with no selector parses to the SAME UseAll as
+           `use Mod.*` (parser.mly, import_path_tail's empty alternative) — the
+           Elixir-style spelling is the one real programs use, and reading only
+           `use ... .*` would leave it open. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADI do
+  import Other
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "no obligation raised at all" 0 (total_obligations ()))
+
+  ; gated "a selector-less `use Other` keeps adoption" (fun () ->
+        (* `use Other` (UseSingle) binds the MODULE, not any bare name, so it
+           competes with nothing. Second over-shoot control, and the one that
+           pins the UseSingle arm specifically: deleting it would make this 0. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADS do
+  use Other
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "still obliged" 1 (total_obligations ()))
+
+    (* Not [gated]: this half needs no solver, and gating a fail-closed test
+       would disable it exactly on the machines where verification is
+       unavailable. *)
+  ; Alcotest.test_case
+      "a `use`-withdrawn impl method may not ASSUME its own refinement" `Quick
+      (fun () ->
+        (* Withdrawal must be symmetric. If the contract binds no caller, the
+           BODY may not treat it as a fact either — otherwise `m / k` is
+           discharged by a predicate nothing enforces, which is the
+           assume-without-check hole that made an earlier widening unsound.
+           [Division_safety] consults [adoptable_impl_methods] directly, so this
+           also pins that the two passes did not drift apart. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error {|
+mod UADD do
+  cap no_panic
+  use Other.{run}
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+end|}))
+
+  ; Alcotest.test_case
+      "without the `use` the same division is still discharged" `Quick (fun () ->
+        (* Negative control for the strip: an adopted contract IS enforced at
+           call sites, so its body may assume it. Without this the case above
+           could be satisfied by stripping unconditionally. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error {|
+mod UADDC do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -6056,4 +6233,5 @@ let () =
       ("trusted", trusted_suite);
       ("postcond-strict", postcond_strict_suite);
       ("qualified-predicate", qualified_pred_suite);
-      ("interface-signature-refinement", iface_refine_suite) ]
+      ("interface-signature-refinement", iface_refine_suite);
+      ("use-impl-adoption", use_adoption_suite) ]

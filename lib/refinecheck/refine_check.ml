@@ -1971,7 +1971,9 @@ let entry_of_sig (sg : fn_sig) : fn_sig option =
      - a `fn` in the same decl list already owns the name (a module with both
        `fn map` and `impl Functor(T) do fn map`), or
      - two impls define the method (`impl Show(Int)` / `impl Show(String)` both
-       give `show`),
+       give `show`), or
+     - a `use` in the same decl list imports the name from elsewhere
+       (`use Other.{run}` beside `impl Runner(Box) do fn run`),
 
    because a call resolved by NAME cannot tell which contract applies, and
    checking correct code against a predicate it never touches is the one
@@ -1980,14 +1982,46 @@ let entry_of_sig (sg : fn_sig) : fn_sig option =
    registered nowhere AND have their bodies walked with parameter refinements
    STRIPPED.  Unenforced means unusable in BOTH directions.
 
+   `use` is the third competitor, and the one this function used to miss: a
+   `use Other.{run}` binds a bare `run` in exactly the scope the impl method is
+   callable from, so the name no longer denotes one contract even though only
+   one impl in this decl list defines it.  Adopting it would oblige callers to
+   satisfy a predicate the call may never reach — the false positive above,
+   arrived at from the other direction.
+
+   Which names a `use` binds is only knowable for the ENUMERATED selector
+   ([UseNames]: `use Other.{run}`, `use Other.run`, `import Other, only: [run]`).
+   [UseAll] and [UseExcept] name a module this function cannot see, so their
+   import set is undecidable HERE and the rule fails CLOSED: every impl method
+   in the decl list is withdrawn.  Note [UseAll] is NOT only the `.*` spelling —
+   a bare `import Other` parses to it too (parser.mly, `import_path_tail`'s
+   empty alternative), and that is the spelling real programs use.  [UseSingle]
+   (`use Other`) binds the module itself, not any bare name, so it competes with
+   nothing.  Failing closed costs only silence; failing open costs a false
+   positive, and this subsystem trades the first for the second by design.
+
+   Scope note: the competition is decl-list-local, matching this function's
+   own input.  A `use` in an ENCLOSING module also binds names lexically inside
+   a nested one; that case is still adopted.  Widening it is a further
+   withdrawal, safe in the same direction, and deliberately not taken here
+   without a witness.
+
    This function is the single definition of that rule.  [division_safety]
    consults it too, so the two passes cannot drift apart. *)
 let adoptable_impl_methods (decls : A.decl list) : string list =
   let fns = Hashtbl.create 16 in
   let counts = Hashtbl.create 16 in
+  (* An unresolvable import: some name set we cannot enumerate is in scope. *)
+  let opaque_import = ref false in
   List.iter
     (function
       | A.DFn (fd, _) -> Hashtbl.replace fns fd.A.fn_name.A.txt ()
+      | A.DUse (ud, _) ->
+        (match ud.A.use_sel with
+         | A.UseNames ns ->
+           List.iter (fun (n : A.name) -> Hashtbl.replace fns n.A.txt ()) ns
+         | A.UseAll | A.UseExcept _ -> opaque_import := true
+         | A.UseSingle -> ())
       | A.DImpl (idf, _) ->
         List.iter
           (fun ((mn : A.name), _) ->
@@ -1996,9 +2030,11 @@ let adoptable_impl_methods (decls : A.decl list) : string list =
           idf.A.impl_methods
       | _ -> ())
     decls;
-  Hashtbl.fold
-    (fun name n acc -> if n = 1 && not (Hashtbl.mem fns name) then name :: acc else acc)
-    counts []
+  if !opaque_import then []
+  else
+    Hashtbl.fold
+      (fun name n acc -> if n = 1 && not (Hashtbl.mem fns name) then name :: acc else acc)
+      counts []
 
 let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   let tbl = Hashtbl.create 128 in

@@ -342,6 +342,24 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **An `impl` method's refinement is no longer adopted when a `use` in the same
+  module imports its name.** An `impl` method's parameter refinement becomes a
+  contract every caller must satisfy only when the method name unambiguously
+  denotes it. That test looked at sibling `fn`s and other `impl`s, but not at
+  imports — so `use Other.{run}` beside `impl Runner(Box) do fn run(b, k :
+  {Int | k != 0})` left `run` looking unambiguous, and a call the import
+  resolves elsewhere was checked against a predicate it never touches. Imports
+  now compete for the name. A glob (`use Other.*`, a bare `import Other`, or
+  `import Other, except: […]`) names a module the checker cannot see at that
+  point, so it withdraws every `impl` method contract in that module — the
+  conservative direction, since the cost is silence rather than a wrongly
+  rejected program. `use Other` with no selector binds the module, not a bare
+  name, and withdraws nothing. Withdrawal is symmetric: a withdrawn contract
+  cannot be assumed inside its own body either, so `cap no_panic` will ask such
+  a body to prove a division safe some other way. Measured against the whole
+  standard library and the typing corpus, this withdraws **zero** existing
+  contracts.
+
 - **A call that spells out the entry module's own name to reach an `extern`
   function now resolves.** `extern "libc": Cap(IO.FileSystem) do fn my_abs(x :
   Int) : Int = "labs" end` inside `mod Foo`, called as `Foo.my_abs(-7)`, failed
