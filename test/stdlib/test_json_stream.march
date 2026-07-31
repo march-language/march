@@ -1,0 +1,165 @@
+-- Tests for the JsonStream stdlib module (streaming JSON tokenizer).
+-- Run with: dune exec march -- test test/stdlib/test_json_stream.march
+-- Design: specs/2026-07-30-json-streaming-design.md
+
+mod TestJsonStream do
+
+-- Render an event list as a compact string so assertions compare one string.
+pfn ev_str(e) do
+  match e do
+  EvObjStart -> "{"
+  EvObjEnd -> "}"
+  EvArrStart -> "["
+  EvArrEnd -> "]"
+  EvKey(k) -> "K(" ++ k ++ ")"
+  EvStr(sv) -> "S(" ++ sv ++ ")"
+  EvNum(f) -> "N(" ++ to_string(f) ++ ")"
+  EvBool(b) -> if b do "T" else "F" end
+  EvNull -> "0"
+  end
+end
+
+pfn evs_str(evs) do
+  match evs do
+  Nil -> ""
+  Cons(h, t) -> ev_str(h) ++ "|" ++ evs_str(t)
+  end
+end
+
+-- Feed one whole string as a single chunk, then finish; render all events,
+-- or "ERR:<n>" / "TRUNC:<n>" etc. on error.
+pfn err_str(e) do
+  match e do
+  EMalformed(_, off) -> "ERR:" ++ to_string(off)
+  EDepthLimit(off) -> "DEPTH:" ++ to_string(off)
+  ETokenLimit(off) -> "TOK:" ++ to_string(off)
+  ETruncated(off) -> "TRUNC:" ++ to_string(off)
+  end
+end
+
+pfn one_shot(src) do
+  match JsonStream.feed(JsonStream.start(), src) do
+  Err(e) -> err_str(e)
+  Ok((evs, st)) ->
+    match JsonStream.finish(st) do
+    Err(e) -> evs_str(evs) ++ err_str(e)
+    Ok(evs2) -> evs_str(evs) ++ evs_str(evs2)
+    end
+  end
+end
+
+-- Same input, split into two chunks at byte k.
+pfn two_shot(src, k) do
+  let n = string_byte_length(src)
+  let a = string_slice(src, 0, k)
+  let b = string_slice(src, k, n - k)
+  match JsonStream.feed(JsonStream.start(), a) do
+  Err(e) -> err_str(e)
+  Ok((evs1, st1)) ->
+    match JsonStream.feed(st1, b) do
+    Err(e) -> evs_str(evs1) ++ err_str(e)
+    Ok((evs2, st2)) ->
+      match JsonStream.finish(st2) do
+      Err(e) -> evs_str(evs1) ++ evs_str(evs2) ++ err_str(e)
+      Ok(evs3) -> evs_str(evs1) ++ evs_str(evs2) ++ evs_str(evs3)
+      end
+    end
+  end
+end
+
+describe "JsonStream" do
+
+  describe "scalars one-shot" do
+    test "sentinel (suite is not vacuously empty)" do
+      assert (true)
+    end
+    test "null" do assert (one_shot("null") == "0|") end
+    test "true" do assert (one_shot("true") == "T|") end
+    test "false" do assert (one_shot("false") == "F|") end
+    test "leading and trailing whitespace" do
+      assert (one_shot("  \t\r\n null \n") == "0|")
+    end
+    test "simple string" do assert (one_shot("\"hi\"") == "S(hi)|") end
+    test "empty string" do assert (one_shot("\"\"") == "S()|") end
+    test "escapes" do
+      assert (one_shot("\"a\\\"b\\\\c\\/d\\n\"") ==
+              "S(a\"b\\c/d" ++ char_from_int(10) ++ ")|")
+    end
+    test "unicode escape BMP" do
+      assert (one_shot("\"\\u0041\"") == "S(A)|")
+    end
+    test "unicode escape two-byte" do
+      -- U+00E9 é = 0xC3 0xA9
+      assert (one_shot("\"\\u00e9\"") ==
+              "S(" ++ char_from_int(195) ++ char_from_int(169) ++ ")|")
+    end
+    test "surrogate pair to 4-byte UTF-8" do
+      -- U+1F600 = \uD83D\uDE00 = F0 9F 98 80
+      assert (one_shot("\"\\ud83d\\ude00\"") ==
+              "S(" ++ char_from_int(240) ++ char_from_int(159)
+                   ++ char_from_int(152) ++ char_from_int(128) ++ ")|")
+    end
+    test "integer" do assert (one_shot("42") == "N(42.)|") end
+    test "negative" do assert (one_shot("-7") == "N(-7.)|") end
+    test "zero" do assert (one_shot("0") == "N(0.)|") end
+    test "float" do assert (one_shot("3.5") == "N(3.5)|") end
+    test "exponent" do assert (one_shot("2e3") == "N(2000.)|") end
+    test "number then trailing space" do assert (one_shot("42 ") == "N(42.)|") end
+  end
+
+  describe "scalars malformed" do
+    test "bare garbage" do assert (one_shot("xyz") == "ERR:0") end
+    test "bad literal" do assert (one_shot("trve") == "ERR:2") end
+    test "trailing garbage after value" do assert (one_shot("null null") == "ERR:5") end
+    test "unknown escape" do assert (one_shot("\"\\q\"") == "ERR:2") end
+    test "bad hex in unicode escape" do assert (one_shot("\"\\u00zz\"") == "ERR:5") end
+    test "lone high surrogate then char" do assert (one_shot("\"\\ud83dx\"") == "ERR:7") end
+    test "lone low surrogate" do assert (one_shot("\"\\ude00\"") == "ERR:6") end
+    test "leading zeros" do assert (one_shot("012") == "ERR:0") end
+    test "bare minus" do assert (one_shot("-") == "ERR:0") end
+    test "dot without frac digits" do assert (one_shot("1.") == "ERR:0") end
+    test "exp without digits" do assert (one_shot("1e") == "ERR:0") end
+  end
+
+  describe "truncation" do
+    test "half a literal" do assert (one_shot("tru") == "TRUNC:0") end
+    test "unterminated string" do assert (one_shot("\"abc") == "TRUNC:0") end
+    test "string open mid-escape" do assert (one_shot("\"a\\") == "TRUNC:0") end
+    test "empty input" do assert (one_shot("") == "TRUNC:0") end
+    test "bare number completes at finish" do assert (one_shot("42") == "N(42.)|") end
+  end
+
+  describe "chunk splits" do
+    test "literal split" do assert (two_shot("true", 2) == "T|") end
+    test "string split mid-content" do assert (two_shot("\"hello\"", 3) == "S(hello)|") end
+    test "string split mid-escape" do
+      assert (two_shot("\"a\\nb\"", 3) == "S(a" ++ char_from_int(10) ++ "b)|")
+    end
+    test "string split mid-hex" do assert (two_shot("\"\\u0041\"", 4) == "S(A)|") end
+    test "surrogate pair split between halves" do
+      assert (two_shot("\"\\ud83d\\ude00\"", 7) ==
+              "S(" ++ char_from_int(240) ++ char_from_int(159)
+                   ++ char_from_int(152) ++ char_from_int(128) ++ ")|")
+    end
+    test "number split" do assert (two_shot("1234", 2) == "N(1234.)|") end
+    test "error offset is absolute across chunks" do
+      -- "null " then "x": offset of x is 5. The first chunk ("null ")
+      -- already completes the null value, so evs1 = "0|" precedes the error.
+      assert (two_shot("null x", 5) == "0|ERR:5")
+    end
+  end
+
+  describe "limits" do
+    test "token limit on a long string" do
+      -- max_token_bytes = 4; five content bytes trips it. Offset = token start.
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 4))
+      match JsonStream.feed(st, "\"abcdef\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+  end
+
+end
+
+end
