@@ -126,22 +126,23 @@ mod JsonStream do
     else 0 - 1 end end end
   end
 
-  -- Encode a Unicode codepoint as UTF-8 bytes.  char_from_int is
-  -- single-byte (n & 0xFF in the runtime), so multi-byte sequences are
-  -- assembled explicitly.  Divisors are nonzero constants (cap no_panic).
+  -- Encode a Unicode codepoint as UTF-8 bytes.  char_from_int is ASCII-only
+  -- (returns "" above 127 in the interpreter); every byte here past the
+  -- first branch is >= 128, so use byte_to_char, which accepts the full
+  -- 0-255 range.  Divisors are nonzero constants (cap no_panic).
   pfn utf8_encode(cp) do
     if cp < 128 do char_from_int(cp)
     else if cp < 2048 do
-      char_from_int(192 + cp / 64) ++ char_from_int(128 + (cp % 64))
+      byte_to_char(192 + cp / 64) ++ byte_to_char(128 + (cp % 64))
     else if cp < 65536 do
-      char_from_int(224 + cp / 4096)
-        ++ char_from_int(128 + ((cp / 64) % 64))
-        ++ char_from_int(128 + (cp % 64))
+      byte_to_char(224 + cp / 4096)
+        ++ byte_to_char(128 + ((cp / 64) % 64))
+        ++ byte_to_char(128 + (cp % 64))
     else
-      char_from_int(240 + cp / 262144)
-        ++ char_from_int(128 + ((cp / 4096) % 64))
-        ++ char_from_int(128 + ((cp / 64) % 64))
-        ++ char_from_int(128 + (cp % 64))
+      byte_to_char(240 + cp / 262144)
+        ++ byte_to_char(128 + ((cp / 4096) % 64))
+        ++ byte_to_char(128 + ((cp / 64) % 64))
+        ++ byte_to_char(128 + (cp % 64))
     end end end
   end
 
@@ -344,9 +345,11 @@ mod JsonStream do
         go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
       else
         -- Raw byte, including control bytes and non-ASCII (passed through;
-        -- see the design's decision table).
+        -- see the design's decision table).  char_from_int is ASCII-only
+        -- (returns "" above 127 in the interpreter); byte_to_char covers
+        -- the full 0-255 range, needed for raw multi-byte UTF-8 text.
         push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff,
-                   char_from_int(c))
+                   byte_to_char(c))
       end end end
     SEsc ->
       if c == 117 do
@@ -515,6 +518,179 @@ mod JsonStream do
         else Err(ETruncated(off)) end
       end
     _ -> Err(ETruncated(off))
+    end
+  end
+
+  -- ── Drivers ───────────────────────────────────────────────────────────
+  -- Seq.fold is eager and cannot early-exit, so after an error the
+  -- remaining chunks are consumed but ignored (total either way).  If
+  -- Seq's Step constructors prove publicly constructible, switching to
+  -- Seq.fold_while for early exit is a drop-in improvement.
+
+  fn fold(chunks, z, f) do
+    let r = Seq.fold(chunks, Ok((z, start())), fn (acc, chunk) ->
+      match acc do
+      Err(e) -> Err(e)
+      Ok((zz, st)) ->
+        match feed(st, chunk) do
+        Err(e) -> Err(e)
+        Ok((evs, st2)) -> Ok((fold_evs(evs, zz, f), st2))
+        end
+      end)
+    match r do
+    Err(e) -> Err(e)
+    Ok((zz, st)) ->
+      match finish(st) do
+      Err(e) -> Err(e)
+      Ok(evs) -> Ok(fold_evs(evs, zz, f))
+      end
+    end
+  end
+
+  pfn fold_evs(evs, z, f) do
+    match evs do
+    Nil -> z
+    Cons(e, t) -> fold_evs(t, f(z, e), f)
+    end
+  end
+
+  -- ── Tree builder (compatibility with Json.JsonValue) ─────────────────
+  -- Builder frames: an open array (reversed elements), an open object
+  -- awaiting a key (reversed pairs), an open object holding a key awaiting
+  -- its value.
+
+  ptype JsFrame =
+      FArr(List(JsonValue))
+    | FObjK(List((String, JsonValue)))
+    | FObjV(String, List((String, JsonValue)))
+
+  -- A completed value lands in the enclosing frame — or, with no frames,
+  -- IS a completed top-level value.
+  pfn bpush(frames, v) do
+    match frames do
+    Nil -> Ok((Nil, Some(v)))
+    Cons(FArr(xs), rest) -> Ok((Cons(FArr(Cons(v, xs)), rest), None))
+    Cons(FObjV(k, ps), rest) -> Ok((Cons(FObjK(Cons((k, v), ps)), rest), None))
+    Cons(FObjK(ps), rest) -> Err(EMalformed("internal: value before key", 0))
+    end
+  end
+
+  pfn build_step(frames, ev) do
+    match ev do
+    EvNull -> bpush(frames, Null)
+    EvBool(b) -> bpush(frames, Bool(b))
+    EvNum(f) -> bpush(frames, Number(f))
+    EvStr(sv) -> bpush(frames, Str(sv))
+    EvKey(k) ->
+      match frames do
+      Cons(FObjK(ps), rest) -> Ok((Cons(FObjV(k, ps), rest), None))
+      _ -> Err(EMalformed("internal: key outside object", 0))
+      end
+    EvObjStart -> Ok((Cons(FObjK(Nil), frames), None))
+    EvArrStart -> Ok((Cons(FArr(Nil), frames), None))
+    EvArrEnd ->
+      match frames do
+      Cons(FArr(xs), rest) -> bpush(rest, Array(rev(xs, Nil)))
+      _ -> Err(EMalformed("internal: mismatched array end", 0))
+      end
+    EvObjEnd ->
+      match frames do
+      Cons(FObjK(ps), rest) -> bpush(rest, Object(rev(ps, Nil)))
+      _ -> Err(EMalformed("internal: mismatched object end", 0))
+      end
+    end
+  end
+
+  -- Fold a whole single-document chunk stream into one JsonValue.
+  fn build(chunks) do
+    let r = fold(chunks, Ok((Nil, None)), fn (acc, ev) ->
+      match acc do
+      Err(e) -> Err(e)
+      Ok((frames, done)) ->
+        match build_step(frames, ev) do
+        Err(e) -> Err(e)
+        Ok((frames2, out)) ->
+          match out do
+          Some(v) -> Ok((frames2, Some(v)))
+          None -> Ok((frames2, done))
+          end
+        end
+      end)
+    match r do
+    Err(e) -> Err(e)
+    Ok(inner) ->
+      match inner do
+      Err(e) -> Err(e)
+      Ok((frames, done)) ->
+        match done do
+        Some(v) -> Ok(v)
+        None -> Err(ETruncated(0))
+        end
+      end
+    end
+  end
+
+  -- NDJSON: parse `path`, calling cb(JsonValue) per completed top-level
+  -- value, with bounded memory.  File.with_chunks wraps the callback's
+  -- return in `Ok(callback_result)` (Result(_, FileError)), while
+  -- ndjson_run itself returns Result(unit, JsonStreamError) — two
+  -- different error types, so the outer FileError is folded into
+  -- JsonStreamError rather than propagated via `let?`.
+  fn each_value(path, cb) do
+    match File.with_chunks(path, 65536, fn chunks -> ndjson_run(chunks, cb)) do
+    Err(e) -> Err(EMalformed("file error: " ++ to_string(e), 0))
+    Ok(inner) -> inner
+    end
+  end
+
+  pfn ndjson_run(chunks, cb) do
+    let r0 = Seq.fold(chunks, nd_init(), fn (acc, chunk) -> nd_chunk(acc, chunk, cb))
+    match r0 do
+    Err(e) -> Err(e)
+    Ok((st, frames)) ->
+      match finish(st) do
+      Err(e) -> Err(e)
+      Ok(evs) ->
+        match nd_events(evs, frames, cb) do
+        Err(e) -> Err(e)
+        Ok(_) -> Ok(())
+        end
+      end
+    end
+  end
+
+  pfn nd_init() do Ok((start_ndjson(), Nil)) end
+
+  pfn nd_chunk(acc, chunk, cb) do
+    match acc do
+    Err(e) -> Err(e)
+    Ok((st, frames)) ->
+      match feed(st, chunk) do
+      Err(e) -> Err(e)
+      Ok((evs, st2)) ->
+        match nd_events(evs, frames, cb) do
+        Err(e) -> Err(e)
+        Ok(frames2) -> Ok((st2, frames2))
+        end
+      end
+    end
+  end
+
+  pfn nd_events(evs, frames, cb) do
+    match evs do
+    Nil -> Ok(frames)
+    Cons(ev, t) ->
+      match build_step(frames, ev) do
+      Err(e) -> Err(e)
+      Ok((frames2, out)) ->
+        match out do
+        Some(v) -> do
+          cb(v)
+          nd_events(t, frames2, cb)
+        end
+        None -> nd_events(t, frames2, cb)
+        end
+      end
     end
   end
 

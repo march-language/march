@@ -138,6 +138,45 @@ pfn drip(d, i, st, out) do
   end
 end
 
+pfn chunks_of2(a, b) do
+  Seq.from_list(Cons(a, Cons(b, Nil)))
+end
+
+pfn diff_all(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) -> if diff_one(d) do diff_all(rest) else false end
+  end
+end
+
+pfn diff_one(d) do
+  let mine = JsonStream.build(Seq.from_list(Cons(d, Nil)))
+  let theirs = Json.parse(d)
+  match mine do
+  Ok(v) ->
+    match theirs do
+    Ok(v2) ->
+      if Json.to_string(v) == Json.to_string(v2) do true
+      else do
+        IO.puts("value mismatch on: " ++ d)
+        false
+      end end
+    Err(_) -> do
+      IO.puts("we accept, Json.parse rejects: " ++ d)
+      false
+    end
+    end
+  Err(_) ->
+    match theirs do
+    Err(_) -> true
+    Ok(_) -> do
+      IO.puts("we reject, Json.parse accepts: " ++ d)
+      false
+    end
+    end
+  end
+end
+
 describe "JsonStream" do
 
   describe "scalars one-shot" do
@@ -162,13 +201,13 @@ describe "JsonStream" do
     test "unicode escape two-byte" do
       -- U+00E9 é = 0xC3 0xA9
       assert (one_shot("\"\\u00e9\"") ==
-              "S(" ++ char_from_int(195) ++ char_from_int(169) ++ ")|")
+              "S(" ++ byte_to_char(195) ++ byte_to_char(169) ++ ")|")
     end
     test "surrogate pair to 4-byte UTF-8" do
       -- U+1F600 = \uD83D\uDE00 = F0 9F 98 80
       assert (one_shot("\"\\ud83d\\ude00\"") ==
-              "S(" ++ char_from_int(240) ++ char_from_int(159)
-                   ++ char_from_int(152) ++ char_from_int(128) ++ ")|")
+              "S(" ++ byte_to_char(240) ++ byte_to_char(159)
+                   ++ byte_to_char(152) ++ byte_to_char(128) ++ ")|")
     end
     test "integer" do assert (one_shot("42") == "N(42.)|") end
     test "negative" do assert (one_shot("-7") == "N(-7.)|") end
@@ -209,8 +248,8 @@ describe "JsonStream" do
     test "string split mid-hex" do assert (two_shot("\"\\u0041\"", 4) == "S(A)|") end
     test "surrogate pair split between halves" do
       assert (two_shot("\"\\ud83d\\ude00\"", 7) ==
-              "S(" ++ char_from_int(240) ++ char_from_int(159)
-                   ++ char_from_int(152) ++ char_from_int(128) ++ ")|")
+              "S(" ++ byte_to_char(240) ++ byte_to_char(159)
+                   ++ byte_to_char(152) ++ byte_to_char(128) ++ ")|")
     end
     test "number split" do assert (two_shot("1234", 2) == "N(1234.)|") end
     test "error offset is absolute across chunks" do
@@ -388,6 +427,93 @@ describe "JsonStream" do
     test "single-byte chunks agree with one big chunk" do
       let d = "{\"a\": [1, \"b\\n\", true]}"
       assert (drip(d, 0, JsonStream.start(), "") == one_shot(d))
+    end
+  end
+
+  describe "drivers" do
+    test "fold counts events across chunks" do
+      let r = JsonStream.fold(chunks_of2("[1, 2, ", "3]"), 0, fn (n, e) -> n + 1)
+      match r do
+      Err(_) -> assert (false)
+      Ok(n) -> assert (n == 5)
+      end
+    end
+    test "fold surfaces errors" do
+      match JsonStream.fold(chunks_of2("[1, ", "x]"), 0, fn (n, e) -> n + 1) do
+      Err(EMalformed(_, off)) -> assert (off == 4)
+      _ -> assert (false)
+      end
+    end
+    test "build reconstructs a tree equal to Json.parse" do
+      let src = "{\"a\": [1, true, null], \"b\": \"x\"}"
+      match JsonStream.build(chunks_of2(string_slice(src, 0, 9),
+                                        string_slice(src, 9, string_byte_length(src) - 9))) do
+      Err(_) -> assert (false)
+      Ok(v) ->
+        match Json.parse(src) do
+        Ok(v2) -> assert (Json.to_string(v) == Json.to_string(v2))
+        Err(_) -> assert (false)
+        end
+      end
+    end
+    test "differential verdicts vs Json.parse over the corpus" do
+      -- \u documents INCLUDED: Json.parse gained \uXXXX + surrogate-pair
+      -- support on main 2026-07-30, so escapes are differential-testable.
+      let corpus = Cons("null", Cons("true", Cons("-12.5e-3",
+                   Cons("\"a\\u0041\\ud83d\\ude00\"",
+                   Cons("\"hello\"", Cons("[]", Cons("{}",
+                   Cons("[1, [2, [3, []]], \"x\"]",
+                   Cons("{\"k\": {\"n\": [true, false, null]}}",
+                   Cons("xyz", Cons("[1,]", Cons("{\"a\" 1}", Cons("012",
+                   Nil)))))))))))))
+      assert (diff_all(corpus))
+    end
+    -- No `Ref` module in stdlib, so this covers each_value (Ok on a valid
+    -- ndjson file, Err on a malformed one) and covers a fold-based count
+    -- separately over a single-chunk file read, rather than counting via
+    -- a mutable ref captured in the each_value callback.
+    test "each_value over an ndjson file" do
+      let path = "/tmp/march_jsonstream_ndjson_test.jsonl"
+      match File.write(path, "{\"n\": 1}\n{\"n\": 2}\n{\"n\": 3}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        match JsonStream.each_value(path, fn v -> ()) do
+        Err(_) -> assert (false)
+        Ok(_) -> assert (true)
+        end
+      end
+      end
+      match File.delete(path) do _ -> () end
+    end
+    test "each_value errors on malformed ndjson" do
+      let path = "/tmp/march_jsonstream_ndjson_bad_test.jsonl"
+      match File.write(path, "{\"n\": 1}\nnot json\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        match JsonStream.each_value(path, fn v -> ()) do
+        Err(_) -> assert (true)
+        Ok(_) -> assert (false)
+        end
+      end
+      end
+      match File.delete(path) do _ -> () end
+    end
+    test "fold-based count over file contents (Ref unavailable)" do
+      let path = "/tmp/march_jsonstream_fold_count_test.json"
+      match File.write(path, "[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}]") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        match File.read(path) do
+        Err(_) -> assert (false)
+        Ok(contents) ->
+          match JsonStream.fold(Seq.from_list(Cons(contents, Nil)), 0, fn (n, e) -> n + 1) do
+          Err(_) -> assert (false)
+          Ok(n) -> assert (n == 14)
+          end
+        end
+      end
+      end
+      match File.delete(path) do _ -> () end
     end
   end
 
