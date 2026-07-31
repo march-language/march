@@ -109,6 +109,14 @@ Both change what the work is, and both were confirmed by reading the source:
   re-run alone before being believed. `adversarial-regressions` #39
   (`MARCH_SANITIZE` timeout) is a known environmental failure — confirm by
   compiling a trivial `clang -fsanitize=address` C program, which also hangs.
+- **`from_json` cross-type dispatch remains broken after Task 2** (Task 2
+  fixes only `to_json`; `from_json`'s fix is separate, larger, unscheduled
+  work — `specs/2026-07-31-json-from-json-dispatch-design.md`). Every task
+  from Task 3 onward that derives Json for more than one type in one test
+  file must continue Task 1's workaround: capture each type's `from_json`
+  result via a top-level `let` placed immediately after that type's own
+  `derive Json`, before the next type's `derive Json` rebinds the bare name.
+  Do not "simplify" this ordering away.
 
 ## File Structure
 
@@ -322,7 +330,140 @@ git commit -m "test(stdlib): map derive Json capabilities and prove the JsonStre
 
 ---
 
-### Task 2: `DecodeError` — the type, the renderer, and its tests
+### Task 2: Fix `to_json` cross-type dispatch via `impl_tbl`
+
+**Inserted after Task 1's discovery.** Task 1 found that `derive Json`
+generates *bare* top-level `to_json`/`from_json`, so when two types in one
+module both derive it, the second declaration's binding silently replaces the
+first — every call from the first type's code now resolves to the wrong
+decoder. `derive Eq`/`Show`/`Ord`/`Hash` do not have this bug: they generate a
+proper `DImpl` (`lib/desugar/desugar.ml:1195`, `impl_one`), dispatched through
+`impl_tbl : (iface, type) -> value` (`lib/eval/eval.ml:278`) keyed by the
+**argument's runtime type**.
+
+**Scope: `to_json` only.** `to_json(x : T) : JsonValue` has a value of type
+`T` in hand at the call site, so it can be fixed the same way — route it
+through `impl_tbl` like `Eq`. `from_json(v : JsonValue) : Result(T, ...)` has
+no value of type `T` to dispatch on; `T` is known only from the *caller's*
+expected type, which needs return-type-directed monomorphization, a
+different and larger piece of work with no existing pattern to copy. That is
+tracked separately in
+`specs/2026-07-31-json-from-json-dispatch-design.md` and is **explicitly not
+this task**. Every later task in this plan continues Task 1's
+sequential-`let`-capture workaround for `from_json` specifically.
+
+**Files:**
+- Modify: `lib/desugar/desugar.ml` (the `"Json"` branch's `to_json` generator)
+- Modify: `test/stdlib/test_json_typed.march`
+
+**Interfaces:**
+- Consumes: nothing from later tasks.
+- Produces: `to_json` correctly dispatching by argument type across multiple
+  derived types in one module — a fact Tasks 3-7 may rely on for `to_json`
+  specifically, never for `from_json`.
+
+- [ ] **Step 1: Investigate before editing — write down what you find**
+
+Read, in order, and record in the report before writing any code:
+
+1. `lib/desugar/desugar.ml:1195-1260` (`impl_one`, the `Eq` derive) — the
+   working pattern: a `DImpl` with `impl_iface`/`impl_ty`/`impl_methods`.
+2. `lib/desugar/desugar.ml:1478` onward — the current `"Json"` branch, and
+   specifically the `encoder_for_ty` helper's fallback
+   `EApp (EVar (mk_name "to_json"), [value_expr], sp)` — this bare recursive
+   call is exactly what needs to become dispatched.
+3. `lib/eval/eval.ml:278-320` (`impl_tbl` and its surrounding doc comment) —
+   how `Eq`/`Show`/etc. register into and read from it, and what
+   `is_type_dispatched_method` (referenced near `eval.ml:1253`) decides.
+4. `lib/eval/eval.ml:9540-9560` and `lib/typecheck/typecheck.ml:9750-9850` —
+   the existing `is_json_iface` / `impl_iface.txt` starting-with-`"Json"`
+   checks. **Determine what these are for** before assuming they help: they
+   may be bookkeeping for a *different*, hand-written `impl Json for T`
+   feature, not reusable machinery for `derive Json`. Record the answer
+   either way.
+5. `lib/typecheck/typecheck.ml:1921-1924` — the current `poly2` binding and
+   its now-known-incorrect comment ("runtime dispatches via impl_tbl").
+
+If step 4's investigation shows real reusable plumbing, use it. If it is
+unrelated, say so plainly and proceed with a `DImpl`-based fix modeled
+directly on `impl_one`.
+
+- [ ] **Step 2: Write the failing test**
+
+Append to `test/stdlib/test_json_typed.march` (this exercises exactly what
+Task 1 found broken):
+
+```march
+  describe "to_json cross-type dispatch (fixed)" do
+    test "two types deriving Json in one module each encode correctly" do
+      -- Flat and Tag both derive Json earlier in this file.
+      let a = to_json(Flat(name = "x", age = 1, active = true, score = 0.5))
+      let b = to_json(Red)
+      assert (String.contains(Json.to_string(a), "\"x\""))
+      assert (String.contains(Json.to_string(b), "\"Red\""))
+    end
+  end
+```
+
+Adapt the record-construction syntax to whatever this file's `Flat` actually
+uses (Task 1 defined it) — read the file first rather than guessing field
+order.
+
+- [ ] **Step 3: Run to verify it currently fails or passes vacuously**
+
+```bash
+dune build --root . bin/main.exe 2>&1 | tail -3
+./_build/default/bin/main.exe test test/stdlib/test_json_typed.march; echo "exit=$?"
+```
+
+Given Task 1's finding, this may already fail (last-derived-wins), or may
+pass by accident depending on declaration order in the file — either way,
+write down what you observe before changing the generator, since that is
+the before-state this task's fix is measured against.
+
+- [ ] **Step 4: Implement dispatch, modeled on `impl_one`**
+
+Change the `"Json"` branch's `to_json` generation to emit a `DImpl` per
+Step 1's finding, with `impl_iface = "Json"` (or a distinct sub-name if
+Step 1's investigation shows that name is already claimed for something
+else — resolve any collision by reading, not by guessing) and `impl_ty` set
+to the deriving type. Update `encoder_for_ty`'s recursive-call fallback so
+nested `to_json` calls also dispatch correctly through the same mechanism
+rather than emitting another bare call.
+
+- [ ] **Step 5: Run the full impact set**
+
+A `desugar.ml` change affects every March program:
+
+```bash
+dune build --root . bin/main.exe @install test/run_compiler.exe test/test_stdlib_march.exe 2>&1 | tail -5
+./_build/default/bin/main.exe test test/stdlib/test_json_typed.march; echo "typed=$?"
+./_build/default/bin/main.exe test test/stdlib/test_derive_json.march; echo "derive=$?"
+./_build/default/bin/main.exe test test/stdlib/test_derive_json_multi.march; echo "multi=$?"
+./_build/default/bin/main.exe test test/stdlib/test_island_bridges.march; echo "island=$?"
+./_build/default/test/run_compiler.exe -e 2>&1 | tail -5; echo "compiler=$?"
+```
+
+`test_derive_json_multi.march` is the file that already demonstrates the bug
+(Task 1's report) — re-run it specifically and confirm its `to_json`-related
+assertions now pass; its `from_json`-related ones are expected to remain
+broken, since that is explicitly out of scope here.
+
+- [ ] **Step 6: Docs and commit**
+
+Update `specs/todos.md`: move "to_json cross-type dispatch" to Done, keep
+"from_json return-type dispatch" open with a pointer to
+`specs/2026-07-31-json-from-json-dispatch-design.md`. Run
+`bash scripts/check-docs.sh`.
+
+```bash
+git add lib/desugar/desugar.ml test/stdlib/test_json_typed.march specs/todos.md
+git commit -m "fix(derive): to_json dispatches through impl_tbl, fixing cross-type shadowing"
+```
+
+---
+
+### Task 3: `DecodeError` — the type, the renderer, and its tests
 
 Stdlib-only. Defines the contract every later task emits, with no codegen
 change yet, so the type can be reviewed on its own.
@@ -463,7 +604,7 @@ git commit -m "feat(stdlib): Json.DecodeError with a JSONPath and an optional by
 
 ---
 
-### Task 3: Restructure the generated record decoder to report paths
+### Task 4: Restructure the generated record decoder to report paths
 
 The largest task. The current generator emits one tuple match with a wildcard
 failure arm, which cannot carry a path; this replaces it with per-field
@@ -637,7 +778,7 @@ git commit -m "feat(derive): record from_json reports a JSONPath instead of one 
 
 ---
 
-### Task 4: Paths for enums and variants-with-args
+### Task 5: Paths for enums and variants-with-args
 
 **Files:**
 - Modify: `lib/desugar/desugar.ml` (variant branches of the `from_json`
@@ -690,7 +831,7 @@ git commit -m "feat(derive): variant from_json reports the tag and argument inde
 
 ---
 
-### Task 5: Byte offsets — `JsonStream.each_typed`
+### Task 6: Byte offsets — `JsonStream.each_typed`
 
 Connects the path to the record, per Decision 3.
 
@@ -771,7 +912,7 @@ git commit -m "feat(stdlib): JsonStream.each_typed decodes records and reports b
 
 ---
 
-### Task 6: Phase B — decode straight from events
+### Task 7: Phase B — decode straight from events
 
 The compiler-side payoff: a second generated decoder per type that consumes
 the event stream, so a record never becomes a tree. Follows serde's
@@ -879,36 +1020,43 @@ git commit -m "feat(derive): from_json_events decodes without building a JsonVal
 
 ## Self-review
 
-**Spec coverage:** design Phase A1 → Task 1; A2 → Tasks 2-4 (split because
-the record restructuring is by far the largest piece and enums are separable);
-A3 → Task 5; Phase B → Task 6. The design's non-goals (combinators, schema
-validation, `to_json` changes, tokenizer changes) have no tasks, deliberately.
+**Spec coverage:** design Phase A1 → Task 1; the `to_json` cross-type
+shadowing bug Task 1 found → Task 2 (inserted; `from_json`'s harder fix is
+tracked separately, unscheduled); A2 → Tasks 3-5 (split because the record
+restructuring is by far the largest piece and enums are separable); A3 →
+Task 6; Phase B → Task 7. The design's non-goals (combinators, schema
+validation, `to_json` changes beyond the dispatch fix, tokenizer changes)
+have no tasks, deliberately.
 
-**Placeholder scan:** four steps defer to source inspection, each with a
+**Placeholder scan:** five steps defer to source inspection, each with a
 concrete instruction and a recorded output rather than "figure it out" —
 Task 1 Steps 2/4 (probe uncertain capabilities; adapt to `File.read`'s actual
-shape), Task 3 Step 1 (read the generator and write down its structure before
-editing), Task 4 Step 1 (mirror the existing variant wire format rather than
-inventing one), Task 5 Step 1 (verify the byte offset rather than trusting
-arithmetic in this document). Task 3's generated-code block is illustrative
-March showing the *target shape*; the actual change is OCaml AST construction,
-which is why Step 1 requires reading the generator first — inventing verbatim
-OCaml for code I have not fully read would be worse than specifying the
-behaviour and the tests.
+shape), Task 2 Step 1 (investigate the existing `impl_tbl`/`is_json_iface`
+machinery before assuming it's reusable), Task 4 Step 1 (read the generator
+and write down its structure before editing), Task 5 Step 1 (mirror the
+existing variant wire format rather than inventing one), Task 6 Step 1
+(verify the byte offset rather than trusting arithmetic in this document).
+Task 4's generated-code block is illustrative March showing the *target
+shape*; the actual change is OCaml AST construction, which is why its Step 1
+requires reading the generator first — inventing verbatim OCaml for code I
+have not fully read would be worse than specifying the behaviour and the
+tests.
 
 **Type consistency:** `DecodeError(msg, path, offset)` with path stored
-outermost-first is used identically in Tasks 2-6;
+outermost-first is used identically in Tasks 3-7;
 `decode_error_under(step, e)` prepends, `decode_error_at(off, e)` sets the
-offset; `from_json` returns `Result(T, Json.DecodeError)` from Task 3 onward;
+offset; `from_json` returns `Result(T, Json.DecodeError)` from Task 4 onward;
 `each_typed(path, cb) : Result(Int, Json.DecodeError)`.
 
 **The invariant most likely to break quietly:** unknown-field subtree skipping
-in Task 6. It produces a wrong value with no error, which no assertion about
-the *failing* cases would catch — hence Step 3's dedicated tests requiring a
-**known field after the skipped one** to still decode, and the oracle corpus
-mandating unknown fields.
+in Task 7. It produces a wrong value with no error, which no assertion about
+the *failing* cases would catch — hence its Step 3's dedicated tests requiring
+a **known field after the skipped one** to still decode, and the oracle
+corpus mandating unknown fields.
 
-**Ordering constraint that is not negotiable:** Task 6 after Tasks 2-4.
+**Ordering constraints that are not negotiable:** Task 2 before Task 3, so
+`from_json`'s error type is not designed against a codegen path that still
+has an unrelated dispatch bug live in the same file. Task 7 after Tasks 3-5:
 serde's `serde_path_to_error` exists because paths were retrofitted onto a
 decoder not designed for them; generating the event decoder before the error
 type settles would repeat that mistake inside this repo.
