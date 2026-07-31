@@ -126,6 +126,27 @@ mod JsonStream do
     else 0 - 1 end end end
   end
 
+  -- Index of the next '"' or '\' at or after `i`, or 0 - 1 if neither occurs
+  -- before the chunk ends.  Both probes go through `string_index_of_from`,
+  -- which is backed by `march_memmem` (two-stage memchr + memcmp) in the C
+  -- runtime -- so this is the vectorized scan phase 2 leans on, with no new
+  -- C written.  Control bytes deliberately do NOT end a run: they are
+  -- passed through as content per the design's decision table.
+  pfn run_end(s, i) do
+    match string_index_of_from(s, "\"", i) do
+    None ->
+      match string_index_of_from(s, "\\", i) do
+      None -> 0 - 1
+      Some(y) -> y
+      end
+    Some(x) ->
+      match string_index_of_from(s, "\\", i) do
+      None -> x
+      Some(y) -> if y < x do y else x end
+      end
+    end
+  end
+
   -- Encode a Unicode codepoint as UTF-8 bytes.  char_from_int is ASCII-only
   -- (returns "" above 127 in the interpreter); every byte here past the
   -- first branch is >= 128, so use byte_to_char, which accepts the full
@@ -335,6 +356,32 @@ mod JsonStream do
     end
   end
 
+  -- Slice a whole plain run in one piece instead of one 1-byte string plus
+  -- one cons cell per byte -- the phase 2 measurement showed that per-byte
+  -- materialization, not scanning, is what made the tokenizer 3.6x slower
+  -- than Json.parse.
+  --
+  -- The caller guarantees the byte at `i` is neither '"' nor '\' and that no
+  -- high surrogate is pending, so the run is at least one byte and `go`
+  -- always advances -- there is no zero-length step to loop on.
+  --
+  -- The length check happens BEFORE the slice is materialized: a 10MB run
+  -- against an 8MB limit must return ETokenLimit, not allocate 10MB first.
+  pfn str_run(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff) do
+    let e = run_end(s, i)
+    let stop = if e < 0 do string_byte_length(s) else e end
+    match cfg do
+    JsCfg(_, maxt, _) ->
+      let len2 = len + (stop - i)
+      if len2 > maxt do Err(ETokenLimit(soff))
+      else
+        go(s, stop, cfg, mode, stack, depth,
+           PStr(Cons(string_slice(s, i, stop - i), ps), len2, SPlain, hi, soff),
+           base, evs)
+      end
+    end
+  end
+
   pfn finish_str(s, i, cfg, mode, stack, depth, base, evs, ps) do
     let v = join_pieces(ps)
     match mode do
@@ -356,12 +403,9 @@ mod JsonStream do
       else if c == 92 do
         go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
       else
-        -- Raw byte, including control bytes and non-ASCII (passed through;
-        -- see the design's decision table).  char_from_int is ASCII-only
-        -- (returns "" above 127 in the interpreter); byte_to_char covers
-        -- the full 0-255 range, needed for raw multi-byte UTF-8 text.
-        push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff,
-                   byte_to_char(c))
+        -- Plain content: take the whole run at once.  `c` is known not to be
+        -- '"' or '\' here, and `hi < 0`, which is exactly str_run's contract.
+        str_run(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff)
       end end end
     SEsc ->
       if c == 117 do

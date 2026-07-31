@@ -574,6 +574,50 @@ describe "JsonStream" do
     end
   end
 
+  describe "run-sliced strings" do
+    test "long escape-free string round-trips" do
+      let body = repeat_str("abcdefghij", 500, "")
+      assert (one_shot("\"" ++ body ++ "\"") == "S(" ++ body ++ ")|")
+    end
+    test "run interrupted by an escape rejoins correctly" do
+      assert (one_shot("\"aaa\\nbbb\"") == "S(aaa" ++ byte_to_char(10) ++ "bbb)|")
+    end
+    test "run split across a chunk boundary rejoins correctly" do
+      assert (two_shot("\"abcdefghij\"", 5) == "S(abcdefghij)|")
+    end
+    test "many runs separated by escapes" do
+      assert (one_shot("\"a\\tb\\tc\\td\"") ==
+              "S(a" ++ byte_to_char(9) ++ "b" ++ byte_to_char(9)
+                   ++ "c" ++ byte_to_char(9) ++ "d)|")
+    end
+    test "non-ASCII bytes survive a run" do
+      -- C3 A9 is U+00E9; run-slicing must not decode or split it.
+      let e = byte_to_char(195) ++ byte_to_char(169)
+      assert (one_shot("\"x" ++ e ++ "y\"") == "S(x" ++ e ++ "y)|")
+    end
+    test "token limit trips mid-run, at the token start offset" do
+      -- The limit must be checked BEFORE the run is materialized: a 100-byte
+      -- run against a 10-byte limit must not allocate 100 bytes first.
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 10))
+      match JsonStream.feed(st, "\"" ++ repeat_str("a", 100, "") ++ "\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "token limit counts across runs, not per run" do
+      -- Two 6-byte runs under an 8-byte limit must still trip.
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 8))
+      match JsonStream.feed(st, "\"aaaaaa\\naaaaaa\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "pending high surrogate still rejects a raw byte at its own offset" do
+      -- Run-slicing must be suppressed while a high surrogate is pending.
+      assert (one_shot("\"\\ud83dxyz\"") == "ERR:7")
+    end
+  end
+
 end
 
 end
