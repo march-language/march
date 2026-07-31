@@ -254,6 +254,124 @@ describe "Json" do
 
   end
 
+  describe "parse \\u escapes" do
+
+    test "BMP escape below 0x80" do
+      match Json.parse("\"\\u0041\"") do
+      Err(e) -> panic("parse \\u0041 failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Json.Str(s) -> assert (s == "A")
+        _ -> panic("expected Str")
+        end
+      end
+      end
+    end
+
+    test "two-byte BMP escape" do
+      match Json.parse("\"\\u00e9\"") do
+      Err(e) -> panic("parse \\u00e9 failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Json.Str(s) -> assert (s == "é")
+        _ -> panic("expected Str")
+        end
+      end
+      end
+    end
+
+    test "three-byte BMP escape" do
+      match Json.parse("\"\\u4e2d\"") do
+      Err(e) -> panic("parse \\u4e2d failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Json.Str(s) -> assert (s == "中")
+        _ -> panic("expected Str")
+        end
+      end
+      end
+    end
+
+    test "astral codepoint from a surrogate pair" do
+      match Json.parse("\"\\uD83D\\uDE00\"") do
+      Err(e) -> panic("parse surrogate pair failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Json.Str(s) -> assert (s == "😀")
+        _ -> panic("expected Str")
+        end
+      end
+      end
+    end
+
+    test "escape mixed with literal runs" do
+      match Json.parse("\"a\\u0042c\"") do
+      Err(e) -> panic("parse mixed escape failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Json.Str(s) -> assert (s == "aBc")
+        _ -> panic("expected Str")
+        end
+      end
+      end
+    end
+
+    test "escape inside an object key" do
+      match Json.parse("{\"\\u006b\": 1}") do
+      Err(e) -> panic("parse escaped key failed: " ++ e)
+      Ok(v) -> do
+        match Json.get(v, "k") do
+        Some(_) -> ()
+        None -> panic("expected key k")
+        end
+      end
+      end
+    end
+
+    test "lone high surrogate rejected" do
+      match Json.parse("\"\\uD83D\"") do
+      Ok(_) -> panic("expected lone high surrogate to be rejected")
+      Err(_) -> ()
+      end
+    end
+
+    test "high surrogate followed by a non-surrogate rejected" do
+      match Json.parse("\"\\uD83D\\u0041\"") do
+      Ok(_) -> panic("expected bad surrogate pair to be rejected")
+      Err(_) -> ()
+      end
+    end
+
+    test "lone low surrogate rejected" do
+      match Json.parse("\"\\uDE00\"") do
+      Ok(_) -> panic("expected lone low surrogate to be rejected")
+      Err(_) -> ()
+      end
+    end
+
+    test "fewer than four hex digits rejected" do
+      match Json.parse("\"\\u12\"") do
+      Ok(_) -> panic("expected short \\u escape to be rejected")
+      Err(_) -> ()
+      end
+    end
+
+    test "non-hex digits rejected" do
+      match Json.parse("\"\\u12g4\"") do
+      Ok(_) -> panic("expected non-hex \\u escape to be rejected")
+      Err(_) -> ()
+      end
+    end
+
+    test "truncated escape at end of input rejected" do
+      match Json.parse("\"\\u00") do
+      Ok(_) -> panic("expected truncated \\u escape to be rejected")
+      Err(_) -> ()
+      end
+    end
+
+  end
+
   describe "parse arrays" do
 
     test "parse empty array" do

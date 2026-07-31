@@ -106,7 +106,75 @@ mod Json do
     match_lit_go(s, i, lit, 0)
   end
 
+  -- Value of a hex digit byte, or -1 for anything else (including the -1 that
+  -- string_byte_at returns past the end of the input).
+  pfn hex_val(b) do
+    if b >= 48 && b <= 57 do b - 48
+    else if b >= 97 && b <= 102 do b - 87
+    else if b >= 65 && b <= 70 do b - 55
+    else -1 end end end
+  end
+
+  -- Read exactly the four hex digits of a `\uXXXX` escape starting at `i`.
+  pfn hex4(s, i) do
+    let d0 = hex_val(string_byte_at(s, i))
+    let d1 = hex_val(string_byte_at(s, i + 1))
+    let d2 = hex_val(string_byte_at(s, i + 2))
+    let d3 = hex_val(string_byte_at(s, i + 3))
+    if d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0 do
+      Err("invalid \\u escape: expected four hex digits")
+    else Ok(d0 * 4096 + d1 * 256 + d2 * 16 + d3) end
+  end
+
+  -- Encode one code point as UTF-8.  byte_to_char (not char_from_int, which
+  -- yields "" above 127 in the interpreter) is single-byte, so multi-byte
+  -- sequences are assembled one continuation byte at a time.
+  pfn utf8_encode(cp) do
+    if cp < 128 do byte_to_char(cp)
+    else if cp < 2048 do
+      byte_to_char(192 + int_shr(cp, 6))
+        ++ byte_to_char(128 + int_and(cp, 63))
+    else if cp < 65536 do
+      byte_to_char(224 + int_shr(cp, 12))
+        ++ byte_to_char(128 + int_and(int_shr(cp, 6), 63))
+        ++ byte_to_char(128 + int_and(cp, 63))
+    else
+      byte_to_char(240 + int_shr(cp, 18))
+        ++ byte_to_char(128 + int_and(int_shr(cp, 12), 63))
+        ++ byte_to_char(128 + int_and(int_shr(cp, 6), 63))
+        ++ byte_to_char(128 + int_and(cp, 63))
+    end end end
+  end
+
+  -- Decode a `\uXXXX` escape.  `i` is the index of the first hex digit (the
+  -- caller has already consumed the backslash and the `u`).  A high surrogate
+  -- must be followed by a second `\uXXXX` low surrogate, which together encode
+  -- one astral code point; a surrogate appearing alone is rejected rather than
+  -- silently emitted, since it is not a valid Unicode scalar value.
+  -- Returns Ok((utf8, index just past the escape)).
+  pfn unescape_u(s, i) do
+    match hex4(s, i) do
+    Err(msg) -> Err(msg)
+    Ok(u) ->
+      if u >= 55296 && u <= 56319 do
+        if string_byte_at(s, i + 4) == 92 && string_byte_at(s, i + 5) == 117 do
+          match hex4(s, i + 6) do
+          Err(msg) -> Err(msg)
+          Ok(lo) ->
+            if lo >= 56320 && lo <= 57343 do
+              Ok((utf8_encode(65536 + (u - 55296) * 1024 + (lo - 56320)), i + 10))
+            else Err("invalid \\u escape: high surrogate not followed by a low surrogate") end
+          end
+        else Err("invalid \\u escape: unpaired high surrogate") end
+      else if u >= 56320 && u <= 57343 do
+        Err("invalid \\u escape: unpaired low surrogate")
+      else Ok((utf8_encode(u), i + 4)) end end
+    end
+  end
+
   -- Decode one escape sequence body (the byte AFTER the backslash).
+  -- `\u` is handled separately by unescape_u — it is the only escape whose
+  -- length is not fixed at two bytes.
   pfn unescape(s, i, e) do
     if e == 34 do Ok("\"")
     else if e == 92 do Ok("\\")
@@ -143,6 +211,16 @@ mod Json do
     else if c == 92 do do
       let e = string_byte_at(s, i + 1)
       if e < 0 do Err("unexpected end of input in string escape")
+      else if e == 117 do
+        match unescape_u(s, i + 2) do
+        Err(msg) -> Err(msg)
+        Ok((ch, next)) -> do
+          let acc2 =
+            if i > start do Cons(string_slice(s, start, i - start), acc)
+            else acc end
+          scan_string(s, next, next, Cons(ch, acc2))
+        end
+        end
       else
         match unescape(s, i + 1, e) do
         Err(msg) -> Err(msg)
@@ -153,7 +231,7 @@ mod Json do
           scan_string(s, i + 2, i + 2, Cons(ch, acc2))
         end
         end
-      end
+      end end
     end
     else scan_string(s, i + 1, start, acc) end end end
   end

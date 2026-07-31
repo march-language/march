@@ -316,7 +316,23 @@ let dep_lib_paths_for_archive archive_root =
               else rel_path
             in
             visit ~dep_root:abs_path ~lib_dir:(Filename.concat abs_path "lib")
-          | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+          | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _
+          | Project.RegistryDep _ ->
+            (* Git AND registry deps both install under ~/.march/cas/deps/<name>
+               (see Project.dep_root_dir), so the same lookup serves both —
+               exactly as cmd_build's dep_to_lib_paths does it.
+
+               RegistryDep used to fall through a `| _ -> []` here, so an
+               archive task got NO lib path for a registry dependency while
+               check/build/test — which go through cmd_build — got the right
+               one. A tool whose dep was a registry dep therefore built and
+               tested green, then failed at run time with `Unknown module` for
+               every symbol that dep provided (scroll 0.1.2: `forge
+               scroll.serve` could not find bastion's Router/Middleware/Static).
+
+               Deliberately NO wildcard arm: Project.dep is a closed variant,
+               so listing every constructor makes a future dep form a compile
+               error here instead of a silently empty search path. *)
             (match Project.git_dep_lib_path dep_name with
              | Some p ->
                (* p is either <dep_root>/lib or <dep_root> itself *)
@@ -324,7 +340,6 @@ let dep_lib_paths_for_archive archive_root =
                  if Filename.basename p = "lib" then Filename.dirname p else p in
                visit ~dep_root ~lib_dir:p
              | None -> [])
-          | _ -> []
         ) deps
   and visit ~dep_root ~lib_dir =
     let key = canon dep_root in
