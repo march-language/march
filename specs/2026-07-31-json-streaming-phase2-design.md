@@ -147,6 +147,87 @@ This is the simpler of the two and is worth doing even if Component 1 were to
 disappoint, because it removes an allocation per digit from every numeric
 field.
 
+### Component 2b — `EvNumRaw(String)`, lossless numbers
+
+Phase 1 deferred this (its open question 1) because it diverges from
+`Json.parse` semantics. Component 2 changes the economics: once a number
+lexeme is materialized as a slice anyway, *preserving* it is nearly free —
+the work becomes **skipping** `string_to_float` rather than doing something
+extra. Retrofitting it after Component 2 would mean rewriting the same
+function twice, so it is built here.
+
+**The problem it solves.** `EvNum` carries `Float`, so an integer above 2⁵³
+is silently rounded. Snowflake IDs, database bigints, and financial minor
+units are all in that range and all common in real JSON. Today the exact
+value is unrecoverable — the lexeme is gone by the time the caller sees the
+event.
+
+**Opt-in, never default.** The default stays `EvNum(Float)`, for two reasons
+that both outrank convenience:
+
+1. This spec commits phase 1's suite to passing **unmodified**. A changed
+   default event stream would require editing tests — the exact disguise for
+   a behavior change this spec forbids elsewhere.
+2. The `build`-vs-`Json.parse` differential depends on `EvNum` matching
+   `Json.parse`'s `Number(Float)` exactly. That test is load-bearing for the
+   whole feature and must keep comparing like with like.
+
+**API — one function, not four.** The four `start*` constructors already
+cover {default, ndjson} × {default, custom limits}; adding raw variants would
+make eight. Instead, a setter that composes with all of them:
+
+```march
+fn with_raw_numbers(st : JsState) : JsState
+```
+
+```march
+let st = JsonStream.with_raw_numbers(JsonStream.start_ndjson())
+```
+
+Internally this is a fourth field on `JsCfg` (currently
+`JsCfg(max_depth, max_token_bytes, ndjson)`), which is a `ptype` — so the
+representation change is invisible to callers. Defined on any state and total;
+it takes effect for numbers *completed* after the call. It is intended for a
+fresh state, and its doc comment says so rather than the type enforcing it —
+enforcement would need a second state type, which is a large price for a
+misuse nobody has demonstrated.
+
+**Semantics.** In raw mode `num_finalize` emits `EvNumRaw(lex)` carrying the
+verbatim lexeme. Everything else is deliberately identical:
+
+- **`valid_num` still runs.** Malformed numbers (`012`, `1.`, `1e`, bare `-`)
+  produce the same `EMalformed` at the same token-start offset. Raw mode
+  changes what a *valid* number carries, never what counts as valid — the
+  decision table is untouched. A "raw" mode that also relaxed validation
+  would be a second, undocumented parser.
+- `string_to_float` is skipped, so raw mode is strictly *less* work.
+- Token limits, truncation, and `finish`-completes-a-pending-top-level-number
+  all behave identically.
+
+**`build` in raw mode.** `Json.JsonValue`'s `Number` holds a `Float`, so
+`build_step` converts on receipt (`string_to_float`, which cannot fail on a
+`valid_num`-approved lexeme — if it ever does, that is
+`EMalformed("invalid number")` at the token offset, not a panic). So `build`
+produces identical trees in both modes, and the differential test holds in
+raw mode too. Callers who want losslessness use `fold` or `each_value` and
+read `EvNumRaw` directly; a tree of `Float` cannot represent it by
+construction, and pretending otherwise would be the trap this feature exists
+to remove.
+
+**Test obligations.** `Event` gains a variant, so every `match` over it must
+stay exhaustive — the compiler enforces that, but the test file's `ev_str`
+helper needs the arm. Beyond that:
+
+- Run the **every-byte-split differential and the truncation sweep in raw
+  mode as well as default mode** over the same corpus. The suspension points
+  are shared, but the number path is where the modes diverge, and that path
+  has cross-chunk state.
+- Pin losslessness with a value that proves the point: an integer above 2⁵³
+  (e.g. `9007199254740993`) must round-trip its lexeme exactly in raw mode
+  **and** demonstrably lose precision through `EvNum` in default mode. A test
+  asserting only the raw side would not show the feature does anything.
+- Pin that malformed numbers behave identically in both modes.
+
 ## Component 3 — Re-measure, and decide
 
 This component produces no optimization. It produces the number that decides
@@ -210,9 +291,14 @@ measurement rather than an intuition.
 - **No interface change.** `feed`/`finish`/`start*`/`fold`/`build`/
   `each_value` keep their signatures and semantics. Phase 1's tests are the
   contract, and they must pass unmodified — a test that needs editing to
-  accommodate a speedup is a behavior change wearing a disguise.
-- **No new events, no decision-table changes**, including the deliberate
-  UTF-8 pass-through and control-byte pass-through choices.
+  accommodate a speedup is a behavior change wearing a disguise. Component
+  2b's `with_raw_numbers` is purely **additive** and off by default, so this
+  still holds: the only permitted edit to the phase 1 suite is the new
+  `EvNumRaw` arm in the test file's `ev_str` helper, which exhaustiveness
+  forces.
+- **No decision-table changes**, including the deliberate UTF-8 pass-through
+  and control-byte pass-through choices, and including raw-number mode —
+  which changes what a valid number *carries*, never what counts as valid.
 - **No typed decoder layer.** Still deferred (phase 1 Component 4).
 - **No string views / mmap.** A view type would subsume run-slicing, but it
   is a representation change touching RC/FBIP and the shared-owner refcount
@@ -251,14 +337,18 @@ measurement rather than an intuition.
    improves it. Expected: the common case collapses to one slice, but a
    near-limit token straddling many chunks keeps a piece per chunk, which is
    already bounded by chunk count.
-3. `EvNumRaw(String)` (phase 1 open question 1) interacts with Component 2 —
-   if number lexemes become slices anyway, preserving the raw lexeme becomes
-   nearly free. Worth revisiting *during* Component 2 rather than after.
+3. ~~`EvNumRaw(String)`~~ — **decided 2026-07-31: build it, as Component 2b.**
+   Opt-in via `with_raw_numbers`, default unchanged. Resolves phase 1's open
+   question 1.
 
 ## Deliverables
 
 - Run-sliced `str_byte`/`num_byte` in `stdlib/json_stream.march`, with phase
-  1's full test suite passing **unmodified**.
+  1's full test suite passing **unmodified** (sole exception: the `EvNumRaw`
+  arm exhaustiveness forces into the test file's `ev_str` helper).
+- `EvNumRaw(String)` + `with_raw_numbers`, with the every-byte-split and
+  truncation harnesses run in **both** number modes, and a >2⁵³ witness
+  showing raw round-trips exactly where the default loses precision.
 - Benchmark results per Component 3 recorded in `specs/benchmarks.md`, with
   the phase-1 baseline retained alongside for comparison.
 - A recorded verdict on Components 4–5 — built, or closed as not-built with

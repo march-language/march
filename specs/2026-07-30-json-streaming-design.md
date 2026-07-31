@@ -332,9 +332,14 @@ Totality claims get tests, not arguments:
 
 ## Open questions
 
-1. `EvNumRaw(String)` for lossless large integers — wanted for real workloads
-   (IDs > 2^53) but diverges from `Json.parse` semantics. Decide before the
-   decoder layer, which is where the divergence would surface.
+1. ~~`EvNumRaw(String)` for lossless large integers~~ — **RESOLVED
+   2026-07-31: build it in phase 2, Component 2b**
+   (`specs/2026-07-31-json-streaming-phase2-design.md`). Opt-in via
+   `with_raw_numbers`; `EvNum(Float)` stays the default, so this spec's
+   `Json.parse` differential and the whole phase 1 suite are unaffected.
+   Phase 2's number run-slicing materializes the lexeme as a slice anyway,
+   which turns preserving it into *skipping* `string_to_float` rather than
+   extra work.
 2. UTF-8 validation default once a fast validator exists — opt-in stays the
    phase 1 answer; revisit with phase 2 data.
 3. Whether `Decode` ships inside phase 1 or immediately after — attachment
