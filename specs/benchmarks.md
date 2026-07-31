@@ -407,7 +407,64 @@ or the C `mbedtls_sha256` binding.
 
 ---
 
+## HTTP benchmark: Run 3 (2026-07-31) — thread pool vs event loop
+
+First run against a harness that measures the routes it drives (see
+`bench/tfb/tfb_server.march`) and a compiled server that survives more than one
+request. **Read the caveat before quoting the latency column.**
+
+**Machine:** macOS Darwin 26.5.0, Apple M-class, 14 logical CPUs. **Contended** —
+load average 4.4 (pool run) / 7.3–8.8 (evloop run), with unrelated processes at
+85–102% CPU throughout. **Tool:** wrk 4.2.0, 4 threads, 256 connections, 15 s
+captured after primer + warmup.
+
+| Server | Test | Req/s | Avg latency | In-flight (Little's Law) |
+|---|---|---:|---:|---:|
+| thread pool (default) | JSON | 31,659 | 0.88 ms | **27.9** |
+| thread pool (default) | plaintext | 31,788 | 0.88 ms | **28.0** |
+| event loop | JSON | 31,769 | 8.04 ms | **255.4** |
+| event loop | plaintext | 31,996 | 7.98 ms | **255.3** |
+| thread pool | plaintext ×16 pipelined | 482,386 | 0.93 ms | — |
+| event loop | plaintext ×16 pipelined | 380,504 | 4.16 ms | — |
+
+**The thread pool is not 9× faster; it is answering 28 of 256 connections.**
+`pool_size = ncpus*2` = 28, and a worker owns a connection for its whole
+keep-alive lifetime, so 228 connections are accepted by the kernel and never
+read. Throughput is identical (~31.8k) because both servers are pinned at the
+same external ceiling, but the pool reaches it while serving one ninth of the
+offered load. The latency ratio 7.98/0.88 = **9.07** against the served ratio
+256/28 = **9.14** is the whole story. The event loop's in-flight figure tracks
+offered concurrency (255.3 of 256); the pool's clamps at exactly `pool_size`.
+Per *served* connection the event loop is the cheaper of the two, at 15–17%
+less CPU per request.
+
+> **Fixed later the same day.** The pool is now elastic — it grows past its
+> initial worker count as connections arrive — so the thread-pool rows above
+> are a record of the defect, not of current behaviour. Re-measured after the
+> fix at c=256: 256 established, **0 unread**, 29,261 req/s, 8.67 ms, **253.7
+> in-flight**. The pool's latency now looks like the event loop's because it is
+> finally doing the same amount of work. Any future comparison against the
+> thread-pool numbers in this table is comparing against a server that was
+> answering one connection in nine.
+
+**Req/s here measures the client and the loopback stack, not March.** Both
+servers cap at ~31–32k while using under one core of fourteen; a second
+independent wrk process raised the aggregate only to 31,243. Every ablation
+tried against the thread-pool path — including one doing zero March work —
+left req/s flat. **Use CPU-µs per request** for server-side comparisons; the
+throughput column is only good for confirming both arms hit the same ceiling.
+
+No Node/Python/Rust columns yet for this run: the Rust actix-web and FastAPI
+servers were never in the repo (below), and Node/Python were not re-measured
+under the same conditions.
+
 ## HTTP benchmark: March vs Rust actix-web 4 vs Python FastAPI
+
+> **The Run 1 and Run 2 tables below are not a valid baseline.** The harness was
+> measuring 404 responses, the March server they name is absent from the repo,
+> and the compiled HTTP server was itself broken until 2026-07-31. See
+> "Runs 1 and 2 are not comparable" at the end of this section before quoting
+> any number from it.
 
 ### Run 2: 2026-03-25 (batch pipelined writev — evloop handle_read)
 
@@ -469,12 +526,46 @@ or the C `mbedtls_sha256` binding.
 ### How to re-run
 
 ```bash
-# From repo root
-bash bench/tfb/run_comparison.sh
+# From repo root — builds bench/tfb/tfb_server.march, verifies its routes, then runs wrk
+bash bench/tfb/run.sh march          # March only (default thread-pool server)
+bash bench/tfb/run.sh all            # March vs Node vs Node-cluster vs Python
+MARCH_HTTP_EVLOOP=1 MARCH_FORCE_REBUILD=1 bash bench/tfb/run.sh march   # event-loop server
 ```
 
-Servers: `bench/tfb/tfb_server` (March, compiled), `bench/tfb/rust_actix/target/release/rust_actix` (Rust), `bench/tfb/fastapi_server.py` (Python).
+Servers: `bench/tfb/tfb_server.march` (March, compiled by the harness),
+`bench/tfb/node_http.js`, `bench/tfb/node_cluster.js`, `bench/tfb/python_http.py`.
 Pipeline script: `bench/tfb/pipeline.lua`.
+
+**The Rust actix-web and Python FastAPI comparisons above cannot currently be
+re-run.** The `run_comparison.sh`, `rust_actix/` and `fastapi_server.py` this
+section used to point at do not exist in the repository and do not appear
+anywhere in its git history — only the numbers they produced were ever
+committed. Re-creating those two servers is open work; until then the Run 1 /
+Run 2 tables are a historical record, not a reproducible measurement.
+
+### Runs 1 and 2 are not comparable to anything measured after 2026-07-31
+
+Two independent problems invalidate them as a baseline:
+
+1. **The harness was benchmarking 404s.** `bench/tfb/run.sh` drove wrk at
+   `/plaintext` and `/json` while its March target was `examples/http_hello`,
+   which routes only `GET /`. Both endpoints returned `404 Not Found` with a
+   9-byte body. (The Run 1/2 tables name a `bench/tfb/tfb_server` binary that
+   is absent, so what they actually measured cannot now be established.)
+   `bench/tfb/tfb_server.march` now serves the same two routes as the Node and
+   Python servers, and `run.sh` refuses to report numbers if any server under
+   test fails a route check.
+2. **The compiled server was broken.** Until 2026-07-31 a compiled `HttpServer`
+   panicked on the first request, and once that was fixed segfaulted on the
+   second (see the 2026-07-31 entry in `specs/progress.md`). Any figure that
+   predates that commit was produced by a binary that could not survive two
+   requests.
+
+The `/json` figures are further affected: `node_http.js`, `node_cluster.js` and
+`python_http.py` used to serialize their JSON body once at startup and write a
+pre-baked buffer per request. They now serialize per request, matching what
+`tfb_server.march` does via `Json.to_string`, so the JSON test exercises a
+serializer in all four servers rather than only in March.
 
 ---
 
@@ -565,7 +656,7 @@ parallel scheduler is degraded.
 
 ---
 
-## bench/json_stream.march — JsonStream chunked NDJSON tokenizer (20,000 records)
+## bench/json_stream.march — JsonStream chunked NDJSON tokenizer (20,000 records, tiny tokens)
 
 **Command:** compile with `--opt 2`, run directly.
 
@@ -585,7 +676,13 @@ scalars, `EvArrStart`, `EvNum`×3, `EvArrEnd`, `EvObjEnd`) — measured
 empirically with 1/2/3-record probes (14, 28, 42 events), not derived from
 prose arithmetic. Expected checksum: `20000 × 14 = 280000`.
 
-**Baseline results (2026-07-31, Apple M-class, `--opt 2`):**
+This corpus is **tiny-token**: keys are 2-6 bytes, values ~11 bytes. It is
+deliberately unfavorable to any fix that only speeds up long runs (see the
+companion string-heavy corpus below) — a 2-6 byte token has almost no run to
+slice, so this is where a per-*token* overhead (as opposed to a per-*byte*
+overhead) would show up as a residual gap.
+
+**Phase 1 baseline results (2026-07-31, Apple M-class, `--opt 2`):**
 
 ```
 checksum=280000
@@ -610,18 +707,101 @@ buffer is O(records), but nothing in `JsonStream`'s chunk-fed state
 (`JsState`) accumulates unboundedly across `feed` calls — only the per-chunk
 event list and in-flight partial-token buffer are live at any point.
 
+**Phase 2 run-slicing results, tiny-token corpus (2026-07-31, order-swapped
+arms, same session as the string-heavy A/B below):**
+
+```
+JsonStream: 219 ms / 234 ms
+Json.parse: 71 ms / 77 ms
+=> ~3.05x (was ~3.6x pre-run-slicing, per specs/2026-07-31-json-streaming-phase2-design.md's "Why" section)
+```
+
+Run-slicing (Components 1-2 of
+`specs/2026-07-31-json-streaming-phase2-design.md`) narrows but does not
+close the gap on this corpus, because there is very little run here to slice
+— see the string-heavy corpus below, where the same fix nearly eliminates
+the gap. **This residual ~3x is per-*token* overhead** (state-machine
+transitions, event-list allocation, a cons + a join even for a
+single-content-byte-run), not scanning throughput; a byte-set scanner cannot
+speed up a 4-byte `memchr` call, so this corpus is why Component 4 (SIMD) is
+closed rather than built — see the verdict below.
+
 **What to watch:**
-- This is the phase 1 pure-March baseline. Phase 2 (SIMD structural
-  scanning, see `specs/2026-07-30-json-streaming-design.md`) must beat this
-  number on the same corpus and chunk size.
+- If `bench/json_stream.march`'s checksum ever moves off `records × 14` at
+  this record shape, that is a tokenizer regression, not a benchmark
+  artifact — recompute the empirical per-record count with a 1/2/3-record
+  probe before assuming the benchmark itself needs adjusting.
 - RSS should stay flat (modulo the input string itself) as record count
   grows at fixed chunk size — re-run the 10× spot-check after any change to
   `feed`/`finish`/the builder drivers and confirm the delta still scales
   with input-string size, not superlinearly.
-- A checksum other than `records × 14` at this record shape is a tokenizer
-  regression, not a benchmark artifact — recompute the empirical per-record
-  count with a 1/2/3-record probe before assuming the benchmark itself needs
-  adjusting.
+- **A regression on this corpus specifically (not the string-heavy one
+  below) points at per-token overhead** — the state machine in
+  `JsonStream.feed`, event-list (`List(Event)`) allocation, or the cons/join
+  pair paid even for a single-byte run — since run-slicing has little to win
+  here already. Component 5 (`feed_fold`, phase 2 design) is the open item
+  that would address this; it is not built.
+
+---
+
+## bench/json_stream_strings.march — JsonStream vs Json.parse, string-heavy corpus (2,000 records)
+
+**Command:** compile with `--opt 2`, run directly.
+
+```bash
+march --compile --opt 2 bench/json_stream_strings.march -o bench/json_stream_strings_bench
+bench/json_stream_strings_bench
+```
+
+Builds 2,000 NDJSON records, each `{"s": "<~1000-byte escape-free payload>"}\n`
+— a single content-bearing string field per record, no escapes, no nesting —
+then times `JsonStream.start_ndjson()`/`feed`/`finish` over the whole
+concatenated source (64KB chunks) against `Json.parse` called once per
+record, in the same process. This is the corpus the tiny-token benchmark
+above cannot exercise: long, escape-free runs, which is what run-slicing
+(Components 1-2) targets and what the phase 1 per-byte accumulation cost the
+most on.
+
+Each record emits 4 events (`EvObjStart`, `EvKey("s")`, `EvStr`, `EvObjEnd`).
+Expected checksums: `stream_events=8000` (2000 × 4) and `parse_len=2000000`
+(2000 × 1000-byte payload) — both are correctness checks, not timings.
+
+**Phase 1 (pre-run-slicing) vs phase 2 (run-slicing) results, interleaved
+same-session A/B (2026-07-31, 3 rounds, commit `8a79a275` = phase 1 /
+`4afc215d` = phase 2):**
+
+```
+BEFORE (8a79a275, per-byte accumulation): JsonStream 322 / 348 / 364 ms; Json.parse 6-25 ms  => ~55x slower
+AFTER  (4afc215d, run-sliced):            JsonStream 6 / 6 / 6 ms;       Json.parse 6 / 6 / 6 ms  => 1.0x, PARITY
+```
+
+Run-slicing takes JsonStream from ~55× slower than `Json.parse` to parity on
+this corpus — confirming the phase 2 design's diagnosis that the tiny-token
+gap (above) was materialization (per-byte allocation), not scanning: the two
+scan identically, and the only thing that changed here is whether a run
+becomes one slice or N one-byte strings plus N cons cells.
+
+**Load caveat — read before trusting an absolute ms figure.** All of the
+above numbers, and the tiny-token numbers above them, were taken on a machine
+running other concurrent sessions in this worktree set, with reported load
+averages of 43-97 on a 14-core machine at measurement time. Absolute
+milliseconds from this session are **not comparable** to absolute
+milliseconds from any other session, and should not be read as a clean,
+reproducible baseline — a quiet-machine re-run would show different absolute
+numbers. What *is* sound is the **ratio within an interleaved round**:
+compared arms (before/after, or JsonStream/Json.parse) ran back-to-back
+under the same load, so a shared load spike inflates both arms together and
+the ratio between them stays meaningful even though neither absolute number
+does. Re-run on a quiet machine before citing an absolute ms figure from
+this benchmark in anything other than a ratio.
+
+**What to watch:**
+- A regression specifically on *this* corpus (not the tiny-token one above)
+  and not on `Json.parse`'s own benchmarks points at run-slicing having
+  regressed to per-byte accumulation — check `str_byte`'s `SPlain` path and
+  `num_byte` in `stdlib/json_stream.march` first.
+- `stream_events`/`parse_len` moving off `8000`/`2000000` is a correctness
+  regression in the tokenizer or `Json.parse`, not a benchmark artifact.
 
 ---
 
@@ -647,4 +827,4 @@ to the features it exercises. Quick reference:
 | `llvm_emit` equality dispatch (TVar / `march_poly_eq`) | `merkle` |
 | `HashMap.*` / `Enum.uniq` / `Enum.frequencies` | `hash_map_bench` |
 | `RRB.*` / `Parallel.*` / `task_await_unwrap` i64 | `rrb_bench` |
-| JsonStream / streaming JSON | `json_stream` |
+| JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |

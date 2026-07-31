@@ -345,6 +345,9 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
         for (int i = 0; i < n; i++) {
             int   keep_alive  = pre_keep_alives[i];
             void *conn        = pre_conns[i];
+            /* One fresh closure reference per call — the compiled apply-fn
+             * consumes it (see march_process_one_request in march_http.c). */
+            march_incrc_local(pipeline);
             void *result_conn = fn(pipeline, conn);
 
             if (!result_conn) {

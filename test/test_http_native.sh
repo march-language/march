@@ -1,5 +1,20 @@
 #!/bin/bash
 # test/test_http_native.sh
+#
+# SUPERSEDED — this is a hand-run smoke script, NOT the project's coverage of
+# the compiled HTTP server.  That lives in test/test_http_native.ml, which
+# rides run_stdlib.exe and therefore runs under `dune runtest` and in CI:
+#
+#   ./_build/default/test/run_stdlib.exe test 'http server' -e
+#
+# This script is kept only as a quick manual poke (it uses a fixed port 8080 and
+# an absolute dune path, so it is not safe to run concurrently).  Do not treat a
+# green run of it as evidence: it compiles WITHOUT --opt, makes one request per
+# assertion, never checks the server survives a sustained sequence, and asserts
+# only a status code on the 404 — so it passed against a server that answered a
+# well-formed empty 200, and against one that segfaulted on request 2.  Those
+# were real, shipped bugs; see test/test_http_native.ml's header.
+#
 # End-to-end test: compile an HTTP server example and verify it serves requests.
 set -e
 

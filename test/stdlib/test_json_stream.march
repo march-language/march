@@ -14,6 +14,7 @@ pfn ev_str(e) do
   EvKey(k) -> "K(" ++ k ++ ")"
   EvStr(sv) -> "S(" ++ sv ++ ")"
   EvNum(f) -> "N(" ++ to_string(f) ++ ")"
+  EvNumRaw(r) -> "R(" ++ r ++ ")"
   EvBool(b) -> if b do "T" else "F" end
   EvNull -> "0"
   end
@@ -62,6 +63,89 @@ pfn two_shot(src, k) do
       match JsonStream.finish(st2) do
       Err(e) -> evs_str(evs1) ++ evs_str(evs2) ++ err_str(e)
       Ok(evs3) -> evs_str(evs1) ++ evs_str(evs2) ++ evs_str(evs3)
+      end
+    end
+  end
+end
+
+-- Raw-number-mode counterparts of one_shot/two_shot, for running the
+-- totality harnesses in both number modes (design Component 2b).
+pfn one_shot_raw(src) do
+  match JsonStream.feed(JsonStream.with_raw_numbers(JsonStream.start()), src) do
+  Err(e) -> err_str(e)
+  Ok((evs, st)) ->
+    match JsonStream.finish(st) do
+    Err(e) -> evs_str(evs) ++ err_str(e)
+    Ok(evs2) -> evs_str(evs) ++ evs_str(evs2)
+    end
+  end
+end
+
+pfn two_shot_raw(src, k) do
+  let n = string_byte_length(src)
+  let a = string_slice(src, 0, k)
+  let b = string_slice(src, k, n - k)
+  match JsonStream.feed(JsonStream.with_raw_numbers(JsonStream.start()), a) do
+  Err(e) -> err_str(e)
+  Ok((evs1, st1)) ->
+    match JsonStream.feed(st1, b) do
+    Err(e) -> evs_str(evs1) ++ err_str(e)
+    Ok((evs2, st2)) ->
+      match JsonStream.finish(st2) do
+      Err(e) -> evs_str(evs1) ++ evs_str(evs2) ++ err_str(e)
+      Ok(evs3) -> evs_str(evs1) ++ evs_str(evs2) ++ evs_str(evs3)
+      end
+    end
+  end
+end
+
+pfn split_all_raw(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) ->
+    if split_doc_raw(d, 1, one_shot_raw(d)) do split_all_raw(rest) else false end
+  end
+end
+
+pfn split_doc_raw(d, k, expect) do
+  if k >= string_byte_length(d) do true
+  else
+    if two_shot_raw(d, k) == expect do split_doc_raw(d, k + 1, expect)
+    else do
+      IO.puts("split mismatch (raw): doc=" ++ d ++ " k=" ++ to_string(k)
+              ++ " got=" ++ two_shot_raw(d, k) ++ " want=" ++ expect)
+      false
+    end end
+  end
+end
+
+pfn trunc_all_raw(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) -> if trunc_doc_raw(d, 1) do trunc_all_raw(rest) else false end
+  end
+end
+
+pfn trunc_doc_raw(d, k) do
+  if k >= string_byte_length(d) do true
+  else
+    let p = string_slice(d, 0, k)
+    match JsonStream.feed(JsonStream.with_raw_numbers(JsonStream.start()), p) do
+    Err(_) -> do
+      IO.puts("prefix rejected by feed (should hold state, raw): " ++ p)
+      false
+    end
+    Ok((_, st)) ->
+      match JsonStream.finish(st) do
+      Err(ETruncated(_)) -> trunc_doc_raw(d, k + 1)
+      Err(_) -> do
+        IO.puts("prefix gave non-truncation error (raw): " ++ p)
+        false
+      end
+      Ok(_) -> do
+        IO.puts("prefix wrongly accepted (raw): " ++ p)
+        false
+      end
       end
     end
   end
@@ -451,6 +535,20 @@ describe "JsonStream" do
                    Nil))))))))))
       assert (split_all(corpus))
     end
+    test "all corpus documents at all split points, raw-number mode" do
+      let corpus = Cons("null",
+                   Cons("true",
+                   Cons("-12.5e-3",
+                   Cons("\"hello\"",
+                   Cons("\"a\\n\\u0041\\ud83d\\ude00 b\"",
+                   Cons("[]",
+                   Cons("{}",
+                   Cons("[1, [2, [3, []]], \"x\"]",
+                   Cons("{\"k\": {\"n\": [true, false, null]}, \"z\": -0.5}",
+                   Cons("  [ 1 , { \"a\" : \"b\" } ]  ",
+                   Nil))))))))))
+      assert (split_all_raw(corpus))
+    end
   end
 
   describe "truncation sweep" do
@@ -461,6 +559,14 @@ describe "JsonStream" do
                    Cons("\"esc \\u0041\\ud83d\\ude00\"",
                    Nil))))
       assert (trunc_all(corpus))
+    end
+    test "all strict prefixes truncate, raw-number mode" do
+      let corpus = Cons("\"hello world\"",
+                   Cons("[1, [2, [3]]]",
+                   Cons("{\"k\": [true, null]}",
+                   Cons("\"esc \\u0041\\ud83d\\ude00\"",
+                   Nil))))
+      assert (trunc_all_raw(corpus))
     end
   end
 
@@ -571,6 +677,147 @@ describe "JsonStream" do
       end
       end
       match File.delete(path) do _ -> () end
+    end
+  end
+
+  describe "run-sliced strings" do
+    test "long escape-free string round-trips" do
+      let body = repeat_str("abcdefghij", 500, "")
+      assert (one_shot("\"" ++ body ++ "\"") == "S(" ++ body ++ ")|")
+    end
+    test "run interrupted by an escape rejoins correctly" do
+      assert (one_shot("\"aaa\\nbbb\"") == "S(aaa" ++ byte_to_char(10) ++ "bbb)|")
+    end
+    test "run split across a chunk boundary rejoins correctly" do
+      assert (two_shot("\"abcdefghij\"", 5) == "S(abcdefghij)|")
+    end
+    test "many runs separated by escapes" do
+      assert (one_shot("\"a\\tb\\tc\\td\"") ==
+              "S(a" ++ byte_to_char(9) ++ "b" ++ byte_to_char(9)
+                   ++ "c" ++ byte_to_char(9) ++ "d)|")
+    end
+    test "non-ASCII bytes survive a run" do
+      -- C3 A9 is U+00E9; run-slicing must not decode or split it.
+      let e = byte_to_char(195) ++ byte_to_char(169)
+      assert (one_shot("\"x" ++ e ++ "y\"") == "S(x" ++ e ++ "y)|")
+    end
+    test "token limit trips mid-run, at the token start offset" do
+      -- The limit must be checked BEFORE the run is materialized: a 100-byte
+      -- run against a 10-byte limit must not allocate 100 bytes first.
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 10))
+      match JsonStream.feed(st, "\"" ++ repeat_str("a", 100, "") ++ "\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "token limit counts across runs, not per run" do
+      -- Two 6-byte runs under an 8-byte limit must still trip.
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 8))
+      match JsonStream.feed(st, "\"aaaaaa\\naaaaaa\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "pending high surrogate still rejects a raw byte at its own offset" do
+      -- Run-slicing must be suppressed while a high surrogate is pending.
+      assert (one_shot("\"\\ud83dxyz\"") == "ERR:7")
+    end
+  end
+
+  describe "run-sliced numbers" do
+    test "long integer round-trips" do
+      -- No string_to_float_or_zero helper exists in this file, so this
+      -- pins chunk-independence of a long run directly instead of pinning
+      -- a float rendering: one_shot and a two_shot split must agree.
+      let digits = repeat_str("1234567890", 20, "")
+      assert (one_shot(digits) == two_shot(digits, 7))
+    end
+    test "number split across a chunk boundary" do
+      assert (two_shot("-12345.6789e2", 6) == one_shot("-12345.6789e2"))
+    end
+    test "number followed immediately by a delimiter" do
+      assert (one_shot("[1,22,333]") == "[|N(1.)|N(22.)|N(333.)|]|")
+    end
+    test "number token limit trips at the token start" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 4))
+      match JsonStream.feed(st, "123456789") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "malformed numbers still report the token start" do
+      assert (one_shot("012") == "ERR:0")
+      assert (one_shot("1e") == "ERR:0")
+    end
+  end
+
+  describe "raw numbers" do
+    test "default mode still yields EvNum" do
+      assert (one_shot("42") == "N(42.)|")
+    end
+    test "raw mode yields the verbatim lexeme" do
+      let st = JsonStream.with_raw_numbers(JsonStream.start())
+      match JsonStream.feed(st, "42") do
+      Err(_) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(_) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "R(42)|")
+        end
+      end
+    end
+    test "raw mode is lossless above 2^53 where default mode is not" do
+      -- 9007199254740993 = 2^53 + 1, not representable as a Float.
+      let big = "9007199254740993"
+      let st = JsonStream.with_raw_numbers(JsonStream.start())
+      match JsonStream.feed(st, big) do
+      Err(_) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(_) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "R(" ++ big ++ ")|")
+        end
+      end
+      -- And the default mode demonstrably loses it: the rendered float is not
+      -- the input lexeme.  This half is what proves the feature does anything.
+      assert (one_shot(big) != "N(" ++ big ++ ")|")
+    end
+    test "raw mode composes with ndjson and custom limits" do
+      let st = JsonStream.with_raw_numbers(
+                 JsonStream.start_ndjson_with(JsonStream.JsonLimits(8, 1000)))
+      match JsonStream.feed(st, "1\n2\n3\n") do
+      Err(_) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(_) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "R(1)|R(2)|R(3)|")
+        end
+      end
+    end
+    test "raw mode rejects malformed numbers identically" do
+      -- Malformed-number validation happens at the delimiter/finish, not
+      -- synchronously during feed (same deferred mechanic the default-mode
+      -- "leading zeros" test above relies on via one_shot) -- so this uses
+      -- one_shot_raw rather than asserting Err straight out of feed.
+      assert (one_shot_raw("012") == "ERR:0")
+    end
+    test "raw mode still respects the token limit" do
+      let st = JsonStream.with_raw_numbers(
+                 JsonStream.start_with(JsonStream.JsonLimits(8, 4)))
+      match JsonStream.feed(st, "123456789") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "build converts raw numbers, so trees match either mode" do
+      match JsonStream.build(Seq.from_list(Cons("[1, 2.5]", Nil))) do
+      Err(_) -> assert (false)
+      Ok(v) ->
+        match Json.parse("[1, 2.5]") do
+        Ok(v2) -> assert (Json.to_string(v) == Json.to_string(v2))
+        Err(_) -> assert (false)
+        end
+      end
     end
   end
 

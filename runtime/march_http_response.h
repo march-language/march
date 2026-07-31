@@ -25,9 +25,19 @@
  *   march_response_set_body(&resp, "Hello, World!", 13);
  *   march_response_send(&resp, client_fd);
  *
- * For the TechEmpower /plaintext benchmark, use the pre-built fast path:
+ * There was once a march_response_send_plaintext() "fast path" here for the
+ * TechEmpower /plaintext benchmark.  It was removed in 2026-07 as dead code
+ * that should stay dead: it hardcoded `Content-Length: 13` and the literal
+ * body "Hello, World!", so reaching it meant bypassing the user's March
+ * router entirely and the program nominally under benchmark never ran.  It
+ * had no callers and never had any.
  *
- *   march_response_send_plaintext(client_fd);   // single writev, zero alloc
+ * A general small-fixed-response fast path is separately not worth adding:
+ * the path above is already zero-copy — every iovec points directly at a
+ * March string or a static constant, and the only per-response formatting is
+ * one snprintf of Content-Length into thread-local scratch.  Measured on
+ * macOS/arm64, the whole March-side response build is well under a
+ * microsecond of a ~32 us per-request budget that is ~92% system time.
  */
 #pragma once
 
@@ -50,12 +60,8 @@
 /* Status + fixed headers block for TechEmpower /plaintext.
  * Does NOT include a Date header (appended from the cache) or the blank line
  * (appended by march_response_set_body). */
-extern const char   MARCH_PLAINTEXT_STATIC_HEADERS[];
-extern const size_t MARCH_PLAINTEXT_STATIC_HEADERS_LEN;
 
 /* "Hello, World!" body. */
-extern const char   MARCH_PLAINTEXT_BODY[];
-extern const size_t MARCH_PLAINTEXT_BODY_LEN;
 
 /* ── Response builder ─────────────────────────────────────────────────── */
 
@@ -134,7 +140,6 @@ void march_response_clear_no_free(march_response_t *resp);
  * Uses at most 4 iovec entries (static headers, Date, CRLF, body).
  * Zero per-request heap allocation; Date is refreshed at most once/second.
  * Returns 0 on success, -1 on error. */
-int march_response_send_plaintext(int fd);
 
 /* ── Date header cache ────────────────────────────────────────────────── */
 
