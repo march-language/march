@@ -12283,8 +12283,24 @@ let test_compiled_nested_default_args_parity () =
     ~expected:"101\n22"
     ()
 
+let test_vectorize_check_module_loads () =
+  let ctx = March_errors.Errors.create () in
+  March_tir.Vectorize_check.check_fn ctx (Hashtbl.create 0)
+    ~severity:March_tir.Vectorize_check.Hard
+    ~span:March_ast.Ast.dummy_span
+    { March_tir.Tir.fn_name = "noop"; fn_params = [];
+      fn_ret_ty = March_tir.Tir.TUnit;
+      fn_body = March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 0));
+      fn_kind = March_tir.Tir.FnNormal };
+  Alcotest.(check int) "zero-call annotated fn reports exactly one (misuse) diagnostic"
+    1 (List.length (March_errors.Errors.sorted ctx))
+
 let codegen_suites =
   [
+      ( "vectorize_check", [
+          Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick
+            test_vectorize_check_module_loads;
+        ] );
       ( "cross_compile", [
           Alcotest.test_case
             "linux/amd64 TLS+gzip links to valid ELF w/ libssl/libcrypto/libz NEEDED (P3)"
