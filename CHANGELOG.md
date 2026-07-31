@@ -31,13 +31,13 @@ git log is authoritative for exact commits.
 ### Fixed
 
 - **The compiled HTTP server works again.** A compiled `HttpServer` panicked
-  with `non-exhaustive pattern match` on the very first request; with that
-  fixed it answered `200 OK` with an empty body and no plug ever running; with
-  *that* fixed it segfaulted on the second request. Three independent bugs,
-  each hidden behind the one in front of it, affecting both the default
-  thread-pool server and the opt-in event-loop server (`MARCH_HTTP_EVLOOP=1`).
-  All three were **compiled-only** — the interpreter was healthy throughout,
-  which is why the interpreted `http_server` tests stayed green.
+  with `non-exhaustive pattern match` on the very first request, and once that
+  was fixed it segfaulted on the second. Two outage-causing bugs, the second
+  hidden behind the first, affecting both the default thread-pool server and
+  the opt-in event-loop server (`MARCH_HTTP_EVLOOP=1`); a third latent
+  representation bug was found and fixed alongside them. All were
+  **compiled-only** — the interpreter was healthy throughout, which is why the
+  interpreted `http_server` tests stayed green.
 
   1. `stdlib/websocket.march` re-declared `Conn`, `Header` and `Upgrade` as
      structural copies of the `HttpServer`/`Http` types, "mirroring" them
@@ -51,9 +51,13 @@ git log is authoritative for exact commits.
      rather than a same-shaped different type.
   2. `make_bool` in `runtime/march_http.c` heap-allocated a two-state object
      for `Conn`'s `halted` field, but a `Bool` field of a boxed ADT is a raw
-     i64 0/1. The resulting non-zero pointer read as `true`, so
-     `HttpServer.run_pipeline` treated every fresh conn as already halted and
-     returned it untouched — a well-formed `200` with `Content-Length: 0`.
+     i64 0/1. This is a latent representation bug rather than a cause of the
+     outage: `halted` is tested by its low bit and `march_alloc` is
+     calloc-backed, so the pointer was always even and read as `false`. It is
+     fixed because correctness should not rest on a pointer-parity
+     coincidence, because any consumer treating the field as a real `Bool`
+     would see a pointer, and because it allocated 16 bytes per request to
+     carry one bit.
   3. The compiled apply-fn consumes one reference to a closure it is called
      with, but all three runtime call sites passed the server's single
      long-lived pipeline closure without bumping it first, on the assumption

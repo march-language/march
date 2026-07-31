@@ -1202,11 +1202,20 @@ static void *make_no_upgrade(void) {
 }
 
 /* Build a March Bool value for a field of a Boxed ADT, where Bool is stored
- * as a raw i64 0/1 — NOT as a heap object.  Returning a heap pointer here put
- * a non-zero pointer in Conn's `halted` slot, so `if halted(conn)` in
- * HttpServer.run_pipeline read every conn as already-halted: run_pipeline
- * short-circuited and returned a well-formed but EMPTY 200 without running a
- * single plug. */
+ * as a raw i64 0/1 — NOT as a heap object, despite what this function used to
+ * claim ("March Bools are heap objects with just a header").
+ *
+ * The old heap-allocating version was not, as first reported, the cause of the
+ * empty-200 outage: `halted` is tested by its LOW BIT (the emitted IR for
+ * HttpServer.run_pipeline does `trunc i64 %x to i1`), and march_alloc is
+ * calloc-backed so its pointers are always even — the pointer read as `false`
+ * and the pipeline ran. Verified by restoring it: 20/20 requests correct.
+ *
+ * It is still wrong, and fixed rather than left alone, for two reasons: it
+ * makes correctness depend on a pointer-parity coincidence that any allocator
+ * change would silently break, and any consumer that treats the field as a
+ * real Bool (equality, printing, handing it to March code) sees a pointer
+ * instead of 0/1. It also malloc'd 16 bytes per request to encode one bit. */
 static void *make_bool(int value) {
     return (void *)(intptr_t)(value ? 1 : 0);
 }
