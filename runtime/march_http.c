@@ -1201,12 +1201,14 @@ static void *make_no_upgrade(void) {
     return march_alloc(16);  /* tag defaults to 0 */
 }
 
-/* Build a March Bool value: tag=0 for False, tag=1 for True.
- * March Bools are heap objects with just a header (no fields). */
+/* Build a March Bool value for a field of a Boxed ADT, where Bool is stored
+ * as a raw i64 0/1 — NOT as a heap object.  Returning a heap pointer here put
+ * a non-zero pointer in Conn's `halted` slot, so `if halted(conn)` in
+ * HttpServer.run_pipeline read every conn as already-halted: run_pipeline
+ * short-circuited and returned a well-formed but EMPTY 200 without running a
+ * single plug. */
 static void *make_bool(int value) {
-    void *b = march_alloc(16);
-    if (value) *(int32_t *)((char *)b + 8) = 1;
-    return b;
+    return (void *)(intptr_t)(value ? 1 : 0);
 }
 
 /* Build a March Int heap value: tag=0, one int64 field at offset 16. */
@@ -1435,8 +1437,14 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
     int keep_alive = march_detect_keep_alive_simd(req);
     void *conn = march_conn_from_parsed(req, buf, buf_len, fd);
 
-    /* Call the pipeline — the pipeline closure is held for the full connection
-     * lifetime by the caller; no per-request RC bump needed (Phase 0.5). */
+    /* Call the pipeline.  The compiled apply-fn CONSUMES one reference to the
+     * closure (its body opens with march_decrc_local($clo)), so the caller must
+     * hand it a fresh one per call — otherwise the server's single long-lived
+     * pipeline closure is freed after the first request and request #2
+     * dereferences freed memory (SIGSEGV).  The previous "held for the full
+     * connection lifetime, no per-request RC bump needed" comment here assumed
+     * the opposite contract. */
+    march_incrc_local(pipeline);
     void *result_conn = fn(pipeline, conn);
 
     if (!result_conn) {
@@ -1575,6 +1583,9 @@ static void *connection_thread(void *arg) {
                     int   keep_alive  = march_detect_keep_alive_simd(&reqs[i]);
                     void *conn        = march_conn_from_parsed(&reqs[i],
                                                                 buf, buf_len, fd);
+                    /* One fresh closure reference per call — the apply-fn
+                     * consumes it (see march_process_one_request). */
+                    march_incrc_local(pipeline);
                     void *result_conn = fn(pipeline, conn);
 
                     if (!result_conn) {
