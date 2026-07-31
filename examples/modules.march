@@ -55,7 +55,7 @@ mod ModuleDemo do
   -- pfn functions are only callable within their defining module.
   -- Callers see only the public API.
 
-  mod Crypto do
+  mod SecretCode do
     fn encode(x : Int) : Int do
       add_checksum(scramble(x))
     end
@@ -71,8 +71,8 @@ mod ModuleDemo do
   end
 
   fn demo_private() do
-    let encoded = Crypto.encode(42)
-    let decoded = Crypto.decode(encoded)
+    let encoded = SecretCode.encode(42)
+    let decoded = SecretCode.decode(encoded)
     println("encode(42)=" ++ int_to_string(encoded)
       ++ "  decode(encode(42))=" ++ int_to_string(decoded))
   end

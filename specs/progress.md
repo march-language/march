@@ -74,6 +74,28 @@ interpreted-vs-compiled equality, so it cannot go green if both backends drift
 together, nor pass vacuously on a machine with no clang. Confirmed RED before
 the fix — the pre-fix interpreter did not merely score 128, it *died* at n=128,
 because `char_to_int` rejects the empty string `char_from_int` handed it.
+## Current State (as of 2026-07-31, `examples/modules.march` oracle failure fixed)
+
+**Counts:** differential oracle sweep (`dune build --root . @test/oracle`) —
+100 MATCH, 0 known-divergence, 0 un-triaged failures, 153 total programs,
+exit 0 (previously 1 un-triaged `INTERP_FAIL` from `examples/modules.march`).
+
+`examples/modules.march`'s Part 3 (`pfn`-vs-`fn` visibility demo) declared
+`mod Crypto`, which collides with stdlib's own `mod Crypto`
+(`stdlib/crypto.march`) in March's flat, global module namespace — so its
+bare calls to `scramble`/`add_checksum`/`remove_checksum` resolved against
+the stdlib module instead of the file's own, failing to typecheck
+(`Module 'Crypto' does not export '...'`) under both the interpreter and the
+oracle sweep. This had previously been misdiagnosed in `specs/todos.md` as a
+nested-module-specific `pfn`-export bug — retesting the same nested shape
+with a genuinely unique module name compiles and runs correctly, confirming
+the real cause is the ordinary global-namespace collision (same class as the
+existing stdlib-collision guidance for app **types**), not nesting or `pfn`
+adjacency. **Fix:** renamed the example's module to `mod SecretCode`; no
+compiler change. Verified interpreted (exit 0) and compiled
+(`--compile --opt 2`, exit 0) with correct output, and the full oracle sweep
+re-run clean.
+
 ## Current State (as of 2026-07-31, JsonStream phase 2 Task 4 — benchmark, SIMD-gate verdict, docs; phase 2 COMPLETE)
 
 **Counts:** no test-count change from Task 3 (239 `test_json_stream.march`, 197 `test_json.march`) — this task adds a benchmark file and docs, no stdlib code change. Full suite re-run: see Verification below.

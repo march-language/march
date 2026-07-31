@@ -272,6 +272,15 @@ git log is authoritative for exact commits.
 
   `Char.from_int` and `Char.to_int` were documented as converting "code points".
   They convert bytes, and now say so.
+- **`examples/modules.march` runs again.** Its `pfn`-visibility demo used
+  `mod Crypto`, which collided with stdlib's `mod Crypto` (`stdlib/crypto.march`)
+  in March's flat, global module namespace — so calls like
+  `remove_checksum(x)` resolved against the stdlib module instead of the
+  file's own, and the example failed to typecheck (`Module 'Crypto' does not
+  export 'remove_checksum'`) under both the interpreter and the
+  interpreter-vs-compiled oracle sweep. Renamed the example's module to
+  `SecretCode`; no compiler change, since the global-namespace behavior is
+  by design (see `specs/lang` module system docs).
 
 - **`Json.parse` now accepts `\uXXXX` escapes.** The escape decoder handled
   only `\" \\ \/ \n \r \t \b \f` and rejected everything else, so
