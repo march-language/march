@@ -1,5 +1,59 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-31, `char_from_int` agrees across backends)
+
+**Counts:** `run_stdlib` 827 (+1: the new `char_from_int` byte-parity case),
+with only the pre-existing environmental `MARCH_SANITIZE` failure;
+`run_compiler` 619, `run_eval` 256, `run_snapshots` 33 unchanged; `run_codegen`
+measured at 521 (this change does not touch `test_codegen.ml` — the 520 recorded
+below was already one behind). `test_stdlib_march` 54/54.
+
+**`char_from_int` returned different bytes interpreted and compiled — a
+differential-oracle bug that silently corrupted data.** The C runtime's
+`march_char_from_int` is `(char)(n & 0xFF)`: a byte constructor over the full
+0–255 range. The interpreter (`lib/eval/eval.ml`) instead clamped to ASCII and
+returned the **empty string** for `n > 127` — no error, just a byte that
+vanishes from the middle of a string. Every stdlib caller that hands it a real
+byte was therefore correct compiled and corrupt interpreted: `Uri.decode`'s
+percent-decode (`stdlib/uri.march`), the msgpack raw-byte walk, `Http` header
+decoding, and `Gen`'s char-list builder. Measured against a pre-fix control,
+`Uri.decode("caf%C3%A9")` yielded `"caf"` (3 bytes) interpreted versus `"café"`
+(5 bytes) compiled; both now yield `"café"`.
+
+The interpreter was moved to the runtime's semantics rather than the reverse.
+ASCII-only was never the intended contract — it is not what the runtime, the JS
+backend, or the docs describe, and adopting it would have broken URI and msgpack
+decoding that works today in compiled builds. The mask (`n land 0xFF`) rather
+than a range check is load-bearing for parity: the runtime wraps, so `256` must
+yield byte 0 here too, not raise. `byte_to_char` keeps its range **error** on
+purpose — it shares the payload and the same C function once compiled, but its
+name denotes a byte, so an out-of-range argument there is a caller bug.
+
+This is the same trap recorded in the 2026-07-30 `Json.parse` entry below, now
+fixed at the source. `stdlib/json.march`'s `utf8_encode` still calls
+`byte_to_char`, which was adopted as a workaround but is also the better name
+for a byte builder; its comment no longer claims the two builtins disagree.
+`Char.from_int`/`Char.to_int` docstrings said "code point", which was never true
+of either backend, and now say byte.
+
+**Still divergent, deliberately out of scope:** the JS backend
+(`runtime/march_runtime.mjs`) implements `char_from_int` as
+`String.fromCodePoint(n)` — a *third* semantics, which differs from the byte
+reading above 255 and throws `RangeError` on a negative argument. That is not a
+one-line fix: JS strings are UTF-16 sequences while native March strings are
+byte arrays, so aligning it is a question about the JS string model, not about
+this builtin. Recorded here rather than silently patched.
+
+**Pinned by** `char_from_int: byte semantics 0-255 + wraparound, compiled +
+interpreted` in `test/test_stdlib_suite.ml` (group `adversarial-regressions`),
+which round-trips all 256 values through `char_to_int` and asserts a byte length
+of 1 for each, plus four wraparound cases (`256`→0, `511`→255, `-1`→255,
+`-256`→0). It asserts a literal expected string rather than mere
+interpreted-vs-compiled equality, so it cannot go green if both backends drift
+together, nor pass vacuously on a machine with no clang. Confirmed RED before
+the fix — the pre-fix interpreter did not merely score 128, it *died* at n=128,
+because `char_to_int` rejects the empty string `char_from_int` handed it.
+
 ## Current State (as of 2026-07-30, `Json.parse` accepts `\uXXXX`)
 
 **Counts:** `run_stdlib` 826 (unchanged — the new coverage is 11 `describe`/`test`
