@@ -12336,31 +12336,23 @@ let test_vectorize_hard_error_fails_compile () =
     write_march_source ~name:"march_vectorize_fail" vectorize_check_fail_src in
   let bin = Filename.temp_file "march_vectorize_fail_bin" "" in
   Sys.remove bin;
-  match compile_march_raw
-          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
-          ~main_exe ~bin ~src () with
-  | `Ok _ ->
-    Alcotest.fail
-      "expected `march --compile` to fail on a @[vectorize] violation, but it succeeded"
-  | `Skipped ->
-    (* Unlike every other compiled test in this file, `Skipped` here is NOT a
-       legitimate "no clang on PATH" outcome: the @[vectorize] violation makes
-       `march --compile` exit at bin/main.ml (~line 2408), well before clang
-       is ever invoked (~line 2468). So a nonzero `rc` on this path can only
-       mean the vectorize check fired correctly -- clang's absence cannot be
-       the true cause. compile_march_raw's clang-availability heuristic can't
-       tell the two apart, so treat `Skipped` as this test's actual failure
-       signal: it means the check did not fire and the process instead ran
-       (and failed) past the point where clang would be needed. *)
-    Alcotest.fail
-      "expected `march --compile` to fail via the @[vectorize] check before \
-       clang is ever invoked, but compile_march_raw attributed the nonzero \
-       exit to a missing clang -- meaning the check may not have fired at \
-       all, since a genuine vectorize-check failure never reaches that stage"
-  | `Failed (rc, output) ->
-    Alcotest.(check bool) "compile fails (nonzero exit)" true (rc <> 0);
-    Alcotest.(check bool) "stderr names the failing fn" true
-      (ir_contains output "`scale` cannot vectorize")
+  (* Deliberately NOT compile_march_raw/compile_march_or_skip, which every
+     other compiled test in this file uses: those treat ANY nonzero exit on a
+     clang-less machine as a legitimate "tool absent" skip. That heuristic is
+     inapplicable here, because this test's PASSING outcome is itself a
+     nonzero exit -- the @[vectorize] check rejects the program at
+     bin/main.ml (~2408), well before clang is invoked (~2468). Routing
+     through the heuristic would classify the passing case as a skip on a
+     clang-less box (silently vacuous), and asserting failure on that skip
+     would instead make the passing case red there. clang's presence is
+     simply irrelevant to this path, so drive the compiler directly. *)
+  let cmd = Printf.sprintf "cd %s && %s --compile -o %s %s"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src) in
+  let (rc, output) = run_capture cmd in
+  Alcotest.(check bool) "compile fails (nonzero exit)" true (rc <> 0);
+  Alcotest.(check bool) "stderr names the failing fn" true
+    (ir_contains output "`scale` cannot vectorize")
 
 let codegen_suites =
   [
