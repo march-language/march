@@ -1,0 +1,1 @@
+- ✅ **`with` expressions** — Elixir-style monadic chaining: `with Ok(x) <- f(), Ok(y) <- g(x) do x + y end` with optional `else` block. Desugars to nested `EMatch` in parser (`build_with` helper). 4 new tests.

@@ -1,0 +1,1 @@
+- ✅ **Opaque types** — `opaque type Handle = Handle(Int)`: type name public, constructors private. `opaque` keyword in lexer/parser; sets `var_vis = Private` on all variants in typecheck. 4 new tests (2 internal access, 2 external enforcement).

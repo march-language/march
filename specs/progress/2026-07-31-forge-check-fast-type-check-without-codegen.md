@@ -1,0 +1,1 @@
+- ✅ **`forge check` — fast type-check without codegen** — `forge/lib/cmd_check.ml`: runs parse → desugar → typecheck pipeline on all project source files and exits 0/1. `--lib-path` flag for multi-file projects. Complements `forge build` for fast CI feedback loops. `--check` flag added to `bin/main.ml` to expose the same fast-check path directly on the march binary.

@@ -1,0 +1,1 @@
+- ✅ **Visibility syntax update for remaining .march files** — `examples/*.march` and `stdlib/dataframe.march` updated: `pub fn → fn` (public by default), `fn → pfn` for truly private helpers, `pub type → type`. DataFrame public API functions correctly use `fn`; internal helpers use `pfn`.

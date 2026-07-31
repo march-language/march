@@ -682,8 +682,8 @@ Steps 1–6 are the functional core and can land together (the build will fail
 until typecheck/eval/tir are handled — those have no catch-all). Step 7 is the
 "silent breakage" tail and must not be skipped. Steps 8–9 follow.
 
-After landing: update `specs/todos.md` (move to Done) and `specs/progress.md`
-(feature bullet + test count), per repo policy.
+After landing: `git mv` the item's file from `specs/todos/` to `specs/progress/`
+(or file a new dated entry there), per repo policy.
 
 ---
 

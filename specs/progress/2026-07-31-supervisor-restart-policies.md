@@ -1,0 +1,1 @@
+- ✅ **Supervisor restart policies** — `one_for_one`, `one_for_all`, `rest_for_one` all implemented and tested in eval.ml

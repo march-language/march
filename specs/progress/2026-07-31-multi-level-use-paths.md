@@ -1,0 +1,1 @@
+- ✅ **Multi-level `use` paths** — `use A.B.*` / `use A.B.{f,g}` now fully supported; `use_path_tail` in parser, qualified lookups in typecheck

@@ -1,0 +1,1 @@
+- ✅ **Logger module additions** — `Logger.level_from_string`, `level_rank`, `level_enabled`, `format_entry`, `log_if` added to `stdlib/logger.march`

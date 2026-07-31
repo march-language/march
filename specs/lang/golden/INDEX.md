@@ -29,7 +29,7 @@ misroute); `g41` the linearity-erasure addition (§4.12 — linear/affine
 annotations are compile-time-erased, widening slice 7; its affine binding is
 consumed by a DIRECT match, the regression witness for finding L7 — FIXED
 2026-07-10: escape analysis no longer stack-promotes erased-repr allocs,
-`specs/todos.md`); `g43` the parallelism addition (§4.14, widening slice 9 —
+`specs/todos/`); `g43` the parallelism addition (§4.14, widening slice 9 —
 the data-parallel determinism guarantee: `List.pmap == List.map` plus the RRB
 `Parallel` integer/bool reductions, the first compiled witness for the RRB
 `Parallel` module; `psum_float` deliberately excluded — IEEE non-associativity,
@@ -37,7 +37,7 @@ finding P1); `g44` the distributed-CRDT addition (§4.15, widening slice 10 —
 the convergence laws of the single-process-testable CRDT core: GCounter/
 PNCounter/ORSet merge + VectorClock causality, including the disjoint-key
 `compare`/`.concurrent` case that used to crash compiled via the read-then-
-update-map use-after-free, finding C1, FIXED 2026-07-11 — `specs/todos.md`);
+update-map use-after-free, finding C1, FIXED 2026-07-11 — `specs/todos/`);
 `g45` the Perceus RC addition
 (§4.16, widening slice 11 — the dual-position dup/drop invariant B1, the ONE
 rule in this corpus verified three ways: interp==compiled, a committed TIR
@@ -150,7 +150,7 @@ note explaining why:
 - **Multi-party session types (`MPST.*`)** — the MPST runtime (§4.11.5) is
   complete and correct interpreted (a 3-role all-`String` relay runs cleanly),
   but **every** `MPST.*` program segfaults compiled (exit 139, filed as F3 in
-  `specs/todos.md`) — the compiled MPST C runtime is not correctly wired to
+  `specs/todos/`) — the compiled MPST C runtime is not correctly wired to
   the lowered representation. A crashing program cannot be a golden `MATCH`,
   so MPST is documented in §4.11 prose only; only the **binary** channel plane
   (`g38`/`g39`) is golden-witnessed.

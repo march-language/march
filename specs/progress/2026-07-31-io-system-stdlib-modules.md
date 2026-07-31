@@ -1,0 +1,1 @@
+- ✅ **IO, System stdlib modules** — `stdlib/io.march` (72 lines): `IO.puts/write/warn/read_line/gets/inspect` — explicit I/O wrappers under clean namespace. `stdlib/system.march` (155 lines): `System.os/arch/cpu_count/monotonic_time/env/put_env/argv/cwd/pid/exit/cmd/version` — OS/runtime info.

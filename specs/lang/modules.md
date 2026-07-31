@@ -146,7 +146,7 @@ end
 > the qualified annotation explicitly is no longer necessary to work around
 > a unification failure — either form works.
 
-> **Known enforcement gap (filed, not fixed — `specs/todos.md`):**
+> **Known enforcement gap (filed, not fixed — `specs/todos/`):**
 > `opaque type`'s constructor-hiding is intended (and, for a same-file
 > reference, believed correct) but is **not actually enforced against a
 > qualified reference to the constructor from a separate file** reached via

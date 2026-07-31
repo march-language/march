@@ -1,0 +1,1 @@
+- ✅ **Actor handler return type checking** — handlers statically verified to return the correct state record type; gap checks added in typecheck

@@ -1,0 +1,1 @@
+- [ ] **Cap(IO.Database) — upgrade from declaration-only to enforced** — Currently declaration-only. Wire Depot builtins (`db_query`, `db_exec`, etc.) when Depot stdlib lands in the march compiler. Spec: `specs/capability-system-design.md §Future Capabilities §2`.

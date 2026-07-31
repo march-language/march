@@ -1,0 +1,1 @@
+- ✅ **March-native stdlib test suite** — 23 `.march` test files in `test/stdlib/` covering all stdlib modules; `stdlib/test.march` (Test module with assert_true/false/eq_int/eq_str/some/none/ok/err); `test/test_stdlib_march.ml` OCaml runner (7 suites: Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger)

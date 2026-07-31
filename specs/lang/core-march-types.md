@@ -285,7 +285,7 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           --   wrong type is still caught via ordinary unification), but
           --   `let x : Int = "foo"` typechecks at exit 0 instead of being
           --   checked against `Int` at the binding site. See §4.1 finding 16
-          --   and `specs/todos.md` ("Compiler: Type System") for the full
+          --   and `specs/todos/` ("Compiler: Type System") for the full
           --   writeup and fix direction.
 
 (T-LetFn) β fresh (at env.level — NO enter_level bump, unlike T-Let)    typecheck.ml:4373
@@ -404,7 +404,7 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           --   calls (the ret-annotation check, and the final self/arrow
           --   reconciliation) can both observe the same already-manifested
           --   conflict when the conflict flows through the self-reference.
-          --   Not fixed here (docs-only task); noted in `specs/todos.md`.
+          --   Not fixed here (docs-only task); noted in `specs/todos/`.
           -- cf. operational (E-LetFn), core-march.md:650–663 — eval's
           --   `ELetFn` arm ties the SAME recursive knot at the VALUE level,
           --   with a mutable `env_ref` back-patched AFTER the closure is
@@ -1105,7 +1105,7 @@ that already existed — see the rule itself, just above the note after
           --   shared call — `A(x) | B(x) -> x` would need a DIFFERENT `x`
           --   bound depending on which alternative matched, and the compiler
           --   has no mechanism (yet — an n-ary join point would suffice,
-          --   filed in `specs/todos.md`) to pass one in. Consequently the
+          --   filed in `specs/todos/`) to pass one in. Consequently the
           --   overall result binding list is always `Γ` unchanged (`[]`),
           --   never `Γ, x:τ` — this is the one pattern-typing rule that can
           --   never introduce a name, unlike every other rule above.
@@ -1456,7 +1456,7 @@ item 1.
    demonstrated cannot arise. See `core-march.md` §4.4.3 (rewritten
    2026-07-22) for the full current account, live-reproduced evidence for the
    generic-vs-specific and derive-vs-manual overlap cases too, and the
-   `specs/todos.md` closeout entries ("impl-coherence" Stage 1+2,
+   `specs/todos/` closeout entries ("impl-coherence" Stage 1+2,
    2026-07-17). **One scoped exception, unchanged from before and NOT a
    residual divergence:** a user impl overlapping a BUILT-IN seeded impl
    (`env.impls` seeds built-ins with `Ast.dummy_span`, `:6302`–`6306`) is
@@ -1705,7 +1705,7 @@ NOT overlap: different concrete types, or different interfaces, still
 coexist freely), and `reject/t82_impl_coherence_shared_ctor_double_collision`
 / `accept/t88_impl_distinct_modules`/`t89_impl_general_iface_collision` (the
 FQN dispatch-identity same-short-name-different-module carve-out and its own
-residual double-collision stopgap — see `specs/todos.md`'s "FQN dispatch
+residual double-collision stopgap — see `specs/todos/`'s "FQN dispatch
 identity" entries for the full staged story, out of this subsection's scope
 to restate).
 
@@ -1806,7 +1806,7 @@ end
 `--check` on this program exits **0** — no diagnostic, no warning. Running it
 also exits **0** and prints `no error, no Ghost type defined` — the program
 behaves exactly as if the `derive Eq for Ghost` line were not present at all.
-This is filed as an open gap in `specs/todos.md` ("Compiler: Type System",
+This is filed as an open gap in `specs/todos/` ("Compiler: Type System",
 finding 17 in this document's §4.1), with this exact repro and the
 `desugar.ml:1659` citation — fixing it (making an unknown derive TARGET TYPE
 an error, symmetric with the unknown derive TARGET INTERFACE case already
@@ -2029,7 +2029,7 @@ either of those two docs claims:**
   `DMod` prebind path rather than the cross-file `Module_registry` path Task
   1 fixed. **This is a real, confirmed compiler gap, filed (not fixed —
   out of Task 3's docs-only scope and beyond Task 1's `load_module_into_env`
-  fix), in `specs/todos.md`.** The PatCon (pattern-matching) side is
+  fix), in `specs/todos/`.** The PatCon (pattern-matching) side is
   differently, and also incorrectly, affected: matching `Mod.Ctor(…)`
   against a value produced by the module's own public API hits the
   UNRELATED, separately-filed qualified-type-unification gap for match
@@ -2072,7 +2072,7 @@ not merely un-flagged at check time but genuinely accepted end-to-end.
 > same-named constructor in a sibling module now shadows a module's OWN
 > constructor inside its own body (`Mk(1)` in `A.make` resolves against B's
 > `Mk(String)` → `expected `String` but got `Int``). Filed as
-> "sibling-module constructor shadowing" in `specs/todos.md`; the witness now
+> "sibling-module constructor shadowing" in `specs/todos/`; the witness now
 > uses distinct ctor names (`MkA`/`MkB`), which isolates the type-identity
 > fact this section documents.
 **This is documented here as ONE deliberate design point, not filed as a
@@ -2259,7 +2259,7 @@ the fix:
   both `Int` and `String` in the same nested module. `--check` exit 0.
 
 (Full root-cause narrative and the 25-case `nested_mod_prebind_erasure` unit
-group: `.superpowers/sdd/prebind-fix-report.md`; the `specs/todos.md`
+group: `.superpowers/sdd/prebind-fix-report.md`; the `specs/todos/`
 "Nested-module qualified-prebind type-erasure" Done entry.)
 
 ### 2.6 Actors: declaration, spawn, and `Pid` typing
@@ -2461,7 +2461,7 @@ dropped": in compiled code a wrong-actor send is undefined behavior. It is
 documented, not corpus-encoded — it typechecks (exit 0), so it cannot be a
 `reject/` witness; the accept path (`send(counter, Inc(3))`) is
 `accept/t40_actor_send_typed_payload`, and the non-guarantee itself is filed as
-an open gap (finding 19, `specs/todos.md`).
+an open gap (finding 19, `specs/todos/`).
 
 **The message-name flat global namespace — a design point, not a bug.** Message
 and handler constructor names (`Inc`, `Log`, …) live in the **single flat global
@@ -2748,7 +2748,7 @@ corpus (§2.7.6, `t42`). An earlier version of this document claimed every
 `MPST.*` program segfaulted compiled (exit 139); re-run live for this task, a
 3-role AND a 4-role `MPST.*` protocol (`Int`/`Bool`/`String` payloads,
 send/recv/close only) both compile, run, and print output identical to the
-interpreter, exit 0 (full transcript in `specs/todos.md`). What genuinely
+interpreter, exit 0 (full transcript in `specs/todos/`). What genuinely
 remains unimplemented is **multiparty `choose`/`offer`** — `MPST.choose` and
 `MPST.offer` do not exist as typed operations at all; calling either now gets
 an explicit `` not a session-channel operation I know `` compile error
@@ -2832,7 +2832,7 @@ merge-rule branch in `project_steps`'s `ProtoChoice` arm is now gated on
 role merges. A binary protocol with two identical-type `choose` branches now
 typechecks (witnessed by `accept/t44_binary_choice_identical_branches`). The
 prose above is retained to describe the historical defect; the "workaround" is
-no longer necessary. See `specs/todos.md` for the Done entry.
+no longer necessary. See `specs/progress/` for the completed entry.
 
 #### 2.7.6 `Chan(Role, Proto)` — the linear channel-endpoint surface type
 
@@ -2896,7 +2896,7 @@ Three new `accept/` programs (§3's sibling harness, `specs/lang/types/`,
   does not exercise sending/receiving over the resulting endpoints — but as
   of the 2026-07-24 re-verification (§2.7.4), doing so is no longer expected
   to fail either: a full 3-role send/recv/close round-trip compiles and runs
-  correctly on both backends (transcript in `specs/todos.md`).
+  correctly on both backends (transcript in `specs/todos/`).
 
 Both new programs declare every role (`Client`/`Server`/`Logger`) as its own
 nullary type (`type Client = Client`, etc.), originally to avoid the
@@ -3109,7 +3109,7 @@ continuation case (no match needed, approximation is exact by construction);
 `reject/t95_offer_unrefined_continuation` and
 `reject/t97_offer_label_shadow_bypass` (`specs/lang/types/reject/`) pin the
 two unrefined-use rejections (direct, and via the name-shadowing bypass);
-see `specs/todos.md`'s Done entry for the full witness list this fix added.
+see `specs/progress/`'s matching entry for the full witness list this fix added.
 Fixing the
 STATIC-typing half needed branch-indexed / dependent typing of the returned
 continuation on the returned `Atom` value — that's what `with_offer_refinement`
@@ -3632,7 +3632,7 @@ function body, with no `Cap(X)` anywhere in any signature, is *warned*, not
 *rejected*; `--check` still exits 0. Authors who want the ERROR-level
 guarantee must thread `Cap(X)` through every effectful function's signature,
 not merely call the builtin and rely on the warning. This gap is filed as
-**F1** in `specs/todos.md` (open, deferred) — it is a design/enforcement
+**F1** in `specs/todos/` (open, deferred) — it is a design/enforcement
 choice, not a bug in the mechanics of Checks 1/4/5 themselves, which are
 sound and precise over the `builtin_cap_table` domain (§2.8.3's F6 scoping
 note is a separate, narrower gap about which hierarchy entries can even be
@@ -3906,7 +3906,7 @@ Three new `accept/` programs (`t51`-`t53`) and two new `reject/` programs
   IO` via subsumption. `--check` exit 0, confirmed stable across 40+ repeated
   live runs of the byte-identical binary and input. **Finding — the flaky
   narrowing HINT (capabilities, live-observed, not fixed here; filed in
-  `specs/todos.md`; NOT a §4.1 numbered entry, and distinct from the sessions
+  `specs/todos/`; NOT a §4.1 numbered entry, and distinct from the sessions
   linearity "F7" cross-referenced earlier in this doc):** the incidental Check
   3 narrowing HINT this
   program's `boot(root : Cap(IO))` parameter would be expected to also emit
@@ -4093,7 +4093,7 @@ same outputs (a weaker claim than `pure` — a `deterministic` module MAY still
 do ordinary IO, e.g. `println`, as long as it isn't reading the clock or an
 RNG).
 
-**F2 — FIXED (Task 5 of this same widening slice, `specs/todos.md`).** Both
+**F2 — FIXED (Task 5 of this same widening slice, `specs/todos/`).** Both
 banned sets used to be **hardcoded, hand-maintained name lists that were
 never cross-checked against the actual builtin surface**. `pure_banned` named
 `write_file`, `read_file`, `append_file`, `delete_file`, `random_int`,
@@ -4150,7 +4150,7 @@ genuinely-pure module (`accept/t54`) and a `cap deterministic` module calling
 `test/test_compiler.ml` (`cap_pure_no_extern_det` group) pin both directions.
 See §2.8.12 below for the REJECT corpus witnesses this fix made possible.
 
-**F3 — FIXED (Task 6 of this same widening slice, `specs/todos.md`).**
+**F3 — FIXED (Task 6 of this same widening slice, `specs/todos/`).**
 `cap no_panic`'s `panic_surface_*` sets (above) cover every NAMED partial
 function (`panic`, `unwrap`, `head`, `List.nth`, …) but used to miss the
 single most common IMPLICIT panic surface in ML-family code: a non-exhaustive
@@ -4225,7 +4225,7 @@ guarded_guardless_catchall`. This was **not a regression** and **not in F3's
 original scope** — F3 correctly consumed whatever verdict `check_exhaustiveness`
 computed; batch 3 extended that verdict to the guarded case.
 
-**F5 (open, cosmetic, filed in `specs/todos.md`):** `println`/`print` are
+**F5 (open, cosmetic, filed in `specs/todos/`):** `println`/`print` are
 registered in `builtin_cap_table` under `IO.Console` and DO count as a
 capability use for Check 2's "declared-but-unused `needs`" accounting
 (§2.8.6) — yet a bare `println` call with no covering `needs IO.Console`
@@ -4437,7 +4437,7 @@ ordinary `Cap(IO)` genuinely cannot forge `Cap(P)` by name, matching the
   case happens to reject. This is distinct from the nested-module hole
   `(T-QualRef)` closes (that is about reference *resolution*; this is about taint
   *propagation* not recursing into `TTuple`/`TCon` payloads). Filed OPEN in
-  `specs/todos.md` (Capabilities/effects section) as a dedicated Batch-A-taint
+  `specs/todos/` (Capabilities/effects section) as a dedicated Batch-A-taint
   follow-up; a fix would recurse the tagger into container payload positions.
 
 (Fix reports: `.superpowers/sdd/batch-a-report.md` for `mint_cap` +
@@ -4472,7 +4472,7 @@ Linear | Affine`, `ast.ml:20-24`) through exactly these surfaces:
 There is deliberately **no `affine let`** production and **no `affine`
 param-keyword** — `affine` exists ONLY as the type modifier. Writing
 `fn f(affine c : T)` is a PARSE error (`I got stuck here`) — finding **L1**,
-filed in `specs/todos.md`; the tutorial previously showed this unparseable
+filed in `specs/todos/`; the tutorial previously showed this unparseable
 form. The working spelling is `fn f(c : affine T)`.
 
 **Return-position caveat (finding L8, OPEN):** the `TyLinear` row above holds
@@ -4553,7 +4553,7 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
   the tracker ever ran. Var-position `TLin` never leaked — binding sites
   strip the wrapper and store the inner type.
 
-#### 2.9.5 Known gaps (all filed in `specs/todos.md`)
+#### 2.9.5 Known gaps (all filed in `specs/todos/`)
 
 - **L1** — `affine` param-keyword is a parse error (§2.9.1).
 - **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
@@ -4658,7 +4658,7 @@ here: ``, `parser.mly:1005`), NOT by a dedicated "cannot have a type
 annotation" message. The `let-propagation.md` tutorial §5.2 shows a dedicated
 `LET QUESTION simple_pattern COLON error` production that was never
 implemented; the annotation is still correctly rejected, just with the
-less-specific message. Filed and reconciled 2026-07-10 (see `specs/todos.md`).
+less-specific message. Filed and reconciled 2026-07-10 (see `specs/todos/`).
 
 #### 2.10.3 Corpus witnesses
 
@@ -4899,7 +4899,7 @@ Every "the typechecker actually does X, which is easy to get wrong" discovery
 made while building this reference lives HERE, in this one subsection — collected
 by Task 7 from where each was originally pinned inline (Tasks 1–6). Two are
 genuine, filed, open gaps against the current implementation (findings 15 and
-16, both cross-referenced to their `specs/todos.md` entry under "Compiler:
+16, both cross-referenced to their `specs/todos/` entry under "Compiler:
 Type System"); the rest are faithful-but-surprising facts about the existing
 typechecker that this document exists to pin down, not defects:
 
@@ -5060,7 +5060,7 @@ typechecker that this document exists to pin down, not defects:
     typecheck.ml:4392) — `reject/t12_letfn_ret_annot_conflict` is the
     witness, and also surfaces a minor, non-blocking diagnostic-quality
     quirk: the identical mismatch is reported TWICE (see (T-LetFn)'s note,
-    §2, and the `specs/todos.md` entry) because the annotation-unify and the
+    §2, and the `specs/todos/` entry) because the annotation-unify and the
     final self-type/arrow-type reconciliation unify independently
     rediscover the same conflict once it flows through the self-reference.
 14. **An unresolved `CNum` constraint silently DEFAULTS to `Int` at its
@@ -5163,7 +5163,7 @@ typechecker that this document exists to pin down, not defects:
     and the deferred generic-call path (b)/(c), breaks that expectation.
     **This is a real typechecker soundness gap** (an explicit `when
     Iface(a)` bound on a generic parameter is not actually enforced
-    polymorphically) — filed in `specs/todos.md` under "Compiler: Type
+    polymorphically) — filed in `specs/todos/` under "Compiler: Type
     System" (2026-07-05) with this exact repro, since fixing it is out of
     scope for this docs-only task. Not exercised by this corpus's `reject/`
     programs (a `reject/` program built on it would need to codify a
@@ -5194,7 +5194,7 @@ typechecker that this document exists to pin down, not defects:
     FUNCTION-PARAMETER annotation (enforced via ordinary T-App param-vs-arg
     unification, §2) rather than a `let` annotation to elicit its mismatch,
     specifically because a `let`-annotation mismatch would NOT be rejected.
-    Filed in `specs/todos.md` under "Compiler: Type System" with the fix
+    Filed in `specs/todos/` under "Compiler: Type System" with the fix
     direction (check the RHS against `bind_ty` via `check_expr` at the `ELet`
     arm, when present, instead of unconditionally inferring); not fixed here
     (docs-only task). A `reject/let_annotation_mismatch`-style program should
@@ -5220,7 +5220,7 @@ typechecker that this document exists to pin down, not defects:
     ```
     `--check` exits **0** (no diagnostic); running it also exits **0** and
     prints `no error, no Ghost type defined` — the `derive` line has zero
-    observable effect, silently. Filed in `specs/todos.md` under "Compiler:
+    observable effect, silently. Filed in `specs/todos/` under "Compiler:
     Type System" with this repro and the `desugar.ml:1659` citation; fixing it
     (rejecting an unknown derive TARGET TYPE the same way an unknown derive
     target INTERFACE already is) is a compiler change, deliberately out of
@@ -5313,7 +5313,7 @@ typechecker that this document exists to pin down, not defects:
     handler-declaration order, with **no default arm** — `ECase(msg, branches,
     None)`, `lower_actor.ml:256`, variant order `lower_actor.ml:17`), and the
     `String` payload pointer was reinterpreted as the `Int` param of `Inc` —
-    non-deterministic, memory-unsafe. Filed in `specs/todos.md` under "Compiler:
+    non-deterministic, memory-unsafe. Filed in `specs/todos/` under "Compiler:
     Type System" (2026-07-06) with this repro; fixing it (typing Pids by their
     accepted-message set so `send` can gate the message against the target actor)
     is a significant type-system design decision — deferred, out of scope for this
@@ -5584,7 +5584,7 @@ diagnostic-quality quirk where the identical mismatch is reported TWICE
 (typecheck.ml:4392) and the final self-type/arrow-type unify
 (typecheck.ml:4396) each independently rediscover the same conflict once it
 flows through the self-reference `β` — noted in (T-LetFn)'s rule (§2), §4
-finding 13, and `specs/todos.md` (cosmetic; does not affect this corpus's
+finding 13, and `specs/todos/` (cosmetic; does not affect this corpus's
 pass/fail, and does not reproduce for the equivalent top-level `fn`, which
 reports once with a better message). `check_types.sh`: 29/29 (17 accept, 12
 reject), exit 0.
@@ -5626,7 +5626,7 @@ its OWN declaration (a concretely-annotated param) but is silently NOT
 re-discharged at a call site when the bound variable is left generic
 (`same(a,b) when Eq(a) do a==b end; same(Rood, Rood)` typechecks even though
 `Hue` has no `Eq` impl and a direct `Rood == Rood` correctly rejects) — filed
-in `specs/todos.md` under "Compiler: Type System" with the exact repro, not
+in `specs/todos/` under "Compiler: Type System" with the exact repro, not
 fixed (docs-only task). Three new `accept/` programs (Num/Eq/Ord discharge
 succeeding on built-in instances, and a `&&`/`||`/`not` boolean-logic
 program) and three new `reject/` programs (the live-verified Num/Ord/Bool-
@@ -5846,7 +5846,7 @@ corrected this section's own stale illustrative counts to the final
 104/104; updated §6's roadmap bullet from "Tasks 1-3 landed, behavioral caps
 still deferred" to reflect all seven tasks landed; reconciled the
 `specs/lang/capabilities.md` tutorial's F1-overclaiming prose (see
-`specs/todos.md`'s slice-5 closeout entry for the full list of corrected
+`specs/todos/`'s slice-5 closeout entry for the full list of corrected
 claims) and extended its behavioral-caps section to document all five caps
 (previously only `no_panic`/`no_alloc`); filed **the proof-cap mint
 mismatch** (deliberately unlabeled rather than a letter — `F1`–`F8` are all
@@ -5884,7 +5884,7 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   simultaneously-matching impls — is noted on the typing side (§2.3, `(T-Impl)`
   step 1) and documented in full, with live-captured interpreter-vs-compiled
   evidence, in the operational companion `core-march.md` §4.4.3 as an open,
-  deliberately-unresolved divergence (filed in `specs/todos.md`, not fixed by
+  deliberately-unresolved divergence (filed in `specs/todos/`, not fixed by
   this documentation slice). Roadmap: an extension of Phase 2 (§4.3's
   "declarative typing rules... extracted from `typecheck.ml`'s algorithm").
 - **The constraint-survival soundness gap itself (finding 15, §4)** — RESOLVED
@@ -5919,7 +5919,7 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   deeper polymorphic-launder exploitation. `Cap(P)` is now genuinely
   unforgeable. One documented residual stays OPEN — the `cap_narrow`
   container-launder taint gap (`tag_cap_producer_result` is shallow), filed in
-  `specs/todos.md`. Linear/uniqueness typing beyond the
+  `specs/todos/`. Linear/uniqueness typing beyond the
   session-channel linearity
   already covered in §2.7.6/§2.7.8 is not separately named in the roadmap
   and is narrower still; grouped with capabilities as a Phase-3-or-later
@@ -5943,12 +5943,12 @@ of the roadmap, adjudicating the operational side's `known_divergence` queue.
 This document's queue of filed typechecker gaps has **one genuinely open
 item**, added by the interfaces/impls widening slice: **finding 17** (§4.1,
 `derive X for UnknownType` silently no-ops) is OPEN — filed in
-`specs/todos.md` under "Compiler: Type System," deliberately NOT fixed by this
+`specs/todos/` under "Compiler: Type System," deliberately NOT fixed by this
 documentation-only slice. The three PRIOR filed gaps — findings 13, 15, and
 16 — were all RESOLVED 2026-07-05 (commits `7e40dc5b`, `8cbd6dd2`,
 `f0f5299c`), with corpus witnesses (`reject/t16`, `reject/t17`, `accept/t21`,
 `accept/t22`) and unit tests. The widening slice's operational companion,
 `core-march.md` §4.4.3, also filed a second open item this slice — the
 impl-coherence/overlap interpreter-vs-compiled divergence, documented there in
-full with both backends' outputs and filed in `specs/todos.md` alongside
+full with both backends' outputs and filed in `specs/todos/` alongside
 finding 17.

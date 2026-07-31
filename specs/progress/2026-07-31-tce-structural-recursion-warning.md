@@ -1,0 +1,1 @@
+- ✅ **TCE structural recursion warning** — `check_tail_position` in `typecheck.ml` now emits a Warning when a structurally-recursive (but non-tail) call is detected; distinguishes arithmetic reductions (`n-1`) from pattern-bound sub-components

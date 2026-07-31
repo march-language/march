@@ -20,7 +20,7 @@ reject/t67–t70}` and golden `g42`. This chapter is the tutorial companion.
 > §5.2 was never implemented. `let? x : T = e` is still correctly rejected,
 > but by the generic missing-`=` recovery (`` I was expecting `=` in the let?
 > binding here: ``), not a bespoke message. See `reject/t70` and the slice-8
-> finding in `specs/todos.md`.
+> finding in `specs/todos/`.
 
 **Depends on:** the `Result` type, the `QUESTION` token, `EMatch`, and as-pattern / tuple-pattern support (all present).
 
@@ -718,8 +718,8 @@ Steps 1–6 are the functional core and can land together (the build will fail
 until typecheck/eval/tir are handled — those have no catch-all). Step 7 is the
 "silent breakage" tail and must not be skipped. Steps 8–9 follow.
 
-After landing: update `specs/todos.md` (move to Done) and `specs/progress.md`
-(feature bullet + test count), per repo policy.
+After landing: `git mv` the item's file from `specs/todos/` to `specs/progress/`
+(or file a new dated entry there), per repo policy.
 
 ---
 

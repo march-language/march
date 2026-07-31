@@ -1,0 +1,1 @@
+- [ ] **Cap(IO.IPC) — inter-process communication capability** — New leaf under `IO.Process`. Wire pipe/unix-socket/signal builtins when IPC runtime is written. Spec: `specs/capability-system-design.md §Future Capabilities §3`.

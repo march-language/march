@@ -1,0 +1,1 @@
+- ✅ TIR pipeline: lower → mono → defun → perceus → escape → opt → LLVM

@@ -4,26 +4,29 @@ March is a statically-typed functional language (ML/Elixir hybrid) compiled with
 
 ## Keeping specs up to date
 
-**IMPORTANT:** When implementing a feature, always update `specs/todos.md` and `specs/progress.md` in the same commit:
-- Move completed items from the todo list to the "Done" section in `specs/todos.md`.
-- Update the "Current State" counts in `specs/progress.md` (test count, known failures).
-- Add any new capabilities to the feature bullet list in `specs/progress.md`.
+**IMPORTANT:** When implementing a feature, always update `specs/todos/` and `specs/progress/` in the same commit:
+- `specs/todos/` holds one open item per file, named `YYYY-MM-DD-slug.md` (date filed). See `specs/todos/README.md`.
+- `specs/progress/` holds one completed item per file, same naming convention. See `specs/progress/README.md`.
+- When an item is finished, `git mv` its file from `specs/todos/` to `specs/progress/` (or delete it and add a new
+  dated file in `specs/progress/`) in the same commit that lands the fix — don't leave a stale open file behind.
+- Don't hand-maintain a running "Current State" test count anywhere; run `scripts/run-tests.sh` for the live number.
 
-These files are the canonical record of what exists. Do not let them go stale.
+These directories are the canonical record of what exists. Do not let them go stale. One item, one file — this
+structure exists specifically so two PRs filing or closing different items never conflict with each other.
 
 **Doc freshness lint.** `scripts/check-docs.sh` (run in CI) guards the current-truth docs
 (root guides, `docs/`, `specs/features/`, the agent SKILL) against two kinds of rot: dead
 compiler-source pointers (e.g. a path that moved) and stale stdlib module counts. It does
-**not** lint the historical corpus (`specs/plans/`, dated design specs, the append-only
-`progress.md`/`todos.md`). If a current doc must reference a since-removed file or a frozen
+**not** lint the historical corpus (`specs/plans/`, dated design specs, `specs/todos/`,
+`specs/progress/`). If a current doc must reference a since-removed file or a frozen
 count, say so in words ("no longer exists", "removed") or add a `doc-lint:ignore-count` /
 `doc-lint:ignore-file` marker — don't silently let the pointer rot.
 
 ## Maintaining the changelog
 
 `CHANGELOG.md` (repo root, [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format)
-is the user-facing digest of what shipped — a different audience than `specs/progress.md`
-(implementer-level detail, append-only, every fix). When a user-visible fix, feature, or
+is the user-facing digest of what shipped — a different audience than `specs/progress/`
+(implementer-level detail, one file per fix). When a user-visible fix, feature, or
 behavior change lands, add a bullet under `## [Unreleased]` in the same commit (`### Added`
 / `### Fixed` / `### Changed` / `### Documentation` as appropriate — see existing entries).
 Skip purely internal refactors with no observable effect. When a release is tagged, rename
@@ -79,7 +82,7 @@ parity tests (~5s), 15 compiled adversarial regression tests (~20s), 2 pbkdf2
 key-derivation tests (~3s), and 1 vault concurrency test. Run the full suite
 before merging to main.
 
-After implementing or completing a feature, update `specs/todos.md` (move item to Done) and `specs/progress.md` (add to feature list) to keep them current.
+After implementing or completing a feature, `git mv` its file from `specs/todos/` to `specs/progress/` (or file a new dated entry in `specs/progress/`) to keep them current.
 
 After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`) — interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
 
