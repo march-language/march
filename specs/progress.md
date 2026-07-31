@@ -2,11 +2,32 @@
 
 ## Current State (as of 2026-07-31, `char_from_int` agrees across backends)
 
-**Counts:** `run_stdlib` 827 (+1: the new `char_from_int` byte-parity case),
-with only the pre-existing environmental `MARCH_SANITIZE` failure;
-`run_compiler` 619, `run_eval` 256, `run_snapshots` 33 unchanged; `run_codegen`
-measured at 521 (this change does not touch `test_codegen.ml` — the 520 recorded
-below was already one behind). `test_stdlib_march` 54/54.
+**Counts** (measured after merging `origin/main`, which brought in `@[vectorize]`
+and JsonStream): `run_stdlib` 827 (+1: the new `char_from_int` byte-parity case),
+with only the pre-existing environmental `MARCH_SANITIZE` failure; `run_codegen`
+538 green; `run_compiler` 620, `run_eval` 256, `run_snapshots` 33, and
+`test_stdlib_march` 54/54 unchanged by this work.
+
+A note on `run_codegen`, since two entries below disagree with each other: this
+branch measured **521** on its pre-merge base, where the entry below it recorded
+520. The post-merge total settles it — 521 + the `@[vectorize]` group's 17 = 538,
+not the 537 the `@[vectorize]` entry predicts from a base of 520. Neither number
+is this branch's doing (it does not touch `test_codegen.ml`); 520 was simply one
+behind when it was written.
+
+**Measurement trap worth recording:** on first run after the merge, `run_codegen`
+reported `vectorize_check / vectorize hard error fails compile` as FAILING — a
+program that must be rejected compiled cleanly instead. It was **not** a
+regression. A control worktree built from pristine `origin/main` passed the same
+test 17/17, and this branch's diff against main touches no vectorize code at all
+(`lib/tir/vectorize_check.ml` and `bin/main.ml` are byte-identical). The cause was
+dune's user-global shared cache re-serving stale objects: `DUNE_CACHE=disabled
+dune build --force` produced a compiler that rejects the program correctly, and
+the group then passed 17/17. Clearing the CAS (`.march/cas/artifacts-v2`) did
+**not** fix it, which is what ruled out the other usual suspect. The general
+lesson is the one already in `specs/progress.md` for goldens: a failure that
+reproduces under `dune build` but vanishes under a cache-disabled rebuild is the
+cache, and `--force` alone is not enough — the env var is.
 
 **`char_from_int` returned different bytes interpreted and compiled — a
 differential-oracle bug that silently corrupted data.** The C runtime's
