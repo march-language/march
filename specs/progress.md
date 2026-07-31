@@ -2,11 +2,13 @@
 
 ## Current State (as of 2026-07-31, `char_from_int` agrees across backends)
 
-**Counts** (measured after merging `origin/main`, which brought in `@[vectorize]`
-and JsonStream): `run_stdlib` 827 (+1: the new `char_from_int` byte-parity case),
-with only the pre-existing environmental `MARCH_SANITIZE` failure; `run_codegen`
-538 green; `run_compiler` 620, `run_eval` 256, `run_snapshots` 33, and
-`test_stdlib_march` 54/54 unchanged by this work.
+**Counts** (measured after merging `origin/main`, which brought in `@[vectorize]`,
+JsonStream phases 1–2, and the compiled-HTTP-server fix): `run_stdlib` 829 (+1:
+the new `char_from_int` byte-parity case — a control worktree at the same
+`origin/main` measures 828), with only the pre-existing environmental
+`MARCH_SANITIZE` failure; `run_codegen` 538 green; `run_compiler` 620,
+`run_eval` 256, `run_snapshots` 33, and `test_stdlib_march` 54/54 unchanged by
+this work.
 
 A note on `run_codegen`, since two entries below disagree with each other: this
 branch measured **521** on its pre-merge base, where the entry below it recorded
@@ -28,6 +30,21 @@ the group then passed 17/17. Clearing the CAS (`.march/cas/artifacts-v2`) did
 lesson is the one already in `specs/progress.md` for goldens: a failure that
 reproduces under `dune build` but vanishes under a cache-disabled rebuild is the
 cache, and `--force` alone is not enough — the env var is.
+
+**A second, different measurement trap in the same session**, worth recording
+because the two look identical from the outside and have opposite causes. After
+the final merge, `run_stdlib` reported both `http server (compiled, end-to-end)`
+cases failing with "server closed the connection mid-response". Again not a
+regression — a control worktree at the same `origin/main` passed both. The cause
+was the *staged* stdlib: `dune build bin/main.exe test/run_*.exe` does not
+restage `_build/default/stdlib`, so the freshly-merged `json_stream.march` was
+**absent** from the staged copy (112 source modules, 111 staged) while every
+compiled test compiles against that copy. `dune build @install` restaged it and
+both cases passed. The diagnostic that named it in one step was
+`diff -q stdlib/<f> _build/default/stdlib/<f>` per file — note that comparing
+*counts* would also have caught this one, but does not catch the more common
+case where a file is present but stale, which is why the per-file content diff
+is the check worth reaching for.
 
 **`char_from_int` returned different bytes interpreted and compiled — a
 differential-oracle bug that silently corrupted data.** The C runtime's
