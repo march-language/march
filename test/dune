@@ -29,7 +29,12 @@
 (library
  (name march_test_stdlib_suite)
  (wrapped false)
- (modules test_stdlib_suite)
+ ; test_http_native rides in this library (rather than getting its own
+ ; runner) so it is carried by run_stdlib.exe — which `dune runtest` runs
+ ; and which CI's `test` job therefore executes on both macOS and Linux.
+ ; Its predecessor, test/test_http_native.sh, was wired into nothing at all,
+ ; which is how a total outage of the compiled HTTP server went unnoticed.
+ (modules test_stdlib_suite test_http_native)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library

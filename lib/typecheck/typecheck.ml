@@ -7505,6 +7505,8 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     List.fold_left calls_in_expr acc args
   | Ast.EApp (f, args, _) ->
     List.fold_left calls_in_expr (calls_in_expr acc f) args
+  | Ast.ECon (_, args, _) -> List.fold_left calls_in_expr acc args
+  | Ast.ELam (_, body, _) -> calls_in_expr acc body
   | Ast.EBlock (es, _) ->
     List.fold_left calls_in_expr acc es
   | Ast.ELet (b, _) ->
@@ -7514,15 +7516,33 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     List.fold_left (fun a arm ->
       let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
       calls_in_expr a arm.Ast.branch_body) acc arms
+  | Ast.ETuple (es, _) -> List.fold_left calls_in_expr acc es
+  | Ast.ERecord (fields, _) ->
+    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    let acc = calls_in_expr acc base in
+    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
+  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
   | Ast.EIf (cond, then_, else_, _) ->
     calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
-  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
+  | Ast.ECond (arms, _) ->
+    List.fold_left (fun a (ce, be) ->
+      calls_in_expr (calls_in_expr a ce) be) acc arms
   | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.EAnnot (ex, _, _) -> calls_in_expr acc ex
+  | Ast.EHole _ -> acc
+  | Ast.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
+  | Ast.ESend (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.ESpawn (e, _) -> calls_in_expr acc e
+  | Ast.EResultRef _ -> acc
+  | Ast.EDbg (None, _) -> acc
+  | Ast.EDbg (Some inner, _) -> calls_in_expr acc inner
   | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
   | Ast.ELetQ (_, rhs, body, _) ->
     calls_in_expr (calls_in_expr acc rhs) body
+  | Ast.EAssert (e, _) -> calls_in_expr acc e
+  | Ast.ESigil (_, content, _) -> calls_in_expr acc content
   | Ast.ELit _ | Ast.EVar _ -> acc
-  | _ -> acc
 
 (** True if [fn_name] ends in the bare "_migrate_state" suffix, regardless of
     which actor it belongs to — the hot-reload state-migration naming
@@ -8843,6 +8863,8 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     List.fold_left calls_in_expr acc args
   | Ast.EApp (f, args, _) ->
     List.fold_left calls_in_expr (calls_in_expr acc f) args
+  | Ast.ECon (_, args, _) -> List.fold_left calls_in_expr acc args
+  | Ast.ELam (_, body, _) -> calls_in_expr acc body
   | Ast.EBlock (es, _) ->
     List.fold_left calls_in_expr acc es
   | Ast.ELet (b, _) ->
@@ -8852,15 +8874,33 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     List.fold_left (fun a arm ->
       let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
       calls_in_expr a arm.Ast.branch_body) acc arms
+  | Ast.ETuple (es, _) -> List.fold_left calls_in_expr acc es
+  | Ast.ERecord (fields, _) ->
+    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    let acc = calls_in_expr acc base in
+    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
+  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
   | Ast.EIf (cond, then_, else_, _) ->
     calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
-  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
+  | Ast.ECond (arms, _) ->
+    List.fold_left (fun a (ce, be) ->
+      calls_in_expr (calls_in_expr a ce) be) acc arms
   | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.EAnnot (ex, _, _) -> calls_in_expr acc ex
+  | Ast.EHole _ -> acc
+  | Ast.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
+  | Ast.ESend (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.ESpawn (e, _) -> calls_in_expr acc e
+  | Ast.EResultRef _ -> acc
+  | Ast.EDbg (None, _) -> acc
+  | Ast.EDbg (Some inner, _) -> calls_in_expr acc inner
   | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
   | Ast.ELetQ (_, rhs, body, _) ->
     calls_in_expr (calls_in_expr acc rhs) body
+  | Ast.EAssert (e, _) -> calls_in_expr acc e
+  | Ast.ESigil (_, content, _) -> calls_in_expr acc content
   | Ast.ELit _ | Ast.EVar _ -> acc
-  | _ -> acc
 
 (** [span_within inner outer] is true when [inner] is nested inside [outer] by
     source position — same file, and [inner]'s start/end fall within [outer]'s

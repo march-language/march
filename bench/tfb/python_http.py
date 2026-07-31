@@ -7,17 +7,29 @@ import http.server
 import json
 
 HELLO = b"Hello, World!"
-JSON_MSG = json.dumps({"message": "Hello, World!"}).encode()
+
+# Serialized PER REQUEST, not once at import. TFB's rules require the /json
+# test to exercise a real serializer, and bench/tfb/tfb_server.march calls
+# Json.to_string on every request -- hoisting this to a module-level constant
+# would measure Python writing a pre-baked buffer against March actually
+# encoding, which is not the same work.
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/json":
+            # separators=(",", ":") -- json.dumps defaults to ", " and ": ",
+            # which would emit 28 bytes against the other three servers' 27 and
+            # fail run.sh's route check. Compact output makes the payload
+            # byte-identical everywhere.
+            body = json.dumps(
+                {"message": "Hello, World!"}, separators=(",", ":")
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(JSON_MSG)))
+            self.send_header("Content-Length", str(len(body)))
             self.send_header("Server", "Python-stdlib")
             self.end_headers()
-            self.wfile.write(JSON_MSG)
+            self.wfile.write(body)
         else:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
