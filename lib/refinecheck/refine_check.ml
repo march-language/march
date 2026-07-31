@@ -5144,8 +5144,21 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
         Option.iter expr app.A.app_on_stop
       | A.DTest (t, _) -> expr t.A.test_body
       | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
-      (* ── Inert: no type annotation or expression that can carry a
-         refinement predicate.  Named so a new decl form breaks the build. ── *)
+      (* ── Not walked.  Named so a new decl form breaks the build. ──
+
+         This list was previously labelled "inert: no type annotation or
+         expression that can carry a refinement predicate".  That is FALSE for
+         two of its members and was demonstrated so by probe: `DSig` carries
+         `sig_fns : (name * ty) list` and `DExtern` carries `extern_fn`'s
+         `ef_params`/`ef_ret_ty`, any of which can be a `TyRefine`.  A
+         refinement written there is accepted in silence today —
+
+             sig Store do fn put : Int -> {Int | _ > 0} end   -- exit 0, no diagnostic
+
+         which is exactly the shape the `DInterface` arm above was just made
+         loud about.  Left silent deliberately for now (tracked in
+         `specs/todos.md`), but do not re-derive "inert" from this list: the
+         label was load-bearing and wrong. ── *)
       | A.DType _ | A.DAlwaysLinearType _  (* refinements in a type DEFINITION
                                               are checked where they are used *)
       | A.DSig _ | A.DProtocol _ | A.DTransitions _ | A.DExtern _

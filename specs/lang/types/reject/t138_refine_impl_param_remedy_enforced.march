@@ -1,0 +1,43 @@
+-- EXPECT-ERROR: refinement violation: argument does not satisfy precondition `_ > 0`
+-- The REMEDY that Task 5's interface-signature warning recommends, proved to
+-- be enforced rather than merely accepted.
+--
+-- `accept/t137` witnesses that a refinement in an `interface` method signature
+-- is inert (and now warns), and carries the working `impl`-side spelling
+-- alongside it. But t137's own call is a SATISFYING one, so it exits 0 whether
+-- the impl-parameter refinement is enforced or silently ignored -- an
+-- accept-only witness cannot tell a working contract from one that checks
+-- nothing, which is the exact trap this corpus has been bitten by before
+-- (see the `List.length` alias, `accept/t118` / `reject/t117`).
+--
+-- This file is the reject companion: the same `Bumper`/`Box` shape as t137's
+-- second half, with a VIOLATING call. If `adoptable_impl_methods` ever stopped
+-- adopting impl-method parameter refinements, t137 would still exit 0 and the
+-- `interface-signature-refinement` alcotest suite would still be green -- the
+-- remedy the warning tells authors to use would have silently stopped working
+-- with nothing failing. This witness is what fails in that case.
+--
+-- `bump` is adoptable here: exactly one `impl` defines it and no top-level
+-- `fn` shares the name. That condition is load-bearing and is stated in the
+-- warning text itself -- with a second `impl Bumper(Crate)` also defining
+-- `bump`, the refinement is NOT adopted and this same call exits 0.
+--
+-- See specs/lang/refinement-types.md, "A refinement in an interface signature
+-- enforces nothing".
+mod T138 do
+
+  type Box = Box(Int)
+
+  interface Bumper(a) do
+    fn bump : a -> Int -> Int
+  end
+
+  impl Bumper(Box) do
+    fn bump(_b : Box, n : {Int | _ > 0}) : Int do n end
+  end
+
+  fn main() : Int do
+    bump(Box(1), 0 - 5)
+  end
+
+end
