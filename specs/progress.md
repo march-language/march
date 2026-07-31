@@ -1,5 +1,31 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-31, `@[vectorize]`/`@[vectorize(warn)]` turns silent auto-vectorization eligibility into a checked contract)
+
+**Counts:** `run_compiler` 619 (unchanged in the quick suite; +1 parser test added by this work), `run_eval` 256 (unchanged), `run_codegen` 535 (was 520, +15 — the new `vectorize_check` group), `run_stdlib` 780 (unchanged); `scripts/run-tests.sh -q` all suites passed, exit 0.
+
+**Feature.** `@[vectorize]` and `@[vectorize(warn)]` function attributes. `NativeArray.map_int`/`map_float`/`map2_int`/`map2_float` have long had an auto-vectorization fast path (`lib/tir/native_map_inline.ml`) that silently either does or doesn't fire depending on how the callback closure is used — until now there was no way for an author to say "this function must vectorize" and have the compiler check it. `@[vectorize]` makes an eligibility violation a hard compile error (exit 1); `@[vectorize(warn)]` reports it as a warning and lets the build continue.
+
+**The two real gates**, deliberately reusing `native_map_inline.ml`'s own matching helpers so the diagnostic can never disagree with what the optimizer actually does:
+- **Reuse gate** (Int and Float targets): the callback closure must be used exactly once, passed directly as the map/map2 call's closure argument. `"<fn> cannot vectorize — this callback isn't safe to inline"`.
+- **Generic-signature gate** (Float targets only): the callback's resolved signature must be concretely `Float`, not a leftover `TVar` — this is what unlocks the zero-boxing unboxed clone. `"<fn> cannot vectorize — callback type is still generic"`.
+
+A third **misuse** category — the attribute on a function with zero `NativeArray.map`/`map2` calls — is always a hard error even under `(warn)`, catching a misapplied or typo'd annotation.
+
+Worth recording: the informal prose in `docs/simd-vectorization.md` and `stdlib/native_array.march` describes the eligibility bar as "non-capturing or single-capture," but the actual implementation gates on reuse and (Float-only) concrete typing — capture count is not a gate; `native_map_inline.ml`'s Phase 2 (0 captures) and Phase 2c (1+ captures) both get the inlining treatment. The checker follows the code, not the prose, which is why there are two gates rather than three.
+
+**Implementation shape.** `lib/parser/parser.mly` gained a new `fn_attr` alternative for the `@[name(value)]` bracket-with-argument form — the grammar previously supported `@[name]` and bare `@name(value)` but not the combination — encoded as `"vectorize:warn"`, the same convention `@compat(full)` already uses. `lib/tir/vectorize_mark.ml` (new) runs immediately after `Lower.lower_module`, before `Mono` — the one point in the pipeline where a TIR function's name is still exactly its source name — and injects a compiler-internal sentinel call (`__vectorize_marker_hard`/`__vectorize_marker_soft`) at the head of each annotated function's body, carrying the source name and declaration span as literal arguments. `lib/tir/vectorize_check.ml` (new) runs late, right before `Native_map_inline.run` (so it sees the same pre-rewrite TIR shape the optimizer peephole consumes): it scans bodies for sentinels, runs the gates, and returns the TIR with every sentinel stripped back out. `bin/main.ml` wires in both insertion points, each guarded on `not is_js_target`.
+
+**Why a sentinel, not name matching.** The first implementation matched AST attributes to TIR functions by name at the late check point, stripping everything after a TIR name's first `$` on the assumption `$` only marks a monomorphization suffix. Review found that unsound two ways, both confirmed empirically: (a) Defun independently produces `<fn>$apply$<uid>` for every lifted lambda, so a stdlib local `fn scale` becomes `scale$apply$1803` and a user's own `@[vectorize] fn scale` would fire a spurious hard error against it; (b) the check runs after Opt, and a small annotated wrapper gets inlined into its caller and no longer exists as its own `fn_def` — so the exact reuse-gate violation the feature exists to catch was silently missed (confirmed via a post-Opt TIR dump showing `fn scale` entirely absent). The sentinel survives both mangling and inlining because Mono's record-update duplication and Opt's inliner preserve body contents wherever they land. It also fixed two consequences for free: diagnostics now name the user-written source name (not `scale$Float`), and `@[vectorize]` inside a nested `mod` no longer silently no-ops (the mark pass qualifies names the same way `Lower` does).
+
+**Known limitation.** If two separately-annotated functions are both inlined into the same caller, their sentinels merge and can't be attributed call-by-call; `combine_markers` widens (joins the names, takes Hard if any is Hard) rather than silently mis-attributing.
+
+**Tests.** A 15-test `vectorize_check` group in `run_codegen` covers: eligible Float, eligible Int, eligible map2, `(warn)` on eligible code is silent, reuse-gate hard fail, reuse-gate under `(warn)`, reuse-gate on map2, reuse-gate caught even after the annotated fn is inlined away, generic-signature pass/hard-fail/`(warn)`, misuse hard fail, misuse still hard under `(warn)`, a module-loads smoke test, and an end-to-end CLI test driving the real `march --compile` binary. Plus one new `run_compiler` parser test for the `@[vectorize(warn)]` bracket-with-argument grammar.
+
+**Out of scope / follow-up.** Fixed-width SIMD vector types (`f32x4`, `f32x8`, `i32x4`, `i32x8`) were part of the original feature request but are explicitly a separate later increment — they don't depend on this attribute. Tracked as an open TODO in `specs/todos.md`.
+
+**Commits:** `47ce1996` (parser), `8bcc320e` + `5b2e731e` (check pass + sentinel redesign), `bea4ccf4` + `93bb6871` + `e82225d0` (pipeline wiring + test-robustness fixes), `284298ff` + `762d6e49` (test matrix + coverage gaps).
+
 ## Current State (as of 2026-07-30, a `(`-led statement no longer glues onto the previous line)
 
 **Counts:** `run_compiler` 619 (was 615, +4 parse tests), `run_codegen` 520
