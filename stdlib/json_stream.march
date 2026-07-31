@@ -24,6 +24,7 @@ mod JsonStream do
     | EvKey(String)
     | EvStr(String)
     | EvNum(Float)
+    | EvNumRaw(String)
     | EvBool(Bool)
     | EvNull
 
@@ -74,8 +75,8 @@ mod JsonStream do
     | PStr(List(String), Int, JsEsc, Int, Int)  -- pieces, len, esc, pending high surrogate (0-1 = none), start
     | PNum(List(String), Int, Int)              -- pieces, len, start
 
-  -- max_depth, max_token_bytes, ndjson mode
-  ptype JsCfg = JsCfg(Int, Int, Bool)
+  -- max_depth, max_token_bytes, ndjson mode, raw-number mode
+  ptype JsCfg = JsCfg(Int, Int, Bool, Bool)
 
   -- cfg, mode, container stack (parent modes), depth, in-flight token,
   -- absolute offset of the next unread byte.
@@ -89,7 +90,28 @@ mod JsonStream do
   fn start_ndjson_with(l) do StOk(cfg_of(l, true), MTop, Nil, 0, PNone, 0) end
 
   pfn cfg_of(l, nd) do
-    match l do JsonLimits(d, t) -> JsCfg(d, t, nd) end
+    match l do JsonLimits(d, t) -> JsCfg(d, t, nd, false) end
+  end
+
+  doc """
+  Emit `EvNumRaw(lexeme)` instead of `EvNum(float)`, preserving integers
+  above 2^53 that a `Float` cannot represent.
+
+  Composes with every constructor:
+
+      let st = JsonStream.with_raw_numbers(JsonStream.start_ndjson())
+
+  Validation is unchanged -- a malformed number is still rejected with the
+  same error at the same offset.  Intended for a fresh state; applied
+  mid-stream it affects only numbers completed after the call.
+  """
+  fn with_raw_numbers(st) do
+    match st do
+    StOk(cfg, mode, stack, depth, partial, off) ->
+      match cfg do
+      JsCfg(d, t, nd, _) -> StOk(JsCfg(d, t, nd, true), mode, stack, depth, partial, off)
+      end
+    end
   end
 
   -- ── Small helpers ─────────────────────────────────────────────────────
@@ -181,7 +203,7 @@ mod JsonStream do
   -- After a value completes in `mode`, the successor mode.
   pfn after_value(cfg, mode) do
     match mode do
-    MTop -> match cfg do JsCfg(_, _, nd) -> if nd do MTop else MDone end end
+    MTop -> match cfg do JsCfg(_, _, nd, _) -> if nd do MTop else MDone end end
     MArrFirst -> MArrNext
     MArrValue -> MArrNext
     MObjValue -> MObjNext
@@ -282,7 +304,7 @@ mod JsonStream do
   pfn num_start(s, i, c, cfg, mode, stack, depth, base, evs) do
     let stop = num_end(s, i)
     match cfg do
-    JsCfg(_, maxt, _) ->
+    JsCfg(_, maxt, _, _) ->
       if stop - i > maxt do Err(ETokenLimit(base + i))
       else
         go(s, stop, cfg, mode, stack, depth,
@@ -294,7 +316,7 @@ mod JsonStream do
   -- '{' or '[': push the parent mode; restore it via after_value on close.
   pfn open_container(s, i, is_obj, cfg, mode, stack, depth, base, evs) do
     match cfg do
-    JsCfg(maxd, _, _) ->
+    JsCfg(maxd, _, _, _) ->
       if depth + 1 > maxd do Err(EDepthLimit(base + i))
       else
         let ev = if is_obj do EvObjStart else EvArrStart end
@@ -358,7 +380,7 @@ mod JsonStream do
 
   pfn push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, t) do
     match cfg do
-    JsCfg(_, maxt, _) ->
+    JsCfg(_, maxt, _, _) ->
       let len2 = len + string_byte_length(t)
       if len2 > maxt do Err(ETokenLimit(soff))
       else
@@ -383,7 +405,7 @@ mod JsonStream do
     let e = run_end(s, i)
     let stop = if e < 0 do string_byte_length(s) else e end
     match cfg do
-    JsCfg(_, maxt, _) ->
+    JsCfg(_, maxt, _, _) ->
       let len2 = len + (stop - i)
       if len2 > maxt do Err(ETokenLimit(soff))
       else
@@ -480,7 +502,7 @@ mod JsonStream do
     if is_num_byte(c) do
       let stop = num_end(s, i)
       match cfg do
-      JsCfg(_, maxt, _) ->
+      JsCfg(_, maxt, _, _) ->
         let len2 = len + (stop - i)
         if len2 > maxt do Err(ETokenLimit(soff))
         else
@@ -490,19 +512,25 @@ mod JsonStream do
       end
     else
       -- Delimiter: finalize, then REPROCESS byte c (same i) token-free.
-      match num_finalize(ps, soff) do
+      match num_finalize(cfg, ps, soff) do
       Err(e) -> Err(e)
       Ok(ev) -> go(s, i, cfg, after_value(cfg, mode), stack, depth, PNone, base, Cons(ev, evs))
       end
     end
   end
 
-  pfn num_finalize(ps, soff) do
+  pfn num_finalize(cfg, ps, soff) do
     let lex = join_pieces(ps)
     if valid_num(lex) do
-      match string_to_float(lex) do
-      Some(f) -> Ok(EvNum(f))
-      None -> Err(EMalformed("invalid number", soff))
+      match cfg do
+      JsCfg(_, _, _, raw) ->
+        if raw do Ok(EvNumRaw(lex))
+        else
+          match string_to_float(lex) do
+          Some(f) -> Ok(EvNum(f))
+          None -> Err(EMalformed("invalid number", soff))
+          end
+        end
       end
     else Err(EMalformed("invalid number", soff)) end
   end
@@ -564,7 +592,7 @@ mod JsonStream do
       match partial do
       PNone -> finish_mode(cfg, mode, stack, off, Nil)
       PNum(ps, len, soff) ->
-        match num_finalize(ps, soff) do
+        match num_finalize(cfg, ps, soff) do
         Err(e) -> Err(e)
         Ok(ev) -> finish_mode(cfg, after_value(cfg, mode), stack, off, Cons(ev, Nil))
         end
@@ -579,7 +607,7 @@ mod JsonStream do
     MDone -> Ok(evs)
     MTop ->
       match cfg do
-      JsCfg(_, _, nd) ->
+      JsCfg(_, _, nd, _) ->
         if nd do
           match stack do
           Nil -> Ok(evs)
@@ -650,6 +678,11 @@ mod JsonStream do
     EvNull -> bpush(frames, Null)
     EvBool(b) -> bpush(frames, Bool(b))
     EvNum(f) -> bpush(frames, Number(f))
+    EvNumRaw(r) ->
+      match string_to_float(r) do
+      Some(f) -> bpush(frames, Number(f))
+      None -> Err(EMalformed("invalid number", 0))
+      end
     EvStr(sv) -> bpush(frames, Str(sv))
     EvKey(k) ->
       match frames do
