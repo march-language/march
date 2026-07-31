@@ -407,6 +407,103 @@ or the C `mbedtls_sha256` binding.
 
 ---
 
+## HTTP benchmark: Run 4 (2026-07-31) — readiness-gated pool: BUILT, MEASURED, REJECTED
+
+A negative result, recorded so it is not rebuilt. **Do not re-attempt this
+without first reading the attribution table below.**
+
+**Hypothesis.** Run 3 left the default thread pool at ~36 CPU-µs/request against
+the opt-in event loop's ~28. The suspected cause was the threading model:
+`conn_serve` owns a connection for its whole keep-alive lifetime and blocks in
+`recv()` between requests, so a thread is parked per open *connection* rather
+than per in-flight *request* — 256 mostly-asleep threads at c=256. The proposed
+fix was a **readiness-gated pool**: a poller thread owns idle connections and
+waits on them with one `poll()`, pushes a connection onto the work queue only
+when it is actually readable, and a worker runs one dispatch cycle and hands it
+straight back. Workers stay ordinary blocking OS threads, so handlers may still
+block — the property that makes the pool, not the event loop, the default.
+
+**It was built in full** (poller thread, self-pipe wakeup, `MSG_DONTWAIT`
+dispatch cycle, poller-enforced idle sweep, drain-based elastic growth) and it
+is **functionally correct**: 256 concurrent connections served by 28 workers +
+1 poller (34 threads total vs 256 before), zero persistently-unread Recv-Q,
+pipelining and keep-alive intact, clean shutdown, and blocking handlers still
+get concurrency (120 blocking handlers grew the pool to 152 threads and all 120
+completed).
+
+**It is also 66% more expensive per request, so it was not kept.**
+
+**Machine:** macOS Darwin 25.5.0, 14 logical CPUs, heavily contended — load
+average 91–140 and **0.0% idle** for every run below. **Tool:** wrk 4.2.0,
+`-t4 -c256 -d10s`, 3 s warm-up, order-swapped A,B,B,A. Metric is CPU-µs per
+request (server-process CPU-time delta ÷ completed requests); req/s is not a
+valid metric on this box (see Run 3).
+
+| Order | Server | CPU-µs/req |
+|---|---|---:|
+| 1 | parked-thread pool (kept) | 36.99 |
+| 2 | readiness-gated pool | 61.45 |
+| 3 | readiness-gated pool | 60.76 |
+| 4 | parked-thread pool (kept) | 36.11 |
+
+The parked-thread numbers reproduce Run 3's 35.70/36.16, so the harness is sound.
+
+**Independently reproduced** on a second harness, both binaries rebuilt from the
+two branches and confirmed to differ (`cmp`), order-swapped A,B,B,A, load 64–74
+at 0.0% idle:
+
+| Order | Server | threads | CPU-µs/req |
+|---|---|---:|---:|
+| 1 | parked-thread pool | 262 | 36.63 |
+| 2 | readiness-gated pool | 34 | 62.03 |
+| 3 | readiness-gated pool | 34 | 62.85 |
+| 4 | parked-thread pool | 262 | 36.89 |
+
+Same direction, same magnitude (~69%), from a separate measurement script. A
+negative result is only worth acting on if it reproduces off its author's
+harness — this one does, which is what licenses not rebuilding this design.
+
+The thread counts in that table are the other half of the trade and are worth
+reading alongside the CPU column: readiness gating really does deliver what it
+promised on thread count (**34 threads for 256 connections, versus 262**). It
+simply costs ~70% more CPU per request to get there. That makes it a lever for
+a machine where threads or their stacks are the binding constraint, not one for
+throughput or latency.
+
+**Attribution — why `kqueue`/`epoll` would not have rescued it.** `poll()` is
+O(n) in registered descriptors, so the obvious rebuttal is that the poller, not
+the design, is at fault. Re-measured at two connection counts:
+
+| Connections | parked-thread | readiness-gated | penalty |
+|---|---:|---:|---:|
+| c=32  | 36.01 / 34.28 | 62.73 / 70.46 | ~+31 µs |
+| c=256 | 37.41 / 39.26 | 61.66 / 63.17 | ~+24 µs |
+
+The penalty does not grow with the number of polled descriptors — it is
+slightly *smaller* at c=256. So it is not the O(n) scan, and swapping in
+kqueue/epoll would not recover it. The cost is the **per-request thread
+handoff**, which is structural to any readiness-gated pool.
+
+**What the parked-thread pool is actually doing right.** Its per-request path is
+close to minimal: the kernel wakes the one thread already blocked in `recv()` on
+that socket and copies the data straight into its buffer. One wakeup, no queue,
+no lock, no readiness syscall. Readiness gating replaces that single wakeup with
+a `poll()` return, poller-side bookkeeping, a mutex + condvar handoff (a *second*
+thread wakeup), an extra `EAGAIN` `recv()`, and a re-arm — roughly +25–30 CPU-µs.
+
+**Corollary: the event loop's ~8 µs advantage is not the parked threads.** That
+hypothesis is now refuted. The remaining candidates are that the evloop runs the
+handler directly on the loop thread with *zero* cross-thread handoff, and its
+`SO_REUSEPORT` listener sharding. Any future attempt at closing the gap should
+start there — and must not reintroduce a queue between readiness and handler.
+
+The parked-thread pool's real cost is memory and scheduler pressure from holding
+a thread per connection (256 threads vs 34), not CPU per request. If that ever
+becomes the binding constraint, this trade is worth revisiting — but it is a
+trade, not a win.
+
+---
+
 ## HTTP benchmark: Run 3 (2026-07-31) — thread pool vs event loop
 
 First run against a harness that measures the routes it drives (see
