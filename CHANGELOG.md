@@ -19,6 +19,19 @@ git log is authoritative for exact commits.
   and string tokens (a degenerate `max_token_bytes = 0` previously accepted
   a 1-digit number while rejecting a 1-char string).
 
+- **`@[vectorize]` / `@[vectorize(warn)]` function attribute.** `NativeArray.map`/`map2`
+  have had a silent auto-vectorization fast path for a while — whether it actually
+  fires depends on how the callback closure is used, with no feedback if it doesn't.
+  This attribute turns that into a checked compile-time contract: `@[vectorize]` on a
+  function is a hard compile error if its `NativeArray.map`/`map2` calls wouldn't
+  actually vectorize; `@[vectorize(warn)]` reports the same problem as a warning and
+  lets the build continue. Two specific diagnoses are distinguished — a callback
+  that isn't safe to inline because it's reused rather than passed directly to the
+  map/map2 call, versus (for `Float` targets) a callback whose type is still generic
+  rather than concretely `Float` — plus a hard error if the attribute is applied to
+  a function that doesn't call `NativeArray.map`/`map2` at all. Fixed-width SIMD
+  vector types (`f32x4`, etc.) remain a separate, future increment.
+
 - **`cap verified`: an obligation the refinement checker cannot discharge is an
   error.** March's default stance is to report a refinement violation only when
   a precondition can *never* hold; anything the checker cannot decide is
