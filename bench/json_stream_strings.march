@@ -1,0 +1,102 @@
+-- JsonStream vs Json.parse, string-heavy corpus: 2,000 NDJSON records, each
+-- `{"s": "<~1000-byte escape-free payload>"}\n` — a single content-bearing
+-- string field per record, no escapes, no nesting. This is the corpus shape
+-- that motivated JsonStream phase 2's run-slicing (Components 1-2,
+-- `specs/2026-07-31-json-streaming-phase2-design.md`): the tiny-token corpus
+-- in `bench/json_stream.march` has almost no run to slice (2-6 byte keys,
+-- ~11 byte values), so it cannot show a materialization win or loss. This
+-- corpus isolates exactly that: long, escape-free runs, one per record.
+--
+-- Each record emits 4 events: EvObjStart, EvKey("s"), EvStr(payload),
+-- EvObjEnd — verified by construction (one key, one string value, no
+-- nesting), not measured empirically like the tiny-token corpus (there is
+-- only one shape here, so there is nothing to disambiguate).
+-- Expected output: stream_events=8000 (2000 records x 4), parse_len=2000000
+-- (2000 records x 1000-byte payload) — both are correctness checksums, not
+-- timings. The two ms lines vary by machine and load; see
+-- `specs/benchmarks.md` for the load caveat before trusting an absolute
+-- number.
+
+mod JsonStreamStringsBench do
+
+pfn build_lines(n, payload, acc) do
+  if n <= 0 do acc
+  else
+    build_lines(n - 1, payload,
+      Cons("{\"s\": \"" ++ payload ++ "\"}\n", acc))
+  end
+end
+
+fn main() do
+  let n = 2000
+  let payload = String.repeat("abcdefghij", 100)  -- 1000 bytes, no quotes/backslashes
+  let lines = build_lines(n, payload, Nil)
+  let src = string_join(lines, "")
+
+  let t0 = System.monotonic_time()
+  let stream_total = run_chunked(src, 0, JsonStream.start_ndjson(), 0)
+  let t1 = System.monotonic_time()
+
+  let t2 = System.monotonic_time()
+  let parse_total = parse_all(lines, 0)
+  let t3 = System.monotonic_time()
+
+  println("stream_events=" ++ to_string(stream_total))
+  println("stream_ms=" ++ to_string(t1 - t0))
+  println("parse_len=" ++ to_string(parse_total))
+  println("parse_ms=" ++ to_string(t3 - t2))
+end
+
+pfn run_chunked(src, off, st, n) do
+  let sz = string_byte_length(src)
+  if off >= sz do
+    match JsonStream.finish(st) do
+    Err(_) -> 0 - 1
+    Ok(evs) -> n + count_list(evs)
+    end
+  else
+    let take = if sz - off < 65536 do sz - off else 65536 end
+    match JsonStream.feed(st, string_slice(src, off, take)) do
+    Err(_) -> 0 - 1
+    Ok((evs, st2)) -> run_chunked(src, off + take, st2, n + count_list(evs))
+    end
+  end
+end
+
+pfn count_list(evs) do
+  match evs do
+  Nil -> 0
+  Cons(_, t) -> count_list(t) + 1
+  end
+end
+
+pfn parse_all(lines, acc) do
+  match lines do
+  Nil -> acc
+  Cons(h, t) ->
+    match Json.parse(h) do
+    Err(_) -> 0 - 1
+    Ok(v) ->
+      match v do
+      Json.Object(fields) -> parse_all(t, acc + field_len(fields))
+      _ -> 0 - 1
+      end
+    end
+  end
+end
+
+pfn field_len(fields) do
+  match fields do
+  Nil -> 0
+  Cons(pair, t) ->
+    match pair do
+    (_, v) ->
+      match v do
+      Json.Str(s) -> string_byte_length(s) + field_len(t)
+      _ -> field_len(t)
+      end
+    end
+  end
+end
+
+end

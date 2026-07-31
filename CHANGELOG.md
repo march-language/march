@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
   `JsonStream.with_raw_numbers(st)` emits the verbatim number lexeme
   (`EvNumRaw(String)`) instead of converting to `Float`, so integers above
   2^53 survive a round trip losslessly; the default mode is unchanged.
+  **Performance:** string and number tokens are now sliced as whole runs
+  instead of accumulated byte-by-byte, closing the gap to `Json.parse` to
+  parity on string-heavy JSON (was ~55x slower); a residual ~3x gap remains
+  on JSON with very short tokens (2-6 byte keys/values), which is a
+  per-token overhead a future `feed_fold` API would address, not a scanning
+  gap — no SIMD/C scanner was added, since the measurement showed one
+  would not help.
 
 - **`@[vectorize]` / `@[vectorize(warn)]` function attribute.** `NativeArray.map`/`map2`
   have had a silent auto-vectorization fast path for a while — whether it actually
