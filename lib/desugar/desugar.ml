@@ -2135,7 +2135,7 @@ let rec expand_defaults_decl (d : decl) : decl list =
       consistent with every other module, not a stripping gap.  Including
       these names actively regresses working code: [qualify_level] would
       rewrite the bare `greet(1)` inside a nested module that declares the
-      interface into `Foo.Bar.greet(1)` (measured: a program that printed
+      interface into `Bar.greet(1)` (measured: a program that printed
       `hi-nested` started failing `unbound variable: Bar.greet`), and for
       [DImpl] it would additionally rewrite every bare `show(x)` in a module
       that merely implements `Show`, breaking dispatch to a method the

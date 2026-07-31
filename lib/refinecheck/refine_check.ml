@@ -5599,8 +5599,20 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
         | A.DExtern (ed, sp) ->
           defines in_mod sp
             (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = fn) ed.A.ext_fns)
-        (* Interface/impl methods are reachable under the declaring module's
-           qualified spelling too. *)
+        (* Interface/impl methods are counted as a DELIBERATE OVER-APPROXIMATION.
+           They are NOT actually reachable under the declaring module's
+           qualified spelling — `Bar.greet(1)` fails `unbound variable` for a
+           nested module and the entry module alike, because a method resolves
+           through interface dispatch rather than module member lookup (measured
+           2026-07-30; see the residual in `specs/todos.md`).  An earlier
+           revision of this comment asserted the opposite as fact.
+
+           The arms stay anyway, because this gate's policy is suppress-on-doubt:
+           over-counting a competitor costs a lost proof (silence), while
+           under-counting puts a wrong fact in the assumption set and reports
+           correct code — the cardinal sin here.  Do NOT "fix" this by deleting
+           the arms: `accept/t126`/`t127` now depend on them, and see the
+           coupling note on that residual before changing either. *)
         | A.DInterface (idf, sp) ->
           defines in_mod sp
             (List.exists
