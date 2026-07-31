@@ -11,6 +11,23 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **The TFB HTTP benchmark harness measures the routes it claims to.**
+  `bench/tfb/run.sh` drove wrk at `/plaintext` and `/json` while its March
+  target was `examples/http_hello`, which routes only `GET /` — so both
+  endpoints answered `404 Not Found` and every March number the harness printed
+  was 404 throughput. There is now a real `bench/tfb/tfb_server.march` serving
+  the same two routes as the Node and Python servers, the harness compiles it
+  itself, and it aborts rather than reporting numbers if any server under test
+  fails a route check. The `/json` body is serialized per request in all four
+  servers (Node and Python previously wrote a buffer baked at startup, against
+  March actually encoding), and all four now emit a byte-identical payload.
+  The historical Run 1 / Run 2 comparison tables in `specs/benchmarks.md` are
+  annotated as invalid rather than deleted; the Rust actix-web and FastAPI
+  servers they reference have never existed in the repository, so those two
+  comparisons cannot currently be reproduced.
+
 ### Fixed
 
 - **The compiled HTTP server works again.** A compiled `HttpServer` panicked

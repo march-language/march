@@ -1,0 +1,54 @@
+-- bench/tfb/tfb_server.march — TechEmpower-style benchmark server.
+--
+-- Routes match bench/tfb/node_http.js and bench/tfb/python_http.py EXACTLY, so
+-- the three are measured on identical work:
+--
+--   GET /plaintext  ->  "Hello, World!"              (text/plain, 13 bytes)
+--   GET /json       ->  {"message":"Hello, World!"}  (application/json)
+--
+-- Do NOT point the harness at examples/http_hello.march instead. That server
+-- routes only `GET /` and 404s everything else, so driving wrk at /plaintext
+-- and /json against it measures the 404 path — which is what bench/tfb/run.sh
+-- did until 2026-07-31.
+--
+-- The /json body is SERIALIZED PER REQUEST via Json.to_string, not returned as
+-- a pre-baked constant. TFB's rules require the JSON test to exercise a real
+-- serializer, and node_http.js / python_http.py were changed to serialize per
+-- request too. If you replace this with a constant string you are no longer
+-- measuring the same thing they are.
+--
+-- Build (from the repo root):
+--   ./_build/default/bin/main.exe --compile --opt 2 \
+--       bench/tfb/tfb_server.march -o bench/tfb/tfb_server
+-- Add MARCH_HTTP_EVLOOP=1 in front to build the event-loop server instead of
+-- the default thread-pool one (see bin/main.ml, -DMARCH_HTTP_USE_EVLOOP).
+
+mod TfbServer do
+
+  -- Built through Json.encode_* rather than the bare `Object`/`Str`
+  -- constructors: `Str` is ambiguous across Json, Msgpack and IOList, and the
+  -- encode_ helpers are unambiguous functions.
+  fn json_body() do
+    Json.to_string(
+      Json.encode_object(
+        Cons(("message", Json.encode_string("Hello, World!")), Nil)))
+  end
+
+  fn router(conn) do
+    match HttpServer.path_info(conn) do
+    Cons("plaintext", Nil) ->
+      conn |> HttpServer.text(200, "Hello, World!")
+    Cons("json", Nil) ->
+      conn |> HttpServer.json(200, json_body())
+    _ ->
+      conn |> HttpServer.text(404, "Not Found")
+    end
+  end
+
+  fn main() do
+    HttpServer.new(8080)
+    |> HttpServer.plug(router)
+    |> HttpServer.listen()
+  end
+
+end

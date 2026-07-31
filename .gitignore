@@ -77,6 +77,11 @@ __pycache__/
 !/bench/c/
 !/bench/cpp/
 !/bench/tfb/
+# ...but not the server binary bench/tfb/run.sh compiles into that directory,
+# nor Python bytecode from python_http.py. The `!/bench/tfb/` un-ignore above
+# would otherwise offer both up as committable.
+/bench/tfb/tfb_server
+/bench/tfb/__pycache__/
 
 # Runtime trace dumps
 /trace/

@@ -3,16 +3,22 @@
 const http = require('http');
 
 const HELLO = Buffer.from('Hello, World!');
-const JSON_MSG = Buffer.from('{"message":"Hello, World!"}');
+
+// The /json body is serialized PER REQUEST, not hoisted to a module-level
+// constant. TFB's rules require the JSON test to exercise a real serializer,
+// and bench/tfb/tfb_server.march calls Json.to_string on every request --
+// pre-baking it here would measure Node writing a fixed buffer against March
+// actually encoding, which is not the same work.
 
 const server = http.createServer((req, res) => {
   if (req.url === '/json') {
+    const body = Buffer.from(JSON.stringify({ message: 'Hello, World!' }));
     res.writeHead(200, {
       'Content-Type': 'application/json',
-      'Content-Length': JSON_MSG.length,
+      'Content-Length': body.length,
       'Server': 'Node.js'
     });
-    res.end(JSON_MSG);
+    res.end(body);
   } else {
     res.writeHead(200, {
       'Content-Type': 'text/plain',
