@@ -1,6 +1,9 @@
 # Streaming JSON — Phase 2: Throughput
 
-**Status:** draft, not yet implemented
+**Status:** implemented (2026-07-31) — Components 1, 2, 2b landed; Component 3's
+gate ran and Component 4 (SIMD) is **closed as not-built** on the measurement;
+Component 5 is recorded as an open item. See the verdict appended after
+Component 3 below.
 **Date:** 2026-07-31
 **Scope:** phase 2 of two. Phase 1
 (`specs/2026-07-30-json-streaming-design.md`) delivered the safety skeleton —
@@ -237,6 +240,58 @@ Re-run `bench/json_stream.march` and the `Json.parse` A/B from *Why*
 (same-session, order-swapped, compiled `--opt 2`), plus a **string-heavy**
 and a **number-heavy** corpus variant, since the two components are expected
 to pay off unevenly and one aggregate number would blur attribution.
+
+### Measurement and verdict (2026-07-31)
+
+Both A/Bs below were run interleaved so compared arms shared identical
+machine load (the load itself was heavy — reported averages 43-97 on 14
+cores, from other concurrent sessions in this worktree set — so **absolute
+milliseconds are not comparable across sessions and are not presented as a
+clean baseline here; the ratios are sound because compared arms ran at the
+same moment**). Full detail and the benchmark sources: `specs/benchmarks.md`
+(`bench/json_stream.march`, `bench/json_stream_strings.march`).
+
+**String-heavy corpus** (new: `bench/json_stream_strings.march`, 2,000
+records, each a single ~1KB escape-free JSON string), 3 interleaved rounds,
+commit `8a79a275` (pre-run-slicing) vs `4afc215d` (post-run-slicing):
+
+| | JsonStream | `Json.parse` | ratio |
+|---|---|---|---|
+| BEFORE run-slicing | 322 / 348 / 364 ms | 6-25 ms | ~55x slower |
+| AFTER run-slicing | 6 / 6 / 6 ms | 6 / 6 / 6 ms | **1.0x, parity** |
+
+**Tiny-token corpus** (`bench/json_stream.march`'s existing 20,000-record
+shape: 2-6 byte keys, ~11 byte values), order-swapped arms:
+
+| | JsonStream | `Json.parse` | ratio |
+|---|---|---|---|
+| AFTER run-slicing | 219 / 234 ms | 71 / 77 ms | ~3.05x |
+| BEFORE (phase 1 design's figures) | 223-226 ms | 62 ms | ~3.6x |
+
+**Verdict.** The diagnosis in *Why* is **confirmed**: run-slicing (Components
+1-2) closes the gap to `Json.parse` parity (1.0x, comfortably inside the
+"~1.5x" criterion) on content-bearing tokens, because that is exactly where
+per-byte materialization dominated. It only narrows the tiny-token gap
+(3.6x -> 3.05x), because a 2-6 byte token has almost no run for run-slicing
+to help with in the first place — that residual is a **different**
+bottleneck: per-*token* overhead (state transitions, `List(Event)`
+allocation, a cons + a join even for a single-piece token), not scanning.
+Both `Json.parse` and `JsonStream` scan identically (byte-at-a-time,
+`string_byte_at`); a byte-set scanner cannot speed up a `memchr` call over a
+4-byte run, so SIMD cannot address the only gap that remains.
+
+**Component 4 (the C byte-set scanner / SIMD) is therefore CLOSED as
+NOT BUILT**, in the manner
+`specs/plans/2026-07-27-string-performance-phase2.md` recorded its own Tasks
+4 and 5 closures — a verdict plus the measurement that produced it, not an
+estimate. A C surface that cannot pay under this feature's threat load is a
+permanent maintenance and safety liability, and declining to add it is a
+result, per the Decision criteria above.
+
+**Component 5 (`feed_fold`, removing the per-event `List(Event)`
+allocation) is the indicated next step** if the small-token case matters —
+left as an **open item**, not built here. It is what the tiny-token
+residual's "per-token overhead" diagnosis points at directly.
 
 ## Decision criteria — committed in advance
 

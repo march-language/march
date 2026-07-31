@@ -656,7 +656,7 @@ parallel scheduler is degraded.
 
 ---
 
-## bench/json_stream.march — JsonStream chunked NDJSON tokenizer (20,000 records)
+## bench/json_stream.march — JsonStream chunked NDJSON tokenizer (20,000 records, tiny tokens)
 
 **Command:** compile with `--opt 2`, run directly.
 
@@ -676,7 +676,13 @@ scalars, `EvArrStart`, `EvNum`×3, `EvArrEnd`, `EvObjEnd`) — measured
 empirically with 1/2/3-record probes (14, 28, 42 events), not derived from
 prose arithmetic. Expected checksum: `20000 × 14 = 280000`.
 
-**Baseline results (2026-07-31, Apple M-class, `--opt 2`):**
+This corpus is **tiny-token**: keys are 2-6 bytes, values ~11 bytes. It is
+deliberately unfavorable to any fix that only speeds up long runs (see the
+companion string-heavy corpus below) — a 2-6 byte token has almost no run to
+slice, so this is where a per-*token* overhead (as opposed to a per-*byte*
+overhead) would show up as a residual gap.
+
+**Phase 1 baseline results (2026-07-31, Apple M-class, `--opt 2`):**
 
 ```
 checksum=280000
@@ -701,18 +707,101 @@ buffer is O(records), but nothing in `JsonStream`'s chunk-fed state
 (`JsState`) accumulates unboundedly across `feed` calls — only the per-chunk
 event list and in-flight partial-token buffer are live at any point.
 
+**Phase 2 run-slicing results, tiny-token corpus (2026-07-31, order-swapped
+arms, same session as the string-heavy A/B below):**
+
+```
+JsonStream: 219 ms / 234 ms
+Json.parse: 71 ms / 77 ms
+=> ~3.05x (was ~3.6x pre-run-slicing, per specs/2026-07-31-json-streaming-phase2-design.md's "Why" section)
+```
+
+Run-slicing (Components 1-2 of
+`specs/2026-07-31-json-streaming-phase2-design.md`) narrows but does not
+close the gap on this corpus, because there is very little run here to slice
+— see the string-heavy corpus below, where the same fix nearly eliminates
+the gap. **This residual ~3x is per-*token* overhead** (state-machine
+transitions, event-list allocation, a cons + a join even for a
+single-content-byte-run), not scanning throughput; a byte-set scanner cannot
+speed up a 4-byte `memchr` call, so this corpus is why Component 4 (SIMD) is
+closed rather than built — see the verdict below.
+
 **What to watch:**
-- This is the phase 1 pure-March baseline. Phase 2 (SIMD structural
-  scanning, see `specs/2026-07-30-json-streaming-design.md`) must beat this
-  number on the same corpus and chunk size.
+- If `bench/json_stream.march`'s checksum ever moves off `records × 14` at
+  this record shape, that is a tokenizer regression, not a benchmark
+  artifact — recompute the empirical per-record count with a 1/2/3-record
+  probe before assuming the benchmark itself needs adjusting.
 - RSS should stay flat (modulo the input string itself) as record count
   grows at fixed chunk size — re-run the 10× spot-check after any change to
   `feed`/`finish`/the builder drivers and confirm the delta still scales
   with input-string size, not superlinearly.
-- A checksum other than `records × 14` at this record shape is a tokenizer
-  regression, not a benchmark artifact — recompute the empirical per-record
-  count with a 1/2/3-record probe before assuming the benchmark itself needs
-  adjusting.
+- **A regression on this corpus specifically (not the string-heavy one
+  below) points at per-token overhead** — the state machine in
+  `JsonStream.feed`, event-list (`List(Event)`) allocation, or the cons/join
+  pair paid even for a single-byte run — since run-slicing has little to win
+  here already. Component 5 (`feed_fold`, phase 2 design) is the open item
+  that would address this; it is not built.
+
+---
+
+## bench/json_stream_strings.march — JsonStream vs Json.parse, string-heavy corpus (2,000 records)
+
+**Command:** compile with `--opt 2`, run directly.
+
+```bash
+march --compile --opt 2 bench/json_stream_strings.march -o bench/json_stream_strings_bench
+bench/json_stream_strings_bench
+```
+
+Builds 2,000 NDJSON records, each `{"s": "<~1000-byte escape-free payload>"}\n`
+— a single content-bearing string field per record, no escapes, no nesting —
+then times `JsonStream.start_ndjson()`/`feed`/`finish` over the whole
+concatenated source (64KB chunks) against `Json.parse` called once per
+record, in the same process. This is the corpus the tiny-token benchmark
+above cannot exercise: long, escape-free runs, which is what run-slicing
+(Components 1-2) targets and what the phase 1 per-byte accumulation cost the
+most on.
+
+Each record emits 4 events (`EvObjStart`, `EvKey("s")`, `EvStr`, `EvObjEnd`).
+Expected checksums: `stream_events=8000` (2000 × 4) and `parse_len=2000000`
+(2000 × 1000-byte payload) — both are correctness checks, not timings.
+
+**Phase 1 (pre-run-slicing) vs phase 2 (run-slicing) results, interleaved
+same-session A/B (2026-07-31, 3 rounds, commit `8a79a275` = phase 1 /
+`4afc215d` = phase 2):**
+
+```
+BEFORE (8a79a275, per-byte accumulation): JsonStream 322 / 348 / 364 ms; Json.parse 6-25 ms  => ~55x slower
+AFTER  (4afc215d, run-sliced):            JsonStream 6 / 6 / 6 ms;       Json.parse 6 / 6 / 6 ms  => 1.0x, PARITY
+```
+
+Run-slicing takes JsonStream from ~55× slower than `Json.parse` to parity on
+this corpus — confirming the phase 2 design's diagnosis that the tiny-token
+gap (above) was materialization (per-byte allocation), not scanning: the two
+scan identically, and the only thing that changed here is whether a run
+becomes one slice or N one-byte strings plus N cons cells.
+
+**Load caveat — read before trusting an absolute ms figure.** All of the
+above numbers, and the tiny-token numbers above them, were taken on a machine
+running other concurrent sessions in this worktree set, with reported load
+averages of 43-97 on a 14-core machine at measurement time. Absolute
+milliseconds from this session are **not comparable** to absolute
+milliseconds from any other session, and should not be read as a clean,
+reproducible baseline — a quiet-machine re-run would show different absolute
+numbers. What *is* sound is the **ratio within an interleaved round**:
+compared arms (before/after, or JsonStream/Json.parse) ran back-to-back
+under the same load, so a shared load spike inflates both arms together and
+the ratio between them stays meaningful even though neither absolute number
+does. Re-run on a quiet machine before citing an absolute ms figure from
+this benchmark in anything other than a ratio.
+
+**What to watch:**
+- A regression specifically on *this* corpus (not the tiny-token one above)
+  and not on `Json.parse`'s own benchmarks points at run-slicing having
+  regressed to per-byte accumulation — check `str_byte`'s `SPlain` path and
+  `num_byte` in `stdlib/json_stream.march` first.
+- `stream_events`/`parse_len` moving off `8000`/`2000000` is a correctness
+  regression in the tokenizer or `Json.parse`, not a benchmark artifact.
 
 ---
 
@@ -738,4 +827,4 @@ to the features it exercises. Quick reference:
 | `llvm_emit` equality dispatch (TVar / `march_poly_eq`) | `merkle` |
 | `HashMap.*` / `Enum.uniq` / `Enum.frequencies` | `hash_map_bench` |
 | `RRB.*` / `Parallel.*` / `task_await_unwrap` i64 | `rrb_bench` |
-| JsonStream / streaming JSON | `json_stream` |
+| JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |
