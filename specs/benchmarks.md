@@ -136,12 +136,12 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 | Feature exercised | Notes |
 |-------------------|-------|
-| `String.index_of` | Byte-at-a-time loop calling `memcmp` — no `memchr`, no SIMD |
+| `String.index_of` | Two-stage `memchr`+`memcmp` via `march_memmem` (`runtime/march_runtime.c`) — rides libc's SIMD-optimised `memchr` |
 | Absent needle | Full O(n·m) worst case: every byte examined on every call |
 | Late needle | Realistic "found at ~90% through" case |
 
 **Comparison baseline:** C (`memmem`), Rust (`str::find`), Go (`strings.Index`), Python (`str.find`).
-**What to watch:** Part of the phase 1 string measurement (`specs/2026-07-26-string-performance-design.md`). March is expected to trail C badly here until a `memchr`/SIMD search lands; the point of the benchmark is to size that gap. Once the fast path exists, a regression here points at it.
+**What to watch:** Part of the phase 1 string measurement (`specs/2026-07-26-string-performance-design.md`). The `memchr`/SIMD fast path (Task 2, `specs/plans/2026-07-27-string-performance-phase2.md`) landed — a regression here now points at `march_memmem` or its call sites, not at a missing fast path.
 
 ---
 
@@ -536,7 +536,7 @@ Four workloads over n=1,000,000 integers:
 
 | Workload | What it exercises | Expected result |
 |----------|-------------------|-----------------|
-| `RRB.fold_left` (sequential) | List-backed Vec traversal | `500000500000` |
+| `RRB.fold_left` (sequential) | Array-trie-backed Vec traversal | `500000500000` |
 | `Parallel.psum` | `task_spawn`/`task_await_unwrap` integer reduce | `500000500000` |
 | `Parallel.preduce` (square+sum) | Parallel map-reduce pass | `333333833333500000` |
 | `Parallel.pmap` (n=1000) | Vec-building tasks, small n to avoid O(n²) list-push | `333833500` |
@@ -550,10 +550,12 @@ par_reduce_sum=333333833333500000  preduce: 87ms
 par_map_sum=333833500  pmap+fold (n=1000): 5ms
 ```
 
-**Note on `pmap` scale:** `RRB.Vec` is list-backed in v1, so `push` is O(n).
-Building a Vec of k elements is O(k²); at n=1M per task this would take
-minutes. The benchmark uses n=1000 for pmap and verifies correctness of the
-task return path only.
+**Note on `pmap` scale:** these baseline numbers predate `RRB.Vec` v2
+(`stdlib/rrb_vec.march`), which is now backed by `Array`'s 32-way trie —
+`push` is O(1) amortised, not the O(n) of the original list-backed v1 that
+motivated capping this workload at n=1000. The n=1000 cap and "verifies
+correctness of the task return path only" framing are stale; re-measure at
+n=1M before trusting this note.
 
 **What to watch:** `psum` and `preduce` correctness depend on `task_await_unwrap`
 correctly double-untagging i64 task results (`lib/tir/llvm_emit.ml`). If results
