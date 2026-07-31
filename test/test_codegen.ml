@@ -12317,6 +12317,37 @@ let test_vectorize_catches_violation_even_when_inlined () =
   Alcotest.(check bool) "severity is Error"
     true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Error)
 
+let vectorize_check_fail_src = {|mod Main do
+  @[vectorize]
+  fn scale(arr) do
+    let f = fn x -> x *. 2.0
+    let _ = f(1.0)
+    native_float_arr_map(arr, f)
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let doubled = scale(arr)
+    println(native_float_arr_get(doubled, 0))
+  end
+end|}
+
+let test_vectorize_hard_error_fails_compile () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_vectorize_fail" vectorize_check_fail_src in
+  let bin = Filename.temp_file "march_vectorize_fail_bin" "" in
+  Sys.remove bin;
+  match compile_march_raw
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | `Ok _ ->
+    Alcotest.fail
+      "expected `march --compile` to fail on a @[vectorize] violation, but it succeeded"
+  | `Skipped -> ()  (* legitimate: no clang on PATH, same policy as every other compiled test here *)
+  | `Failed (rc, output) ->
+    Alcotest.(check bool) "compile fails (nonzero exit)" true (rc <> 0);
+    Alcotest.(check bool) "stderr names the failing fn" true
+      (ir_contains output "`scale` cannot vectorize")
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -12324,6 +12355,8 @@ let codegen_suites =
             test_vectorize_check_module_loads;
           Alcotest.test_case "reuse gate: caught even after the annotated fn is inlined away" `Quick
             test_vectorize_catches_violation_even_when_inlined;
+          Alcotest.test_case "vectorize hard error fails compile" `Quick
+            test_vectorize_hard_error_fails_compile;
         ] );
       ( "cross_compile", [
           Alcotest.test_case
