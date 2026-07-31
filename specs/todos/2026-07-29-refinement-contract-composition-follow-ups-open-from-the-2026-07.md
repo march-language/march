@@ -5,10 +5,16 @@
   caller's declared contract. `if List.length(ys) > 0 do head(ys)` already
   worked (the `len` alias, 2026-07-28) and is untouched. Which shape you have
   decides which machinery you get.
-- **Postconditions are still outside the ledger** — `check_post` composes no
-  list or ADT measure through a return refinement, and files no obligation.
-- **The measure-alias gates are still unit-global.**
-- **There is still no `@[trusted]`.**
+- **Postconditions compose no measure through a return refinement.** Narrowed
+  2026-07-30: `check_post` now *files* an obligation at every exit (so
+  `--refine-report` counts return refinements) and `cap verified` escalates an
+  undischarged one. What remains open is composition — a list or ADT measure
+  still does not carry through a return refinement to a caller's goal.
+- **The measure-alias gates are still unit-global**, except the selector-less
+  `use X.List` arm, which since 2026-07-31 resolves its target and withdraws
+  only if some match can provide the aliased member. The member gate,
+  `alias … as List`, `import X.{List}` and the glob fuel bound stay coarse on
+  purpose — no measurement implicated them.
 
 **Follow-ups.**
 - ~~**A tag refinement still does not forward.** `{Option(Int) | is_Some(_)}`

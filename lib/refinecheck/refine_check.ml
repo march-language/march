@@ -563,7 +563,14 @@ let withdrawals : withdrawal list ref = ref []
    [resolve_measure], on the DECLARED BASE TYPE of the argument — so the String
    spellings need no separate reflection path, and a `String.byte_size` applied
    to something the checker does not see as a String simply fails to reflect
-   (skipped) rather than asserting a list fact. *)
+   (skipped) rather than asserting a list fact.
+
+   ADDING A QUALIFIED (dotted) SPELLING HERE?  Mirror it in
+   [qualified_measure_spelling] too, or the predicate warning silently drops to
+   its generic remedy for that spelling — degraded advice, not wrong advice,
+   but the two lists are meant to agree.  A bare spelling like
+   [string_byte_length] needs no mirror: that warning only fires on dotted
+   paths. *)
 let measure_alias (m : string) : string option =
   match m with
   | "List.length" when !list_length_is_stdlib -> Some "len"
@@ -1728,6 +1735,67 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
 
+(* Does [e] mention [m] FREE — an occurrence not captured by an intervening
+   binder of the same name?
+
+   This exists because [expr_mentions] above is only safe in a DISCARDING
+   position: it counts a lambda parameter (and occurrences under it) as
+   mentions, which over-retires facts — silence, never a lie.  Used in an
+   ACCEPTING position that direction inverts: `if any(ys, fn n -> n > 0)`
+   would count as "the guard mentions `n`" when the guard's `n` is the
+   lambda's own parameter and says nothing about the laundered value.  That
+   shipped once (caught in review, 2026-07-31): the laundered-guard
+   attribution blamed a withdrawal for a guard that never used the length.
+   Anything that CONSUMES a mention as evidence must use this; anything that
+   discards on a mention should keep [expr_mentions]. *)
+let rec expr_mentions_free (m : string) (e : A.expr) : bool =
+  let free = expr_mentions_free m in
+  let any = List.exists free in
+  let binds ps = List.mem m ps in
+  let pbinds ps = List.exists (fun (p : A.param) -> p.A.param_name.A.txt = m) ps in
+  match e with
+  | A.EVar n -> n.A.txt = m
+  | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+  | A.EApp (f, args, _) -> free f || any args
+  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+  | A.ELam (ps, body, _) -> if pbinds ps then false else free body
+  | A.EBlock (es, _) ->
+    (* Sequential: a `let` (or `let fn`) rebinding [m] shadows the REST of the
+       block, but its own RHS still sees the outer [m]. *)
+    let rec go = function
+      | [] -> false
+      | e :: rest ->
+        free e
+        ||
+        (match e with
+         | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
+         | A.ELetFn (n, _, _, _, _) when n.A.txt = m -> false
+         | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+         | _ -> go rest)
+    in
+    go es
+  | A.ELet (b, _) -> free b.A.bind_expr
+  | A.ELetFn (n, ps, _, body, _) ->
+    if n.A.txt = m || pbinds ps then false else free body
+  | A.ELetQ (p, e1, e2, _) -> free e1 || (if binds (pat_binders p) then false else free e2)
+  | A.EMatch (subj, brs, _) ->
+    free subj
+    || List.exists
+         (fun (br : A.branch) ->
+           if binds (pat_binders br.A.branch_pat) then false
+           else
+             (match br.A.branch_guard with Some g -> free g | None -> false)
+             || free br.A.branch_body)
+         brs
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> free v) fs
+  | A.ERecordUpdate (r, fs, _) -> free r || List.exists (fun (_, v) -> free v) fs
+  | A.EField (r, _, _) -> free r
+  | A.EIf (c, t, el, _) -> any [ c; t; el ]
+  | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EDbg (Some e, _) -> free e
+
 (* The path-context companion to [scope_shadow].  A path condition is recorded
    against a VARIABLE NAME (`is_None(x)`, `x < 0`); when an inner scope rebinds
    that name, the fact is about the OUTER value and saying it about the inner
@@ -1746,6 +1814,34 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
    contradictions, i.e. more silence. *)
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
+
+(* ── Laundered guards: name -> the application it was let-bound to ─────────
+   [visit] records, per program point, which local names are ONE `let` away
+   from a direct application: `let n = List.length(ys)` records
+   `n -> List.length(ys)`, so a later `if n > 0` can be recognised by
+   [alias_withdrawal_cause] as the same author intent as guarding directly.
+   One level ONLY — through a chain (`let a = …; let n = a`) "the guard is
+   about this value" stops being syntactically evident, and the fallback is
+   the honest general message, not a guess.
+
+   The channel carries NO solver-visible fact — it is consulted only when
+   choosing the WORDING of a skip — but it obeys the same shadow discipline as
+   [scope]/[path], and for the same reason: an entry surviving a rebinding
+   attributes an outer value's guard to an inner binding, which in this
+   channel is a wrong SENTENCE rather than a wrong verdict, and a wrong
+   attribution is worse than a vague one.  Hence BOTH tests below: the KEY
+   retires when the laundering name rebinds (`let n = 5` after the laundering
+   `let` makes the guard's `n` a literal), and the entry retires when any name
+   its RHS mentions rebinds (`let ys = zs` in between leaves `n` measuring the
+   OUTER list while the obligation is about the new one). *)
+type launder = (string * A.expr) list
+
+let launder_shadow (lets : launder) (names : string list) : launder =
+  if names = [] then lets
+  else
+    List.filter
+      (fun (n, rhs) -> not (List.mem n names) && not (expr_mentions names rhs))
+      lets
 
 (* ── Record-typed variables in scope, refined or not ───────────────────────
    [scope] carries only REFINED locals, so a plain `c : Config` parameter is
@@ -1964,7 +2060,9 @@ let entry_of_sig (sg : fn_sig) : fn_sig option =
      - a `fn` in the same decl list already owns the name (a module with both
        `fn map` and `impl Functor(T) do fn map`), or
      - two impls define the method (`impl Show(Int)` / `impl Show(String)` both
-       give `show`),
+       give `show`), or
+     - a `use` in the same decl list imports the name from elsewhere
+       (`use Other.{run}` beside `impl Runner(Box) do fn run`),
 
    because a call resolved by NAME cannot tell which contract applies, and
    checking correct code against a predicate it never touches is the one
@@ -1973,14 +2071,46 @@ let entry_of_sig (sg : fn_sig) : fn_sig option =
    registered nowhere AND have their bodies walked with parameter refinements
    STRIPPED.  Unenforced means unusable in BOTH directions.
 
+   `use` is the third competitor, and the one this function used to miss: a
+   `use Other.{run}` binds a bare `run` in exactly the scope the impl method is
+   callable from, so the name no longer denotes one contract even though only
+   one impl in this decl list defines it.  Adopting it would oblige callers to
+   satisfy a predicate the call may never reach — the false positive above,
+   arrived at from the other direction.
+
+   Which names a `use` binds is only knowable for the ENUMERATED selector
+   ([UseNames]: `use Other.{run}`, `use Other.run`, `import Other, only: [run]`).
+   [UseAll] and [UseExcept] name a module this function cannot see, so their
+   import set is undecidable HERE and the rule fails CLOSED: every impl method
+   in the decl list is withdrawn.  Note [UseAll] is NOT only the `.*` spelling —
+   a bare `import Other` parses to it too (parser.mly, `import_path_tail`'s
+   empty alternative), and that is the spelling real programs use.  [UseSingle]
+   (`use Other`) binds the module itself, not any bare name, so it competes with
+   nothing.  Failing closed costs only silence; failing open costs a false
+   positive, and this subsystem trades the first for the second by design.
+
+   Scope note: the competition is decl-list-local, matching this function's
+   own input.  A `use` in an ENCLOSING module also binds names lexically inside
+   a nested one; that case is still adopted.  Widening it is a further
+   withdrawal, safe in the same direction, and deliberately not taken here
+   without a witness.
+
    This function is the single definition of that rule.  [division_safety]
    consults it too, so the two passes cannot drift apart. *)
 let adoptable_impl_methods (decls : A.decl list) : string list =
   let fns = Hashtbl.create 16 in
   let counts = Hashtbl.create 16 in
+  (* An unresolvable import: some name set we cannot enumerate is in scope. *)
+  let opaque_import = ref false in
   List.iter
     (function
       | A.DFn (fd, _) -> Hashtbl.replace fns fd.A.fn_name.A.txt ()
+      | A.DUse (ud, _) ->
+        (match ud.A.use_sel with
+         | A.UseNames ns ->
+           List.iter (fun (n : A.name) -> Hashtbl.replace fns n.A.txt ()) ns
+         | A.UseAll | A.UseExcept _ -> opaque_import := true
+         | A.UseSingle -> ())
       | A.DImpl (idf, _) ->
         List.iter
           (fun ((mn : A.name), _) ->
@@ -1989,9 +2119,11 @@ let adoptable_impl_methods (decls : A.decl list) : string list =
           idf.A.impl_methods
       | _ -> ())
     decls;
-  Hashtbl.fold
-    (fun name n acc -> if n = 1 && not (Hashtbl.mem fns name) then name :: acc else acc)
-    counts []
+  if !opaque_import then []
+  else
+    Hashtbl.fold
+      (fun name n acc -> if n = 1 && not (Hashtbl.mem fns name) then name :: acc else acc)
+      counts []
 
 let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   let tbl = Hashtbl.create 128 in
@@ -2504,6 +2636,12 @@ let sort_of_ctor (ctor : string) : string option =
        module strict the moment one user module asked for verification. *)
 let strict_verified = ref false
 
+(* Scoped exactly like [strict_verified], but to a single `fn` rather than a
+   decl list: true while [visit_fn] is walking a function whose [fn_attrs]
+   carry `@[trusted]`.  Consulted only by [check_call]'s [note] — see there for
+   why [check_post] does not (yet) need to. *)
+let trusted_fn = ref false
+
 (* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
    mention (`let f = List.length`) is not a guard, and counting it would let an
    unrelated line decide what a call site is told. *)
@@ -2579,26 +2717,52 @@ let expr_applies_to (name : string) (subject : string) (e : A.expr) : bool =
       `{String | len(_) > 0}` — naming a list definition that could not
       possibly have mattered.
 
+   Condition 3 accepts the guard in two spellings, and only two.  DIRECT: the
+   condition itself applies the withdrawn spelling to the subject.  LAUNDERED
+   through exactly one `let`: the condition mentions a name that [lets] maps
+   to an application, and THAT application applies the withdrawn spelling to
+   the subject — `let n = List.length(ys)` then `if n > 0` is the same author
+   intent, stopped by the same withdrawal, so it earns the same sentence.
+   The laundered check runs [expr_applies_to] against the recorded RHS with
+   the obligation's own subject, never against the let-bound name: `let n =
+   List.length(zs)` guarding a call about `ys` fails it exactly as the direct
+   `if List.length(zs) > 0` does.  [lets] is shadow-disciplined by [visit]
+   (see [launder]), so a rebinding of either the laundering name or the
+   collection between the `let` and the guard has already retired the entry
+   before this function ever sees it.
+
    Note the asymmetry with the gates themselves: THEY resolve doubt by
    suppressing (silence is safe).  This resolves doubt by staying general,
    because the thing being chosen here is a sentence, and an over-confident
-   sentence is a lie.  The cost is coverage: a guard laundered through a local
-   (`let n = List.length(ys)`), applied to a non-variable actual, or
-   established in a caller, falls back to the general message.  That is the
-   right trade — this reason exists to explain one specific confusion, not to
-   claim every skip. *)
+   sentence is a lie.  The cost is coverage: a guard laundered through a CHAIN
+   of locals (`let a = List.length(ys)` then `let n = a`), applied to a
+   non-variable actual, or established in a caller, falls back to the general
+   message.  That is the right trade — this reason exists to explain one
+   specific confusion, not to claim every skip. *)
 let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
-    ~(subject_is_str : bool) ~(path : (A.expr * bool) list) (r : Obligation.reason) :
-    withdrawal option =
+    ~(subject_is_str : bool) ~(path : (A.expr * bool) list) ~(lets : launder)
+    (r : Obligation.reason) : withdrawal option =
   match (r, subject) with
   | Obligation.Solver_undecided, Some (A.EVar sn) ->
+    let guard_applies (w : withdrawal) (cond : A.expr) : bool =
+      expr_applies_to w.wd_spelling sn.A.txt cond
+      || List.exists
+           (fun (m, rhs) ->
+             (* FREE mention only: this is an ACCEPTING position, so the
+                discard-only [expr_mentions] is the wrong tool — a lambda
+                parameter in the guard that merely collides with the
+                laundering name must not read as evidence (review 2026-07-31,
+                probe PE). *)
+             expr_mentions_free m cond
+             && expr_applies_to w.wd_spelling sn.A.txt rhs)
+           lets
+    in
     List.find_opt
       (fun w ->
         w.wd_str = subject_is_str
         && expr_applies w.wd_measure pred
         && List.exists
-             (fun (cond, negated) ->
-               (not negated) && expr_applies_to w.wd_spelling sn.A.txt cond)
+             (fun (cond, negated) -> (not negated) && guard_applies w cond)
              path)
       !withdrawals
   (* A non-variable actual (`head(f(xs))`) carries no name a guard could be
@@ -2620,7 +2784,7 @@ type check_subject =
   | Bound_expr
 
 let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
-    ?(verdict_out : Obligation.verdict option ref option)
+    ?(verdict_out : Obligation.verdict option ref option) ~(lets : launder)
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
@@ -2679,18 +2843,34 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
         (match
            alias_withdrawal_cause ~pred:rp.pred
              ~subject:(List.nth_opt args rp.idx)
-             ~subject_is_str:(rp_is_str rp) ~path r
+             ~subject_is_str:(rp_is_str rp) ~path ~lets r
          with
          | Some w -> (Obligation.Skipped (Obligation.Alias_withdrawn w.wd_spelling), w.wd_span)
          | None -> (verdict, None))
       | _ -> (verdict, None)
     in
+    (* `@[trusted]` accepts a SKIP as an assertion, recorded as its own verdict
+       rather than escalated — see [trusted_fn].  This must run before the
+       verdict is recorded (not just before the escalation match below), or
+       the ledger would say `Skipped` while the diagnostic behaved as if it
+       were `Trusted`.  A [Violated] is deliberately untouched: it never
+       reaches this branch because it is not a [Skipped _] to begin with — a
+       predicate the solver proved can never hold is a bug in the annotation,
+       not an incompleteness `@[trusted]` may wave through. *)
+    let verdict =
+      match verdict with
+      | Obligation.Skipped _ when !trusted_fn -> Obligation.Trusted
+      | _ -> verdict
+    in
     Obligation.record
-      { Obligation.span; callee; predicate = pred_str rp.pred; verdict };
+      { Obligation.span; callee; predicate = pred_str rp.pred; verdict
+      ; kind = Obligation.Precondition };
     Option.iter (fun r -> r := Some verdict) verdict_out;
     (* …except inside a `cap verified` module, where a skip is the very thing
        the user asked to be told about (see [strict_verified]).  `Proved` and
-       `Violated` are unaffected: the latter already reported itself. *)
+       `Violated` are unaffected: the latter already reported itself.  A
+       [Skipped] that was just turned into [Trusted] above no longer matches
+       here, which is how `@[trusted]` suppresses the escalation. *)
     match verdict with
     | Obligation.Skipped r when !strict_verified ->
       (* The remedy depends on the reason.  The generic advice below is worse
@@ -3895,9 +4075,56 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
    would declare `b` at `Int` and use it as a Bool. *)
 let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(scalar_env : (string * Smt.sort) list = [])
-    ?(fn_name : string option = None) ?(emit = true) (sc : scope)
-    (binder : string) (ret_pred : A.expr)
+    ?(fn_name : string option = None) ?(emit = true) ?(record = true)
+    (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
+  (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
+     refinement that checks nothing is distinguishable from one that passes.
+     [record] (NOT [emit]) gates whether this fires at all — [check_fn_post_verdict]
+     is invoked twice per refined-return function, once from the
+     [gate_unverified_posts] pre-pass with [~emit:false] and once from the walk
+     with [emit = true]; both calls are threaded here as [~record:emit] by the
+     caller, so only the emitting (reporting) run ever records, and the same
+     postcondition is never counted twice. *)
+  let note verdict =
+    (* `@[trusted]` accepts a SKIP as an assertion rather than escalating it —
+       mirrors [check_call]'s [note] exactly, including running before the
+       verdict is recorded/escalated, so the ledger and the diagnostic agree.
+       A [Violated] is untouched: a predicate the solver proved can never hold
+       is a bug in the annotation, not an incompleteness [@[trusted]] waves
+       through. *)
+    let verdict =
+      match verdict with
+      | Obligation.Skipped _ when !trusted_fn -> Obligation.Trusted
+      | _ -> verdict
+    in
+    if record then
+      Obligation.record
+        { Obligation.span; callee = Option.value ~default:"" fn_name
+        ; predicate = pred_str ret_pred; verdict; kind = Obligation.Postcondition };
+    (* `cap verified` escalates an undischarged POSTCONDITION exactly as
+       [check_call] escalates an undischarged precondition — the last place a
+       fact was granted without obliging anyone.  Gated on [record] (which
+       [check_fn_post_verdict] threads as [~record:emit]) so only the emitting
+       run escalates: the [gate_unverified_posts] pre-pass calls this with
+       [~record:false] purely to decide propagation, and must never also
+       report — that would print the same contract's failure twice. *)
+    match verdict with
+    | Obligation.Skipped r when !strict_verified && record ->
+      let fn_label = match fn_name with Some n -> n | None -> "<anonymous>" in
+      let remedy =
+        "note: strengthen the return expression so the checker can see it \
+         satisfies this contract, rewrite the predicate into the fragment the \
+         checker supports, or remove `cap verified` from this module — it asks \
+         for every obligation to be discharged"
+      in
+      Err.error errctx ~span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify return type constraint `%s` on `%s` (%s: %s)\n%s"
+           (pred_str ret_pred) fn_label (Obligation.reason_name r)
+           (Obligation.reason_detail r) remedy)
+    | _ -> ()
+  in
   let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
   (* Scope names already declared into the `Str` sort by [scope_facts].  Both
@@ -3996,7 +4223,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     | None -> scalar tail_e
   in
   match tail_term_opt with
-  | None -> false
+  | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate); false
   | Some tail_term ->
     let resolve_field = match record_sort with
       | Some sort_name -> make_field_resolver binder sort_name tail_term
@@ -4039,19 +4266,20 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         | None -> ())
       path;
     (match smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
-     | None -> false
+     | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate); false
      | Some goal ->
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
-       if sort_conflict decls then false
+       if sort_conflict decls then (note (Obligation.Skipped Obligation.Sort_conflict); false)
        else
        (* See [check_call] for why the IEEE rewrite runs here, once the
           declarations — and hence which symbols are `Float64` — are final. *)
        let sort_of n = List.assoc_opt n decls in
        let is_float n = sort_of n = Some Smt.SFloat in
        let goal = fp_rewrite is_float goal in
-       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then false
+       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then
+         (note (Obligation.Skipped Obligation.Float_sort_gate); false)
        else
        let assumptions =
          List.filter_map
@@ -4074,7 +4302,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          else ""
        in
        (match Refine.discharge ~root ~preamble vc with
-        | Refine.Verified -> true
+        | Refine.Verified -> note Obligation.Proved; true
         | first ->
           let emit_error () =
             if emit then begin
@@ -4097,16 +4325,23 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
                 ; notes = [hint]; code = None; fix = None }
             end
           in
-          if scope_has_record then
-            (* With concrete record preconditions in scope, a SAT counterexample
-               satisfying those preconditions IS a real violation — report it. *)
-            (match first with Refine.Refuted _ -> emit_error () | _ -> ())
-          else
-            (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
-             | Refine.Verified -> emit_error ()
-             | _ -> ());
+          (* Whether this IS a violation is independent of [emit] — [emit_error]
+             merely gates whether we tell the user; [note] below must still
+             record the true verdict either way. *)
+          let violated =
+            if scope_has_record then
+              (* With concrete record preconditions in scope, a SAT counterexample
+                 satisfying those preconditions IS a real violation — report it. *)
+              (match first with Refine.Refuted _ -> emit_error (); true | _ -> false)
+            else
+              (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
+               | Refine.Verified -> emit_error (); true
+               | _ -> false)
+          in
           (* Not [Verified] on the positive goal ⇒ not proven, whatever the
              refutation attempt said. *)
+          if violated then note Obligation.Violated
+          else note (Obligation.Skipped Obligation.Solver_undecided);
           false))
 
 (* ══ Tier 2: structural induction over a recursive function ═════════════════
@@ -4439,7 +4674,7 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
       && List.fold_left
            (fun acc t ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env
-               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit sc binder ret_pred t
+               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit sc binder ret_pred t
              && acc)
            true ts
     in
@@ -4549,7 +4784,7 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
    the checker cannot see is no longer usable — and the cost lands entirely in
    the safe direction, as more skips. *)
 let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
-    (sc : scope) (re : recenv) (b : A.binding) : bool option =
+    (lets : launder) (sc : scope) (re : recenv) (b : A.binding) : bool option =
   match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
   | A.PatVar n, Some (binder, pred, sort) ->
     let name = n.A.txt in
@@ -4566,7 +4801,8 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
     let out = ref None in
     check_call ~root errctx ~span:n.A.span
       ~callee:(Printf.sprintf "let %s" name)
-      ~subject:Bound_expr ~verdict_out:out ~postcond:(postcond_of ctx defs) sg
+      ~subject:Bound_expr ~verdict_out:out ~lets:(launder_shadow lets names)
+      ~postcond:(postcond_of ctx defs) sg
       [ b.A.bind_expr ]
       (path_shadow path names)
       { idx = 0; binder; pred; sort }
@@ -4576,10 +4812,10 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
 
 (* ── Walk expressions, threading the refined-local scope, the record-typed
    variables ([recenv]) and the path context ─────────────────────────────── *)
-let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
-    (re : recenv) (cb : cbenv) (e : A.expr) : unit =
-  let go = visit ~root errctx defs ctx path sc re cb in
-  let go_path p = visit ~root errctx defs ctx p sc re cb in
+let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
+    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (e : A.expr) : unit =
+  let go = visit ~root errctx defs ctx path lets sc re cb in
+  let go_path p = visit ~root errctx defs ctx p lets sc re cb in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match resolve_call ctx defs fname with
@@ -4587,7 +4823,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        let postcond = postcond_of ctx defs in
        List.iter
          (fun rp ->
-           check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
+           check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path rp
+             sc re)
          sg.refined
      | _ ->
        (* Not a resolvable NAMED callee: fall back to the callee env — a call
@@ -4598,7 +4835,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
           let postcond = postcond_of ctx defs in
           List.iter
             (fun rp ->
-              check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
+              check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path
+                rp sc re)
             sg.refined
         | None -> ()));
     List.iter go args
@@ -4621,8 +4859,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        new, unrelated local function. *)
     ignore
       (List.fold_left
-         (fun (ctx, path, sc, re, cb) e ->
-           visit ~root errctx defs ctx path sc re cb e;
+         (fun (ctx, path, lets, sc, re, cb) e ->
+           visit ~root errctx defs ctx path lets sc re cb e;
            (* An annotated `let`'s refinement is checked against its bound
               expression HERE, against the scope as it stands BEFORE the
               binding — exactly as a call's arguments are checked against the
@@ -4630,7 +4868,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
               would let the annotation discharge itself. *)
            let annot_proved =
              match e with
-             | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path sc re b
+             | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path lets sc re b
              | _ -> None
            in
            (* A `let`/local-`fn` binder also retires the name for CALLEE
@@ -4649,6 +4887,25 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
            in
+           (* The laundering channel: retire first (both the key and any entry
+              whose RHS mentions a rebound name — see [launder]), then record a
+              single-name binding whose RHS is a direct application, so a later
+              guard on that name can be traced back to the call it launders.
+              Any [A.EApp] qualifies — [alias_withdrawal_cause] re-checks the
+              recorded RHS against the withdrawn spelling and the obligation's
+              own subject, so recording a non-measure application costs nothing
+              but the entry. *)
+           let lets' =
+             match e with
+             | A.ELet (b, _) ->
+               let names = pat_binders b.A.bind_pat in
+               let lets = launder_shadow lets names in
+               (match b.A.bind_pat, b.A.bind_expr with
+                | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
+                | _ -> lets)
+             | A.ELetFn (n, _, _, _, _) -> launder_shadow lets [ n.A.txt ]
+             | _ -> lets
+           in
            let sc' =
              match e with
              (* An annotation that was NOT proved grants no fact — it is
@@ -4666,13 +4923,13 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | A.ELetFn (n, _, _, _, _) -> cb_shadow cb [ n.A.txt ]
              | _ -> cb
            in
-           (ctx', path', sc', re', cb'))
-         (ctx, path, sc, re, cb) es)
+           (ctx', path', lets', sc', re', cb'))
+         (ctx, path, lets, sc, re, cb) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let ctx = local_shadow ctx names in
-    visit ~root errctx defs ctx (path_shadow path names)
+    visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
@@ -4683,7 +4940,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let re = recenv_shadow re [ n.A.txt ] in
     let cb = cb_shadow cb [ n.A.txt ] in
     let ctx = local_shadow ctx names in
-    visit ~root errctx defs ctx (path_shadow path names)
+    visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
@@ -4697,6 +4954,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         let sc = scope_shadow sc binders in
         (* …and a same-named fact in the path context, for the same reason. *)
         let path = path_shadow path binders in
+        (* …and a same-named laundered-guard fact — see [launder]. *)
+        let lets = launder_shadow lets binders in
         (* …and a same-named callback/alias fact — see [cbenv]. *)
         let cb = cb_shadow cb binders in
         (* …and a same-named GLOBAL FUNCTION, for callee resolution. *)
@@ -4778,7 +5037,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
             (tester, false) :: p
           | _ -> p
         in
-        visit ~root errctx defs ctx p sc re cb br.A.branch_body)
+        visit ~root errctx defs ctx p lets sc re cb br.A.branch_body)
       branches
   | A.EIf (c, t, e, _) ->
     go c;
@@ -4802,9 +5061,46 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
     let ctx = local_shadow ctx binders in
-    visit ~root errctx defs ctx (path_shadow path binders) sc re cb e2
+    visit ~root errctx defs ctx (path_shadow path binders) (launder_shadow lets binders)
+      sc re cb e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
+
+(* Render a dotted MODULE path (`List.length`, `M.N.f`, …) back to a string, or
+   [None] for anything else.  Mirrors [desugar_expr]'s [flatten_module_path]
+   (`lib/desugar/desugar.ml`) exactly, which is the ground truth for what the
+   parser produces for a dotted reference: an uppercase module segment parses
+   as a zero-arg `A.ECon`, and the chain BOTTOMS OUT there.
+
+   A bare `A.EVar` receiver is deliberately NOT accepted. `c.cb(1)` is a record
+   FIELD call on a value, not a qualified call on a module; flattening it would
+   report it as "a qualified call" and suggest the field name as a "bare
+   spelling", both of which are false. It enforces nothing either way (`smt_of`
+   has no arm for an applied field access), but a wrong explanation costs more
+   than silence here. *)
+let rec qualified_name (e : A.expr) : string option =
+  match e with
+  | A.ECon (mod_name, [], _) -> Some mod_name.A.txt
+  | A.EField (r, { A.txt = n; _ }, _) ->
+    Option.map (fun base -> base ^ "." ^ n) (qualified_name r)
+  | _ -> None
+
+(* The bare measure a QUALIFIED spelling should be rewritten to, independent of
+   whether that alias is currently withdrawn.
+
+   Deliberately NOT [measure_alias]: that function is gated on the
+   stdlib-ownership refs ([list_length_is_stdlib] &c), so it answers "does this
+   spelling alias `len` right now". The question here is the different one
+   "what should the author write instead", whose answer is `len` either way —
+   a withdrawn alias is a separate problem with its own attribution machinery
+   ([withdrawals]), not a reason to send the author somewhere else.
+
+   Deriving the suggestion from the last dotted segment instead — the obvious
+   shortcut — hands back `length`, which is not predicate vocabulary: following
+   that advice merely swaps this warning for the unknown-name one, and the
+   contract still enforces nothing. *)
+let qualified_measure_spelling (qname : string) : string option =
+  match qname with "List.length" | "String.byte_size" -> Some "len" | _ -> None
 
 (* ── Predicate-vocabulary warning ──────────────────────────────────────────
    A refinement predicate that calls a name [known_predicate_fn] does not
@@ -4827,6 +5123,33 @@ let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
               Annotate the function `@[measure]`, or use a supported predicate."
              f);
       List.iter go args
+    (* A QUALIFIED call in call position (`List.length(_)`) is never desugared
+       here — [Desugar.respan_ty] is the only place that touches `A.TyRefine`
+       and it never rewrites the predicate — so it stays an `EField` chain
+       rather than the dotted `EVar` [measure_alias] keys
+       on, and the obligation this predicate should generate is silently
+       skipped instead.  The contract parses and typechecks and looks like it
+       works; it enforces nothing.  Warn once, naming the qualified spelling
+       found and the bare spelling that IS recognized. *)
+    | A.EApp ((A.EField _ as fhd), args, span) ->
+      (match qualified_name fhd with
+       | Some qname ->
+         let remedy =
+           match qualified_measure_spelling qname with
+           | Some bare -> Printf.sprintf " Use the bare spelling `%s` instead." bare
+           | None ->
+             " A predicate can only call the bare measure vocabulary — `len`, or an \
+              `@[measure]` function by its bare name."
+         in
+         Err.warning errctx ~span
+           (Printf.sprintf
+              "`%s` is a qualified call inside a refinement predicate. Predicates are \
+               not desugared, so this is never reflected and the refinement enforces \
+               nothing.%s"
+              qname remedy)
+       | None -> ());
+      go fhd;
+      List.iter go args
     | A.EApp (f, args, _) -> go f; List.iter go args
     | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
     | A.EAnnot (e, _, _) -> go e
@@ -4846,6 +5169,62 @@ let rec warn_predicate_ty (errctx : Err.ctx) (t : A.ty) : unit =
   | A.TyRecord fs -> List.iter (fun (_, t) -> warn_predicate_ty errctx t) fs
   | A.TyLinear (_, t) -> warn_predicate_ty errctx t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
+
+(* Does [t] carry a refinement ANYWHERE — either position of an arrow spine
+   (so both a parameter and the return), or nested inside a type argument,
+   tuple, record field or linearity wrapper?  Every one of those positions is
+   equally inert in an interface method signature, so the detector must not be
+   narrowed to the spine.  Mirrors [warn_predicate_ty]'s traversal exactly. *)
+let rec ty_has_refinement (t : A.ty) : bool =
+  match t with
+  | A.TyRefine _ -> true
+  | A.TyCon (_, args) -> List.exists ty_has_refinement args
+  | A.TyArrow (a, b) -> ty_has_refinement a || ty_has_refinement b
+  | A.TyTuple ts -> List.exists ty_has_refinement ts
+  | A.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refinement t) fs
+  | A.TyLinear (_, t) -> ty_has_refinement t
+  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
+
+(* ── Interface-signature refinement warning ────────────────────────────────
+   A refinement written in an `interface` method signature (`A.method_decl`'s
+   [md_ty]) is inert.  NOTHING in this pass reads [md_ty]: [visit_decl]'s
+   `DInterface` arm descends only into [md_default], and the two other walks
+   that touch [iface_methods] ([stdlib_member_defs_ok], [bare_builtin_undefined])
+   read method NAMES only.  Nor does the front end carry it anywhere:
+   [Desugar.inject_defaults] synthesises a default method's `fn_def` with
+   `fn_ret_ty = None` and parameters taken from the default LAMBDA (which
+   carries no `param_ty`), so even the one place an interface signature turns
+   into code drops the predicate on the floor.
+
+   So it obliges no call site AND lets no body assume anything — a missing
+   check, not an unsound one.  The defect is that it is silent: it parses,
+   typechecks, and reads exactly like a working contract.
+
+   The remedy is deliberately stated for BOTH positions, because they are
+   enforced under different conditions and naming only the parameter one would
+   be wrong advice for a return refinement:
+     · a RETURN refinement on an `impl` method is always checked — [visit_fn]
+       calls [check_fn_post] unconditionally;
+     · a PARAMETER refinement is enforced only when [adoptable_impl_methods]
+       adopts the method name (exactly one `impl` defines it and no top-level
+       `fn` owns it); otherwise [visit_decl] walks the body with the parameter
+       refinements STRIPPED and no caller is obliged.
+   Saying "put it on the impl parameter" flatly would send an author with an
+   ambiguous method name from one silent no-op to another.
+
+   Emits unconditionally: the caller has already established
+   [ty_has_refinement m.md_ty] and branches on it. *)
+let warn_iface_method_refinement (errctx : Err.ctx) (m : A.method_decl) : unit =
+  Err.warning errctx ~span:m.A.md_name.A.span
+    (Printf.sprintf
+       "the interface signature of `%s` carries a refinement, which enforces \
+        nothing: an interface method signature is never read by the refinement \
+        checker, so no call site is obliged by this predicate and no body may \
+        assume it. Write the refinement on the corresponding `impl` method's own \
+        signature instead — a refinement on its return type is always checked, \
+        and one on a parameter is enforced when the method name is unambiguous \
+        (exactly one `impl` defines it and no top-level `fn` shares the name)."
+       m.A.md_name.A.txt)
 
 let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   let ge = warn_predicate_expr_tys errctx in
@@ -4913,7 +5292,19 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
       | A.DInterface (idf, _) ->
         List.iter
           (fun (m : A.method_decl) ->
-            warn_predicate_ty errctx m.A.md_ty;
+            (* Either the signature carries a refinement — in which case the
+               whole thing is inert and [warn_iface_method_refinement] says so —
+               or it does not, in which case [warn_predicate_ty] has nothing to
+               find.  Running BOTH would append "annotate the function
+               `@[measure]`" to a signature where no annotation can help:
+               following that advice leaves the contract enforcing nothing just
+               the same, and a misleading remedy costs more here than a missing
+               one.  The vocabulary warning still fires once the predicate is
+               moved to the `impl` method, which is where it can act. *)
+            if ty_has_refinement m.A.md_ty then warn_iface_method_refinement errctx m
+            else warn_predicate_ty errctx m.A.md_ty;
+            (* A DEFAULT body is real code; it is walked as such and is not
+               part of the signature this warning is about. *)
             Option.iter expr m.A.md_default)
           idf.A.iface_methods
       | A.DLet (_, b, _) ->
@@ -4929,8 +5320,21 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
         Option.iter expr app.A.app_on_stop
       | A.DTest (t, _) -> expr t.A.test_body
       | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
-      (* ── Inert: no type annotation or expression that can carry a
-         refinement predicate.  Named so a new decl form breaks the build. ── *)
+      (* ── Not walked.  Named so a new decl form breaks the build. ──
+
+         This list was previously labelled "inert: no type annotation or
+         expression that can carry a refinement predicate".  That is FALSE for
+         two of its members and was demonstrated so by probe: `DSig` carries
+         `sig_fns : (name * ty) list` and `DExtern` carries `extern_fn`'s
+         `ef_params`/`ef_ret_ty`, any of which can be a `TyRefine`.  A
+         refinement written there is accepted in silence today —
+
+             sig Store do fn put : Int -> {Int | _ > 0} end   -- exit 0, no diagnostic
+
+         which is exactly the shape the `DInterface` arm above was just made
+         loud about.  Left silent deliberately for now (tracked in
+         `specs/todos.md`), but do not re-derive "inert" from this list: the
+         label was load-bearing and wrong. ── *)
       | A.DType _ | A.DAlwaysLinearType _  (* refinements in a type DEFINITION
                                               are checked where they are used *)
       | A.DSig _ | A.DProtocol _ | A.DTransitions _ | A.DExtern _
@@ -4947,19 +5351,38 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
    [fd] — a return refinement is verified, not assumed, and verifying it
    against the declared parameters is exactly right. *)
 let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_def) : unit =
-  check_fn_post ~root errctx fd;
-  let walked = if assume_params then fd else strip_param_refinements fd in
-  List.iter
-    (fun (c : A.fn_clause) ->
-      let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
-      let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
-      let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
-      (* A PARAMETER named like a module-level function shadows it for callee
-         resolution inside this body too — see [local_shadow]. *)
-      let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
-      let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      visit ~root errctx defs ctx path sc re cb c.A.fc_body)
-    walked.A.fn_clauses
+  let is_trusted = List.mem "trusted" fd.A.fn_attrs in
+  (* `@[trusted]` outside `cap verified` changes no behaviour at all — [note]
+     only consults [trusted_fn] inside the [strict_verified] escalation
+     branch.  An attribute that silently does nothing is exactly the failure
+     mode this subsystem keeps producing, so say so. *)
+  if is_trusted && not !strict_verified then
+    Err.warning errctx ~span:fd.A.fn_name.A.span
+      (Printf.sprintf
+         "`@[trusted]` on `%s` has no effect here: this function is not inside \
+          a `cap verified` module, so there is no escalation for it to \
+          suppress. Add `cap verified` to this module, or remove the attribute."
+         fd.A.fn_name.A.txt);
+  (* Scoped to exactly this function, mirroring [strict_verified]'s own
+     save/restore around a decl list — a nested `fn` (there is no such thing
+     in March, but a fresh call into [visit_fn] for a sibling clearly must not
+     inherit this) never sees a stale `true` left behind by a caller. *)
+  let saved_trusted = !trusted_fn in
+  trusted_fn := is_trusted;
+  Fun.protect ~finally:(fun () -> trusted_fn := saved_trusted) (fun () ->
+    check_fn_post ~root errctx fd;
+    let walked = if assume_params then fd else strip_param_refinements fd in
+    List.iter
+      (fun (c : A.fn_clause) ->
+        let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
+        let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
+        let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
+        (* A PARAMETER named like a module-level function shadows it for callee
+           resolution inside this body too — see [local_shadow]. *)
+        let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
+        let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
+        visit ~root errctx defs ctx path [] sc re cb c.A.fc_body)
+      walked.A.fn_clauses)
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
   (* Gather this scope's aliases/uses first so every function in the module sees
@@ -4994,7 +5417,7 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
 and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
   (* A bare expression that is not a function clause: no parameters, no guard,
      hence empty scope/recenv/cbenv and an empty path condition. *)
-  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] e in
+  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] [] e in
   (* Decls that merely group other decls (`describe`) must NOT go through
      [visit_decls]: that would re-derive [strict_verified] from the inner list,
      which carries no `cap` directive of its own, and so would silently drop
@@ -5035,7 +5458,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         let re = List.fold_left recenv_add_fnparam [] ps in
         let cb = List.fold_left cb_add_fnparam [] ps in
         let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
-        visit ~root errctx defs ctx [] sc re cb h.A.ah_body)
+        visit ~root errctx defs ctx [] [] sc re cb h.A.ah_body)
       ad.A.actor_handlers;
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)
@@ -5250,12 +5673,21 @@ let glob_import_competes ~(root : A.decl list) ~(unit_name : string)
    shadows_list_length.march` (and `t127…string_byte_size` for the other
    alias), not by any unit fixture here — a string-parsed module has an empty
    [stdlib_source_files], so nothing in it can be told apart from the stdlib's
-   own definitions.  The witness declares `length` in an `extern` block on
-   purpose: desugar's [strip_entry_self_qual] rewrites `List.length` to bare
-   `length` when the entry module declares `length` as a `fn` or a `let`, so
-   only the decl forms it does not rewrite (`extern`, `impl`, `interface`)
-   leave a qualified call site for this gate to matter at.  Revert this to
-   `go false` and the corpus rejects `t126` with a false `len(ys) = 0`.
+   own definitions.  The witness declares `length` as an `interface`/`impl`
+   method pair on purpose: desugar's [strip_entry_self_qual] rewrites
+   `List.length` to bare `length` when the entry module declares `length` as a
+   `fn`, a `let` or (since 2026-07-30) an `extern`, so only the decl forms it
+   does not rewrite (`impl`, `interface`) leave a qualified call site for this
+   gate to matter at.  Revert this to `go false` and the corpus rejects `t126`
+   with a false `len(ys) = 0`.
+
+   The `A.DExtern` arm of the member scan below is pinned separately, by
+   `accept/t139_nested_module_shadows_list_length_extern.march` — a NESTED
+   `mod List` with a foreign `length`, whose module name [strip_entry_self_qual]
+   does not touch.  Delete that arm and the corpus rejects `t139` with the same
+   false `len(ys) = 0`.  Before 2026-07-30, `t126` covered both at once; it can
+   no longer, because an entry-level extern member's call site is now stripped
+   bare and never reaches the alias at all.
 
    Direction of doubt is always to SUPPRESS: a missed proof is silence, the
    status quo ante; a wrong fact in the assumption set is a false positive.
@@ -5331,6 +5763,130 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
       blame sp
     end
   in
+  (* ── The UseSingle narrowing (Task 9, 2026-07-31): LOOK, don't assume ────
+     `use X.<md>` used to withdraw purely syntactically on its last path
+     segment, while the two glob forms already RESOLVE their target and check
+     it.  Measured cost (MARCH_LIB_PATH fixture, obligation-ledger report):
+     one nested `use Extras.Deep.List` in a dependency module — whose target
+     had NO `length` member at all — flipped an entry program's obligation
+     from `1 proved` to `1 skipped (alias-withdrawn)`, program-wide.
+
+     [use_target_provides] answers: can the module at [path] provide a member
+     named [fn]?  If it provably cannot, rebinding the bare segment `<md>` to
+     it cannot make `<md>.<fn>` denote a non-stdlib function at ANY call site
+     — the spelling either fails to resolve through that binding (a typecheck
+     error, not a wrong refinement fact) or resolves elsewhere, and any
+     elsewhere that competes is some OTHER declaration this walk still sees.
+     The argument deliberately does NOT rest on resolver semantics (scoping,
+     shadowing order): it only needs "a module provides no `<fn>` ⟹ member
+     lookup of `<fn>` in it finds nothing", so the resolve_call step-ordering
+     hole filed in specs/todos.md is neither consulted nor widened.
+
+     Fail-closed edges, each an over-approximation:
+       - resolution considers EVERY module scope of the unit and ALL matches
+         (duplicate paths, enclosing-relative spellings), withdrawing if ANY
+         match provides — which resolution the real resolver would pick is
+         exactly the question this pass cannot answer;
+       - nothing resolves ⇒ withdraw, as the glob forms always have;
+       - "provides" counts every member-capable decl form the [defines] scan
+         counts (fn, let-bound, extern, interface/impl — the latter two the
+         same deliberate over-approximation documented on the member arms
+         below), PLUS the target's own use-forms: a `use Y.{<fn>}` or an
+         unenumerable glob inside the target may re-export the member, so
+         both count as providing (glob fuel exhaustion ⇒ provides).
+
+     Note the residual duty is small by construction: a target that provides
+     `<fn>` via a DIRECT member decl is a `mod <md>` carrying that member,
+     which the [defines] scan withdraws independently — so this check alone
+     stands guard over the re-export and unresolvable shapes, and an
+     under-count in the member forms here is still backstopped there.
+     DAlias/UseNames stay unconditionally withdrawing: no measured cost
+     implicated them, and each narrowing in this gate must pay its own way. *)
+  let use_target_provides (path : A.name list) : bool =
+    let member = function
+      | A.DFn (fd, _) -> fd.A.fn_name.A.txt = fn
+      | A.DLet (_, b, _) -> List.mem fn (pat_binders b.A.bind_pat)
+      | A.DExtern (ed, _) ->
+        List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = fn) ed.A.ext_fns
+      | A.DInterface (idf, _) ->
+        List.exists
+          (fun (m : A.method_decl) -> m.A.md_name.A.txt = fn)
+          idf.A.iface_methods
+      | A.DImpl (idf, _) ->
+        List.exists (fun ((mn : A.name), _) -> mn.A.txt = fn) idf.A.impl_methods
+      | _ -> false
+    in
+    let mentions_fn xs = List.exists (fun (n : A.name) -> n.A.txt = fn) xs in
+    (* Every decl-list scope in the unit: the root, and the body of every
+       (arbitrarily nested) module.  `describe` blocks do not open a scope. *)
+    let scopes =
+      let rec go acc ds =
+        List.fold_left
+          (fun acc d ->
+            match d with
+            | A.DMod (_, _, ds', _) -> go (ds' :: acc) ds'
+            | A.DDescribe (_, ds', _) -> go acc ds'
+            | _ -> acc)
+          acc ds
+      in
+      go [ decls ] decls
+    in
+    (* All decl-lists reachable by [p] from scope [ds] — every matching module
+       per segment, describe blocks flattened at each level. *)
+    let rec descend_all ds p =
+      match p with
+      | [] -> [ ds ]
+      | (seg : A.name) :: rest ->
+        let rec at_level acc = function
+          | [] -> acc
+          | A.DMod (n, _, ds', _) :: tl when n.A.txt = seg.A.txt ->
+            at_level (descend_all ds' rest @ acc) tl
+          | A.DDescribe (_, ds', _) :: tl -> at_level (at_level acc ds') tl
+          | _ :: tl -> at_level acc tl
+        in
+        at_level [] ds
+    in
+    let resolve_all p =
+      let direct = List.concat_map (fun s -> descend_all s p) scopes in
+      (* A path may be written relative to the unit's own module, whose
+         declarations are the root list rather than a `DMod` within it. *)
+      match p with
+      | (hd : A.name) :: (_ :: _ as tl) when hd.A.txt = mod_name ->
+        direct @ List.concat_map (fun s -> descend_all s tl) scopes
+      | _ -> direct
+    in
+    let rec provides fuel ds =
+      List.exists
+        (fun d ->
+          member d
+          ||
+          match d with
+          | A.DDescribe (_, ds', _) -> provides fuel ds'
+          | A.DUse (u, _) -> (
+            match u.A.use_sel with
+            (* `use A.B` binds the MODULE B, not B's members — but a
+               lowercase last segment is a shape we do not understand, so
+               count it as providing rather than reason about it. *)
+            | A.UseSingle -> (
+              match List.rev u.A.use_path with
+              | last :: _ -> last.A.txt = fn
+              | [] -> false)
+            | A.UseNames xs -> mentions_fn xs
+            | A.UseExcept xs -> (not (mentions_fn xs)) && glob fuel u.A.use_path
+            | A.UseAll -> glob fuel u.A.use_path)
+          | _ -> false)
+        ds
+    and glob fuel p =
+      if fuel <= 0 then true
+      else
+        match resolve_all p with
+        | [] -> true
+        | ms -> List.exists (provides (fuel - 1)) ms
+    in
+    match resolve_all path with
+    | [] -> true
+    | ms -> List.exists (provides 4) ms
+  in
   let rec go in_mod ds =
     List.iter
       (function
@@ -5343,8 +5899,20 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
         | A.DExtern (ed, sp) ->
           defines in_mod sp
             (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = fn) ed.A.ext_fns)
-        (* Interface/impl methods are reachable under the declaring module's
-           qualified spelling too. *)
+        (* Interface/impl methods are counted as a DELIBERATE OVER-APPROXIMATION.
+           They are NOT actually reachable under the declaring module's
+           qualified spelling — `Bar.greet(1)` fails `unbound variable` for a
+           nested module and the entry module alike, because a method resolves
+           through interface dispatch rather than module member lookup (measured
+           2026-07-30; see the residual in `specs/todos.md`).  An earlier
+           revision of this comment asserted the opposite as fact.
+
+           The arms stay anyway, because this gate's policy is suppress-on-doubt:
+           over-counting a competitor costs a lost proof (silence), while
+           under-counting puts a wrong fact in the assumption set and reports
+           correct code — the cardinal sin here.  Do NOT "fix" this by deleting
+           the arms: `accept/t126`/`t127` now depend on them, and see the
+           coupling note on that residual before changing either. *)
         | A.DInterface (idf, sp) ->
           defines in_mod sp
             (List.exists
@@ -5365,10 +5933,15 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
                `import X, except: [_]` — UseExcept, ditto unless `<md>` is
                                          excluded. *)
           (match u.A.use_sel with
+           (* UseSingle RESOLVES its target and asks whether it can provide
+              the member, instead of assuming so from the segment name — see
+              [use_target_provides] above for the measurement and the
+              soundness argument.  Unresolvable ⇒ withdraw, as before. *)
            | A.UseSingle ->
              rebinds sp
                (match List.rev u.A.use_path with
-                | last :: _ :: _ -> last.A.txt = md
+                | last :: _ :: _ ->
+                  last.A.txt = md && use_target_provides u.A.use_path
                 | _ -> false)
            | A.UseNames xs -> rebinds sp (mentions_md xs)
            (* The two glob forms RESOLVE their target and look for a module

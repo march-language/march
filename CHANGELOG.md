@@ -6,7 +6,7 @@ All notable changes to March are documented here. Format follows
 
 This file starts at the point March adopted a changelog (2026-07-21).
 Implementer-level detail on every change — including everything that shipped
-before this file existed — lives in `specs/progress.md` and `specs/todos.md`;
+before this file existed — lives in `specs/progress/` and `specs/todos/`;
 git log is authoritative for exact commits.
 
 ## [Unreleased]
@@ -175,17 +175,35 @@ git log is authoritative for exact commits.
   not make the callee's module strict, and nested modules do not inherit the
   capability. Modules that do not declare it behave exactly as before.
 
-  Three limits worth knowing before relying on it: return refinements go through
-  a separate path that files no record, so an undischarged **postcondition** is
-  neither reported nor escalated; a refinement written on an **`interface`
+  `cap verified` now also escalates an undischarged **postcondition** (a
+  function's own return-type refinement), not just a call-site precondition —
+  the last place a fact was granted without obliging anyone. A return
+  refinement the checker can neither prove nor refute is reported the same
+  way a precondition is, naming the function, the predicate, and the reason;
+  `@[trusted]` (see below) suppresses it there too. One limit worth knowing
+  before relying on `cap verified`: a refinement written on an **`interface`
   method's signature** is not enforced at call sites (put it on the `impl`
   method's parameter, where it is — see the 2026-07-29 entries below), and an
   `impl` method's own parameter refinement is adopted only when its name
-  unambiguously denotes one contract; and there is **no
-  `@[trusted]` escape hatch yet** — the only ways to accept an obligation the
-  checker cannot discharge are an `assert` or removing `cap verified` from the
-  module. It is therefore a tool for small, deliberately-verified modules rather
-  than a whole-codebase setting.
+  unambiguously denotes one contract.
+
+- **`@[trusted]`: a per-function escape hatch from `cap verified`.** `cap
+  verified` used to be all-or-nothing — one obligation the checker could not
+  discharge anywhere in the module forced dropping the capability entirely, or
+  restating the fact with `assert`. Annotating a single function `@[trusted]`
+  now accepts, as an assertion, any obligation *inside that function* the
+  checker could not otherwise discharge — both a call-site precondition and
+  the function's own return-type postcondition — without disarming
+  `cap verified` for the rest of the module. It never suppresses a *definite violation* — a
+  predicate the solver has proved can never hold is a bug in the annotation,
+  not an incompleteness to wave through, so that case is still reported
+  exactly as before — and it is scoped strictly to the annotated function: an
+  ordinary sibling in the same `cap verified` module still escalates.
+  `--refine-report`'s headline now has a fourth column, `N trusted`, counted
+  separately from `proved` so a reader can tell how much of a module's
+  "verification" is an assertion rather than a proof. Putting `@[trusted]` on
+  a function in a module that does not declare `cap verified` warns, since the
+  attribute would otherwise silently do nothing.
 
 - **`--refine-report`: the checked fraction of your refinements is now a
   number.** `march --check --refine-report file.march` prints how many
@@ -203,9 +221,9 @@ git log is authoritative for exact commits.
   from the **user-code** slice of a fixture whose single obligation is actually
   *proved*, so it falls to zero the moment that proof stops happening; a
   whole-program proof count would not have moved. So a change that quietly stops
-  checking things fails the build. Counts cover precondition obligations raised
-  at call sites; postconditions are not in the ledger, so the report undercounts
-  by every undischarged return refinement.
+  checking things fails the build. Counts cover both precondition obligations
+  raised at call sites and postcondition obligations (a function's own return
+  refinement) — see the Fixed entry below.
 
 - **A `List.length` guard now discharges a `len` refinement obligation.** The
   refinement checker treats `List.length` as an alias of the `len` measure, so
@@ -324,6 +342,119 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **A selector-less `use X.List` no longer withdraws the `List.length` measure
+  alias when its target provably cannot provide a `length`.** The rebinding
+  gate used to treat `use Extras.Deep.List` — anywhere in the compilation
+  unit, including a `MARCH_LIB_PATH` dependency's internals — as a competitor
+  purely because the path ends in `List`, silently turning every
+  `{List(a) | len(_) > 0}` proof discharged by an ordinary
+  `if List.length(ys) > 0` guard into a skip, program-wide (measured: one such
+  `use` in a dependency flipped an entry program from `1 proved` to `1 skipped
+  (alias-withdrawn)`). The use's target is now resolved and checked, the way
+  glob imports already were: the alias survives only when every module the
+  path could denote provably provides no member with the aliased name —
+  re-exports (`use Y.{length}`), unenumerable globs inside the target, and
+  unresolvable paths all still withdraw, as does `alias … as List` /
+  `import X.{List}`. Same treatment for `String.byte_size`.
+
+- **The `alias-withdrawn` explanation now follows a guard laundered through one
+  `let`.** Under `cap verified`, `let n = List.length(ys)` followed by
+  `if n > 0 do head(ys)` — where something in the compilation unit has
+  withdrawn the `List.length` alias — used to report the generic
+  `solver-undecided` text, pointing at z3 and advising the exact guard the
+  author had already written. It now names the withdrawal and the binding that
+  caused it, exactly as the direct `if List.length(ys) > 0` spelling already
+  did. The verdict is unchanged (the obligation is still skipped); only the
+  explanation improves. One `let` level only, and the attribution stays
+  deliberately conservative: a guard laundered through a chain of `let`s, a
+  guard on a different collection, or a guard whose laundering name (or
+  collection) was rebound in between all keep the honest general message.
+
+- **An `impl` method's refinement is no longer adopted when a `use` in the same
+  module imports its name.** An `impl` method's parameter refinement becomes a
+  contract every caller must satisfy only when the method name unambiguously
+  denotes it. That test looked at sibling `fn`s and other `impl`s, but not at
+  imports — so `use Other.{run}` beside `impl Runner(Box) do fn run(b, k :
+  {Int | k != 0})` left `run` looking unambiguous — and depending on
+  declaration order, a call the import resolves elsewhere was checked against a
+  predicate it never touches (the false positive), or a call that really does
+  reach the impl was checked correctly. Refinecheck cannot see that order
+  distinction, so imports now compete for the name unconditionally: in the
+  first ordering this removes a wrong rejection, in the second it trades a real
+  check for silence — the deliberate direction, since a lost proof costs
+  silence while a wrong fact rejects correct code. A glob (`use Other.*`, a bare `import Other`, or
+  `import Other, except: […]`) names a module the checker cannot see at that
+  point, so it withdraws every `impl` method contract in that module — the
+  conservative direction, since the cost is silence rather than a wrongly
+  rejected program. `use Other` with no selector binds the module, not a bare
+  name, and withdraws nothing. Withdrawal is symmetric: a withdrawn contract
+  cannot be assumed inside its own body either, so `cap no_panic` will ask such
+  a body to prove a division safe some other way. Measured against the whole
+  standard library and the typing corpus, this withdraws **zero** existing
+  contracts.
+
+- **A call that spells out the entry module's own name to reach an `extern`
+  function now resolves.** `extern "libc": Cap(IO.FileSystem) do fn my_abs(x :
+  Int) : Int = "labs" end` inside `mod Foo`, called as `Foo.my_abs(-7)`, failed
+  with `unbound variable: Foo.my_abs` interpreted and `Undefined symbols:
+  _Foo.my_abs` compiled, while the bare `my_abs(-7)` worked. March unwraps the
+  entry file's own top-level module, and the pass that strips a redundant
+  self-qualifying prefix knew only about `fn` and `let` members, so an `extern`
+  member's self-qualified spelling never converged on its definition. `fn` and
+  `let` members, nested-module references, and bare intra-module calls are
+  unaffected.
+
+  Known limitation, unchanged by this fix: an **interface method** name is not
+  module-qualifiable at all — `Bar.greet(1)` does not resolve for any module,
+  entry or nested. Call interface methods unqualified.
+
+- **A refinement in an `interface` method signature no longer enforces nothing
+  silently.** `interface Runner(a) do fn run : a -> {Int | _ > 0} -> Int end`
+  parses and typechecks, and the predicate is never read: no call site is
+  obliged by it, and no method body may assume it. Nor does it survive the
+  front end — when a default method is injected into an `impl`, the synthesised
+  function keeps no annotations from the signature. So it is a *missing* check
+  rather than an unsound one, but a silent one, and the contract reads exactly
+  like a working one. It now warns, naming the method and the spelling that
+  works: the refinement belongs on the corresponding `impl` method's own
+  signature, where a return refinement is always checked and a parameter
+  refinement is enforced when the method name is unambiguous (exactly one
+  `impl` defines it and no top-level `fn` shares the name). Following that
+  advice needs no change to the interface — the typechecker accepts a refined
+  `impl` parameter against a plain type in the signature. Making the interface
+  signature itself enforce, so it obliges every call dispatched through the
+  interface, remains open.
+
+- **A qualified spelling inside a refinement predicate no longer enforces
+  nothing silently.** `{List(Int) | List.length(_) > 0}` parses, typechecks,
+  and checks nothing: the `List.length`→`len` alias keys on the dotted variable
+  the *desugarer* produces, but refinement predicates are never run through the
+  expression desugarer, so inside a predicate the name stays a field-access
+  chain, the alias never fires, and the obligation is skipped — invisibly,
+  since skipping is silence by default. The contract reads as working and does
+  not work. It now warns, naming both the spelling found and the bare measure
+  that does work (`len`); the same applies to `String.byte_size`. This is a
+  warning rather than an error on purpose: the shape compiles today, so
+  promoting it would break working builds, and the defect is the silence, not a
+  missing capability — the bare spelling `len(_) > 0` has always enforced the
+  contract. Desugaring predicates so the qualified spelling means what it reads
+  as remains open.
+
+- **`--refine-report` now counts return-type refinements, not just call-site
+  preconditions.** A function's own return refinement (`fn mk() : {Int | _ > 0}
+  do 100 end`) previously went through `check_post`, which discharged the
+  obligation (proving it, reporting a violation, or silently giving up) without
+  ever recording it — so `--refine-report` undercounted by every return
+  refinement in the program, and a function whose *entire* contract was its
+  return type was invisible to the report. `check_post` now files an obligation
+  at every exit — proved, violated, or skipped with a reason (unreflectable
+  predicate, sort conflict, float-sort gate, or solver-undecided) — tagged with
+  a new `kind` (precondition vs. postcondition) so the two can be told apart;
+  `--refine-report` prints a `by kind` breakdown line under each slice's
+  headline. Behaviour-neutral: nothing newly errors, and `cap verified` still
+  escalates only precondition obligations (postcondition escalation is a
+  separate follow-up). `stdlib/list.march`'s `--refine-report` ceiling is
+  unchanged at 28 skipped (it has no refined return types).
 
 - **A refined annotation on a `let` is now checked against the expression it
   annotates, instead of being believed.** `let ys : {List(Int) | len(_) > 0} =

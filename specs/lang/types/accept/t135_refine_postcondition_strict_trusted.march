@@ -1,0 +1,30 @@
+-- `@[trusted]` rescues an undischarged POSTCONDITION under `cap verified`,
+-- the same way it already rescued an undischarged precondition (Task 2 of
+-- the 2026-07-30 refinement backlog). Without this, Task 3's new escalation
+-- would make `cap verified` LESS adoptable: a function with a genuinely
+-- undecidable return contract would have no way to opt in short of dropping
+-- the capability for the whole module.
+--
+-- `mk` is identical to the reject companion
+-- `reject/t134_refine_postcondition_strict_undischarged` -- same signature,
+-- same body, same undecidable obligation -- except `mk` now carries
+-- `@[trusted]`. The postcondition is still SKIPPED (the checker still cannot
+-- decide it), but that skip is now recorded as `Trusted` -- an assertion,
+-- not a proof -- and the escalation is suppressed.
+--
+-- See specs/lang/refinement-types.md, "`@[trusted]` — a scoped, loud escape
+-- hatch".
+mod T135 do
+
+  cap verified
+
+  @[trusted]
+  fn mk(z : Int) : {Int | _ > 0} do
+    z
+  end
+
+  fn main() : Int do
+    mk(1)
+  end
+
+end

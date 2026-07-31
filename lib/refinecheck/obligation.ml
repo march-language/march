@@ -34,9 +34,32 @@ type reason =
      [print_refine_report] keeps its own `Hashtbl` keyed on the whole reason. *)
   | Alias_withdrawn of string
 
-type verdict = Proved | Violated | Skipped of reason
+(* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
+   enclosing function carries `@[trusted]`, so under `cap verified` it is
+   accepted as an ASSERTION rather than escalated to an error.  This is a
+   deliberate soundness hole and therefore its own verdict, never folded into
+   [Proved] — a reader of `--refine-report` must be able to tell how much of a
+   module's "verification" is actually a trusted assertion.  It can only ever
+   replace a [Skipped _]: a [Violated] (the solver proved the predicate can
+   NEVER hold) is a bug in the annotation, not an incompleteness to wave
+   through, so [Trusted] must never be produced from one. *)
+type verdict = Proved | Violated | Trusted | Skipped of reason
 
-type t = { span : March_ast.Ast.span; callee : string; predicate : string; verdict : verdict }
+(* [Precondition]: an argument checked against a callee's declared param
+   refinement (or a bound expression against a `let` annotation) — [callee]
+   names the callee/annotation site.  [Postcondition]: a function's own
+   return value checked against its declared return refinement — [callee]
+   carries the FUNCTION's own name, since there is no separate callee to
+   name. *)
+type kind = Precondition | Postcondition
+
+type t =
+  { span : March_ast.Ast.span
+  ; callee : string
+  ; predicate : string
+  ; verdict : verdict
+  ; kind : kind
+  }
 
 let log : t list ref = ref []
 let reset () = log := []
@@ -77,6 +100,11 @@ let reason_detail = function
        nothing"
       spelling
 
+(* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
+   existing caller destructures it that way, and [Trusted] does not belong in
+   any of those three buckets — it is neither a proof nor a skip nor a
+   violation.  Its own count is queried directly off [all ()] (see
+   bin/main.ml's [print_refine_report], which keeps its own tally). *)
 let summary () =
   let proved = ref 0 and violated = ref 0 and skips = Hashtbl.create 8 in
   List.iter
@@ -84,6 +112,7 @@ let summary () =
       match o.verdict with
       | Proved -> incr proved
       | Violated -> incr violated
+      | Trusted -> ()
       | Skipped r ->
         Hashtbl.replace skips r (1 + Option.value ~default:0 (Hashtbl.find_opt skips r)))
     !log;

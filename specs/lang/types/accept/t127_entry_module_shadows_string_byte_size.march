@@ -1,15 +1,24 @@
 -- The `String.byte_size` half of `t126`: the entry module is named `String` and
--- defines its own `byte_size` through an `extern` block, so the alias that reads
--- `String.byte_size(s)` as `len(s)` must be withdrawn and the guarded call must
--- draw SILENCE.  Reverting the gate's walk start (`go (mod_name = md)` in
--- `stdlib_member_defs_ok`) makes the alias survive the entry module's own
--- foreign definition and this program is rejected with a FALSE refinement
--- violation on `first(t)`.
+-- defines its own `byte_size` — as an `interface`/`impl` method pair, a decl
+-- form whose members `strip_entry_self_qual` does not rewrite — so the alias
+-- that reads `String.byte_size(s)` as `len(s)` must be withdrawn and the
+-- guarded call must draw SILENCE.  Reverting the gate's walk start
+-- (`go (mod_name = md)` in `stdlib_member_defs_ok`) makes the alias survive the
+-- entry module's own definition and this program is rejected with a FALSE
+-- refinement violation on `first(t)`.
+--
+-- (Until 2026-07-30 this used an `extern` block; `strip_entry_self_qual` now
+-- rewrites extern members too, which would leave no qualified call site here.
+-- See `t126`'s header and `t139`.)
 mod String do
-  needs IO.Foreign
+  type Ruler = Ruler(Int)
 
-  extern "c" : Cap(IO.Foreign) do
-    fn byte_size(s : String) : Int = "march_shim_byte_size"
+  interface Measure(a) do
+    fn byte_size : a -> Int
+  end
+
+  impl Measure(Ruler) do
+    fn byte_size(_r) do 0 end
   end
 
   fn first(s : {String | len(_) > 0}) : String do s end

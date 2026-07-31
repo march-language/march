@@ -1,9 +1,15 @@
 -- The ENTRY module is itself named `List` and defines its own `length` — here
--- through an `extern` block, a decl form whose members `strip_entry_self_qual`
--- does not rewrite, so the call below really does reach refinecheck spelled
--- `List.length`.  The measure alias that lets refinecheck read `List.length(xs)`
--- as `len(xs)` must therefore be WITHDRAWN: this `length` is a foreign C
--- function that may return anything at all.
+-- as an `interface`/`impl` method pair, a decl form whose members
+-- `strip_entry_self_qual` does not rewrite, so the call below really does reach
+-- refinecheck spelled `List.length`.  The measure alias that lets refinecheck
+-- read `List.length(xs)` as `len(xs)` must therefore be WITHDRAWN: this
+-- `length` is the program's own function and may return anything at all.
+--
+-- (Until 2026-07-30 this witness used an `extern` block for the same purpose.
+-- `strip_entry_self_qual` now DOES rewrite extern members — `Foo.my_extern`
+-- inside entry `mod Foo` used to be an unbound variable / an undefined symbol —
+-- so an extern-declared `length` no longer leaves a qualified call site here.
+-- The nested-module variant `t139` keeps the `extern` arm of the gate covered.)
 --
 -- With the alias withdrawn, `List.length(ys) == 0` says nothing about `len(ys)`,
 -- `head(ys)` is neither provably satisfied nor provably violated, and the right
@@ -12,12 +18,18 @@
 -- the alias survives, `len(ys) = 0` becomes a fact, and this program is
 -- rejected with a FALSE refinement violation on `head(ys)` — the shape that
 -- makes this witness discriminating and that no string-parsed unit fixture can
--- reproduce (it needs bin/main.ml's real stdlib prepend).
+-- reproduce (it needs bin/main.ml's real stdlib prepend).  Verified by mutation
+-- in this form: with the walk start reverted to `go false`, this program is
+-- rejected with exactly `refinement violation: ... (e.g. len(ys) = 0)`.
 mod List do
-  needs IO.Foreign
+  type Ruler = Ruler(Int)
 
-  extern "c" : Cap(IO.Foreign) do
-    fn length(xs : List(Int)) : Int = "march_shim_list_length"
+  interface Measure(a) do
+    fn length : a -> Int
+  end
+
+  impl Measure(Ruler) do
+    fn length(_r) do 0 end
   end
 
   fn head(xs : {List(Int) | len(_) > 0}) : List(Int) do xs end
