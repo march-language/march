@@ -1340,10 +1340,16 @@ violation inside a `@[trusted]` function is still reported).
     in that declaration list is withdrawn. `use Other` with no selector binds
     the module, not any bare name, and withdraws nothing. Failing closed costs
     silence; failing open would cost a false positive.
-  - The competition is judged over **one declaration list**. A `use` in an
-    *enclosing* module also binds names lexically inside a nested one, and that
-    case is still adopted — a further withdrawal in the same safe direction,
-    deliberately not taken without a witness.
+  - The competition is judged over **one declaration list**, and the review of
+    this change probed both cross-list nestings end-to-end (2026-07-31). An
+    enclosing `use` over a nested `impl` turned out NOT to be a hole: the call
+    inside the nested module really dispatches to the impl, so adoption matches
+    dispatch. The live defect is the **mirror** shape — a `use` in a *nested*
+    module shadowing an *enclosing* contract — where the call dispatches to the
+    import but `resolve_call` tries the lexical enclosing lookup first and
+    rejects correct code against a contract it never touches. That is
+    pre-existing, reaches plain `fn` contracts (no `impl` involved), and is
+    tracked in `specs/todos.md` as the cardinal-sin-direction item.
   - When the name is ambiguous the refinement binds **nobody**: the body is
     walked with it stripped, so it cannot discharge anything either. Unenforced
     means unusable in both directions — never "assumed in the body but demanded
@@ -1421,10 +1427,15 @@ sense; each is a check that does not happen.
    re-verify those two by mutation: folding method names in makes the entry
    module's `List.length(ys)` rewrite to a bare `length(ys)`, and both
    witnesses would then pass regardless of the behaviour they pin.
-6. **Impl-method contract adoption judges `use` competition per DECLARATION
-   LIST.** A `use` in an *enclosing* module binds names lexically inside a
-   nested one, and that case is still adopted. Since 2026-07-30 a `use` in the
-   *same* declaration list does compete, glob imports failing closed.
+6. **A `use` in a NESTED module shadowing an enclosing contract is a live
+   false positive.** The call dispatches to the import, but `resolve_call`
+   consults the lexical enclosing-module lookup before `use`-imported names,
+   so correct code is rejected against a contract it never touches — with a
+   plain `fn` as well as an impl method. Pre-existing (confirmed at the
+   pre-2026-07-30 parent); the cardinal-sin direction. (The opposite nesting —
+   enclosing `use` over a nested `impl` — was probed and is NOT a hole:
+   adoption matches dispatch there. Since 2026-07-30 a `use` in the *same*
+   declaration list competes for adoption, glob imports failing closed.)
 7. **`alias-withdrawn` attribution does not follow a laundered guard.**
    `let n = List.length(ys)` followed by `if n > 0` falls back to the general
    `solver-undecided` message even when a withdrawal really was the cause.

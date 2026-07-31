@@ -347,9 +347,14 @@ git log is authoritative for exact commits.
   contract every caller must satisfy only when the method name unambiguously
   denotes it. That test looked at sibling `fn`s and other `impl`s, but not at
   imports — so `use Other.{run}` beside `impl Runner(Box) do fn run(b, k :
-  {Int | k != 0})` left `run` looking unambiguous, and a call the import
-  resolves elsewhere was checked against a predicate it never touches. Imports
-  now compete for the name. A glob (`use Other.*`, a bare `import Other`, or
+  {Int | k != 0})` left `run` looking unambiguous — and depending on
+  declaration order, a call the import resolves elsewhere was checked against a
+  predicate it never touches (the false positive), or a call that really does
+  reach the impl was checked correctly. Refinecheck cannot see that order
+  distinction, so imports now compete for the name unconditionally: in the
+  first ordering this removes a wrong rejection, in the second it trades a real
+  check for silence — the deliberate direction, since a lost proof costs
+  silence while a wrong fact rejects correct code. A glob (`use Other.*`, a bare `import Other`, or
   `import Other, except: […]`) names a module the checker cannot see at that
   point, so it withdraws every `impl` method contract in that module — the
   conservative direction, since the cost is silence rather than a wrongly
