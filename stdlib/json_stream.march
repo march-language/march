@@ -1,0 +1,697 @@
+-- JsonStream: resumable, total, constant-memory streaming JSON tokenizer.
+--
+-- Design: specs/2026-07-30-json-streaming-design.md.  Feed chunks with
+-- `feed`, close with `finish`.  Every failure is an Err with an absolute
+-- byte offset; no input can panic, crash, or grow memory beyond the
+-- configured limits.  The per-byte loop is strictly tail-recursive — keep
+-- it that way (see the design's "why a state machine" section).
+--
+-- All constructor names are prefixed (Ev*/E*/M*/P*/S*/Js*/St*): the ctor
+-- namespace is flat across modules, and Json.JsonValue already owns the
+-- natural names.  Do not rename until FQN type identity lands.
+
+mod JsonStream do
+
+  cap no_panic
+
+  -- ── Public types ──────────────────────────────────────────────────────
+
+  type Event =
+      EvObjStart
+    | EvObjEnd
+    | EvArrStart
+    | EvArrEnd
+    | EvKey(String)
+    | EvStr(String)
+    | EvNum(Float)
+    | EvBool(Bool)
+    | EvNull
+
+  type JsonStreamError =
+      EMalformed(String, Int)
+    | EDepthLimit(Int)
+    | ETokenLimit(Int)
+    | ETruncated(Int)
+
+  -- max_depth, max_token_bytes
+  type JsonLimits = JsonLimits(Int, Int)
+
+  fn default_limits() do JsonLimits(512, 8000000) end
+
+  fn err_to_string(e) do
+    match e do
+    EMalformed(msg, off) -> msg ++ " at byte " ++ to_string(off)
+    EDepthLimit(off) -> "nesting deeper than max_depth at byte " ++ to_string(off)
+    ETokenLimit(off) -> "token longer than max_token_bytes starting at byte " ++ to_string(off)
+    ETruncated(off) -> "input truncated at byte " ++ to_string(off)
+    end
+  end
+
+  -- ── Internal state ────────────────────────────────────────────────────
+
+  -- What the grammar expects next.  MTop: the (next) top-level value.
+  -- MDone: single-doc top-level value consumed.  MArrFirst: just after '['
+  -- (value or ']').  MArrValue: after ',' in an array (value required).
+  -- MArrNext: after an array element (',' or ']').  MObjFirst: just after
+  -- '{' (key or '}').  MObjKey: after ',' in an object (key required).
+  -- MObjColon: after a key (':' required).  MObjValue: after ':'.
+  -- MObjNext: after an object value (',' or '}').
+  ptype JsMode =
+      MTop | MDone
+    | MArrFirst | MArrValue | MArrNext
+    | MObjFirst | MObjKey | MObjColon | MObjValue | MObjNext
+
+  -- String-escape scanner state: plain content, just after '\', or inside
+  -- \uXXXX with (digits seen, value so far).
+  ptype JsEsc = SPlain | SEsc | SHex(Int, Int)
+
+  -- In-flight token.  String/number content accumulates as a REVERSED list
+  -- of pieces joined once at completion (linear, unlike repeated ++).
+  -- Every variant carries the token's absolute start offset for errors.
+  ptype JsPartial =
+      PNone
+    | PLit(String, Int, Int)                    -- lexeme, matched, start
+    | PStr(List(String), Int, JsEsc, Int, Int)  -- pieces, len, esc, pending high surrogate (0-1 = none), start
+    | PNum(List(String), Int, Int)              -- pieces, len, start
+
+  -- max_depth, max_token_bytes, ndjson mode
+  ptype JsCfg = JsCfg(Int, Int, Bool)
+
+  -- cfg, mode, container stack (parent modes), depth, in-flight token,
+  -- absolute offset of the next unread byte.
+  ptype JsState = StOk(JsCfg, JsMode, List(JsMode), Int, JsPartial, Int)
+
+  -- ── Construction ──────────────────────────────────────────────────────
+
+  fn start() do StOk(cfg_of(default_limits(), false), MTop, Nil, 0, PNone, 0) end
+  fn start_with(l) do StOk(cfg_of(l, false), MTop, Nil, 0, PNone, 0) end
+  fn start_ndjson() do StOk(cfg_of(default_limits(), true), MTop, Nil, 0, PNone, 0) end
+  fn start_ndjson_with(l) do StOk(cfg_of(l, true), MTop, Nil, 0, PNone, 0) end
+
+  pfn cfg_of(l, nd) do
+    match l do JsonLimits(d, t) -> JsCfg(d, t, nd) end
+  end
+
+  -- ── Small helpers ─────────────────────────────────────────────────────
+
+  pfn rev(xs, acc) do
+    match xs do
+    Nil -> acc
+    Cons(h, t) -> rev(t, Cons(h, acc))
+    end
+  end
+
+  pfn join_pieces(ps) do string_join(rev(ps, Nil), "") end
+
+  pfn is_ws(c) do
+    if c == 32 do true else if c == 9 do true else if c == 10 do true
+    else if c == 13 do true else false end end end end
+  end
+
+  pfn is_digit(c) do
+    if c >= 48 do c <= 57 else false end
+  end
+
+  -- Bytes that may CONTINUE a number token: digits - + . e E
+  pfn is_num_byte(c) do
+    if is_digit(c) do true else if c == 45 do true else if c == 43 do true
+    else if c == 46 do true else if c == 101 do true else if c == 69 do true
+    else false end end end end end end
+  end
+
+  pfn hex_val(c) do
+    if is_digit(c) do c - 48
+    else if c >= 97 do if c <= 102 do c - 87 else 0 - 1 end
+    else if c >= 65 do if c <= 70 do c - 55 else 0 - 1 end
+    else 0 - 1 end end end
+  end
+
+  -- Encode a Unicode codepoint as UTF-8 bytes.  char_from_int is ASCII-only
+  -- (returns "" above 127 in the interpreter); every byte here past the
+  -- first branch is >= 128, so use byte_to_char, which accepts the full
+  -- 0-255 range.  Divisors are nonzero constants (cap no_panic).
+  pfn utf8_encode(cp) do
+    if cp < 128 do char_from_int(cp)
+    else if cp < 2048 do
+      byte_to_char(192 + cp / 64) ++ byte_to_char(128 + (cp % 64))
+    else if cp < 65536 do
+      byte_to_char(224 + cp / 4096)
+        ++ byte_to_char(128 + ((cp / 64) % 64))
+        ++ byte_to_char(128 + (cp % 64))
+    else
+      byte_to_char(240 + cp / 262144)
+        ++ byte_to_char(128 + ((cp / 4096) % 64))
+        ++ byte_to_char(128 + ((cp / 64) % 64))
+        ++ byte_to_char(128 + (cp % 64))
+    end end end
+  end
+
+  -- After a value completes in `mode`, the successor mode.
+  pfn after_value(cfg, mode) do
+    match mode do
+    MTop -> match cfg do JsCfg(_, _, nd) -> if nd do MTop else MDone end end
+    MArrFirst -> MArrNext
+    MArrValue -> MArrNext
+    MObjValue -> MObjNext
+    _ -> mode  -- unreachable by construction; total anyway
+    end
+  end
+
+  -- ── The per-byte loop ─────────────────────────────────────────────────
+  -- Every continuation is a tail call to `go` or an Err.  `base` is the
+  -- absolute offset of chunk byte 0; `base + i` is the current byte's
+  -- absolute offset.
+
+  fn feed(st, chunk) do
+    match st do
+    StOk(cfg, mode, stack, depth, partial, base) ->
+      go(chunk, 0, cfg, mode, stack, depth, partial, base, Nil)
+    end
+  end
+
+  pfn go(s, i, cfg, mode, stack, depth, partial, base, evs) do
+    let c = string_byte_at(s, i)
+    if c < 0 do
+      Ok((rev(evs, Nil), StOk(cfg, mode, stack, depth, partial, base + i)))
+    else
+      match partial do
+      PNone -> free_byte(s, i, c, cfg, mode, stack, depth, base, evs)
+      PLit(lex, k, soff) ->
+        lit_byte(s, i, c, cfg, mode, stack, depth, base, evs, lex, k, soff)
+      PStr(ps, len, esc, hi, soff) ->
+        str_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, esc, hi, soff)
+      PNum(ps, len, soff) ->
+        num_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, soff)
+      end
+    end
+  end
+
+  -- No token in flight: dispatch on the grammar mode.
+  pfn free_byte(s, i, c, cfg, mode, stack, depth, base, evs) do
+    if is_ws(c) do go(s, i + 1, cfg, mode, stack, depth, PNone, base, evs)
+    else
+      match mode do
+      MDone -> Err(EMalformed("unexpected data after top-level value", base + i))
+      MObjColon ->
+        if c == 58 do go(s, i + 1, cfg, MObjValue, stack, depth, PNone, base, evs)
+        else Err(EMalformed("expected ':' after object key", base + i)) end
+      MObjNext ->
+        if c == 44 do go(s, i + 1, cfg, MObjKey, stack, depth, PNone, base, evs)
+        else if c == 125 do close_obj(s, i, cfg, stack, depth, base, evs)
+        else Err(EMalformed("expected ',' or '}' in object", base + i)) end end
+      MArrNext ->
+        if c == 44 do go(s, i + 1, cfg, MArrValue, stack, depth, PNone, base, evs)
+        else if c == 93 do close_arr(s, i, cfg, stack, depth, base, evs)
+        else Err(EMalformed("expected ',' or ']' in array", base + i)) end end
+      MObjFirst ->
+        if c == 34 do
+          go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
+        else if c == 125 do close_obj(s, i, cfg, stack, depth, base, evs)
+        else Err(EMalformed("expected a key or '}' in object", base + i)) end end
+      MObjKey ->
+        if c == 34 do
+          go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
+        else Err(EMalformed("expected a key in object", base + i)) end
+      MArrFirst ->
+        if c == 93 do close_arr(s, i, cfg, stack, depth, base, evs)
+        else value_start(s, i, c, cfg, mode, stack, depth, base, evs) end
+      _ -> value_start(s, i, c, cfg, mode, stack, depth, base, evs)
+      end
+    end
+  end
+
+  -- A byte that must begin a value (mode is MTop, MArrFirst, MArrValue,
+  -- or MObjValue).
+  pfn value_start(s, i, c, cfg, mode, stack, depth, base, evs) do
+    if c == 34 do
+      go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
+    else if c == 116 do
+      go(s, i + 1, cfg, mode, stack, depth, PLit("true", 1, base + i), base, evs)
+    else if c == 102 do
+      go(s, i + 1, cfg, mode, stack, depth, PLit("false", 1, base + i), base, evs)
+    else if c == 110 do
+      go(s, i + 1, cfg, mode, stack, depth, PLit("null", 1, base + i), base, evs)
+    else if c == 45 do
+      go(s, i + 1, cfg, mode, stack, depth,
+         PNum(Cons(char_from_int(c), Nil), 1, base + i), base, evs)
+    else if is_digit(c) do
+      go(s, i + 1, cfg, mode, stack, depth,
+         PNum(Cons(char_from_int(c), Nil), 1, base + i), base, evs)
+    else if c == 123 do
+      open_container(s, i, true, cfg, mode, stack, depth, base, evs)
+    else if c == 91 do
+      open_container(s, i, false, cfg, mode, stack, depth, base, evs)
+    else Err(EMalformed("expected a JSON value", base + i))
+    end end end end end end end end
+  end
+
+  -- Containers: Task 2 implements open_container and replaces close_* bodies.
+  -- '{' or '[': push the parent mode; restore it via after_value on close.
+  pfn open_container(s, i, is_obj, cfg, mode, stack, depth, base, evs) do
+    match cfg do
+    JsCfg(maxd, _, _) ->
+      if depth + 1 > maxd do Err(EDepthLimit(base + i))
+      else
+        let ev = if is_obj do EvObjStart else EvArrStart end
+        let m2 = if is_obj do MObjFirst else MArrFirst end
+        go(s, i + 1, cfg, m2, Cons(mode, stack), depth + 1, PNone, base, Cons(ev, evs))
+      end
+    end
+  end
+
+  pfn close_obj(s, i, cfg, stack, depth, base, evs) do
+    match stack do
+    Nil -> Err(EMalformed("unmatched '}'", base + i))
+    Cons(parent, rest) ->
+      go(s, i + 1, cfg, after_value(cfg, parent), rest, depth - 1, PNone, base,
+         Cons(EvObjEnd, evs))
+    end
+  end
+
+  pfn close_arr(s, i, cfg, stack, depth, base, evs) do
+    match stack do
+    Nil -> Err(EMalformed("unmatched ']'", base + i))
+    Cons(parent, rest) ->
+      go(s, i + 1, cfg, after_value(cfg, parent), rest, depth - 1, PNone, base,
+         Cons(EvArrEnd, evs))
+    end
+  end
+
+  -- ── Literals ──────────────────────────────────────────────────────────
+
+  pfn lit_event(lex) do
+    if lex == "true" do EvBool(true)
+    else if lex == "false" do EvBool(false)
+    else EvNull end end
+  end
+
+  pfn lit_byte(s, i, c, cfg, mode, stack, depth, base, evs, lex, k, soff) do
+    let e = string_byte_at(lex, k)
+    if c == e do
+      if string_byte_at(lex, k + 1) < 0 do
+        go(s, i + 1, cfg, after_value(cfg, mode), stack, depth, PNone, base,
+           Cons(lit_event(lex), evs))
+      else
+        go(s, i + 1, cfg, mode, stack, depth, PLit(lex, k + 1, soff), base, evs)
+      end
+    else Err(EMalformed("invalid literal", base + i)) end
+  end
+
+  -- ── Strings ───────────────────────────────────────────────────────────
+
+  pfn simple_escape(c) do
+    if c == 34 do Some("\"")
+    else if c == 92 do Some("\\")
+    else if c == 47 do Some("/")
+    else if c == 110 do Some(char_from_int(10))
+    else if c == 114 do Some(char_from_int(13))
+    else if c == 116 do Some(char_from_int(9))
+    else if c == 98 do Some(char_from_int(8))
+    else if c == 102 do Some(char_from_int(12))
+    else None end end end end end end end end
+  end
+
+  pfn push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, t) do
+    match cfg do
+    JsCfg(_, maxt, _) ->
+      let len2 = len + string_byte_length(t)
+      if len2 > maxt do Err(ETokenLimit(soff))
+      else
+        go(s, i + 1, cfg, mode, stack, depth,
+           PStr(Cons(t, ps), len2, SPlain, hi, soff), base, evs)
+      end
+    end
+  end
+
+  pfn finish_str(s, i, cfg, mode, stack, depth, base, evs, ps) do
+    let v = join_pieces(ps)
+    match mode do
+    MObjFirst -> go(s, i + 1, cfg, MObjColon, stack, depth, PNone, base, Cons(EvKey(v), evs))
+    MObjKey -> go(s, i + 1, cfg, MObjColon, stack, depth, PNone, base, Cons(EvKey(v), evs))
+    _ -> go(s, i + 1, cfg, after_value(cfg, mode), stack, depth, PNone, base, Cons(EvStr(v), evs))
+    end
+  end
+
+  pfn str_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, esc, hi, soff) do
+    match esc do
+    SPlain ->
+      if hi >= 0 do
+        -- A high surrogate is pending: only '\' (opening the low half) is legal.
+        if c == 92 do
+          go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
+        else Err(EMalformed("lone high surrogate in string escape", base + i)) end
+      else if c == 34 do finish_str(s, i, cfg, mode, stack, depth, base, evs, ps)
+      else if c == 92 do
+        go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SEsc, hi, soff), base, evs)
+      else
+        -- Raw byte, including control bytes and non-ASCII (passed through;
+        -- see the design's decision table).  char_from_int is ASCII-only
+        -- (returns "" above 127 in the interpreter); byte_to_char covers
+        -- the full 0-255 range, needed for raw multi-byte UTF-8 text.
+        push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff,
+                   byte_to_char(c))
+      end end end
+    SEsc ->
+      if c == 117 do
+        go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SHex(0, 0), hi, soff), base, evs)
+      else if hi >= 0 do
+        Err(EMalformed("lone high surrogate in string escape", base + i))
+      else
+        match simple_escape(c) do
+        Some(t) -> push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, t)
+        None -> Err(EMalformed("unknown escape sequence", base + i))
+        end
+      end end
+    SHex(k, v) ->
+      let d = hex_val(c)
+      if d < 0 do Err(EMalformed("invalid hex digit in unicode escape", base + i))
+      else
+        let v2 = v * 16 + d
+        if k < 3 do
+          go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SHex(k + 1, v2), hi, soff), base, evs)
+        else
+          hex_done(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, v2)
+        end
+      end
+    end
+  end
+
+  -- All four hex digits of \uXXXX are in: interpret the codepoint.
+  pfn hex_done(s, i, cfg, mode, stack, depth, base, evs, ps, len, hi, soff, cp) do
+    if hi >= 0 do
+      -- Expecting the LOW half of a surrogate pair: DC00..DFFF.
+      if cp >= 56320 do
+        if cp <= 57343 do
+          let full = 65536 + (hi - 55296) * 1024 + (cp - 56320)
+          push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, 0 - 1, soff,
+                     utf8_encode(full))
+        else Err(EMalformed("expected low surrogate in unicode escape", base + i)) end
+      else Err(EMalformed("expected low surrogate in unicode escape", base + i)) end
+    else if cp >= 55296 do
+      if cp <= 56319 do
+        -- High surrogate: hold it; the next escape must be the low half.
+        go(s, i + 1, cfg, mode, stack, depth, PStr(ps, len, SPlain, cp, soff), base, evs)
+      else if cp <= 57343 do
+        Err(EMalformed("lone low surrogate in unicode escape", base + i))
+      else
+        push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, 0 - 1, soff,
+                   utf8_encode(cp))
+      end end
+    else
+      push_piece(s, i, cfg, mode, stack, depth, base, evs, ps, len, 0 - 1, soff,
+                 utf8_encode(cp))
+    end end
+  end
+
+  -- ── Numbers ───────────────────────────────────────────────────────────
+  -- Accumulate every number-class byte; validate the complete lexeme when a
+  -- delimiter (or finish) ends it.  Shape errors therefore report the token
+  -- START offset — a documented, deliberate coarsening (design §tokenizer).
+
+  pfn num_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, soff) do
+    if is_num_byte(c) do
+      match cfg do
+      JsCfg(_, maxt, _) ->
+        if len + 1 > maxt do Err(ETokenLimit(soff))
+        else
+          go(s, i + 1, cfg, mode, stack, depth,
+             PNum(Cons(char_from_int(c), ps), len + 1, soff), base, evs)
+        end
+      end
+    else
+      -- Delimiter: finalize, then REPROCESS byte c (same i) token-free.
+      match num_finalize(ps, soff) do
+      Err(e) -> Err(e)
+      Ok(ev) -> go(s, i, cfg, after_value(cfg, mode), stack, depth, PNone, base, Cons(ev, evs))
+      end
+    end
+  end
+
+  pfn num_finalize(ps, soff) do
+    let lex = join_pieces(ps)
+    if valid_num(lex) do
+      match string_to_float(lex) do
+      Some(f) -> Ok(EvNum(f))
+      None -> Err(EMalformed("invalid number", soff))
+      end
+    else Err(EMalformed("invalid number", soff)) end
+  end
+
+  -- Complete-lexeme validator for: -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
+  pfn valid_num(lex) do
+    let i = if string_byte_at(lex, 0) == 45 do 1 else 0 end
+    vn_int(lex, i)
+  end
+
+  pfn vn_int(lex, i) do
+    let c = string_byte_at(lex, i)
+    if c == 48 do vn_frac(lex, i + 1)
+    else if is_digit(c) do vn_frac(lex, vn_digits(lex, i + 1))
+    else false end end
+  end
+
+  pfn vn_digits(lex, i) do
+    if is_digit(string_byte_at(lex, i)) do vn_digits(lex, i + 1) else i end
+  end
+
+  pfn vn_frac(lex, i) do
+    let c = string_byte_at(lex, i)
+    if c < 0 do true
+    else if c == 46 do
+      if is_digit(string_byte_at(lex, i + 1)) do vn_exp(lex, vn_digits(lex, i + 2))
+      else false end
+    else if c == 101 do vn_exp_body(lex, i + 1)
+    else if c == 69 do vn_exp_body(lex, i + 1)
+    else false end end end end
+  end
+
+  pfn vn_exp(lex, i) do
+    let c = string_byte_at(lex, i)
+    if c < 0 do true
+    else if c == 101 do vn_exp_body(lex, i + 1)
+    else if c == 69 do vn_exp_body(lex, i + 1)
+    else false end end end
+  end
+
+  pfn vn_exp_body(lex, i) do
+    let c = string_byte_at(lex, i)
+    let j = if c == 43 do i + 1 else if c == 45 do i + 1 else i end end
+    if is_digit(string_byte_at(lex, j)) do vn_tail(lex, j + 1) else false end
+  end
+
+  pfn vn_tail(lex, i) do
+    let c = string_byte_at(lex, i)
+    if c < 0 do true
+    else if is_digit(c) do vn_tail(lex, i + 1)
+    else false end end
+  end
+
+  -- ── finish ────────────────────────────────────────────────────────────
+
+  fn finish(st) do
+    match st do
+    StOk(cfg, mode, stack, depth, partial, off) ->
+      match partial do
+      PNone -> finish_mode(cfg, mode, stack, off, Nil)
+      PNum(ps, len, soff) ->
+        match num_finalize(ps, soff) do
+        Err(e) -> Err(e)
+        Ok(ev) -> finish_mode(cfg, after_value(cfg, mode), stack, off, Cons(ev, Nil))
+        end
+      PLit(lex, k, soff) -> Err(ETruncated(soff))
+      PStr(ps, len, esc, hi, soff) -> Err(ETruncated(soff))
+      end
+    end
+  end
+
+  pfn finish_mode(cfg, mode, stack, off, evs) do
+    match mode do
+    MDone -> Ok(evs)
+    MTop ->
+      match cfg do
+      JsCfg(_, _, nd) ->
+        if nd do
+          match stack do
+          Nil -> Ok(evs)
+          _ -> Err(ETruncated(off))
+          end
+        else Err(ETruncated(off)) end
+      end
+    _ -> Err(ETruncated(off))
+    end
+  end
+
+  -- ── Drivers ───────────────────────────────────────────────────────────
+  -- Seq.fold is eager and cannot early-exit, so after an error the
+  -- remaining chunks are consumed but ignored (total either way).  If
+  -- Seq's Step constructors prove publicly constructible, switching to
+  -- Seq.fold_while for early exit is a drop-in improvement.
+
+  fn fold(chunks, z, f) do
+    let r = Seq.fold(chunks, Ok((z, start())), fn (acc, chunk) ->
+      match acc do
+      Err(e) -> Err(e)
+      Ok((zz, st)) ->
+        match feed(st, chunk) do
+        Err(e) -> Err(e)
+        Ok((evs, st2)) -> Ok((fold_evs(evs, zz, f), st2))
+        end
+      end)
+    match r do
+    Err(e) -> Err(e)
+    Ok((zz, st)) ->
+      match finish(st) do
+      Err(e) -> Err(e)
+      Ok(evs) -> Ok(fold_evs(evs, zz, f))
+      end
+    end
+  end
+
+  pfn fold_evs(evs, z, f) do
+    match evs do
+    Nil -> z
+    Cons(e, t) -> fold_evs(t, f(z, e), f)
+    end
+  end
+
+  -- ── Tree builder (compatibility with Json.JsonValue) ─────────────────
+  -- Builder frames: an open array (reversed elements), an open object
+  -- awaiting a key (reversed pairs), an open object holding a key awaiting
+  -- its value.
+
+  ptype JsFrame =
+      FArr(List(JsonValue))
+    | FObjK(List((String, JsonValue)))
+    | FObjV(String, List((String, JsonValue)))
+
+  -- A completed value lands in the enclosing frame — or, with no frames,
+  -- IS a completed top-level value.
+  pfn bpush(frames, v) do
+    match frames do
+    Nil -> Ok((Nil, Some(v)))
+    Cons(FArr(xs), rest) -> Ok((Cons(FArr(Cons(v, xs)), rest), None))
+    Cons(FObjV(k, ps), rest) -> Ok((Cons(FObjK(Cons((k, v), ps)), rest), None))
+    Cons(FObjK(ps), rest) -> Err(EMalformed("internal: value before key", 0))
+    end
+  end
+
+  pfn build_step(frames, ev) do
+    match ev do
+    EvNull -> bpush(frames, Null)
+    EvBool(b) -> bpush(frames, Bool(b))
+    EvNum(f) -> bpush(frames, Number(f))
+    EvStr(sv) -> bpush(frames, Str(sv))
+    EvKey(k) ->
+      match frames do
+      Cons(FObjK(ps), rest) -> Ok((Cons(FObjV(k, ps), rest), None))
+      _ -> Err(EMalformed("internal: key outside object", 0))
+      end
+    EvObjStart -> Ok((Cons(FObjK(Nil), frames), None))
+    EvArrStart -> Ok((Cons(FArr(Nil), frames), None))
+    EvArrEnd ->
+      match frames do
+      Cons(FArr(xs), rest) -> bpush(rest, Array(rev(xs, Nil)))
+      _ -> Err(EMalformed("internal: mismatched array end", 0))
+      end
+    EvObjEnd ->
+      match frames do
+      Cons(FObjK(ps), rest) -> bpush(rest, Object(rev(ps, Nil)))
+      _ -> Err(EMalformed("internal: mismatched object end", 0))
+      end
+    end
+  end
+
+  -- Fold a whole single-document chunk stream into one JsonValue.
+  fn build(chunks) do
+    let r = fold(chunks, Ok((Nil, None)), fn (acc, ev) ->
+      match acc do
+      Err(e) -> Err(e)
+      Ok((frames, done)) ->
+        match build_step(frames, ev) do
+        Err(e) -> Err(e)
+        Ok((frames2, out)) ->
+          match out do
+          Some(v) -> Ok((frames2, Some(v)))
+          None -> Ok((frames2, done))
+          end
+        end
+      end)
+    match r do
+    Err(e) -> Err(e)
+    Ok(inner) ->
+      match inner do
+      Err(e) -> Err(e)
+      Ok((frames, done)) ->
+        match done do
+        Some(v) -> Ok(v)
+        None -> Err(ETruncated(0))
+        end
+      end
+    end
+  end
+
+  -- NDJSON: parse `path`, calling cb(JsonValue) per completed top-level
+  -- value, with bounded memory.  File.with_chunks wraps the callback's
+  -- return in `Ok(callback_result)` (Result(_, FileError)), while
+  -- ndjson_run itself returns Result(unit, JsonStreamError) — two
+  -- different error types, so the outer FileError is folded into
+  -- JsonStreamError rather than propagated via `let?`.
+  fn each_value(path, cb) do
+    match File.with_chunks(path, 65536, fn chunks -> ndjson_run(chunks, cb)) do
+    Err(e) -> Err(EMalformed("file error: " ++ to_string(e), 0))
+    Ok(inner) -> inner
+    end
+  end
+
+  pfn ndjson_run(chunks, cb) do
+    let r0 = Seq.fold(chunks, nd_init(), fn (acc, chunk) -> nd_chunk(acc, chunk, cb))
+    match r0 do
+    Err(e) -> Err(e)
+    Ok((st, frames)) ->
+      match finish(st) do
+      Err(e) -> Err(e)
+      Ok(evs) ->
+        match nd_events(evs, frames, cb) do
+        Err(e) -> Err(e)
+        Ok(_) -> Ok(())
+        end
+      end
+    end
+  end
+
+  pfn nd_init() do Ok((start_ndjson(), Nil)) end
+
+  pfn nd_chunk(acc, chunk, cb) do
+    match acc do
+    Err(e) -> Err(e)
+    Ok((st, frames)) ->
+      match feed(st, chunk) do
+      Err(e) -> Err(e)
+      Ok((evs, st2)) ->
+        match nd_events(evs, frames, cb) do
+        Err(e) -> Err(e)
+        Ok(frames2) -> Ok((st2, frames2))
+        end
+      end
+    end
+  end
+
+  pfn nd_events(evs, frames, cb) do
+    match evs do
+    Nil -> Ok(frames)
+    Cons(ev, t) ->
+      match build_step(frames, ev) do
+      Err(e) -> Err(e)
+      Ok((frames2, out)) ->
+        match out do
+        Some(v) -> do
+          cb(v)
+          nd_events(t, frames2, cb)
+        end
+        None -> nd_events(t, frames2, cb)
+        end
+      end
+    end
+  end
+
+end
