@@ -1308,14 +1308,15 @@ end
       end
     end
     test "differential verdicts vs Json.parse over the corpus" do
-      -- \u documents excluded: Json.parse rejects ALL \uXXXX (its gap,
-      -- filed separately) while JsonStream accepts them.
+      -- \u documents INCLUDED: Json.parse gained \uXXXX + surrogate-pair
+      -- support on main 2026-07-30, so escapes are differential-testable.
       let corpus = Cons("null", Cons("true", Cons("-12.5e-3",
+                   Cons("\"a\\u0041\\ud83d\\ude00\"",
                    Cons("\"hello\"", Cons("[]", Cons("{}",
                    Cons("[1, [2, [3, []]], \"x\"]",
                    Cons("{\"k\": {\"n\": [true, false, null]}}",
                    Cons("xyz", Cons("[1,]", Cons("{\"a\" 1}", Cons("012",
-                   Nil))))))))))))
+                   Nil)))))))))))))
       assert (diff_all(corpus))
     end
   end

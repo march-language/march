@@ -182,7 +182,7 @@ Committed now so implementation doesn't improvise:
 | Input condition | Behavior |
 |---|---|
 | Truncated anywhere (EOF mid-token, mid-value, mid-escape) | `feed` holds state; `finish` → `ETruncated` |
-| Unknown escape, bad `\u`, lone surrogate | `EMalformed` at the escape's offset. Note: the tokenizer is a strict superset of `Json.parse` here — **`Json.parse` rejects ALL `\uXXXX` escapes** ("unknown escape sequence", `stdlib/json.march` `unescape`), a discovered gap filed separately. Verdict-differential corpora must exclude `\u` documents. |
+| Unknown escape, bad `\u`, lone surrogate | `EMalformed` at the escape's offset. (An earlier draft noted `Json.parse` rejected all `\uXXXX`; that gap was fixed on main 2026-07-30 — including surrogate-pair handling — so verdict-differential corpora now include `\u` documents.) |
 | Leading zeros, `1.`, `.5`, `1e`, `-` alone | `EMalformed` (same rules as `Json.parse`) |
 | Nesting deeper than `max_depth` | `EDepthLimit` at the opening bracket |
 | Single token (string/number) longer than `max_token_bytes` | `ETokenLimit` — bounds the partial-token buffer, hence RSS |
