@@ -67,6 +67,77 @@ pfn two_shot(src, k) do
   end
 end
 
+pfn split_all(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) ->
+    if split_doc(d, 1, one_shot(d)) do split_all(rest) else false end
+  end
+end
+
+pfn split_doc(d, k, expect) do
+  if k >= string_byte_length(d) do true
+  else
+    if two_shot(d, k) == expect do split_doc(d, k + 1, expect)
+    else do
+      IO.puts("split mismatch: doc=" ++ d ++ " k=" ++ to_string(k)
+              ++ " got=" ++ two_shot(d, k) ++ " want=" ++ expect)
+      false
+    end end
+  end
+end
+
+pfn trunc_all(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) -> if trunc_doc(d, 1) do trunc_all(rest) else false end
+  end
+end
+
+pfn trunc_doc(d, k) do
+  if k >= string_byte_length(d) do true
+  else
+    let p = string_slice(d, 0, k)
+    match JsonStream.feed(JsonStream.start(), p) do
+    Err(_) -> do
+      IO.puts("prefix rejected by feed (should hold state): " ++ p)
+      false
+    end
+    Ok((_, st)) ->
+      match JsonStream.finish(st) do
+      Err(ETruncated(_)) -> trunc_doc(d, k + 1)
+      Err(_) -> do
+        IO.puts("prefix gave non-truncation error: " ++ p)
+        false
+      end
+      Ok(_) -> do
+        IO.puts("prefix wrongly accepted: " ++ p)
+        false
+      end
+      end
+    end
+  end
+end
+
+pfn repeat_str(piece, n, acc) do
+  if n <= 0 do acc else repeat_str(piece, n - 1, acc ++ piece) end
+end
+
+pfn drip(d, i, st, out) do
+  let n = string_byte_length(d)
+  if i >= n do
+    match JsonStream.finish(st) do
+    Err(e) -> out ++ err_str(e)
+    Ok(evs) -> out ++ evs_str(evs)
+    end
+  else
+    match JsonStream.feed(st, string_slice(d, i, 1)) do
+    Err(e) -> out ++ err_str(e)
+    Ok((evs, st2)) -> drip(d, i + 1, st2, out ++ evs_str(evs))
+    end
+  end
+end
+
 describe "JsonStream" do
 
   describe "scalars one-shot" do
@@ -266,6 +337,57 @@ describe "JsonStream" do
         Ok(_) -> assert (false)
         end
       end
+    end
+  end
+
+  describe "every-byte-split differential" do
+    test "all corpus documents at all split points" do
+      let corpus = Cons("null",
+                   Cons("true",
+                   Cons("-12.5e-3",
+                   Cons("\"hello\"",
+                   Cons("\"a\\n\\u0041\\ud83d\\ude00 b\"",
+                   Cons("[]",
+                   Cons("{}",
+                   Cons("[1, [2, [3, []]], \"x\"]",
+                   Cons("{\"k\": {\"n\": [true, false, null]}, \"z\": -0.5}",
+                   Cons("  [ 1 , { \"a\" : \"b\" } ]  ",
+                   Nil))))))))))
+      assert (split_all(corpus))
+    end
+  end
+
+  describe "truncation sweep" do
+    test "all strict prefixes truncate" do
+      let corpus = Cons("\"hello world\"",
+                   Cons("[1, [2, [3]]]",
+                   Cons("{\"k\": [true, null]}",
+                   Cons("\"esc \\u0041\\ud83d\\ude00\"",
+                   Nil))))
+      assert (trunc_all(corpus))
+    end
+  end
+
+  describe "adversarial" do
+    test "depth bomb errors fast, no crash" do
+      let bomb = repeat_str("[", 10000, "")
+      let st = JsonStream.start_with(JsonStream.JsonLimits(64, 1000))
+      match JsonStream.feed(st, bomb) do
+      Err(e) -> assert (err_str(e) == "DEPTH:64")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "token bomb errors fast, no crash" do
+      let bomb = "\"" ++ repeat_str("a", 10000, "")
+      let st = JsonStream.start_with(JsonStream.JsonLimits(64, 1024))
+      match JsonStream.feed(st, bomb) do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "single-byte chunks agree with one big chunk" do
+      let d = "{\"a\": [1, \"b\\n\", true]}"
+      assert (drip(d, 0, JsonStream.start(), "") == one_shot(d))
     end
   end
 
