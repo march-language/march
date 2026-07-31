@@ -1,5 +1,197 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-31, the default HTTP pool is elastic — no more stranded connections)
+
+**The fixed thread pool's concurrency cap is gone.** `connection_thread` owns a
+connection for its whole keep-alive lifetime, so with a fixed pool of N workers
+the server served at most N concurrent connections and silently stranded the
+rest — accepted by the kernel, never read. `pool_grow_if_starved` now runs on
+every dequeue: a worker that is about to park increments `g_pool.busy` first,
+and if that leaves no idle worker it starts one more, up to `max_size`.
+
+*Why growth is one-at-a-time and not in blocks:* connections arrive one at a
+time, so single-step growth tracks demand exactly, and a burst that closes
+again leaves the pool sized to its peak concurrency rather than to a rounded-up
+block.
+
+*Why `threads` is allocated at `max_size` upfront:* growth writes into slots
+past the initial run while other workers are live, so the array must never be
+reallocated after the workers start.
+
+*The shutdown race, and why the `shutdown` test sits inside the lock.*
+`march_http_pool_stop` sets `shutdown`, then takes the queue lock and
+snapshots `size` as the set of threads it will join. A first draft of
+`pool_grow_if_starved` checked `shutdown` *before* acquiring the lock, as a
+cheap early-out. That is a use-after-free: the grow could read `shutdown == 0`,
+block on the lock while `stop` took its snapshot and released, then acquire the
+lock and create thread number `size` — one past the snapshot. That worker is
+never joined, and `stop` proceeds to `pthread_mutex_destroy` /
+`pthread_cond_destroy` the very primitives it is about to wait on. The check is
+now the first thing done *under* the lock, with acquire ordering against
+`stop`'s release store, so a grow either completes before the snapshot (and is
+counted in it) or observes shutdown and bails. Found by review, not by a test —
+it needs a specific interleaving during shutdown and would be near-impossible
+to reproduce on demand.
+
+**Measured at c=256, order-swapped and repeated (wrk -t4 -c256 -d8s):**
+
+| | established | unread `Recv-Q>0` | req/s | avg latency | in-flight |
+|---|---:|---:|---:|---:|---:|
+| fixed pool (before) | 256 | **228** | 30,774 / 30,625 | 0.90 / 0.91 ms | 27.7 / 27.9 |
+| elastic pool (after) | 256 | **0** | 29,261 / 29,068 | 8.67 / 8.76 ms | 253.7 / 254.6 |
+
+In-flight is throughput × latency. The before column clamps at `pool_size`;
+the after column tracks offered concurrency. Reported latency rising ~9× is the
+correct result, not a regression — the old average covered only the 28
+connections that were being served. Throughput drops ~5% because the box's
+~30k req/s ceiling is client/kernel-side, so serving 9× the connections buys
+no additional throughput and costs some scheduler overhead; the trade is
+correctness for 5% at a ceiling that is not March's.
+
+`HttpServer.max_connections` is now enforced as that ceiling. It had been
+accepted and discarded (`(void)max_conns`), which is part of why the real limit
+looked like an accident of CPU count.
+
+**Also removed:** `march_response_send_plaintext`, a TechEmpower `/plaintext`
+fast path hardcoding `Content-Length: 13` and the body `"Hello, World!"`.
+Reaching it meant bypassing the user's March router, so the program under
+benchmark would never run. Zero callers, ever.
+
+**Doc corrected:** `specs/features/http-and-networking.md` described the event
+loop as the default. It has not been since it was made opt-in behind
+`MARCH_HTTP_EVLOOP=1`; the thread pool is what every March HTTP server runs
+unless that variable was set at compile time.
+
+## Current State (as of 2026-07-31, HTTP server measured: the default pool starves past 28 connections)
+
+**Counts:** `run_compiler` 619, `run_codegen` 521, `run_eval` 256,
+`run_stdlib` **828** (+2 new compiled HTTP e2e cases) with only the
+pre-existing environmental `MARCH_SANITIZE` failure — 2224 total.
+
+**The default thread-pool server silently serves only `ncpus*2` connections.**
+`march_http.c` sizes the pool at 28 on a 14-core box, and `connection_thread`
+owns a connection for its **entire keep-alive lifetime**. At 100 concurrent
+connections the kernel accepts all 100 — so clients see no error — but 72 are
+never read. Server-side socket queues sampled mid-run: thread pool 100
+established, **72 with `Recv-Q > 0`** (request bytes sitting unread), 28
+served; event loop 100 established, **0 unread**. Past `pool_size`, a client
+connects successfully and then waits indefinitely. This is a production
+defect, not a benchmark artifact. The fix is to return the fd to the queue
+after each request/batch rather than looping inside the worker; **not done
+here** — it is a design change, and the event loop already avoids it.
+
+**The event loop's "3.4x worse latency" was that defect, seen from the client
+side.** wrk's latency statistic only reflects connections that were answered,
+so the pool looked fast by not doing the work. Little's Law closes it exactly:
+pool 28/30,268 = 0.93 ms predicted vs 0.92 ms measured; evloop 100/31,210 =
+3.20 ms predicted vs 3.20 ms measured — the ratio *is* 100/28. Per **served**
+connection both are ~33 µs, and the event loop costs **15–17% less CPU per
+request** (26.4–27.3 vs 31.0–32.1 CPU-µs/req). At c=28, where the pool starves
+nobody, the event loop wins on all three axes. An oversubscription theory was
+**refuted** by an env-gated thread sweep: 1 loop thread and 14 are
+indistinguishable (29.9–31.5k rps, 3.15–3.35 ms), because the server never
+exceeded 0.84 of 14 cores.
+
+**Per-request cost, thread-pool path: ~32 µs CPU, 92% of it system time.** All
+March user-space work is **1.7 µs (5%)** — `march_conn_from_parsed` 0.8 µs, the
+pipeline 0.7 µs, request header `List(Header)` 0.2 µs. The per-call
+`march_incrc_local(pipeline)` required for correctness costs **~6 ns (0.02%)`,
+measured by slope across 200 extra atomic pairs at ~5.75 ns per atomic RMW —
+no bulk pre-bump or codegen borrow is warranted. The `TCP_NOPUSH` cork pair
+cost ~1.5 µs and is now skipped for single-request batches (−4.5%). Neither
+server's throughput was movable on this box: both cap at ~31k rps while using
+under one core, and a second independent client process raised the aggregate
+only to 31,243 — the ceiling is macOS loopback, not March. **Only CPU-µs/req
+is a valid metric here**; req/s was flat across every ablation including one
+that does zero March work.
+
+`march_response_send_plaintext` (`march_http_response.c`) remains dead code and
+should be **deleted rather than wired up**: it hardcodes `Content-Length: 13`
+and the literal body `"Hello, World!"`, and reaching it requires bypassing the
+user's March router entirely, so the program nominally under benchmark never
+runs. A general small-fixed-response path is separately not worth building —
+the response path is already zero-copy, with iovecs pointing directly into
+March strings and static constants and one `snprintf` of Content-Length into
+thread-local scratch.
+
+## Current State (as of 2026-07-31, the compiled HTTP server serves requests again)
+
+**Counts:** `run_compiler` 619, `run_codegen` 521, `run_eval` 256,
+`run_stdlib` 826 with only the pre-existing environmental `MARCH_SANITIZE`
+failure (2222 total), `dune build @runtest` clean.
+
+**Two stacked bugs, and the compiled HTTP server served nothing.** A compiled
+`HttpServer` panicked `non-exhaustive pattern match` on request 1; fix that and
+it segfaulted (exit 139, silently) on request 2. Both server paths were
+affected — the default thread-pool one and the opt-in event loop. Both were
+compiled-only; the interpreter served the same program correctly throughout,
+which is exactly why the `http_server` tests (all interpreted,
+`adversarial-regressions 48`/`49`) never saw it. A third defect (bug 2 below)
+was found and fixed in passing but did **not** contribute to the outage — it
+was initially reported as having caused one, and that report was wrong; see
+the correction under bug 2.
+
+*Bug 1 — constructor tag.* `stdlib/websocket.march` carried structural copies
+of `Conn`, `Header` and `Upgrade` under a comment explaining they "mirror types
+from Http/HttpServer (no imports in March)". March has one global type
+namespace, so the copies were always redundant. They turned fatal when
+`lib/tir/collision_set.ml` began giving same-short-name types in different
+modules globally unique constructor tags: `HttpServer.Conn`'s ctor moved to tag
+33554459 while `march_conn_from_parsed` in the C runtime kept writing tag 0.
+The switch in `HttpServer.halted` had exactly one arm, for 33554459, so a
+runtime-built conn fell through to the default and panicked. The duplicate
+declarations are gone. The diagnostic that cracked it: `--emit-llvm` showed
+`switch i32 %tag27, label %case_default12 [ i32 33554459, label %case_br13 ]`
+against a value the runtime had zeroed.
+
+*Bug 2 — boxed vs. raw `Bool`, and a misdiagnosis worth recording.*
+`make_bool` in `runtime/march_http.c` allocated a 16-byte object and set a tag,
+per a comment claiming "March Bools are heap objects with just a header". A
+`Bool` field of a *boxed* ADT is a raw i64 0/1 (the `(v<<1)|1` tagging in
+`lib/tir/repr.ml` governs niche *payloads*, not ordinary fields).
+`march_ffi.c`'s `march_make_bool` had the encoding right all along; only this
+local copy was wrong.
+
+**This was initially reported as the cause of an empty-200 outage. It was
+not.** `halted` is tested by its LOW BIT — the emitted IR for
+`HttpServer.run_pipeline` loads the field as i64 and does `trunc i64 %x to i1`
+— and `march_alloc` is calloc-backed, so the pointer is always even and reads
+as `false`. The pipeline ran. Confirmed by restoring the heap version on top
+of the other two fixes: 20/20 requests correct, full 26-byte body.
+
+The empty 200 was **self-inflicted during debugging**: an intermediate fix
+encoded the field as `(v<<1)|1`, which makes `false` = 1 — low bit set, so
+every conn read as already-halted and `run_pipeline` short-circuited. The
+symptom appeared while bisecting and was attributed to the code being
+replaced rather than to the replacement. The lesson is narrow and repeatable:
+when a fix for bug A reveals symptom B, test B against the *original*
+unmodified code before attributing it — a pre-fix control, not the code you
+have in hand.
+
+The fix is kept regardless. Correctness should not rest on a pointer-parity
+coincidence that an allocator change would silently break; any consumer
+treating the field as a real `Bool` (equality, printing, passing to March
+code) sees a pointer; and it malloc'd 16 bytes per request to carry one bit.
+
+*Bug 3 — closure refcount at the C boundary.* The compiled apply-fn opens with
+`march_decrc_local($clo)`: **calling a closure consumes a reference to it.**
+All three runtime call sites — `march_process_one_request`, the
+`connection_thread` batch loop, and `handle_read` in the event loop — passed
+the server's one long-lived pipeline closure without bumping it, under a
+comment asserting that holding it for the connection lifetime meant "no
+per-request RC bump needed". Two calls took the refcount to zero; the closure
+and its captured plug list were freed underneath the server. Each site now does
+`march_incrc_local(pipeline)` first. This is the same "the C runtime is a third
+owner of closures" hazard already documented for `task_spawn` and the
+`__try_call` family, at three sites that audit missed.
+
+**No automated coverage would have caught any of this.**
+`test/test_http_native.sh` is the only end-to-end test of the compiled server
+and is referenced by no dune rule and no CI workflow. It also compiles without
+`--opt`, makes one request per server, and asserts on status codes — so even if
+it were wired up it would have passed against bug 3, which needs a *second*
+request to show up, and against a silently-skipped pipeline, which returns a
+well-formed status with an empty body.
 ## Current State (as of 2026-07-31, `@[vectorize]`/`@[vectorize(warn)]` turns silent auto-vectorization eligibility into a checked contract)
 
 **Counts:** `run_compiler` 619 (unchanged in the quick suite; +1 parser test added by this work), `run_eval` 256 (unchanged), `run_codegen` 537 (was 520, +17 — the `vectorize_check` group, including 2 tests added by the final-review fix wave below), `run_stdlib` 780 (unchanged); `scripts/run-tests.sh -q` all suites passed, exit 0.

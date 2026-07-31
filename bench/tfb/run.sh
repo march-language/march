@@ -73,12 +73,71 @@ run_bench() {
 
 # ── Framework launchers ──
 
+# Compile bench/tfb/tfb_server.march if the binary is missing or out of date.
+# MARCH_HTTP_EVLOOP=1 selects the event-loop server instead of the default
+# thread-pool one; the two are separate code paths and benchmark differently,
+# so the label records which was measured.
+build_march() {
+  local root="../.."
+  local src="tfb_server.march"
+  local bin="tfb_server"
+  local compiler="$root/_build/default/bin/main.exe"
+
+  if [[ ! -x "$compiler" ]]; then
+    echo "ERROR: compiler not built. Run: dune build --root . bin/main.exe" >&2
+    return 1
+  fi
+  if [[ -x "$bin" && "$bin" -nt "$src" && -z "${MARCH_FORCE_REBUILD:-}" ]]; then
+    return 0
+  fi
+
+  echo -e "${G}Compiling $src (evloop=${MARCH_HTTP_EVLOOP:-0})...${R}"
+  # Never pipe the compiler's output -- it hangs. Redirect, then judge by $?.
+  # `|| rc=$?` keeps `set -e` from aborting the script before we can report.
+  local rc=0
+  ( cd "$root" && ./_build/default/bin/main.exe --compile --opt 2 \
+      bench/tfb/"$src" -o bench/tfb/"$bin" ) > /tmp/tfb_build.log 2>&1 || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "ERROR: compiling $src failed (rc=$rc). Output:" >&2
+    cat /tmp/tfb_build.log >&2
+    return 1
+  fi
+  return 0
+}
+
+# Fail loudly if the server under test does not serve the routes the harness
+# drives. Until 2026-07-31 this script benchmarked ../../examples/http_hello,
+# which routes ONLY `GET /` -- so every /plaintext and /json number it ever
+# printed was measuring the 404 path.
+verify_routes() {
+  local name="$1"
+  # `|| true` so a failed curl reports a route mismatch below instead of
+  # tripping `set -e` and killing the run with no explanation.
+  local pt js
+  pt=$(curl -s -m 5 "http://localhost:$PORT/plaintext" || true)
+  js=$(curl -s -m 5 "http://localhost:$PORT/json" || true)
+  if [[ "$pt" != "Hello, World!" ]]; then
+    echo "ERROR: $name /plaintext returned '$pt', expected 'Hello, World!'" >&2
+    return 1
+  fi
+  if [[ "$js" != '{"message":"Hello, World!"}' ]]; then
+    echo "ERROR: $name /json returned '$js', expected '{\"message\":\"Hello, World!\"}'" >&2
+    return 1
+  fi
+  echo -e "${G}Routes verified: /plaintext and /json both correct.${R}"
+  return 0
+}
+
 bench_march() {
   kill_port
-  ../../examples/http_hello &
+  build_march || return 1
+  ./tfb_server &
   local PID=$!
   wait_for_port
-  run_bench "March (compiled, 28 worker threads)"
+  local label="March (compiled, thread-pool)"
+  [[ "${MARCH_HTTP_EVLOOP:-}" == "1" ]] && label="March (compiled, event-loop)"
+  verify_routes "$label" || { kill $PID 2>/dev/null; return 1; }
+  run_bench "$label"
   kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
 }
 
@@ -87,6 +146,7 @@ bench_node() {
   node node_http.js &
   local PID=$!
   wait_for_port
+  verify_routes "Node.js" || { kill $PID 2>/dev/null; return 1; }
   run_bench "Node.js (single-thread, http module)"
   kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
 }
@@ -96,6 +156,7 @@ bench_node_cluster() {
   node node_cluster.js &
   local PID=$!
   wait_for_port
+  verify_routes "Node.js cluster" || { kill $PID 2>/dev/null; return 1; }
   run_bench "Node.js cluster (multi-process, http module)"
   kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
 }
@@ -105,6 +166,7 @@ bench_python() {
   python3 python_http.py &
   local PID=$!
   wait_for_port
+  verify_routes "Python 3" || { kill $PID 2>/dev/null; return 1; }
   run_bench "Python 3 (ThreadingHTTPServer, stdlib)"
   kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
 }

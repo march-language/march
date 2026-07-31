@@ -14,15 +14,18 @@ mod WebSocket do
 
   type SelectResult = WsData(WsFrame) | ActorMsg | Timeout
 
-  -- These mirror types from Http/HttpServer (no imports in March).
-  -- Method field uses Atom (:get, :post, etc.) matching HttpServer.Conn.
-  type Header = Header(String, String)
-  type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
-  type Conn = Conn(
-    Int, Atom, String, List(String), String,
-    List(Header), String, Int, List(Header), String,
-    Bool, List((String, String)), Upgrade
-  )
+  -- Conn, Header and Upgrade are NOT re-declared here: March has a single
+  -- global type namespace, so `upgrade` below resolves them to the ONE
+  -- declaration each — Http.Header, HttpServer.Upgrade, HttpServer.Conn.
+  --
+  -- They used to be duplicated here "to mirror Http/HttpServer (no imports in
+  -- March)".  That silently stopped working when same-short-name types in
+  -- different modules started getting globally-unique constructor tags
+  -- (lib/tir/collision_set.ml): HttpServer.Conn's tag moved off 0, so the C
+  -- runtime's march_conn_from_parsed (which writes tag 0) built a value that
+  -- matched no arm — every compiled HTTP request panicked with
+  -- "non-exhaustive pattern match" — and a WebSocket.Conn returned from
+  -- `upgrade` was a different type from the HttpServer.Conn going in.
 
   -- Upgrade a conn to websocket. Handler is called after handshake.
   -- Validates upgrade headers, marks conn as halted with WebSocketUpgrade.
