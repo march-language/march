@@ -192,6 +192,194 @@ and is referenced by no dune rule and no CI workflow. It also compiles without
 it were wired up it would have passed against bug 3, which needs a *second*
 request to show up, and against a silently-skipped pipeline, which returns a
 well-formed status with an empty body.
+## Current State (as of 2026-07-31, `@[vectorize]`/`@[vectorize(warn)]` turns silent auto-vectorization eligibility into a checked contract)
+
+**Counts:** `run_compiler` 619 (unchanged in the quick suite; +1 parser test added by this work), `run_eval` 256 (unchanged), `run_codegen` 537 (was 520, +17 — the `vectorize_check` group, including 2 tests added by the final-review fix wave below), `run_stdlib` 780 (unchanged); `scripts/run-tests.sh -q` all suites passed, exit 0.
+
+**Final-review fix wave (2026-07-31).** Four fixes landed after the whole-branch review, before merge: (1) `reuse_example` (`lib/tir/vectorize_check.ml`) hardcoded float syntax (`x *. 2.0`) in its reuse-gate hint for BOTH Int and Float targets, so the compiler's own suggested fix for an Int violation didn't typecheck — fixed to branch on `is_float_target` too, covering all four map/map2 x Int/Float combinations; regression test `"reuse gate: Int hint uses Int syntax"` asserts the diagnostic's `notes` field. (2) No test compiled-and-ran a PASSING `@[vectorize]` program — the only compiler-driving test exercised a rejected program that never reaches clang, so a `find_markers`/`strip_markers` regression (a surviving sentinel reaching LLVM emission, which has no matching symbol to link against) could ship green; added `"pass: eligible annotated program compiles and runs"`, which compiles `vectorize_source_ok` and runs the binary. (3) A stale comment in `test/test_compiler.ml:475` still said `Vectorize_check.collect_attrs`; that function lives in `Vectorize_mark` since the sentinel redesign — fixed. (4) `generic_diag`'s note pointed at a `docs/simd-vectorization.md` "map_float" heading that doesn't exist — repointed to the real "What vectorizes" heading.
+
+**Feature.** `@[vectorize]` and `@[vectorize(warn)]` function attributes. `NativeArray.map_int`/`map_float`/`map2_int`/`map2_float` have long had an auto-vectorization fast path (`lib/tir/native_map_inline.ml`) that silently either does or doesn't fire depending on how the callback closure is used — until now there was no way for an author to say "this function must vectorize" and have the compiler check it. `@[vectorize]` makes an eligibility violation a hard compile error (exit 1); `@[vectorize(warn)]` reports it as a warning and lets the build continue.
+
+**The two real gates**, deliberately reusing `native_map_inline.ml`'s own matching helpers so the diagnostic can never disagree with what the optimizer actually does:
+- **Reuse gate** (Int and Float targets): the callback closure must be used exactly once, passed directly as the map/map2 call's closure argument. `"<fn> cannot vectorize — this callback isn't safe to inline"`.
+- **Generic-signature gate** (Float targets only): the callback's resolved signature must be concretely `Float`, not a leftover `TVar` — this is what unlocks the zero-boxing unboxed clone. `"<fn> cannot vectorize — callback type is still generic"`.
+
+A third **misuse** category — the attribute on a function with zero `NativeArray.map`/`map2` calls — is always a hard error even under `(warn)`, catching a misapplied or typo'd annotation.
+
+Worth recording: the informal prose in `docs/simd-vectorization.md` and `stdlib/native_array.march` describes the eligibility bar as "non-capturing or single-capture," but the actual implementation gates on reuse and (Float-only) concrete typing — capture count is not a gate; `native_map_inline.ml`'s Phase 2 (0 captures) and Phase 2c (1+ captures) both get the inlining treatment. The checker follows the code, not the prose, which is why there are two gates rather than three.
+
+**Implementation shape.** `lib/parser/parser.mly` gained a new `fn_attr` alternative for the `@[name(value)]` bracket-with-argument form — the grammar previously supported `@[name]` and bare `@name(value)` but not the combination — encoded as `"vectorize:warn"`, the same convention `@compat(full)` already uses. `lib/tir/vectorize_mark.ml` (new) runs immediately after `Lower.lower_module`, before `Mono` — the one point in the pipeline where a TIR function's name is still exactly its source name — and injects a compiler-internal sentinel call (`__vectorize_marker_hard`/`__vectorize_marker_soft`) at the head of each annotated function's body, carrying the source name and declaration span as literal arguments. `lib/tir/vectorize_check.ml` (new) runs late, right before `Native_map_inline.run` (so it sees the same pre-rewrite TIR shape the optimizer peephole consumes): it scans bodies for sentinels, runs the gates, and returns the TIR with every sentinel stripped back out. `bin/main.ml` wires in both insertion points, each guarded on `not is_js_target`.
+
+**Why a sentinel, not name matching.** The first implementation matched AST attributes to TIR functions by name at the late check point, stripping everything after a TIR name's first `$` on the assumption `$` only marks a monomorphization suffix. Review found that unsound two ways, both confirmed empirically: (a) Defun independently produces `<fn>$apply$<uid>` for every lifted lambda, so a stdlib local `fn scale` becomes `scale$apply$1803` and a user's own `@[vectorize] fn scale` would fire a spurious hard error against it; (b) the check runs after Opt, and a small annotated wrapper gets inlined into its caller and no longer exists as its own `fn_def` — so the exact reuse-gate violation the feature exists to catch was silently missed (confirmed via a post-Opt TIR dump showing `fn scale` entirely absent). The sentinel survives both mangling and inlining because Mono's record-update duplication and Opt's inliner preserve body contents wherever they land. It also fixed two consequences for free: diagnostics now name the user-written source name (not `scale$Float`), and `@[vectorize]` inside a nested `mod` no longer silently no-ops (the mark pass qualifies names the same way `Lower` does).
+
+**Known limitation.** If two separately-annotated functions are both inlined into the same caller, their sentinels merge and can't be attributed call-by-call; `combine_markers` widens (joins the names, takes Hard if any is Hard) rather than silently mis-attributing.
+
+**Tests.** A 17-test `vectorize_check` group in `run_codegen` covers: eligible Float, eligible Int, eligible map2, `(warn)` on eligible code is silent, reuse-gate hard fail, reuse-gate under `(warn)`, reuse-gate on map2, reuse-gate caught even after the annotated fn is inlined away, reuse-gate Int-hint-uses-Int-syntax, generic-signature pass/hard-fail/`(warn)`, misuse hard fail, misuse still hard under `(warn)`, a module-loads smoke test, an end-to-end CLI test driving the real `march --compile` binary against a REJECTED program, and an end-to-end compile-AND-RUN test against an ELIGIBLE program (proves the marker sentinel is actually stripped before LLVM emission). Plus one new `run_compiler` parser test for the `@[vectorize(warn)]` bracket-with-argument grammar.
+
+**Out of scope / follow-up.** Fixed-width SIMD vector types (`f32x4`, `f32x8`, `i32x4`, `i32x8`) were part of the original feature request but are explicitly a separate later increment — they don't depend on this attribute. Tracked as an open TODO in `specs/todos.md`.
+
+**Commits:** `47ce1996` (parser), `8bcc320e` + `5b2e731e` (check pass + sentinel redesign), `bea4ccf4` + `93bb6871` + `e82225d0` (pipeline wiring + test-robustness fixes), `284298ff` + `762d6e49` (test matrix + coverage gaps).
+
+## Current State (as of 2026-07-31, JsonStream phase 1 review-fix set)
+
+**Counts:** `test/stdlib/test_json_stream.march` 212 → 217 (interpreted, via
+`march test`); `run_stdlib`'s `json_stream` alcotest group (which runs the
+whole march test file as one alcotest case) unchanged in group count. No
+other suite touched.
+
+Four Minor findings from the whole-branch review of JsonStream phase 1
+(PR #134) fixed:
+
+1. **`max_token_bytes = 0` number/string asymmetry.** `value_start` created
+   a number token's first `PNum` unconditionally, while `push_piece` always
+   checked `max_token_bytes` for strings — so at `maxt=0` a 1-digit number
+   was accepted but a 1-char string was rejected with `ETokenLimit`. Fixed
+   by a new `num_start` helper (`stdlib/json_stream.march`) that checks
+   `1 > maxt` at number-token creation, matching `push_piece`'s check for
+   strings. At any `maxt >= 1` the two kinds already agreed; this only
+   affected the degenerate `0` case. 4 new tests pin both directions at
+   `maxt=0` and `maxt=1`.
+2. **Partial-token memory-accounting doc precision.** The design spec's
+   "constant memory" paragraph implied a tighter bound than phase 1
+   actually delivers: the partial-token buffer accumulates as one cons cell
+   + one string piece **per content byte**, not one byte. Documented in
+   `specs/2026-07-30-json-streaming-design.md` (still bounded by
+   `max_token_bytes`, still flat across document size — this is a precision
+   fix to the stated constant factor, not a correctness bug). Phase 2's
+   block-scanning tokenizer removes this shape outright; noted as an input
+   to that design in `specs/todos.md`'s phase 2 open item.
+3. **Stale plan-narration comment removed** at `open_container`'s doc
+   comment (previously described implementation-task history — "Task 2
+   implements open_container..." — rather than current behavior).
+4. **`start_ndjson_with` gained test coverage.** Was public with zero tests;
+   new test exercises non-default `JsonLimits` (a `max_depth` a later
+   record trips) in ndjson mode, confirming limits and ndjson compose.
+
+Verification: `march test test/stdlib/test_json_stream.march` — 217/217
+green, exit 0. `test_stdlib_march.exe test json_stream -e` (compiled stdlib
+test binary) — green, exit 0.
+
+## Current State (as of 2026-07-31, JsonStream phase 1 — benchmark + compiled parity + docs)
+
+**Counts:** `run_stdlib` 826 (unchanged in count — JsonStream's 212 interpreted
+tests were added across Tasks 1–4 and are already reflected in this total;
+this task added no new `describe`/`test` cases, only the benchmark and docs),
+with only the pre-existing environmental `MARCH_SANITIZE`/adversarial-regressions
+timeout failure (`test_compiled_sanitize_clean_exit`, killed after 30s under
+load — not a JsonStream regression). `run_compiler` 619, `run_codegen` 520,
+`run_eval` 256, `run_snapshots` 33 unchanged (no compiler-pipeline code
+touched). `find stdlib -name '*.march' | wc -l` is now 112 (JsonStream's own
+module, landed in Tasks 1–4, pushed the count from 111 — `scripts/check-docs.sh`
+Check B caught four stale "111 stdlib modules" references — `README.md`,
+`CLAUDE.md`, `docs/stdlib.md`, `.claude/skills/march-lang/SKILL.md` — bumped
+to 112 in this commit).
+
+**Task 5 closes out the JsonStream phase 1 plan** (tokenizer + drivers landed
+Tasks 1–4, 212 tests green interpreted): benchmark, first-ever **compiled**
+exercise of the module, and canonical docs.
+
+**Totality-harness approach (carried from Tasks 1–4, unchanged, restated here
+since Task 5 is where it gets a benchmark backing it):** every test document is
+fed through the tokenizer at *every* possible byte-split point — not a
+hand-picked sample of chunk boundaries — asserting the resulting event stream
+is identical to feeding the whole document in one `feed` call. Truncation
+sweeps drop the input at every prefix length and require either a clean
+partial-event set or a final `ETruncated`, never a wrong answer. This is the
+same style of exhaustive-over-a-dimension check as the every-byte-split
+sweep, applied to the "where does the caller stop feeding" axis instead of
+"where does the caller cut the chunks."
+
+**Compiled parity: no divergence found**, closing this repo's most common bug
+class (compiled-vs-interpreted mismatch) for this module on first contact.
+Two checks:
+1. `bench/json_stream.march` (20,000 synthetic NDJSON records, 64KB chunks):
+   interpreted (n=200 sanity) and compiled agree — checksum `2800` at n=200,
+   `280000` at n=20,000 (`20000 × 14`; see below for where 14 comes from).
+2. A dedicated surrogate-pair probe (`"a😀b"`, i.e. `a😀b`) run
+   through `JsonStream.fold` — interpreted and compiled both decode to
+   `EvStr("a😀b")`, 6 UTF-8 bytes, byte-identical output. This specifically
+   exercises the compiled `march_byte_to_char` path Task 4's string-content
+   emission depends on, which had never been exercised by this module before
+   Task 5.
+
+**The benchmark's own per-record event count was wrong in the plan and was
+computed empirically before use, per the plan's own instruction not to trust
+prose arithmetic here.** The plan text guessed 13 events/record
+(`checksum = 20000 × 13 = 260000`); a 1/2/3-record probe measured 14, 28, 42
+— i.e. **14** events/record, not 13 (the record's `EvObjStart`, 4×`EvKey`,
+3 scalar events, `EvArrStart`, 3×`EvNum`, `EvArrEnd`, `EvObjEnd` = 14). Fixed
+both the benchmark's header comment and the expected checksum
+(20000 × 14 = **280000**) before recording the baseline. The plan's timing
+arithmetic was also wrong the same way it warned about: `System.monotonic_time()`
+already returns milliseconds (see `stdlib/system.march`'s own doc comment and
+every other `bench/*.march` file's usage), so the plan's `(t1 - t0) / 1000000`
+divided milliseconds by a million and printed `ms=0` every run; fixed to
+`t1 - t0` directly.
+
+**Benchmark baseline (2026-07-31, Apple M-class, `--opt 2`, n=20,000
+records):** `checksum=280000`, `ms=224-229` across three runs,
+`/usr/bin/time -l` maximum resident set size ≈ 85 MB (85016576–85049344
+bytes). **10× record-count spot-check** (n=200,000, same 64KB chunk size):
+`checksum=2800000`, `ms=2373`, MaxRSS 840138752 bytes (≈801 MB) — RSS grew
+≈9.9× against the 10× input-size increase (≈82 MB baseline delta above a
+≈3 MB empty-program floor vs. ≈837 MB at 10×), i.e. RSS tracks the size of
+the in-memory input string the benchmark holds by construction, not the
+record count independent of that — consistent with the constant-memory
+design claim for the tokenizer's own state (see `specs/benchmarks.md` for the
+full writeup and what-to-watch notes for phase 2).
+
+**Deferred, per the design's own scoping, not found during this task:** the
+decoder-combinator layer (design Component 4, "separable — nothing in
+Components 1–3 depends on it"). `specs/2026-07-30-json-streaming-design.md`
+status flipped to phase 1 implemented; no decision-table deviations were
+found during implementation. Phase 2 (SIMD structural scanning) is filed as
+an open item in `specs/todos.md`, seeded with this task's benchmark baseline
+as the number it must beat.
+
+## Current State (as of 2026-07-30, `Json.parse` accepts `\uXXXX`)
+
+**Counts:** `run_stdlib` 826 (unchanged — the new coverage is 11 `describe`/`test`
+cases inside `test/stdlib/test_json.march`, which the OCaml suites count as one
+test), with only the pre-existing environmental `MARCH_SANITIZE` failure;
+`run_compiler` 619, `run_codegen` 520, `run_eval` 256, `run_snapshots` 33 unchanged.
+`test/stdlib/test_json.march` 197/197.
+
+**`Json.parse` rejected `\uXXXX`, which is most of the non-ASCII JSON in the
+world.** `unescape` decoded the eight two-byte escapes (`\" \\ \/ \n \r \t \b
+\f`) and returned `Err("unknown escape sequence")` for everything else — so a
+document containing `"A"`, valid per RFC 8259 §7 and the form nearly every
+serializer emits for a non-ASCII character, failed to parse outright. The
+serializer side was never the problem: `escape_str` emits raw UTF-8, which is
+also valid, so March could write documents it could not read back from other
+producers.
+
+`\u` is the only JSON escape whose length is not fixed at two bytes, so it is
+handled beside `unescape` rather than inside it: `unescape_u` returns the
+decoded text *and* the index just past the escape, and `scan_string` resumes
+from that index — preserving the existing run-slicing discipline (a run of
+unescaped bytes is still materialized with one `string_slice`). A high
+surrogate must be followed by a second `\uXXXX` low surrogate, and the pair
+decodes to one astral code point; a surrogate appearing alone is rejected
+rather than emitted, since it is not a Unicode scalar value.
+
+**`char_from_int` was the wrong primitive for the UTF-8 encoder.** It is
+documented as single-byte `n & 0xFF` — true of `march_char_from_int` in the C
+runtime, but the *interpreter* returns `VString ""` for anything above 127
+(`lib/eval/eval.ml`), so a first version of `utf8_encode` built from it produced
+the empty string for every multi-byte code point while the ASCII case passed.
+`byte_to_char` is the builtin that covers the full 0–255 range in both
+backends (it maps to the same `march_char_from_int` when compiled), and is what
+`utf8_encode` uses. Worth noting as a general trap: the two builtins share a C
+implementation but not an interpreter implementation, and the divergence is
+silent — no error, just an empty string. Output verified identical interpreted
+and compiled (`--compile`) for 1-, 2-, 3- and 4-byte results.
+
+**Pinned by** 11 new cases in `test/stdlib/test_json.march`: the four encoder
+widths (`A`, `é`, `中`, the `😀` pair), an escape
+adjacent to literal runs, an escape in an object key, and five rejections
+(lone high surrogate, high surrogate followed by a non-surrogate, lone low
+surrogate, fewer than four hex digits, a non-hex digit, and a `\u` truncated by
+end of input). The six accept cases were confirmed RED before the fix.
 
 ## Current State (as of 2026-07-30, a `(`-led statement no longer glues onto the previous line)
 

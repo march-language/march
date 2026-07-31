@@ -133,6 +133,25 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **JsonStream** — streaming JSON tokenizer: resumable chunk-fed parsing with
+  bounded memory, depth/token limits, ndjson mode, and typed errors with
+  absolute byte offsets. `max_token_bytes` now applies identically to number
+  and string tokens (a degenerate `max_token_bytes = 0` previously accepted
+  a 1-digit number while rejecting a 1-char string).
+
+- **`@[vectorize]` / `@[vectorize(warn)]` function attribute.** `NativeArray.map`/`map2`
+  have had a silent auto-vectorization fast path for a while — whether it actually
+  fires depends on how the callback closure is used, with no feedback if it doesn't.
+  This attribute turns that into a checked compile-time contract: `@[vectorize]` on a
+  function is a hard compile error if its `NativeArray.map`/`map2` calls wouldn't
+  actually vectorize; `@[vectorize(warn)]` reports the same problem as a warning and
+  lets the build continue. Two specific diagnoses are distinguished — a callback
+  that isn't safe to inline because it's reused rather than passed directly to the
+  map/map2 call, versus (for `Float` targets) a callback whose type is still generic
+  rather than concretely `Float` — plus a hard error if the attribute is applied to
+  a function that doesn't call `NativeArray.map`/`map2` at all. Fixed-width SIMD
+  vector types (`f32x4`, etc.) remain a separate, future increment.
+
 - **`cap verified`: an obligation the refinement checker cannot discharge is an
   error.** March's default stance is to report a refinement violation only when
   a precondition can *never* hold; anything the checker cannot decide is
@@ -221,6 +240,16 @@ git log is authoritative for exact commits.
   two could never meet.
 
 ### Fixed
+
+- **`Json.parse` now accepts `\uXXXX` escapes.** The escape decoder handled
+  only `\" \\ \/ \n \r \t \b \f` and rejected everything else, so
+  `Json.parse("\"\\u0041\"")` failed with "unknown escape sequence" on input
+  that is valid per RFC 8259 §7 — and that most serializers emit for any
+  non-ASCII character. `\uXXXX` is now decoded and encoded as UTF-8, including
+  surrogate pairs (`\uD83D\uDE00` → one astral code point). A surrogate that
+  is not part of a well-formed pair, a `\u` with fewer than four hex digits,
+  and a `\u` with a non-hex digit are all rejected with a message naming the
+  problem.
 
 - **A registry dependency now works for archive tasks, and brings its own
   dependencies with it.** Three gaps in `registry = "forge"` handling, all

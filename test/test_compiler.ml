@@ -462,6 +462,26 @@ let test_parse_with_else_infix_bodies () =
   end|} in
   Alcotest.(check int) "1 ok branch + 2 infix-body else arms" 3 (with_else_match_branches src)
 
+let test_bracket_attr_with_arg_parses () =
+  let m = parse_and_desugar
+      {|mod Test do
+          @[vectorize(warn)]
+          fn scale(x : Float) : Float do x *. 2.0 end
+          fn main() : Unit do () end
+        end|} in
+  (* The entry file's own [mod Test do ... end] becomes [m] itself — its
+     top-level fns sit directly in [m.mod_decls], not wrapped in a nested
+     DMod (nested DMod is only how OTHER, sibling/stdlib modules appear;
+     see Vectorize_mark.collect_attrs in Task 2, which relies on this
+     same distinction). *)
+  let attrs = List.find_map (function
+      | March_ast.Ast.DFn (def, _) when def.March_ast.Ast.fn_name.March_ast.Ast.txt = "scale" ->
+        Some def.March_ast.Ast.fn_attrs
+      | _ -> None
+    ) m.March_ast.Ast.mod_decls in
+  Alcotest.(check (option (list string))) "bracket+arg attribute parses to \"name:value\""
+    (Some [ "vectorize:warn" ]) attrs
+
 (* ── Helpers for desugar + typecheck tests ─────────────────────────────── *)
 
 let test_desugar_pipe () =
@@ -10389,6 +10409,7 @@ let compiler_suites =
           Alcotest.test_case "with-else two nullary arms" `Quick test_parse_with_else_two_nullary_arms;
           Alcotest.test_case "with-else three payload arms" `Quick test_parse_with_else_three_payload_arms;
           Alcotest.test_case "with-else infix arm bodies" `Quick test_parse_with_else_infix_bodies;
+          Alcotest.test_case "bracket attribute with argument parses" `Quick test_bracket_attr_with_arg_parses;
         ] );
       ( "module",
         [

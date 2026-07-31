@@ -2013,4 +2013,24 @@ let unused_pfn_names diags =
        | _ :: name :: _ -> name
        | _ -> msg)
 
+(** Run [src] through the full compile pipeline ([Lower] ->
+    [Vectorize_mark.mark] -> [Mono] -> [Defun] -> [Perceus] -> [Opt] ->
+    [Vectorize_check.check]) and return every diagnostic the
+    @[vectorize]/@[vectorize(warn)] check produced. [mark] must run
+    immediately after [Lower.lower_module] (before Mono/Defun/Opt can
+    mangle or inline anything away) and [check] must run after [Opt], both
+    matching the placement Task 3 wires into bin/main.ml. *)
+let run_vectorize_check src =
+  let ast = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module ast in
+  let tir = March_tir.Lower.lower_module ~type_map ast in
+  let tir = March_tir.Vectorize_mark.mark ast tir in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Opt.run tir in
+  let ctx = March_errors.Errors.create () in
+  ignore (March_tir.Vectorize_check.check ctx tir);
+  March_errors.Errors.sorted ctx
+
 (** pfn called from within a lambda passed to a HOF — must NOT be flagged. *)

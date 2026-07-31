@@ -291,6 +291,7 @@ let stdlib_file_list = [
   "actor.march";
   "flow.march";
   "json.march";
+  "json_stream.march";
   "regex.march";
   "datetime.march";
   "queue.march";
@@ -2142,6 +2143,16 @@ let compile filename =
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared in
+    (* @[vectorize]/@[vectorize(warn)]: this is the one point in the
+       pipeline where a TIR fn's name is still exactly its source name —
+       Mono hasn't mangled/duplicated anything yet, Defun hasn't lifted
+       any lambdas yet — so AST attrs can be matched to TIR functions by
+       plain name equality. Installs a sentinel call (see
+       Vectorize_mark's doc comment) that survives everything between
+       here and Vectorize_check.check far below, including inlining.
+       Native/wasm compile only — no sentinel should reach Js_emit.ml, which
+       has no codegen arm for the synthetic call this pass introduces. *)
+    let tir = if is_js_target then tir else March_tir.Vectorize_mark.mark desugared tir in
     (* Inject IO-module names from the typecheck env so the policy audit can
        identify calls that require Cap(IO) at the TIR level. *)
     let io_modules =
@@ -2374,6 +2385,35 @@ let compile filename =
        symbols".  When opt IS enabled the DCE pass already pruned inside
        Opt.run, so this is an idempotent no-op there. *)
     let tir = March_tir.Dce.prune_unreachable tir in
+    (* @[vectorize]/@[vectorize(warn)]: verify NativeArray.map/map2
+       eligibility against the SAME pre-rewrite TIR shape
+       Native_map_inline.run (right below) is about to consume — a
+       DIFFERENT ctx than the shared typecheck [errors], printed and
+       gated on its own, so already-printed earlier diagnostics in
+       [errors] are never re-emitted here. [check]'s return value MUST be
+       used going forward (not the original [tir]) — it has every
+       Vectorize_mark sentinel stripped back out, and nothing past this
+       point may see one (there is no @__vectorize_marker_* symbol to
+       link against). *)
+    let (tir, vectorize_diags) =
+      if is_js_target then (tir, [])
+      else
+        let ctx = March_errors.Errors.create () in
+        let tir' = March_tir.Vectorize_check.check ctx tir in
+        (tir', March_errors.Errors.sorted ctx)
+    in
+    List.iter (fun (d : March_errors.Errors.diagnostic) ->
+        let f = d.span.March_ast.Ast.file in
+        let (d_src, d_file) =
+          if f = filename || f = "" || f = "<unknown>" then (src, filename)
+          else (try read_file f with Sys_error _ -> src), f
+        in
+        Printf.eprintf "%s\n\n\n"
+          (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
+      ) vectorize_diags;
+    if List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error) vectorize_diags
+    then exit 1;
     (* P10 Phase 2: inline non-capturing NativeArray.map closures so
        llvm_emit.ml can emit a direct-call loop instead of going through the
        C runtime's opaque closure-pointer indirection (never inlinable across

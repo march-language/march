@@ -1,0 +1,579 @@
+-- Tests for the JsonStream stdlib module (streaming JSON tokenizer).
+-- Run with: dune exec march -- test test/stdlib/test_json_stream.march
+-- Design: specs/2026-07-30-json-streaming-design.md
+
+mod TestJsonStream do
+
+-- Render an event list as a compact string so assertions compare one string.
+pfn ev_str(e) do
+  match e do
+  EvObjStart -> "{"
+  EvObjEnd -> "}"
+  EvArrStart -> "["
+  EvArrEnd -> "]"
+  EvKey(k) -> "K(" ++ k ++ ")"
+  EvStr(sv) -> "S(" ++ sv ++ ")"
+  EvNum(f) -> "N(" ++ to_string(f) ++ ")"
+  EvBool(b) -> if b do "T" else "F" end
+  EvNull -> "0"
+  end
+end
+
+pfn evs_str(evs) do
+  match evs do
+  Nil -> ""
+  Cons(h, t) -> ev_str(h) ++ "|" ++ evs_str(t)
+  end
+end
+
+-- Feed one whole string as a single chunk, then finish; render all events,
+-- or "ERR:<n>" / "TRUNC:<n>" etc. on error.
+pfn err_str(e) do
+  match e do
+  EMalformed(_, off) -> "ERR:" ++ to_string(off)
+  EDepthLimit(off) -> "DEPTH:" ++ to_string(off)
+  ETokenLimit(off) -> "TOK:" ++ to_string(off)
+  ETruncated(off) -> "TRUNC:" ++ to_string(off)
+  end
+end
+
+pfn one_shot(src) do
+  match JsonStream.feed(JsonStream.start(), src) do
+  Err(e) -> err_str(e)
+  Ok((evs, st)) ->
+    match JsonStream.finish(st) do
+    Err(e) -> evs_str(evs) ++ err_str(e)
+    Ok(evs2) -> evs_str(evs) ++ evs_str(evs2)
+    end
+  end
+end
+
+-- Same input, split into two chunks at byte k.
+pfn two_shot(src, k) do
+  let n = string_byte_length(src)
+  let a = string_slice(src, 0, k)
+  let b = string_slice(src, k, n - k)
+  match JsonStream.feed(JsonStream.start(), a) do
+  Err(e) -> err_str(e)
+  Ok((evs1, st1)) ->
+    match JsonStream.feed(st1, b) do
+    Err(e) -> evs_str(evs1) ++ err_str(e)
+    Ok((evs2, st2)) ->
+      match JsonStream.finish(st2) do
+      Err(e) -> evs_str(evs1) ++ evs_str(evs2) ++ err_str(e)
+      Ok(evs3) -> evs_str(evs1) ++ evs_str(evs2) ++ evs_str(evs3)
+      end
+    end
+  end
+end
+
+pfn split_all(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) ->
+    if split_doc(d, 1, one_shot(d)) do split_all(rest) else false end
+  end
+end
+
+pfn split_doc(d, k, expect) do
+  if k >= string_byte_length(d) do true
+  else
+    if two_shot(d, k) == expect do split_doc(d, k + 1, expect)
+    else do
+      IO.puts("split mismatch: doc=" ++ d ++ " k=" ++ to_string(k)
+              ++ " got=" ++ two_shot(d, k) ++ " want=" ++ expect)
+      false
+    end end
+  end
+end
+
+pfn trunc_all(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) -> if trunc_doc(d, 1) do trunc_all(rest) else false end
+  end
+end
+
+pfn trunc_doc(d, k) do
+  if k >= string_byte_length(d) do true
+  else
+    let p = string_slice(d, 0, k)
+    match JsonStream.feed(JsonStream.start(), p) do
+    Err(_) -> do
+      IO.puts("prefix rejected by feed (should hold state): " ++ p)
+      false
+    end
+    Ok((_, st)) ->
+      match JsonStream.finish(st) do
+      Err(ETruncated(_)) -> trunc_doc(d, k + 1)
+      Err(_) -> do
+        IO.puts("prefix gave non-truncation error: " ++ p)
+        false
+      end
+      Ok(_) -> do
+        IO.puts("prefix wrongly accepted: " ++ p)
+        false
+      end
+      end
+    end
+  end
+end
+
+pfn repeat_str(piece, n, acc) do
+  if n <= 0 do acc else repeat_str(piece, n - 1, acc ++ piece) end
+end
+
+pfn drip(d, i, st, out) do
+  let n = string_byte_length(d)
+  if i >= n do
+    match JsonStream.finish(st) do
+    Err(e) -> out ++ err_str(e)
+    Ok(evs) -> out ++ evs_str(evs)
+    end
+  else
+    match JsonStream.feed(st, string_slice(d, i, 1)) do
+    Err(e) -> out ++ err_str(e)
+    Ok((evs, st2)) -> drip(d, i + 1, st2, out ++ evs_str(evs))
+    end
+  end
+end
+
+pfn chunks_of2(a, b) do
+  Seq.from_list(Cons(a, Cons(b, Nil)))
+end
+
+pfn diff_all(docs) do
+  match docs do
+  Nil -> true
+  Cons(d, rest) -> if diff_one(d) do diff_all(rest) else false end
+  end
+end
+
+pfn diff_one(d) do
+  let mine = JsonStream.build(Seq.from_list(Cons(d, Nil)))
+  let theirs = Json.parse(d)
+  match mine do
+  Ok(v) ->
+    match theirs do
+    Ok(v2) ->
+      if Json.to_string(v) == Json.to_string(v2) do true
+      else do
+        IO.puts("value mismatch on: " ++ d)
+        false
+      end end
+    Err(_) -> do
+      IO.puts("we accept, Json.parse rejects: " ++ d)
+      false
+    end
+    end
+  Err(_) ->
+    match theirs do
+    Err(_) -> true
+    Ok(_) -> do
+      IO.puts("we reject, Json.parse accepts: " ++ d)
+      false
+    end
+    end
+  end
+end
+
+describe "JsonStream" do
+
+  describe "scalars one-shot" do
+    test "sentinel (suite is not vacuously empty)" do
+      assert (true)
+    end
+    test "null" do assert (one_shot("null") == "0|") end
+    test "true" do assert (one_shot("true") == "T|") end
+    test "false" do assert (one_shot("false") == "F|") end
+    test "leading and trailing whitespace" do
+      assert (one_shot("  \t\r\n null \n") == "0|")
+    end
+    test "simple string" do assert (one_shot("\"hi\"") == "S(hi)|") end
+    test "empty string" do assert (one_shot("\"\"") == "S()|") end
+    test "escapes" do
+      assert (one_shot("\"a\\\"b\\\\c\\/d\\n\"") ==
+              "S(a\"b\\c/d" ++ char_from_int(10) ++ ")|")
+    end
+    test "unicode escape BMP" do
+      assert (one_shot("\"\\u0041\"") == "S(A)|")
+    end
+    test "unicode escape two-byte" do
+      -- U+00E9 é = 0xC3 0xA9
+      assert (one_shot("\"\\u00e9\"") ==
+              "S(" ++ byte_to_char(195) ++ byte_to_char(169) ++ ")|")
+    end
+    test "surrogate pair to 4-byte UTF-8" do
+      -- U+1F600 = \uD83D\uDE00 = F0 9F 98 80
+      assert (one_shot("\"\\ud83d\\ude00\"") ==
+              "S(" ++ byte_to_char(240) ++ byte_to_char(159)
+                   ++ byte_to_char(152) ++ byte_to_char(128) ++ ")|")
+    end
+    test "integer" do assert (one_shot("42") == "N(42.)|") end
+    test "negative" do assert (one_shot("-7") == "N(-7.)|") end
+    test "zero" do assert (one_shot("0") == "N(0.)|") end
+    test "float" do assert (one_shot("3.5") == "N(3.5)|") end
+    test "exponent" do assert (one_shot("2e3") == "N(2000.)|") end
+    test "number then trailing space" do assert (one_shot("42 ") == "N(42.)|") end
+  end
+
+  describe "scalars malformed" do
+    test "bare garbage" do assert (one_shot("xyz") == "ERR:0") end
+    test "bad literal" do assert (one_shot("trve") == "ERR:2") end
+    test "trailing garbage after value" do assert (one_shot("null null") == "ERR:5") end
+    test "unknown escape" do assert (one_shot("\"\\q\"") == "ERR:2") end
+    test "bad hex in unicode escape" do assert (one_shot("\"\\u00zz\"") == "ERR:5") end
+    test "lone high surrogate then char" do assert (one_shot("\"\\ud83dx\"") == "ERR:7") end
+    test "lone low surrogate" do assert (one_shot("\"\\ude00\"") == "ERR:6") end
+    test "leading zeros" do assert (one_shot("012") == "ERR:0") end
+    test "bare minus" do assert (one_shot("-") == "ERR:0") end
+    test "dot without frac digits" do assert (one_shot("1.") == "ERR:0") end
+    test "exp without digits" do assert (one_shot("1e") == "ERR:0") end
+  end
+
+  describe "truncation" do
+    test "half a literal" do assert (one_shot("tru") == "TRUNC:0") end
+    test "unterminated string" do assert (one_shot("\"abc") == "TRUNC:0") end
+    test "string open mid-escape" do assert (one_shot("\"a\\") == "TRUNC:0") end
+    test "empty input" do assert (one_shot("") == "TRUNC:0") end
+    test "bare number completes at finish" do assert (one_shot("42") == "N(42.)|") end
+  end
+
+  describe "chunk splits" do
+    test "literal split" do assert (two_shot("true", 2) == "T|") end
+    test "string split mid-content" do assert (two_shot("\"hello\"", 3) == "S(hello)|") end
+    test "string split mid-escape" do
+      assert (two_shot("\"a\\nb\"", 3) == "S(a" ++ char_from_int(10) ++ "b)|")
+    end
+    test "string split mid-hex" do assert (two_shot("\"\\u0041\"", 4) == "S(A)|") end
+    test "surrogate pair split between halves" do
+      assert (two_shot("\"\\ud83d\\ude00\"", 7) ==
+              "S(" ++ byte_to_char(240) ++ byte_to_char(159)
+                   ++ byte_to_char(152) ++ byte_to_char(128) ++ ")|")
+    end
+    test "number split" do assert (two_shot("1234", 2) == "N(1234.)|") end
+    test "error offset is absolute across chunks" do
+      -- "null " then "x": offset of x is 5. The first chunk ("null ")
+      -- already completes the null value, so evs1 = "0|" precedes the error.
+      assert (two_shot("null x", 5) == "0|ERR:5")
+    end
+  end
+
+  describe "limits" do
+    test "token limit on a long string" do
+      -- max_token_bytes = 4; five content bytes trips it. Offset = token start.
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 4))
+      match JsonStream.feed(st, "\"abcdef\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+
+    -- max_token_bytes = 0 is a degenerate case: number and string tokens
+    -- must reject their first byte identically (a 1-byte token always
+    -- exceeds a zero limit). Pinned here so a future change can't
+    -- reintroduce the asymmetry where a 1-digit number was accepted while
+    -- a 1-char string was rejected.
+    test "maxt=0 rejects a one-char string" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 0))
+      match JsonStream.feed(st, "\"a\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "maxt=0 rejects a one-digit number" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 0))
+      match JsonStream.feed(st, "1") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+
+    -- max_token_bytes = 1 is the smallest limit that admits a one-byte
+    -- token: both a one-char string and a one-digit number must succeed.
+    test "maxt=1 accepts a one-char string" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 1))
+      match JsonStream.feed(st, "\"a\"") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "S(a)|")
+        end
+      end
+    end
+    test "maxt=1 accepts a one-digit number" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 1))
+      match JsonStream.feed(st, "1") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "N(1.)|")
+        end
+      end
+    end
+  end
+
+  describe "containers" do
+    test "empty array" do assert (one_shot("[]") == "[|]|") end
+    test "empty object" do assert (one_shot("{}") == "{|}|") end
+    test "array of scalars" do
+      assert (one_shot("[1, \"a\", true, null]") == "[|N(1.)|S(a)|T|0|]|")
+    end
+    test "object" do
+      assert (one_shot("{\"x\": 1, \"y\": [2]}") == "{|K(x)|N(1.)|K(y)|[|N(2.)|]|}|")
+    end
+    test "nested" do
+      assert (one_shot("[[[]]]") == "[|[|[|]|]|]|")
+    end
+    test "number closed by bracket" do assert (one_shot("[7]") == "[|N(7.)|]|") end
+    test "container split across chunks" do
+      assert (two_shot("{\"a\": [1, 2]}", 6) == "{|K(a)|[|N(1.)|N(2.)|]|}|")
+    end
+  end
+
+  describe "containers malformed" do
+    test "trailing comma in array" do assert (one_shot("[1,]") == "ERR:3") end
+    test "comma before first element" do assert (one_shot("[,1]") == "ERR:1") end
+    test "missing colon" do assert (one_shot("{\"a\" 1}") == "ERR:5") end
+    test "missing comma" do assert (one_shot("[1 2]") == "ERR:3") end
+    test "mismatched close" do assert (one_shot("{]") == "ERR:1") end
+    test "bare close bracket" do assert (one_shot("]") == "ERR:0") end
+    test "unclosed array truncates" do
+      -- the pending number is validated but its event is dropped: errors are final
+      assert (one_shot("[1, 2") == "[|N(1.)|TRUNC:5")
+    end
+    test "unclosed object truncates" do assert (one_shot("{\"a\":") == "{|K(a)|TRUNC:5") end
+    test "non-string key" do
+      -- same-chunk events are discarded on Err: errors are final and fail fast
+      assert (one_shot("{1: 2}") == "ERR:1")
+    end
+  end
+
+  describe "depth limit" do
+    test "depth exactly at limit is fine" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(3, 1000))
+      match JsonStream.feed(st, "[[[1]]]") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "[|[|[|N(1.)|]|]|]|")
+        end
+      end
+    end
+    test "depth past limit errors at the opening bracket" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(3, 1000))
+      match JsonStream.feed(st, "[[[[1]]]]") do
+      Err(e) -> assert (err_str(e) == "DEPTH:3")
+      Ok(_) -> assert (false)
+      end
+    end
+  end
+
+  describe "ndjson" do
+    test "three records" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "{\"a\":1}\n[2]\ntrue\n") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "{|K(a)|N(1.)|}|[|N(2.)|]|T|")
+        end
+      end
+    end
+    test "record split across chunks" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "1\n2") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.feed(st2, "3\n") do
+        Err(e) -> assert (false)
+        Ok((evs2, st3)) ->
+          match JsonStream.finish(st3) do
+          Err(e) -> assert (false)
+          Ok(evs3) ->
+            assert (evs_str(evs) ++ evs_str(evs2) ++ evs_str(evs3) == "N(1.)|N(23.)|")
+          end
+        end
+      end
+    end
+    test "trailing bare number completes at finish" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "1\n2") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "N(1.)|N(2.)|")
+        end
+      end
+    end
+    test "start_ndjson_with composes limits with ndjson mode" do
+      -- max_depth = 2: the first record ("[1]") stays within it, but the
+      -- second record's third '[' (absolute offset 6) trips EDepthLimit --
+      -- proving non-default limits carry through into ndjson mode. Errors
+      -- are final, so the first record's same-chunk events are discarded
+      -- along with it (see the "non-string key" test above).
+      let st = JsonStream.start_ndjson_with(JsonStream.JsonLimits(2, 1000))
+      match JsonStream.feed(st, "[1]\n[[[1]]]\n") do
+      Err(e) -> assert (err_str(e) == "DEPTH:6")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "unterminated container still truncates" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "[1\n") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (err_str(e) == "TRUNC:3")
+        Ok(_) -> assert (false)
+        end
+      end
+    end
+  end
+
+  describe "every-byte-split differential" do
+    test "all corpus documents at all split points" do
+      let corpus = Cons("null",
+                   Cons("true",
+                   Cons("-12.5e-3",
+                   Cons("\"hello\"",
+                   Cons("\"a\\n\\u0041\\ud83d\\ude00 b\"",
+                   Cons("[]",
+                   Cons("{}",
+                   Cons("[1, [2, [3, []]], \"x\"]",
+                   Cons("{\"k\": {\"n\": [true, false, null]}, \"z\": -0.5}",
+                   Cons("  [ 1 , { \"a\" : \"b\" } ]  ",
+                   Nil))))))))))
+      assert (split_all(corpus))
+    end
+  end
+
+  describe "truncation sweep" do
+    test "all strict prefixes truncate" do
+      let corpus = Cons("\"hello world\"",
+                   Cons("[1, [2, [3]]]",
+                   Cons("{\"k\": [true, null]}",
+                   Cons("\"esc \\u0041\\ud83d\\ude00\"",
+                   Nil))))
+      assert (trunc_all(corpus))
+    end
+  end
+
+  describe "adversarial" do
+    test "depth bomb errors fast, no crash" do
+      let bomb = repeat_str("[", 10000, "")
+      let st = JsonStream.start_with(JsonStream.JsonLimits(64, 1000))
+      match JsonStream.feed(st, bomb) do
+      Err(e) -> assert (err_str(e) == "DEPTH:64")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "token bomb errors fast, no crash" do
+      let bomb = "\"" ++ repeat_str("a", 10000, "")
+      let st = JsonStream.start_with(JsonStream.JsonLimits(64, 1024))
+      match JsonStream.feed(st, bomb) do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "single-byte chunks agree with one big chunk" do
+      let d = "{\"a\": [1, \"b\\n\", true]}"
+      assert (drip(d, 0, JsonStream.start(), "") == one_shot(d))
+    end
+  end
+
+  describe "drivers" do
+    test "fold counts events across chunks" do
+      let r = JsonStream.fold(chunks_of2("[1, 2, ", "3]"), 0, fn (n, e) -> n + 1)
+      match r do
+      Err(_) -> assert (false)
+      Ok(n) -> assert (n == 5)
+      end
+    end
+    test "fold surfaces errors" do
+      match JsonStream.fold(chunks_of2("[1, ", "x]"), 0, fn (n, e) -> n + 1) do
+      Err(EMalformed(_, off)) -> assert (off == 4)
+      _ -> assert (false)
+      end
+    end
+    test "build reconstructs a tree equal to Json.parse" do
+      let src = "{\"a\": [1, true, null], \"b\": \"x\"}"
+      match JsonStream.build(chunks_of2(string_slice(src, 0, 9),
+                                        string_slice(src, 9, string_byte_length(src) - 9))) do
+      Err(_) -> assert (false)
+      Ok(v) ->
+        match Json.parse(src) do
+        Ok(v2) -> assert (Json.to_string(v) == Json.to_string(v2))
+        Err(_) -> assert (false)
+        end
+      end
+    end
+    test "differential verdicts vs Json.parse over the corpus" do
+      -- \u documents INCLUDED: Json.parse gained \uXXXX + surrogate-pair
+      -- support on main 2026-07-30, so escapes are differential-testable.
+      let corpus = Cons("null", Cons("true", Cons("-12.5e-3",
+                   Cons("\"a\\u0041\\ud83d\\ude00\"",
+                   Cons("\"hello\"", Cons("[]", Cons("{}",
+                   Cons("[1, [2, [3, []]], \"x\"]",
+                   Cons("{\"k\": {\"n\": [true, false, null]}}",
+                   Cons("xyz", Cons("[1,]", Cons("{\"a\" 1}", Cons("012",
+                   Nil)))))))))))))
+      assert (diff_all(corpus))
+    end
+    -- No `Ref` module in stdlib, so this covers each_value (Ok on a valid
+    -- ndjson file, Err on a malformed one) and covers a fold-based count
+    -- separately over a single-chunk file read, rather than counting via
+    -- a mutable ref captured in the each_value callback.
+    test "each_value over an ndjson file" do
+      let path = "/tmp/march_jsonstream_ndjson_test.jsonl"
+      match File.write(path, "{\"n\": 1}\n{\"n\": 2}\n{\"n\": 3}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        match JsonStream.each_value(path, fn v -> ()) do
+        Err(_) -> assert (false)
+        Ok(_) -> assert (true)
+        end
+      end
+      end
+      match File.delete(path) do _ -> () end
+    end
+    test "each_value errors on malformed ndjson" do
+      let path = "/tmp/march_jsonstream_ndjson_bad_test.jsonl"
+      match File.write(path, "{\"n\": 1}\nnot json\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        match JsonStream.each_value(path, fn v -> ()) do
+        Err(_) -> assert (true)
+        Ok(_) -> assert (false)
+        end
+      end
+      end
+      match File.delete(path) do _ -> () end
+    end
+    test "fold-based count over file contents (Ref unavailable)" do
+      let path = "/tmp/march_jsonstream_fold_count_test.json"
+      match File.write(path, "[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}]") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        match File.read(path) do
+        Err(_) -> assert (false)
+        Ok(contents) ->
+          match JsonStream.fold(Seq.from_list(Cons(contents, Nil)), 0, fn (n, e) -> n + 1) do
+          Err(_) -> assert (false)
+          Ok(n) -> assert (n == 14)
+          end
+        end
+      end
+      end
+      match File.delete(path) do _ -> () end
+    end
+  end
+
+end
+
+end
