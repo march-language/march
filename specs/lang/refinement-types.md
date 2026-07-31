@@ -429,7 +429,7 @@ Like the qualified-spelling warning, this is a warning rather than an error on
 purpose: the shape compiles today, and the defect being fixed is the *silence*.
 Making an interface signature actually enforce — obliging every call dispatched
 through the interface and checking it against every `impl` — is a much larger
-change and stays open in `specs/todos.md`. Witnessed by `accept/t137` (whose
+change and stays open in `specs/todos/`. Witnessed by `accept/t137` (whose
 exit code is the point: it pins that the program stays exit 0) and by
 `test_refinecheck.ml`'s `interface-signature-refinement` suite, which pins the
 warning text, the return-position case, and a false-positive control that a
@@ -1388,7 +1388,7 @@ violation inside a `@[trusted]` function is still reported).
     import but `resolve_call` tries the lexical enclosing lookup first and
     rejects correct code against a contract it never touches. That is
     pre-existing, reaches plain `fn` contracts (no `impl` involved), and is
-    tracked in `specs/todos.md` as the cardinal-sin-direction item.
+    tracked in `specs/todos/` as the cardinal-sin-direction item.
   - When the name is ambiguous the refinement binds **nobody**: the body is
     walked with it stripped, so it cannot discharge anything either. Unenforced
     means unusable in both directions — never "assumed in the body but demanded
@@ -1490,7 +1490,7 @@ sense; each is a check that does not happen.
    is not evidence (fixed 2026-07-31 after review; `expr_mentions_free`). The
    DIRECT path retains the mirror-image pre-existing hole: an application
    under a binder that shadows the subject (`fn ys -> List.length(ys) > 0`
-   passed to a combinator) still counts. Filed in `specs/todos.md`; fixing it
+   passed to a combinator) still counts. Filed in `specs/todos/`; fixing it
    changes direct-path behavior that predates the laundering work.
 
 ---

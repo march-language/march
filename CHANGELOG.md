@@ -6,7 +6,7 @@ All notable changes to March are documented here. Format follows
 
 This file starts at the point March adopted a changelog (2026-07-21).
 Implementer-level detail on every change — including everything that shipped
-before this file existed — lives in `specs/progress.md` and `specs/todos.md`;
+before this file existed — lives in `specs/progress/` and `specs/todos/`;
 git log is authoritative for exact commits.
 
 ## [Unreleased]
