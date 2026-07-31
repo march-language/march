@@ -232,11 +232,9 @@ mod JsonStream do
     else if c == 110 do
       go(s, i + 1, cfg, mode, stack, depth, PLit("null", 1, base + i), base, evs)
     else if c == 45 do
-      go(s, i + 1, cfg, mode, stack, depth,
-         PNum(Cons(char_from_int(c), Nil), 1, base + i), base, evs)
+      num_start(s, i, c, cfg, mode, stack, depth, base, evs)
     else if is_digit(c) do
-      go(s, i + 1, cfg, mode, stack, depth,
-         PNum(Cons(char_from_int(c), Nil), 1, base + i), base, evs)
+      num_start(s, i, c, cfg, mode, stack, depth, base, evs)
     else if c == 123 do
       open_container(s, i, true, cfg, mode, stack, depth, base, evs)
     else if c == 91 do
@@ -245,7 +243,21 @@ mod JsonStream do
     end end end end end end end end
   end
 
-  -- Containers: Task 2 implements open_container and replaces close_* bodies.
+  -- First byte of a number token ('-' or a digit).  Checked against
+  -- max_token_bytes here, the same way push_piece checks it for strings, so
+  -- a 1-digit number and a 1-char string behave identically at
+  -- max_token_bytes = 0 (a single-byte token always exceeds a zero limit).
+  pfn num_start(s, i, c, cfg, mode, stack, depth, base, evs) do
+    match cfg do
+    JsCfg(_, maxt, _) ->
+      if 1 > maxt do Err(ETokenLimit(base + i))
+      else
+        go(s, i + 1, cfg, mode, stack, depth,
+           PNum(Cons(char_from_int(c), Nil), 1, base + i), base, evs)
+      end
+    end
+  end
+
   -- '{' or '[': push the parent mode; restore it via after_value on close.
   pfn open_container(s, i, is_obj, cfg, mode, stack, depth, base, evs) do
     match cfg do

@@ -15,7 +15,9 @@ git log is authoritative for exact commits.
 
 - **JsonStream** — streaming JSON tokenizer: resumable chunk-fed parsing with
   bounded memory, depth/token limits, ndjson mode, and typed errors with
-  absolute byte offsets.
+  absolute byte offsets. `max_token_bytes` now applies identically to number
+  and string tokens (a degenerate `max_token_bytes = 0` previously accepted
+  a 1-digit number while rejecting a 1-char string).
 
 - **`@[vectorize]` / `@[vectorize(warn)]` function attribute.** `NativeArray.map`/`map2`
   have had a silent auto-vectorization fast path for a while — whether it actually
