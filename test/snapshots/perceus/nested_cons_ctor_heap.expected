@@ -342,8 +342,7 @@ alloc List.Cons($t4, $t9) in
 case rows of
   Cons($f529, $f530) -> dec_rc rows;
 case $f529 of
-  Row($f531) -> dec_rc $f529;
-let $jp_clo533 : () -> '_ = alloc $Clo_$jp532$12($jp532$apply$12) in
+  Row($f531) -> let $jp_clo533 : () -> '_ = alloc $Clo_$jp532$12($jp532$apply$12) in
 dec_rc $jp_clo533;
 let rest : List(Row) = $f530 in
 let fp : List(Int) = $f531 in
