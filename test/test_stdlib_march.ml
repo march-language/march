@@ -98,6 +98,7 @@ let all_stdlib_decls =
        Array, ...) keep winning bare lookups exactly as they did before
        json.march joined this list. *)
     "json.march";
+    "json_stream.march";
     "iolist.march";
     "http.march";
     "http_transport.march";
@@ -295,6 +296,10 @@ let () =
     ("json", [
       Alcotest.test_case "Json module"
         `Quick (run_stdlib_test "test_json.march" "TestJson");
+    ]);
+    ("json_stream", [
+      Alcotest.test_case "JsonStream module"
+        `Quick (run_stdlib_test "test_json_stream.march" "TestJsonStream");
     ]);
     ("msgpack", [
       Alcotest.test_case "Msgpack module"

@@ -448,7 +448,7 @@ Search is forge-only — there is no `-search` flag on the `march` compiler.
 
 ## 5. Stdlib Manifest
 
-111 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+112 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -1125,7 +1125,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     111 March stdlib modules
+stdlib/                     112 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server
