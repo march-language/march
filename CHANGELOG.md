@@ -11,6 +11,126 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The default HTTP server no longer strands connections past its worker
+  count.** A pool worker owns a connection for that connection's entire
+  keep-alive lifetime, so a *fixed* pool of N workers served at most N
+  concurrent connections — every further connection was accepted by the
+  kernel, showed the client a successful connect, and was then never read.
+  With the default `ncpus*2` = 28 workers and 256 offered connections, 228 sat
+  with unread bytes in `Recv-Q` indefinitely. The pool is now **elastic**: the
+  worker count is a floor, and a worker about to park on a connection starts
+  one more if it was the last idle one, up to `max_connections`. Measured at
+  256 connections, order-swapped and repeated: **228 starved connections → 0**,
+  and in-flight requests (throughput × latency) **27.7 → 253.7**. Reported
+  average latency rises from 0.9 ms to 8.7 ms, which is the honest figure — the
+  old number only averaged the 28 connections that were being served at all.
+
+  `HttpServer.max_connections` now does something. It had been accepted and
+  discarded (`(void)max_conns`), which is part of why the real limit was
+  invisible; it is now the ceiling the pool grows to, defaulting to 1024.
+
+  Servers with many mostly-idle keep-alive connections should still prefer the
+  event loop (`MARCH_HTTP_EVLOOP=1`), which costs 15–17% less CPU per request
+  and does not spend a thread per connection.
+
+### Added
+
+- **The compiled HTTP server is covered end-to-end by the test suite**
+  (`test/test_http_native.ml`, carried by `run_stdlib.exe` and therefore by
+  `dune runtest` and CI on both macOS and Linux). A total outage of the
+  compiled server went unnoticed because the only end-to-end test of it,
+  `test/test_http_native.sh`, was referenced by no dune rule and no CI
+  workflow — and would have passed against two of the three defects anyway.
+  The replacement compiles at `--opt 2` (every defect was compiled-only),
+  makes ~65 requests against one process (one crashed on request 2), asserts
+  on response *bodies* with two routes echoing request-derived data (one
+  returned a well-formed `200` with an empty body), asserts the process is
+  still alive and decodes `128 + signal` if not (one crash was silent), and
+  covers the thread-pool and event-loop servers as equal peers. The only skip
+  is clang genuinely absent; a broken server can never become a skip.
+
+### Removed
+
+- **`march_response_send_plaintext` is deleted.** It was a TechEmpower
+  `/plaintext` fast path that hardcoded `Content-Length: 13` and the literal
+  body `"Hello, World!"`, so reaching it required bypassing the user's March
+  router entirely — the program nominally under benchmark would never have
+  run. It had no callers and never had any. A general small-fixed-response
+  path is separately not worth adding: the normal response builder is already
+  zero-copy, with every iovec pointing at a March string or a static constant
+  and one `snprintf` of Content-Length into thread-local scratch.
+
+### Changed
+
+- **The thread-pool HTTP server no longer pays for TCP corking on
+  single-request batches.** `TCP_NOPUSH`/`TCP_CORK` were set and cleared around
+  every response batch, but corking only earns its two `setsockopt` syscalls
+  when the batch emits more than one `writev` — a single request is one
+  `writev`, which the kernel already coalesces. Every non-pipelining client
+  (browsers, curl, wrk — effectively all real traffic) took that path on every
+  request. Measured on macOS/arm64: **−1.45 µs of ~32 µs CPU per request,
+  −4.5%**, with `setsockopt` per request going 2.000 → 0.000. Throughput is
+  unchanged, because on the measurement box the ~30k req/s ceiling is
+  client/kernel-side rather than server-side.
+
+- **The TFB HTTP benchmark harness measures the routes it claims to.**
+  `bench/tfb/run.sh` drove wrk at `/plaintext` and `/json` while its March
+  target was `examples/http_hello`, which routes only `GET /` — so both
+  endpoints answered `404 Not Found` and every March number the harness printed
+  was 404 throughput. There is now a real `bench/tfb/tfb_server.march` serving
+  the same two routes as the Node and Python servers, the harness compiles it
+  itself, and it aborts rather than reporting numbers if any server under test
+  fails a route check. The `/json` body is serialized per request in all four
+  servers (Node and Python previously wrote a buffer baked at startup, against
+  March actually encoding), and all four now emit a byte-identical payload.
+  The historical Run 1 / Run 2 comparison tables in `specs/benchmarks.md` are
+  annotated as invalid rather than deleted; the Rust actix-web and FastAPI
+  servers they reference have never existed in the repository, so those two
+  comparisons cannot currently be reproduced.
+
+### Fixed
+
+- **The compiled HTTP server works again.** A compiled `HttpServer` panicked
+  with `non-exhaustive pattern match` on the very first request, and once that
+  was fixed it segfaulted on the second. Two outage-causing bugs, the second
+  hidden behind the first, affecting both the default thread-pool server and
+  the opt-in event-loop server (`MARCH_HTTP_EVLOOP=1`); a third latent
+  representation bug was found and fixed alongside them. All were
+  **compiled-only** — the interpreter was healthy throughout, which is why the
+  interpreted `http_server` tests stayed green.
+
+  1. `stdlib/websocket.march` re-declared `Conn`, `Header` and `Upgrade` as
+     structural copies of the `HttpServer`/`Http` types, "mirroring" them
+     because March has no imports. March has a single global type namespace, so
+     these were always redundant; they became actively harmful once
+     same-short-name types in different modules started receiving globally
+     unique constructor tags. `HttpServer.Conn`'s tag moved off 0 while the C
+     runtime's `march_conn_from_parsed` still wrote tag 0, so the value it
+     handed to the pipeline matched no arm. The duplicates are removed, and
+     `WebSocket.upgrade` now takes and returns the one true `HttpServer.Conn`
+     rather than a same-shaped different type.
+  2. `make_bool` in `runtime/march_http.c` heap-allocated a two-state object
+     for `Conn`'s `halted` field, but a `Bool` field of a boxed ADT is a raw
+     i64 0/1. This is a latent representation bug rather than a cause of the
+     outage: `halted` is tested by its low bit and `march_alloc` is
+     calloc-backed, so the pointer was always even and read as `false`. It is
+     fixed because correctness should not rest on a pointer-parity
+     coincidence, because any consumer treating the field as a real `Bool`
+     would see a pointer, and because it allocated 16 bytes per request to
+     carry one bit.
+  3. The compiled apply-fn consumes one reference to a closure it is called
+     with, but all three runtime call sites passed the server's single
+     long-lived pipeline closure without bumping it first, on the assumption
+     that holding it for the connection's lifetime was enough. Two requests
+     dropped the refcount to zero, freeing the closure and its captured plug
+     list; request three dereferenced freed memory.
+
+  Note that `test/test_http_native.sh` — the only end-to-end test of the
+  compiled HTTP server — is wired into neither dune nor CI, which is why a
+  total outage of the built-in server went unnoticed.
+
 ### Added
 
 - **JsonStream** — streaming JSON tokenizer: resumable chunk-fed parsing with

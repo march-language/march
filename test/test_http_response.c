@@ -252,49 +252,9 @@ static void test_full_response_roundtrip(void) {
     }
 }
 
-/* ── 11. march_response_send_plaintext produces valid HTTP ───────────── */
-
-static void test_plaintext_fast_path(void) {
-    int sv[2];
-    if (make_socketpair(sv) != 0) {
-        fprintf(stderr, "  [skip] socketpair failed\n");
-        CHECK(1);
-        return;
-    }
-
-    int r = march_response_send_plaintext(sv[1]);
-    close(sv[1]);
-
-    CHECK(r == 0);
-
-    char buf[1024];
-    ssize_t total = read_all(sv[0], buf, sizeof(buf) - 1);
-    close(sv[0]);
-    buf[total] = '\0';
-
-    CHECK(total > 0);
-    CHECK(memcmp(buf, "HTTP/1.1 200 OK\r\n", 17) == 0);
-    CHECK(strstr(buf, "Content-Type: text/plain\r\n") != NULL);
-    CHECK(strstr(buf, "Content-Length: 13\r\n")       != NULL);
-    CHECK(strstr(buf, "Server: March\r\n")             != NULL);
-    /* Body */
-    const char *blank = strstr(buf, "\r\n\r\n");
-    CHECK(blank != NULL);
-    if (blank) {
-        const char *body = blank + 4;
-        CHECK(memcmp(body, "Hello, World!", 13) == 0);
-    }
-}
-
-/* ── 12. Plaintext static headers constant is well-formed ────────────── */
-
-static void test_plaintext_static_headers_const(void) {
-    /* LEN must match actual string length. */
-    CHECK(MARCH_PLAINTEXT_STATIC_HEADERS_LEN == strlen(MARCH_PLAINTEXT_STATIC_HEADERS));
-    CHECK(MARCH_PLAINTEXT_BODY_LEN == strlen(MARCH_PLAINTEXT_BODY));
-    /* Content of the body. */
-    CHECK(memcmp(MARCH_PLAINTEXT_BODY, "Hello, World!", 13) == 0);
-}
+/* Tests 11 and 12 covered march_response_send_plaintext and its
+ * MARCH_PLAINTEXT_* constants, deleted in 2026-07 as a benchmark-only
+ * fast path with no callers (see march_http_response.h). */
 
 /* ── 13. Date cache returns non-empty string ─────────────────────────── */
 
@@ -395,15 +355,6 @@ static void test_scratch_reinit(void) {
     CHECK(resp.scratch_used == used_after_first);
 }
 
-/* ── 19. Pre-serialized plaintext body length matches Content-Length ─── */
-
-static void test_plaintext_cl_matches_body(void) {
-    /* MARCH_PLAINTEXT_STATIC_HEADERS contains "Content-Length: 13\r\n"
-     * and MARCH_PLAINTEXT_BODY_LEN == 13. */
-    CHECK(MARCH_PLAINTEXT_BODY_LEN == 13);
-    CHECK(strstr(MARCH_PLAINTEXT_STATIC_HEADERS, "Content-Length: 13\r\n") != NULL);
-}
-
 /* ── 20. Thread-safety smoke test for Date cache ─────────────────────── */
 
 #define DATE_THREADS 8
@@ -451,15 +402,12 @@ int main(void) {
     test_set_body();
     test_set_body_empty();
     test_full_response_roundtrip();
-    test_plaintext_fast_path();
-    test_plaintext_static_headers_const();
     test_date_cache_non_empty();
     test_date_cache_stable_within_second();
     test_multiple_headers();
     test_send_empty_noop();
     test_404_roundtrip();
     test_scratch_reinit();
-    test_plaintext_cl_matches_body();
     test_date_cache_thread_safe();
 
     printf("\n%d/%d passed", g_passed, g_total);
