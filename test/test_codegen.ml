@@ -12295,11 +12295,35 @@ let test_vectorize_check_module_loads () =
   Alcotest.(check int) "zero-call annotated fn reports exactly one (misuse) diagnostic"
     1 (List.length (March_errors.Errors.sorted ctx))
 
+let vectorize_source_inlined_reuse_fail = {|mod Main do
+  @[vectorize]
+  fn scale(arr, k) do
+    let f = fn x -> x *. k
+    let a1 = native_float_arr_map(arr, f)
+    let a2 = native_float_arr_map(a1, f)
+    native_float_arr_map(a2, f)
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let out = scale(arr, 2.0)
+    println(native_float_arr_get(out, 0))
+  end
+end|}
+
+let test_vectorize_catches_violation_even_when_inlined () =
+  let diags = Test_helpers.run_vectorize_check vectorize_source_inlined_reuse_fail in
+  Alcotest.(check bool) "at least one diagnostic even if Opt inlines `scale` into `main`"
+    true (List.length diags >= 1);
+  Alcotest.(check bool) "severity is Error"
+    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Error)
+
 let codegen_suites =
   [
       ( "vectorize_check", [
           Alcotest.test_case "module loads, misuse case reports one diagnostic" `Quick
             test_vectorize_check_module_loads;
+          Alcotest.test_case "reuse gate: caught even after the annotated fn is inlined away" `Quick
+            test_vectorize_catches_violation_even_when_inlined;
         ] );
       ( "cross_compile", [
           Alcotest.test_case

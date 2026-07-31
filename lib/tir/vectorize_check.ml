@@ -199,46 +199,118 @@ let check_fn
         March_errors.Errors.report ctx diag)
       failures
 
-(* ── AST attribute collection + TIR dispatch ─────────────────────────── *)
+(* ── Marker scanning (post-mark, pre-strip) ──────────────────────────── *)
 
-(** Every top-level [DFn] anywhere in [decls] (recursing into nested
-    [DMod]s, since sibling/stdlib modules appear that way in the AST the
-    compile pipeline hands to [Lower.lower_module]) whose [fn_attrs]
-    names a @[vectorize] variant, keyed by its *source* name. *)
-let rec collect_attrs (decls : March_ast.Ast.decl list)
-  : (string * (severity * March_ast.Ast.span)) list =
-  List.concat_map (function
-      | March_ast.Ast.DFn (def, span) ->
-        (match attr_severity def.March_ast.Ast.fn_attrs with
-         | Some sev -> [ (def.March_ast.Ast.fn_name.March_ast.Ast.txt, (sev, span)) ]
-         | None -> [])
-      | March_ast.Ast.DMod (_, _, inner, _) -> collect_attrs inner
-      | _ -> [])
-    decls
+(** Revision note: an earlier version of this module matched @[vectorize]
+    functions to TIR [fn_def]s by name — walking [Ast.decl]s for the
+    attribute, then looking up each TIR fn whose name (stripped of any
+    "$..." monomorphization suffix) matched. Review found that unsound in
+    two confirmed ways: (1) the "$"-strip collided with Defun's own
+    "<fn>$apply$<uid>" lifted-lambda naming, so an unrelated stdlib lambda
+    sharing a user fn's name could spuriously fail the check; (2) the
+    check ran post-Opt/inlining, so a small annotated wrapper that the
+    optimizer inlined into its caller no longer existed as a distinct
+    [Tir.fn_def] by the time the check ran — the exact "reuse gate"
+    violation this feature exists to catch was silently missed. Both are
+    now structurally impossible: [Vectorize_mark.mark] does the
+    name-matching immediately after [Lower.lower_module] (the one point
+    where TIR names are still exactly source names), and stamps a
+    sentinel *call* into the matched fn's body instead of relying on the
+    fn's own identity surviving to this point. Mono's duplication and
+    Opt's inlining both preserve body contents, so the sentinel — and
+    with it, the (source name, severity, span) triple — rides along into
+    wherever the body ends up, and this module scans for sentinels
+    instead of matching by name. *)
 
-(** Monomorphization suffixes a name with "$..." (e.g. "scale$Float") but
-    always keeps the original source name as the prefix before the first
-    "$" (see e.g. bin/main.ml's WASM-island-export matching, which relies
-    on the same convention). A generic annotated fn may be monomorphized
-    into several concrete instantiations; each is checked independently
-    below — intentional, not a limitation: a generic wrapper can
-    vectorize for one call site's type and fail to for another's. *)
-let base_name (name : string) : string =
-  match String.index_opt name '$' with
-  | Some i -> String.sub name 0 i
-  | None -> name
+let marker_severity : string -> severity option = function
+  | "__vectorize_marker_hard" -> Some Hard
+  | "__vectorize_marker_soft" -> Some Soft
+  | _ -> None
 
-(** Entry point. Walks [ast] for @[vectorize]/@[vectorize(warn)]
-    functions and checks every TIR instantiation ([m.tm_fns]) whose base
-    name matches. A no-op (does not even build the apply-fn table) when
-    nothing in [ast] carries the attribute. *)
-let check (ctx : March_errors.Errors.ctx) (ast : March_ast.Ast.module_) (m : Tir.tir_module) : unit =
-  let attrs = collect_attrs ast.March_ast.Ast.mod_decls in
-  if attrs <> [] then begin
-    let apply_fns = Native_map_inline.apply_fn_table m in
-    List.iter (fun (fd : Tir.fn_def) ->
-        match List.assoc_opt (base_name fd.Tir.fn_name) attrs with
-        | Some (severity, span) -> check_fn ctx apply_fns ~severity ~span fd
-        | None -> ())
-      m.Tir.tm_fns
-  end
+let marker_shape (f : Tir.var) (args : Tir.atom list) : (string * severity * March_ast.Ast.span) option =
+  match marker_severity f.Tir.v_name, args with
+  | Some sev,
+    [ Tir.ALit (March_ast.Ast.LitString file);
+      Tir.ALit (March_ast.Ast.LitInt start_line);
+      Tir.ALit (March_ast.Ast.LitInt start_col);
+      Tir.ALit (March_ast.Ast.LitInt end_line);
+      Tir.ALit (March_ast.Ast.LitInt end_col);
+      Tir.ALit (March_ast.Ast.LitString name) ] ->
+    Some (name, sev, { March_ast.Ast.file; start_line; start_col; end_line; end_col })
+  | _ -> None
+
+(** Every sentinel call anywhere in [e], as (source_name, severity, span).
+    Does not stop at the first one — see [combine_markers]'s doc comment
+    on the rare case where more than one turns up in the same body. *)
+let rec find_markers (e : Tir.expr) : (string * severity * March_ast.Ast.span) list =
+  let go = find_markers in
+  match e with
+  | Tir.EApp (f, args) ->
+    (match marker_shape f args with Some m -> [ m ] | None -> [])
+  | Tir.ELet (_, e1, e2) -> go e1 @ go e2
+  | Tir.ELetRec (fns, body) ->
+    List.concat_map (fun fn -> go fn.Tir.fn_body) fns @ go body
+  | Tir.ECase (_, brs, def) ->
+    List.concat_map (fun (br : Tir.branch) -> go br.Tir.br_body) brs
+    @ (match def with Some e -> go e | None -> [])
+  | Tir.ESeq (e1, e2) -> go e1 @ go e2
+  | _ -> []
+
+(** Strip every sentinel call out of [e] once its payload has been read —
+    sentinels are compiler-internal and must never reach LLVM emission
+    (there is no @__vectorize_marker_* symbol to link against). [mark]
+    only ever installs one as an [ESeq] head directly in a fn's body, but
+    every sentinel found is defensively replaced wherever it sits (not
+    just that shape), so nothing downstream chokes even if some future
+    pass moved it somewhere unexpected. *)
+let rec strip_markers (e : Tir.expr) : Tir.expr =
+  let go = strip_markers in
+  match e with
+  | Tir.EApp (f, args) when marker_shape f args <> None ->
+    Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt 0))
+  | Tir.ESeq (Tir.EApp (f, args), rest) when marker_shape f args <> None -> go rest
+  | Tir.ELet (v, e1, e2) -> Tir.ELet (v, go e1, go e2)
+  | Tir.ELetRec (fns, body) ->
+    Tir.ELetRec (List.map (fun fn -> { fn with Tir.fn_body = go fn.Tir.fn_body }) fns, go body)
+  | Tir.ECase (a, brs, def) ->
+    Tir.ECase (a, List.map (fun (br : Tir.branch) -> { br with Tir.br_body = go br.Tir.br_body }) brs,
+               Option.map go def)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (go e1, go e2)
+  | other -> other
+
+(** Combine multiple sentinels found in the same function body into one
+    effective (name, severity, span) to report against: severity is Hard
+    if ANY sentinel present is Hard (never silently downgrade); name is
+    every sentinel's source name, comma-joined; span is the first
+    sentinel's (arbitrary but deterministic — precise attribution isn't
+    possible once bodies have merged). The overwhelmingly common case is
+    exactly one sentinel (the fn was never inlined, or exactly one
+    annotated fn got inlined into this body) and this is a no-op
+    passthrough; more than one only arises when two SEPARATELY annotated
+    functions both got inlined into the very same caller, which cannot be
+    cleanly attributed call-by-call — a documented limitation, not a
+    silent misattribution (it still fires, just against a joined name). *)
+let combine_markers (markers : (string * severity * March_ast.Ast.span) list)
+  : string * severity * March_ast.Ast.span =
+  let name = String.concat "`, `" (List.map (fun (n, _, _) -> n) markers) in
+  let severity = if List.exists (fun (_, s, _) -> s = Hard) markers then Hard else Soft in
+  let (_, _, span) = List.hd markers in
+  (name, severity, span)
+
+(** Entry point. Walks every function body for sentinel calls [mark]
+    installed earlier in the pipeline, runs [check_fn] against whichever
+    body a sentinel ended up in, and returns the TIR with every sentinel
+    stripped back out. A function with no sentinels is untouched and
+    never walked for eligibility at all. *)
+let check (ctx : March_errors.Errors.ctx) (m : Tir.tir_module) : Tir.tir_module =
+  let apply_fns = Native_map_inline.apply_fn_table m in
+  let new_fns = List.map (fun (fd : Tir.fn_def) ->
+      match find_markers fd.Tir.fn_body with
+      | [] -> fd
+      | markers ->
+        let (name, severity, span) = combine_markers markers in
+        check_fn ctx apply_fns ~severity ~span { fd with Tir.fn_name = name };
+        { fd with Tir.fn_body = strip_markers fd.Tir.fn_body })
+    m.Tir.tm_fns
+  in
+  { m with Tir.tm_fns = new_fns }
