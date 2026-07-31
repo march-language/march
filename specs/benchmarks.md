@@ -1,5 +1,65 @@
 # March Benchmarks
 
+## Compute-benchmark sweep, 2026-07-31 — and why absolute-ms baselines cannot detect regressions
+
+All 31 non-network benchmarks compiled at `--opt 2` and ran clean: 31/31 exit 0,
+every documented checksum correct (`fib` 102334155, `tree_transform` 104857600,
+`list_ops` 333333666666, `merkle` 6400 — not the 51200 that would flag the
+pointer-equality bug, `string_build` 2888895, `string_pipeline` 644449).
+
+**The methodology finding is the important one.** `hash_map_bench` measured
+~25–29% above its documented 2026-06-24 baseline, on all nine workload/size
+combinations, with tight variance (best-of-3 spread ~4%). Nine out of nine in
+the same direction, and stable across repeats — the signature of a real
+regression rather than noise.
+
+It was not a regression. Built at the baseline commit (`79d10f06`) in a scratch
+worktree, confirmed the benchmark source is byte-identical, and A/B'd the two
+compilers on the same box at the same moment, order-swapped:
+
+| workload | n | June compiler | today | delta |
+|---|---:|---:|---:|---:|
+| put/get | 10000 | 36 ms | 31 ms | **−14%** |
+| put/get | 50000 | 239 ms | 206 ms | **−14%** |
+| put/get | 100000 | 531 ms | 475 ms | **−11%** |
+| uniq | 10000 | 19 ms | 16 ms | **−16%** |
+| uniq | 50000 | 117 ms | 104 ms | **−11%** |
+| uniq | 100000 | 275 ms | 239 ms | **−13%** |
+| frequencies | 10000 | 38 ms | 33 ms | **−13%** |
+| frequencies | 50000 | 213 ms | 184 ms | **−14%** |
+| frequencies | 100000 | 452 ms | 395 ms | **−13%** |
+
+**Today is 13% faster than June.** The documented numbers were simply taken on
+a quieter machine. The same trap caught `string_small_churn`: a single run read
+1021 ms against a documented 741 ms (+38%), but best-of-3 gave 761 ms (+3%) —
+and non-March controls built from `bench/c` and `bench/cpp` were themselves
++7% and +13% over *their* documented numbers, i.e. March was the least affected
+of the three.
+
+**So: an absolute millisecond figure in this file is a record of one machine on
+one day, not a regression detector.** To decide whether a change regressed
+something, do not compare against the numbers here. Instead:
+
+```bash
+git worktree add /tmp/base <baseline-commit> --detach
+cd /tmp/base && dune build --root . bin/main.exe && dune build --root . @install
+./_build/default/bin/main.exe --compile --opt 2 bench/<name>.march -o /tmp/base-bin
+# then A/B /tmp/base-bin against today's binary, same box, same minute,
+# order-swapped A,B,B,A, and diff the benchmark source first to confirm it
+# has not changed underneath you.
+```
+
+**One open lead.** `bench/rrb_bench.march`'s parallel arms are consistently
+*slower* than its sequential one — `seq_fold_left` 1011/1012/1015 ms against
+`psum` 1225/1252/1245 ms and `preduce` 1228/1204/1268 ms, so ~+22% with under
+5% variance. Tight enough to look structural rather than noisy, but it was
+measured at load 15 on a 14-core box shared with other work, where a parallel
+arm cannot get cores and a sequential one only needs a single core. **Not yet a
+finding** — it needs a quiet-box re-run before anyone concludes the parallel
+machinery costs more than it saves.
+
+---
+
 All benchmarks live in `bench/`. Run the full suite:
 
 ```
