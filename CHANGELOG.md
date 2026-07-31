@@ -342,6 +342,21 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **A selector-less `use X.List` no longer withdraws the `List.length` measure
+  alias when its target provably cannot provide a `length`.** The rebinding
+  gate used to treat `use Extras.Deep.List` — anywhere in the compilation
+  unit, including a `MARCH_LIB_PATH` dependency's internals — as a competitor
+  purely because the path ends in `List`, silently turning every
+  `{List(a) | len(_) > 0}` proof discharged by an ordinary
+  `if List.length(ys) > 0` guard into a skip, program-wide (measured: one such
+  `use` in a dependency flipped an entry program from `1 proved` to `1 skipped
+  (alias-withdrawn)`). The use's target is now resolved and checked, the way
+  glob imports already were: the alias survives only when every module the
+  path could denote provably provides no member with the aliased name —
+  re-exports (`use Y.{length}`), unenumerable globs inside the target, and
+  unresolvable paths all still withdraw, as does `alias … as List` /
+  `import X.{List}`. Same treatment for `String.byte_size`.
+
 - **The `alias-withdrawn` explanation now follows a guard laundered through one
   `let`.** Under `cap verified`, `let n = List.length(ys)` followed by
   `if n > 0 do head(ys)` — where something in the compilation unit has

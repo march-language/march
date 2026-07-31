@@ -5763,6 +5763,130 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
       blame sp
     end
   in
+  (* ── The UseSingle narrowing (Task 9, 2026-07-31): LOOK, don't assume ────
+     `use X.<md>` used to withdraw purely syntactically on its last path
+     segment, while the two glob forms already RESOLVE their target and check
+     it.  Measured cost (MARCH_LIB_PATH fixture, obligation-ledger report):
+     one nested `use Extras.Deep.List` in a dependency module — whose target
+     had NO `length` member at all — flipped an entry program's obligation
+     from `1 proved` to `1 skipped (alias-withdrawn)`, program-wide.
+
+     [use_target_provides] answers: can the module at [path] provide a member
+     named [fn]?  If it provably cannot, rebinding the bare segment `<md>` to
+     it cannot make `<md>.<fn>` denote a non-stdlib function at ANY call site
+     — the spelling either fails to resolve through that binding (a typecheck
+     error, not a wrong refinement fact) or resolves elsewhere, and any
+     elsewhere that competes is some OTHER declaration this walk still sees.
+     The argument deliberately does NOT rest on resolver semantics (scoping,
+     shadowing order): it only needs "a module provides no `<fn>` ⟹ member
+     lookup of `<fn>` in it finds nothing", so the resolve_call step-ordering
+     hole filed in specs/todos.md is neither consulted nor widened.
+
+     Fail-closed edges, each an over-approximation:
+       - resolution considers EVERY module scope of the unit and ALL matches
+         (duplicate paths, enclosing-relative spellings), withdrawing if ANY
+         match provides — which resolution the real resolver would pick is
+         exactly the question this pass cannot answer;
+       - nothing resolves ⇒ withdraw, as the glob forms always have;
+       - "provides" counts every member-capable decl form the [defines] scan
+         counts (fn, let-bound, extern, interface/impl — the latter two the
+         same deliberate over-approximation documented on the member arms
+         below), PLUS the target's own use-forms: a `use Y.{<fn>}` or an
+         unenumerable glob inside the target may re-export the member, so
+         both count as providing (glob fuel exhaustion ⇒ provides).
+
+     Note the residual duty is small by construction: a target that provides
+     `<fn>` via a DIRECT member decl is a `mod <md>` carrying that member,
+     which the [defines] scan withdraws independently — so this check alone
+     stands guard over the re-export and unresolvable shapes, and an
+     under-count in the member forms here is still backstopped there.
+     DAlias/UseNames stay unconditionally withdrawing: no measured cost
+     implicated them, and each narrowing in this gate must pay its own way. *)
+  let use_target_provides (path : A.name list) : bool =
+    let member = function
+      | A.DFn (fd, _) -> fd.A.fn_name.A.txt = fn
+      | A.DLet (_, b, _) -> List.mem fn (pat_binders b.A.bind_pat)
+      | A.DExtern (ed, _) ->
+        List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = fn) ed.A.ext_fns
+      | A.DInterface (idf, _) ->
+        List.exists
+          (fun (m : A.method_decl) -> m.A.md_name.A.txt = fn)
+          idf.A.iface_methods
+      | A.DImpl (idf, _) ->
+        List.exists (fun ((mn : A.name), _) -> mn.A.txt = fn) idf.A.impl_methods
+      | _ -> false
+    in
+    let mentions_fn xs = List.exists (fun (n : A.name) -> n.A.txt = fn) xs in
+    (* Every decl-list scope in the unit: the root, and the body of every
+       (arbitrarily nested) module.  `describe` blocks do not open a scope. *)
+    let scopes =
+      let rec go acc ds =
+        List.fold_left
+          (fun acc d ->
+            match d with
+            | A.DMod (_, _, ds', _) -> go (ds' :: acc) ds'
+            | A.DDescribe (_, ds', _) -> go acc ds'
+            | _ -> acc)
+          acc ds
+      in
+      go [ decls ] decls
+    in
+    (* All decl-lists reachable by [p] from scope [ds] — every matching module
+       per segment, describe blocks flattened at each level. *)
+    let rec descend_all ds p =
+      match p with
+      | [] -> [ ds ]
+      | (seg : A.name) :: rest ->
+        let rec at_level acc = function
+          | [] -> acc
+          | A.DMod (n, _, ds', _) :: tl when n.A.txt = seg.A.txt ->
+            at_level (descend_all ds' rest @ acc) tl
+          | A.DDescribe (_, ds', _) :: tl -> at_level (at_level acc ds') tl
+          | _ :: tl -> at_level acc tl
+        in
+        at_level [] ds
+    in
+    let resolve_all p =
+      let direct = List.concat_map (fun s -> descend_all s p) scopes in
+      (* A path may be written relative to the unit's own module, whose
+         declarations are the root list rather than a `DMod` within it. *)
+      match p with
+      | (hd : A.name) :: (_ :: _ as tl) when hd.A.txt = mod_name ->
+        direct @ List.concat_map (fun s -> descend_all s tl) scopes
+      | _ -> direct
+    in
+    let rec provides fuel ds =
+      List.exists
+        (fun d ->
+          member d
+          ||
+          match d with
+          | A.DDescribe (_, ds', _) -> provides fuel ds'
+          | A.DUse (u, _) -> (
+            match u.A.use_sel with
+            (* `use A.B` binds the MODULE B, not B's members — but a
+               lowercase last segment is a shape we do not understand, so
+               count it as providing rather than reason about it. *)
+            | A.UseSingle -> (
+              match List.rev u.A.use_path with
+              | last :: _ -> last.A.txt = fn
+              | [] -> false)
+            | A.UseNames xs -> mentions_fn xs
+            | A.UseExcept xs -> (not (mentions_fn xs)) && glob fuel u.A.use_path
+            | A.UseAll -> glob fuel u.A.use_path)
+          | _ -> false)
+        ds
+    and glob fuel p =
+      if fuel <= 0 then true
+      else
+        match resolve_all p with
+        | [] -> true
+        | ms -> List.exists (provides (fuel - 1)) ms
+    in
+    match resolve_all path with
+    | [] -> true
+    | ms -> List.exists (provides 4) ms
+  in
   let rec go in_mod ds =
     List.iter
       (function
@@ -5809,10 +5933,15 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
                `import X, except: [_]` — UseExcept, ditto unless `<md>` is
                                          excluded. *)
           (match u.A.use_sel with
+           (* UseSingle RESOLVES its target and asks whether it can provide
+              the member, instead of assuming so from the segment name — see
+              [use_target_provides] above for the measurement and the
+              soundness argument.  Unresolvable ⇒ withdraw, as before. *)
            | A.UseSingle ->
              rebinds sp
                (match List.rev u.A.use_path with
-                | last :: _ :: _ -> last.A.txt = md
+                | last :: _ :: _ ->
+                  last.A.txt = md && use_target_provides u.A.use_path
                 | _ -> false)
            | A.UseNames xs -> rebinds sp (mentions_md xs)
            (* The two glob forms RESOLVE their target and look for a module

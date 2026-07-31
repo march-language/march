@@ -3372,6 +3372,138 @@ mod QGAlias do
   fn main() : Int do go([1]) end
 end|}));
 
+    (* ── The UseSingle pair: LOOK, don't assume (Task 9, 2026-07-31) ───────
+       `use X.List` (UseSingle) used to withdraw purely syntactically on its
+       last path segment, while the two glob forms already RESOLVED their
+       target and checked it.  Measured cost (MARCH_LIB_PATH fixture, ledger
+       report): one nested `use Extras.Deep.List` in a dependency — whose
+       target has NO `length` member at all, so it cannot make `List.length`
+       denote anything non-stdlib at ANY call site — flipped the entry's
+       obligation from `1 proved` to `1 skipped (alias-withdrawn)`.
+
+       The narrowed arm resolves the use's target (from EVERY module scope of
+       the unit, ALL matches) and withdraws only when some match provides a
+       member named `length` — where "provides" is fail-closed over the
+       target's own use-forms — or when nothing resolves.  Soundness does not
+       rest on resolver semantics: rebinding `List` to a module that provably
+       provides nothing named `length` cannot make `List.length` denote a
+       non-stdlib function anywhere.  A target that provides it via a DIRECT
+       member decl is a `mod List` with that member, which the member gate
+       withdraws independently — so the cases this arm alone must keep are
+       the re-export and unresolvable shapes below. *)
+    gated "`use X.List` whose target provably lacks `length` keeps the alias"
+      (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QUKeep do
+  mod Shim do
+    mod List do
+      fn size(xs : List(Int)) : Int do 0 end
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* The member gate is silent here — a `use Helpers.{length}` inside the
+       target is not a member DECL — so this fixture discriminates the
+       provides-walk itself: drop its UseNames arm and the alias is wrongly
+       kept, and this correct program is reported. *)
+    gated "`use X.List` whose target re-exports a `length` withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUReex do
+  mod Helpers do
+    fn length(xs : List(Int)) : Int do 99 end
+  end
+  mod Shim do
+    mod List do
+      use Helpers.{length}
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "`use X.List` with an UNRESOLVABLE target withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUUnres do
+  use Ghost.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "`use X.List` whose target holds an unenumerable glob withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUGlob do
+  mod Shim do
+    mod List do
+      import Unknowable
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* Two modules answer to the path `Shim.List` — a top-level one that lacks
+       `length` and a nested one that re-exports it.  Which one the `use`
+       semantically binds is exactly the question this pass cannot answer, so
+       resolution must consider ALL matches from EVERY scope and withdraw if
+       ANY provides: a first-match-from-root implementation keeps the alias
+       here and reports this correct program. *)
+    gated "`use X.List` withdraws when ANY same-path module provides `length`"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUDup do
+  mod Helpers do
+    fn length(xs : List(Int)) : Int do 99 end
+  end
+  mod Shim do
+    mod List do
+      fn size(xs : List(Int)) : Int do 0 end
+    end
+  end
+  mod Outer do
+    mod Shim do
+      mod List do
+        use Helpers.{length}
+      end
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
     (* ── The ENABLING branch ───────────────────────────────────────────────
        Every case above reaches its verdict WITHOUT a `List.length` definition
        in scope at all, i.e. via the gate's "no defs -> allow" path.  None of
@@ -3681,6 +3813,28 @@ mod QSGClean do
     fn helper(x : Int) : Int do x end
   end
   import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The UseSingle narrowing, string side — the gate is one parameterised
+       function, so the `use X.String` arm is pinned symmetrically with the
+       list side's QUKeep. *)
+    gated "`use X.String` whose target provably lacks `byte_size` keeps the alias"
+      (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QSUKeep do
+  mod Shim do
+    mod String do
+      fn size(s : String) : Int do 0 end
+    end
+  end
+  use Shim.String
   fn slug(s : {String | len(_) > 0}) : Int do 1 end
   fn go(t : String) : Int do
     if String.byte_size(t) == 0 do slug(t) else 0 end

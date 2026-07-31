@@ -261,6 +261,30 @@ function would manufacture false positives:
   a REJECT witness (`reject/t117`) and the `--refine-report` proof *floor* can
   see the difference.
 
+- **A selector-less `use X.List` RESOLVES its target too** (since 2026-07-31).
+  The `UseSingle` form used to withdraw purely syntactically on its last path
+  segment, while the glob forms already looked. Measured cost (obligation
+  ledger, `MARCH_LIB_PATH` fixture): one nested `use Extras.Deep.List` in a
+  dependency module — whose target had **no `length` member at all**, so it
+  could not make `List.length` denote anything non-stdlib at any call site —
+  flipped an entry program's obligation from `1 proved` to `1 skipped
+  (alias-withdrawn)`, program-wide. Now the use's target is resolved (from
+  every module scope of the unit, **all** matches — which resolution the real
+  resolver would pick is exactly the question this pass cannot answer) and the
+  alias is withdrawn only if some match provides a member with the aliased
+  name, where "provides" is fail-closed: direct members in every form the
+  member gate counts, plus the target's own use-forms (`use Y.{length}`
+  re-exports count; an unenumerable glob inside the target counts; an
+  unresolvable path counts). Soundness does not rest on resolver semantics:
+  rebinding `List` to a module that provably provides nothing named `length`
+  cannot make `List.length` resolve to a non-stdlib function anywhere. A
+  target that provides it via a direct member decl is a `mod List` carrying
+  that member, which the member-definition gate withdraws independently — so
+  this narrowing alone stands guard over the re-export and unresolvable
+  shapes. `alias … as List` and `import X.{List}` still withdraw
+  unconditionally: no measured cost has implicated them, and each narrowing
+  in this gate must pay its own way.
+
 - **A `use`/`alias` competes only when it is the *program's*** (since
   2026-07-29). The rebinding half now ignores declarations whose span is a
   standard-library source file, exactly as the member-definition half always
@@ -789,7 +813,8 @@ method — rebinds `String` via `alias`/`use`, or binds the name
 an import, a `let`, a lambda or `fn` parameter, or a match binder — loses the
 alias for the whole **compilation unit** (prepended stdlib and every
 `MARCH_LIB_PATH` dependency included), and the obligation returns to being
-skipped. A glob import withdraws only if its resolved target really provides the
+skipped. A glob import — and, since 2026-07-31, a selector-less `use X.String`
+— withdraws only if its resolved target really provides the
 competitor; see
 [`List.length` is an alias of the `len` measure](#listlength-is-an-alias-of-the-len-measure).
 
