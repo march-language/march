@@ -436,7 +436,16 @@ offered load. The latency ratio 7.98/0.88 = **9.07** against the served ratio
 256/28 = **9.14** is the whole story. The event loop's in-flight figure tracks
 offered concurrency (255.3 of 256); the pool's clamps at exactly `pool_size`.
 Per *served* connection the event loop is the cheaper of the two, at 15–17%
-less CPU per request. Tracked as an open defect in `specs/todos.md`.
+less CPU per request.
+
+> **Fixed later the same day.** The pool is now elastic — it grows past its
+> initial worker count as connections arrive — so the thread-pool rows above
+> are a record of the defect, not of current behaviour. Re-measured after the
+> fix at c=256: 256 established, **0 unread**, 29,261 req/s, 8.67 ms, **253.7
+> in-flight**. The pool's latency now looks like the event loop's because it is
+> finally doing the same amount of work. Any future comparison against the
+> thread-pool numbers in this table is comparing against a server that was
+> answering one connection in nine.
 
 **Req/s here measures the client and the loopback stack, not March.** Both
 servers cap at ~31–32k while using under one core of fourteen; a second
