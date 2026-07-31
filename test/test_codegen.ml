@@ -12354,6 +12354,196 @@ let test_vectorize_hard_error_fails_compile () =
   Alcotest.(check bool) "stderr names the failing fn" true
     (ir_contains output "`scale` cannot vectorize")
 
+let vectorize_source_ok = {|mod Main do
+  @[vectorize]
+  fn scale(arr) do
+    native_float_arr_map(arr, fn x -> x *. 2.0)
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let doubled = scale(arr)
+    println(native_float_arr_get(doubled, 0))
+  end
+end|}
+
+let vectorize_source_ok_int = {|mod Main do
+  @[vectorize]
+  fn double_all(arr) do
+    native_int_arr_map(arr, fn x -> x * 2)
+  end
+  fn main() : () do
+    let arr = native_int_arr_make(4, 1)
+    let doubled = double_all(arr)
+    println(native_int_arr_get(doubled, 0))
+  end
+end|}
+
+let vectorize_source_reuse_fail = {|mod Main do
+  @[vectorize]
+  fn scale(arr) do
+    let f = fn x -> x *. 2.0
+    let _ = f(1.0)
+    native_float_arr_map(arr, f)
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let doubled = scale(arr)
+    println(native_float_arr_get(doubled, 0))
+  end
+end|}
+
+let vectorize_source_reuse_warn = {|mod Main do
+  @[vectorize(warn)]
+  fn scale(arr) do
+    let f = fn x -> x *. 2.0
+    let _ = f(1.0)
+    native_float_arr_map(arr, f)
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let doubled = scale(arr)
+    println(native_float_arr_get(doubled, 0))
+  end
+end|}
+
+let vectorize_source_misuse = {|mod Main do
+  @[vectorize]
+  fn scale(arr) do
+    arr
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let doubled = scale(arr)
+    println(native_float_arr_get(doubled, 0))
+  end
+end|}
+
+let vectorize_source_misuse_warn = {|mod Main do
+  @[vectorize(warn)]
+  fn scale(arr) do
+    arr
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let doubled = scale(arr)
+    println(native_float_arr_get(doubled, 0))
+  end
+end|}
+
+let test_vectorize_pass_float () =
+  Alcotest.(check int) "no diagnostics for an eligible Float callback"
+    0 (List.length (Test_helpers.run_vectorize_check vectorize_source_ok))
+
+let test_vectorize_pass_int () =
+  Alcotest.(check int) "no diagnostics for an eligible Int callback (no generic gate applies)"
+    0 (List.length (Test_helpers.run_vectorize_check vectorize_source_ok_int))
+
+let test_vectorize_reuse_fail () =
+  let diags = Test_helpers.run_vectorize_check vectorize_source_reuse_fail in
+  Alcotest.(check int) "exactly one reuse-gate diagnostic" 1 (List.length diags);
+  let d = List.hd diags in
+  Alcotest.(check bool) "severity is Error"
+    true (d.March_errors.Errors.severity = March_errors.Errors.Error);
+  Alcotest.(check bool) "message names the reuse failure"
+    true (ir_contains d.March_errors.Errors.message "isn't safe to inline")
+
+let test_vectorize_reuse_warn () =
+  let diags = Test_helpers.run_vectorize_check vectorize_source_reuse_warn in
+  Alcotest.(check int) "exactly one diagnostic" 1 (List.length diags);
+  Alcotest.(check bool) "severity is Warning, not Error"
+    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Warning)
+
+let test_vectorize_misuse () =
+  let diags = Test_helpers.run_vectorize_check vectorize_source_misuse in
+  Alcotest.(check int) "exactly one misuse diagnostic" 1 (List.length diags);
+  Alcotest.(check bool) "severity is Error"
+    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Error)
+
+let test_vectorize_misuse_ignores_warn () =
+  let diags = Test_helpers.run_vectorize_check vectorize_source_misuse_warn in
+  Alcotest.(check int) "exactly one misuse diagnostic" 1 (List.length diags);
+  Alcotest.(check bool) "misuse is ALWAYS Error, even under @[vectorize(warn)]"
+    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Error)
+
+(* ── generic-signature-gate unit tests (hand-built TIR) ────────────────
+   Sidesteps the open question of whether real March source can be made to
+   leave a callback's TIR signature as a bare TVar post-monomorphization by
+   constructing that TIR shape directly. *)
+
+let vc_clo_ty = March_tir.Tir.TCon ("Main.scale$clo", [])
+let vc_clo_var : March_tir.Tir.var =
+  { v_name = "$c0"; v_ty = vc_clo_ty; v_lin = March_tir.Tir.Unr }
+let vc_apply_var : March_tir.Tir.var =
+  { v_name = "scale$apply$0"; v_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
+    v_lin = March_tir.Tir.Unr }
+let vc_arr_var : March_tir.Tir.var =
+  { v_name = "arr"; v_ty = March_tir.Tir.TCon ("NativeFloatArr", []);
+    v_lin = March_tir.Tir.Unr }
+let vc_map_fn_var : March_tir.Tir.var =
+  { v_name = "native_float_arr_map"; v_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
+    v_lin = March_tir.Tir.Unr }
+
+let vc_outer_fd : March_tir.Tir.fn_def =
+  { fn_name = "scale"; fn_kind = March_tir.Tir.FnNormal;
+    fn_params = [ vc_arr_var ]; fn_ret_ty = March_tir.Tir.TCon ("NativeFloatArr", []);
+    fn_body =
+      March_tir.Tir.ELet (vc_clo_var,
+        March_tir.Tir.EAlloc (vc_clo_ty, [ March_tir.Tir.AVar vc_apply_var ]),
+        March_tir.Tir.EApp (vc_map_fn_var,
+          [ March_tir.Tir.AVar vc_arr_var; March_tir.Tir.AVar vc_clo_var ])) }
+
+let vc_apply_fn_concrete : March_tir.Tir.fn_def =
+  { fn_name = "scale$apply$0"; fn_kind = March_tir.Tir.FnApply;
+    fn_params = [ { March_tir.Tir.v_name = "$clo"; v_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
+                    v_lin = March_tir.Tir.Unr };
+                  { March_tir.Tir.v_name = "x"; v_ty = March_tir.Tir.TFloat;
+                    v_lin = March_tir.Tir.Unr } ];
+    fn_ret_ty = March_tir.Tir.TFloat;
+    fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar
+                { March_tir.Tir.v_name = "x"; v_ty = March_tir.Tir.TFloat;
+                  v_lin = March_tir.Tir.Unr }) }
+
+let vc_apply_fn_generic : March_tir.Tir.fn_def =
+  { vc_apply_fn_concrete with
+    fn_params = [ { March_tir.Tir.v_name = "$clo"; v_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
+                    v_lin = March_tir.Tir.Unr };
+                  { March_tir.Tir.v_name = "x"; v_ty = March_tir.Tir.TVar "a";
+                    v_lin = March_tir.Tir.Unr } ];
+    fn_ret_ty = March_tir.Tir.TVar "a" }
+
+let vc_table fn =
+  let t = Hashtbl.create 1 in
+  Hashtbl.replace t "scale$apply$0" fn; t
+
+let test_vectorize_generic_pass () =
+  let ctx = March_errors.Errors.create () in
+  March_tir.Vectorize_check.check_fn ctx (vc_table vc_apply_fn_concrete)
+    ~severity:March_tir.Vectorize_check.Hard ~span:March_ast.Ast.dummy_span vc_outer_fd;
+  Alcotest.(check int) "concrete Float signature: no diagnostics"
+    0 (List.length (March_errors.Errors.sorted ctx))
+
+let test_vectorize_generic_fail () =
+  let ctx = March_errors.Errors.create () in
+  March_tir.Vectorize_check.check_fn ctx (vc_table vc_apply_fn_generic)
+    ~severity:March_tir.Vectorize_check.Hard ~span:March_ast.Ast.dummy_span vc_outer_fd;
+  let diags = March_errors.Errors.sorted ctx in
+  Alcotest.(check int) "generic signature: exactly one diagnostic" 1 (List.length diags);
+  let d = List.hd diags in
+  Alcotest.(check bool) "severity is Error"
+    true (d.March_errors.Errors.severity = March_errors.Errors.Error);
+  Alcotest.(check bool) "message names the generic-signature failure"
+    true (ir_contains d.March_errors.Errors.message "still generic")
+
+let test_vectorize_generic_fail_warn () =
+  let ctx = March_errors.Errors.create () in
+  March_tir.Vectorize_check.check_fn ctx (vc_table vc_apply_fn_generic)
+    ~severity:March_tir.Vectorize_check.Soft ~span:March_ast.Ast.dummy_span vc_outer_fd;
+  let diags = March_errors.Errors.sorted ctx in
+  Alcotest.(check int) "generic signature under (warn): exactly one diagnostic"
+    1 (List.length diags);
+  Alcotest.(check bool) "severity is Warning, not Error"
+    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Warning)
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -12363,6 +12553,24 @@ let codegen_suites =
             test_vectorize_catches_violation_even_when_inlined;
           Alcotest.test_case "vectorize hard error fails compile" `Quick
             test_vectorize_hard_error_fails_compile;
+          Alcotest.test_case "pass: eligible Float callback" `Quick
+            test_vectorize_pass_float;
+          Alcotest.test_case "pass: eligible Int callback" `Quick
+            test_vectorize_pass_int;
+          Alcotest.test_case "reuse gate: fails hard" `Quick
+            test_vectorize_reuse_fail;
+          Alcotest.test_case "reuse gate: warns under (warn)" `Quick
+            test_vectorize_reuse_warn;
+          Alcotest.test_case "generic-signature gate: passes when concrete" `Quick
+            test_vectorize_generic_pass;
+          Alcotest.test_case "generic-signature gate: fails hard" `Quick
+            test_vectorize_generic_fail;
+          Alcotest.test_case "generic-signature gate: warns under (warn)" `Quick
+            test_vectorize_generic_fail_warn;
+          Alcotest.test_case "misuse: zero calls fails hard" `Quick
+            test_vectorize_misuse;
+          Alcotest.test_case "misuse: fails hard even under (warn)" `Quick
+            test_vectorize_misuse_ignores_warn;
         ] );
       ( "cross_compile", [
           Alcotest.test_case
