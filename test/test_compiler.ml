@@ -472,7 +472,7 @@ let test_bracket_attr_with_arg_parses () =
   (* The entry file's own [mod Test do ... end] becomes [m] itself — its
      top-level fns sit directly in [m.mod_decls], not wrapped in a nested
      DMod (nested DMod is only how OTHER, sibling/stdlib modules appear;
-     see Vectorize_check.collect_attrs in Task 2, which relies on this
+     see Vectorize_mark.collect_attrs in Task 2, which relies on this
      same distinction). *)
   let attrs = List.find_map (function
       | March_ast.Ast.DFn (def, _) when def.March_ast.Ast.fn_name.March_ast.Ast.txt = "scale" ->

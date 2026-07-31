@@ -12366,6 +12366,37 @@ let vectorize_source_ok = {|mod Main do
   end
 end|}
 
+(** FIX 2 regression: the only compile-driving test above
+    (test_vectorize_hard_error_fails_compile) exercises a FAILING program,
+    which exits before clang ever runs — so no test proves that a PASSING
+    program's `__vectorize_marker_*` sentinel actually gets stripped before
+    LLVM emission (there is no such symbol to link against; a
+    find_markers/strip_markers regression would otherwise ship green,
+    silently, forever). This test compiles an eligible annotated program
+    (vectorize_source_ok, above) and then RUNS the binary, which is the
+    only way to prove the marker was stripped and the program links and
+    behaves correctly.
+
+    Unlike its neighbor above, this test's PASSING path genuinely reaches
+    clang (there's no compiler-side rejection to stop short), so the usual
+    clang-absent skip policy legitimately applies here — hence
+    [compile_march_or_skip] instead of driving `march --compile` raw. *)
+let test_vectorize_pass_compiles_and_runs () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_vectorize_ok" vectorize_source_ok in
+  let bin = Filename.concat tmp "vectorize_ok_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled eligible @[vectorize] program runs and prints the doubled value \
+       (proves the sentinel was stripped before LLVM emission and the \
+       program links/behaves correctly)"
+      "2." run_out
+
 let vectorize_source_warn_ok = {|mod Main do
   @[vectorize(warn)]
   fn scale(arr) do
@@ -12504,6 +12535,35 @@ let test_vectorize_reuse_fail () =
   Alcotest.(check bool) "message names the reuse failure"
     true (ir_contains d.March_errors.Errors.message "isn't safe to inline")
 
+let vectorize_source_reuse_fail_int = {|mod Main do
+  @[vectorize]
+  fn double_all(arr) do
+    let f = fn x -> x * 2
+    let _ = f(1)
+    native_int_arr_map(arr, f)
+  end
+  fn main() : () do
+    let arr = native_int_arr_make(4, 1)
+    let doubled = double_all(arr)
+    println(native_int_arr_get(doubled, 0))
+  end
+end|}
+
+(** FIX 1 regression: [reuse_example] used to hardcode float syntax
+    (`x *. 2.0`) for BOTH Int and Float targets, so the hint the compiler
+    prints for an Int reuse-gate violation suggested code that doesn't
+    typecheck against an Int array. The hint lives in the diagnostic's
+    [notes] field, not [message]. *)
+let test_vectorize_reuse_fail_int_hint_uses_int_syntax () =
+  let diags = Test_helpers.run_vectorize_check vectorize_source_reuse_fail_int in
+  Alcotest.(check int) "exactly one reuse-gate diagnostic" 1 (List.length diags);
+  let d = List.hd diags in
+  let notes = String.concat "\n" d.March_errors.Errors.notes in
+  Alcotest.(check bool) "hint uses Int syntax (`fn x -> x * 2`)"
+    true (ir_contains notes "fn x -> x * 2");
+  Alcotest.(check bool) "hint does NOT use Float syntax (`*.`)"
+    false (ir_contains notes "*.")
+
 let test_vectorize_reuse_warn () =
   let diags = Test_helpers.run_vectorize_check vectorize_source_reuse_warn in
   Alcotest.(check int) "exactly one diagnostic" 1 (List.length diags);
@@ -12614,12 +12674,16 @@ let codegen_suites =
             test_vectorize_catches_violation_even_when_inlined;
           Alcotest.test_case "vectorize hard error fails compile" `Quick
             test_vectorize_hard_error_fails_compile;
+          Alcotest.test_case "pass: eligible annotated program compiles and runs" `Quick
+            test_vectorize_pass_compiles_and_runs;
           Alcotest.test_case "pass: eligible Float callback" `Quick
             test_vectorize_pass_float;
           Alcotest.test_case "pass: eligible Int callback" `Quick
             test_vectorize_pass_int;
           Alcotest.test_case "reuse gate: fails hard" `Quick
             test_vectorize_reuse_fail;
+          Alcotest.test_case "reuse gate: Int hint uses Int syntax" `Quick
+            test_vectorize_reuse_fail_int_hint_uses_int_syntax;
           Alcotest.test_case "reuse gate: warns under (warn)" `Quick
             test_vectorize_reuse_warn;
           Alcotest.test_case "pass: (warn) on eligible code is silent" `Quick

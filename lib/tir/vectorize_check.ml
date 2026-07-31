@@ -43,10 +43,11 @@ let is_float_target name =
 
 let reuse_example target =
   let d = display_name target in
-  if is_map2_target target then
-    Printf.sprintf "NativeArray.%s(a, b, fn (x, y) -> x +. y)" d
-  else
-    Printf.sprintf "NativeArray.%s(arr, fn x -> x *. 2.0)" d
+  match is_map2_target target, is_float_target target with
+  | true, true -> Printf.sprintf "NativeArray.%s(a, b, fn (x, y) -> x +. y)" d
+  | true, false -> Printf.sprintf "NativeArray.%s(a, b, fn (x, y) -> x + y)" d
+  | false, true -> Printf.sprintf "NativeArray.%s(arr, fn x -> x *. 2.0)" d
+  | false, false -> Printf.sprintf "NativeArray.%s(arr, fn x -> x * 2)" d
 
 let reuse_diag ~span ~severity ~fn_name ~target : March_errors.Errors.diagnostic =
   let d = display_name target in
@@ -80,8 +81,8 @@ let generic_diag ~span ~severity ~fn_name ~target : March_errors.Errors.diagnost
     notes = [ Printf.sprintf
         "Hint: give the callback passed to `%s` a concrete Float\n\
          signature, e.g. `fn (x: Float) -> x *. 2.0`, instead of leaving\n\
-         it generic. (see docs/simd-vectorization.md \"%s\")"
-        d d ] }
+         it generic. (see docs/simd-vectorization.md \"What vectorizes\")"
+        d ] }
 
 let misuse_diag ~span ~fn_name : March_errors.Errors.diagnostic =
   { March_errors.Errors.severity = March_errors.Errors.Error; span;
