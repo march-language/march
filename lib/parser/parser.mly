@@ -297,6 +297,8 @@ decl_list_r:
 fn_attr:
   | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { name }
   | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { name ^ ":" ^ value }
+  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN; RBRACKET
+      { name ^ ":" ^ value }
 
 decl:
   | DOC; s = STRING; d = fn_decl
