@@ -102,6 +102,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Json.parse` now accepts `\uXXXX` escapes.** The escape decoder handled
+  only `\" \\ \/ \n \r \t \b \f` and rejected everything else, so
+  `Json.parse("\"\\u0041\"")` failed with "unknown escape sequence" on input
+  that is valid per RFC 8259 §7 — and that most serializers emit for any
+  non-ASCII character. `\uXXXX` is now decoded and encoded as UTF-8, including
+  surrogate pairs (`\uD83D\uDE00` → one astral code point). A surrogate that
+  is not part of a well-formed pair, a `\u` with fewer than four hex digits,
+  and a `\u` with a non-hex digit are all rejected with a message naming the
+  problem.
+
 - **A registry dependency now works for archive tasks, and brings its own
   dependencies with it.** Three gaps in `registry = "forge"` handling, all
   found while releasing scroll — which builds and tests green, then failed the
