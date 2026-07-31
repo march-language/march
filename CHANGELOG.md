@@ -13,6 +13,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **JsonStream** — streaming JSON tokenizer: resumable chunk-fed parsing with
+  bounded memory, depth/token limits, ndjson mode, and typed errors with
+  absolute byte offsets.
+
 - **`@[vectorize]` / `@[vectorize(warn)]` function attribute.** `NativeArray.map`/`map2`
   have had a silent auto-vectorization fast path for a while — whether it actually
   fires depends on how the callback closure is used, with no feedback if it doesn't.
@@ -114,6 +118,49 @@ git log is authoritative for exact commits.
   two could never meet.
 
 ### Fixed
+
+- **`Json.parse` now accepts `\uXXXX` escapes.** The escape decoder handled
+  only `\" \\ \/ \n \r \t \b \f` and rejected everything else, so
+  `Json.parse("\"\\u0041\"")` failed with "unknown escape sequence" on input
+  that is valid per RFC 8259 §7 — and that most serializers emit for any
+  non-ASCII character. `\uXXXX` is now decoded and encoded as UTF-8, including
+  surrogate pairs (`\uD83D\uDE00` → one astral code point). A surrogate that
+  is not part of a well-formed pair, a `\u` with fewer than four hex digits,
+  and a `\u` with a non-hex digit are all rejected with a message naming the
+  problem.
+
+- **A registry dependency now works for archive tasks, and brings its own
+  dependencies with it.** Three gaps in `registry = "forge"` handling, all
+  found while releasing scroll — which builds and tests green, then failed the
+  moment its own `forge scroll.serve` task ran:
+
+  - **Archive tasks saw no lib path for a registry dep.**
+    `Archive_store.dep_lib_paths_for_archive` matched path and the three git
+    forms then fell off a `| _ -> []`, so `RegistryDep` contributed nothing.
+    `Cmd_build.dep_to_lib_paths` — which backs check/build/test — handled the
+    same case, which is why a package could pass every check and still fail at
+    run time with `Unknown module` for everything the dependency provides. The
+    match is now exhaustive with no wildcard, so a future dep form is a compile
+    error rather than a silently empty search path.
+
+  - **`forge deps` did not fetch a registry package's own dependencies.**
+    Resolution ran phase 1 (path/git, BFS) then phase 2 (registry, version
+    solve) once each, and phase 2 only ever recursed into *registry* children —
+    so registry → registry worked but registry → git/path did not, and a
+    registry package's git dependency was never installed. The two phases now
+    alternate to a joint fixpoint; the existing nearest-wins name dedup both
+    preserves precedence and terminates the alternation.
+
+  - **The CAS reused an install from the wrong source.**
+    `~/.march/cas/deps/<name>` is keyed by dependency name only, and
+    `install_dep` treated "directory exists" as "correctly installed" — so
+    switching a dependency between registry and git reported `already
+    installed` over the previous source's content and then failed with `fatal:
+    not a git repository`. A git install is now reused only when its `origin`
+    matches; otherwise it is re-installed. (Two projects wanting the same
+    package at different revs still share one directory — fixing that means
+    keying the path by source, tracked in
+    `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
 
 - **A refined annotation on a `let` is now checked against the expression it
   annotates, instead of being believed.** `let ys : {List(Int) | len(_) > 0} =

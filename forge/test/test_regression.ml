@@ -196,6 +196,158 @@ let test_three_way_diamond_highest_lower_bound () =
     true (V.compare c_v (V.parse_exn "1.5.0") >= 0)
 
 (* ------------------------------------------------------------------ *)
+(*  Archive-task lib paths                                             *)
+(* ------------------------------------------------------------------ *)
+
+(** An archive task must see a REGISTRY dependency's lib dir, not just a
+    git/path one.
+
+    [Archive_store.dep_lib_paths_for_archive] matched PathDep and the three git
+    forms and then fell off a `| _ -> []`, so a RegistryDep contributed no lib
+    paths at all. [Cmd_build.dep_to_lib_paths] — which backs check/build/test —
+    handled the same case, so a tool with a registry dependency built and
+    tested green and then failed at run time with `Unknown module` for every
+    symbol that dependency provided. scroll 0.1.2 shipped that way: `forge
+    scroll.serve` could not find bastion's Router/Middleware/Static.
+
+    Registry and git deps both install to ~/.march/cas/deps/<name>, so the
+    check is simply that the CAS lib dir shows up. HOME is redirected at a
+    temp dir so this is hermetic and does not read the developer's real CAS. *)
+let test_archive_lib_paths_include_registry_dep () =
+  let tmp = Filename.temp_file "forge_archive_reg" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let mkdir_p d = ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote d))) in
+  let write path contents =
+    let oc = open_out path in output_string oc contents; close_out oc in
+  (* Fake CAS: the dep is installed exactly where a registry install lands. *)
+  let fake_home = Filename.concat tmp "home" in
+  let dep_lib = Filename.concat fake_home ".march/cas/deps/somedep/lib" in
+  mkdir_p dep_lib;
+  write (Filename.concat dep_lib "somedep.march") "mod SomeDep do\nend\n";
+  (* An archive project whose only dependency is a REGISTRY dep. *)
+  let archive_root = Filename.concat tmp "archive" in
+  mkdir_p (Filename.concat archive_root "lib");
+  write (Filename.concat archive_root "forge.toml")
+    "[package]\n\
+     name = \"tool\"\n\
+     version = \"0.1.0\"\n\
+     type = \"tool\"\n\n\
+     [deps]\n\
+     somedep = { registry = \"forge\", version = \"1.0.0\" }\n";
+  let old_home = Sys.getenv_opt "HOME" in
+  let restore () =
+    match old_home with
+    | Some h -> Unix.putenv "HOME" h
+    | None   -> Unix.putenv "HOME" ""
+  in
+  Fun.protect ~finally:restore (fun () ->
+    Unix.putenv "HOME" fake_home;
+    let paths = Archive_store.dep_lib_paths_for_archive archive_root in
+    let canon p = try Unix.realpath p with Unix.Unix_error _ -> p in
+    let wanted = canon dep_lib in
+    let found = List.exists (fun p -> canon p = wanted) paths in
+    Alcotest.(check bool)
+      (Printf.sprintf
+         "registry dep's lib dir must be on an archive task's search path \
+          (wanted %s, got [%s])"
+         wanted (String.concat "; " paths))
+      true found)
+
+(** Control: the git form must keep working — this arm was never broken, and
+    the fix must not regress it while generalising the match. *)
+let test_archive_lib_paths_include_git_dep () =
+  let tmp = Filename.temp_file "forge_archive_git" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let mkdir_p d = ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote d))) in
+  let write path contents =
+    let oc = open_out path in output_string oc contents; close_out oc in
+  let fake_home = Filename.concat tmp "home" in
+  let dep_lib = Filename.concat fake_home ".march/cas/deps/gitdep/lib" in
+  mkdir_p dep_lib;
+  write (Filename.concat dep_lib "gitdep.march") "mod GitDep do\nend\n";
+  let archive_root = Filename.concat tmp "archive" in
+  mkdir_p (Filename.concat archive_root "lib");
+  write (Filename.concat archive_root "forge.toml")
+    "[package]\n\
+     name = \"tool\"\n\
+     version = \"0.1.0\"\n\
+     type = \"tool\"\n\n\
+     [deps]\n\
+     gitdep = { git = \"https://example.invalid/gitdep.git\", branch = \"main\" }\n";
+  let old_home = Sys.getenv_opt "HOME" in
+  let restore () =
+    match old_home with
+    | Some h -> Unix.putenv "HOME" h
+    | None   -> Unix.putenv "HOME" ""
+  in
+  Fun.protect ~finally:restore (fun () ->
+    Unix.putenv "HOME" fake_home;
+    let paths = Archive_store.dep_lib_paths_for_archive archive_root in
+    let canon p = try Unix.realpath p with Unix.Unix_error _ -> p in
+    let wanted = canon dep_lib in
+    Alcotest.(check bool) "git dep's lib dir still on the search path"
+      true (List.exists (fun p -> canon p = wanted) paths))
+
+(* ------------------------------------------------------------------ *)
+(*  CAS install reuse must check the source                            *)
+(* ------------------------------------------------------------------ *)
+
+(** ~/.march/cas/deps/<name> is keyed by dep NAME only, so it can hold content
+    from a different source than the manifest now asks for (switch a dep
+    between `registry = ...` and `git = ...`, or two projects wanting different
+    URLs). [install_dep] used to treat "directory exists" as "correctly
+    installed": it printed `already installed (branch main)` over a registry
+    tarball and then failed with `fatal: not a git repository`, with the
+    lockfile claiming the git source while the directory held registry content.
+
+    [Cmd_deps.git_checkout_matches] is the guard. These cover its three
+    outcomes without any network access. *)
+let with_tmp_dir f =
+  let tmp = Filename.temp_file "forge_cas_reuse" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  Fun.protect
+    ~finally:(fun () -> ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmp))))
+    (fun () -> f tmp)
+
+let test_cas_reuse_rejects_non_git_dir () =
+  with_tmp_dir (fun tmp ->
+    let dest = Filename.concat tmp "dep" in
+    ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote dest)));
+    (* A registry tarball extract: real files, but no .git. *)
+    let oc = open_out (Filename.concat dest "forge.toml") in
+    output_string oc "[package]\nname = \"dep\"\n"; close_out oc;
+    Alcotest.(check bool)
+      "a non-git directory is never reused as a git checkout"
+      false
+      (Cmd_deps.git_checkout_matches ~url:"https://example.invalid/dep.git" dest))
+
+let test_cas_reuse_rejects_wrong_remote () =
+  with_tmp_dir (fun tmp ->
+    let dest = Filename.concat tmp "dep" in
+    ignore (Sys.command (Printf.sprintf
+      "git init -q %s && git -C %s remote add origin https://example.invalid/OTHER.git"
+      (Filename.quote dest) (Filename.quote dest)));
+    Alcotest.(check bool)
+      "a git checkout of a DIFFERENT url is not reused"
+      false
+      (Cmd_deps.git_checkout_matches ~url:"https://example.invalid/dep.git" dest))
+
+let test_cas_reuse_accepts_matching_remote () =
+  with_tmp_dir (fun tmp ->
+    let dest = Filename.concat tmp "dep" in
+    let url = "https://example.invalid/dep.git" in
+    ignore (Sys.command (Printf.sprintf
+      "git init -q %s && git -C %s remote add origin %s"
+      (Filename.quote dest) (Filename.quote dest) (Filename.quote url)));
+    Alcotest.(check bool)
+      "a git checkout of the SAME url is reused (no needless re-clone)"
+      true
+      (Cmd_deps.git_checkout_matches ~url dest))
+
+(* ------------------------------------------------------------------ *)
 (*  Suite                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -210,5 +362,19 @@ let () =
       Alcotest.test_case "independent root deps: no spurious entries" `Quick test_independent_root_deps_no_spurious_entries;
       Alcotest.test_case "tight transitive compatible with loose root" `Quick test_tight_transitive_compatible_with_loose_root;
       Alcotest.test_case "three-way diamond: highest lower bound"   `Quick test_three_way_diamond_highest_lower_bound;
+    ];
+    "archive-lib-paths", [
+      Alcotest.test_case "archive task sees a REGISTRY dep's lib dir" `Quick
+        test_archive_lib_paths_include_registry_dep;
+      Alcotest.test_case "archive task still sees a git dep's lib dir" `Quick
+        test_archive_lib_paths_include_git_dep;
+    ];
+    "cas-install-reuse", [
+      Alcotest.test_case "non-git dir (registry tarball) not reused as git" `Quick
+        test_cas_reuse_rejects_non_git_dir;
+      Alcotest.test_case "git checkout of a different url not reused" `Quick
+        test_cas_reuse_rejects_wrong_remote;
+      Alcotest.test_case "git checkout of the same url is reused" `Quick
+        test_cas_reuse_accepts_matching_remote;
     ];
   ]
