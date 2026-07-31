@@ -1754,6 +1754,34 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
+(* ── Laundered guards: name -> the application it was let-bound to ─────────
+   [visit] records, per program point, which local names are ONE `let` away
+   from a direct application: `let n = List.length(ys)` records
+   `n -> List.length(ys)`, so a later `if n > 0` can be recognised by
+   [alias_withdrawal_cause] as the same author intent as guarding directly.
+   One level ONLY — through a chain (`let a = …; let n = a`) "the guard is
+   about this value" stops being syntactically evident, and the fallback is
+   the honest general message, not a guess.
+
+   The channel carries NO solver-visible fact — it is consulted only when
+   choosing the WORDING of a skip — but it obeys the same shadow discipline as
+   [scope]/[path], and for the same reason: an entry surviving a rebinding
+   attributes an outer value's guard to an inner binding, which in this
+   channel is a wrong SENTENCE rather than a wrong verdict, and a wrong
+   attribution is worse than a vague one.  Hence BOTH tests below: the KEY
+   retires when the laundering name rebinds (`let n = 5` after the laundering
+   `let` makes the guard's `n` a literal), and the entry retires when any name
+   its RHS mentions rebinds (`let ys = zs` in between leaves `n` measuring the
+   OUTER list while the obligation is about the new one). *)
+type launder = (string * A.expr) list
+
+let launder_shadow (lets : launder) (names : string list) : launder =
+  if names = [] then lets
+  else
+    List.filter
+      (fun (n, rhs) -> not (List.mem n names) && not (expr_mentions names rhs))
+      lets
+
 (* ── Record-typed variables in scope, refined or not ───────────────────────
    [scope] carries only REFINED locals, so a plain `c : Config` parameter is
    invisible to it — and a guard `if c.port >= 1` had nowhere to attach: the
@@ -2628,26 +2656,46 @@ let expr_applies_to (name : string) (subject : string) (e : A.expr) : bool =
       `{String | len(_) > 0}` — naming a list definition that could not
       possibly have mattered.
 
+   Condition 3 accepts the guard in two spellings, and only two.  DIRECT: the
+   condition itself applies the withdrawn spelling to the subject.  LAUNDERED
+   through exactly one `let`: the condition mentions a name that [lets] maps
+   to an application, and THAT application applies the withdrawn spelling to
+   the subject — `let n = List.length(ys)` then `if n > 0` is the same author
+   intent, stopped by the same withdrawal, so it earns the same sentence.
+   The laundered check runs [expr_applies_to] against the recorded RHS with
+   the obligation's own subject, never against the let-bound name: `let n =
+   List.length(zs)` guarding a call about `ys` fails it exactly as the direct
+   `if List.length(zs) > 0` does.  [lets] is shadow-disciplined by [visit]
+   (see [launder]), so a rebinding of either the laundering name or the
+   collection between the `let` and the guard has already retired the entry
+   before this function ever sees it.
+
    Note the asymmetry with the gates themselves: THEY resolve doubt by
    suppressing (silence is safe).  This resolves doubt by staying general,
    because the thing being chosen here is a sentence, and an over-confident
-   sentence is a lie.  The cost is coverage: a guard laundered through a local
-   (`let n = List.length(ys)`), applied to a non-variable actual, or
-   established in a caller, falls back to the general message.  That is the
-   right trade — this reason exists to explain one specific confusion, not to
-   claim every skip. *)
+   sentence is a lie.  The cost is coverage: a guard laundered through a CHAIN
+   of locals (`let a = List.length(ys)` then `let n = a`), applied to a
+   non-variable actual, or established in a caller, falls back to the general
+   message.  That is the right trade — this reason exists to explain one
+   specific confusion, not to claim every skip. *)
 let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
-    ~(subject_is_str : bool) ~(path : (A.expr * bool) list) (r : Obligation.reason) :
-    withdrawal option =
+    ~(subject_is_str : bool) ~(path : (A.expr * bool) list) ~(lets : launder)
+    (r : Obligation.reason) : withdrawal option =
   match (r, subject) with
   | Obligation.Solver_undecided, Some (A.EVar sn) ->
+    let guard_applies (w : withdrawal) (cond : A.expr) : bool =
+      expr_applies_to w.wd_spelling sn.A.txt cond
+      || List.exists
+           (fun (m, rhs) ->
+             expr_mentions [ m ] cond && expr_applies_to w.wd_spelling sn.A.txt rhs)
+           lets
+    in
     List.find_opt
       (fun w ->
         w.wd_str = subject_is_str
         && expr_applies w.wd_measure pred
         && List.exists
-             (fun (cond, negated) ->
-               (not negated) && expr_applies_to w.wd_spelling sn.A.txt cond)
+             (fun (cond, negated) -> (not negated) && guard_applies w cond)
              path)
       !withdrawals
   (* A non-variable actual (`head(f(xs))`) carries no name a guard could be
@@ -2669,7 +2717,7 @@ type check_subject =
   | Bound_expr
 
 let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
-    ?(verdict_out : Obligation.verdict option ref option)
+    ?(verdict_out : Obligation.verdict option ref option) ~(lets : launder)
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
@@ -2728,7 +2776,7 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
         (match
            alias_withdrawal_cause ~pred:rp.pred
              ~subject:(List.nth_opt args rp.idx)
-             ~subject_is_str:(rp_is_str rp) ~path r
+             ~subject_is_str:(rp_is_str rp) ~path ~lets r
          with
          | Some w -> (Obligation.Skipped (Obligation.Alias_withdrawn w.wd_spelling), w.wd_span)
          | None -> (verdict, None))
@@ -4669,7 +4717,7 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
    the checker cannot see is no longer usable — and the cost lands entirely in
    the safe direction, as more skips. *)
 let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
-    (sc : scope) (re : recenv) (b : A.binding) : bool option =
+    (lets : launder) (sc : scope) (re : recenv) (b : A.binding) : bool option =
   match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
   | A.PatVar n, Some (binder, pred, sort) ->
     let name = n.A.txt in
@@ -4686,7 +4734,8 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
     let out = ref None in
     check_call ~root errctx ~span:n.A.span
       ~callee:(Printf.sprintf "let %s" name)
-      ~subject:Bound_expr ~verdict_out:out ~postcond:(postcond_of ctx defs) sg
+      ~subject:Bound_expr ~verdict_out:out ~lets:(launder_shadow lets names)
+      ~postcond:(postcond_of ctx defs) sg
       [ b.A.bind_expr ]
       (path_shadow path names)
       { idx = 0; binder; pred; sort }
@@ -4696,10 +4745,10 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
 
 (* ── Walk expressions, threading the refined-local scope, the record-typed
    variables ([recenv]) and the path context ─────────────────────────────── *)
-let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
-    (re : recenv) (cb : cbenv) (e : A.expr) : unit =
-  let go = visit ~root errctx defs ctx path sc re cb in
-  let go_path p = visit ~root errctx defs ctx p sc re cb in
+let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
+    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (e : A.expr) : unit =
+  let go = visit ~root errctx defs ctx path lets sc re cb in
+  let go_path p = visit ~root errctx defs ctx p lets sc re cb in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match resolve_call ctx defs fname with
@@ -4707,7 +4756,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        let postcond = postcond_of ctx defs in
        List.iter
          (fun rp ->
-           check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
+           check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path rp
+             sc re)
          sg.refined
      | _ ->
        (* Not a resolvable NAMED callee: fall back to the callee env — a call
@@ -4718,7 +4768,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
           let postcond = postcond_of ctx defs in
           List.iter
             (fun rp ->
-              check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
+              check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path
+                rp sc re)
             sg.refined
         | None -> ()));
     List.iter go args
@@ -4741,8 +4792,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        new, unrelated local function. *)
     ignore
       (List.fold_left
-         (fun (ctx, path, sc, re, cb) e ->
-           visit ~root errctx defs ctx path sc re cb e;
+         (fun (ctx, path, lets, sc, re, cb) e ->
+           visit ~root errctx defs ctx path lets sc re cb e;
            (* An annotated `let`'s refinement is checked against its bound
               expression HERE, against the scope as it stands BEFORE the
               binding — exactly as a call's arguments are checked against the
@@ -4750,7 +4801,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
               would let the annotation discharge itself. *)
            let annot_proved =
              match e with
-             | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path sc re b
+             | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path lets sc re b
              | _ -> None
            in
            (* A `let`/local-`fn` binder also retires the name for CALLEE
@@ -4769,6 +4820,25 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
            in
+           (* The laundering channel: retire first (both the key and any entry
+              whose RHS mentions a rebound name — see [launder]), then record a
+              single-name binding whose RHS is a direct application, so a later
+              guard on that name can be traced back to the call it launders.
+              Any [A.EApp] qualifies — [alias_withdrawal_cause] re-checks the
+              recorded RHS against the withdrawn spelling and the obligation's
+              own subject, so recording a non-measure application costs nothing
+              but the entry. *)
+           let lets' =
+             match e with
+             | A.ELet (b, _) ->
+               let names = pat_binders b.A.bind_pat in
+               let lets = launder_shadow lets names in
+               (match b.A.bind_pat, b.A.bind_expr with
+                | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
+                | _ -> lets)
+             | A.ELetFn (n, _, _, _, _) -> launder_shadow lets [ n.A.txt ]
+             | _ -> lets
+           in
            let sc' =
              match e with
              (* An annotation that was NOT proved grants no fact — it is
@@ -4786,13 +4856,13 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | A.ELetFn (n, _, _, _, _) -> cb_shadow cb [ n.A.txt ]
              | _ -> cb
            in
-           (ctx', path', sc', re', cb'))
-         (ctx, path, sc, re, cb) es)
+           (ctx', path', lets', sc', re', cb'))
+         (ctx, path, lets, sc, re, cb) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let ctx = local_shadow ctx names in
-    visit ~root errctx defs ctx (path_shadow path names)
+    visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
@@ -4803,7 +4873,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let re = recenv_shadow re [ n.A.txt ] in
     let cb = cb_shadow cb [ n.A.txt ] in
     let ctx = local_shadow ctx names in
-    visit ~root errctx defs ctx (path_shadow path names)
+    visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
@@ -4817,6 +4887,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         let sc = scope_shadow sc binders in
         (* …and a same-named fact in the path context, for the same reason. *)
         let path = path_shadow path binders in
+        (* …and a same-named laundered-guard fact — see [launder]. *)
+        let lets = launder_shadow lets binders in
         (* …and a same-named callback/alias fact — see [cbenv]. *)
         let cb = cb_shadow cb binders in
         (* …and a same-named GLOBAL FUNCTION, for callee resolution. *)
@@ -4898,7 +4970,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
             (tester, false) :: p
           | _ -> p
         in
-        visit ~root errctx defs ctx p sc re cb br.A.branch_body)
+        visit ~root errctx defs ctx p lets sc re cb br.A.branch_body)
       branches
   | A.EIf (c, t, e, _) ->
     go c;
@@ -4922,7 +4994,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
     let ctx = local_shadow ctx binders in
-    visit ~root errctx defs ctx (path_shadow path binders) sc re cb e2
+    visit ~root errctx defs ctx (path_shadow path binders) (launder_shadow lets binders)
+      sc re cb e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
@@ -5241,7 +5314,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
            resolution inside this body too — see [local_shadow]. *)
         let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
         let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-        visit ~root errctx defs ctx path sc re cb c.A.fc_body)
+        visit ~root errctx defs ctx path [] sc re cb c.A.fc_body)
       walked.A.fn_clauses)
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
@@ -5277,7 +5350,7 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
 and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
   (* A bare expression that is not a function clause: no parameters, no guard,
      hence empty scope/recenv/cbenv and an empty path condition. *)
-  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] e in
+  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] [] e in
   (* Decls that merely group other decls (`describe`) must NOT go through
      [visit_decls]: that would re-derive [strict_verified] from the inner list,
      which carries no `cap` directive of its own, and so would silently drop
@@ -5318,7 +5391,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         let re = List.fold_left recenv_add_fnparam [] ps in
         let cb = List.fold_left cb_add_fnparam [] ps in
         let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
-        visit ~root errctx defs ctx [] sc re cb h.A.ah_body)
+        visit ~root errctx defs ctx [] [] sc re cb h.A.ah_body)
       ad.A.actor_handlers;
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)

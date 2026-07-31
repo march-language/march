@@ -342,6 +342,19 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **The `alias-withdrawn` explanation now follows a guard laundered through one
+  `let`.** Under `cap verified`, `let n = List.length(ys)` followed by
+  `if n > 0 do head(ys)` — where something in the compilation unit has
+  withdrawn the `List.length` alias — used to report the generic
+  `solver-undecided` text, pointing at z3 and advising the exact guard the
+  author had already written. It now names the withdrawal and the binding that
+  caused it, exactly as the direct `if List.length(ys) > 0` spelling already
+  did. The verdict is unchanged (the obligation is still skipped); only the
+  explanation improves. One `let` level only, and the attribution stays
+  deliberately conservative: a guard laundered through a chain of `let`s, a
+  guard on a different collection, or a guard whose laundering name (or
+  collection) was rebound in between all keep the honest general message.
+
 - **An `impl` method's refinement is no longer adopted when a `use` in the same
   module imports its name.** An `impl` method's parameter refinement becomes a
   contract every caller must satisfy only when the method name unambiguously

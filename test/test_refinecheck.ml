@@ -4977,6 +4977,175 @@ end|}
         Alcotest.(check bool)
           "so the withdrawal is not blamed" false
           (contains witness "alias-withdrawn"));
+    (* ── A guard LAUNDERED through one `let` ──────────────────────────────
+       `let n = List.length(ys)` then `if n > 0` is the same author intent as
+       guarding directly, and the same withdrawal stopped the same proof — so
+       it earns the same attribution.  ONE level only, and every control below
+       is a way the laundered walk could attribute WRONGLY rather than merely
+       vaguely: through a rebinding of the laundering name, through a rebinding
+       of the collection itself, through a different collection, or through a
+       second hop. *)
+    gated "a guard laundered through one `let` is attributed to the withdrawal"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod LA1 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let n = List.length(ys)
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "a laundered guard on a DIFFERENT collection is not this guard"
+      (fun () ->
+        (* The laundered analogue of the WA control: the walk must consult
+           [expr_applies_to] with the ORIGINAL argument (`zs`), never the
+           let-bound name — `n` guards `zs`, and the obligation is about
+           `ys`. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA2 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(zs)
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a REBOUND laundering name is not the launder"
+      (fun () ->
+        (* `let n = 5` between the laundering `let` and the guard: the guard's
+           `n` is the literal, not the length.  The fact must retire exactly
+           as a path fact would (see [path_shadow]) — surviving it would
+           attribute an unrelated comparison to the withdrawal. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA3 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let n = List.length(ys)
+    let n = 5
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a REBOUND collection retires the laundered fact"
+      (fun () ->
+        (* The collection itself rebinds between the `let` and the call: `n`
+           measures the OUTER `ys`, the obligation is about the new one.  The
+           laundered fact's RHS mentions the rebound name, so it must retire —
+           the same both-channels discipline every binding construct already
+           applies to [scope] and [path]. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA4 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    let ys = zs
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "TWO-level laundering stays general"
+      (fun () ->
+        (* `let a = List.length(ys)` then `let n = a`: the walk is one level
+           deep on purpose — a chain is where "the guard is about this value"
+           stops being syntactically evident, and the fallback is the honest
+           general message, not a guess. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA5 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let a = List.length(ys)
+    let n = a
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a NEGATED laundered guard is not read as a guard that proved nothing"
+      (fun () ->
+        (* The laundered analogue of WC: in the else-branch the guard
+           DISPROVES the predicate; the existing polarity gate must apply to
+           the laundered walk exactly as to the direct one. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA6 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let n = List.length(ys)
+    if n > 0 do 0 else head(ys) end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn"));
     (* Suppression itself is untouched: with nothing competing, the same guarded
        call still PROVES and reports nothing at all. *)
     gated "the guarded call still proves when no alias was withdrawn" (fun () ->

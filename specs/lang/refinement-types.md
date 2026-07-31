@@ -1087,7 +1087,7 @@ Each skip is attributed to one of six reasons:
 | `unreflectable-subject` | the argument's own value did not translate, so no goal was built |
 | `sort-conflict` | reflecting it would declare one symbol at two different sorts |
 | `float-sort-gate` | the float wellsortedness gate rejected the formula |
-| `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`) that this compilation unit had withdrawn, because something in the unit binds that name |
+| `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`) — directly, or through one `let` (`let n = List.length(ys)` then `if n > 0`) — that this compilation unit had withdrawn, because something in the unit binds that name |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
 
 `alias-withdrawn` is a refinement of `solver-undecided`, not a separate failure:
@@ -1206,7 +1206,15 @@ message stands:
    cannot cause an earlier reflection or sort failure);
 2. the predicate applies the measure the alias routes to;
 3. a **positive** path condition applies the withdrawn spelling **to this
-   obligation's own argument**;
+   obligation's own argument** — either directly, or laundered through exactly
+   **one** `let`: `let n = List.length(ys)` followed by `if n > 0` is the same
+   author intent stopped by the same withdrawal. The laundered walk re-checks
+   the *recorded application* against the obligation's own argument (so
+   `let n = List.length(zs)` is not a guard on `ys`), and the recorded fact is
+   shadow-disciplined: rebinding either the laundering name (`let n = 5` in
+   between) or the collection itself (`let ys = zs` in between) retires it,
+   and a two-`let` chain (`let a = List.length(ys)` then `let n = a`) stays
+   general;
 4. the spelling measures the same kind of thing as that argument — `List.length`
    for a list, `String.byte_size` / `string_byte_length` for a String.
 
@@ -1220,15 +1228,21 @@ refinement violation, so it is never dressed up as a shadowing story. And since
 all three spellings route to the single name `len`, condition 4 is what stops a
 withdrawn `List.length` being blamed for an undischarged `{String | len(_) > 0}`.
 
-The cost is coverage: a guard laundered through a local (`let n =
-List.length(ys)`), applied to a non-variable actual, or established in a caller
-falls back to the general message. That is the intended trade — the reason
-exists to explain one specific confusion, not to claim every skip.
+The cost is coverage: a guard laundered through a **chain** of locals
+(`let a = List.length(ys)` then `let n = a`), applied to a non-variable actual,
+or established in a caller falls back to the general message. That is the
+intended trade — the reason exists to explain one specific confusion, not to
+claim every skip.
 
 Verified 2026-07-29 (both triggers report `alias-withdrawn` with the causing
 span; an unguarded call, a guard on a different variable, a cross-measure guard,
 and a negated guard all still report `solver-undecided`, each matched against a
-control with the competing binding deleted).
+control with the competing binding deleted). The one-`let` laundered walk was
+added and verified 2026-07-31: the laundered witness reports `alias-withdrawn`,
+and its four wrong-attribution controls — a laundered guard on a *different*
+collection, a rebound laundering name, a rebound collection, and a two-level
+chain — all keep `solver-undecided`, with the negated laundered guard never
+blamed.
 
 ### `@[trusted]` — a scoped, loud escape hatch
 
@@ -1436,9 +1450,16 @@ sense; each is a check that does not happen.
    enclosing `use` over a nested `impl` — was probed and is NOT a hole:
    adoption matches dispatch there. Since 2026-07-30 a `use` in the *same*
    declaration list competes for adoption, glob imports failing closed.)
-7. **`alias-withdrawn` attribution does not follow a laundered guard.**
-   `let n = List.length(ys)` followed by `if n > 0` falls back to the general
-   `solver-undecided` message even when a withdrawal really was the cause.
+7. **`alias-withdrawn` attribution follows a laundered guard one `let` deep,
+   and no deeper.** `let n = List.length(ys)` followed by `if n > 0` is
+   attributed to the withdrawal (closed 2026-07-31); a chain
+   (`let a = List.length(ys)` then `let n = a`) still falls back to the
+   general `solver-undecided` message even when the withdrawal really was the
+   cause. A related pre-existing approximation is unchanged: condition 3
+   checks that the guard *applies the spelling to the argument*, not that the
+   guard would have *discharged* the obligation, so `if List.length(ys) >= 0`
+   is attributed to the withdrawal although `len >= 0` proves nothing about
+   `len > 0` — identically in the direct and laundered spellings.
 
 ---
 
