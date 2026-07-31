@@ -308,30 +308,6 @@ count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
 - **Not a regression:** `binary-trees(15)` improved (265.4 → 176.6 ms) and
   `list-ops(1M)` is exactly restored (67.6 → 67.3 ms).
 
-## Compiler: `pfn` unreachable from a sibling in the same NESTED module (OPEN, 2026-07-24)
-
-- [ ] **A public `fn` in a nested `mod` cannot call a `pfn` declared beside it
-  in that same module** — reported as `Module `X` does not export `y``.
-  Top-level modules are unaffected. Since the project convention is exactly
-  one top-level `mod` per file, nested modules are the normal way to have
-  several modules, so this breaks ordinary private-helper code. Minimal repro:
-
-  ```march
-  mod Outer do
-    mod Crypto do
-      fn encode(x : Int) : Int do scramble(x) end
-      pfn scramble(x : Int) : Int do x * 31 end
-    end
-  end
-  -- Module `Crypto` does not export `scramble`.
-  ```
-
-  Found by the differential oracle: `examples/modules.march` (whose Part 3 is
-  a deliberate pub-vs-`pfn` demonstration) now fails to typecheck at all, so
-  it reports `INTERP_FAIL` and reddens the sweep. Suspected interaction
-  between the 0.2.0 "Module does not export" diagnostic change and the
-  intra-module qualification pass (`specs/2026-06-23-desugar-intra-module-qualification.md`)
-  rewriting the bare call to a qualified one before the export check runs.
 
 ## Quarantined tests — coverage that is currently DARK (inventory, 2026-07-24)
 
@@ -546,6 +522,8 @@ makes a quarantine indistinguishable from a deletion.
 - [ ] **JsonStream Component 4 — decoder-combinator layer (deferred from phase 1, by design).** The phase 1 design doc (`specs/2026-07-30-json-streaming-design.md`) scoped a typed decoder-combinator layer over the raw `Event` stream (e.g. `Decoder.field`/`Decoder.list`/`Decoder.at` composing into a value decoder, analogous to `Json.Decode` in Elm) as Component 4, explicitly separable — "nothing in Components 1–3 depends on it." Not started; phase 1 shipped the tokenizer + drivers (`fold`/`build`/`each_value`) only.
 
 ## Done (recently completed)
+
+- ✅ **Misdiagnosed "`pfn` unreachable from a sibling in the same NESTED module" — root cause was the ordinary stdlib name collision, not a nested-module-specific compiler bug (2026-07-31, `examples/modules.march`).** The 2026-07-24 entry's minimal repro (`mod Outer do mod Crypto do fn encode(x) do scramble(x) end  pfn scramble(x) do x * 31 end end end`) and the real-world `examples/modules.march` failure it cited both reused `mod Crypto`, which collides with stdlib's own `mod Crypto` (`stdlib/crypto.march`) in March's flat, global module namespace — so the bare `scramble`/`add_checksum`/`remove_checksum` calls resolved against the stdlib module (which has no such — or no `pfn` — members) instead of the file's own, giving `Module 'Crypto' does not export '...'`. Retesting the same nested-module shape with a genuinely unique name (`mod Zzqnested`) compiles and runs correctly (exit 0), and retesting with another colliding name (`mod Vault`, which also shadows `stdlib/vault.march`) reproduces the same false error — confirming nesting and `pfn`-adjacency were never the actual variable. This is the same known-taken-name class documented for app **types** (see stdlib-collision guidance for module/type names). **Fix:** renamed the example's `mod Crypto` to `mod SecretCode`; no compiler change, since a flat global module namespace is by design. `./_build/default/bin/main.exe examples/modules.march` now exits 0 (interpreted) and compiled (`--compile --opt 2`), and the differential oracle sweep (`dune build --root . @test/oracle`) is fully green: 100 MATCH, 0 known-divergence, 0 un-triaged failures, exit 0.
 
 - ✅ **JsonStream phase 1 review-fix set — four Minor findings from the whole-branch review (2026-07-31, `stdlib/json_stream.march`, `test/stdlib/test_json_stream.march`, `specs/2026-07-30-json-streaming-design.md`).** (1) **`max_token_bytes = 0` asymmetry fixed**: `value_start` created a number token's first `PNum` with no limit check while `push_piece` always checked it for strings, so at `maxt=0` a 1-digit number was accepted while a 1-char string was rejected with `ETokenLimit`. Fixed by routing the number-start bytes (`value_start`'s `-`/digit branches) through a new `num_start` helper that checks `1 > maxt` the same way `push_piece` does, so the two token kinds now agree at every `max_token_bytes` value, including the degenerate `0` case. Pinned by 4 new tests (`maxt=0`/`maxt=1` × number/string). (2) **Partial-token memory-accounting doc fix** (not a code change — phase 2's block scanning eliminates the shape): the design spec's memory-accounting paragraph now states the real constant factor (one cons cell + one string piece per content byte, not the single byte the bound might suggest); noted as an input to the phase 2 spec above. (3) **Stale plan-narration comment removed** at `open_container`'s doc comment (was "Containers: Task 2 implements open_container and replaces close_* bodies", describing implementation-plan history in shipped code; now describes what the function does). (4) **`start_ndjson_with` test coverage added** — was public with zero test coverage; new test exercises it with non-default `JsonLimits` (`max_depth = 2`) in ndjson mode, proving a later record's depth violation is still caught (`EDepthLimit` at the correct absolute offset) with limits and ndjson mode composed. 212 → 217 tests green interpreted; compiled stdlib test binary (`test_stdlib_march.exe test json_stream -e`) also green.
 
