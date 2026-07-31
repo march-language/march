@@ -11,7 +11,34 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **The compiled HTTP server is covered end-to-end by the test suite**
+  (`test/test_http_native.ml`, carried by `run_stdlib.exe` and therefore by
+  `dune runtest` and CI on both macOS and Linux). A total outage of the
+  compiled server went unnoticed because the only end-to-end test of it,
+  `test/test_http_native.sh`, was referenced by no dune rule and no CI
+  workflow — and would have passed against two of the three defects anyway.
+  The replacement compiles at `--opt 2` (every defect was compiled-only),
+  makes ~65 requests against one process (one crashed on request 2), asserts
+  on response *bodies* with two routes echoing request-derived data (one
+  returned a well-formed `200` with an empty body), asserts the process is
+  still alive and decodes `128 + signal` if not (one crash was silent), and
+  covers the thread-pool and event-loop servers as equal peers. The only skip
+  is clang genuinely absent; a broken server can never become a skip.
+
 ### Changed
+
+- **The thread-pool HTTP server no longer pays for TCP corking on
+  single-request batches.** `TCP_NOPUSH`/`TCP_CORK` were set and cleared around
+  every response batch, but corking only earns its two `setsockopt` syscalls
+  when the batch emits more than one `writev` — a single request is one
+  `writev`, which the kernel already coalesces. Every non-pipelining client
+  (browsers, curl, wrk — effectively all real traffic) took that path on every
+  request. Measured on macOS/arm64: **−1.45 µs of ~32 µs CPU per request,
+  −4.5%**, with `setsockopt` per request going 2.000 → 0.000. Throughput is
+  unchanged, because on the measurement box the ~30k req/s ceiling is
+  client/kernel-side rather than server-side.
 
 - **The TFB HTTP benchmark harness measures the routes it claims to.**
   `bench/tfb/run.sh` drove wrk at `/plaintext` and `/json` while its March

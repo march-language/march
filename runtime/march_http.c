@@ -1572,19 +1572,30 @@ static void *connection_thread(void *arg) {
              *     a non-overlapping slice of the TLS scratch buffer.
              * All iovecs are accumulated in batch_iov[], then sent with
              * one writev() syscall.  TCP_NOPUSH / TCP_CORK hold the kernel
-             * from flushing partial segments during accumulation. */
+             * from flushing partial segments during accumulation.
+             *
+             * Corking only earns its two setsockopt() syscalls when the batch
+             * can emit more than one writev() — i.e. when this parse yielded
+             * several pipelined requests.  A single request is sent by exactly
+             * one writev(), which the kernel already coalesces, so for n == 1
+             * the cork/uncork pair is pure overhead.  Measured on macOS/arm64
+             * (wrk -t4 -c100, examples/http_hello): the pair cost ~1.5 us of
+             * the ~32 us total CPU per request, ~5%.  Non-pipelining clients —
+             * browsers, curl, and wrk — take the n == 1 path for every single
+             * request, so this is the common case, not a corner case. */
             {
                 struct iovec  batch_iov[CONN_BATCH_IOV_MAX];
                 int           batch_n = 0;
+                const int     do_cork = (n > 1);
                 march_response_t bresp;
                 bresp.iov_count    = 0;
                 bresp.scratch_used = 0;
 
 #if defined(__APPLE__) && defined(TCP_NOPUSH)
-                { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
+                if (do_cork) { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                           &one, sizeof(one)); }
 #elif defined(__linux__) && defined(TCP_CORK)
-                { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
+                if (do_cork) { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
                                           &one, sizeof(one)); }
 #endif
 
@@ -1688,10 +1699,10 @@ static void *connection_thread(void *arg) {
 
                 /* Release TCP_NOPUSH / TCP_CORK → kernel flushes. */
 #if defined(__APPLE__) && defined(TCP_NOPUSH)
-                { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
+                if (do_cork) { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                             &zero, sizeof(zero)); }
 #elif defined(__linux__) && defined(TCP_CORK)
-                { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
+                if (do_cork) { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
                                             &zero, sizeof(zero)); }
 #endif
             }
