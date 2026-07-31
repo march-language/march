@@ -12366,6 +12366,18 @@ let vectorize_source_ok = {|mod Main do
   end
 end|}
 
+let vectorize_source_warn_ok = {|mod Main do
+  @[vectorize(warn)]
+  fn scale(arr) do
+    native_float_arr_map(arr, fn x -> x *. 2.0)
+  end
+  fn main() : () do
+    let arr = native_float_arr_make(4, 1.0)
+    let doubled = scale(arr)
+    println(native_float_arr_get(doubled, 0))
+  end
+end|}
+
 let vectorize_source_ok_int = {|mod Main do
   @[vectorize]
   fn double_all(arr) do
@@ -12406,6 +12418,34 @@ let vectorize_source_reuse_warn = {|mod Main do
   end
 end|}
 
+let vectorize_source_ok_map2 = {|mod Main do
+  @[vectorize]
+  fn combine(a, b) do
+    native_float_arr_map2(a, b, fn (x, y) -> x +. y)
+  end
+  fn main() : () do
+    let a = native_float_arr_make(4, 1.0)
+    let b = native_float_arr_make(4, 2.0)
+    let summed = combine(a, b)
+    println(native_float_arr_get(summed, 0))
+  end
+end|}
+
+let vectorize_source_reuse_fail_map2 = {|mod Main do
+  @[vectorize]
+  fn combine(a, b) do
+    let f = fn (x, y) -> x +. y
+    let _ = f(1.0, 1.0)
+    native_float_arr_map2(a, b, f)
+  end
+  fn main() : () do
+    let a = native_float_arr_make(4, 1.0)
+    let b = native_float_arr_make(4, 2.0)
+    let summed = combine(a, b)
+    println(native_float_arr_get(summed, 0))
+  end
+end|}
+
 let vectorize_source_misuse = {|mod Main do
   @[vectorize]
   fn scale(arr) do
@@ -12438,6 +12478,23 @@ let test_vectorize_pass_int () =
   Alcotest.(check int) "no diagnostics for an eligible Int callback (no generic gate applies)"
     0 (List.length (Test_helpers.run_vectorize_check vectorize_source_ok_int))
 
+let test_vectorize_warn_on_eligible_code_is_silent () =
+  Alcotest.(check int) "no diagnostics for (warn) on eligible code"
+    0 (List.length (Test_helpers.run_vectorize_check vectorize_source_warn_ok))
+
+let test_vectorize_pass_map2 () =
+  Alcotest.(check int) "no diagnostics for an eligible map2 callback"
+    0 (List.length (Test_helpers.run_vectorize_check vectorize_source_ok_map2))
+
+let test_vectorize_reuse_fail_map2 () =
+  let diags = Test_helpers.run_vectorize_check vectorize_source_reuse_fail_map2 in
+  Alcotest.(check int) "exactly one reuse-gate diagnostic" 1 (List.length diags);
+  let d = List.hd diags in
+  Alcotest.(check bool) "severity is Error"
+    true (d.March_errors.Errors.severity = March_errors.Errors.Error);
+  Alcotest.(check bool) "message names the reuse failure"
+    true (ir_contains d.March_errors.Errors.message "isn't safe to inline")
+
 let test_vectorize_reuse_fail () =
   let diags = Test_helpers.run_vectorize_check vectorize_source_reuse_fail in
   Alcotest.(check int) "exactly one reuse-gate diagnostic" 1 (List.length diags);
@@ -12451,13 +12508,17 @@ let test_vectorize_reuse_warn () =
   let diags = Test_helpers.run_vectorize_check vectorize_source_reuse_warn in
   Alcotest.(check int) "exactly one diagnostic" 1 (List.length diags);
   Alcotest.(check bool) "severity is Warning, not Error"
-    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Warning)
+    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Warning);
+  Alcotest.(check bool) "message names the reuse failure"
+    true (ir_contains (List.hd diags).March_errors.Errors.message "isn't safe to inline")
 
 let test_vectorize_misuse () =
   let diags = Test_helpers.run_vectorize_check vectorize_source_misuse in
   Alcotest.(check int) "exactly one misuse diagnostic" 1 (List.length diags);
   Alcotest.(check bool) "severity is Error"
-    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Error)
+    true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Error);
+  Alcotest.(check bool) "message names the misuse failure"
+    true (ir_contains (List.hd diags).March_errors.Errors.message "calls no NativeArray.map/map2")
 
 let test_vectorize_misuse_ignores_warn () =
   let diags = Test_helpers.run_vectorize_check vectorize_source_misuse_warn in
@@ -12561,6 +12622,12 @@ let codegen_suites =
             test_vectorize_reuse_fail;
           Alcotest.test_case "reuse gate: warns under (warn)" `Quick
             test_vectorize_reuse_warn;
+          Alcotest.test_case "pass: (warn) on eligible code is silent" `Quick
+            test_vectorize_warn_on_eligible_code_is_silent;
+          Alcotest.test_case "pass: eligible map2 callback" `Quick
+            test_vectorize_pass_map2;
+          Alcotest.test_case "reuse gate: map2 fails hard" `Quick
+            test_vectorize_reuse_fail_map2;
           Alcotest.test_case "generic-signature gate: passes when concrete" `Quick
             test_vectorize_generic_pass;
           Alcotest.test_case "generic-signature gate: fails hard" `Quick
