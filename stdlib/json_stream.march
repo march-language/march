@@ -147,6 +147,17 @@ mod JsonStream do
     end
   end
 
+  -- End of the number run starting at `i`: the first index whose byte is not
+  -- part of a number lexeme.  `string_byte_at` returns a negative sentinel
+  -- past the end and `is_num_byte` rejects it, so this always terminates.
+  -- Unlike run_end there is no memchr for "first byte NOT in a set", so this
+  -- stays a scalar scan -- but it allocates nothing, which is the win.
+  -- Replacing it with a C classifier is exactly the phase 2 design's
+  -- Component 4 question, gated on measurement.
+  pfn num_end(s, i) do
+    if is_num_byte(string_byte_at(s, i)) do num_end(s, i + 1) else i end
+  end
+
   -- Encode a Unicode codepoint as UTF-8 bytes.  char_from_int is ASCII-only
   -- (returns "" above 127 in the interpreter); every byte here past the
   -- first branch is >= 128, so use byte_to_char, which accepts the full
@@ -269,12 +280,13 @@ mod JsonStream do
   -- a 1-digit number and a 1-char string behave identically at
   -- max_token_bytes = 0 (a single-byte token always exceeds a zero limit).
   pfn num_start(s, i, c, cfg, mode, stack, depth, base, evs) do
+    let stop = num_end(s, i)
     match cfg do
     JsCfg(_, maxt, _) ->
-      if 1 > maxt do Err(ETokenLimit(base + i))
+      if stop - i > maxt do Err(ETokenLimit(base + i))
       else
-        go(s, i + 1, cfg, mode, stack, depth,
-           PNum(Cons(char_from_int(c), Nil), 1, base + i), base, evs)
+        go(s, stop, cfg, mode, stack, depth,
+           PNum(Cons(string_slice(s, i, stop - i), Nil), stop - i, base + i), base, evs)
       end
     end
   end
@@ -466,12 +478,14 @@ mod JsonStream do
 
   pfn num_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, soff) do
     if is_num_byte(c) do
+      let stop = num_end(s, i)
       match cfg do
       JsCfg(_, maxt, _) ->
-        if len + 1 > maxt do Err(ETokenLimit(soff))
+        let len2 = len + (stop - i)
+        if len2 > maxt do Err(ETokenLimit(soff))
         else
-          go(s, i + 1, cfg, mode, stack, depth,
-             PNum(Cons(char_from_int(c), ps), len + 1, soff), base, evs)
+          go(s, stop, cfg, mode, stack, depth,
+             PNum(Cons(string_slice(s, i, stop - i), ps), len2, soff), base, evs)
         end
       end
     else

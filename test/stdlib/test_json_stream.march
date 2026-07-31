@@ -618,6 +618,33 @@ describe "JsonStream" do
     end
   end
 
+  describe "run-sliced numbers" do
+    test "long integer round-trips" do
+      -- No string_to_float_or_zero helper exists in this file, so this
+      -- pins chunk-independence of a long run directly instead of pinning
+      -- a float rendering: one_shot and a two_shot split must agree.
+      let digits = repeat_str("1234567890", 20, "")
+      assert (one_shot(digits) == two_shot(digits, 7))
+    end
+    test "number split across a chunk boundary" do
+      assert (two_shot("-12345.6789e2", 6) == one_shot("-12345.6789e2"))
+    end
+    test "number followed immediately by a delimiter" do
+      assert (one_shot("[1,22,333]") == "[|N(1.)|N(22.)|N(333.)|]|")
+    end
+    test "number token limit trips at the token start" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 4))
+      match JsonStream.feed(st, "123456789") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "malformed numbers still report the token start" do
+      assert (one_shot("012") == "ERR:0")
+      assert (one_shot("1e") == "ERR:0")
+    end
+  end
+
 end
 
 end
