@@ -190,7 +190,10 @@ describe "JsonStream" do
       assert (one_shot("[1, 2") == "[|N(1.)|TRUNC:5")
     end
     test "unclosed object truncates" do assert (one_shot("{\"a\":") == "{|K(a)|TRUNC:5") end
-    test "non-string key" do assert (one_shot("{1: 2}") == "{|ERR:1") end
+    test "non-string key" do
+      -- same-chunk events are discarded on Err: errors are final and fail fast
+      assert (one_shot("{1: 2}") == "ERR:1")
+    end
   end
 
   describe "depth limit" do

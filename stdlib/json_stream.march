@@ -68,13 +68,11 @@ mod JsonStream do
   -- In-flight token.  String/number content accumulates as a REVERSED list
   -- of pieces joined once at completion (linear, unlike repeated ++).
   -- Every variant carries the token's absolute start offset for errors.
-  -- PErr defers an error until finish time (for events emitted before error).
   ptype JsPartial =
       PNone
     | PLit(String, Int, Int)                    -- lexeme, matched, start
     | PStr(List(String), Int, JsEsc, Int, Int)  -- pieces, len, esc, pending high surrogate (0-1 = none), start
     | PNum(List(String), Int, Int)              -- pieces, len, start
-    | PErr(JsonStreamError)                     -- deferred error to report at finish
 
   -- max_depth, max_token_bytes, ndjson mode
   ptype JsCfg = JsCfg(Int, Int, Bool)
@@ -183,7 +181,6 @@ mod JsonStream do
         str_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, esc, hi, soff)
       PNum(ps, len, soff) ->
         num_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, soff)
-      PErr(e) -> go(s, i + 1, cfg, mode, stack, depth, PErr(e), base, evs)
       end
     end
   end
@@ -209,8 +206,7 @@ mod JsonStream do
         if c == 34 do
           go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
         else if c == 125 do close_obj(s, i, cfg, stack, depth, base, evs)
-        else if c == 93 do Err(EMalformed("expected a key or '}' in object", base + i))
-        else go(s, i, cfg, mode, stack, depth, PErr(EMalformed("expected a key or '}' in object", base + i)), base, evs) end end end
+        else Err(EMalformed("expected a key or '}' in object", base + i)) end end
       MObjKey ->
         if c == 34 do
           go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
@@ -501,7 +497,6 @@ mod JsonStream do
         end
       PLit(lex, k, soff) -> Err(ETruncated(soff))
       PStr(ps, len, esc, hi, soff) -> Err(ETruncated(soff))
-      PErr(e) -> Err(e)
       end
     end
   end
