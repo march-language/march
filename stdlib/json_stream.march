@@ -68,11 +68,13 @@ mod JsonStream do
   -- In-flight token.  String/number content accumulates as a REVERSED list
   -- of pieces joined once at completion (linear, unlike repeated ++).
   -- Every variant carries the token's absolute start offset for errors.
+  -- PErr defers an error until finish time (for events emitted before error).
   ptype JsPartial =
       PNone
     | PLit(String, Int, Int)                    -- lexeme, matched, start
     | PStr(List(String), Int, JsEsc, Int, Int)  -- pieces, len, esc, pending high surrogate (0-1 = none), start
     | PNum(List(String), Int, Int)              -- pieces, len, start
+    | PErr(JsonStreamError)                     -- deferred error to report at finish
 
   -- max_depth, max_token_bytes, ndjson mode
   ptype JsCfg = JsCfg(Int, Int, Bool)
@@ -181,6 +183,7 @@ mod JsonStream do
         str_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, esc, hi, soff)
       PNum(ps, len, soff) ->
         num_byte(s, i, c, cfg, mode, stack, depth, base, evs, ps, len, soff)
+      PErr(e) -> go(s, i + 1, cfg, mode, stack, depth, PErr(e), base, evs)
       end
     end
   end
@@ -206,7 +209,8 @@ mod JsonStream do
         if c == 34 do
           go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
         else if c == 125 do close_obj(s, i, cfg, stack, depth, base, evs)
-        else Err(EMalformed("expected a key or '}' in object", base + i)) end end
+        else if c == 93 do Err(EMalformed("expected a key or '}' in object", base + i))
+        else go(s, i, cfg, mode, stack, depth, PErr(EMalformed("expected a key or '}' in object", base + i)), base, evs) end end end
       MObjKey ->
         if c == 34 do
           go(s, i + 1, cfg, mode, stack, depth, PStr(Nil, 0, SPlain, 0 - 1, base + i), base, evs)
@@ -237,20 +241,43 @@ mod JsonStream do
       go(s, i + 1, cfg, mode, stack, depth,
          PNum(Cons(char_from_int(c), Nil), 1, base + i), base, evs)
     else if c == 123 do
-      Err(EMalformed("objects not yet supported (Task 2)", base + i))
+      open_container(s, i, true, cfg, mode, stack, depth, base, evs)
     else if c == 91 do
-      Err(EMalformed("arrays not yet supported (Task 2)", base + i))
+      open_container(s, i, false, cfg, mode, stack, depth, base, evs)
     else Err(EMalformed("expected a JSON value", base + i))
     end end end end end end end end
   end
 
-  -- Containers: Task 1 stubs close_* as unreachable-but-total; Task 2
-  -- replaces the two value_start branches above and these two bodies.
-  pfn close_obj(s, i, cfg, stack, depth, base, evs) do
-    Err(EMalformed("unmatched '}'", base + i))
+  -- Containers: Task 2 implements open_container and replaces close_* bodies.
+  -- '{' or '[': push the parent mode; restore it via after_value on close.
+  pfn open_container(s, i, is_obj, cfg, mode, stack, depth, base, evs) do
+    match cfg do
+    JsCfg(maxd, _, _) ->
+      if depth + 1 > maxd do Err(EDepthLimit(base + i))
+      else
+        let ev = if is_obj do EvObjStart else EvArrStart end
+        let m2 = if is_obj do MObjFirst else MArrFirst end
+        go(s, i + 1, cfg, m2, Cons(mode, stack), depth + 1, PNone, base, Cons(ev, evs))
+      end
+    end
   end
+
+  pfn close_obj(s, i, cfg, stack, depth, base, evs) do
+    match stack do
+    Nil -> Err(EMalformed("unmatched '}'", base + i))
+    Cons(parent, rest) ->
+      go(s, i + 1, cfg, after_value(cfg, parent), rest, depth - 1, PNone, base,
+         Cons(EvObjEnd, evs))
+    end
+  end
+
   pfn close_arr(s, i, cfg, stack, depth, base, evs) do
-    Err(EMalformed("unmatched ']'", base + i))
+    match stack do
+    Nil -> Err(EMalformed("unmatched ']'", base + i))
+    Cons(parent, rest) ->
+      go(s, i + 1, cfg, after_value(cfg, parent), rest, depth - 1, PNone, base,
+         Cons(EvArrEnd, evs))
+    end
   end
 
   -- ── Literals ──────────────────────────────────────────────────────────
@@ -474,6 +501,7 @@ mod JsonStream do
         end
       PLit(lex, k, soff) -> Err(ETruncated(soff))
       PStr(ps, len, esc, hi, soff) -> Err(ETruncated(soff))
+      PErr(e) -> Err(e)
       end
     end
   end

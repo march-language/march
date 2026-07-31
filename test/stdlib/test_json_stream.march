@@ -160,6 +160,109 @@ describe "JsonStream" do
     end
   end
 
+  describe "containers" do
+    test "empty array" do assert (one_shot("[]") == "[|]|") end
+    test "empty object" do assert (one_shot("{}") == "{|}|") end
+    test "array of scalars" do
+      assert (one_shot("[1, \"a\", true, null]") == "[|N(1.)|S(a)|T|0|]|")
+    end
+    test "object" do
+      assert (one_shot("{\"x\": 1, \"y\": [2]}") == "{|K(x)|N(1.)|K(y)|[|N(2.)|]|}|")
+    end
+    test "nested" do
+      assert (one_shot("[[[]]]") == "[|[|[|]|]|]|")
+    end
+    test "number closed by bracket" do assert (one_shot("[7]") == "[|N(7.)|]|") end
+    test "container split across chunks" do
+      assert (two_shot("{\"a\": [1, 2]}", 6) == "{|K(a)|[|N(1.)|N(2.)|]|}|")
+    end
+  end
+
+  describe "containers malformed" do
+    test "trailing comma in array" do assert (one_shot("[1,]") == "ERR:3") end
+    test "comma before first element" do assert (one_shot("[,1]") == "ERR:1") end
+    test "missing colon" do assert (one_shot("{\"a\" 1}") == "ERR:5") end
+    test "missing comma" do assert (one_shot("[1 2]") == "ERR:3") end
+    test "mismatched close" do assert (one_shot("{]") == "ERR:1") end
+    test "bare close bracket" do assert (one_shot("]") == "ERR:0") end
+    test "unclosed array truncates" do assert (one_shot("[1, 2") == "[|N(1.)|N(2.)|TRUNC:5") end
+    test "unclosed object truncates" do assert (one_shot("{\"a\":") == "{|K(a)|TRUNC:5") end
+    test "non-string key" do assert (one_shot("{1: 2}") == "{|ERR:1") end
+  end
+
+  describe "depth limit" do
+    test "depth exactly at limit is fine" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(3, 1000))
+      match JsonStream.feed(st, "[[[1]]]") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "[|[|[|N(1.)|]|]|]|")
+        end
+      end
+    end
+    test "depth past limit errors at the opening bracket" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(3, 1000))
+      match JsonStream.feed(st, "[[[[1]]]]") do
+      Err(e) -> assert (err_str(e) == "DEPTH:3")
+      Ok(_) -> assert (false)
+      end
+    end
+  end
+
+  describe "ndjson" do
+    test "three records" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "{\"a\":1}\n[2]\ntrue\n") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "{|K(a)|N(1.)|}|[|N(2.)|]|T|")
+        end
+      end
+    end
+    test "record split across chunks" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "1\n2") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.feed(st2, "3\n") do
+        Err(e) -> assert (false)
+        Ok((evs2, st3)) ->
+          match JsonStream.finish(st3) do
+          Err(e) -> assert (false)
+          Ok(evs3) ->
+            assert (evs_str(evs) ++ evs_str(evs2) ++ evs_str(evs3) == "N(1.)|N(23.)|")
+          end
+        end
+      end
+    end
+    test "trailing bare number completes at finish" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "1\n2") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "N(1.)|N(2.)|")
+        end
+      end
+    end
+    test "unterminated container still truncates" do
+      let st = JsonStream.start_ndjson()
+      match JsonStream.feed(st, "[1\n") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (err_str(e) == "TRUNC:3")
+        Ok(_) -> assert (false)
+        end
+      end
+    end
+  end
+
 end
 
 end
