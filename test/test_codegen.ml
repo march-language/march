@@ -12342,7 +12342,21 @@ let test_vectorize_hard_error_fails_compile () =
   | `Ok _ ->
     Alcotest.fail
       "expected `march --compile` to fail on a @[vectorize] violation, but it succeeded"
-  | `Skipped -> ()  (* legitimate: no clang on PATH, same policy as every other compiled test here *)
+  | `Skipped ->
+    (* Unlike every other compiled test in this file, `Skipped` here is NOT a
+       legitimate "no clang on PATH" outcome: the @[vectorize] violation makes
+       `march --compile` exit at bin/main.ml (~line 2408), well before clang
+       is ever invoked (~line 2468). So a nonzero `rc` on this path can only
+       mean the vectorize check fired correctly -- clang's absence cannot be
+       the true cause. compile_march_raw's clang-availability heuristic can't
+       tell the two apart, so treat `Skipped` as this test's actual failure
+       signal: it means the check did not fire and the process instead ran
+       (and failed) past the point where clang would be needed. *)
+    Alcotest.fail
+      "expected `march --compile` to fail via the @[vectorize] check before \
+       clang is ever invoked, but compile_march_raw attributed the nonzero \
+       exit to a missing clang -- meaning the check may not have fired at \
+       all, since a genuine vectorize-check failure never reaches that stage"
   | `Failed (rc, output) ->
     Alcotest.(check bool) "compile fails (nonzero exit)" true (rc <> 0);
     Alcotest.(check bool) "stderr names the failing fn" true
