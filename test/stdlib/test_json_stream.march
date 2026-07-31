@@ -185,7 +185,10 @@ describe "JsonStream" do
     test "missing comma" do assert (one_shot("[1 2]") == "ERR:3") end
     test "mismatched close" do assert (one_shot("{]") == "ERR:1") end
     test "bare close bracket" do assert (one_shot("]") == "ERR:0") end
-    test "unclosed array truncates" do assert (one_shot("[1, 2") == "[|N(1.)|N(2.)|TRUNC:5") end
+    test "unclosed array truncates" do
+      -- the pending number is validated but its event is dropped: errors are final
+      assert (one_shot("[1, 2") == "[|N(1.)|TRUNC:5")
+    end
     test "unclosed object truncates" do assert (one_shot("{\"a\":") == "{|K(a)|TRUNC:5") end
     test "non-string key" do assert (one_shot("{1: 2}") == "{|ERR:1") end
   end
