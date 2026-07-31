@@ -64,7 +64,7 @@ rather than repeating it here.
 for the full deferred-set breakdown and its roadmap citations. Coherence/
 overlap resolution between impls is NOT in this deferred set — it is a known,
 intentionally OPEN divergence (documented in `core-march.md` §4.4.3 and filed
-in `specs/todos.md`), not a documentation gap awaiting a later widening slice;
+in `specs/todos/`), not a documentation gap awaiting a later widening slice;
 resolving the divergence itself (a language-design decision — add a coherence
 check, or pick a shared deterministic selection policy) is what's deferred.
 
@@ -232,7 +232,7 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           --   wrong type is still caught via ordinary unification), but
           --   `let x : Int = "foo"` typechecks at exit 0 instead of being
           --   checked against `Int` at the binding site. See §4.1 finding 16
-          --   and `specs/todos.md` ("Compiler: Type System") for the full
+          --   and `specs/todos/` ("Compiler: Type System") for the full
           --   writeup and fix direction.
 
 (T-LetFn) β fresh (at env.level — NO enter_level bump, unlike T-Let)    typecheck.ml:4373
@@ -351,7 +351,7 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           --   calls (the ret-annotation check, and the final self/arrow
           --   reconciliation) can both observe the same already-manifested
           --   conflict when the conflict flows through the self-reference.
-          --   Not fixed here (docs-only task); noted in `specs/todos.md`.
+          --   Not fixed here (docs-only task); noted in `specs/todos/`.
           -- cf. operational (E-LetFn), core-march.md:650–663 — eval's
           --   `ELetFn` arm ties the SAME recursive knot at the VALUE level,
           --   with a mutable `env_ref` back-patched AFTER the closure is
@@ -1599,7 +1599,7 @@ end
 `--check` on this program exits **0** — no diagnostic, no warning. Running it
 also exits **0** and prints `no error, no Ghost type defined` — the program
 behaves exactly as if the `derive Eq for Ghost` line were not present at all.
-This is filed as an open gap in `specs/todos.md` ("Compiler: Type System",
+This is filed as an open gap in `specs/todos/` ("Compiler: Type System",
 finding 17 in this document's §4.1), with this exact repro and the
 `desugar.ml:1659` citation — fixing it (making an unknown derive TARGET TYPE
 an error, symmetric with the unknown derive TARGET INTERFACE case already
@@ -1822,7 +1822,7 @@ either of those two docs claims:**
   `DMod` prebind path rather than the cross-file `Module_registry` path Task
   1 fixed. **This is a real, confirmed compiler gap, filed (not fixed —
   out of Task 3's docs-only scope and beyond Task 1's `load_module_into_env`
-  fix), in `specs/todos.md`.** The PatCon (pattern-matching) side is
+  fix), in `specs/todos/`.** The PatCon (pattern-matching) side is
   differently, and also incorrectly, affected: matching `Mod.Ctor(…)`
   against a value produced by the module's own public API hits the
   UNRELATED, separately-filed qualified-type-unification gap for match
@@ -2164,7 +2164,7 @@ dropped": in compiled code a wrong-actor send is undefined behavior. It is
 documented, not corpus-encoded — it typechecks (exit 0), so it cannot be a
 `reject/` witness; the accept path (`send(counter, Inc(3))`) is
 `accept/t40_actor_send_typed_payload`, and the non-guarantee itself is filed as
-an open gap (finding 19, `specs/todos.md`).
+an open gap (finding 19, `specs/todos/`).
 
 **The message-name flat global namespace — a design point, not a bug.** Message
 and handler constructor names (`Inc`, `Log`, …) live in the **single flat global
@@ -2463,7 +2463,7 @@ merge-rule branch in `project_steps`'s `ProtoChoice` arm is now gated on
 role merges. A binary protocol with two identical-type `choose` branches now
 typechecks (witnessed by `accept/t44_binary_choice_identical_branches`). The
 prose above is retained to describe the historical defect; the "workaround" is
-no longer necessary. See `specs/todos.md` for the Done entry.
+no longer necessary. See `specs/progress/` for the completed entry.
 
 #### 2.7.6 `Chan(Role, Proto)` — the linear channel-endpoint surface type
 
@@ -2687,7 +2687,7 @@ insists on `Int`) even though the peer, having chosen `:err`, is waiting to
 `recv` a `String`. Fixing this properly needs branch-indexed / dependent
 typing of the returned continuation on the returned `Atom` value (refining
 the tuple's second component based on a `match` over the first) — out of
-scope for this docs-only slice; filed in `specs/todos.md` under "Compiler:
+scope for this docs-only slice; filed in `specs/todos/` under "Compiler:
 Type System" as **F5**, cross-referenced to `.superpowers/sdd/
 sessions-survey.md` §4 F5. Not given a `reject/` corpus program for the same
 reason F4 (§2.7.5) isn't: it typechecks (wrongly-permissively) today, so a
@@ -2812,7 +2812,7 @@ Every "the typechecker actually does X, which is easy to get wrong" discovery
 made while building this reference lives HERE, in this one subsection — collected
 by Task 7 from where each was originally pinned inline (Tasks 1–6). Two are
 genuine, filed, open gaps against the current implementation (findings 15 and
-16, both cross-referenced to their `specs/todos.md` entry under "Compiler:
+16, both cross-referenced to their `specs/todos/` entry under "Compiler:
 Type System"); the rest are faithful-but-surprising facts about the existing
 typechecker that this document exists to pin down, not defects:
 
@@ -2971,7 +2971,7 @@ typechecker that this document exists to pin down, not defects:
     typecheck.ml:4392) — `reject/t12_letfn_ret_annot_conflict` is the
     witness, and also surfaces a minor, non-blocking diagnostic-quality
     quirk: the identical mismatch is reported TWICE (see (T-LetFn)'s note,
-    §2, and the `specs/todos.md` entry) because the annotation-unify and the
+    §2, and the `specs/todos/` entry) because the annotation-unify and the
     final self-type/arrow-type reconciliation unify independently
     rediscover the same conflict once it flows through the self-reference.
 14. **An unresolved `CNum` constraint silently DEFAULTS to `Int` at its
@@ -3074,7 +3074,7 @@ typechecker that this document exists to pin down, not defects:
     and the deferred generic-call path (b)/(c), breaks that expectation.
     **This is a real typechecker soundness gap** (an explicit `when
     Iface(a)` bound on a generic parameter is not actually enforced
-    polymorphically) — filed in `specs/todos.md` under "Compiler: Type
+    polymorphically) — filed in `specs/todos/` under "Compiler: Type
     System" (2026-07-05) with this exact repro, since fixing it is out of
     scope for this docs-only task. Not exercised by this corpus's `reject/`
     programs (a `reject/` program built on it would need to codify a
@@ -3105,7 +3105,7 @@ typechecker that this document exists to pin down, not defects:
     FUNCTION-PARAMETER annotation (enforced via ordinary T-App param-vs-arg
     unification, §2) rather than a `let` annotation to elicit its mismatch,
     specifically because a `let`-annotation mismatch would NOT be rejected.
-    Filed in `specs/todos.md` under "Compiler: Type System" with the fix
+    Filed in `specs/todos/` under "Compiler: Type System" with the fix
     direction (check the RHS against `bind_ty` via `check_expr` at the `ELet`
     arm, when present, instead of unconditionally inferring); not fixed here
     (docs-only task). A `reject/let_annotation_mismatch`-style program should
@@ -3131,7 +3131,7 @@ typechecker that this document exists to pin down, not defects:
     ```
     `--check` exits **0** (no diagnostic); running it also exits **0** and
     prints `no error, no Ghost type defined` — the `derive` line has zero
-    observable effect, silently. Filed in `specs/todos.md` under "Compiler:
+    observable effect, silently. Filed in `specs/todos/` under "Compiler:
     Type System" with this repro and the `desugar.ml:1659` citation; fixing it
     (rejecting an unknown derive TARGET TYPE the same way an unknown derive
     target INTERFACE already is) is a compiler change, deliberately out of
@@ -3224,7 +3224,7 @@ typechecker that this document exists to pin down, not defects:
     handler-declaration order, with **no default arm** — `ECase(msg, branches,
     None)`, `lower_actor.ml:256`, variant order `lower_actor.ml:17`), and the
     `String` payload pointer was reinterpreted as the `Int` param of `Inc` —
-    non-deterministic, memory-unsafe. Filed in `specs/todos.md` under "Compiler:
+    non-deterministic, memory-unsafe. Filed in `specs/todos/` under "Compiler:
     Type System" (2026-07-06) with this repro; fixing it (typing Pids by their
     accepted-message set so `send` can gate the message against the target actor)
     is a significant type-system design decision — deferred, out of scope for this
@@ -3264,7 +3264,7 @@ typechecker that this document exists to pin down, not defects:
     clean (exit 0) with no other change. See §2.7.5 for the full writeup. Not
     a corpus `reject/` program (it typechecks incorrectly today; a `reject/`
     witness would codify the bug as intended behavior) — filed in
-    `specs/todos.md` under "Compiler: Type System" with this exact repro, not
+    `specs/todos/` under "Compiler: Type System" with this exact repro, not
     fixed (docs-only slice; the fix direction is gating the merge branch on
     `multiparty` in `ProtoChoice`).
 21. **[OPEN — filed, not fixed] F5 — `Chan.offer` always returns the FIRST
@@ -3283,7 +3283,7 @@ typechecker that this document exists to pin down, not defects:
     the channel differently per branch is never actually re-typed per
     branch. Not a corpus `reject/` program (it typechecks — wrongly
     permissively — today; a `reject/` witness would codify the gap as
-    intended) — filed in `specs/todos.md` under "Compiler: Type System" with
+    intended) — filed in `specs/todos/` under "Compiler: Type System" with
     the cite and repro, not fixed (docs-only slice; the fix direction is
     branch-indexed/dependent typing of the returned continuation on the
     returned `Atom`). See §2.7.9 for the full writeup and worked example.
@@ -3404,7 +3404,7 @@ diagnostic-quality quirk where the identical mismatch is reported TWICE
 (typecheck.ml:4392) and the final self-type/arrow-type unify
 (typecheck.ml:4396) each independently rediscover the same conflict once it
 flows through the self-reference `β` — noted in (T-LetFn)'s rule (§2), §4
-finding 13, and `specs/todos.md` (cosmetic; does not affect this corpus's
+finding 13, and `specs/todos/` (cosmetic; does not affect this corpus's
 pass/fail, and does not reproduce for the equivalent top-level `fn`, which
 reports once with a better message). `check_types.sh`: 29/29 (17 accept, 12
 reject), exit 0.
@@ -3446,7 +3446,7 @@ its OWN declaration (a concretely-annotated param) but is silently NOT
 re-discharged at a call site when the bound variable is left generic
 (`same(a,b) when Eq(a) do a==b end; same(Rood, Rood)` typechecks even though
 `Hue` has no `Eq` impl and a direct `Rood == Rood` correctly rejects) — filed
-in `specs/todos.md` under "Compiler: Type System" with the exact repro, not
+in `specs/todos/` under "Compiler: Type System" with the exact repro, not
 fixed (docs-only task). Three new `accept/` programs (Num/Eq/Ord discharge
 succeeding on built-in instances, and a `&&`/`||`/`not` boolean-logic
 program) and three new `reject/` programs (the live-verified Num/Ord/Bool-
@@ -3537,7 +3537,7 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   simultaneously-matching impls — is noted on the typing side (§2.3, `(T-Impl)`
   step 1) and documented in full, with live-captured interpreter-vs-compiled
   evidence, in the operational companion `core-march.md` §4.4.3 as an open,
-  deliberately-unresolved divergence (filed in `specs/todos.md`, not fixed by
+  deliberately-unresolved divergence (filed in `specs/todos/`, not fixed by
   this documentation slice). Roadmap: an extension of Phase 2 (§4.3's
   "declarative typing rules... extracted from `typecheck.ml`'s algorithm").
 - **The constraint-survival soundness gap itself (finding 15, §4)** — RESOLVED
@@ -3574,12 +3574,12 @@ of the roadmap, adjudicating the operational side's `known_divergence` queue.
 This document's queue of filed typechecker gaps has **one genuinely open
 item**, added by the interfaces/impls widening slice: **finding 17** (§4.1,
 `derive X for UnknownType` silently no-ops) is OPEN — filed in
-`specs/todos.md` under "Compiler: Type System," deliberately NOT fixed by this
+`specs/todos/` under "Compiler: Type System," deliberately NOT fixed by this
 documentation-only slice. The three PRIOR filed gaps — findings 13, 15, and
 16 — were all RESOLVED 2026-07-05 (commits `7e40dc5b`, `8cbd6dd2`,
 `f0f5299c`), with corpus witnesses (`reject/t16`, `reject/t17`, `accept/t21`,
 `accept/t22`) and unit tests. The widening slice's operational companion,
 `core-march.md` §4.4.3, also filed a second open item this slice — the
 impl-coherence/overlap interpreter-vs-compiled divergence, documented there in
-full with both backends' outputs and filed in `specs/todos.md` alongside
+full with both backends' outputs and filed in `specs/todos/` alongside
 finding 17.

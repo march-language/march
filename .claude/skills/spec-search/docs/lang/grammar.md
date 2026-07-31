@@ -2428,6 +2428,6 @@ Both `PatRecord`/`PatAs` unreachability (§6.3) and `then`'s
 no-accepting-production status (§4.10) are reachability *claims this
 chapter makes and witnesses live*, not open findings requiring follow-up —
 they are listed here only for completeness of cross-reference, not because
-either is unresolved. The `f(1)(2)` entry in `specs/todos.md`'s "Grammar /
+either is unresolved. The `f(1)(2)` entry in `specs/todos/`'s "Grammar /
 lint contradictions (2026-07-03)" section is now closed (moved to Done,
 2026-07-06) — see §7.3 for the fix.

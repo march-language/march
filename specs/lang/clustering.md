@@ -464,7 +464,7 @@ single-process golden. True multi-*machine* failure semantics (netsplit,
 node restart/incarnation, clock skew across hosts) remain undocumented in
 executable form.
 
-**A compiled memory-safety gap, FIXED (finding C1, `specs/todos.md`, 2026-07-11).**
+**A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**
 `VectorClock.compare` — and, transitively, `.concurrent`/`.happens_before` on
 clocks with disjoint or partial actor-id sets — used to **crash when compiled**
 (a use-after-free freeing a `String` map key, SIGSEGV) while running

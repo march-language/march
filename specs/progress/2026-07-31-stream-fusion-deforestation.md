@@ -1,0 +1,1 @@
+- ✅ **Stream fusion / deforestation** — `lib/tir/fusion.ml` TIR optimization pass; fuses `map+fold`, `filter+fold`, `map+filter+fold` chains into single-pass fused functions with no intermediate lists; ANF flatten step hoists lambda pre-bindings; guards for multi-use and impure ops; wired into pipeline after mono, before defun (`--opt` flag); 9 tests

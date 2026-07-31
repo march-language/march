@@ -622,7 +622,7 @@ Concretely, `{ record_from_list([("a", 1)]) with z: 99 }` used to panic
 compiled (`no field "z" in record`, clean exit 1) while succeeding
 interpreted (`Some(99)` printed via `record_get`, exit 0) — confirmed by hand
 before this task's fix (see the golden-corpus verification note below).
-This was filed as an open bug (`specs/todos.md`, "Interpreter/compiled
+This was filed as an open bug (`specs/todos/`, "Interpreter/compiled
 divergence: `ERecordUpdate` on a missing field") and pinned by a dedicated
 unit test (`test/test_properties.ml`,
 `test_record_update_missing_field_on_erased_base_...`) rather than generated
@@ -657,7 +657,7 @@ the one test built to pin the divergence itself, which was updated to
 assert convergence instead (see `test/test_properties.ml`,
 `test_record_update_missing_field_on_erased_base_converged`, and
 `test/test_codegen.ml`'s `test_erased_update_missing_field_panics_compiled`
-doc comment). The `specs/todos.md` open-divergence entry and the informal
+doc comment). The `specs/todos/` open-divergence entry and the informal
 "known divergence" framing around this bug are both retired by this
 convergence; §5's golden corpus documents the now-agreeing behavior as a
 prose note (not a golden MATCH program — see §5's caveat on why this
@@ -1274,7 +1274,7 @@ reference at all to the call's actual argument type. That was accurate for
 the interpreter as it stood on 2026-07-06, but it was subsequently identified
 as a real correctness bug (`specs/plans/archive/2026-07-17-interface-impl-coherence.md`)
 and fixed as part of the impl-coherence / FQN-dispatch-identity work
-(2026-07-17 → 2026-07-21, `specs/todos.md`'s "impl-coherence" and "FQN
+(2026-07-17 → 2026-07-21, `specs/todos/`'s "impl-coherence" and "FQN
 dispatch-identity" entries). `DImpl`'s eval handler (still two copies kept in
 lockstep — the top-level/module path around `eval.ml:8969`–`9069` and the
 `make_recursive_env`/letrec-style path around `eval.ml:9345`–`9440`; re-grep,
@@ -1380,7 +1380,7 @@ overlapping impls both typechecked silently, and the interpreter and
 compiled backend picked different winners at runtime. That divergence was
 resolved by adding a genuine impl-coherence check, landed in two stages
 (`specs/plans/archive/2026-07-17-interface-impl-coherence.md`, Stage 1+2, 2026-07-17;
-`specs/todos.md`'s "impl-coherence" entries).** The design decision
+`specs/todos/`'s "impl-coherence" entries).** The design decision
 `core-march-types.md` §2.3's `(T-ImplMatch)` discussion and the original
 version of this subsection both flagged as unmade — "add a coherence check
 that rejects overlap outright, à la Rust; pick one deterministic selection
@@ -1466,7 +1466,7 @@ same methodology as the original finding:
   not exempted from the coherence check.
 
 **What is deliberately still allowed (not a residual divergence, a scoping
-decision).** Per `specs/todos.md`'s Stage-1+2 closeout note, a user impl
+decision).** Per `specs/todos/`'s Stage-1+2 closeout note, a user impl
 overlapping a *built-in* seeded impl (e.g. a hand-written `impl Eq(Int)`) is
 still accepted — built-ins are seeded into `env.impls` with a `dummy_span`
 and skipped by the check, because several interface-machinery test fixtures
@@ -1477,7 +1477,7 @@ backends still agree once a program passes typecheck, since a single
 ever sees the program). Two DISTINCT types each implementing the same
 interface (§4.4.2's `Speak(Dog)` + `Speak(Cat)` case), and same-short-name
 types in DIFFERENT declaring modules (the "FQN dispatch-identity" work,
-`specs/todos.md`, 2026-07-20/21), are correctly NOT treated as overlap —
+`specs/todos/`, 2026-07-20/21), are correctly NOT treated as overlap —
 coherence is scoped to "the same type implements the same interface twice,"
 not "an interface has more than one impl in the program."
 
@@ -1492,7 +1492,7 @@ mechanism no longer runs on any program that reaches either runtime, because
 before either backend's `DImpl`/lowering handler is invoked. This is the
 same kind of resolution §4.2.1 documents for the (unrelated) `ERecordUpdate`
 missing-field case — a genuinely OPEN divergence that got ADJUDICATED AND
-CONVERGED, not a divergence quietly left in place. `specs/todos.md`'s
+CONVERGED, not a divergence quietly left in place. `specs/todos/`'s
 impl-coherence entries are the closeout record; `core-march-types.md` §2.3's
 `(T-Impl)`/`(T-ImplMatch)` sections should be read alongside this one for
 the typing-side mechanics of the new check (re-verify that section's own
@@ -2399,7 +2399,7 @@ with NO `get_actor_field`/`pid_of_int` — **diverges** (interp fires the child
 run byte-identically on both backends (that path is not supervisor-mediated), so
 the divergence is specifically the supervisor-child-spawn plane, not `init`
 bodies in general. The `get_actor_field`/`pid_of_int` compiled crash is filed as an open finding
-in `specs/todos.md` (the `Actor.call` timeout gap encountered nearby was fixed
+in `specs/todos/` (the `Actor.call` timeout gap encountered nearby was fixed
 2026-07-13 — the compiled runtime now enforces `timeout_ms`, see
 `specs/lang/actors.md`). Consequently the supervision restart semantics are documented
 here in prose + `eval.ml` citations, and **no `one_for_one` restart golden was
@@ -2416,7 +2416,7 @@ pins the **runtime** side: what a channel actually IS at runtime, how the four
 core operations reduce in `eval.ml`, and — the point of adding channel
 programs to the golden corpus at all — that a program using only the binary
 channel plane is **byte-identical interpreted vs compiled**, now that the
-concurrent codegen fix (F1/F2, `specs/todos.md`) tags payloads symmetrically
+concurrent codegen fix (F1/F2, `specs/todos/`) tags payloads symmetrically
 at the send site.
 
 **The runtime model in one line:** a channel is a pair of synchronous,
@@ -2518,7 +2518,7 @@ channel plane (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads,
 correctly interleaved (every `send` textually before its matching `recv` —
 §4.11.6/F6), the interpreted and compiled outputs are **byte-identical**.
 This was NOT true before the concurrent codegen fix filed as F1/F2 in
-`specs/todos.md`: `march_chan_send` used to receive its payload as a bare
+`specs/todos/`: `march_chan_send` used to receive its payload as a bare
 untagged `i64` while `march_chan_recv`'s result went through the standard
 conditional erased-i64 untag (`ashr` iff the low bit is set) — an asymmetry
 that corrupted every **odd** `Int` payload (`43` came back `21`) and flipped
@@ -2546,7 +2546,7 @@ attributed it to the compiled MPST C runtime
 representation. Re-run live for this task: a 3-role and a 4-role MPST
 protocol (`Int`/`Bool`/`String` payloads, `MPST.new`/`send`/`recv`/`close`
 only) both compile, run, and print output identical to the interpreter,
-exit 0 (full transcript in `specs/todos.md`) — the segfault does not
+exit 0 (full transcript in `specs/todos/`) — the segfault does not
 reproduce. **MPST is still NOT in the golden corpus**, though: the property
 above is verified only by this ad hoc transcript, not by a mechanically-
 pinned `specs/lang/golden/` witness the way binary channels are (§5) — a
@@ -2595,7 +2595,7 @@ docs-widening slice:
   advancing state" guarantee therefore only actually holds for `let`-bound
   continuations threaded through in the same scope.
 
-Both are filed in `specs/todos.md` with live repros; neither blocks a golden
+Both are filed in `specs/todos/` with live repros; neither blocks a golden
 witness (every witness here is written to avoid both shapes on purpose:
 every channel is closed, and every continuation is threaded through fresh
 `let` bindings rather than re-read from a stale parameter or `let`).
@@ -2645,7 +2645,7 @@ What each layer actually does (all line numbers drift; re-grep):
   `lower_actor.ml:~92`). The *type*-level `TLin` wrapper is stripped at both
   lowering entries (`lower_types.ml:51` surface, `:92` typecheck-ty).
 - **Consequence**: any program the static tracker fails to reject (the L3/L4
-  param-field and F7 session-parameter gaps, `specs/todos.md`) runs with NO
+  param-field and F7 session-parameter gaps, `specs/todos/`) runs with NO
   runtime backstop — same posture as the capability system (§2.8's
   runtime-erased `Cap(X)`).
 
@@ -2660,7 +2660,7 @@ allocs are no longer stack-promotion candidates
 promotion was also a strict pessimization), and `llvm_emit.ml`'s
 `EStackAlloc` arm fails loudly if one ever slips through. `g41` now consumes
 its affine binding via a DIRECT match — the exact shape that was broken —
-as the permanent regression witness. Full writeup in `specs/todos.md`
+as the permanent regression witness. Full writeup in `specs/todos/`
 (Linearity section, L7 ✅).
 
 ### 4.13 `let?` — Result-propagation (operational)
@@ -3044,9 +3044,9 @@ confirmed by hand, not assumed:** (1) no golden program prints a whole
 `VRecord` via `to_string`/`println`/`hash` — confirmed by hand that
 `to_string({x: 1, y: 2})` prints `{ x: 1, y: 2 }` interpreted but `#<tag:0>`
 compiled (the same `to_string`-on-container class already in
-`specs/todos.md`'s P1 and `test/test_oracle.ml`'s `known_divergence` list),
+`specs/todos/`'s P1 and `test/test_oracle.ml`'s `known_divergence` list),
 and that `hash({x: 1, y: 2})` differs across backends entirely by design
-(`specs/todos.md`, "Compiled and interpreted `hash()` use different,
+(`specs/todos/`, "Compiled and interpreted `hash()` use different,
 backend-specific algorithms ... for RECORD types") — every golden program
 here prints only extracted `Int` FIELD VALUES (via `int_to_string`), never a
 record value itself. (2) no golden program generates the missing-field
@@ -3084,11 +3084,11 @@ pattern (rather than a block `let`) also compiles and runs correctly
 `nested PatTuple` × `ELet` specifically, not `PatTuple` or `nesting` or `ELet`
 in isolation. This is outside this task's scope (documenting the interpreter
 faithfully, not fixing the compiler) and is a **new** divergence, not the
-already-filed whole-tuple-`Show` bug (`specs/todos.md`, "Tuples have no `Show`
+already-filed whole-tuple-`Show` bug (`specs/todos/`, "Tuples have no `Show`
 impl") — `g16` was rewritten to destructure the nested tuple in a `match`
 instead of a `let` specifically to route around it while still exercising
 nested tuple construction and componentwise matching. Flagged here for
-separate triage; not filed as a `specs/todos.md` entry by this task (spec-only
+separate triage; not filed as a `specs/todos/` entry by this task (spec-only
 scope) but should be by a follow-up.
 
 **A third divergence — this one ADJUDICATED and CONVERGED by this task, not
@@ -3198,7 +3198,7 @@ Phase-1 tasks did):**
   this reference originally described. §4.4.3 documents the impl-coherence
   rule: overlapping impls of the SAME `(iface, type)` — including
   generic-vs-specific and derive-vs-manual overlap — are REJECTED at
-  typecheck by `register_impl_shape` (landed 2026-07-17, `specs/todos.md`),
+  typecheck by `register_impl_shape` (landed 2026-07-17, `specs/todos/`),
   closing what this reference originally filed as an open,
   deliberately-left-unfixed cross-backend selection divergence. §4.4.4
   documents `derive`/`satisfy`'s operational consequence — a generated impl

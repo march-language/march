@@ -1,0 +1,8 @@
+- ✅ **stdlib: Bytes, Process, Logger, Actor, Flow modules** — 5 new stdlib modules + docs:
+  - `stdlib/bytes.march`: Raw byte buffer (`Bytes` type wrapping `List(Int)`), `from_string`/`to_string`, `from_list`/`to_list`, `get`, `slice`, `concat`, `to_hex`, `encode_base64`/`decode_base64` (pure arithmetic, no bitwise ops), `encode_utf8`/`decode_utf8`. Self-contained with inline helpers.
+  - `stdlib/process.march`: OS subprocess interaction — `Process.run/run_stream` (sync/streaming), `env/set_env`, `cwd`, `argv`, `pid`, `exit`; `ProcessResult` type with `exit_code/stdout/stderr/ok` accessors.
+  - `stdlib/logger.march`: Structured logging — `Logger.Level = Debug | Info | Warn | Error`; `set_level`/`get_level`; `with_context`/`clear_context`; `debug/info/warn/error/log/log_with`; OCaml global state in `eval.ml`.
+  - `stdlib/actor.march`: Actor messaging helpers — `Actor.cast(pid, msg)` (fire-and-forget), `Actor.call(pid, msg, timeout)` (sync, wraps in `Call(ref_id, msg)`, returns `Ok(result)` or `Err(reason)`), `Actor.reply(ref, result)`.
+  - `stdlib/flow.march`: Backpressure pipeline abstraction — `Stage(a)` wrapping `Seq(a)`; producers: `from_list/from_seq/unfold/range`; transformers: `map/filter/flat_map/take/drop/batch/with_concurrency`; consumers: `collect/run/reduce/into/each/count/find/any/all`. `with_concurrency` is a no-op in interpreter (hint for compiled runtime). `stdlib/docs/flow.md` documents design, examples, GenStage comparison.
+  - OCaml builtins added to `eval.ml`: `byte_to_char`, `process_spawn_sync/lines`, `process_env/set_env/cwd/exit/argv/pid`, `logger_*` (6 ops), `actor_cast/call/reply` + `pending_replies` hashtable + `next_call_ref`.
+  - 28 new tests across `bytes`, `logger`, `flow`, `actor_module` groups.

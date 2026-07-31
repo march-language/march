@@ -16,7 +16,7 @@ jobs:
   # deleted rather than quarantined. Run them here, nightly and
   # continue-on-error, purely as a signal: a green run is the cue to
   # un-quarantine (restore `(alias runtest)` in test/dune). Never blocks the
-  # nightly release. See the P0 entries in specs/todos.md.
+  # nightly release. See specs/todos/ for the open items.
   quarantined:
     runs-on: ubuntu-24.04
     continue-on-error: true
@@ -36,7 +36,7 @@ jobs:
           failed=""
           # Full alias paths, not bare names: build_check lives in
           # forge/test/dune, the rest in test/dune. Keep this list in sync
-          # with the quarantine inventory in specs/todos.md.
+          # with the quarantine inventory in specs/todos/.
           for a in test/task_burst_await_quarantined \
                    test/signal_term_suppress_quarantined \
                    test/node_call_loopback_quarantined \

@@ -1,0 +1,1 @@
+- ⏳ **String performance phase 2 (pending):** fix the two RC leaks, then small-string optimization, then array-returning `split`, then `memchr`/SIMD search — in that order, per the phase 1 recommendation. Re-run the memory criteria after the leak fixes.

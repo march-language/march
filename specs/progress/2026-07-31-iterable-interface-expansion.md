@@ -1,0 +1,1 @@
+- ✅ **`Iterable` interface expansion** — `stdlib/iterable.march` expanded to 184 lines with full lazy iteration protocol (map, filter, fold, take, drop, zip, enumerate, flat_map, any, all, find, count)

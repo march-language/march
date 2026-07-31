@@ -1,0 +1,1 @@
+- ✅ **Supervision tree spec V2** — `specs/features/actor-system.md` documents linear type restrictions, V2 transfer protocol via session types, and future path

@@ -1179,7 +1179,7 @@ control with the competing binding deleted).
 
 Everything above says what these capabilities *do*. This is the complementary
 list — what a reader must not assume — kept here rather than only in
-`specs/todos.md` so that nobody reads a guarantee out of the absence of a
+`specs/todos/` so that nobody reads a guarantee out of the absence of a
 caveat. None of these is known to be *unsound* in the "assumed but unchecked"
 sense; each is a check that does not happen.
 

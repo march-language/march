@@ -1036,7 +1036,7 @@ parenthesize/terminate the prior expression so the next line can't attach.
 
 (The compiled-crash half of this section — named `eq`/`compare`/`hash` on
 `Newtype`-repr variants SIGSEGV'ing or panicking — was fixed 2026-07-04; see
-`specs/todos.md`'s Done section for the root cause and fix. The
+`specs/progress/` for the root cause and fix. The
 payload-ignoring `Ord`/`Hash` *semantics* below are unchanged and intentional.)
 
 **Semantics (interpreter, and compiled where it doesn't crash):** `derive Ord
@@ -1068,7 +1068,7 @@ end
 
 Interpreter output: `0` / `0` / `0` — payload ignored. Compiled output is
 identical (this used to crash on single-ctor single-field — `Newtype`-repr —
-variants; fixed 2026-07-04, see `specs/todos.md` Done section).
+variants; fixed 2026-07-04, see `specs/progress/`).
 
 Records are unaffected: derived `Ord`/`Hash` for `TDRecord` compares/hashes
 field-by-field as expected. Do not rely on derived `Ord`/`Hash` for any
@@ -1125,7 +1125,7 @@ default-arg top-level function fails with `I cannot find `add`` under
 including full arity; only OCaml-level test harnesses that call
 `call_fn env "add" [...]` directly (bypassing name resolution) exercise the
 arity-dispatch machinery today. Filed as a P1 compiler bug in
-`specs/todos.md` (typecheck-level default-arg name resolution + the test
+`specs/todos/` (typecheck-level default-arg name resolution + the test
 gap).
 
 ### Reserved soft-keyword asymmetry: bindable but not referenceable

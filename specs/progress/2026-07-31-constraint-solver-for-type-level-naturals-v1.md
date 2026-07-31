@@ -1,0 +1,1 @@
+- ✅ **Constraint solver for type-level naturals (v1)** — `normalize_tnat` reduces concrete arithmetic and identity/annihilation laws; `solve_nat_eq` solves linear equations (e.g. `a+2=5 → a=3`); parser extended with `ty_nat_add`/`ty_nat_mul` levels and `INT` as `TyNat`; 9 tests in `type_level_nat` group.

@@ -2503,5 +2503,5 @@ follow-up — it is listed here only for completeness of cross-reference,
 not because it is unresolved. (`PatRecord` and `PatAs` were the same kind
 of claim through 2026-07-23; both became reachable 2026-07-24 and are no
 longer in this category — see §6.3.) The `f(1)(2)` entry in
-`specs/todos.md`'s "Grammar / lint contradictions (2026-07-03)" section is
+`specs/todos/`'s "Grammar / lint contradictions (2026-07-03)" section is
 now closed (moved to Done, 2026-07-06) — see §7.3 for the fix.

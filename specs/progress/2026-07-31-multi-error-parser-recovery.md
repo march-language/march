@@ -1,0 +1,1 @@
+- ✅ **Multi-error parser recovery** — `Parse_errors` module collects errors without stopping; multiple syntax errors per file reported

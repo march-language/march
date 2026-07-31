@@ -13,7 +13,7 @@ March's concurrency model is built on **actors** and **tasks**. Actors are isola
 
 **Compiled-actor status:** the core actor message plane runs both in the tree-walking interpreter and in ahead-of-time-compiled (native) binaries. In the compiled runtime, both actors and tasks run on an M:N green-thread scheduler (`runtime/march_scheduler.c`) — multiple OS threads, each running many lightweight green threads, with work-stealing across threads. Actor declarations lower to TIR (`lib/tir/lower_actor.ml`) and emit LLVM IR that calls the public C API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`, `runtime/march_runtime.c`); each actor runs as its own green thread. Actors park cooperatively when their mailbox is empty; tasks park when awaiting a result.
 
-**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.5). The **`Actor.call` plane** is also backend-identical as of 2026-07-13: both backends tag-route the zero-arg sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms` (compiled via a deadline-bounded yield-poll in `march_actor_call`, `runtime/march_runtime.c`; `timeout_ms <= 0` means wait forever) — pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. The two formerly-diverging planes are also backend-identical now (their historical findings are closed in the `specs/todos.md` ledger):
+**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.5). The **`Actor.call` plane** is also backend-identical as of 2026-07-13: both backends tag-route the zero-arg sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms` (compiled via a deadline-bounded yield-poll in `march_actor_call`, `runtime/march_runtime.c`; `timeout_ms <= 0` means wait forever) — pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. The two formerly-diverging planes are also backend-identical now (their historical findings are closed in the `specs/todos/` ledger):
 
 - **Capabilities / dead-`send`** (`get_cap`, `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid): byte-identical as of 2026-07-18 — compiled `get_cap` builds the real epoch cap (niche `None` for a dead/unknown pid), `send_checked`/`revoke_cap` return the same `:ok`/`:error` atoms as the interpreter, and `send` to a dead pid returns `None` on both backends. Pinned by `test/native/cap_epoch_plane`. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
 - **Supervision / external state inspection**: `get_actor_field`/`pid_of_int` and the full compiled supervision plane (spawn-time child `init`, crash isolation, all three restart strategies) work compiled as of 2026-07-08 (`examples/supervision_strategies.march` runs clean). See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.7.
@@ -204,7 +204,7 @@ Use capabilities when you hold a reference across an actor restart boundary and 
 > (hence the `_` catch-all above rather than a `:error` arm) — and `get_cap` does not gate
 > on liveness. The entire capability mechanism is therefore non-functional in compiled
 > binaries today; it is a filed open finding ([`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6, and
-> `specs/todos.md`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
+> `specs/todos/`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
 > additionally not registered in the typechecker, so they are not surface-callable at all.
 > Use plain `send`/`is_alive` if you need behavior that agrees on both backends.
 
@@ -495,7 +495,7 @@ The `app` declaration integrates with the supervision system. See [Supervision](
 > — reading its pid out of the supervisor state via `get_actor_field(sup, …)` +
 > `pid_of_int(…)` — **SIGSEGVs compiled** (`examples/supervision_strategies.march` exits
 > 139), and the compiled supervisor does not even run its children's `init` at
-> `spawn(Sup)`. Both are filed open findings (`specs/todos.md`). Supervised-actor programs
+> `spawn(Sup)`. Both are filed open findings (`specs/todos/`). Supervised-actor programs
 > run correctly under the interpreter; treat compiled supervision as not-yet-observable.
 
 ---

@@ -1,0 +1,1 @@
+- ✅ Session types (binary, phases 1–3)
