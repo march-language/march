@@ -11453,6 +11453,73 @@ let test_string_index_of_from () =
     Alcotest.(check string) "compiled matches interpreted (builtin parity)"
       index_of_from_expected out
 
+(* ── char_from_int: byte semantics, identical in both backends ───────────
+   `char_from_int` is a BYTE constructor, not a code-point constructor: it
+   yields the one-byte string `n & 0xFF`, matching `march_char_from_int` in
+   the C runtime.  The interpreter used to clamp to ASCII and return the
+   EMPTY string for n > 127, which is the worst possible failure shape --
+   no error, just a byte that silently vanishes from the middle of a string.
+   Every stdlib caller that feeds it a real byte hit this: URI percent-decode
+   (`stdlib/uri.march`), the msgpack raw-byte walk, and `Http` header decoding
+   all produced correct output compiled and corrupt output interpreted.  It
+   surfaced through the JSON `\uXXXX` decoder's `utf8_encode`, which was
+   written against `byte_to_char` to route around the divergence and keeps
+   that call because it is also the better-named primitive for a byte
+   builder.
+
+   The probe deliberately does NOT print the bytes themselves: half of 0-255
+   is control characters (including NUL, which no stdout diff survives
+   intact).  It round-trips instead -- `char_to_int(char_from_int(n)) == n`
+   and a byte length of exactly 1, for all 256 values -- which pins the
+   payload without depending on how a terminal or a C string handles it.
+   A count of 256 is the only passing answer; the pre-fix interpreter did
+   not merely score 128, it DIED at n=128, because `char_to_int` rejects the
+   empty string that `char_from_int` handed it.
+
+   The last four lines pin wraparound, which is the part of `n & 0xFF` that
+   an ASCII-only or a range-checking implementation would get wrong in a
+   different direction: 256 -> 0, 511 -> 255, -1 -> 255, -256 -> 0.  Negative
+   inputs are written `0 - k` because that is how the rest of this file
+   spells them. *)
+let char_from_int_probe_src =
+  "mod CharFromIntParity do\n\
+  \  pfn rt(n : Int, acc : Int) : Int do\n\
+  \    if n > 255 do\n\
+  \      acc\n\
+  \    else\n\
+  \      let c = char_from_int(n)\n\
+  \      let good = if char_to_int(c) == n && String.byte_size(c) == 1 do 1 else 0 end\n\
+  \      rt(n + 1, acc + good)\n\
+  \    end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    println(to_string(rt(0, 0)))\n\
+  \    println(to_string(char_to_int(char_from_int(256))))\n\
+  \    println(to_string(char_to_int(char_from_int(511))))\n\
+  \    println(to_string(char_to_int(char_from_int(0 - 1))))\n\
+  \    println(to_string(char_to_int(char_from_int(0 - 256))))\n\
+  \  end\n\
+   end\n"
+
+(* Asserted as a literal, not just as interpreted-vs-compiled equality: a
+   pure parity check would go green if BOTH backends drifted to ASCII-only
+   together, and it would also pass vacuously on a machine with no clang,
+   where the compiled half is a legitimate skip. *)
+let char_from_int_expected = "256\n0\n255\n255\n0"
+
+let test_char_from_int_byte_parity () =
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_charfromint"
+      ~src_text:char_from_int_probe_src
+  in
+  Alcotest.(check string) "interpreted: 0-255 round-trip, wraparound is n & 0xFF"
+    char_from_int_expected interpreted;
+  match compiled with
+  | None -> ()  (* clang absent: interpreted half still asserted above *)
+  | Some out ->
+    Alcotest.(check string) "compiled matches interpreted (byte semantics)"
+      char_from_int_expected out
+
 (* ── Substring search edge cases ─────────────────────────────────────────
    Pinned BEFORE the search implementation is rewritten to a memchr-based
    two-stage scan, and asserted for compiled AND interpreted so the rewrite
@@ -13373,6 +13440,8 @@ let stdlib_suites =
           test_string_stats_copy_bytes_byte_loops;
         Alcotest.test_case "String.index_of_from: offsets, clamping, parity" `Slow
           test_string_index_of_from;
+        Alcotest.test_case "char_from_int: byte semantics 0-255 + wraparound, compiled + interpreted" `Slow
+          test_char_from_int_byte_parity;
         Alcotest.test_case "substring search: edge cases, compiled + interpreted" `Slow
           test_string_search_edge_cases;
         Alcotest.test_case "concat chain: one allocation, not one per link" `Slow

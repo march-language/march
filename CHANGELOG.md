@@ -251,6 +251,37 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`char_from_int` now returns the same byte interpreted and compiled.** It is
+  a byte constructor — the one-byte string `n & 0xFF` — which is what the
+  compiled runtime always did, but the interpreter clamped to ASCII and returned
+  the **empty string** for any `n > 127`, with no error. The same program
+  therefore produced different output depending on how it was run, and anything
+  built on a real byte silently lost data interpreted: `Uri.decode("caf%C3%A9")`
+  returned `"caf"` in the interpreter and `"café"` compiled. Msgpack's raw-byte
+  walk, `Http` header decoding and `Gen`'s char-list builder were affected the
+  same way. Wraparound is part of the contract and matches the runtime: `256`
+  yields byte 0, `-1` yields byte 255. `byte_to_char` is unchanged and still
+  reports an out-of-range argument as an error — it builds the same byte, but
+  its name promises one, so a value outside 0–255 there is a mistake worth
+  hearing about.
+
+  Known limitation: the JavaScript backend still implements `char_from_int` as
+  `String.fromCodePoint(n)`, which differs above 255 and throws on a negative
+  argument. Aligning it is a question about the JS UTF-16 string model rather
+  than about this builtin, and is not addressed here.
+
+  `Char.from_int` and `Char.to_int` were documented as converting "code points".
+  They convert bytes, and now say so.
+- **`examples/modules.march` runs again.** Its `pfn`-visibility demo used
+  `mod Crypto`, which collided with stdlib's `mod Crypto` (`stdlib/crypto.march`)
+  in March's flat, global module namespace — so calls like
+  `remove_checksum(x)` resolved against the stdlib module instead of the
+  file's own, and the example failed to typecheck (`Module 'Crypto' does not
+  export 'remove_checksum'`) under both the interpreter and the
+  interpreter-vs-compiled oracle sweep. Renamed the example's module to
+  `SecretCode`; no compiler change, since the global-namespace behavior is
+  by design (see `specs/lang` module system docs).
+
 - **`Json.parse` now accepts `\uXXXX` escapes.** The escape decoder handled
   only `\" \\ \/ \n \r \t \b \f` and rejected everything else, so
   `Json.parse("\"\\u0041\"")` failed with "unknown escape sequence" on input

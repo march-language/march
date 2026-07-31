@@ -180,10 +180,12 @@ mod JsonStream do
     if is_num_byte(string_byte_at(s, i)) do num_end(s, i + 1) else i end
   end
 
-  -- Encode a Unicode codepoint as UTF-8 bytes.  char_from_int is ASCII-only
-  -- (returns "" above 127 in the interpreter); every byte here past the
-  -- first branch is >= 128, so use byte_to_char, which accepts the full
-  -- 0-255 range.  Divisors are nonzero constants (cap no_panic).
+  -- Encode a Unicode codepoint as UTF-8 bytes.  Every byte past the first
+  -- branch is >= 128, so byte_to_char is used: it names a byte, which is
+  -- what is being emitted here one at a time.  (It used to be required --
+  -- char_from_int returned "" above 127 in the interpreter -- but both
+  -- builtins are now `n & 0xFF` in every backend.)  Divisors are nonzero
+  -- constants (cap no_panic).
   pfn utf8_encode(cp) do
     if cp < 128 do char_from_int(cp)
     else if cp < 2048 do
