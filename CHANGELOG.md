@@ -342,6 +342,21 @@ git log is authoritative for exact commits.
     package at different revs still share one directory — fixing that means
     keying the path by source, tracked in
     `specs/plans/2026-07-30-forge-registry-dep-gaps.md`.)
+- **A call that spells out the entry module's own name to reach an `extern`
+  function now resolves.** `extern "libc": Cap(IO.FileSystem) do fn my_abs(x :
+  Int) : Int = "labs" end` inside `mod Foo`, called as `Foo.my_abs(-7)`, failed
+  with `unbound variable: Foo.my_abs` interpreted and `Undefined symbols:
+  _Foo.my_abs` compiled, while the bare `my_abs(-7)` worked. March unwraps the
+  entry file's own top-level module, and the pass that strips a redundant
+  self-qualifying prefix knew only about `fn` and `let` members, so an `extern`
+  member's self-qualified spelling never converged on its definition. `fn` and
+  `let` members, nested-module references, and bare intra-module calls are
+  unaffected.
+
+  Known limitation, unchanged by this fix: an **interface method** name is not
+  module-qualifiable at all — `Bar.greet(1)` does not resolve for any module,
+  entry or nested. Call interface methods unqualified.
+
 - **A refinement in an `interface` method signature no longer enforces nothing
   silently.** `interface Runner(a) do fn run : a -> {Int | _ > 0} -> Int end`
   parses and typechecks, and the predicate is never read: no call site is

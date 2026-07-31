@@ -5497,12 +5497,21 @@ let glob_import_competes ~(root : A.decl list) ~(unit_name : string)
    shadows_list_length.march` (and `t127…string_byte_size` for the other
    alias), not by any unit fixture here — a string-parsed module has an empty
    [stdlib_source_files], so nothing in it can be told apart from the stdlib's
-   own definitions.  The witness declares `length` in an `extern` block on
-   purpose: desugar's [strip_entry_self_qual] rewrites `List.length` to bare
-   `length` when the entry module declares `length` as a `fn` or a `let`, so
-   only the decl forms it does not rewrite (`extern`, `impl`, `interface`)
-   leave a qualified call site for this gate to matter at.  Revert this to
-   `go false` and the corpus rejects `t126` with a false `len(ys) = 0`.
+   own definitions.  The witness declares `length` as an `interface`/`impl`
+   method pair on purpose: desugar's [strip_entry_self_qual] rewrites
+   `List.length` to bare `length` when the entry module declares `length` as a
+   `fn`, a `let` or (since 2026-07-30) an `extern`, so only the decl forms it
+   does not rewrite (`impl`, `interface`) leave a qualified call site for this
+   gate to matter at.  Revert this to `go false` and the corpus rejects `t126`
+   with a false `len(ys) = 0`.
+
+   The `A.DExtern` arm of the member scan below is pinned separately, by
+   `accept/t139_nested_module_shadows_list_length_extern.march` — a NESTED
+   `mod List` with a foreign `length`, whose module name [strip_entry_self_qual]
+   does not touch.  Delete that arm and the corpus rejects `t139` with the same
+   false `len(ys) = 0`.  Before 2026-07-30, `t126` covered both at once; it can
+   no longer, because an entry-level extern member's call site is now stripped
+   bare and never reaches the alias at all.
 
    Direction of doubt is always to SUPPRESS: a missed proof is silence, the
    status quo ante; a wrong fact in the assumption set is a false positive.

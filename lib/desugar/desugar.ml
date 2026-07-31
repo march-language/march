@@ -2086,9 +2086,87 @@ let rec expand_defaults_decl (d : decl) : decl list =
 
 (* ---- Intra-module qualification pass ---- *)
 
-(** Collect the bare names of all functions/values declared directly in [decls].
-    Does NOT recurse into nested [DMod]. *)
-let collect_direct_names (decls : decl list) : string list =
+(** Collect the bare VALUE names declared directly in [decls].
+    Does NOT recurse into nested [DMod].
+
+    "Value name" means precisely: a name that can appear as an [EVar] and
+    resolve to something this module declares.  That is the only currency both
+    consumers deal in — [make_qualifier]/[qualify_level] rewrite [EVar]s, and
+    [strip_entry_self_qual] renames [EVar]s (its [ECon] namespace is explicitly
+    left alone).  So a declaration that introduces only a TYPE name, a
+    CONSTRUCTOR name, a module/interface/protocol/signature name, or a
+    capability name contributes NOTHING here even though it very much
+    introduces a name — those live in namespaces neither consumer touches.
+
+    The match below is deliberately EXHAUSTIVE over [Ast.decl] with no
+    wildcard: this list decides which self-qualified spellings
+    [strip_entry_self_qual] rewrites and which bare calls [qualify_level]
+    qualifies, so a name added here silently changes which definition a call
+    resolves to.  A new declaration form must therefore be classified
+    explicitly rather than defaulting to "not a value name".
+
+    [externs] splits the ONE case where the two consumers genuinely disagree,
+    and the split is not cosmetic — getting it wrong miscompiles.  An extern
+    `fn` IS a value name of the declaring module, so
+    [strip_entry_self_qual] must know about it ([externs:true]).  But it is
+    NOT emitted under a module-qualified name: codegen calls it by its C
+    symbol (`labs`, or `<lib>_<fn>` by default), so [qualify_level] must NOT
+    rewrite a bare intra-module call to it ([externs:false]).  Measured: with
+    externs folded into the qualification set, a nested module calling its own
+    extern bare compiled to `Undefined symbols: _Bar.my_abs`.
+
+    Classification evidence (each verified by running a program that spells the
+    name self-qualified, `Foo.thing` inside entry `mod Foo`, against the same
+    program spelling it bare):
+    - [DFn], [DLet] — the two original cases; bare value names.
+    - [DExtern] — an extern block's [fn]s are ordinary lowercase value names,
+      but only for the stripping consumer (see [externs] above).  Pre-fix,
+      `Foo.labs(-3)` inside `mod Foo` failed with
+      `unbound variable: Foo.labs` (interp) / `Undefined symbols: _Foo.labs`
+      (compiled) while bare `labs(-3)` resolved.
+    - [DInterface], [DImpl] — deliberately NOT included, and this is the one
+      genuinely close call.  An interface method name IS lowercase and IS
+      reachable as an [EVar], but it is not a MODULE-QUALIFIED name in March:
+      it resolves through interface dispatch, not through module member
+      lookup.  Verified — with the interface declared in a nested `mod Bar`,
+      BOTH `Bar.greet(1)` written from outside AND the auto-qualified form
+      [qualify_level] would produce fail identically, with
+      `unbound variable: Bar.greet`.  So entry-level `Foo.greet(1)` failing is
+      consistent with every other module, not a stripping gap.  Including
+      these names actively regresses working code: [qualify_level] would
+      rewrite the bare `greet(1)` inside a nested module that declares the
+      interface into `Foo.Bar.greet(1)` (measured: a program that printed
+      `hi-nested` started failing `unbound variable: Bar.greet`), and for
+      [DImpl] it would additionally rewrite every bare `show(x)` in a module
+      that merely implements `Show`, breaking dispatch to a method the
+      implementing module does not own.  Making `Foo.greet` resolve would need
+      interface methods to become qualifiable in general — a separate change,
+      not a classification question.
+    - [DActor] — the actor NAME is a constructor, not a value: `spawn(Counter)`
+      parses as [ECon], and `spawn(Foo.Counter)` fails in the constructor
+      namespace ("I don't know a constructor called `Foo.Counter`"), which
+      [strip_entry_self_qual] documents as out of scope.  The functions
+      lowering derives from an actor are underscore-mangled
+      ([Counter_spawn]/[Counter_dispatch]/[Counter_Increment], confirmed via
+      `MARCH_DUMP_TXT=tir-lower`) and are unwritable in source.
+    - [DType], [DAlwaysLinearType] — a type name plus constructors, both
+      uppercase and both in namespaces neither consumer rewrites.
+    - [DDeriving], [DSatisfy] — already expanded into [DImpl] by
+      [desugar_module] before either consumer runs; classified as [DImpl].
+    - [DUse], [DAlias] — bring names in from ELSEWHERE.  Treating an imported
+      name as one of ours would qualify it to a definition this module does
+      not have.
+    - [DMod] — a nested module name is uppercase (never an [EVar]), and
+      [strip_entry_self_qual] already collects nested module names separately
+      for its dotted-head guard.
+    - [DDescribe] — its body admits only [test]/nested [describe] (see
+      [describe_body] in parser.mly), so it can hold no value declaration.
+    - [DProtocol], [DSig], [DInterface]'s own name, [DProofCap], [DApp],
+      [DTransitions] — uppercase names in the type/module/capability
+      namespaces.
+    - [DNeeds], [DOpts], [DTest], [DSetup], [DSetupAll] — declare no name at
+      all. *)
+let collect_direct_names ~(externs : bool) (decls : decl list) : string list =
   List.concat_map (function
     | DFn (def, _) -> [def.fn_name.txt]
     | DLet (_, b, _) ->
@@ -2099,7 +2177,16 @@ let collect_direct_names (decls : decl list) : string list =
         | _ -> []
       in
       from_pat b.bind_pat
-    | _ -> []
+    | DExtern (ext, _) ->
+      if externs then List.map (fun ef -> ef.ef_name.txt) ext.ext_fns else []
+    (* Names in namespaces neither consumer rewrites, names resolved by
+       interface dispatch rather than module lookup, or no name at all. *)
+    | DInterface _
+    | DImpl _ | DActor _ | DType _ | DAlwaysLinearType _
+    | DDeriving _ | DSatisfy _ | DUse _ | DAlias _ | DMod _
+    | DDescribe _ | DProtocol _ | DSig _ | DProofCap _ | DApp _
+    | DTransitions _ | DNeeds _ | DOpts _ | DTest _ | DSetup _
+    | DSetupAll _ -> []
   ) decls
 
 (** Extend [bound] with all variable names introduced by [pat]. *)
@@ -2230,7 +2317,10 @@ let qualify_module_refs ?(entry_prefix = "") (decls : decl list) : decl list =
     List.map (function
       | DMod (name, vis, inner, sp) ->
         let mod_prefix = prefix ^ name.txt ^ "." in
-        let own_names  = collect_direct_names inner in
+        (* [externs:false] — codegen calls an extern by its C symbol, never
+           under a module-qualified name, so a bare intra-module call to one
+           must be left alone.  See [collect_direct_names]'s [externs] doc. *)
+        let own_names  = collect_direct_names ~externs:false inner in
         (* Recurse first so nested mods pick up their full prefix. *)
         let inner' = walk mod_prefix inner in
         (* Then qualify this module's own function bodies. *)
@@ -2280,7 +2370,9 @@ let qualify_module_refs ?(entry_prefix = "") (decls : decl list) : decl list =
 let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
   let prefix = mod_name ^ "." in
   let plen = String.length prefix in
-  let direct_names = collect_direct_names decls in
+  (* [externs:true] — an extern `fn` IS a member of the entry module, so a
+     self-qualified `Foo.my_extern` must be stripped like any other member. *)
+  let direct_names = collect_direct_names ~externs:true decls in
   let nested_mod_names =
     List.filter_map (function DMod (n, _, _, _) -> Some n.txt | _ -> None) decls
   in
