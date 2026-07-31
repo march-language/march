@@ -308,30 +308,6 @@ count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
 - **Not a regression:** `binary-trees(15)` improved (265.4 → 176.6 ms) and
   `list-ops(1M)` is exactly restored (67.6 → 67.3 ms).
 
-## Compiler: `pfn` unreachable from a sibling in the same NESTED module (OPEN, 2026-07-24)
-
-- [ ] **A public `fn` in a nested `mod` cannot call a `pfn` declared beside it
-  in that same module** — reported as `Module `X` does not export `y``.
-  Top-level modules are unaffected. Since the project convention is exactly
-  one top-level `mod` per file, nested modules are the normal way to have
-  several modules, so this breaks ordinary private-helper code. Minimal repro:
-
-  ```march
-  mod Outer do
-    mod Crypto do
-      fn encode(x : Int) : Int do scramble(x) end
-      pfn scramble(x : Int) : Int do x * 31 end
-    end
-  end
-  -- Module `Crypto` does not export `scramble`.
-  ```
-
-  Found by the differential oracle: `examples/modules.march` (whose Part 3 is
-  a deliberate pub-vs-`pfn` demonstration) now fails to typecheck at all, so
-  it reports `INTERP_FAIL` and reddens the sweep. Suspected interaction
-  between the 0.2.0 "Module does not export" diagnostic change and the
-  intra-module qualification pass (`specs/2026-06-23-desugar-intra-module-qualification.md`)
-  rewriting the bare call to a qualified one before the export check runs.
 
 ## Quarantined tests — coverage that is currently DARK (inventory, 2026-07-24)
 
@@ -546,6 +522,8 @@ makes a quarantine indistinguishable from a deletion.
 - [ ] **JsonStream Component 4 — decoder-combinator layer (deferred from phase 1, by design).** The phase 1 design doc (`specs/2026-07-30-json-streaming-design.md`) scoped a typed decoder-combinator layer over the raw `Event` stream (e.g. `Decoder.field`/`Decoder.list`/`Decoder.at` composing into a value decoder, analogous to `Json.Decode` in Elm) as Component 4, explicitly separable — "nothing in Components 1–3 depends on it." Not started; phase 1 shipped the tokenizer + drivers (`fold`/`build`/`each_value`) only.
 
 ## Done (recently completed)
+
+- ✅ **Misdiagnosed "`pfn` unreachable from a sibling in the same NESTED module" — root cause was the ordinary stdlib name collision, not a nested-module-specific compiler bug (2026-07-31, `examples/modules.march`).** The 2026-07-24 entry's minimal repro (`mod Outer do mod Crypto do fn encode(x) do scramble(x) end  pfn scramble(x) do x * 31 end end end`) and the real-world `examples/modules.march` failure it cited both reused `mod Crypto`, which collides with stdlib's own `mod Crypto` (`stdlib/crypto.march`) in March's flat, global module namespace — so the bare `scramble`/`add_checksum`/`remove_checksum` calls resolved against the stdlib module (which has no such — or no `pfn` — members) instead of the file's own, giving `Module 'Crypto' does not export '...'`. Retesting the same nested-module shape with a genuinely unique name (`mod Zzqnested`) compiles and runs correctly (exit 0), and retesting with another colliding name (`mod Vault`, which also shadows `stdlib/vault.march`) reproduces the same false error — confirming nesting and `pfn`-adjacency were never the actual variable. This is the same known-taken-name class documented for app **types** (see stdlib-collision guidance for module/type names). **Fix:** renamed the example's `mod Crypto` to `mod SecretCode`; no compiler change, since a flat global module namespace is by design. `./_build/default/bin/main.exe examples/modules.march` now exits 0 (interpreted) and compiled (`--compile --opt 2`), and the differential oracle sweep (`dune build --root . @test/oracle`) is fully green: 100 MATCH, 0 known-divergence, 0 un-triaged failures, exit 0.
 
 - ✅ **JsonStream phase 2 complete — run-slicing (Components 1-2), re-measurement (Component 3), and the SIMD gate verdict (Component 4 CLOSED, not built) (2026-07-31, `stdlib/json_stream.march`, `bench/json_stream_strings.march` new, `specs/benchmarks.md`, `specs/2026-07-31-json-streaming-phase2-design.md` status flipped to implemented).** `str_byte`'s `SPlain` path and `num_byte` now slice a whole uninterrupted run as one `string_slice` (via `String.index_of_from` finding the next `"`/`\`, riding libc's `memchr`) instead of accumulating one 1-byte string + one cons cell per content byte; the piece list is kept solely for what still needs it — a run interrupted by a chunk boundary, escapes, and `\uXXXX` synthesized output. `max_token_bytes` is checked before materializing the slice, so a 10MB run against an 8MB limit still returns `ETokenLimit` at the token-start offset rather than allocating first. Phase 1's full suite passes unmodified (the every-byte-split differential and truncation sweep are the load-bearing proof that chunking still can't change the event stream). **Measurement (interleaved, same machine load per round, so ratios are sound even though absolute ms are not comparable across sessions — load averages 43-97 on 14 cores):** new string-heavy corpus (`bench/json_stream_strings.march`, 2,000 records, each a single ~1KB escape-free JSON string) went from ~55x slower than `Json.parse` (322-364ms vs 6-25ms, pre-run-slicing commit `8a79a275`) to 1.0x parity (6ms vs 6ms, post-run-slicing commit `4afc215d`) — confirming the phase 2 design's diagnosis that the gap was per-byte materialization, not scanning. The existing tiny-token corpus (`bench/json_stream.march`, 2-6 byte keys, ~11 byte values) only narrows, 3.6x -> ~3.05x (219-234ms vs 71-77ms), because a 2-6 byte token has almost no run to slice — that residual is **per-token overhead** (state transitions, `List(Event)` allocation, a cons + a join even for a single-piece token), a different bottleneck a byte-set scanner cannot help with (SIMD cannot speed up a `memchr` over a 4-byte run). **Verdict: Component 4 (the C byte-set scanner) is CLOSED as NOT BUILT**, recorded the way `specs/plans/2026-07-27-string-performance-phase2.md` recorded its own Tasks 4/5 closures — a verdict plus the measurement, not an estimate; a C surface that cannot pay under this feature's threat model is a permanent liability. **Component 5 (`feed_fold`, removing the per-event list allocation) is the indicated next step for the tiny-token residual — left open, not built** (tracked above). Full writeup: `specs/2026-07-31-json-streaming-phase2-design.md` (verdict section after Component 3) and `specs/benchmarks.md` (both bench files' entries).
 
