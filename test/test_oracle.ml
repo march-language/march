@@ -146,6 +146,16 @@ let nondeterministic_allowlist =
        (full-sweep MATCH) + test/native/{niche_ctor_ambiguity,
        dataframe_groupby_count}.march. *)
     "dataframe_bench";
+    (* Parallel string-scan scaling benchmark: prints "workers=N ms=T" wall-
+       clock lines for N in {1,2,4,8} before the final deterministic
+       "checksum=16000000" line. The timings are never byte-stable across
+       runs (let alone between interpreter and compiled binary), so this
+       program is structurally non-comparable, not a divergence — the
+       checksum is the only part worth pinning, and that already has
+       ground truth in the leading doc comment
+       (bench/string_parallel_scan.march: "Expected output:
+       checksum=16000000"). Same class as dataframe_bench above. *)
+    "string_parallel_scan";
     (* Interactive or needs real files *)
     "debugger"; "read_file";
     (* Supervision trees (start actors / servers; scheduler-order-dependent) *)
