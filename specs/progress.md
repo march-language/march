@@ -1,5 +1,72 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-31, `@[vectorize]`/`@[vectorize(warn)]` turns silent auto-vectorization eligibility into a checked contract)
+
+**Counts:** `run_compiler` 619 (unchanged in the quick suite; +1 parser test added by this work), `run_eval` 256 (unchanged), `run_codegen` 537 (was 520, +17 — the `vectorize_check` group, including 2 tests added by the final-review fix wave below), `run_stdlib` 780 (unchanged); `scripts/run-tests.sh -q` all suites passed, exit 0.
+
+**Final-review fix wave (2026-07-31).** Four fixes landed after the whole-branch review, before merge: (1) `reuse_example` (`lib/tir/vectorize_check.ml`) hardcoded float syntax (`x *. 2.0`) in its reuse-gate hint for BOTH Int and Float targets, so the compiler's own suggested fix for an Int violation didn't typecheck — fixed to branch on `is_float_target` too, covering all four map/map2 x Int/Float combinations; regression test `"reuse gate: Int hint uses Int syntax"` asserts the diagnostic's `notes` field. (2) No test compiled-and-ran a PASSING `@[vectorize]` program — the only compiler-driving test exercised a rejected program that never reaches clang, so a `find_markers`/`strip_markers` regression (a surviving sentinel reaching LLVM emission, which has no matching symbol to link against) could ship green; added `"pass: eligible annotated program compiles and runs"`, which compiles `vectorize_source_ok` and runs the binary. (3) A stale comment in `test/test_compiler.ml:475` still said `Vectorize_check.collect_attrs`; that function lives in `Vectorize_mark` since the sentinel redesign — fixed. (4) `generic_diag`'s note pointed at a `docs/simd-vectorization.md` "map_float" heading that doesn't exist — repointed to the real "What vectorizes" heading.
+
+**Feature.** `@[vectorize]` and `@[vectorize(warn)]` function attributes. `NativeArray.map_int`/`map_float`/`map2_int`/`map2_float` have long had an auto-vectorization fast path (`lib/tir/native_map_inline.ml`) that silently either does or doesn't fire depending on how the callback closure is used — until now there was no way for an author to say "this function must vectorize" and have the compiler check it. `@[vectorize]` makes an eligibility violation a hard compile error (exit 1); `@[vectorize(warn)]` reports it as a warning and lets the build continue.
+
+**The two real gates**, deliberately reusing `native_map_inline.ml`'s own matching helpers so the diagnostic can never disagree with what the optimizer actually does:
+- **Reuse gate** (Int and Float targets): the callback closure must be used exactly once, passed directly as the map/map2 call's closure argument. `"<fn> cannot vectorize — this callback isn't safe to inline"`.
+- **Generic-signature gate** (Float targets only): the callback's resolved signature must be concretely `Float`, not a leftover `TVar` — this is what unlocks the zero-boxing unboxed clone. `"<fn> cannot vectorize — callback type is still generic"`.
+
+A third **misuse** category — the attribute on a function with zero `NativeArray.map`/`map2` calls — is always a hard error even under `(warn)`, catching a misapplied or typo'd annotation.
+
+Worth recording: the informal prose in `docs/simd-vectorization.md` and `stdlib/native_array.march` describes the eligibility bar as "non-capturing or single-capture," but the actual implementation gates on reuse and (Float-only) concrete typing — capture count is not a gate; `native_map_inline.ml`'s Phase 2 (0 captures) and Phase 2c (1+ captures) both get the inlining treatment. The checker follows the code, not the prose, which is why there are two gates rather than three.
+
+**Implementation shape.** `lib/parser/parser.mly` gained a new `fn_attr` alternative for the `@[name(value)]` bracket-with-argument form — the grammar previously supported `@[name]` and bare `@name(value)` but not the combination — encoded as `"vectorize:warn"`, the same convention `@compat(full)` already uses. `lib/tir/vectorize_mark.ml` (new) runs immediately after `Lower.lower_module`, before `Mono` — the one point in the pipeline where a TIR function's name is still exactly its source name — and injects a compiler-internal sentinel call (`__vectorize_marker_hard`/`__vectorize_marker_soft`) at the head of each annotated function's body, carrying the source name and declaration span as literal arguments. `lib/tir/vectorize_check.ml` (new) runs late, right before `Native_map_inline.run` (so it sees the same pre-rewrite TIR shape the optimizer peephole consumes): it scans bodies for sentinels, runs the gates, and returns the TIR with every sentinel stripped back out. `bin/main.ml` wires in both insertion points, each guarded on `not is_js_target`.
+
+**Why a sentinel, not name matching.** The first implementation matched AST attributes to TIR functions by name at the late check point, stripping everything after a TIR name's first `$` on the assumption `$` only marks a monomorphization suffix. Review found that unsound two ways, both confirmed empirically: (a) Defun independently produces `<fn>$apply$<uid>` for every lifted lambda, so a stdlib local `fn scale` becomes `scale$apply$1803` and a user's own `@[vectorize] fn scale` would fire a spurious hard error against it; (b) the check runs after Opt, and a small annotated wrapper gets inlined into its caller and no longer exists as its own `fn_def` — so the exact reuse-gate violation the feature exists to catch was silently missed (confirmed via a post-Opt TIR dump showing `fn scale` entirely absent). The sentinel survives both mangling and inlining because Mono's record-update duplication and Opt's inliner preserve body contents wherever they land. It also fixed two consequences for free: diagnostics now name the user-written source name (not `scale$Float`), and `@[vectorize]` inside a nested `mod` no longer silently no-ops (the mark pass qualifies names the same way `Lower` does).
+
+**Known limitation.** If two separately-annotated functions are both inlined into the same caller, their sentinels merge and can't be attributed call-by-call; `combine_markers` widens (joins the names, takes Hard if any is Hard) rather than silently mis-attributing.
+
+**Tests.** A 17-test `vectorize_check` group in `run_codegen` covers: eligible Float, eligible Int, eligible map2, `(warn)` on eligible code is silent, reuse-gate hard fail, reuse-gate under `(warn)`, reuse-gate on map2, reuse-gate caught even after the annotated fn is inlined away, reuse-gate Int-hint-uses-Int-syntax, generic-signature pass/hard-fail/`(warn)`, misuse hard fail, misuse still hard under `(warn)`, a module-loads smoke test, an end-to-end CLI test driving the real `march --compile` binary against a REJECTED program, and an end-to-end compile-AND-RUN test against an ELIGIBLE program (proves the marker sentinel is actually stripped before LLVM emission). Plus one new `run_compiler` parser test for the `@[vectorize(warn)]` bracket-with-argument grammar.
+
+**Out of scope / follow-up.** Fixed-width SIMD vector types (`f32x4`, `f32x8`, `i32x4`, `i32x8`) were part of the original feature request but are explicitly a separate later increment — they don't depend on this attribute. Tracked as an open TODO in `specs/todos.md`.
+
+**Commits:** `47ce1996` (parser), `8bcc320e` + `5b2e731e` (check pass + sentinel redesign), `bea4ccf4` + `93bb6871` + `e82225d0` (pipeline wiring + test-robustness fixes), `284298ff` + `762d6e49` (test matrix + coverage gaps).
+
+## Current State (as of 2026-07-31, JsonStream phase 1 review-fix set)
+
+**Counts:** `test/stdlib/test_json_stream.march` 212 → 217 (interpreted, via
+`march test`); `run_stdlib`'s `json_stream` alcotest group (which runs the
+whole march test file as one alcotest case) unchanged in group count. No
+other suite touched.
+
+Four Minor findings from the whole-branch review of JsonStream phase 1
+(PR #134) fixed:
+
+1. **`max_token_bytes = 0` number/string asymmetry.** `value_start` created
+   a number token's first `PNum` unconditionally, while `push_piece` always
+   checked `max_token_bytes` for strings — so at `maxt=0` a 1-digit number
+   was accepted but a 1-char string was rejected with `ETokenLimit`. Fixed
+   by a new `num_start` helper (`stdlib/json_stream.march`) that checks
+   `1 > maxt` at number-token creation, matching `push_piece`'s check for
+   strings. At any `maxt >= 1` the two kinds already agreed; this only
+   affected the degenerate `0` case. 4 new tests pin both directions at
+   `maxt=0` and `maxt=1`.
+2. **Partial-token memory-accounting doc precision.** The design spec's
+   "constant memory" paragraph implied a tighter bound than phase 1
+   actually delivers: the partial-token buffer accumulates as one cons cell
+   + one string piece **per content byte**, not one byte. Documented in
+   `specs/2026-07-30-json-streaming-design.md` (still bounded by
+   `max_token_bytes`, still flat across document size — this is a precision
+   fix to the stated constant factor, not a correctness bug). Phase 2's
+   block-scanning tokenizer removes this shape outright; noted as an input
+   to that design in `specs/todos.md`'s phase 2 open item.
+3. **Stale plan-narration comment removed** at `open_container`'s doc
+   comment (previously described implementation-task history — "Task 2
+   implements open_container..." — rather than current behavior).
+4. **`start_ndjson_with` gained test coverage.** Was public with zero tests;
+   new test exercises non-default `JsonLimits` (a `max_depth` a later
+   record trips) in ndjson mode, confirming limits and ndjson compose.
+
+Verification: `march test test/stdlib/test_json_stream.march` — 217/217
+green, exit 0. `test_stdlib_march.exe test json_stream -e` (compiled stdlib
+test binary) — green, exit 0.
+
 ## Current State (as of 2026-07-31, JsonStream phase 1 — benchmark + compiled parity + docs)
 
 **Counts:** `run_stdlib` 826 (unchanged in count — JsonStream's 212 interpreted

@@ -268,6 +268,51 @@ describe "JsonStream" do
       Ok(_) -> assert (false)
       end
     end
+
+    -- max_token_bytes = 0 is a degenerate case: number and string tokens
+    -- must reject their first byte identically (a 1-byte token always
+    -- exceeds a zero limit). Pinned here so a future change can't
+    -- reintroduce the asymmetry where a 1-digit number was accepted while
+    -- a 1-char string was rejected.
+    test "maxt=0 rejects a one-char string" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 0))
+      match JsonStream.feed(st, "\"a\"") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+    test "maxt=0 rejects a one-digit number" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 0))
+      match JsonStream.feed(st, "1") do
+      Err(e) -> assert (err_str(e) == "TOK:0")
+      Ok(_) -> assert (false)
+      end
+    end
+
+    -- max_token_bytes = 1 is the smallest limit that admits a one-byte
+    -- token: both a one-char string and a one-digit number must succeed.
+    test "maxt=1 accepts a one-char string" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 1))
+      match JsonStream.feed(st, "\"a\"") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "S(a)|")
+        end
+      end
+    end
+    test "maxt=1 accepts a one-digit number" do
+      let st = JsonStream.start_with(JsonStream.JsonLimits(8, 1))
+      match JsonStream.feed(st, "1") do
+      Err(e) -> assert (false)
+      Ok((evs, st2)) ->
+        match JsonStream.finish(st2) do
+        Err(e) -> assert (false)
+        Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "N(1.)|")
+        end
+      end
+    end
   end
 
   describe "containers" do
@@ -364,6 +409,18 @@ describe "JsonStream" do
         Err(e) -> assert (false)
         Ok(evs2) -> assert (evs_str(evs) ++ evs_str(evs2) == "N(1.)|N(2.)|")
         end
+      end
+    end
+    test "start_ndjson_with composes limits with ndjson mode" do
+      -- max_depth = 2: the first record ("[1]") stays within it, but the
+      -- second record's third '[' (absolute offset 6) trips EDepthLimit --
+      -- proving non-default limits carry through into ndjson mode. Errors
+      -- are final, so the first record's same-chunk events are discarded
+      -- along with it (see the "non-string key" test above).
+      let st = JsonStream.start_ndjson_with(JsonStream.JsonLimits(2, 1000))
+      match JsonStream.feed(st, "[1]\n[[[1]]]\n") do
+      Err(e) -> assert (err_str(e) == "DEPTH:6")
+      Ok(_) -> assert (false)
       end
     end
     test "unterminated container still truncates" do

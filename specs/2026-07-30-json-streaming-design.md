@@ -208,6 +208,17 @@ the context stack (≤ `max_depth` cons cells), and the returned event list
 No component grows with document size. This paragraph is the claim the
 Component 5 RSS test verifies.
 
+The partial-token buffer's *byte* bound is `max_token_bytes`, but its actual
+allocation shape in phase 1 is one cons cell plus one string piece **per
+content byte** (`PStr`/`PNum`'s reversed `List(String)` accumulator, joined
+once at completion) — so the constant factor per byte is roughly a cons cell
+plus a string header, not the single byte the bound might suggest. This is
+still `O(max_token_bytes)`, bounded, and the RSS test's flat-across-document-size
+claim holds regardless of the constant. Phase 2's block-scanning tokenizer
+replaces this per-byte accumulation with slice-and-copy, which removes the
+per-byte allocation shape entirely — noted as an input to that design, not a
+phase 1 fix.
+
 ## Component 2 — Drivers
 
 Thin, and mostly demonstrations that the sources already compose:
@@ -332,9 +343,14 @@ Totality claims get tests, not arguments:
 
 ## Open questions
 
-1. `EvNumRaw(String)` for lossless large integers — wanted for real workloads
-   (IDs > 2^53) but diverges from `Json.parse` semantics. Decide before the
-   decoder layer, which is where the divergence would surface.
+1. ~~`EvNumRaw(String)` for lossless large integers~~ — **RESOLVED
+   2026-07-31: build it in phase 2, Component 2b**
+   (`specs/2026-07-31-json-streaming-phase2-design.md`). Opt-in via
+   `with_raw_numbers`; `EvNum(Float)` stays the default, so this spec's
+   `Json.parse` differential and the whole phase 1 suite are unaffected.
+   Phase 2's number run-slicing materializes the lexeme as a slice anyway,
+   which turns preserving it into *skipping* `string_to_float` rather than
+   extra work.
 2. UTF-8 validation default once a fast validator exists — opt-in stays the
    phase 1 answer; revisit with phase 2 data.
 3. Whether `Decode` ships inside phase 1 or immediately after — attachment
