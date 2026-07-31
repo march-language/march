@@ -1,6 +1,12 @@
 # Streaming JSON — Phase 1: Total, Resumable, Constant-Memory
 
-**Status:** draft, not yet implemented
+**Status:** phase 1 implemented (2026-07-31) — tokenizer (`stdlib/json_stream.march`),
+totality/truncation/differential test harnesses, drivers (`fold`/`build`/`each_value`),
+and the `bench/json_stream.march` baseline are all done; compiled parity confirmed
+(including a surrogate-pair round-trip). Component 4 (typed decoding, below) is
+deferred — it was scoped as separable from the start and nothing in Components 1–3
+depends on it. Phase 2 (SIMD structural scanning) is not started; see the open item
+in `specs/todos.md`. No decision-table deviations were found during implementation.
 **Date:** 2026-07-30
 **Scope:** phase 1 of two. This phase builds the safety skeleton — a pure-March
 resumable tokenizer plus its consumers — and proves totality and constant

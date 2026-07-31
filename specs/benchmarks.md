@@ -565,6 +565,66 @@ parallel scheduler is degraded.
 
 ---
 
+## bench/json_stream.march — JsonStream chunked NDJSON tokenizer (20,000 records)
+
+**Command:** compile with `--opt 2`, run directly.
+
+```bash
+march --compile --opt 2 bench/json_stream.march -o bench/json_stream_bench
+bench/json_stream_bench
+```
+
+Builds 20,000 synthetic NDJSON records (`{"id": N, "name": "user-N", "active":
+true, "tags": [1, 2, 3]}\n`) into one in-memory source string, then feeds it
+to `JsonStream.start_ndjson()`/`feed`/`finish` in 64KB chunks — exercising the
+`JsonStream.feed` per-byte tokenizer loop, per-token event allocation, and RC
+churn on the chunk-slice `String` pieces passed across `feed` calls.
+
+Each record emits 14 events (`EvObjStart`, `EvKey`×4, `EvNum`/`EvStr`/`EvBool`
+scalars, `EvArrStart`, `EvNum`×3, `EvArrEnd`, `EvObjEnd`) — measured
+empirically with 1/2/3-record probes (14, 28, 42 events), not derived from
+prose arithmetic. Expected checksum: `20000 × 14 = 280000`.
+
+**Baseline results (2026-07-31, Apple M-class, `--opt 2`):**
+
+```
+checksum=280000
+ms=224-229 (three runs)
+maximum resident set size: ~85 MB (85016576-85049344 bytes)
+```
+
+**10× spot-check (n=200,000, same 64KB chunk size):**
+
+```
+checksum=2800000
+ms=2373
+maximum resident set size: 840138752 bytes (~801 MB)
+```
+
+RSS grew ~9.9× against a 10× input-size increase (baseline ~82 MB above the
+~3 MB empty-program floor; 10× run ~837 MB above floor) — i.e. RSS tracks the
+size of the in-memory source string the benchmark holds by construction, not
+the record count independent of that. This is consistent with the
+constant-memory claim for the parser itself: the benchmark's own input
+buffer is O(records), but nothing in `JsonStream`'s chunk-fed state
+(`JsState`) accumulates unboundedly across `feed` calls — only the per-chunk
+event list and in-flight partial-token buffer are live at any point.
+
+**What to watch:**
+- This is the phase 1 pure-March baseline. Phase 2 (SIMD structural
+  scanning, see `specs/2026-07-30-json-streaming-design.md`) must beat this
+  number on the same corpus and chunk size.
+- RSS should stay flat (modulo the input string itself) as record count
+  grows at fixed chunk size — re-run the 10× spot-check after any change to
+  `feed`/`finish`/the builder drivers and confirm the delta still scales
+  with input-string size, not superlinearly.
+- A checksum other than `records × 14` at this record shape is a tokenizer
+  regression, not a benchmark artifact — recompute the empirical per-record
+  count with a 1/2/3-record probe before assuming the benchmark itself needs
+  adjusting.
+
+---
+
 ## Running benchmarks to validate changes
 
 See also the note in `CLAUDE.md`: run the relevant benchmark after any change
@@ -587,3 +647,4 @@ to the features it exercises. Quick reference:
 | `llvm_emit` equality dispatch (TVar / `march_poly_eq`) | `merkle` |
 | `HashMap.*` / `Enum.uniq` / `Enum.frequencies` | `hash_map_bench` |
 | `RRB.*` / `Parallel.*` / `task_await_unwrap` i64 | `rrb_bench` |
+| JsonStream / streaming JSON | `json_stream` |

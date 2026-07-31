@@ -13,6 +13,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **JsonStream** — streaming JSON tokenizer: resumable chunk-fed parsing with
+  bounded memory, depth/token limits, ndjson mode, and typed errors with
+  absolute byte offsets.
+
 - **`cap verified`: an obligation the refinement checker cannot discharge is an
   error.** March's default stance is to report a refinement violation only when
   a precondition can *never* hold; anything the checker cannot decide is
