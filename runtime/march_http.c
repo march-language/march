@@ -1770,9 +1770,23 @@ typedef struct {
     pthread_cond_t  not_full;   /* signalled when count drops below capacity */
 } http_work_queue_t;
 
+/* The pool is ELASTIC, and it has to be.  A worker owns a connection for that
+ * connection's entire keep-alive lifetime (connection_thread loops until EOF
+ * or idle timeout), so with a fixed worker count N the server serves at most N
+ * concurrent connections — every further connection is accepted by the kernel,
+ * shows the client a successful connect, and is then never read.  Measured
+ * before this was elastic: at 256 offered connections, 28 workers served 28
+ * and 228 sat with unread bytes in Recv-Q indefinitely.
+ *
+ * So `size` is a floor (warm workers), not a ceiling.  A worker about to park
+ * on a connection grows the pool if it was the last idle one, up to
+ * `max_size`.  `threads` is allocated at max_size upfront so growth never
+ * reallocates a live array and shutdown can still join every worker. */
 typedef struct {
     pthread_t        *threads;
-    int               size;       /* number of worker threads allocated */
+    int               size;       /* worker threads started so far */
+    int               max_size;   /* hard ceiling on worker threads */
+    _Atomic int       busy;       /* workers currently inside connection_thread */
     void             *pipeline;   /* shared March pipeline closure */
     http_work_queue_t queue;
     _Atomic int       shutdown;   /* set to 1 to request worker exit */
@@ -1788,6 +1802,46 @@ _Atomic int g_http_shutdown = 0;  /* set by signal handlers to request shutdown 
 static void http_signal_handler(int sig) {
     (void)sig;
     atomic_store_explicit(&g_http_shutdown, 1, memory_order_relaxed);
+}
+
+static void *pool_worker(void *arg);
+
+/* Called by a worker that has just taken a connection and is about to park on
+ * it for the connection's lifetime.  If that leaves no idle worker, start one
+ * more so the next arrival is served rather than queued behind a keep-alive
+ * loop.  Caller must NOT hold the queue lock.
+ *
+ * Grows by one per starved dequeue rather than in blocks: connections arrive
+ * one at a time, so one-at-a-time growth tracks demand exactly and a burst
+ * that closes again leaves the pool only as large as its peak concurrency. */
+static void pool_grow_if_starved(void) {
+    pthread_mutex_lock(&g_pool.queue.lock);
+    /* The shutdown test MUST be inside the lock, and must be re-read here
+       rather than cached from before it.  march_http_pool_stop sets shutdown,
+       then takes this lock and snapshots `size` as the set of threads it will
+       join.  A grow that checked shutdown before the lock could observe 0,
+       block until stop released the lock, and then create thread `size` —
+       after the snapshot.  That worker is never joined, and stop goes on to
+       destroy the very mutex and condvar it is about to wait on. */
+    if (atomic_load_explicit(&g_pool.shutdown, memory_order_acquire)) {
+        pthread_mutex_unlock(&g_pool.queue.lock);
+        return;
+    }
+    int busy = atomic_load_explicit(&g_pool.busy, memory_order_relaxed);
+    if (busy >= g_pool.size && g_pool.size < g_pool.max_size) {
+        int idx = g_pool.size;
+        if (pthread_create(&g_pool.threads[idx], NULL, pool_worker, NULL) == 0) {
+            g_pool.size = idx + 1;
+        } else {
+            /* Out of threads: the connection still gets served by this worker.
+               Report once per failure — a silent cap is what made the fixed
+               pool's starvation invisible in the first place. */
+            fprintf(stderr, "march: pool grow to %d failed: %s "
+                            "(serving %d connections)\n",
+                    idx + 1, strerror(errno), busy);
+        }
+    }
+    pthread_mutex_unlock(&g_pool.queue.lock);
 }
 
 /* Worker thread: dequeue fds and run the connection handler in a loop. */
@@ -1814,7 +1868,13 @@ static void *pool_worker(void *arg) {
         if (a) {
             a->client_fd = fd;
             a->pipeline  = g_pool.pipeline;
+            /* Count this worker busy BEFORE growing, so the grow check sees
+               it occupied; connection_thread does not return until the
+               connection closes or times out. */
+            atomic_fetch_add_explicit(&g_pool.busy, 1, memory_order_relaxed);
+            pool_grow_if_starved();
             connection_thread(a);   /* handles fd and frees a */
+            atomic_fetch_sub_explicit(&g_pool.busy, 1, memory_order_relaxed);
         } else {
             close(fd);
         }
@@ -1823,6 +1883,11 @@ static void *pool_worker(void *arg) {
 }
 
 void march_http_pool_start(int64_t pool_size, void *pipeline) {
+    march_http_pool_start_max(pool_size, 0, pipeline);
+}
+
+void march_http_pool_start_max(int64_t pool_size, int64_t max_conns,
+                                void *pipeline) {
     if (pool_size <= 0) {
         /* Auto-detect: 2× logical CPUs, clamped to [4, 256]. */
         long ncpus = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1831,16 +1896,31 @@ void march_http_pool_start(int64_t pool_size, void *pipeline) {
         if (pool_size > 256) pool_size = 256;
     }
 
+    /* Ceiling on concurrent connections.  This is what HttpServer's
+       max_connections has always meant and never enforced — it was accepted
+       and discarded (`(void)max_conns`), which is part of why the fixed pool's
+       real limit was invisible.  A connection beyond the ceiling still waits
+       for a worker, but the ceiling is now an explicit, documented number
+       rather than an accident of CPU count. */
+    int64_t max_size = (max_conns > 0) ? max_conns : MARCH_HTTP_POOL_MAX_SIZE;
+    if (max_size < pool_size) max_size = pool_size;
+    if (max_size > MARCH_HTTP_POOL_HARD_MAX) max_size = MARCH_HTTP_POOL_HARD_MAX;
+
     memset(&g_pool, 0, sizeof(g_pool));
     g_pool.size     = (int)pool_size;
+    g_pool.max_size = (int)max_size;
     g_pool.pipeline = pipeline;
     atomic_store_explicit(&g_pool.shutdown, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_pool.busy, 0, memory_order_relaxed);
 
     pthread_mutex_init(&g_pool.queue.lock, NULL);
     pthread_cond_init(&g_pool.queue.not_empty, NULL);
     pthread_cond_init(&g_pool.queue.not_full, NULL);
 
-    g_pool.threads = malloc(sizeof(pthread_t) * (size_t)pool_size);
+    /* Sized for max_size, not pool_size: pool_grow_if_starved() writes into
+       slots past the initial run while other workers are live, so this array
+       must never be reallocated after the workers start. */
+    g_pool.threads = malloc(sizeof(pthread_t) * (size_t)g_pool.max_size);
     if (!g_pool.threads) {
         fprintf(stderr, "march: thread pool alloc failed\n");
         g_pool.size = 0;
@@ -1855,17 +1935,24 @@ void march_http_pool_start(int64_t pool_size, void *pipeline) {
             break;
         }
     }
-    fprintf(stderr, "march: HTTP thread pool started (%d workers)\n", g_pool.size);
+    fprintf(stderr, "march: HTTP thread pool started "
+                    "(%d workers, growing to %d as connections arrive)\n",
+            g_pool.size, g_pool.max_size);
 }
 
 void march_http_pool_stop(void) {
     /* Signal workers to exit once the queue drains. */
     atomic_store_explicit(&g_pool.shutdown, 1, memory_order_release);
+    /* Read `size` under the lock and join that snapshot.  pool_grow_if_starved
+       both reads shutdown and mutates size under this same lock, and it bails
+       when shutdown is set — so once we have released the lock below, no
+       worker beyond `n` can be created and the snapshot is complete. */
     pthread_mutex_lock(&g_pool.queue.lock);
+    int n = g_pool.size;
     pthread_cond_broadcast(&g_pool.queue.not_empty);
     pthread_mutex_unlock(&g_pool.queue.lock);
 
-    for (int i = 0; i < g_pool.size; i++)
+    for (int i = 0; i < n; i++)
         pthread_join(g_pool.threads[i], NULL);
 
     free(g_pool.threads);
@@ -1881,7 +1968,6 @@ void march_http_pool_stop(void) {
 void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline) {
     if (!pipeline) return;
-    (void)max_conns;
     (void)idle_timeout;
 
     /* Ignore broken-pipe signals — send errors are handled explicitly. */
@@ -1928,7 +2014,12 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
      * holds. */
     int sequential = (getenv("MARCH_HTTP_SEQUENTIAL") != NULL);
     if (!sequential) {
-        march_http_pool_start(0 /* auto-detect from CPU count */, pipeline);
+        /* max_conns is the concurrent-connection ceiling the pool grows to.
+           It used to be accepted and discarded here, which is why
+           HttpServer.max_connections had no effect and the real limit was
+           whatever ncpus*2 happened to be. */
+        march_http_pool_start_max(0 /* auto-detect from CPU count */,
+                                  max_conns, pipeline);
         fprintf(stderr, "march: HTTP server listening on port %lld\n", (long long)port);
     } else {
         fprintf(stderr, "march: HTTP server listening on port %lld (sequential)\n",

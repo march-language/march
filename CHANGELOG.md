@@ -11,6 +11,30 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The default HTTP server no longer strands connections past its worker
+  count.** A pool worker owns a connection for that connection's entire
+  keep-alive lifetime, so a *fixed* pool of N workers served at most N
+  concurrent connections — every further connection was accepted by the
+  kernel, showed the client a successful connect, and was then never read.
+  With the default `ncpus*2` = 28 workers and 256 offered connections, 228 sat
+  with unread bytes in `Recv-Q` indefinitely. The pool is now **elastic**: the
+  worker count is a floor, and a worker about to park on a connection starts
+  one more if it was the last idle one, up to `max_connections`. Measured at
+  256 connections, order-swapped and repeated: **228 starved connections → 0**,
+  and in-flight requests (throughput × latency) **27.7 → 253.7**. Reported
+  average latency rises from 0.9 ms to 8.7 ms, which is the honest figure — the
+  old number only averaged the 28 connections that were being served at all.
+
+  `HttpServer.max_connections` now does something. It had been accepted and
+  discarded (`(void)max_conns`), which is part of why the real limit was
+  invisible; it is now the ceiling the pool grows to, defaulting to 1024.
+
+  Servers with many mostly-idle keep-alive connections should still prefer the
+  event loop (`MARCH_HTTP_EVLOOP=1`), which costs 15–17% less CPU per request
+  and does not spend a thread per connection.
+
 ### Added
 
 - **The compiled HTTP server is covered end-to-end by the test suite**
@@ -26,6 +50,17 @@ git log is authoritative for exact commits.
   still alive and decodes `128 + signal` if not (one crash was silent), and
   covers the thread-pool and event-loop servers as equal peers. The only skip
   is clang genuinely absent; a broken server can never become a skip.
+
+### Removed
+
+- **`march_response_send_plaintext` is deleted.** It was a TechEmpower
+  `/plaintext` fast path that hardcoded `Content-Length: 13` and the literal
+  body `"Hello, World!"`, so reaching it required bypassing the user's March
+  router entirely — the program nominally under benchmark would never have
+  run. It had no callers and never had any. A general small-fixed-response
+  path is separately not worth adding: the normal response builder is already
+  zero-copy, with every iovec pointing at a March string or a static constant
+  and one `snprintf` of Content-Length into thread-local scratch.
 
 ### Changed
 

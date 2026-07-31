@@ -126,12 +126,34 @@ void march_evloop_server_listen(int port, void *pipeline);
  * Used as a fallback when sysconf(_SC_NPROCESSORS_ONLN) is unavailable. */
 #define MARCH_HTTP_POOL_DEFAULT_SIZE 16
 
+/* Ceiling on concurrent connections when the caller does not supply one.
+ *
+ * A worker owns a connection for its whole keep-alive lifetime, so the worker
+ * count IS the concurrent-connection limit; the pool grows on demand up to
+ * this bound rather than leaving further connections accepted-but-unread.
+ * 1024 threads at the default stack size is a few hundred MB of *virtual*
+ * address space and very little resident memory — the real cost is scheduler
+ * pressure, which is why the event-loop server (MARCH_HTTP_EVLOOP=1) is the
+ * better answer above a few hundred concurrent connections. */
+#define MARCH_HTTP_POOL_MAX_SIZE 1024
+
+/* Absolute cap, even if the caller asks for more via max_connections. */
+#define MARCH_HTTP_POOL_HARD_MAX 4096
+
 /* Start the HTTP connection thread pool.
  * pool_size: number of worker threads (0 → MARCH_HTTP_POOL_DEFAULT_SIZE).
  * pipeline:  compiled March function pointer (Conn -> Conn), shared by all workers.
  * Must be called before the accept loop starts enqueuing connections.
- * Safe to call once per process lifetime. */
+ * Safe to call once per process lifetime.
+ * Equivalent to march_http_pool_start_max(pool_size, 0, pipeline). */
 void march_http_pool_start(int64_t pool_size, void *pipeline);
+
+/* As march_http_pool_start, but with an explicit concurrent-connection
+ * ceiling.  max_conns <= 0 → MARCH_HTTP_POOL_MAX_SIZE; values above
+ * MARCH_HTTP_POOL_HARD_MAX are clamped.  pool_size workers start immediately
+ * and the pool grows towards the ceiling as concurrent connections arrive. */
+void march_http_pool_start_max(int64_t pool_size, int64_t max_conns,
+                                void *pipeline);
 
 /* Signal all worker threads to drain remaining work and exit, then join them.
  * Blocks until every worker has returned.  Destroys pool synchronisation

@@ -73,25 +73,6 @@ static const char *status_line_static(int code, size_t *len_out) {
 #undef SL
 }
 
-/* ── Pre-serialized plaintext benchmark response ─────────────────────── */
-
-/* Static headers block for the TechEmpower /plaintext benchmark.
- * Does NOT include "Date:" (filled from cache) or the terminal "\r\n"
- * (added by march_response_set_body).
- *
- * Content-Length: 13 matches sizeof("Hello, World!") - 1. */
-const char MARCH_PLAINTEXT_STATIC_HEADERS[] =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/plain\r\n"
-    "Content-Length: 13\r\n"
-    "Server: March\r\n";
-
-const size_t MARCH_PLAINTEXT_STATIC_HEADERS_LEN =
-    sizeof(MARCH_PLAINTEXT_STATIC_HEADERS) - 1;  /* exclude NUL */
-
-const char MARCH_PLAINTEXT_BODY[] = "Hello, World!";
-const size_t MARCH_PLAINTEXT_BODY_LEN = sizeof(MARCH_PLAINTEXT_BODY) - 1;
-
 /* ── Thread-local scratch buffer ─────────────────────────────────────── */
 
 /* Each thread gets MARCH_RESPONSE_SCRATCH_SIZE bytes for dynamic content.
@@ -269,36 +250,4 @@ void march_response_clear_no_free(march_response_t *resp) {
     resp->iov_count = 0;
     /* scratch_used intentionally NOT reset — the caller manages the scratch
      * lifetime and may still have live iovecs pointing into scratch[0..used]. */
-}
-
-/* ── Plaintext fast path ──────────────────────────────────────────────── */
-
-int march_response_send_plaintext(int fd) {
-    /* iov layout:
-     *   [0]  static headers (status + Content-Type + Content-Length + Server)
-     *   [1]  cached Date header
-     *   [2]  "\r\n"  (blank line, end of headers)
-     *   [3]  "Hello, World!"
-     */
-    size_t     date_len = 0;
-    const char *date    = march_http_cached_date(&date_len);
-
-    struct iovec iov[4];
-    iov[0].iov_base = (void *)MARCH_PLAINTEXT_STATIC_HEADERS;
-    iov[0].iov_len  = MARCH_PLAINTEXT_STATIC_HEADERS_LEN;
-    iov[1].iov_base = (void *)date;
-    iov[1].iov_len  = date_len;
-    iov[2].iov_base = (void *)CRLF;
-    iov[2].iov_len  = 2;
-    iov[3].iov_base = (void *)MARCH_PLAINTEXT_BODY;
-    iov[3].iov_len  = MARCH_PLAINTEXT_BODY_LEN;
-
-    int iovcnt = (date_len > 0) ? 4 : 3;
-    if (date_len == 0) {
-        /* No Date — collapse: static headers → CRLF → body */
-        iov[1] = iov[2];
-        iov[2] = iov[3];
-    }
-
-    return writev_all_resp(fd, iov, iovcnt);
 }
