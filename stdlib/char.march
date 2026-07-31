@@ -54,12 +54,12 @@ mod Char do
     end
   end
 
-  doc "Returns the integer code point of c."
+  doc "Returns the value (0-255) of the first byte of c. A byte, not a code point: for multi-byte UTF-8 text this is the leading byte only."
   fn to_int(c : String) : Int do
     char_to_int(c)
   end
 
-  doc "Returns the character with the given code point."
+  doc "Returns the one-byte string for byte value n, taken modulo 256 (so 256 yields byte 0, and -1 yields byte 255). A byte, not a code point: build a multi-byte UTF-8 character one byte at a time."
   fn from_int(n : Int) : String do
     char_from_int(n)
   end

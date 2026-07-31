@@ -4950,10 +4950,16 @@ let base_env : env =
   ; ("char_to_int", VBuiltin ("char_to_int", function
         | [VString c] when String.length c = 1 -> VInt (Char.code c.[0])
         | _ -> eval_error "char_to_int: expected single-char string"))
+  (* Byte constructor, NOT a code-point constructor: the result is the single
+     byte [n land 0xFF], which is exactly what march_char_from_int does in the
+     C runtime ((char)(n & 0xFF)).  This used to clamp to ASCII and return the
+     EMPTY string above 127, so every caller handing it a real byte -- URI
+     percent-decode, the msgpack byte walk, Http header decoding -- was correct
+     compiled and silently corrupt interpreted, with no error to notice.  The
+     masking (rather than a range check) is deliberate and load-bearing for
+     parity: the runtime wraps, so 256 must yield byte 0 here too, not raise. *)
   ; ("char_from_int", VBuiltin ("char_from_int", function
-        | [VInt n] ->
-          if n >= 0 && n <= 127 then VString (String.make 1 (Char.chr n))
-          else VString ""
+        | [VInt n] -> VString (String.make 1 (Char.chr (n land 0xFF)))
         | _ -> eval_error "char_from_int: expected int"))
 
     (* ---- Comparison helpers ---- *)
@@ -6587,8 +6593,11 @@ let base_env : env =
         | _ -> eval_error "MPST.close: expected MChan"))
 
   (* ---- Bytes builtins ---- *)
-  (* Convert a raw byte value (0–255) to a single-byte String. Unlike
-     char_from_int, this accepts the full 0–255 range including non-ASCII. *)
+  (* Convert a raw byte value (0–255) to a single-byte String.  Same payload
+     as char_from_int (they share march_char_from_int once compiled); the
+     difference is the out-of-range contract, which is deliberate.  This one
+     names a byte, so a value outside 0–255 is a caller bug and is reported;
+     char_from_int wraps, because the C runtime wraps. *)
   ; ("byte_to_char", VBuiltin ("byte_to_char", function
         | [VInt n] when n >= 0 && n <= 255 -> VString (String.make 1 (Char.chr n))
         | [VInt n] -> eval_error "byte_to_char: %d out of range 0–255" n
