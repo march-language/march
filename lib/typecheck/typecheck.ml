@@ -3659,6 +3659,13 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
          end
        end);
        let arg_tys, result_ty = instantiate_ctor env ci in
+       (* Record in type_map so lower_match.ml's pattern-matrix compiler can look
+          up the resolved type via ty_of_span for a NESTED constructor
+          sub-pattern (e.g. `Cons(Row(fp), rest)`'s `Row(fp)`) — without this the
+          destructured field var stays TVar "_" forever, and if the ctor's short
+          name collides with another type's ctor (Collision_set), codegen's
+          ambiguous by-arity ctor_entry fallback can pick the WRONG type's tag. *)
+       Hashtbl.replace env.type_map name.span result_ty;
        (* Resolve the constructor's own type against the expected type BEFORE
           walking its arguments.  [instantiate_ctor] hands back fresh vars for
           the parent type's parameters, so `Some`'s argument is still an

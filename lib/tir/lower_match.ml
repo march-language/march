@@ -560,30 +560,41 @@ and compile_matrix_impl
                (e.g. one row wildcards a field another row names), but they
                all denote the SAME constructor field, so any row's
                resolvable span is authoritative. *)
-            (* IMPORTANT: only give a field its concrete type when EVERY row
-               wildcard-discards it.  A wildcard-discarded field is never rebound
-               by name, so it exists only for RC — and needs the concrete type so
+            (* IMPORTANT: only give a field its concrete type when no row binds
+               it to a raw NAME (PatVar/PatAs).  A wildcard-discarded field, or
+               one destructured further by a nested pattern (PatCon/PatTuple/
+               PatRecord/…), is never rebound to a bare name, so it exists only
+               for RC/nested-match codegen — and needs the concrete type so
                Rc_types.needs_rc doesn't spuriously dec_rc an unboxed scalar (the
-               List(Float) crash above).  But a field BOUND by name in any row is
-               rebound downstream via bind_trivial_pat as `let n = <sub_var>` with
-               n's real type; if the sub_var ALSO carries that concrete scalar
-               type, the ELet's source and target types match, so codegen elides
-               the uniform→natural untag — and the field's runtime value in the
-               uniform ADT cell is TAGGED.  That regressed `Ok(n) -> int_to_string(n)`
-               on Result(Int): int_to_string received the tagged pointer (15 = 7<<1|1)
-               instead of 7.  Keeping the sub_var at the erased placeholder for any
-               named field preserves the untag at the binding's use sites, while the
-               named rebinding still gives Perceus the real type. *)
+               List(Float) crash above) and so a nested constructor sub-pattern
+               (e.g. `Cons(Row(fp), rest)`'s `Row(fp)`) resolves its scrutinee's
+               real type instead of TVar "_" — which, for a ctor whose short
+               name collides with another type's ctor (Collision_set), made
+               codegen's ambiguous by-arity ctor_entry fallback pick the WRONG
+               type's tag and panic "non-exhaustive pattern match" (nested Cons/
+               Ctor pattern over a type sharing its short name with a stdlib
+               type, e.g. user `Row` vs stdlib `DataFrame.Row`/`Csv.CsvRow.Row`).
+               But a field BOUND BY NAME in any row is rebound downstream via
+               bind_trivial_pat as `let n = <sub_var>` with n's real type; if the
+               sub_var ALSO carries that concrete scalar type, the ELet's source
+               and target types match, so codegen elides the uniform→natural
+               untag — and the field's runtime value in the uniform ADT cell is
+               TAGGED.  That regressed `Ok(n) -> int_to_string(n)` on
+               Result(Int): int_to_string received the tagged pointer
+               (15 = 7<<1|1) instead of 7.  Keeping the sub_var at the erased
+               placeholder for any name-bound field preserves the untag at the
+               binding's use sites, while the named rebinding still gives
+               Perceus the real type. *)
             let field_ty_at (i : int) : Tir.ty =
-              let all_wild =
+              let no_name_binder =
                 List.for_all (fun (pats, _) ->
                     match List.nth_opt pats i with
-                    | Some (Ast.PatWild _) -> true
-                    | Some _               -> false
-                    | None                 -> true)
+                    | Some (Ast.PatVar _) | Some (Ast.PatAs _) -> false
+                    | Some _                                  -> true
+                    | None                                    -> true)
                   !rows_ref
               in
-              if not all_wild then Lower_types.unknown_ty
+              if not no_name_binder then Lower_types.unknown_ty
               else
                 let rec scan = function
                   | [] -> Lower_types.unknown_ty

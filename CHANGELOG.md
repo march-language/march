@@ -299,6 +299,12 @@ git log is authoritative for exact commits.
   interpreter-vs-compiled oracle sweep. Renamed the example's module to
   `SecretCode`; no compiler change, since the global-namespace behavior is
   by design (see `specs/lang` module system docs).
+- **A nested constructor pattern over a type whose short name is shared with
+  a stdlib type (e.g. `match rows do Cons(Row(fp), rest) -> ... end` where the
+  user's own `Row` type collides by name with `DataFrame.Row`) no longer
+  panics `non-exhaustive pattern match` when compiled.** It matched correctly
+  interpreted; a destructured sub-pattern's erased type meant compiled codegen
+  could pick the wrong same-named type's constructor tag.
 
 - **`Json.parse` now accepts `\uXXXX` escapes.** The escape decoder handled
   only `\" \\ \/ \n \r \t \b \f` and rejected everything else, so
