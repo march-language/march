@@ -48,6 +48,50 @@ floor, and the treatment effect is twenty times smaller than it. The
 within-arm spread on shards=1 close (13.1 µs) is itself larger than the whole
 treatment effect. Reverted in the commit following its own.
 
+### 6. TCP_FASTOPEN — investigated, not implemented: unmeasurable in this rig
+
+Considered as a way to cut the connection-close cost (Run 5 measured ~94-107
+CPU-us/request for a fresh connection per request, against keep-alive's
+~24-27). Not built, because two independent facts make it unverifiable here,
+either one alone sufficient:
+
+1. **`wrk` has no TFO support** — no `--fastopen` flag, and `strings` on the
+   binary shows no `MSG_FASTOPEN` anywhere. TFO's saving only exists when the
+   *client* sends data in the SYN packet; our load generator can never
+   exercise that path, so a correct server-side implementation would be
+   invisible to every benchmark this project runs.
+2. **Loopback has no RTT to amortize.** Measured `ping -c3 127.0.0.1`:
+   0.027-0.054 ms round trip. TFO's entire mechanism is skipping the wait for
+   a handshake ACK before sending data; on a real network with 20-50 ms RTT
+   that is decisive, but the maximum theoretical saving over a sub-millisecond
+   loopback round trip is a few tens of microseconds. The technique's value
+   only exists over real network latency, which this rig cannot produce.
+
+**What actually explains the connection-close cost, from `strace -f -c`
+(counts, not the reported timings — `strace`'s ptrace-trap overhead inflates
+per-syscall timing by an unknown, large factor, so only call COUNTS are
+trustworthy here):**
+
+| syscall | connection-close | keep-alive |
+|---|---:|---:|
+| accept | 1/request | amortized over the connection |
+| setsockopt (NODELAY + SNDBUF + RCVTIMEO) | 3/request | amortized |
+| recv | 1/request | 1/request |
+| writev | 1/request | 1/request |
+| close | 1/request | amortized |
+
+**7 syscalls/request against keep-alive's 2.** The gap is syscall COUNT, not
+RTT — every one of those extra 5 is real kernel work (socket alloc, TCP state
+machine, buffer setup, fd teardown) that has to happen once per TCP
+connection regardless of how fast the network is. Nothing under consideration
+here removes that work; TFO specifically only removes a WAIT, not the work
+itself, which is why it would not have helped even if it were measurable.
+
+Not investigated: whether `SO_SNDBUF` set on the *listening* socket is
+inherited by `accept()`ed sockets on Linux, which would drop one of the three
+per-connection `setsockopt` calls if so. Flagged as a small, real, but
+unverified follow-up rather than the primary throughput lever.
+
 ### 5. Header allocation is not a measurable cost, even at a realistic count
 
 `march_conn_from_parsed` (`runtime/march_http.c`) allocates a March string,
