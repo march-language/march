@@ -11,6 +11,58 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`derive Json for T` (record types) now also generates
+  `from_json_events(events) : Result((T, List(JsonStream.Event)),
+  Json.DecodeError)`, a second decoder that consumes `JsonStream`'s
+  `Event` list directly instead of building a `JsonValue` tree first.**
+  A record can now be decoded straight off the token stream — useful for
+  a single huge top-level JSON object, where the existing tree-based
+  `from_json` would otherwise have to materialize the whole thing as a
+  `JsonValue` first. Generated as a small state machine: one `Option`
+  slot per field, filled opportunistically as `EvKey` events arrive in
+  whatever order the JSON object happens to use; a nested field whose
+  type also derives Json recurses into its own `from_json_events`,
+  composing the error path across the boundary exactly like the tree
+  decoder does. Unknown fields (and duplicate keys, which keep
+  first-occurrence-wins, matching the tree decoder) are skipped by
+  consuming their WHOLE value — including nested containers — via
+  explicit depth counting, so the event stream never desynchronizes.
+  Scope: record types only; `TDVariant`/`TDAlias` are unchanged and do
+  not get this second decoder.
+
+- **`JsonStream.each_typed(path, cb)` decodes an NDJSON file straight to
+  typed records via `derive Json`'s `from_json`, and attaches the
+  decoding record's absolute byte offset to any failure.** A driver built
+  on top of the existing (frozen) `JsonStream` tokenizer/event API,
+  modeled on `each_value`: feeds the file to the tokenizer one line at a
+  time (NDJSON is one record per line) so the byte offset just before
+  each line is known, decodes each completed top-level value with the
+  caller's bare `from_json`, and calls `cb(record)` per success. Returns
+  `Ok(n)` with the record count, or the FIRST decode/tokenizer failure —
+  `Json.DecodeError` — with `Json.decode_error_at` used to set its offset
+  to that record's start, so `Json.decode_error_to_string(e)` names both
+  the failing field and the byte offset, e.g. `"$.id (byte 9): expected
+  Int"`. `test/stdlib/test_json_stream.march` (phase 1/2's tokenizer
+  suite) is unchanged and stays green — `each_typed` does not touch
+  `feed`/`finish`/`go` or any tokenizer internals.
+
+### Changed
+
+- **`derive Json`'s generated `from_json` now returns
+  `Result(T, Json.DecodeError)` instead of `Result(T, String)` — a
+  breaking change for any caller matching on the old bare-`String` error.**
+  `Json.DecodeError(message, path, byte_offset)` carries a JSONPath-style
+  path (`Json.JPathField`/`Json.JPathIndex` steps, e.g.
+  `"$.users[3].id: expected Int"`) and an optional byte offset (`-1` when
+  none applies), rendered via `Json.decode_error_to_string`. Every
+  in-repo caller (`JsonStream.each_value`/`each_typed`,
+  `test/stdlib/test_json_typed.march`) was migrated in the same set of
+  commits that introduced the type. A bare `to_string(e)` still produces
+  a readable message (e.g. `DecodeError("missing field",
+  [JPathField("age")], -1)`), but code that expected a plain error string
+  should switch to `Json.decode_error_to_string(e)`.
 ### Changed
 
 - **The event-loop HTTP server is now selectable at RUN TIME, not build time.**
@@ -63,6 +115,42 @@ git log is authoritative for exact commits.
   call to a same-named ordinary function. An extern has no body, so it cannot
   recurse at all; declaring `extern fn length` and calling it reported the same
   bogus error.
+- **`derive Json`'s generated `from_json` for enum and variant-with-args
+  types now reports a JSONPath instead of one opaque
+  `"invalid JSON for T"` error, and no longer panics on a nested-argument
+  decode failure.** An unrecognized tag reports
+  `Json.decode_error_to_string(e) == "$.tag: unknown variant \`X\`"`; a
+  wrong-typed positional argument names its index, e.g.
+  `"$[0]: expected Int"` (via a new `Json.JPathIndex` step, not
+  `JPathField`); a missing tag or a non-object input reuse the same
+  `"missing field"` / `"expected an object"` wording as the record decoder.
+  An argument whose type is itself another `derive Json` type composes a
+  path across the boundary the same way a nested record field does (via
+  `Json.decode_error_under`). No wire-format change: the encoder/decoder
+  both use a flat JSON object with a `"tag"` key plus positional
+  string-numbered keys (`"0"`, `"1"`, ...) — there is no `"values"` array.
+  The same pre-existing, separately-tracked `from_json` cross-type dispatch
+  bug (recursive `from_json` calls resolve to whichever type derived `Json`
+  most recently in the module) is unaffected by this change and remains
+  open.
+- **`derive Json`'s generated `from_json` for record types now reports a
+  JSONPath instead of one opaque `"invalid JSON for T"` error, and no longer
+  panics on a nested-record decode failure.** Each field is checked in turn,
+  so a failure names exactly which field caused it — `Json.decode_error_to_string`
+  renders it as e.g. `"$.age: missing field"` or `"$.name: expected String"` —
+  and a field whose type is itself another `derive Json` record composes a
+  path across the boundary (`"$.inner.id: expected Int"`). Unknown JSON fields
+  continue to be ignored (unchanged). `Json.get_field(kvs, key)` was added to
+  `stdlib/json.march` in support. A separate, pre-existing bug (recursive
+  `from_json` calls resolve to whichever type derived `Json` most recently in
+  the module, not necessarily the field's own type) is unaffected by this
+  change and remains open.
+- **`derive Json`'s `to_json` no longer misencodes a record whose field is
+  itself another `derive Json` type.** `to_json(outer)` could panic with
+  `record has no field '...'` when a record contained a field of another
+  `derive Json`-derived type — the recursive encode call resolved back into
+  the enclosing type's own encoder instead of the field's. Interpreter only;
+  `from_json` is a separate, still-open issue.
 
 - **The default HTTP server no longer strands connections past its worker
   count.** A pool worker owns a connection for that connection's entire

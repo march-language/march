@@ -30,7 +30,7 @@ mod TestMultiJson do
     -- Roundtrips
     match from_json(pj) do
     Ok(p2) -> println("Point roundtrip: x=" ++ int_to_string(p2.x))
-    Err(e) -> println("Point error: " ++ e)
+    Err(e) -> println("Point error: " ++ Json.decode_error_to_string(e))
     end
 
     match from_json(cj) do

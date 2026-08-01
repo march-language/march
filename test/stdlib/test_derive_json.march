@@ -25,7 +25,7 @@ mod TestDeriveJson do
       match result do
       Ok(c) -> assert (c == Red)
       Err(e) -> do
-        println("Error: " ++ e)
+        println("Error: " ++ Json.decode_error_to_string(e))
         assert (false)
       end
       end
@@ -37,7 +37,7 @@ mod TestDeriveJson do
       match result do
       Ok(c) -> assert (c == Green)
       Err(e) -> do
-        println("Error: " ++ e)
+        println("Error: " ++ Json.decode_error_to_string(e))
         assert (false)
       end
       end
@@ -49,7 +49,7 @@ mod TestDeriveJson do
       match result do
       Ok(c) -> assert (c == Blue)
       Err(e) -> do
-        println("Error: " ++ e)
+        println("Error: " ++ Json.decode_error_to_string(e))
         assert (false)
       end
       end
@@ -90,7 +90,7 @@ mod TestDeriveJson do
       match result do
       Ok(s2) -> assert (s2 == Circle(10))
       Err(e) -> do
-        println("Error: " ++ e)
+        println("Error: " ++ Json.decode_error_to_string(e))
         assert (false)
       end
       end
@@ -103,7 +103,7 @@ mod TestDeriveJson do
       match result do
       Ok(s2) -> assert (s2 == Rect(3, 4))
       Err(e) -> do
-        println("Error: " ++ e)
+        println("Error: " ++ Json.decode_error_to_string(e))
         assert (false)
       end
       end
@@ -115,7 +115,7 @@ mod TestDeriveJson do
       match result do
       Ok(s2) -> assert (s2 == Empty)
       Err(e) -> do
-        println("Error: " ++ e)
+        println("Error: " ++ Json.decode_error_to_string(e))
         assert (false)
       end
       end
@@ -157,7 +157,7 @@ mod TestDeriveJson do
         assert (u2.active == true)
       end
       Err(e) -> do
-        println("Error: " ++ e)
+        println("Error: " ++ Json.decode_error_to_string(e))
         assert (false)
       end
       end

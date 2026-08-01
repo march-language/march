@@ -478,6 +478,28 @@ describe "Json" do
       end
     end
 
+    test "get_field looks up a key directly in the kvs list" do
+      match Json.parse("{\"a\": 1, \"b\": 2}") do
+      Err(e) -> panic("parse failed: " ++ e)
+      Ok(v) -> match v do
+        Object(kvs) -> do
+          match Json.get_field(kvs, "b") do
+          None -> panic("b missing")
+          Some(val) -> match val do
+            Number(f) -> assert (f == 2.0)
+            _ -> panic("b not Number")
+            end
+          end
+          match Json.get_field(kvs, "missing") do
+          None -> assert (true)
+          Some(_) -> panic("missing key should be None")
+          end
+        end
+        _ -> panic("expected Object")
+        end
+      end
+    end
+
   end
 
   describe "nested JSON" do

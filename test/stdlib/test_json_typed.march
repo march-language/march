@@ -1,0 +1,658 @@
+-- Capability probe + wiring proof for `derive Json` x JsonStream.
+-- Run: dune exec march -- test test/stdlib/test_json_typed.march
+-- Design: specs/2026-07-31-json-typed-decoding-design.md
+-- Capability map: specs/2026-07-31-derive-json-capability-map.md
+--
+-- IMPORTANT structural note (a finding in its own right -- see the
+-- capability map's "cross-type shadowing" entry): `derive Json for T`
+-- binds a single bare `from_json`/`to_json` pair per module. Each
+-- subsequent `derive Json for U` in the SAME module rebinds those same
+-- bare names, silently shadowing T's decoder -- there is no per-type
+-- dispatch for the bare call. Calling `from_json` lazily inside a `test`
+-- block (which runs after the whole module, and hence every `derive`, has
+-- loaded) would therefore always observe whichever type derived Json
+-- LAST in the file, not the type the call site intends. To probe each
+-- type's own decoder faithfully in one file, every round-trip below is
+-- computed as a top-level `let` immediately after that type's
+-- `derive Json`, before the next `derive Json` rebinds the name.
+
+mod TestJsonTyped do
+
+  type Flat = { name : String, age : Int, active : Bool, score : Float }
+  derive Json for Flat
+
+  pfn parse_flat(s) do
+    match Json.parse(s) do
+    Err(e) -> Err("parse: " ++ e)
+    Ok(v) -> match from_json(v) do
+      Err(e) -> Err("decode: " ++ to_string(e))
+      Ok(x) -> Ok(x)
+      end
+    end
+  end
+
+  let flat_ok_r = parse_flat("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}")
+  let flat_missing_r = parse_flat("{\"name\":\"a\",\"age\":3}")
+  let flat_wrongtype_r = parse_flat("{\"name\":1,\"age\":3,\"active\":true,\"score\":1.5}")
+  let flat_unknown_r = parse_flat("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5,\"zzz\":9}")
+  let flat_dup_r = parse_flat("{\"name\":\"a\",\"name\":\"b\",\"age\":3,\"active\":true,\"score\":1.5}")
+
+  -- ── Record decode errors carry a path (Task 4) ───────────────────────
+  -- Unlike parse_flat above (which immediately stringifies the DecodeError
+  -- via to_string), these capture the raw Json.DecodeError so the tests
+  -- below can inspect its path via Json.decode_error_to_string.
+
+  let path_wrong_scalar_r = match Json.parse("{\"name\":1,\"age\":3,\"active\":true,\"score\":1.5}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let path_missing_field_r = match Json.parse("{\"name\":\"a\",\"active\":true,\"score\":1.5}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let path_unknown_fields_r = match Json.parse("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5,\"zzz\":9}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let path_non_object_r = match Json.parse("[1,2]") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+
+  -- ── Phase B: from_json_events, the differential oracle (Task 7) ──────
+  -- `derive Json for Flat` also generates `from_json_events`, a SECOND
+  -- decoder that consumes JsonStream's `Event` list directly instead of
+  -- building a JsonValue tree first (lib/desugar/desugar.ml's
+  -- from_json_events_impl). It must be probed here, immediately after
+  -- Flat's own `derive Json`, for the exact same cross-type-shadowing
+  -- reason as everything else in this file: the bare `from_json_events`
+  -- name is rebound by every subsequent `derive Json`, so a call made
+  -- lazily (e.g. inside a `describe`/`test` block below, which runs after
+  -- the whole module has loaded) would resolve to whichever type derived
+  -- Json LAST, not to Flat's own decoder.
+  --
+  -- `events_of(s)` turns a whole JSON document into its flat `Event`
+  -- list via JsonStream's own feed/finish (NOT reimplementing the
+  -- tokenizer -- JsonStream's tokenizer is frozen and this is only ever
+  -- a consumer of the events it already produces).
+  pfn events_of(s) do
+    match JsonStream.feed(JsonStream.start(), s) do
+    Err(e) -> Err(e)
+    Ok((evs1, st2)) ->
+      match JsonStream.finish(st2) do
+      Err(e) -> Err(e)
+      Ok(evs2) -> Ok(List.append(evs1, evs2))
+      end
+    end
+  end
+
+  -- Render the TREE decoder's verdict as one comparable string: on
+  -- success, re-encode the decoded value via `to_json` (so the oracle
+  -- compares VALUES, not just verdicts) -- on failure, the rendered
+  -- DecodeError (message AND path, per Json.decode_error_to_string).
+  pfn render_tree(s) do
+    match Json.parse(s) do
+    Err(e) -> "PARSEERR:" ++ e
+    Ok(v) -> match from_json(v) do
+      Ok(r) -> "OK:" ++ Json.to_string(to_json(r))
+      Err(e) -> "ERR:" ++ Json.decode_error_to_string(e)
+      end
+    end
+  end
+
+  -- Same, but via the EVENT decoder -- decodes straight off `events_of`'s
+  -- Event list, never touching Json.parse or a JsonValue tree.
+  pfn render_events(s) do
+    match events_of(s) do
+    Err(e) -> "PARSEERR:" ++ JsonStream.err_to_string(e)
+    Ok(evs) -> match from_json_events(evs) do
+      Ok((r, _rest)) -> "OK:" ++ Json.to_string(to_json(r))
+      Err(e) -> "ERR:" ++ Json.decode_error_to_string(e)
+      end
+    end
+  end
+
+  -- Compare the two decoders' rendered verdicts for one document,
+  -- printing a diagnostic on any mismatch (both verdict AND message must
+  -- agree, since `render_tree`/`render_events` fold verdict and message
+  -- into one string).
+  pfn agree_one(s) do
+    let a = render_tree(s)
+    let b = render_events(s)
+    if a == b do true
+    else do
+      IO.puts("ORACLE MISMATCH for " ++ s ++ " -- tree=" ++ a ++ " events=" ++ b)
+      false
+    end
+    end
+  end
+
+  -- No `&&` short-circuiting: every document is checked (and any
+  -- mismatch printed) even after an earlier one has already failed.
+  pfn agree_all(docs) do
+    match docs do
+    Nil -> true
+    Cons(d, rest) -> do
+      let ok1 = agree_one(d)
+      let ok2 = agree_all(rest)
+      ok1 && ok2
+    end
+    end
+  end
+
+  -- The corpus: task-7-brief.md's Step 1 example, PLUS a duplicate-key
+  -- document (Step 4 requires the oracle to cover it explicitly).
+  let json_events_corpus =
+    Cons("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}",
+    Cons("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5,\"zzz\":9}",
+    Cons("{\"age\":3,\"name\":\"a\",\"score\":1.5,\"active\":true}",
+    Cons("{\"name\":1,\"age\":3,\"active\":true,\"score\":1.5}",
+    Cons("{\"name\":\"a\",\"active\":true,\"score\":1.5}",
+    Cons("[1,2]",
+    Cons("{\"name\":\"a\",\"name\":\"b\",\"age\":3,\"active\":true,\"score\":1.5}",
+    Nil)))))))
+  let json_events_corpus_agrees_r = agree_all(json_events_corpus)
+
+  -- ── Unknown-field subtree skipping: depth-counting tests (Task 7 Step 3)
+  -- The single most likely way a generated event decoder goes wrong: if
+  -- `skip_value` desynchronizes the stream (e.g. by counting only "the
+  -- next event" instead of tracking container depth explicitly), it does
+  -- NOT raise an error -- it silently reads the following KNOWN field's
+  -- events as if they were the unknown field's remaining subtree, so the
+  -- next field decodes to a WRONG VALUE with no error at all. So each
+  -- case below has an unknown field (whose value is itself a container)
+  -- immediately followed by Flat's normal fields, and the assertions
+  -- below check every one of those fields' ACTUAL DECODED VALUES -- not
+  -- merely that decoding succeeded -- which is what would actually catch
+  -- a desynchronized skip.
+  let skip_nested_object_r =
+    match events_of("{\"zzz\":{\"a\":{\"b\":1}},\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+  let skip_nested_array_r =
+    match events_of("{\"zzz\":[[1,2],[3,4]],\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+  let skip_array_of_objects_r =
+    match events_of("{\"zzz\":[{\"x\":1},{\"y\":2}],\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+  let skip_empty_object_r =
+    match events_of("{\"zzz\":{},\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+
+  -- A second, nested record pair, to probe path composition across a
+  -- record boundary (Json.decode_error_under). PathOuter must derive Json
+  -- LAST (of this pair) so the bare `from_json` called just below resolves
+  -- to PathOuter's own decoder -- see the module-level note at the top of
+  -- this file re: cross-type shadowing.
+  type PathInner = { id : Int }
+  derive Json for PathInner
+
+  type PathOuter = { label : String, inner : PathInner }
+  derive Json for PathOuter
+
+  let path_nested_r = match Json.parse("{\"label\":\"x\",\"inner\":{\"id\":\"nope\"}}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+
+  type Tag = Red | Green
+  derive Json for Tag
+
+  let enum_r = match Json.parse("{\"tag\":\"Red\"}") do
+    Err(e) -> Err("parse: " ++ e)
+    Ok(v) -> from_json(v)
+    end
+
+  type Shape = Circle(Int) | Rect(Int, Int)
+  derive Json for Shape
+
+  let variant_r = match Json.parse("{\"tag\":\"Rect\",\"0\":3,\"1\":4}") do
+    Err(e) -> Err("parse: " ++ e)
+    Ok(v) -> from_json(v)
+    end
+
+  -- ── Variant decode errors carry a path (Task 5) ──────────────────────
+  -- Same wire shape the encoder produces for Shape (see `variant_r` above:
+  -- {"tag": "...", "0": ..., "1": ...}) -- these two probes must be
+  -- computed here, right after Shape's own `derive Json`, for the same
+  -- cross-type-shadowing reason as the Task 4 `path_*` bindings above.
+
+  let variant_unknown_tag_r = match Json.parse("{\"tag\":\"Purple\"}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let variant_wrong_arg_type_r = match Json.parse("{\"tag\":\"Circle\",\"0\":\"nope\"}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+
+  describe "derive Json capability map" do
+
+    test "flat record round-trips" do
+      match flat_ok_r do
+      Ok(r) -> assert (r.name == "a" && r.age == 3)
+      Err(e) -> do IO.puts("FLAT: " ++ e) assert (false) end
+      end
+    end
+
+    test "enum round-trips" do
+      match enum_r do
+      Ok(t) -> match t do
+        Red -> assert (true)
+        _ -> assert (false)
+        end
+      Err(e) -> do IO.puts("ENUM: " ++ to_string(e)) assert (false) end
+      end
+    end
+
+    test "variant-with-args round-trips" do
+      match variant_r do
+      Ok(s) -> match s do
+        Rect(w, h) -> assert (w == 3 && h == 4)
+        _ -> assert (false)
+        end
+      Err(e) -> do IO.puts("VARIANT: " ++ to_string(e)) assert (false) end
+      end
+    end
+
+    test "missing field is an error, not a crash" do
+      match flat_missing_r do
+      Ok(_) -> assert (false)
+      Err(e) -> do IO.puts("MISSING-FIELD MSG: " ++ e) assert (true) end
+      end
+    end
+
+    test "wrong field type is an error, not a crash" do
+      match flat_wrongtype_r do
+      Ok(_) -> assert (false)
+      Err(e) -> do IO.puts("WRONG-TYPE MSG: " ++ e) assert (true) end
+      end
+    end
+
+    test "unknown extra field" do
+      match flat_unknown_r do
+      Ok(_) -> IO.puts("UNKNOWN-FIELD: ignored (accepted)")
+      Err(e) -> IO.puts("UNKNOWN-FIELD: rejected -- " ++ e)
+      end
+      assert (true)
+    end
+
+    test "duplicate key" do
+      match flat_dup_r do
+      Ok(r) -> IO.puts("DUPLICATE-KEY: accepted, name=" ++ r.name)
+      Err(e) -> IO.puts("DUPLICATE-KEY: rejected -- " ++ e)
+      end
+      assert (true)
+    end
+
+  end
+
+  describe "record decode errors carry a path" do
+
+    test "wrong scalar type names the field" do
+      match path_wrong_scalar_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.name: expected String")
+      end
+    end
+
+    test "missing field names the field" do
+      match path_missing_field_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.age: missing field")
+      end
+    end
+
+    test "non-object for a record type" do
+      match path_non_object_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$: expected an object")
+      end
+    end
+
+    test "unknown fields are ignored (Decision 2)" do
+      match path_unknown_fields_r do
+      Ok(r) -> assert (r.age == 3)
+      Err(_) -> assert (false)
+      end
+    end
+
+    -- The brief's spec for this test expects the composed path
+    -- "$.inner.id: expected Int" -- i.e. PathOuter's decoder recurses into
+    -- PathInner's own decoder for the "inner" field, which reports
+    -- "expected Int" for its "id" field, and PathOuter prepends its own
+    -- ".inner" step via Json.decode_error_under. That is NOT what happens
+    -- today: the pre-existing, separately-tracked from_json cross-type
+    -- dispatch bug (see the "Nested records" note below, and
+    -- specs/2026-07-31-json-from-json-dispatch-design.md) means every
+    -- `derive Json for T` unconditionally rebinds the bare `from_json` name
+    -- in the module env (lib/eval/eval.ml ~9674-9681, "from_json &c.:
+    -- name-bound"), so PathOuter's generated decoder recursing into its
+    -- "inner" field's `from_json(fv)` call resolves to PathOuter's OWN
+    -- decoder (the last one bound), not PathInner's -- regardless of
+    -- declaration order, since the outer type must derive after the inner
+    -- type it references. What IS verified here, and what this Task 4
+    -- change actually fixes relative to the old generator: the failure
+    -- no longer PANICS (the old per-field-less generator's nested-field
+    -- fallback was an unconditional `Err(e) -> panic(e)`), it composes a
+    -- ".inner" path prefix via Json.decode_error_under, and it renders a
+    -- well-typed Json.DecodeError all the way out -- just misattributed to
+    -- PathOuter's own field set until the dispatch bug is fixed.
+    test "nested failure composes a path (limited by the known cross-type from_json dispatch bug)" do
+      match path_nested_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.inner.label: missing field")
+      end
+    end
+
+  end
+
+  describe "variant decode errors carry a path" do
+
+    test "unknown tag" do
+      match variant_unknown_tag_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.tag: unknown variant `Purple`")
+      end
+    end
+
+    test "variant argument of the wrong type names its index" do
+      -- Circle(Int) given a string argument at position 0
+      match variant_wrong_arg_type_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$[0]: expected Int")
+      end
+    end
+
+  end
+
+  -- ── to_json cross-type dispatch (fixed, Task 2) ──────────────────────
+  -- `to_json` now dispatches through `impl_tbl` keyed by the argument's
+  -- RUNTIME type (`lib/eval/eval.ml`'s `is_type_dispatched_method` gained
+  -- a `("JsonTo", "to_json")` case), the same mechanism `Eq`/`Show`/`Ord`/
+  -- `Hash` already used -- so calling `to_json` on an EARLIER-declared
+  -- type (`Flat`, `Tag`) after a LATER type (`Shape`, `NdRec`) has also
+  -- derived Json no longer resolves to the wrong encoder.
+  --
+  -- This also fixes a second, nastier manifestation of the same root
+  -- cause that was NOT simply "wrong type encoded": a record with a field
+  -- of another `derive Json` type recursively calls bare `to_json` on
+  -- that field (`encoder_for_ty`'s fallback, desugar.ml ~1494-1496). Before
+  -- the fix, the DImpl eval's catch-all branch bound `to_json` into a
+  -- SELF-recursive closure, so that recursive call re-entered the
+  -- ENCLOSING type's own encoder instead of the field's -- `type Inner =
+  -- { id : Int }` nested in `type Outer = { label : String, inner : Inner
+  -- }` (both `derive Json`, no other type involved) made `to_json(outer)`
+  -- panic with "record has no field 'label'". `Nested`/`NestedHolder`
+  -- below pin that exact shape. (`from_json`'s equivalent nested-panic bug,
+  -- documented below, is explicitly OUT of scope for this fix -- see
+  -- `specs/2026-07-31-json-from-json-dispatch-design.md`.)
+
+  type Nested = { id : Int }
+  derive Json for Nested
+
+  type NestedHolder = { label : String, inner : Nested }
+  derive Json for NestedHolder
+
+  let nested_holder_json =
+    Json.to_string(to_json({ label: "x", inner: { id: 7 } }))
+
+  describe "to_json cross-type dispatch (fixed)" do
+
+    test "two types deriving Json in one module each encode correctly" do
+      let a = to_json({ name: "x", age: 1, active: true, score: 0.5 })
+      let b = to_json(Red)
+      assert (String.contains(Json.to_string(a), "\"x\""))
+      assert (String.contains(Json.to_string(b), "\"Red\""))
+    end
+
+    test "a record field whose type also derives Json encodes without panicking" do
+      assert (String.contains(nested_holder_json, "\"label\":\"x\""))
+      assert (String.contains(nested_holder_json, "\"inner\":{\"id\":7}"))
+    end
+
+  end
+
+  -- ── Nested records (`from_json` only): NOW probed live, see PathInner/
+  -- PathOuter above ────────────────────────────────────────────────────
+  -- Before Task 4, `type Inner = { id : Int }` + `derive Json for Inner`,
+  -- then `type Outer = { label : String, inner : Inner }` +
+  -- `derive Json for Outer`, then `from_json` on a malformed
+  -- `{"label":"x","inner":{...}}` did not return `Err` -- it PANICED
+  -- ("panic: invalid JSON for Outer"), because the old record-field
+  -- decoder's non-primitive-field fallback (lib/desugar/desugar.ml, old
+  -- ~1599-1610) was `match from_json(raw) do Ok(v) -> v | Err(e) ->
+  -- panic(e) end`. Task 4's per-field generator replaced that unconditional
+  -- panic with `Err(inner) -> Err(Json.decode_error_under(step, inner))`
+  -- (desugar.ml's `decode_field_value`), so the failure now surfaces as a
+  -- normal `Err(Json.DecodeError(...))` instead of taking down the whole
+  -- process -- see the "nested failure composes a path" test above
+  -- (PathInner/PathOuter) for a live probe.
+  --
+  -- What Task 4 did NOT fix -- and could not, without touching the
+  -- separately-tracked dispatch bug -- is WHICH decoder that recursive
+  -- `from_json(fv)` call actually reaches: bare `from_json` still always
+  -- resolves to whichever type derived Json most recently (an unconditional
+  -- env-rebind, lib/eval/eval.ml ~9674-9681), so Outer's own recursive
+  -- decode of its `inner` field still calls Outer's OWN from_json, not
+  -- Inner's. The live PathInner/PathOuter test above pins this exact
+  -- interaction: it gets a well-formed, path-bearing `Err`, but the path
+  -- and message describe Outer's (wrong) view of the inner object, not
+  -- Inner's true failure. `to_json` is safe on this same shape -- see
+  -- `Nested`/`NestedHolder` above -- only `from_json`'s cross-type dispatch
+  -- still has this failure mode.
+
+  -- ── Uncertain capabilities: NOT probed live here, for the same reason ─
+  -- Option(T), List(T), and a type parameter. Manually confirmed outside
+  -- this suite (see capability map) that all three COMPILE but crash at
+  -- runtime with the same self-recursion bug described above: the
+  -- generated to_json/from_json for a field whose type is neither a
+  -- primitive nor another derive-Json'd record falls back to "assume it
+  -- also derives Json and call to_json/from_json recursively" -- and
+  -- since there is only one to_json/from_json bare binding in scope (the
+  -- enclosing record's own), it recurses into itself and hits a raw
+  -- "field access on non-record value" error.
+  --   type WithOpt = { a : Int, b : Option(Int) }   derive Json for WithOpt
+  --   type WithList = { xs : List(Int) }            derive Json for WithList
+  --   type Box(a) = { value : a }                   derive Json for Box
+
+  -- ── JsonStream x derive Json wiring proof ────────────────────────────
+  -- NdRec is the LAST type in this file to derive Json, so bare
+  -- to_json/from_json calls made from here on (including inside the
+  -- JsonStream callback below, which runs later at test time) correctly
+  -- resolve to NdRec's decoder.
+
+  type NdRec = { id : Int }
+  derive Json for NdRec
+
+  pfn nd_cb(v) do
+    match from_json(v) do
+    Ok(r) -> IO.puts("NDJSON decoded: id=" ++ to_string(r.id))
+    Err(e) -> IO.puts("NDJSON decode err: " ++ to_string(e))
+    end
+  end
+
+  describe "JsonStream x derive Json" do
+
+    test "ndjson file decodes to typed records via each_value" do
+      let path = "/tmp/march_json_typed_test.jsonl"
+      match File.write(path, "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        let r = JsonStream.each_value(path, nd_cb)
+        match File.delete(path) do _ -> () end
+        match r do
+        Ok(_) -> assert (true)
+        Err(e) -> do IO.puts("NDJSON STREAM ERR: " ++ JsonStream.err_to_string(e)) assert (false) end
+        end
+      end
+      end
+    end
+
+    -- A syntactically malformed line (not just a wrong-typed field) is
+    -- caught by JsonStream itself and surfaces as an each_value-level Err
+    -- -- this is the error path a genuinely malformed stream takes.
+    test "malformed json line surfaces as a stream-level error" do
+      let path = "/tmp/march_json_typed_test_bad.jsonl"
+      match File.write(path, "{\"id\":1}\n{\"id\":2\n{\"id\":3}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        let r = JsonStream.each_value(path, nd_cb)
+        match File.delete(path) do _ -> () end
+        match r do
+        Ok(_) -> assert (false)
+        Err(e) -> do IO.puts("MALFORMED STREAM MSG: " ++ JsonStream.err_to_string(e)) assert (true) end
+        end
+      end
+      end
+    end
+
+    -- Ergonomics finding: a *wrong-typed* field inside an otherwise
+    -- well-formed record is NOT caught by JsonStream at all -- from_json's
+    -- Err is only visible to the callback, whose return value each_value's
+    -- nd_events discards. The stream itself reports Ok(()) even though one
+    -- record failed to decode; the callback's own IO.puts is the only
+    -- record of the failure. See capability map.
+    test "wrong-typed field inside ndjson is swallowed by the stream result" do
+      let path = "/tmp/march_json_typed_test_wrongtype.jsonl"
+      match File.write(path, "{\"id\":1}\n{\"id\":\"not-an-int\"}\n{\"id\":3}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        let r = JsonStream.each_value(path, nd_cb)
+        match File.delete(path) do _ -> () end
+        match r do
+        Ok(_) -> do IO.puts("WRONG-TYPE-IN-STREAM: each_value still Ok despite a decode error") assert (true) end
+        Err(e) -> do IO.puts("WRONG-TYPE-IN-STREAM: each_value Err -- " ++ JsonStream.err_to_string(e)) assert (true) end
+        end
+      end
+      end
+    end
+
+  end
+
+  describe "each_typed carries the record's byte offset" do
+
+    test "decodes an ndjson file to typed records" do
+      let path = "/tmp/march_each_typed_ok.jsonl"
+      match File.write(path, "{\"id\":1}\n{\"id\":2}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        let r = JsonStream.each_typed(path, fn r -> ())
+        match File.delete(path) do _ -> () end
+        match r do
+        Ok(n) -> assert (n == 2)
+        Err(e) -> do IO.puts("EACH_TYPED OK-CASE ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+        end
+      end
+      end
+    end
+
+    -- second record is malformed; its offset is past the first record
+    test "a bad record reports its field AND a nonzero byte offset" do
+      let path = "/tmp/march_each_typed_bad.jsonl"
+      match File.write(path, "{\"id\":1}\n{\"id\":\"nope\"}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        let r = JsonStream.each_typed(path, fn r -> ())
+        match File.delete(path) do _ -> () end
+        match r do
+        Ok(_) -> assert (false)
+        Err(e) -> do
+          let msg = Json.decode_error_to_string(e)
+          IO.puts("EACH_TYPED BAD-CASE ERR: " ++ msg)
+          assert (String.contains(msg, "$.id"))
+          assert (String.contains(msg, "byte 9"))
+        end
+        end
+      end
+      end
+    end
+
+  end
+
+  describe "DecodeError rendering" do
+    test "bare message renders with the root path" do
+      let e = Json.DecodeError("expected Int", Nil, 0 - 1)
+      assert (Json.decode_error_to_string(e) == "$: expected Int")
+    end
+    test "field path renders JSONPath-style" do
+      let e = Json.DecodeError("expected Int",
+                Cons(Json.JPathField("id"), Nil), 0 - 1)
+      assert (Json.decode_error_to_string(e) == "$.id: expected Int")
+    end
+    test "nested field and index render in order" do
+      -- $.users[3].id -- steps are stored outermost-first.
+      let p = Cons(Json.JPathField("users"),
+              Cons(Json.JPathIndex(3),
+              Cons(Json.JPathField("id"), Nil)))
+      let e = Json.DecodeError("expected Int", p, 0 - 1)
+      assert (Json.decode_error_to_string(e) == "$.users[3].id: expected Int")
+    end
+    test "byte offset is included when present" do
+      let e = Json.DecodeError("expected Int", Cons(Json.JPathField("id"), Nil), 4096)
+      assert (Json.decode_error_to_string(e) == "$.id (byte 4096): expected Int")
+    end
+    test "prepending a step builds the path outermost-first" do
+      let inner = Json.DecodeError("expected Int", Cons(Json.JPathField("id"), Nil), 0 - 1)
+      let outer = Json.decode_error_under(Json.JPathField("user"), inner)
+      assert (Json.decode_error_to_string(outer) == "$.user.id: expected Int")
+    end
+  end
+
+  describe "event decoder matches the tree decoder" do
+    -- For every corpus document, from_json(build(doc)) (tree) and
+    -- from_json_events(events(doc)) (Task 7's new event decoder) must
+    -- agree: same value on success, same rendered error on failure. The
+    -- corpus covers an unknown field, a reordered object, a missing
+    -- field, a wrong type, a non-object, and a duplicate key -- the
+    -- cases where a generated state machine is most likely to diverge
+    -- from a tree walk.
+    test "tree and event decoders agree over the corpus" do
+      assert (json_events_corpus_agrees_r)
+    end
+  end
+
+  describe "unknown-field subtree skipping (depth counting)" do
+    -- These do NOT merely check "no error was raised" -- a desynchronized
+    -- skip produces a WRONG VALUE with no error, so each assertion checks
+    -- the actual decoded value of every field that follows the skipped
+    -- unknown one.
+
+    test "unknown field holding a nested object, followed by known fields" do
+      match skip_nested_object_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP NESTED OBJECT ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
+    test "unknown field holding a nested array, followed by known fields" do
+      match skip_nested_array_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP NESTED ARRAY ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
+    test "unknown field holding an array of objects, followed by known fields" do
+      match skip_array_of_objects_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP ARRAY-OF-OBJECTS ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
+    test "unknown field holding an empty object, followed by known fields" do
+      match skip_empty_object_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP EMPTY OBJECT ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
+  end
+
+end

@@ -1922,6 +1922,12 @@ let builtin_bindings : (string * scheme) list =
        ∀a b. a -> b  — this avoids shadowing when multiple types derive Json. *)
     ("to_json",   poly2 (fun a b -> TArrow (a, b)));
     ("from_json",  poly2 (fun a b -> TArrow (a, b)));
+    (* from_json_events: same rationale as from_json above (Task 7 / Phase
+       B) -- a second, event-consuming decoder derived per record type,
+       bound as a plain (non-impl_tbl-dispatched) name per derive so
+       multiple types deriving Json in one module can each define it
+       without colliding with the polymorphic scheme registered here. *)
+    ("from_json_events", poly2 (fun a b -> TArrow (a, b)));
     (* Actor/respond: ∀a. a -> Unit *)
     ("respond", poly1 (fun a -> TArrow (a, t_unit)));
     (* Actor builtins *)

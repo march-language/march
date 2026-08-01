@@ -1495,30 +1495,6 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         (* Assume nested type also derives Json — call to_json recursively *)
         EApp (EVar (mk_name "to_json"), [value_expr], sp)
     in
-    (* Helper: build a decoder pattern + extraction for a given type.
-       Returns (pattern_for_Some_wrapper, expression_to_convert) *)
-    let decoder_pat_for_ty (ty : ty) (var_name : string) : pattern * expr =
-      match ty with
-      | TyCon ({txt = "String"; _}, []) ->
-        (PatCon (mk_name "Some", [PatCon (mk_name "Str", [PatVar (mk_name var_name)])]),
-         EVar (mk_name var_name))
-      | TyCon ({txt = "Int"; _}, []) ->
-        (PatCon (mk_name "Some", [PatCon (mk_name "Number", [PatVar (mk_name var_name)])]),
-         EApp (EVar (mk_name "float_to_int"), [EVar (mk_name var_name)], sp))
-      | TyCon ({txt = "Float"; _}, []) ->
-        (PatCon (mk_name "Some", [PatCon (mk_name "Number", [PatVar (mk_name var_name)])]),
-         EVar (mk_name var_name))
-      | TyCon ({txt = "Bool"; _}, []) ->
-        (PatCon (mk_name "Some", [PatCon (mk_name "Bool", [PatVar (mk_name var_name)])]),
-         EVar (mk_name var_name))
-      | _ ->
-        (* For other types, extract raw JsonValue and call from_json *)
-        let raw_var = var_name ^ "_raw" in
-        (PatCon (mk_name "Some", [PatVar (mk_name raw_var)]),
-         (* We'll need a match on from_json result — but for simplicity in the
-            pattern approach, just store the raw value and handle in the body *)
-         EVar (mk_name raw_var))
-    in
     (* ── to_json ────────────────────────────────────────────── *)
     let to_json_body = match td with
       | TDRecord fields ->
@@ -1570,133 +1546,236 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         EApp (EVar (mk_name "to_json"), [EVar (mk_name "x")], sp)
     in
     (* ── from_json ──────────────────────────────────────────── *)
+    (* Shared helpers for the TDRecord decoder: build a Json.DecodeError
+       whose path is a single JPathField(key) step (or Nil for the
+       root-level "expected an object" case), so every failure names the
+       field that caused it instead of one opaque wildcard error. *)
+    let jpath_field_step (key : string) : expr =
+      ECon (mk_name "Json.JPathField", [ELit (LitString key, sp)], sp)
+    in
+    let nil_path : expr = ECon (mk_name "Nil", [], sp) in
+    let single_step_path (key : string) : expr =
+      ECon (mk_name "Cons", [jpath_field_step key; nil_path], sp)
+    in
+    let mk_decode_err (msg : string) (path : expr) : expr =
+      ECon (mk_name "Json.DecodeError",
+            [ELit (LitString msg, sp); path; ELit (LitInt (-1), sp)], sp)
+    in
+    let err_at_field (msg : string) (key : string) : expr =
+      ECon (mk_name "Err", [mk_decode_err msg (single_step_path key)], sp)
+    in
+    (* Variant-decoding counterparts of the above: a positional argument's
+       path step is JPathIndex(i) rather than JPathField(key), so an argument
+       error renders as `$[0]: expected Int` instead of `$.field: ...`. *)
+    let jpath_index_step (i : int) : expr =
+      ECon (mk_name "Json.JPathIndex", [ELit (LitInt i, sp)], sp)
+    in
+    let single_index_path (i : int) : expr =
+      ECon (mk_name "Cons", [jpath_index_step i; nil_path], sp)
+    in
+    let err_at_path (msg : string) (path : expr) : expr =
+      ECon (mk_name "Err", [mk_decode_err msg path], sp)
+    in
+    let mk_decode_err_expr (msg_expr : expr) (path : expr) : expr =
+      ECon (mk_name "Json.DecodeError", [msg_expr; path; ELit (LitInt (-1), sp)], sp)
+    in
+    let cat2 (a : expr) (b : expr) : expr =
+      EApp (EVar (mk_name "++"), [a; b], sp)
+    in
+    (* Decode a single field's raw JsonValue (bound to [fv]) according to its
+       declared type, then invoke [k] with the expression for the decoded
+       (already-converted) value. For a nested derive-Json type, recurse via
+       from_json and prepend this field's step to the inner error — this one
+       line (Json.decode_error_under) is what makes a path like `$.inner.id`
+       compose across a record boundary without threading a cursor through
+       user code. *)
+    (* Generic version: decode a raw JsonValue (bound to [fv]) according to
+       its declared type, given the path [step] to prepend to a nested error
+       (via Json.decode_error_under) and the full [single_path] to use for a
+       directly-observed type-mismatch at this position. Record fields use
+       JPathField(key) for both; variant arguments use JPathIndex(i). *)
+    let decode_value_at (ty : ty) (fv : name) (step : expr) (single_path : expr)
+        (k : expr -> expr) : expr =
+      let scalar_case (ctor : string) (msg : string)
+          (conv : expr -> expr) : expr =
+        let bound = mk_name (fv.txt ^ "_v") in
+        EMatch (EVar fv, [
+            { branch_pat = PatCon (mk_name ctor, [PatVar bound]);
+              branch_guard = None;
+              branch_body = k (conv (EVar bound)) };
+            { branch_pat = PatWild sp;
+              branch_guard = None;
+              branch_body = err_at_path msg single_path };
+          ], sp)
+      in
+      match ty with
+      | TyCon ({txt = "String"; _}, []) ->
+        scalar_case "Str" "expected String" (fun e -> e)
+      | TyCon ({txt = "Int"; _}, []) ->
+        scalar_case "Number" "expected Int"
+          (fun e -> EApp (EVar (mk_name "float_to_int"), [e], sp))
+      | TyCon ({txt = "Float"; _}, []) ->
+        scalar_case "Number" "expected Float" (fun e -> e)
+      | TyCon ({txt = "Bool"; _}, []) ->
+        scalar_case "Bool" "expected Bool" (fun e -> e)
+      | _ ->
+        let inner_ok = mk_name (fv.txt ^ "_ok") in
+        let inner_err = mk_name (fv.txt ^ "_err") in
+        EMatch (EApp (EVar (mk_name "from_json"), [EVar fv], sp), [
+            { branch_pat = PatCon (mk_name "Ok", [PatVar inner_ok]);
+              branch_guard = None;
+              branch_body = k (EVar inner_ok) };
+            { branch_pat = PatCon (mk_name "Err", [PatVar inner_err]);
+              branch_guard = None;
+              branch_body = ECon (mk_name "Err",
+                [EApp (EVar (mk_name "Json.decode_error_under"),
+                       [step; EVar inner_err], sp)], sp) };
+          ], sp)
+    in
+    let decode_field_value (ty : ty) (fv : name) (key : string)
+        (k : expr -> expr) : expr =
+      decode_value_at ty fv (jpath_field_step key) (single_step_path key) k
+    in
+    let decode_arg_value (ty : ty) (fv : name) (i : int)
+        (k : expr -> expr) : expr =
+      decode_value_at ty fv (jpath_index_step i) (single_index_path i) k
+    in
+    (* Build the right-nested per-field chain (Step 4 of the design):
+         match Json.get_field(kvs, "f1") do
+         None -> Err(DecodeError("missing field", [JPathField("f1")], -1))
+         Some(fv1) -> match fv1 do
+           <ok-pattern> -> <recurse into rest, or Ok({...}) at the end>
+           _ -> Err(DecodeError("expected <Ty>", [JPathField("f1")], -1))
+           end
+         end
+       Fields are looked up by name one at a time and never enumerated, so
+       unmentioned/unknown JSON keys are silently ignored for free — no
+       separate handling is needed for "unknown fields are ignored". *)
+    let rec build_field_chain (fields : field list)
+        (decoded : (name * expr) list) : expr =
+      match fields with
+      | [] -> ECon (mk_name "Ok", [ERecord (List.rev decoded, sp)], sp)
+      | f :: rest ->
+        let key = f.fld_name.txt in
+        let fv = mk_name (Printf.sprintf "_jf_%s" key) in
+        let get_expr = EApp (EVar (mk_name "Json.get_field"),
+                             [EVar (mk_name "kvs"); ELit (LitString key, sp)], sp)
+        in
+        let some_body = decode_field_value f.fld_ty fv key (fun value_expr ->
+            build_field_chain rest ((f.fld_name, value_expr) :: decoded))
+        in
+        EMatch (get_expr, [
+            { branch_pat = PatCon (mk_name "None", []);
+              branch_guard = None;
+              branch_body = err_at_field "missing field" key };
+            { branch_pat = PatCon (mk_name "Some", [PatVar fv]);
+              branch_guard = None;
+              branch_body = some_body };
+          ], sp)
+    in
     let from_json_body = match td with
       | TDRecord fields ->
-        (* match (Json.get(v,"f1"), Json.get(v,"f2"), ...) with
-           | (Some(Str(f1)), Some(Number(f2)), ...) -> Ok({f1=f1, f2=float_to_int(f2), ...})
-           | _ -> Err("invalid JSON for TypeName") *)
-        let get_exprs = List.map (fun (f : field) ->
-            EApp (EVar (mk_name "Json.get"),
-                  [EVar (mk_name "v"); ELit (LitString f.fld_name.txt, sp)], sp)
-          ) fields
-        in
-        let scrutinee = ETuple (get_exprs, sp) in
-        let pats_and_convs = List.mapi (fun _i (f : field) ->
-            let var_name = Printf.sprintf "_jf%d" _i in
-            decoder_pat_for_ty f.fld_ty var_name
-          ) fields
-        in
-        let ok_pats = List.map fst pats_and_convs in
-        (* Build the record expression *)
-        let record_fields = List.mapi (fun i (f : field) ->
-            let (_pat, conv_expr) = List.nth pats_and_convs i in
-            (* For non-primitive types we need to call from_json and handle Result *)
-            let value_expr = match f.fld_ty with
-              | TyCon ({txt = "String"; _}, [])
-              | TyCon ({txt = "Int"; _}, [])
-              | TyCon ({txt = "Float"; _}, [])
-              | TyCon ({txt = "Bool"; _}, []) -> conv_expr
-              | _ ->
-                (* For complex types, conv_expr is the raw JsonValue var.
-                   We need: match from_json(raw) with Ok(v) -> v | Err(e) -> panic(e) *)
-                let from_result = EApp (EVar (mk_name "from_json"), [conv_expr], sp) in
-                EMatch (from_result, [
-                  { branch_pat = PatCon (mk_name "Ok", [PatVar (mk_name (Printf.sprintf "_jfok%d" i))]);
-                    branch_guard = None;
-                    branch_body = EVar (mk_name (Printf.sprintf "_jfok%d" i)) };
-                  { branch_pat = PatCon (mk_name "Err", [PatVar (mk_name "_jfe")]);
-                    branch_guard = None;
-                    branch_body = EApp (EVar (mk_name "panic"), [EVar (mk_name "_jfe")], sp) };
-                ], sp)
-            in
-            (f.fld_name, value_expr)
-          ) fields
-        in
-        let ok_record = ECon (mk_name "Ok", [ERecord (record_fields, sp)], sp) in
-        let err_msg = Printf.sprintf "invalid JSON for %s" type_name.txt in
-        let err_branch = {
+        let kvs = mk_name "kvs" in
+        let object_branch = {
+          branch_pat = PatCon (mk_name "Object", [PatVar kvs]);
+          branch_guard = None;
+          branch_body = build_field_chain fields [];
+        } in
+        let not_object_branch = {
           branch_pat = PatWild sp;
           branch_guard = None;
-          branch_body = ECon (mk_name "Err", [ELit (LitString err_msg, sp)], sp);
+          branch_body = ECon (mk_name "Err",
+            [mk_decode_err "expected an object" nil_path], sp);
         } in
-        let ok_branch = {
-          branch_pat = PatTuple (ok_pats, sp);
-          branch_guard = None;
-          branch_body = ok_record;
-        } in
-        EMatch (scrutinee, [ok_branch; err_branch], sp)
+        EMatch (EVar (mk_name "v"), [object_branch; not_object_branch], sp)
       | TDVariant variants ->
-        (* match Json.get(v, "tag") with
-           | Some(Str("Ctor0")) -> Ok(Ctor0)
-           | Some(Str("Ctor1")) -> match Json.get(v, "0") with ...
-           | _ -> Err("invalid JSON for TypeName") *)
-        let tag_expr = EApp (EVar (mk_name "Json.get"),
-                             [EVar (mk_name "v"); ELit (LitString "tag", sp)], sp)
+        (* match v do
+             Object(kvs) -> match Json.get_field(kvs, "tag") do
+               None -> Err(DecodeError("missing field", [JPathField("tag")], -1))
+               Some(tagv) -> match tagv do
+                 Str("Ctor0") -> Ok(Ctor0)
+                 Str("Ctor1") -> <build_arg_chain over kvs, keys "0","1",...>
+                 Str(tagstr) -> Err(DecodeError("unknown variant `" ++ tagstr ++ "`", [JPathField("tag")], -1))
+                 _ -> Err(DecodeError("expected String", [JPathField("tag")], -1))
+               end
+             end
+             _ -> Err(DecodeError("expected an object", Nil, -1))
+           end
+           Each argument is looked up positionally by string key ("0", "1", ...)
+           out of the same object, mirroring the wire shape the encoder above
+           produces (tag + numeric-string keys), and its error is tagged with
+           JPathIndex(i) rather than JPathField(key) so it renders as
+           `$[i]: ...` — see decode_arg_value/build_arg_chain. *)
+        let kvs = mk_name "kvs" in
+        let tagv = mk_name "tagv" in
+        let tagstr = mk_name "_tagstr" in
+        let tag_path = single_step_path "tag" in
+        let rec build_arg_chain (ctor_name : name) (arg_tys : ty list)
+            (idx : int) (decoded : expr list) : expr =
+          match arg_tys with
+          | [] -> ECon (mk_name "Ok", [ECon (ctor_name, List.rev decoded, sp)], sp)
+          | ty :: rest ->
+            let key = string_of_int idx in
+            let fv = mk_name (Printf.sprintf "_ja_%d" idx) in
+            let get_expr = EApp (EVar (mk_name "Json.get_field"),
+                                 [EVar kvs; ELit (LitString key, sp)], sp)
+            in
+            let some_body = decode_arg_value ty fv idx (fun value_expr ->
+                build_arg_chain ctor_name rest (idx + 1) (value_expr :: decoded))
+            in
+            EMatch (get_expr, [
+                { branch_pat = PatCon (mk_name "None", []);
+                  branch_guard = None;
+                  branch_body = err_at_path "missing field" (single_index_path idx) };
+                { branch_pat = PatCon (mk_name "Some", [PatVar fv]);
+                  branch_guard = None;
+                  branch_body = some_body };
+              ], sp)
         in
-        let branches = List.map (fun (v : variant) ->
-            let n = List.length v.var_args in
-            if n = 0 then
-              { branch_pat = PatCon (mk_name "Some",
-                  [PatCon (mk_name "Str",
-                    [PatLit (LitString v.var_name.txt, sp)])]);
-                branch_guard = None;
-                branch_body = ECon (mk_name "Ok", [ECon (v.var_name, [], sp)], sp) }
-            else begin
-              (* For variants with args, extract each arg from "0", "1", etc. *)
-              let arg_gets = List.init n (fun i ->
-                  EApp (EVar (mk_name "Json.get"),
-                        [EVar (mk_name "v"); ELit (LitString (string_of_int i), sp)], sp)
-                ) in
-              let scrutinee2 = if n = 1 then List.hd arg_gets
-                               else ETuple (arg_gets, sp) in
-              let arg_pats_convs = List.mapi (fun i ty ->
-                  let var_name = Printf.sprintf "_ja%d" i in
-                  decoder_pat_for_ty ty var_name
-                ) v.var_args
-              in
-              let inner_pats = if n = 1 then [fst (List.hd arg_pats_convs)]
-                               else [PatTuple (List.map fst arg_pats_convs, sp)] in
-              let ctor_args = List.mapi (fun i ty ->
-                  let (_pat, conv_expr) = List.nth arg_pats_convs i in
-                  match ty with
-                  | TyCon ({txt = "String"; _}, [])
-                  | TyCon ({txt = "Int"; _}, [])
-                  | TyCon ({txt = "Float"; _}, [])
-                  | TyCon ({txt = "Bool"; _}, []) -> conv_expr
-                  | _ ->
-                    let from_result = EApp (EVar (mk_name "from_json"), [conv_expr], sp) in
-                    EMatch (from_result, [
-                      { branch_pat = PatCon (mk_name "Ok", [PatVar (mk_name (Printf.sprintf "_jaok%d" i))]);
-                        branch_guard = None;
-                        branch_body = EVar (mk_name (Printf.sprintf "_jaok%d" i)) };
-                      { branch_pat = PatCon (mk_name "Err", [PatVar (mk_name "_jae")]);
-                        branch_guard = None;
-                        branch_body = EApp (EVar (mk_name "panic"), [EVar (mk_name "_jae")], sp) };
-                    ], sp)
-                ) v.var_args
-              in
-              let ok_ctor = ECon (mk_name "Ok", [ECon (v.var_name, ctor_args, sp)], sp) in
-              let err_msg2 = Printf.sprintf "invalid JSON for %s.%s" type_name.txt v.var_name.txt in
-              let inner_branches =
-                [{ branch_pat = List.hd inner_pats; branch_guard = None; branch_body = ok_ctor };
-                 { branch_pat = PatWild sp; branch_guard = None;
-                   branch_body = ECon (mk_name "Err", [ELit (LitString err_msg2, sp)], sp) }]
-              in
-              { branch_pat = PatCon (mk_name "Some",
-                  [PatCon (mk_name "Str",
-                    [PatLit (LitString v.var_name.txt, sp)])]);
-                branch_guard = None;
-                branch_body = EMatch (scrutinee2, inner_branches, sp) }
-            end
+        let tag_branches = List.map (fun (variant_def : variant) ->
+            { branch_pat = PatCon (mk_name "Str",
+                [PatLit (LitString variant_def.var_name.txt, sp)]);
+              branch_guard = None;
+              branch_body = build_arg_chain variant_def.var_name variant_def.var_args 0 [] }
           ) variants
         in
-        let err_msg = Printf.sprintf "invalid JSON for %s" type_name.txt in
-        let wild_branch = {
+        let unknown_variant_branch = {
+          branch_pat = PatCon (mk_name "Str", [PatVar tagstr]);
+          branch_guard = None;
+          branch_body = ECon (mk_name "Err",
+            [mk_decode_err_expr
+               (cat2 (cat2 (ELit (LitString "unknown variant `", sp)) (EVar tagstr))
+                     (ELit (LitString "`", sp)))
+               tag_path], sp);
+        } in
+        let tag_not_string_branch = {
           branch_pat = PatWild sp;
           branch_guard = None;
-          branch_body = ECon (mk_name "Err", [ELit (LitString err_msg, sp)], sp);
+          branch_body = err_at_path "expected String" tag_path;
         } in
-        EMatch (tag_expr, branches @ [wild_branch], sp)
+        let tagv_match = EMatch (EVar tagv,
+            tag_branches @ [unknown_variant_branch; tag_not_string_branch], sp)
+        in
+        let object_branch = {
+          branch_pat = PatCon (mk_name "Object", [PatVar kvs]);
+          branch_guard = None;
+          branch_body = EMatch (
+            EApp (EVar (mk_name "Json.get_field"),
+                  [EVar kvs; ELit (LitString "tag", sp)], sp),
+            [ { branch_pat = PatCon (mk_name "None", []);
+                branch_guard = None;
+                branch_body = err_at_field "missing field" "tag" };
+              { branch_pat = PatCon (mk_name "Some", [PatVar tagv]);
+                branch_guard = None;
+                branch_body = tagv_match } ], sp);
+        } in
+        let not_object_branch = {
+          branch_pat = PatWild sp;
+          branch_guard = None;
+          branch_body = ECon (mk_name "Err",
+            [mk_decode_err "expected an object" nil_path], sp);
+        } in
+        EMatch (EVar (mk_name "v"), [object_branch; not_object_branch], sp)
       | TDAlias _ ->
         EApp (EVar (mk_name "from_json"), [EVar (mk_name "v")], sp)
     in
@@ -1715,8 +1794,295 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
       } in
       DImpl (idef, sp)
     in
+    (* ── from_json_events (Task 7 / Phase B) ───────────────────────────
+       A second, event-consuming decoder, generated ONLY for TDRecord
+       types (task-7-brief.md's Step 2 illustrates a record-specific state
+       machine; TDVariant/TDAlias keep only the tree-based to_json/
+       from_json above -- extending the event path to variants is
+       explicitly out of this task's scope).
+
+       from_json_events(events : List(JsonStream.Event))
+         : Result((T, List(JsonStream.Event)), Json.DecodeError)
+
+       consumes exactly the events belonging to one value of type T off
+       the FRONT of [events] and returns the decoded value paired with
+       whatever events remain -- this is what lets a nested derived-Json
+       field recurse by calling its own from_json_events on the same
+       stream and threading the remainder back out, without ever
+       building a JsonValue tree. This mirrors the "JsonFrom"/"JsonTo"
+       pseudo-interface trick above: iface name "JsonFromEvents" starts
+       with "Json", so eval.ml's/typecheck.ml's [is_json_iface]/
+       [is_json_derive] prefix checks treat it exactly like from_json --
+       skip interface-existence validation, bind the bare method name in
+       the local env (not impl_tbl-dispatched), self-recursive closure --
+       with NO changes needed to either file. This also means
+       from_json_events inherits the SAME cross-type shadowing caveat as
+       bare from_json (lib/eval/eval.ml's DImpl handling name-binds it
+       per-derive, so the LAST type to derive Json in a module owns the
+       bare name) -- a known, separately-tracked issue, not a new one.
+
+       Two helpers are generated as LOCAL recursive functions (`ELetFn`,
+       scoped to this from_json_events body) rather than extra top-level
+       `pfn` declarations, so that two types deriving Json in the same
+       module never collide on a shared top-level helper name -- unlike
+       the shared bare `from_json`/`to_json` names (which tolerate
+       last-wins shadowing by design), a stray collision on an internal
+       helper would be a new, gratuitous bug.
+
+       - skip(events, depth): unknown-field subtree skip. Tracks
+         container depth EXPLICITLY (EvObjStart/EvArrStart increment,
+         EvObjEnd/EvArrEnd decrement) and stops only when depth returns
+         to the level it started at -- see task-7-brief.md's Step 3 for
+         why counting only "the next event" would silently desynchronize
+         the stream instead of erroring.
+       - loop(events, slot_f1, slot_f2, ...): one Option slot per field
+         (all None initially). On EvKey(k) matching a field whose slot is
+         still None, decode that field's value and recurse with the slot
+         filled; on EvKey(k) matching a field whose slot is ALREADY Some
+         (a duplicate key) or matching no field at all (an unknown key),
+         skip the value via `skip` and recurse UNCHANGED --
+         first-occurrence-wins for duplicates, matching the tree
+         decoder's Json.get_field/Json.parse behavior (the capability
+         map), which the oracle in test_json_typed.march requires the two
+         decoders to agree on. On EvObjEnd, every slot must be Some, else
+         `DecodeError("missing field", ...)`. *)
+    let from_json_events_impl : decl option =
+      match td with
+      | TDRecord fields ->
+        let ev_field_slots = List.mapi (fun i (f : field) ->
+            (i, f, mk_name (Printf.sprintf "_evf_%s" f.fld_name.txt))
+          ) fields
+        in
+        let skip_name = mk_name "_ev_skip" in
+        let loop_name = mk_name "_ev_loop" in
+        let sk_events = mk_name "_sk_events" in
+        let sk_depth  = mk_name "_sk_depth" in
+        let sk_rest   = mk_name "_sk_rest" in
+        let depth_e = EVar sk_depth in
+        let depth_plus1  = EApp (EVar (mk_name "+"), [depth_e; ELit (LitInt 1, sp)], sp) in
+        let depth_minus1 = EApp (EVar (mk_name "-"), [depth_e; ELit (LitInt 1, sp)], sp) in
+        let depth_eq n = EApp (EVar (mk_name "=="), [depth_e; ELit (LitInt n, sp)], sp) in
+        let sk_recurse events_e depth_e2 =
+          EApp (EVar skip_name, [events_e; depth_e2], sp)
+        in
+        let sk_ok_rest = ECon (mk_name "Ok", [EVar sk_rest], sp) in
+        let sk_close_branch =
+          EIf (depth_eq 1, sk_ok_rest, sk_recurse (EVar sk_rest) depth_minus1, sp)
+        in
+        let skip_body =
+          EMatch (EVar sk_events, [
+              { branch_pat = PatCon (mk_name "Nil", []);
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "truncated while skipping an unknown field's value" nil_path], sp) };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjStart", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_recurse (EVar sk_rest) depth_plus1 };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvArrStart", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_recurse (EVar sk_rest) depth_plus1 };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjEnd", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_close_branch };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvArrEnd", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_close_branch };
+              { branch_pat = PatCon (mk_name "Cons", [PatWild sp; PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = EIf (depth_eq 0, sk_ok_rest, sk_recurse (EVar sk_rest) depth_e, sp) };
+            ], sp)
+        in
+        let skip_fn_letfn =
+          ELetFn (skip_name,
+            [ { param_name = sk_events; param_ty = None; param_lin = Unrestricted };
+              { param_name = sk_depth;  param_ty = None; param_lin = Unrestricted } ],
+            None, skip_body, sp)
+        in
+        (* Decode one field's value out of the events immediately
+           following its EvKey, mirroring decode_value_at above but
+           consuming events instead of a JsonValue -- see
+           decode_value_at's comment for why a nested derived-Json field
+           recurses via decode_error_under. Returns
+           Result((value, remaining_events), DecodeError). *)
+        let decode_field_from_events (fty : ty) (events_e : expr)
+            (step : expr) (single_path : expr) : expr =
+          let scalar_case (ctor : string) (msg : string) (conv : expr -> expr) : expr =
+            let bound = mk_name "_evsv" in
+            let rest3 = mk_name "_evsrest" in
+            EMatch (events_e, [
+                { branch_pat = PatCon (mk_name "Cons",
+                    [PatCon (mk_name ctor, [PatVar bound]); PatVar rest3]);
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Ok",
+                    [ETuple ([conv (EVar bound); EVar rest3], sp)], sp) };
+                { branch_pat = PatWild sp;
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Err", [mk_decode_err msg single_path], sp) };
+              ], sp)
+          in
+          match fty with
+          | TyCon ({txt = "String"; _}, []) ->
+            scalar_case "EvStr" "expected String" (fun e -> e)
+          | TyCon ({txt = "Int"; _}, []) ->
+            scalar_case "EvNum" "expected Int"
+              (fun e -> EApp (EVar (mk_name "float_to_int"), [e], sp))
+          | TyCon ({txt = "Float"; _}, []) ->
+            scalar_case "EvNum" "expected Float" (fun e -> e)
+          | TyCon ({txt = "Bool"; _}, []) ->
+            scalar_case "EvBool" "expected Bool" (fun e -> e)
+          | _ ->
+            (* Assume the field's type also derives Json and recurses via
+               ITS OWN generated from_json_events, threading the
+               remaining-events tuple straight through on success and
+               prefixing this field's path step on failure. *)
+            let inner_ok = mk_name "_evok" in
+            let inner_rest = mk_name "_evokrest" in
+            let inner_err = mk_name "_everr" in
+            EMatch (EApp (EVar (mk_name "from_json_events"), [events_e], sp), [
+                { branch_pat = PatCon (mk_name "Ok",
+                    [PatTuple ([PatVar inner_ok; PatVar inner_rest], sp)]);
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Ok",
+                    [ETuple ([EVar inner_ok; EVar inner_rest], sp)], sp) };
+                { branch_pat = PatCon (mk_name "Err", [PatVar inner_err]);
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Err",
+                    [EApp (EVar (mk_name "Json.decode_error_under"),
+                           [step; EVar inner_err], sp)], sp) };
+              ], sp)
+        in
+        let cursor = mk_name "_ev_cursor" in
+        let all_slots = List.map (fun (_, _, s) -> s) ev_field_slots in
+        let slots_as_evars = List.map (fun s -> EVar s) all_slots in
+        let key_v = mk_name "_evk" in
+        let after_key_v = mk_name "_evrestk" in
+        let tail_v = mk_name "_evtail" in
+        (* Skip one whole value (unknown key, or a duplicate of a
+           known key), then resume the loop with the slots UNCHANGED. *)
+        let skip_and_continue (events_after_e : expr) (slot_args : expr list) : expr =
+          let sk2_ok = mk_name "_evskrest" in
+          let sk2_err = mk_name "_evskerr" in
+          EMatch (EApp (EVar skip_name, [events_after_e; ELit (LitInt 0, sp)], sp), [
+              { branch_pat = PatCon (mk_name "Ok", [PatVar sk2_ok]);
+                branch_guard = None;
+                branch_body = EApp (EVar loop_name, EVar sk2_ok :: slot_args, sp) };
+              { branch_pat = PatCon (mk_name "Err", [PatVar sk2_err]);
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err", [EVar sk2_err], sp) };
+            ], sp)
+        in
+        let is_some_expr (e : expr) : expr =
+          EMatch (e, [
+              { branch_pat = PatCon (mk_name "Some", [PatWild sp]);
+                branch_guard = None; branch_body = ELit (LitBool true, sp) };
+              { branch_pat = PatWild sp;
+                branch_guard = None; branch_body = ELit (LitBool false, sp) };
+            ], sp)
+        in
+        let rec build_key_chain (remaining : (int * field * name) list) : expr =
+          match remaining with
+          | [] ->
+            (* No field matched this key: unknown field. *)
+            skip_and_continue (EVar after_key_v) slots_as_evars
+          | (i, f, slot) :: rest ->
+            let key_eq = EApp (EVar (mk_name "=="),
+              [EVar key_v; ELit (LitString f.fld_name.txt, sp)], sp) in
+            let decode_and_set =
+              let decoded = decode_field_from_events f.fld_ty (EVar after_key_v)
+                  (jpath_field_step f.fld_name.txt) (single_step_path f.fld_name.txt) in
+              let dv = mk_name "_evdv" in
+              let drest = mk_name "_evdrest" in
+              let derr = mk_name "_evderr" in
+              EMatch (decoded, [
+                  { branch_pat = PatCon (mk_name "Ok",
+                      [PatTuple ([PatVar dv; PatVar drest], sp)]);
+                    branch_guard = None;
+                    branch_body =
+                      let new_args = List.mapi (fun j s ->
+                          if j = i then ECon (mk_name "Some", [EVar dv], sp)
+                          else EVar s) all_slots in
+                      EApp (EVar loop_name, EVar drest :: new_args, sp) };
+                  { branch_pat = PatCon (mk_name "Err", [PatVar derr]);
+                    branch_guard = None;
+                    branch_body = ECon (mk_name "Err", [EVar derr], sp) };
+                ], sp)
+            in
+            EIf (key_eq,
+              (* Duplicate key (slot already filled): first-wins, so skip
+                 this occurrence's value instead of overwriting. *)
+              EIf (is_some_expr (EVar slot),
+                   skip_and_continue (EVar after_key_v) slots_as_evars,
+                   decode_and_set, sp),
+              build_key_chain rest, sp)
+        in
+        let rec build_finish_chain (remaining : (int * field * name) list)
+            (decoded : (name * expr) list) (tail_e : expr) : expr =
+          match remaining with
+          | [] -> ECon (mk_name "Ok",
+              [ETuple ([ERecord (List.rev decoded, sp); tail_e], sp)], sp)
+          | (_, f, slot) :: rest ->
+            let bv = mk_name (Printf.sprintf "_evfv_%s" f.fld_name.txt) in
+            EMatch (EVar slot, [
+                { branch_pat = PatCon (mk_name "Some", [PatVar bv]);
+                  branch_guard = None;
+                  branch_body = build_finish_chain rest
+                    ((f.fld_name, EVar bv) :: decoded) tail_e };
+                { branch_pat = PatCon (mk_name "None", []);
+                  branch_guard = None;
+                  branch_body = err_at_field "missing field" f.fld_name.txt };
+              ], sp)
+        in
+        let loop_body =
+          EMatch (EVar cursor, [
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjEnd", []); PatVar tail_v]);
+                branch_guard = None;
+                branch_body = build_finish_chain ev_field_slots [] (EVar tail_v) };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvKey", [PatVar key_v]); PatVar after_key_v]);
+                branch_guard = None;
+                branch_body = build_key_chain ev_field_slots };
+              { branch_pat = PatCon (mk_name "Nil", []);
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "truncated while decoding an object" nil_path], sp) };
+              { branch_pat = PatWild sp;
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "expected a field name or end of object" nil_path], sp) };
+            ], sp)
+        in
+        let loop_params =
+          { param_name = cursor; param_ty = None; param_lin = Unrestricted }
+          :: List.map (fun s -> { param_name = s; param_ty = None; param_lin = Unrestricted }) all_slots
+        in
+        let loop_fn_letfn = ELetFn (loop_name, loop_params, None, loop_body, sp) in
+        let rest0 = mk_name "_ev_rest0" in
+        let all_none_args = List.map (fun _ -> ECon (mk_name "None", [], sp)) all_slots in
+        let top_body =
+          EMatch (EVar (mk_name "events"), [
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjStart", []); PatVar rest0]);
+                branch_guard = None;
+                branch_body = EApp (EVar loop_name, EVar rest0 :: all_none_args, sp) };
+              { branch_pat = PatWild sp;
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "expected an object" nil_path], sp) };
+            ], sp)
+        in
+        let full_body = EBlock ([skip_fn_letfn; loop_fn_letfn; top_body], sp) in
+        let from_json_events_fn = mk_fn_def "from_json_events" ["events"] full_body in
+        Some (mk_json_impl "JsonFromEvents" "from_json_events" from_json_events_fn)
+      | TDVariant _ | TDAlias _ -> None
+    in
     [mk_json_impl "JsonTo" "to_json" to_json_fn;
      mk_json_impl "JsonFrom" "from_json" from_json_fn]
+    @ (match from_json_events_impl with Some d -> [d] | None -> [])
 
   | _ ->
     Err.error errors ~span:iface_span
