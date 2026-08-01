@@ -689,7 +689,7 @@ mod Json do
     Cons(h, t) -> do
       let new_acc = match h do
         JPathField(f) -> acc ++ "." ++ f
-        JPathIndex(i) -> acc ++ "[" ++ to_string(i) ++ "]"
+        JPathIndex(i) -> acc ++ "[" ++ int_to_string(i) ++ "]"
       end
       render_path(t, new_acc)
     end
@@ -705,7 +705,7 @@ mod Json do
     DecodeError(msg, path, off) -> do
       let p = render_path(path, "$")
       if off < 0 do p ++ ": " ++ msg
-      else p ++ " (byte " ++ to_string(off) ++ "): " ++ msg end
+      else p ++ " (byte " ++ int_to_string(off) ++ "): " ++ msg end
     end
     end
   end
