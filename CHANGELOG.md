@@ -32,6 +32,24 @@ git log is authoritative for exact commits.
   call to a same-named ordinary function. An extern has no body, so it cannot
   recurse at all; declaring `extern fn length` and calling it reported the same
   bogus error.
+- **`derive Json`'s generated `from_json` for enum and variant-with-args
+  types now reports a JSONPath instead of one opaque
+  `"invalid JSON for T"` error, and no longer panics on a nested-argument
+  decode failure.** An unrecognized tag reports
+  `Json.decode_error_to_string(e) == "$.tag: unknown variant \`X\`"`; a
+  wrong-typed positional argument names its index, e.g.
+  `"$[0]: expected Int"` (via a new `Json.JPathIndex` step, not
+  `JPathField`); a missing tag or a non-object input reuse the same
+  `"missing field"` / `"expected an object"` wording as the record decoder.
+  An argument whose type is itself another `derive Json` type composes a
+  path across the boundary the same way a nested record field does (via
+  `Json.decode_error_under`). No wire-format change: the encoder/decoder
+  both use a flat JSON object with a `"tag"` key plus positional
+  string-numbered keys (`"0"`, `"1"`, ...) — there is no `"values"` array.
+  The same pre-existing, separately-tracked `from_json` cross-type dispatch
+  bug (recursive `from_json` calls resolve to whichever type derived `Json`
+  most recently in the module) is unaffected by this change and remains
+  open.
 - **`derive Json`'s generated `from_json` for record types now reports a
   JSONPath instead of one opaque `"invalid JSON for T"` error, and no longer
   panics on a nested-record decode failure.** Each field is checked in turn,
