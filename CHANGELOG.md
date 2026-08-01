@@ -32,6 +32,18 @@ git log is authoritative for exact commits.
   call to a same-named ordinary function. An extern has no body, so it cannot
   recurse at all; declaring `extern fn length` and calling it reported the same
   bogus error.
+- **`derive Json`'s generated `from_json` for record types now reports a
+  JSONPath instead of one opaque `"invalid JSON for T"` error, and no longer
+  panics on a nested-record decode failure.** Each field is checked in turn,
+  so a failure names exactly which field caused it — `Json.decode_error_to_string`
+  renders it as e.g. `"$.age: missing field"` or `"$.name: expected String"` —
+  and a field whose type is itself another `derive Json` record composes a
+  path across the boundary (`"$.inner.id: expected Int"`). Unknown JSON fields
+  continue to be ignored (unchanged). `Json.get_field(kvs, key)` was added to
+  `stdlib/json.march` in support. A separate, pre-existing bug (recursive
+  `from_json` calls resolve to whichever type derived `Json` most recently in
+  the module, not necessarily the field's own type) is unaffected by this
+  change and remains open.
 - **`derive Json`'s `to_json` no longer misencodes a record whose field is
   itself another `derive Json` type.** `to_json(outer)` could panic with
   `record has no field '...'` when a record contained a field of another

@@ -573,6 +573,27 @@ mod Json do
   end
 
   doc """
+  Look up a key in a JSON object's raw key-value list directly -- the list
+  already bound by matching `Object(kvs)`, rather than a `JsonValue`. Returns
+  Some(value) if found, or None otherwise. Used by the generated `from_json`
+  record decoder, which destructures `Object(kvs)` once and then looks up
+  each field by name without re-matching the wrapper each time.
+
+      Json.get_field([("x", Number(1.0))], "x") -- Some(Number(1.0))
+      Json.get_field([], "x")                    -- None
+  """
+  fn get_field(kvs : List((String, JsonValue)), key : String) : Option(JsonValue) do
+    match kvs do
+    Nil -> None
+    Cons(kv, rest) -> do
+      let (k, v) = kv
+      if k == key do Some(v)
+      else get_field(rest, key) end
+    end
+    end
+  end
+
+  doc """
   Nested field access: traverse a path of keys into nested JSON Objects.
   Returns Some(value) if the full path exists, or None if any step fails.
 

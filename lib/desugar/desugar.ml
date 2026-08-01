@@ -1570,61 +1570,117 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         EApp (EVar (mk_name "to_json"), [EVar (mk_name "x")], sp)
     in
     (* ── from_json ──────────────────────────────────────────── *)
+    (* Shared helpers for the TDRecord decoder: build a Json.DecodeError
+       whose path is a single JPathField(key) step (or Nil for the
+       root-level "expected an object" case), so every failure names the
+       field that caused it instead of one opaque wildcard error. *)
+    let jpath_field_step (key : string) : expr =
+      ECon (mk_name "Json.JPathField", [ELit (LitString key, sp)], sp)
+    in
+    let nil_path : expr = ECon (mk_name "Nil", [], sp) in
+    let single_step_path (key : string) : expr =
+      ECon (mk_name "Cons", [jpath_field_step key; nil_path], sp)
+    in
+    let mk_decode_err (msg : string) (path : expr) : expr =
+      ECon (mk_name "Json.DecodeError",
+            [ELit (LitString msg, sp); path; ELit (LitInt (-1), sp)], sp)
+    in
+    let err_at_field (msg : string) (key : string) : expr =
+      ECon (mk_name "Err", [mk_decode_err msg (single_step_path key)], sp)
+    in
+    (* Decode a single field's raw JsonValue (bound to [fv]) according to its
+       declared type, then invoke [k] with the expression for the decoded
+       (already-converted) value. For a nested derive-Json type, recurse via
+       from_json and prepend this field's step to the inner error — this one
+       line (Json.decode_error_under) is what makes a path like `$.inner.id`
+       compose across a record boundary without threading a cursor through
+       user code. *)
+    let decode_field_value (ty : ty) (fv : name) (key : string)
+        (k : expr -> expr) : expr =
+      let scalar_case (ctor : string) (msg : string)
+          (conv : expr -> expr) : expr =
+        let bound = mk_name (fv.txt ^ "_v") in
+        EMatch (EVar fv, [
+            { branch_pat = PatCon (mk_name ctor, [PatVar bound]);
+              branch_guard = None;
+              branch_body = k (conv (EVar bound)) };
+            { branch_pat = PatWild sp;
+              branch_guard = None;
+              branch_body = err_at_field msg key };
+          ], sp)
+      in
+      match ty with
+      | TyCon ({txt = "String"; _}, []) ->
+        scalar_case "Str" "expected String" (fun e -> e)
+      | TyCon ({txt = "Int"; _}, []) ->
+        scalar_case "Number" "expected Int"
+          (fun e -> EApp (EVar (mk_name "float_to_int"), [e], sp))
+      | TyCon ({txt = "Float"; _}, []) ->
+        scalar_case "Number" "expected Float" (fun e -> e)
+      | TyCon ({txt = "Bool"; _}, []) ->
+        scalar_case "Bool" "expected Bool" (fun e -> e)
+      | _ ->
+        let inner_ok = mk_name (fv.txt ^ "_ok") in
+        let inner_err = mk_name (fv.txt ^ "_err") in
+        EMatch (EApp (EVar (mk_name "from_json"), [EVar fv], sp), [
+            { branch_pat = PatCon (mk_name "Ok", [PatVar inner_ok]);
+              branch_guard = None;
+              branch_body = k (EVar inner_ok) };
+            { branch_pat = PatCon (mk_name "Err", [PatVar inner_err]);
+              branch_guard = None;
+              branch_body = ECon (mk_name "Err",
+                [EApp (EVar (mk_name "Json.decode_error_under"),
+                       [jpath_field_step key; EVar inner_err], sp)], sp) };
+          ], sp)
+    in
+    (* Build the right-nested per-field chain (Step 4 of the design):
+         match Json.get_field(kvs, "f1") do
+         None -> Err(DecodeError("missing field", [JPathField("f1")], -1))
+         Some(fv1) -> match fv1 do
+           <ok-pattern> -> <recurse into rest, or Ok({...}) at the end>
+           _ -> Err(DecodeError("expected <Ty>", [JPathField("f1")], -1))
+           end
+         end
+       Fields are looked up by name one at a time and never enumerated, so
+       unmentioned/unknown JSON keys are silently ignored for free — no
+       separate handling is needed for "unknown fields are ignored". *)
+    let rec build_field_chain (fields : field list)
+        (decoded : (name * expr) list) : expr =
+      match fields with
+      | [] -> ECon (mk_name "Ok", [ERecord (List.rev decoded, sp)], sp)
+      | f :: rest ->
+        let key = f.fld_name.txt in
+        let fv = mk_name (Printf.sprintf "_jf_%s" key) in
+        let get_expr = EApp (EVar (mk_name "Json.get_field"),
+                             [EVar (mk_name "kvs"); ELit (LitString key, sp)], sp)
+        in
+        let some_body = decode_field_value f.fld_ty fv key (fun value_expr ->
+            build_field_chain rest ((f.fld_name, value_expr) :: decoded))
+        in
+        EMatch (get_expr, [
+            { branch_pat = PatCon (mk_name "None", []);
+              branch_guard = None;
+              branch_body = err_at_field "missing field" key };
+            { branch_pat = PatCon (mk_name "Some", [PatVar fv]);
+              branch_guard = None;
+              branch_body = some_body };
+          ], sp)
+    in
     let from_json_body = match td with
       | TDRecord fields ->
-        (* match (Json.get(v,"f1"), Json.get(v,"f2"), ...) with
-           | (Some(Str(f1)), Some(Number(f2)), ...) -> Ok({f1=f1, f2=float_to_int(f2), ...})
-           | _ -> Err("invalid JSON for TypeName") *)
-        let get_exprs = List.map (fun (f : field) ->
-            EApp (EVar (mk_name "Json.get"),
-                  [EVar (mk_name "v"); ELit (LitString f.fld_name.txt, sp)], sp)
-          ) fields
-        in
-        let scrutinee = ETuple (get_exprs, sp) in
-        let pats_and_convs = List.mapi (fun _i (f : field) ->
-            let var_name = Printf.sprintf "_jf%d" _i in
-            decoder_pat_for_ty f.fld_ty var_name
-          ) fields
-        in
-        let ok_pats = List.map fst pats_and_convs in
-        (* Build the record expression *)
-        let record_fields = List.mapi (fun i (f : field) ->
-            let (_pat, conv_expr) = List.nth pats_and_convs i in
-            (* For non-primitive types we need to call from_json and handle Result *)
-            let value_expr = match f.fld_ty with
-              | TyCon ({txt = "String"; _}, [])
-              | TyCon ({txt = "Int"; _}, [])
-              | TyCon ({txt = "Float"; _}, [])
-              | TyCon ({txt = "Bool"; _}, []) -> conv_expr
-              | _ ->
-                (* For complex types, conv_expr is the raw JsonValue var.
-                   We need: match from_json(raw) with Ok(v) -> v | Err(e) -> panic(e) *)
-                let from_result = EApp (EVar (mk_name "from_json"), [conv_expr], sp) in
-                EMatch (from_result, [
-                  { branch_pat = PatCon (mk_name "Ok", [PatVar (mk_name (Printf.sprintf "_jfok%d" i))]);
-                    branch_guard = None;
-                    branch_body = EVar (mk_name (Printf.sprintf "_jfok%d" i)) };
-                  { branch_pat = PatCon (mk_name "Err", [PatVar (mk_name "_jfe")]);
-                    branch_guard = None;
-                    branch_body = EApp (EVar (mk_name "panic"), [EVar (mk_name "_jfe")], sp) };
-                ], sp)
-            in
-            (f.fld_name, value_expr)
-          ) fields
-        in
-        let ok_record = ECon (mk_name "Ok", [ERecord (record_fields, sp)], sp) in
-        let err_msg = Printf.sprintf "invalid JSON for %s" type_name.txt in
-        let err_branch = {
+        let kvs = mk_name "kvs" in
+        let object_branch = {
+          branch_pat = PatCon (mk_name "Object", [PatVar kvs]);
+          branch_guard = None;
+          branch_body = build_field_chain fields [];
+        } in
+        let not_object_branch = {
           branch_pat = PatWild sp;
           branch_guard = None;
-          branch_body = ECon (mk_name "Err", [ELit (LitString err_msg, sp)], sp);
+          branch_body = ECon (mk_name "Err",
+            [mk_decode_err "expected an object" nil_path], sp);
         } in
-        let ok_branch = {
-          branch_pat = PatTuple (ok_pats, sp);
-          branch_guard = None;
-          branch_body = ok_record;
-        } in
-        EMatch (scrutinee, [ok_branch; err_branch], sp)
+        EMatch (EVar (mk_name "v"), [object_branch; not_object_branch], sp)
       | TDVariant variants ->
         (* match Json.get(v, "tag") with
            | Some(Str("Ctor0")) -> Ok(Ctor0)

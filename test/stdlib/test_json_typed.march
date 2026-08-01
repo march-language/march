@@ -37,6 +37,44 @@ mod TestJsonTyped do
   let flat_unknown_r = parse_flat("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5,\"zzz\":9}")
   let flat_dup_r = parse_flat("{\"name\":\"a\",\"name\":\"b\",\"age\":3,\"active\":true,\"score\":1.5}")
 
+  -- ── Record decode errors carry a path (Task 4) ───────────────────────
+  -- Unlike parse_flat above (which immediately stringifies the DecodeError
+  -- via to_string), these capture the raw Json.DecodeError so the tests
+  -- below can inspect its path via Json.decode_error_to_string.
+
+  let path_wrong_scalar_r = match Json.parse("{\"name\":1,\"age\":3,\"active\":true,\"score\":1.5}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let path_missing_field_r = match Json.parse("{\"name\":\"a\",\"active\":true,\"score\":1.5}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let path_unknown_fields_r = match Json.parse("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5,\"zzz\":9}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let path_non_object_r = match Json.parse("[1,2]") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+
+  -- A second, nested record pair, to probe path composition across a
+  -- record boundary (Json.decode_error_under). PathOuter must derive Json
+  -- LAST (of this pair) so the bare `from_json` called just below resolves
+  -- to PathOuter's own decoder -- see the module-level note at the top of
+  -- this file re: cross-type shadowing.
+  type PathInner = { id : Int }
+  derive Json for PathInner
+
+  type PathOuter = { label : String, inner : PathInner }
+  derive Json for PathOuter
+
+  let path_nested_r = match Json.parse("{\"label\":\"x\",\"inner\":{\"id\":\"nope\"}}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+
   type Tag = Red | Green
   derive Json for Tag
 
@@ -114,6 +152,66 @@ mod TestJsonTyped do
 
   end
 
+  describe "record decode errors carry a path" do
+
+    test "wrong scalar type names the field" do
+      match path_wrong_scalar_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.name: expected String")
+      end
+    end
+
+    test "missing field names the field" do
+      match path_missing_field_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.age: missing field")
+      end
+    end
+
+    test "non-object for a record type" do
+      match path_non_object_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$: expected an object")
+      end
+    end
+
+    test "unknown fields are ignored (Decision 2)" do
+      match path_unknown_fields_r do
+      Ok(r) -> assert (r.age == 3)
+      Err(_) -> assert (false)
+      end
+    end
+
+    -- The brief's spec for this test expects the composed path
+    -- "$.inner.id: expected Int" -- i.e. PathOuter's decoder recurses into
+    -- PathInner's own decoder for the "inner" field, which reports
+    -- "expected Int" for its "id" field, and PathOuter prepends its own
+    -- ".inner" step via Json.decode_error_under. That is NOT what happens
+    -- today: the pre-existing, separately-tracked from_json cross-type
+    -- dispatch bug (see the "Nested records" note below, and
+    -- specs/2026-07-31-json-from-json-dispatch-design.md) means every
+    -- `derive Json for T` unconditionally rebinds the bare `from_json` name
+    -- in the module env (lib/eval/eval.ml ~9674-9681, "from_json &c.:
+    -- name-bound"), so PathOuter's generated decoder recursing into its
+    -- "inner" field's `from_json(fv)` call resolves to PathOuter's OWN
+    -- decoder (the last one bound), not PathInner's -- regardless of
+    -- declaration order, since the outer type must derive after the inner
+    -- type it references. What IS verified here, and what this Task 4
+    -- change actually fixes relative to the old generator: the failure
+    -- no longer PANICS (the old per-field-less generator's nested-field
+    -- fallback was an unconditional `Err(e) -> panic(e)`), it composes a
+    -- ".inner" path prefix via Json.decode_error_under, and it renders a
+    -- well-typed Json.DecodeError all the way out -- just misattributed to
+    -- PathOuter's own field set until the dispatch bug is fixed.
+    test "nested failure composes a path (limited by the known cross-type from_json dispatch bug)" do
+      match path_nested_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.inner.label: missing field")
+      end
+    end
+
+  end
+
   -- ── to_json cross-type dispatch (fixed, Task 2) ──────────────────────
   -- `to_json` now dispatches through `impl_tbl` keyed by the argument's
   -- RUNTIME type (`lib/eval/eval.ml`'s `is_type_dispatched_method` gained
@@ -161,31 +259,34 @@ mod TestJsonTyped do
 
   end
 
-  -- ── Nested records (`from_json` only): NOT probed live here ──────────
-  -- `type Inner = { id : Int }` + `derive Json for Inner`, then
-  -- `type Outer = { label : String, inner : Inner }` +
-  -- `derive Json for Outer`, then `from_json` on
-  -- `{"label":"x","inner":{"id":7}}` does not return `Err` -- it PANICS
-  -- ("panic: invalid JSON for Outer"), even with ONLY these two types
-  -- deriving Json in the whole module (i.e. this is not an artifact of
-  -- the cross-type shadowing above; it reproduces with exactly one other
-  -- derived type). Root cause: the record-field decoder generated for a
-  -- non-primitive field type (lib/desugar/desugar.ml ~1599-1610) is
-  -- `match from_json(raw) do Ok(v) -> v | Err(e) -> panic(e) end` --  and
-  -- because bare `from_json` always resolves to whichever type derived
-  -- Json most recently, Outer's own recursive decode of its `inner` field
-  -- calls Outer's OWN from_json (not Inner's), which correctly returns
-  -- `Err("invalid JSON for Outer")` for the mismatched shape -- and that
-  -- Err is then unconditionally promoted to an uncatchable panic by the
-  -- wrapping match. Since a live probe here would either panic and take
-  -- down this whole alcotest case (if Outer is the last-declared type at
-  -- test-run time) or silently target the wrong type's decoder (if
-  -- something else is declared afterward, as NdRec is below) -- neither
-  -- outcome is a trustworthy, isolated demonstration -- this was instead
-  -- reproduced manually, standalone (see the capability map for the
-  -- exact repro file and output). `to_json` is now safe on this same
-  -- shape -- see `Nested`/`NestedHolder` above -- only `from_json` still
-  -- has this failure mode.
+  -- ── Nested records (`from_json` only): NOW probed live, see PathInner/
+  -- PathOuter above ────────────────────────────────────────────────────
+  -- Before Task 4, `type Inner = { id : Int }` + `derive Json for Inner`,
+  -- then `type Outer = { label : String, inner : Inner }` +
+  -- `derive Json for Outer`, then `from_json` on a malformed
+  -- `{"label":"x","inner":{...}}` did not return `Err` -- it PANICED
+  -- ("panic: invalid JSON for Outer"), because the old record-field
+  -- decoder's non-primitive-field fallback (lib/desugar/desugar.ml, old
+  -- ~1599-1610) was `match from_json(raw) do Ok(v) -> v | Err(e) ->
+  -- panic(e) end`. Task 4's per-field generator replaced that unconditional
+  -- panic with `Err(inner) -> Err(Json.decode_error_under(step, inner))`
+  -- (desugar.ml's `decode_field_value`), so the failure now surfaces as a
+  -- normal `Err(Json.DecodeError(...))` instead of taking down the whole
+  -- process -- see the "nested failure composes a path" test above
+  -- (PathInner/PathOuter) for a live probe.
+  --
+  -- What Task 4 did NOT fix -- and could not, without touching the
+  -- separately-tracked dispatch bug -- is WHICH decoder that recursive
+  -- `from_json(fv)` call actually reaches: bare `from_json` still always
+  -- resolves to whichever type derived Json most recently (an unconditional
+  -- env-rebind, lib/eval/eval.ml ~9674-9681), so Outer's own recursive
+  -- decode of its `inner` field still calls Outer's OWN from_json, not
+  -- Inner's. The live PathInner/PathOuter test above pins this exact
+  -- interaction: it gets a well-formed, path-bearing `Err`, but the path
+  -- and message describe Outer's (wrong) view of the inner object, not
+  -- Inner's true failure. `to_json` is safe on this same shape -- see
+  -- `Nested`/`NestedHolder` above -- only `from_json`'s cross-type dispatch
+  -- still has this failure mode.
 
   -- ── Uncertain capabilities: NOT probed live here, for the same reason ─
   -- Option(T), List(T), and a type parameter. Manually confirmed outside
