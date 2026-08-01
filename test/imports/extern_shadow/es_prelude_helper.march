@@ -1,0 +1,11 @@
+-- Companion to es_extern_length.march: the same bogus-SCC bug with no extern
+-- involved at all.  A top-level `go` that calls any prelude function whose
+-- body uses a local `fn go` helper (`length`, `reverse`, `map`, `filter`, …)
+-- was reported as non-tail-recursive.  `--check` must exit 0.
+mod EsPreludeHelper do
+  fn go(ys : List(Int)) : Int do
+    if length(ys) == 0 do 0 else 1 end
+  end
+
+  fn main() : Int do go([1, 2]) end
+end

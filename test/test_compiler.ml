@@ -9714,6 +9714,111 @@ let test_entry_qual_annotated_same_tvar_ok () =
   end|} in
   Alcotest.(check bool) "Main.identity (a->a) used at Int: no error" false (has_errors ctx)
 
+(* ── Tail-call enforcement: callee attribution ──────────────────────────────
+   [collect_direct_fn_calls] built the call graph by matching bare call names
+   against the set of TOP-LEVEL function names, with no regard for local
+   scoping.  A call to a locally-bound helper whose name happens to collide
+   with a top-level function therefore forged a call-graph edge, inventing an
+   SCC (mutual recursion) that does not exist — and every member of that bogus
+   SCC then got its calls reported as "recursive call ... not in tail
+   position".  Reported in the wild as: a module declaring an `extern` named
+   `length` (prelude's `length` uses a local helper `fn go`) plus a top-level
+   `fn go` calling it. *)
+let test_tce_local_helper_shadow_no_false_recursion () =
+  (* `helper`'s local `fn go` is NOT the top-level `go`: no edge, no SCC, and
+     so `helper(m)` inside `go` is not a recursive call at all. *)
+  let ctx = typecheck {|mod T do
+    fn helper(n : Int) : Int do
+      fn go(k : Int, acc : Int) : Int do
+        if k == 0 do acc else go(k - 1, acc + 1) end
+      end
+      go(n, 0)
+    end
+    fn go(m : Int) : Int do
+      if helper(m) == 0 do 0 else 1 end
+    end
+  end|} in
+  Alcotest.(check bool) "local helper shadowing a top-level fn: no TCE error"
+    false (has_error_with ctx "not in tail position")
+
+(* Same shape via a `let`-bound lambda rather than an inner `fn`. *)
+let test_tce_let_bound_lambda_shadow_no_false_recursion () =
+  let ctx = typecheck {|mod T do
+    fn helper(n : Int) : Int do
+      let go = fn k -> k + 1
+      go(n)
+    end
+    fn go(m : Int) : Int do
+      if helper(m) == 0 do 0 else 1 end
+    end
+  end|} in
+  Alcotest.(check bool) "let-bound lambda shadowing a top-level fn: no TCE error"
+    false (has_error_with ctx "not in tail position")
+
+(* An `extern` fn has no body, so it can never recurse.  A call to a name
+   declared as an extern at this level must not be resolved against a
+   same-named ordinary function. *)
+let test_tce_extern_name_not_recursive () =
+  let ctx = typecheck {|mod T do
+    needs IO.Foreign
+    extern "c" : Cap(IO.Foreign) do
+      fn helper(n : Int) : Int = "march_shim_helper"
+    end
+    fn go(m : Int) : Int do
+      if helper(m) == 0 do 0 else go(m - 1) end
+    end
+  end|} in
+  Alcotest.(check bool) "call to an extern name: no TCE error"
+    false (has_error_with ctx "not in tail position")
+
+(* The same shadow-blindness existed a second time, in the CHECKER rather than
+   the graph builder: inside a genuinely recursive SCC, a call to a local
+   binding that shadows an SCC member was reported as a recursive call.  Here
+   `f`/`g` really are mutually recursive, but `Some(g) -> g(n)` calls the
+   arm-bound closure, not the top-level `g`. *)
+let test_tce_arm_bound_name_shadows_scc_member () =
+  let ctx = typecheck {|mod T do
+    fn f(n : Int) : Int do
+      match Some(fn x -> x + 1) do
+        Some(g) -> g(n) + 1
+        None -> g(n)
+      end
+    end
+    fn g(n : Int) : Int do
+      if n == 0 do 0 else f(n - 1) end
+    end
+  end|} in
+  Alcotest.(check bool) "arm-bound name shadowing an SCC member: no TCE error"
+    false (has_error_with ctx "not in tail position")
+
+(* Control: genuine non-tail self-recursion is still rejected.  The shadowing
+   fix must not blunt the check it is narrowing. *)
+let test_tce_real_non_tail_recursion_still_errors () =
+  let ctx = typecheck {|mod T do
+    fn f(xs : List(Int)) : Int do
+      match xs do
+        Nil -> 0
+        Cons(_, t) -> 1 + f(Cons(1, t))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "genuine non-tail recursion still reported"
+    true (has_error_with ctx "not in tail position")
+
+(* Control: mutual recursion between two real top-level functions is still
+   detected — the SCC must survive when the names are genuinely unshadowed. *)
+let test_tce_real_mutual_recursion_still_errors () =
+  let ctx = typecheck {|mod T do
+    fn even(n : Int) : Int do
+      if n == 0 do 1 else 1 + odd(n) end
+    end
+    fn odd(n : Int) : Int do
+      if n == 0 do 0 else even(n) end
+    end
+  end|} in
+  Alcotest.(check bool) "genuine mutual recursion still reported"
+    true (has_error_with ctx "not in tail position")
+
 (* A match in CHECKING position (function with a declared return type) must
    still get redundant-arm warnings.  check_expr's EMatch arm called only
    check_exhaustiveness, never check_redundant_arms, so every match inside an
@@ -11038,6 +11143,14 @@ let compiler_suites =
           Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
           Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
           Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;
+        ] );
+      ( "tail_call_enforcement", [
+          Alcotest.test_case "local `fn` helper shadowing a top-level fn: no error"  `Quick test_tce_local_helper_shadow_no_false_recursion;
+          Alcotest.test_case "let-bound lambda shadowing a top-level fn: no error"   `Quick test_tce_let_bound_lambda_shadow_no_false_recursion;
+          Alcotest.test_case "call to an extern-declared name: no error"            `Quick test_tce_extern_name_not_recursive;
+          Alcotest.test_case "match-arm name shadowing an SCC member: no error"     `Quick test_tce_arm_bound_name_shadows_scc_member;
+          Alcotest.test_case "genuine non-tail self-recursion: still errors"        `Quick test_tce_real_non_tail_recursion_still_errors;
+          Alcotest.test_case "genuine mutual recursion: still errors"               `Quick test_tce_real_mutual_recursion_still_errors;
         ] );
   ]
 

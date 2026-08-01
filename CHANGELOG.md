@@ -13,6 +13,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A local helper whose name collides with a top-level function no longer
+  invents recursion.** The tail-call checker built its call graph by matching
+  bare call names against the set of top-level function names, ignoring scope,
+  so a call to a *local* helper with a colliding name forged a call-graph edge
+  and fabricated a strongly-connected component. Because the entry module's
+  declarations have the prelude spliced in, and prelude's `length`, `reverse`,
+  `map` and friends are all written with a local `fn go` helper, any program
+  with its own top-level `go` that called one of them was rejected with
+  ``Function `go`: recursive call to `length` is not in tail position`` — for a
+  `go` that is not recursive, against a `length` it does not call. Binders now
+  shadow: an inner `fn`/`let` for the rest of its block, a `match` arm's
+  pattern inside that arm, and `let?`'s pattern in its continuation — both in
+  the call graph and in the tail-position check itself, so a local that shadows
+  a member of a genuinely recursive group is no longer mistaken for it either.
+
+  Relatedly, a name declared in an `extern` block is no longer treated as a
+  call to a same-named ordinary function. An extern has no body, so it cannot
+  recurse at all; declaring `extern fn length` and calling it reported the same
+  bogus error.
+
 - **The default HTTP server no longer strands connections past its worker
   count.** A pool worker owns a connection for that connection's entire
   keep-alive lifetime, so a *fixed* pool of N workers served at most N
