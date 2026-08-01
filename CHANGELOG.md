@@ -32,6 +32,12 @@ git log is authoritative for exact commits.
   call to a same-named ordinary function. An extern has no body, so it cannot
   recurse at all; declaring `extern fn length` and calling it reported the same
   bogus error.
+- **`derive Json`'s `to_json` no longer misencodes a record whose field is
+  itself another `derive Json` type.** `to_json(outer)` could panic with
+  `record has no field '...'` when a record contained a field of another
+  `derive Json`-derived type — the recursive encode call resolved back into
+  the enclosing type's own encoder instead of the field's. Interpreter only;
+  `from_json` is a separate, still-open issue.
 
 - **The default HTTP server no longer strands connections past its worker
   count.** A pool worker owns a connection for that connection's entire

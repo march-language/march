@@ -114,7 +114,54 @@ mod TestJsonTyped do
 
   end
 
-  -- ── Nested records: NOT probed live here ─────────────────────────────
+  -- ── to_json cross-type dispatch (fixed, Task 2) ──────────────────────
+  -- `to_json` now dispatches through `impl_tbl` keyed by the argument's
+  -- RUNTIME type (`lib/eval/eval.ml`'s `is_type_dispatched_method` gained
+  -- a `("JsonTo", "to_json")` case), the same mechanism `Eq`/`Show`/`Ord`/
+  -- `Hash` already used -- so calling `to_json` on an EARLIER-declared
+  -- type (`Flat`, `Tag`) after a LATER type (`Shape`, `NdRec`) has also
+  -- derived Json no longer resolves to the wrong encoder.
+  --
+  -- This also fixes a second, nastier manifestation of the same root
+  -- cause that was NOT simply "wrong type encoded": a record with a field
+  -- of another `derive Json` type recursively calls bare `to_json` on
+  -- that field (`encoder_for_ty`'s fallback, desugar.ml ~1494-1496). Before
+  -- the fix, the DImpl eval's catch-all branch bound `to_json` into a
+  -- SELF-recursive closure, so that recursive call re-entered the
+  -- ENCLOSING type's own encoder instead of the field's -- `type Inner =
+  -- { id : Int }` nested in `type Outer = { label : String, inner : Inner
+  -- }` (both `derive Json`, no other type involved) made `to_json(outer)`
+  -- panic with "record has no field 'label'". `Nested`/`NestedHolder`
+  -- below pin that exact shape. (`from_json`'s equivalent nested-panic bug,
+  -- documented below, is explicitly OUT of scope for this fix -- see
+  -- `specs/2026-07-31-json-from-json-dispatch-design.md`.)
+
+  type Nested = { id : Int }
+  derive Json for Nested
+
+  type NestedHolder = { label : String, inner : Nested }
+  derive Json for NestedHolder
+
+  let nested_holder_json =
+    Json.to_string(to_json({ label: "x", inner: { id: 7 } }))
+
+  describe "to_json cross-type dispatch (fixed)" do
+
+    test "two types deriving Json in one module each encode correctly" do
+      let a = to_json({ name: "x", age: 1, active: true, score: 0.5 })
+      let b = to_json(Red)
+      assert (String.contains(Json.to_string(a), "\"x\""))
+      assert (String.contains(Json.to_string(b), "\"Red\""))
+    end
+
+    test "a record field whose type also derives Json encodes without panicking" do
+      assert (String.contains(nested_holder_json, "\"label\":\"x\""))
+      assert (String.contains(nested_holder_json, "\"inner\":{\"id\":7}"))
+    end
+
+  end
+
+  -- ── Nested records (`from_json` only): NOT probed live here ──────────
   -- `type Inner = { id : Int }` + `derive Json for Inner`, then
   -- `type Outer = { label : String, inner : Inner }` +
   -- `derive Json for Outer`, then `from_json` on
@@ -136,7 +183,9 @@ mod TestJsonTyped do
   -- something else is declared afterward, as NdRec is below) -- neither
   -- outcome is a trustworthy, isolated demonstration -- this was instead
   -- reproduced manually, standalone (see the capability map for the
-  -- exact repro file and output).
+  -- exact repro file and output). `to_json` is now safe on this same
+  -- shape -- see `Nested`/`NestedHolder` above -- only `from_json` still
+  -- has this failure mode.
 
   -- ── Uncertain capabilities: NOT probed live here, for the same reason ─
   -- Option(T), List(T), and a type parameter. Manually confirmed outside

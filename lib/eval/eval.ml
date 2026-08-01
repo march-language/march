@@ -287,7 +287,8 @@ let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 let iface_method_tbl : (string * string * string, value) Hashtbl.t = Hashtbl.create 8
 
 (** Interface methods that are dispatched by the argument's type through a
-    type-directed builtin ([show], [eq], [compare], [hash]) rather than by name.
+    type-directed builtin ([show], [eq], [compare], [hash], [to_json]) rather
+    than by name.
 
     For these, the DImpl eval must NOT bind the bare method name in the outer
     env: doing so lets the last-registered impl shadow the builtin, so a second
@@ -296,10 +297,31 @@ let iface_method_tbl : (string * string * string, value) Hashtbl.t = Hashtbl.cre
     Instead they are registered only in [impl_tbl], keyed by (iface, type), and
     the builtin resolves the correct impl from the value's type at call time.
     A plain (non-self-referential) closure is used so recursive calls in the
-    body (e.g. [eq] on nested fields) also route through builtin dispatch. *)
+    body (e.g. [eq] on nested fields) also route through builtin dispatch.
+
+    [("JsonTo", "to_json")] is included for the same reason: without it, the
+    DImpl eval's catch-all branch (`eval_decl env (DFn (fn_def, sp))`) binds
+    `to_json` into a SELF-recursive closure (via [eval_decl]'s DFn case),
+    so a bare `to_json(...)` call inside one type's derived encoder body —
+    emitted by `encoder_for_ty`'s recursive-call fallback for any non-scalar
+    field, e.g. a field whose type is another `derive Json` record — calls
+    right back into the ENCLOSING type's own encoder instead of dispatching
+    by the field VALUE's runtime type. Concretely: `type Inner = { id: Int }`
+    nested inside `type Outer = { label: String, inner: Inner }`, both
+    `derive Json`, made `to_json(outer_val)` panic with "record has no field
+    'label'" — it silently re-entered `Outer`'s own encoder on the `Inner`
+    value. `to_json` itself is never bound in the env either way (see the
+    [is_json_iface] branch below), so marking it type-dispatched only changes
+    which KIND of closure the DImpl eval builds for the impl_tbl entry — from
+    self-referential to plain — with no other observable effect. [from_json]
+    is deliberately NOT included: unlike `to_json`, there is no value of the
+    target type in hand at a `from_json` call site to dispatch on (its
+    dispatch is by JSON shape, at the return type, not the argument type) —
+    see `specs/2026-07-31-json-from-json-dispatch-design.md`. *)
 let is_type_dispatched_method iface meth =
   match iface, meth with
-  | "Show", "show" | "Eq", "eq" | "Ord", "compare" | "Hash", "hash" -> true
+  | "Show", "show" | "Eq", "eq" | "Ord", "compare" | "Hash", "hash"
+  | "JsonTo", "to_json" -> true
   | _ -> false
 
 (** Whether [iface] is a built-in interface whose value-level dispatch reads
@@ -311,9 +333,13 @@ let is_type_dispatched_method iface meth =
     [le]/[ge].  Those extra methods must NOT be written into [impl_tbl], or they
     clobber the dispatch method under the same key: the builtin then invokes the
     wrong method and [neq → eq → neq] recurses forever (stack overflow).
-    Non-dispatched interfaces (Json, Drop, user interfaces) are unaffected —
-    nothing reads their (iface, type) entry by value, so they keep their
-    existing per-method registration. *)
+    Interfaces excluded here (Json, Drop, user interfaces) have no EXTRA
+    method that could collide with a single dispatch slot the way [Eq]'s
+    [neq] or [Ord]'s [lt]/[gt] can, so they don't need this exclusivity
+    protection — [JsonTo]'s `to_json` is still a genuine
+    [is_type_dispatched_method] and still reads/writes its (iface, type)
+    [impl_tbl] entry by value (see the `to_json` builtin above); it just
+    doesn't need to be excluded from anything here. *)
 let is_type_dispatched_iface = function
   | "Show" | "Eq" | "Ord" | "Hash" -> true
   | _ -> false
