@@ -11,6 +11,24 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`JsonStream.each_typed(path, cb)` decodes an NDJSON file straight to
+  typed records via `derive Json`'s `from_json`, and attaches the
+  decoding record's absolute byte offset to any failure.** A driver built
+  on top of the existing (frozen) `JsonStream` tokenizer/event API,
+  modeled on `each_value`: feeds the file to the tokenizer one line at a
+  time (NDJSON is one record per line) so the byte offset just before
+  each line is known, decodes each completed top-level value with the
+  caller's bare `from_json`, and calls `cb(record)` per success. Returns
+  `Ok(n)` with the record count, or the FIRST decode/tokenizer failure —
+  `Json.DecodeError` — with `Json.decode_error_at` used to set its offset
+  to that record's start, so `Json.decode_error_to_string(e)` names both
+  the failing field and the byte offset, e.g. `"$.id (byte 9): expected
+  Int"`. `test/stdlib/test_json_stream.march` (phase 1/2's tokenizer
+  suite) is unchanged and stays green — `each_typed` does not touch
+  `feed`/`finish`/`go` or any tokenizer internals.
+
 ### Fixed
 
 - **A local helper whose name collides with a top-level function no longer

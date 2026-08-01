@@ -410,6 +410,46 @@ mod TestJsonTyped do
 
   end
 
+  describe "each_typed carries the record's byte offset" do
+
+    test "decodes an ndjson file to typed records" do
+      let path = "/tmp/march_each_typed_ok.jsonl"
+      match File.write(path, "{\"id\":1}\n{\"id\":2}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        let r = JsonStream.each_typed(path, fn r -> ())
+        match File.delete(path) do _ -> () end
+        match r do
+        Ok(n) -> assert (n == 2)
+        Err(e) -> do IO.puts("EACH_TYPED OK-CASE ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+        end
+      end
+      end
+    end
+
+    -- second record is malformed; its offset is past the first record
+    test "a bad record reports its field AND a nonzero byte offset" do
+      let path = "/tmp/march_each_typed_bad.jsonl"
+      match File.write(path, "{\"id\":1}\n{\"id\":\"nope\"}\n") do
+      Err(_) -> assert (false)
+      Ok(_) -> do
+        let r = JsonStream.each_typed(path, fn r -> ())
+        match File.delete(path) do _ -> () end
+        match r do
+        Ok(_) -> assert (false)
+        Err(e) -> do
+          let msg = Json.decode_error_to_string(e)
+          IO.puts("EACH_TYPED BAD-CASE ERR: " ++ msg)
+          assert (String.contains(msg, "$.id"))
+          assert (String.contains(msg, "byte 9"))
+        end
+        end
+      end
+      end
+    end
+
+  end
+
   describe "DecodeError rendering" do
     test "bare message renders with the root path" do
       let e = Json.DecodeError("expected Int", Nil, 0 - 1)

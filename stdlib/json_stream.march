@@ -799,4 +799,109 @@ mod JsonStream do
     end
   end
 
+  -- ── Typed driver (derive-Json x byte offsets) ────────────────────────
+  -- NDJSON: parse `path`, decode each completed top-level value to a typed
+  -- record via the caller's `derive Json`-generated `from_json`, calling
+  -- `cb(record)` per success. Returns the record count, or the FIRST
+  -- decode/parse failure with the failing record's absolute byte offset
+  -- attached (`Json.decode_error_at`) so a field-path failure like
+  -- "$.id: expected Int" also names *which* record, in a large file.
+  --
+  -- `from_json` is deliberately called bare (not `Json.from_json`): a
+  -- `derive Json for T` binds it as a plain name in the environment (see
+  -- lib/eval/eval.ml's `is_json_iface` handling -- from_json cannot be
+  -- dispatched on argument type the way `to_json` is, since every call
+  -- site's argument is the same `JsonValue`), so it resolves to whichever
+  -- type's `derive Json` the CALLER last executed -- exactly the
+  -- resolution `each_typed`'s own caller relies on (see
+  -- specs/2026-07-31-json-from-json-dispatch-design.md and the
+  -- module-level note atop test/stdlib/test_json_typed.march).
+  --
+  -- Unlike `each_value` (which feeds the file in 64KB chunks and is
+  -- agnostic to record boundaries), this driver feeds the tokenizer ONE
+  -- LINE at a time via `File.with_lines`: NDJSON is one record per line,
+  -- so the byte offset just before each line is fed is that record's
+  -- start offset -- exactly the offset attached to any decode failure
+  -- produced while consuming events from that line. This is independent
+  -- of (and does not read) the tokenizer's own internal `StOk` offset
+  -- field; it is a running counter of bytes handed to `feed` so far.
+  fn each_typed(path, cb) do
+    match File.with_lines(path, fn seq -> typed_run(seq, cb)) do
+    Err(e) -> Err(Json.DecodeError("file error: " ++ to_string(e), Nil, 0 - 1))
+    Ok(inner) -> inner
+    end
+  end
+
+  pfn typed_run(seq, cb) do
+    let r0 = Seq.fold(seq, Ok((start_ndjson(), Nil, 0, 0)), fn (acc, line) ->
+      match acc do
+      Err(e) -> Err(e)
+      Ok((st, frames, off, cnt)) -> typed_line(st, frames, off, cnt, line, cb)
+      end)
+    match r0 do
+    Err(e) -> Err(e)
+    Ok((st, frames, off, cnt)) ->
+      match finish(st) do
+      Err(e) -> Err(stream_err_to_decode(e))
+      Ok(evs) ->
+        match typed_events(evs, frames, off, cnt, cb) do
+        Err(e) -> Err(e)
+        Ok((_, cnt2)) -> Ok(cnt2)
+        end
+      end
+    end
+  end
+
+  -- Feed one NDJSON line (plus the newline `File.with_lines` stripped) to
+  -- the tokenizer, then decode whatever top-level value(s) it completed.
+  -- `off` is the absolute byte offset of THIS line's first byte -- the
+  -- offset attached to a decode failure for any record completed while
+  -- processing it.
+  pfn typed_line(st, frames, off, cnt, line, cb) do
+    match feed(st, line ++ "\n") do
+    Err(e) -> Err(stream_err_to_decode(e))
+    Ok((evs, st2)) ->
+      let off2 = off + string_byte_length(line) + 1
+      match typed_events(evs, frames, off, cnt, cb) do
+      Err(e) -> Err(e)
+      Ok((frames2, cnt2)) -> Ok((st2, frames2, off2, cnt2))
+      end
+    end
+  end
+
+  pfn typed_events(evs, frames, off, cnt, cb) do
+    match evs do
+    Nil -> Ok((frames, cnt))
+    Cons(ev, t) ->
+      match build_step(frames, ev) do
+      Err(e) -> Err(stream_err_to_decode(e))
+      Ok((frames2, out)) ->
+        match out do
+        Some(v) ->
+          match from_json(v) do
+          Err(e) -> Err(Json.decode_error_at(off, e))
+          Ok(r) -> do
+            cb(r)
+            typed_events(t, frames2, off, cnt + 1, cb)
+          end
+          end
+        None -> typed_events(t, frames2, off, cnt, cb)
+        end
+      end
+    end
+  end
+
+  pfn stream_err_offset(e) do
+    match e do
+    EMalformed(_, off) -> off
+    EDepthLimit(off) -> off
+    ETokenLimit(off) -> off
+    ETruncated(off) -> off
+    end
+  end
+
+  pfn stream_err_to_decode(e) do
+    Json.DecodeError(err_to_string(e), Nil, stream_err_offset(e))
+  end
+
 end
