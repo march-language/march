@@ -246,9 +246,16 @@ let run_http_e2e ~variant ~slug ~evloop () =
     port := pick_free_port ();
     let log_fd =
       Unix.openfile log_path [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o644 in
+    (* Select the implementation AT RUN TIME, explicitly, for BOTH variants.
+       The event loop is now the default, so the thread-pool case must force
+       MARCH_HTTP_EVLOOP=0 -- otherwise both cases would silently exercise the
+       same server and this suite's whole point (covering both code paths)
+       would evaporate into vacuous green.  Do not "simplify" this by relying
+       on the default for either arm. *)
     let env =
       Array.append (Unix.environment ())
-        [| Printf.sprintf "MARCH_TEST_HTTP_PORT=%d" !port |] in
+        [| Printf.sprintf "MARCH_TEST_HTTP_PORT=%d" !port
+         ; (if evloop then "MARCH_HTTP_EVLOOP=1" else "MARCH_HTTP_EVLOOP=0") |] in
     let pid =
       Unix.create_process_env bin [| bin |] env Unix.stdin log_fd log_fd in
     Unix.close log_fd;
@@ -302,6 +309,24 @@ let run_http_e2e ~variant ~slug ~evloop () =
     poll ()
   in
   start_with_retry 4;
+
+  (* PROVE the requested implementation is the one that actually started.
+     Forcing MARCH_HTTP_EVLOOP above is necessary but not sufficient: if the
+     runtime selector regressed, both variants would quietly run the same
+     server and every assertion below would still pass.  The server announces
+     itself on stderr, so check it.  ("(event-loop)" appears only in the
+     event-loop banner; the pool prints "HTTP thread pool started".) *)
+  let banner = read_log () in
+  let saw_evloop = find_from banner "(event-loop)" 0 <> None in
+  let saw_pool   = find_from banner "thread pool"  0 <> None in
+  if evloop && not saw_evloop then
+    bail "asked for the EVENT LOOP but the server did not announce it — the \
+          runtime implementation selector (march_http_evloop_enabled) is \
+          broken, and both variants of this suite are testing one server";
+  if (not evloop) && not saw_pool then
+    bail "asked for the THREAD POOL but the server did not announce it — the \
+          runtime implementation selector (march_http_evloop_enabled) is \
+          broken, and both variants of this suite are testing one server";
 
   (* ── Request/response plumbing ──────────────────────────────────────── *)
   let recv_more fd pending ~deadline =

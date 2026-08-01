@@ -1977,14 +1977,30 @@ void march_http_pool_stop(void) {
  * build recipes keep working. */
 int march_http_evloop_enabled(void) {
 #if defined(MARCH_HTTP_USE_EVLOOP)
-    return 1;
+    return 1;                      /* build-time force-on */
+#elif defined(MARCH_HTTP_USE_BLOCKING)
+    return 0;                      /* build-time force-off */
 #else
+    /* DEFAULT: the event loop.  Measured on idle 4-vCPU Linux/epoll, wrk
+     * -c256, one binary switching at runtime: 76-80k req/s at 25-27
+     * CPU-us/request against the pool's 46-51k at 43-47 — +61% throughput,
+     * -42% CPU per request.
+     *
+     * The cost of this default is real and worth stating plainly: event-loop
+     * threads MUST NOT BLOCK.  A handler doing synchronous I/O — the classic
+     * case is a blocking database call — stalls every other connection
+     * assigned to that loop thread.  An application whose handlers block
+     * should set MARCH_HTTP_EVLOOP=0 and get the thread pool back, where each
+     * connection has its own OS thread and blocking is free.
+     *
+     * Explicit "0"/"false"/"no" opts out; anything else (including unset)
+     * takes the event loop. */
     static int cached = -1;
     if (cached >= 0) return cached;
     const char *v = getenv("MARCH_HTTP_EVLOOP");
-    cached = (v && (strcmp(v, "1") == 0 ||
-                    strcmp(v, "true") == 0 ||
-                    strcmp(v, "yes") == 0)) ? 1 : 0;
+    cached = (v && (strcmp(v, "0") == 0 ||
+                    strcmp(v, "false") == 0 ||
+                    strcmp(v, "no") == 0)) ? 0 : 1;
     return cached;
 #endif
 }
