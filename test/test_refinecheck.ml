@@ -6387,6 +6387,131 @@ end|}));
           (List.length (ctx.March_errors.Errors.diagnostics)))
   ]
 
+(* ── `sig` / `extern` signature refinements ────────────────────────────────
+   The same silent-no-op shape as `iface_refine_suite`, in the two other decl
+   forms that carry a `ty` the checker never reads.  Both were probed silent
+   before the fix: `--check` on either fixture exited 0 with ZERO diagnostics.
+
+   These assert over `ctx.diagnostics` directly rather than through
+   `refine_error_text_d`, which filters to `Error` severity and would therefore
+   be green on both sides of a fix that ships a WARNING — pinning nothing. *)
+let sig_extern_refine_suite =
+  [ gated "a refinement in a `sig` signature is diagnosed" (fun () ->
+        (* PRE-FIX: silent. `sig_fns`' types were never walked. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR1 do
+  sig Store do
+    fn put : Int -> {Int | _ > 0}
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "names the signature function" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`put`") msgs);
+        (* Naming the enclosing `sig` too: a module may declare several, and
+           "`put` enforces nothing" is not locatable without it. *)
+        Alcotest.(check bool) "names the enclosing sig" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`sig Store`") msgs);
+        (* The remedy must be the sig-specific one, NOT the interface message's
+           "put it on the `impl` method" — there is no impl here and that
+           advice would be actively wrong. *)
+        Alcotest.(check bool) "remedy names the module's own `fn` definition" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message
+               "Write the refinement on the module's own `fn` definition") msgs);
+        Alcotest.(check bool) "does not give the interface remedy" false
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message
+               "corresponding `impl` method's own signature") msgs))
+
+  ; gated "a refinement in an `extern` signature is diagnosed" (fun () ->
+        (* The plan's fixture for this case did not compile: it wrote
+           `Cap(IO.FileSystem)` with no `needs`, which `--check` rejects with
+           two hard errors before refinecheck is reached.  Corrected to
+           `needs IO.Foreign` + `Cap(IO.Foreign)`, matching
+           `specs/lang/types/accept/t139`. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR2 do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn take(n : {Int | _ > 0}) : Int = "take"
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "names the extern function" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`take`") msgs);
+        (* The extern reason is NOT the sig reason. A foreign return refinement
+           is unverifiable in principle, not merely unwalked, so the message
+           must say the callee is not March code — advice that told the author
+           to move the predicate somewhere it would be "checked" is wrong for
+           the return position. *)
+        Alcotest.(check bool) "states the callee is not March code" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "the callee is not March code") msgs);
+        Alcotest.(check bool) "remedy names a March wrapper" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "Wrap the extern in a March `fn`") msgs))
+
+  ; gated "a RETURN-position `extern` refinement is diagnosed too" (fun () ->
+        (* `ef_ret_ty` is a separate field from `ef_params`; a detector that
+           only walked the parameters would be green on the case above and
+           silent here. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR4 do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn count(s : String) : {Int | _ >= 0} = "strlen"
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check bool) "diagnosed" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`count`")
+            ctx.March_errors.Errors.diagnostics))
+
+  ; gated "an UNREFINED sig signature stays quiet" (fun () ->
+        (* The false-positive control: it must be the REFINEMENT that fires,
+           not the mere presence of a `sig`. Green on both sides of the fix. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR3 do
+  sig Store do
+    fn put : Int -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics))
+
+  ; gated "an UNREFINED extern signature stays quiet" (fun () ->
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR5 do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn count(s : String) : Int = "strlen"
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics))
+  ]
+
 (* ── `use` competes with an impl method for its name ───────────────────────
    [adoptable_impl_methods] counted only the decls it could SEE defining a
    name — sibling `fn`s and other `impl`s — so a `use Other.{run}` beside
@@ -6564,6 +6689,106 @@ mod UADDC do
 end|}))
   ]
 
+(* ── A nested `use` must not be shadowed by an enclosing contract ──────────
+   [resolve_call]'s step 1 (lexical enclosing-module lookup) used to run
+   BEFORE step 3 (`use`-imported names), so a call inside a module that
+   `use`-imports a name was checked against an ENCLOSING module's
+   same-named function — a contract the call never actually dispatches to
+   at runtime.  That is a false positive on correct code, the one failure
+   this subsystem must never have.
+
+   The fix must not introduce the mirror-image bug: an ENCLOSING module's
+   `use` must not be allowed to beat an INNER module's own definition — see
+   case 3.  `ctx.uses` inherits into nested modules while declaration-list
+   competition does not, so the fix has to be scope-aware: at each level of
+   the modpath walk, consult that level's own `use`s before falling
+   outward.
+
+   EVERY case asserts obligation COUNTS via [total_obligations] /
+   [Obligation.summary], not the presence of a diagnostic — modeled on
+   [use_adoption_suite] above, since a correctly-resolved call and a
+   silently-skipped one are both quiet. *)
+let resolve_precedence_suite =
+  [ gated "a nested `use` beats an enclosing contract of the same name (the fix)"
+      (fun () ->
+        (* `Inner.go`'s `run(7, 0)` dispatches to `Other.run` (unrefined) at
+           runtime, per the `MARCH_LIB_PATH` ground-truth fixture. Pre-fix,
+           step 1 resolved it to the ENCLOSING `run` (`k != 0`) instead and
+           raised+violated an obligation against a contract this call never
+           touches. Post-fix: no obligation at all. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN1 do
+  mod Other do fn run(a : Int, k : Int) : Int do a / k end end
+  fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+  mod Inner do
+    use Other.{run}
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "no obligation raised against the enclosing contract"
+          0 (total_obligations ()))
+
+  ; gated "CONTROL: with no `use`, the enclosing contract still applies" (fun () ->
+        (* Must NOT regress: absent any shadowing import, the nearest
+           enclosing definition is still the right resolution, and a
+           violating call is still caught. Green on both sides of the fix. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN2 do
+  fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+  mod Inner do
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "CONTROL: an outer module's `use` must not beat an inner module's own def"
+      (fun () ->
+        (* The mirror-image direction the naive "move step 3 first" fix would
+           have broken. The OUTER (top-level) scope imports `run` via `use`;
+           `Inner` defines its OWN refined `run`. `Inner.go`'s call must
+           still resolve to Inner's own definition — declaration-list
+           competition (nearest enclosing def) already got this right before
+           the fix (defs are consulted across every prefix before uses), so
+           this must stay green on both sides. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN3 do
+  mod Other do fn run(a : Int, k : Int) : Int do a / k end end
+  use Other.{run}
+  mod Inner do
+    fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "CONTROL: a selector-less `use Other` binds the module, not the bare name"
+      (fun () ->
+        (* `use Other` (no `.{...}` selector) parses to `UseSingle`, which
+           binds the module name itself, not any bare function name — so it
+           competes with nothing and the enclosing contract still applies.
+           Green on both sides; pins the `UseSingle` arm specifically. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN4 do
+  mod Other do fn run(a : Int, k : Int) : Int do a / k end end
+  fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+  mod Inner do
+    use Other
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -6614,4 +6839,6 @@ let () =
       ("postcond-strict", postcond_strict_suite);
       ("qualified-predicate", qualified_pred_suite);
       ("interface-signature-refinement", iface_refine_suite);
-      ("use-impl-adoption", use_adoption_suite) ]
+      ("sig-extern-refinement", sig_extern_refine_suite);
+      ("use-impl-adoption", use_adoption_suite);
+      ("resolve-precedence", resolve_precedence_suite) ]

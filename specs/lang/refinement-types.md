@@ -435,6 +435,51 @@ exit code is the point: it pins that the program stays exit 0) and by
 warning text, the return-position case, and a false-positive control that a
 refinement on an `impl` method is *not* reported as inert.
 
+### The same holds for a `sig` or an `extern` signature
+
+Two further declaration forms carry a type the checker never reads, and both
+were silent until 2026-07-31:
+
+```march
+sig Store do
+  fn put : Int -> {Int | _ > 0}          -- enforces NOTHING
+end
+
+extern "c" : Cap(IO.Foreign) do
+  fn take(n : {Int | _ > 0}) : Int = "take"   -- enforces NOTHING
+end
+```
+
+Both now **warn**, and the two messages say deliberately different things,
+because the reasons are not the same and one remedy would be wrong advice for
+the other position:
+
+- A **`sig`** refinement is merely *unread*. A `sig` is an ascription: it
+  constrains what a module exports, not what any particular function body does,
+  so there is no function definition for the predicate to attach to and no call
+  site that consults it. The remedy is the module's **own `fn` definition**,
+  where a parameter refinement obliges callers and a return refinement is
+  checked against the body.
+- An **`extern`** refinement cannot be honoured *in principle*. The callee is
+  foreign C: there is no March body to discharge a claim about the value it
+  returns, and *assuming* such a claim would be **unsound** rather than merely
+  missing. So the remedy is not "move it somewhere it gets checked" — it is a
+  March **wrapper**, carrying the *parameter* refinement (where call sites
+  really are obliged), with the foreign *result* checked at run time rather
+  than asserted in its type.
+
+Both an extern's parameters and its return type are inspected; they are
+separate positions and a check covering only one would stay silent on the
+other.
+
+As above, these are warnings and not errors on purpose: the shapes compile
+today and the defect is the silence. Making a `sig` ascription or an FFI
+boundary actually *enforce* a refinement is a much larger question and stays
+open. Witnessed by `accept/t140` — whose exit code is the point, pinning that
+all three shapes stay exit 0 — and by `test_refinecheck.ml`'s
+`sig-extern-refinement` suite, which pins both message texts, the
+return-position extern case, and unrefined-signature controls for each form.
+
 ---
 
 ## A Parameter's Own Contract Is a Fact Inside Its Body
@@ -1383,12 +1428,10 @@ violation inside a `@[trusted]` function is still reported).
     this change probed both cross-list nestings end-to-end (2026-07-31). An
     enclosing `use` over a nested `impl` turned out NOT to be a hole: the call
     inside the nested module really dispatches to the impl, so adoption matches
-    dispatch. The live defect is the **mirror** shape — a `use` in a *nested*
-    module shadowing an *enclosing* contract — where the call dispatches to the
-    import but `resolve_call` tries the lexical enclosing lookup first and
-    rejects correct code against a contract it never touches. That is
-    pre-existing, reaches plain `fn` contracts (no `impl` involved), and is
-    tracked in `specs/todos/` as the cardinal-sin-direction item.
+    dispatch. The **mirror** shape — a `use` in a *nested* module shadowing an
+    *enclosing* contract, reaching plain `fn` contracts as well as `impl`
+    methods — was a live false positive at the time this was written and is
+    now CLOSED; see item 6 in [Open holes](#open-holes-stated-as-of-2026-07-29).
   - When the name is ambiguous the refinement binds **nobody**: the body is
     walked with it stripped, so it cannot discharge anything either. Unenforced
     means unusable in both directions — never "assumed in the body but demanded
@@ -1402,6 +1445,13 @@ violation inside a `@[trusted]` function is still reported).
     method's own signature instead. Since 2026-07-30 the pass **warns** rather
     than staying silent about it — see
     [A refinement in an interface signature enforces nothing](#a-refinement-in-an-interface-signature-enforces-nothing).
+  - The same is true of a refinement in a **`sig`** signature or an **`extern`**
+    signature, and since 2026-07-31 both **warn** as well. A `sig` refinement is
+    simply never read (the remedy is the module's own `fn` definition); an
+    `extern` one cannot be honoured at all, since the callee is not March code
+    (the remedy is a March wrapper, with the foreign result checked at run
+    time). See
+    [The same holds for a `sig` or an `extern` signature](#the-same-holds-for-a-sig-or-an-extern-signature).
 - **`cap no_panic`'s divisor check tries to DISCHARGE before it rejects**
   (since 2026-07-29). Every outcome short of `Refine.Verified` is an error —
   that is what the capability promises — but "we could not reflect the
@@ -1466,15 +1516,24 @@ sense; each is a check that does not happen.
    re-verify those two by mutation: folding method names in makes the entry
    module's `List.length(ys)` rewrite to a bare `length(ys)`, and both
    witnesses would then pass regardless of the behaviour they pin.
-6. **A `use` in a NESTED module shadowing an enclosing contract is a live
-   false positive.** The call dispatches to the import, but `resolve_call`
-   consults the lexical enclosing-module lookup before `use`-imported names,
-   so correct code is rejected against a contract it never touches — with a
-   plain `fn` as well as an impl method. Pre-existing (confirmed at the
-   pre-2026-07-30 parent); the cardinal-sin direction. (The opposite nesting —
-   enclosing `use` over a nested `impl` — was probed and is NOT a hole:
-   adoption matches dispatch there. Since 2026-07-30 a `use` in the *same*
-   declaration list competes for adoption, glob imports failing closed.)
+6. **CLOSED (2026-07-31).** A `use` in a NESTED module no longer loses to an
+   ENCLOSING contract of the same name. `resolve_call`'s lexical walk over
+   `modpath_prefixes` is now scope-aware: `ctx.uses` carries a third
+   component, the modpath of the module that recorded it, and at each prefix
+   the walk consults that prefix's own definition, then that SAME prefix's
+   own `use`-imports, before falling outward to the next prefix. That makes a
+   nested `use` beat an enclosing definition (matching runtime dispatch)
+   while an outer module's `use` still loses to an inner module's own
+   definition — the asymmetry a naive "move the `use` step first" fix would
+   have gotten backwards, since `ctx.uses` inherits into nested modules while
+   declaration-list competition does not. Pinned by the `resolve-precedence`
+   suite in `test/test_refinecheck.ml` (obligation-count assertions, since a
+   correctly-resolved call and a silently-skipped one are both quiet) and
+   verified against real dispatch with a two-file `MARCH_LIB_PATH` fixture.
+   (The opposite nesting — enclosing `use` over a nested `impl` — was probed
+   in the original review and was never a hole: adoption already matched
+   dispatch there. Since 2026-07-30 a `use` in the *same* declaration list
+   competes for adoption, glob imports failing closed.)
 7. **`alias-withdrawn` attribution follows a laundered guard one `let` deep,
    and no deeper.** `let n = List.length(ys)` followed by `if n > 0` is
    attributed to the withdrawal (closed 2026-07-31); a chain

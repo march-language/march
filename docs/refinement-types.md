@@ -32,6 +32,16 @@ prove a value is definitely wrong, it stays silent rather than guessing.
 > `PATH`. Without it, the predicates type-check as their base type and no
 > refinement diagnostics are produced (the build still succeeds).
 
+**New to this?** Read [Syntax](#syntax) through
+[Contracts Compose](#contracts-compose--a-parameters-promise-holds-inside-its-body)
+and you'll be able to write and read everyday refinements. Everything after
+[Postconditions](#postconditions) goes deeper — measures over your own data
+structures, `Bool`/`Float`/tag refinements, the strict `cap verified` /
+`cap no_panic` modes, and the full [Limitations](#limitations) list. If you
+just want to know why a specific contract *isn't* catching something, jump
+straight to Limitations or to
+[`--refine-report`](#seeing-what-got-checked---refine-report).
+
 ---
 
 ## The Problem They Solve
@@ -170,9 +180,18 @@ function is how you'd get a false alarm on correct code. Only the **qualified**
 `List.length` counts (a bare `length` is left alone), and only while it's still the
 standard library's own. If your program defines its own `List.length` — however it
 spells the definition: a `fn`, a module-level `let`, an `extern` block, an interface
-or impl method — ships a forked `List` via `MARCH_LIB_PATH`, or rebinds `List` with
-`alias` or `use`, the connection is dropped and you're back to the older behaviour:
-the obligation is skipped, quietly, rather than proved.
+or impl method — or ships a forked `List` via `MARCH_LIB_PATH`, the connection is
+dropped and you're back to the older behaviour: the obligation is skipped, quietly,
+rather than proved.
+
+One shape got more forgiving: a selector-less `use Foo.List` (importing the
+module itself, not a member of it) resolves its target since 2026-07-31,
+rather than assuming the worst from the name alone. `use Analytics.List`
+where `Analytics.List` only has a `size` function leaves `List.length`
+connected to `len` exactly as if the `use` weren't there; a `use` whose
+target really does define `length` withdraws it, same as before. `alias Foo.List
+as List` and a named import (`use Foo.{List}`) are unaffected by this and stay
+unconditional — narrowing them wasn't shown to be worth it.
 
 **"Dropped" means dropped for the whole compilation unit, not just the file you're
 editing.** The check is syntactic and unit-global: it doesn't ask whether the
@@ -220,6 +239,31 @@ where `String.byte_size` returns 2 — and is left alone. So is `string_length`:
 happens to be a byte length today, but the *name* suggests characters, and a
 connection made on a name that might later be corrected is a bug waiting to happen.
 Reach for `String.byte_size` in a guard; it says what it means.
+
+### A common mistake: `List.length` *inside* the predicate itself
+
+Everything above is about a **guard** — ordinary code, outside the `{...}`. Writing
+the qualified name **inside** the braces is a different, much easier mistake to
+make, and it looks completely reasonable:
+
+```march
+fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end   -- enforces NOTHING
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end            -- enforces the contract
+```
+
+A predicate is never desugared the way a function body is, so inside the braces
+`List.length` never becomes the dotted name the alias above is keyed on — it parses,
+typechecks, and silently discharges nothing, ever, for any caller. Since 2026-07-30
+this warns instead of compiling silently:
+
+> `List.length` is a qualified call inside a refinement predicate. Predicates are not
+> desugared, so this is never reflected and the refinement enforces nothing. Use the
+> bare spelling `len` instead.
+
+The fix is always the bare measure name — `len(_)`, never `List.length(_)` — inside
+a predicate. The same applies to `String.byte_size`. This is a warning, not an error:
+the shape has always compiled, and turning it into a hard error would break code that
+happens to have this typo today.
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
@@ -363,6 +407,34 @@ fn bad(n : Int) : {Int | _ >= 0} do
   if n < 0 do n else 0 end        -- error: the n < 0 branch returns a negative
 end
 ```
+
+A postcondition is checked the same way a precondition is — a **compile
+error** when it can never hold, silent **proof** when it always does, and a
+silent **skip** when the checker can't decide either way. It also counts
+toward [`--refine-report`](#seeing-what-got-checked---refine-report) (tagged
+`postcondition` rather than `precondition`, in the report's `by kind` line)
+and, inside a `cap verified` module, an undischarged postcondition is a
+compile error exactly like an undischarged precondition:
+
+```march
+mod Checked do
+  cap verified
+
+  fn mk(z : Int) : {Int | _ > 0} do
+    z                              -- error under cap verified: unproven
+  end
+end
+```
+
+`@[trusted]` rescues a postcondition the same way it rescues a precondition —
+see [`cap verified`](#cap-verified--making-silence-an-error) below.
+
+**What doesn't carry through:** proving a *plain* postcondition (as above) is
+different from proving a **relational** one that relates a measure across an
+operation — `size(insert(t, x)) == size(t) + 1` — which needs the checker to
+supply an induction hypothesis at each structurally-recursive call. That
+narrower, more powerful case is covered in [Limitations](#limitations), under
+"Relational postconditions work, within structural recursion."
 
 ---
 
@@ -676,9 +748,9 @@ or the solver simply didn't decide (`solver-undecided`).
 The counts include both **preconditions checked at call sites** and
 **postconditions** — a function's own return value checked against its declared
 return type. Each obligation is tagged with its kind, shown as a `by kind`
-breakdown line under each slice; a proved postcondition still counts toward the
-same "proved" headline as a proved precondition. `cap verified` (below) still
-only escalates preconditions.
+breakdown line under each slice; a proved postcondition counts toward the same
+"proved" headline as a proved precondition, and [`cap verified`](#cap-verified--making-silence-an-error)
+(below) escalates an undischarged one of either kind.
 
 ---
 
@@ -773,28 +845,49 @@ handler or a `test` raised no obligation and had nothing to escalate. Both that 
 and `cap no_panic`'s are now exhaustive, so a future declaration form is a compile
 error in the compiler rather than a new silent hole.
 
-Three things it still doesn't do, and you should know all three before trusting it:
+Also covers **postconditions** now: an undischarged return refinement is a
+compile error under `cap verified` too, exactly as a precondition is — see
+[Postconditions](#postconditions) above for the example.
 
-- **Postconditions are recorded, but `cap verified` doesn't escalate them yet.** A
-  refined *return* type now files an obligation (proved, violated, or skipped)
-  just like a precondition does, so `--refine-report` counts it — but
-  `cap verified` still escalates only a precondition obligation raised at a
-  call site, so an undischarged return refinement stays silent under
-  `cap verified` today.
-- **A refinement in an `interface`'s own method signature isn't enforced.** Write
-  `fn run : a -> {Int | _ > 0} -> Int` in the interface and no call site is obliged by
-  it. Nothing assumes it either, so it's a missing check rather than an unsound one —
-  but put the refinement on the `impl` method's parameter, where it *is* enforced.
+One real limitation, and one escape hatch, worth knowing before you rely on it:
 
-  Even there, enforcement is conditional. An `impl` method's parameter refinement
-  obliges callers only when the method's name unambiguously denotes it: no `fn` in the
-  same module owns the name, and only one `impl` defines the method. A call is resolved
-  here by *name* while it dispatches by *type*, and checking correct code against a
-  predicate it never touches is the one failure this subsystem must never have. When
-  the name is ambiguous the refinement binds **nobody** — it's stripped from the body
-  too, so it can't discharge anything either. Unenforced means unusable in both
-  directions, never "assumed inside the body but demanded of no caller", which is
-  exactly how `fn run(b, k : {Int | k != 0})` once made `m / k` provable under
+- **A refinement in an `interface`'s own method signature isn't enforced —
+  and the compiler now tells you so.** Write `fn run : a -> {Int | _ > 0} -> Int`
+  in the interface and no call site is obliged by it. Nothing assumes it
+  either, so it's a missing check rather than an unsound one, but it used to
+  be a silent one — a contract that read like it worked and did nothing.
+  Since 2026-07-30 writing a refinement there produces a warning:
+
+  > the interface signature of `run` carries a refinement, which enforces
+  > nothing: an interface method signature is never read by the refinement
+  > checker, so no call site is obliged by this predicate and no body may
+  > assume it. Write the refinement on the corresponding `impl` method's own
+  > signature instead — a refinement on its return type is always checked,
+  > and one on a parameter is enforced when the method name is unambiguous
+  > (exactly one `impl` defines it and no top-level `fn` shares the name).
+
+  The same silent-no-op shape exists for a `sig` ascription and an `extern`
+  declaration, and both warn too since 2026-08-01: `sig Store do fn put :
+  Int -> {Int | _ > 0} end` compiles clean while enforcing nothing, because
+  a `sig` is an ascription on what a module exports, not a body a call could
+  be checked against — write the refinement on the module's own `fn`
+  instead. An `extern` refinement is the more fundamental case: the callee
+  isn't March code, so there's no body to check a return value against, and
+  no amount of rewiring makes it enforceable in principle. The remedy there
+  is a thin March wrapper around the extern call that checks the foreign
+  result itself.
+
+  Enforcement on the `impl` method's parameter, when you use that spelling,
+  is conditional. An `impl` method's parameter refinement obliges callers only
+  when the method's name unambiguously denotes it: no `fn` in the same module
+  owns the name, and only one `impl` defines the method. A call is resolved
+  here by *name* while it dispatches by *type*, and checking correct code
+  against a predicate it never touches is the one failure this subsystem
+  must never have. When the name is ambiguous the refinement binds
+  **nobody** — it's stripped from the body too, so it can't discharge
+  anything either. Unenforced means unusable in both directions, never
+  "assumed inside the body but demanded of no caller", which is exactly how
+  `fn run(b, k : {Int | k != 0})` once made `m / k` provable under
   `cap no_panic` while `run(Box(4), 0)` compiled and then divided by zero.
 - **`@[trusted]` (since 2026-07-30) is a per-function escape hatch.** Annotate a
   single function `@[trusted]` and any obligation inside it that the checker
@@ -939,10 +1032,13 @@ dependent typing. Know the edges:
   `take_pos(u)` against `{Int | _ > 0}` is skipped. Pass the value directly, or
   restate it with `assert`. (This is also why rebinding a refined parameter drops
   its promise.)
-- **Only preconditions compose.** A parameter's promise reaches *calls* in the
-  body; it does not flow into a refined **return** type, which goes down a
-  separate path. Postconditions are also absent from `--refine-report` and from
-  what `cap verified` escalates.
+- **Only preconditions compose automatically.** A parameter's promise reaches
+  *calls* in the body; it does not flow into a refined **return** type the same
+  way. A postcondition is still checked on every return path, counted by
+  `--refine-report`, and escalated by `cap verified` — see
+  [Postconditions](#postconditions) — but composing a measure *through* one
+  (proving a caller's obligation from a callee's return contract) is the
+  narrower, structural-recursion-only case described a few bullets down.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
@@ -1017,9 +1113,30 @@ mod App do
 end
 ```
 
-A bare call binds to the nearest enclosing module that defines it (with
-shadowing), so a local helper is never confused with a same-named function
-elsewhere.
+A bare call resolves at the scope that actually owns it: a `use` written
+**inside** a nested module is consulted before the checker falls outward to an
+enclosing module's own definition of the same name, matching how the call
+really dispatches. An enclosing module's `use`, on the other hand, still loses
+to a nested module's *own* definition of the name — an import never reaches
+in and overrides a local one.
+
+```march
+mod Outer do
+  fn take_pos(n : {Int | n >= 0}) : Int do n end   -- Outer's own contract
+
+  mod Inner do
+    use Lib.{take_pos}                              -- Lib's take_pos, unrefined
+
+    fn go() : Int do
+      take_pos(-1)   -- resolves to Lib.take_pos, NOT Outer's — no error
+    end
+  end
+end
+```
+
+Before 2026-08-01 this call was checked against the *enclosing* `App.take_pos`
+instead — a false positive on correct code, since `Inner.go` never actually
+calls it.
 
 ---
 
