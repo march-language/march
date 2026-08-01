@@ -861,6 +861,19 @@ mod JsonStream do
     match feed(st, line ++ "\n") do
     Err(e) -> Err(stream_err_to_decode(e))
     Ok((evs, st2)) ->
+      -- `+ 1` assumes a single-byte (`\n`-only) line terminator. This is
+      -- correct today only by accident of the interpreter backend: `File.with_lines`
+      -- strips the line terminator via OCaml's `input_line` (`lib/eval/eval.ml`),
+      -- which strips only `\n`, so on a CRLF file the stray `\r` is left attached
+      -- to `line` and gets counted in `string_byte_length(line)`, making this
+      -- formula land on the correct absolute offset by coincidence. The C runtime's
+      -- `file_read_line` (`runtime/march_runtime.c`, `fgets` + explicit strip)
+      -- strips BOTH `\r` and `\n`, so this formula would undercount by 1 byte per
+      -- line for CRLF input on that backend. Currently unreachable there because
+      -- any compiled program calling `each_typed` (or bare `from_json`) fails to
+      -- link today (separate, pre-existing, out-of-scope bug — undefined symbol
+      -- `_to_json`/`_from_json` in the LLVM backend, `lib/tir/lower_state.ml`).
+      -- Revisit this arithmetic if that link gap is ever fixed.
       let off2 = off + string_byte_length(line) + 1
       match typed_events(evs, frames, off, cnt, cb) do
       Err(e) -> Err(e)
