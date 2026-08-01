@@ -1,0 +1,1 @@
+- ✅ **`tap>` async value inspector** — Clojure `tap>` model: `tap` builtin (∀a. a → a) sends values to a thread-safe global tap bus (Mutex + Queue in `eval.ml`); REPL drains after each expression and displays tapped values in orange in TUI pane and as `tap> value` in simple mode. Type registered in typecheck `base_env`. 6 tests in `tap` group.

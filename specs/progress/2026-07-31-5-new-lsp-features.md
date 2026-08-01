@@ -1,0 +1,1 @@
+- ✅ **5 new LSP features** — Doc-string hover, find references (`textDocument/references`), rename symbol (`textDocument/rename`), signature help (`textDocument/signatureHelp`), code actions (make-linear quickfix, pattern exhaustion quickfix). 27 new tests; 84 total LSP tests.

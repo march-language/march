@@ -1,0 +1,1 @@
+- ⏳ **String performance phase 3 (gated):** data-parallel chunked string operations. Blocked on explaining the 4-worker scaling ceiling (shared-owner refcount traffic vs allocator contention) before any chunking algorithm is written.

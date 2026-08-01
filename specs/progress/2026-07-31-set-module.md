@@ -1,0 +1,1 @@
+- ✅ **`Set` module** — `stdlib/set.march` (289 lines, AVL tree-backed, full API)

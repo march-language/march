@@ -262,11 +262,13 @@ mod UUID do
       None -> UUID("00000000-0000-0000-0000-000000000000")
       Some(ns_bytes) ->
         -- Per RFC 4122 §4.3: SHA-1(namespace_bytes || name_bytes).  The
-        -- namespace is 16 raw bytes; we must not route them through
-        -- `char_from_int` (which silently drops bytes > 0x7F via empty
-        -- strings and would corrupt the hash input).  Build a single
-        -- `Bytes(...)` value and pass it directly to `sha1_bytes`, which
-        -- accepts both String and Bytes.
+        -- namespace is 16 raw bytes, so they are kept as bytes end to end:
+        -- build a single `Bytes(...)` value and pass it directly to
+        -- `sha1_bytes`, which accepts both String and Bytes.  (This shape
+        -- was originally forced by `char_from_int` silently dropping bytes
+        -- > 0x7F in the interpreter, corrupting the hash input; that is
+        -- fixed, but routing raw bytes through a String is still the
+        -- longer way round.)
         fn name_to_bytes(s) do
           fn go(cs, acc) do
             match cs do

@@ -126,9 +126,12 @@ mod Json do
     else Ok(d0 * 4096 + d1 * 256 + d2 * 16 + d3) end
   end
 
-  -- Encode one code point as UTF-8.  byte_to_char (not char_from_int, which
-  -- yields "" above 127 in the interpreter) is single-byte, so multi-byte
-  -- sequences are assembled one continuation byte at a time.
+  -- Encode one code point as UTF-8.  byte_to_char emits ONE byte, so a
+  -- multi-byte sequence is assembled one continuation byte at a time --
+  -- this is a byte builder, not a code-point builder.  (char_from_int is
+  -- now equivalent, both being `n & 0xFF` in every backend; it used to
+  -- yield "" above 127 in the interpreter, which is how this encoder came
+  -- to be written against byte_to_char.  The name still says what is meant.)
   pfn utf8_encode(cp) do
     if cp < 128 do byte_to_char(cp)
     else if cp < 2048 do

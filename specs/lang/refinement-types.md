@@ -215,7 +215,7 @@ The guard above is a genuine proof, not a skip. The checker treats the
 **qualified** `List.length` as an alias of the `len` measure, so
 `i < List.length(xs)` establishes exactly the fact `i < len(xs)` that `at`'s
 precondition asks for. Verified 2026-07-28: `--refine-report` on that program
-reports `1 proved, 0 violated, 0 skipped` for user code.
+reports `1 proved, 0 violated, 0 trusted, 0 skipped` for user code.
 
 Until 2026-07-28 the two were unconnected symbols and the guarded call was
 silent because it was *skipped*, not because it was verified. That is fixed; the
@@ -261,6 +261,30 @@ function would manufacture false positives:
   a REJECT witness (`reject/t117`) and the `--refine-report` proof *floor* can
   see the difference.
 
+- **A selector-less `use X.List` RESOLVES its target too** (since 2026-07-31).
+  The `UseSingle` form used to withdraw purely syntactically on its last path
+  segment, while the glob forms already looked. Measured cost (obligation
+  ledger, `MARCH_LIB_PATH` fixture): one nested `use Extras.Deep.List` in a
+  dependency module — whose target had **no `length` member at all**, so it
+  could not make `List.length` denote anything non-stdlib at any call site —
+  flipped an entry program's obligation from `1 proved` to `1 skipped
+  (alias-withdrawn)`, program-wide. Now the use's target is resolved (from
+  every module scope of the unit, **all** matches — which resolution the real
+  resolver would pick is exactly the question this pass cannot answer) and the
+  alias is withdrawn only if some match provides a member with the aliased
+  name, where "provides" is fail-closed: direct members in every form the
+  member gate counts, plus the target's own use-forms (`use Y.{length}`
+  re-exports count; an unenumerable glob inside the target counts; an
+  unresolvable path counts). Soundness does not rest on resolver semantics:
+  rebinding `List` to a module that provably provides nothing named `length`
+  cannot make `List.length` resolve to a non-stdlib function anywhere. A
+  target that provides it via a direct member decl is a `mod List` carrying
+  that member, which the member-definition gate withdraws independently — so
+  this narrowing alone stands guard over the re-export and unresolvable
+  shapes. `alias … as List` and `import X.{List}` still withdraw
+  unconditionally: no measured cost has implicated them, and each narrowing
+  in this gate must pay its own way.
+
 - **A `use`/`alias` competes only when it is the *program's*** (since
   2026-07-29). The rebinding half now ignores declarations whose span is a
   standard-library source file, exactly as the member-definition half always
@@ -290,6 +314,127 @@ Use `assert` as the escape hatch for facts the checker can't derive on its own
 A guard may also read a **record field** (`if c.port >= 1 do serve(c)`) — see
 [Refining a record over its fields](#refining-a-record-over-its-fields).
 
+### A qualified spelling in a predicate enforces nothing
+
+The alias above holds in a **guard** — ordinary code the desugarer rewrites.
+It does **not** hold inside a **predicate**, the `{T | … }` itself:
+
+```march
+fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do …   -- enforces NOTHING
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do …           -- enforces the contract
+```
+
+Refinement predicates are never run through the expression desugarer —
+`Desugar.respan_ty` is the only place that touches `A.TyRefine`, and it only
+respans — so inside a predicate `List.length` stays a field-access chain
+rather than the dotted variable the alias keys on. The obligation the contract
+looks like it generates is simply skipped, and skipping is silent by default.
+The contract parses, typechecks, reads as working, and checks nothing.
+
+Since 2026-07-30 this **warns**, naming both the spelling found and the bare
+measure that works:
+
+```
+`List.length` is a qualified call inside a refinement predicate. Predicates
+are not desugared, so this is never reflected and the refinement enforces
+nothing. Use the bare spelling `len` instead.
+```
+
+It is a warning rather than an error on purpose: this shape compiles today, so
+promoting it would break working builds, and the defect being fixed is the
+*silence*, not the lack of capability — the bare spelling has always worked.
+Desugaring predicates properly, so the qualified spelling means what it reads
+as, is a genuine follow-up and a much larger change with its own regression
+surface. Witnessed by `accept/t136` (which pins that the program stays exit 0)
+and by `test_refinecheck.ml`'s `qualified-predicate` suite, which pins the
+warning text together with a false-positive control that the bare spelling
+stays quiet.
+
+The same reasoning covers the other qualified measures: write `len(_)`, not
+`String.byte_size(_)`, inside a predicate. The advice stays `len` even in a unit
+that has [withdrawn the alias](#listlength-is-an-alias-of-the-len-measure) by
+defining its own competing `List.length` — a withdrawn alias is a separate
+problem, and the bare measure is still what the predicate needs.
+
+Two limits worth stating, since the warning is narrower than "any call that
+enforces nothing":
+
+- It fires on a **qualified module path** (`List.length`, `M.N.f`), the shape
+  desugar would have flattened. A record **field** call — `{Cfg | c.cb(1) > 0}`
+  — enforces nothing either, but it is not a qualified call and is not reported
+  as one; calling it that, and offering the field name as a "bare spelling",
+  would be a false explanation.
+- A receiver that is itself a call (`f(x).g(y)`) is not rendered as a path and
+  stays silent.
+
+### A refinement in an interface signature enforces nothing
+
+The predicate above is at least *reached* by the checker. A refinement written
+in an **`interface` method signature** is not reached at all:
+
+```march
+interface Runner(a) do
+  fn run : a -> {Int | _ > 0} -> Int    -- enforces NOTHING
+end
+```
+
+Nothing in `lib/refinecheck` reads a method declaration's type: the pass's
+`interface` arm descends only into a method's **default body**, and the other
+walks that visit an interface read method *names* only. Nor does the front end
+carry the predicate anywhere — when the desugarer injects a default method into
+an `impl`, it synthesises that function with no return annotation and with
+parameters taken from the default lambda, which carry no annotations either. So
+the predicate obliges no call site **and** lets no body assume anything: a
+*missing* check rather than an unsound one, but a silent one, and the contract
+reads exactly like a working one.
+
+Since 2026-07-30 this **warns**, naming the method and the spelling that works:
+
+```
+the interface signature of `run` carries a refinement, which enforces nothing:
+an interface method signature is never read by the refinement checker, so no
+call site is obliged by this predicate and no body may assume it. Write the
+refinement on the corresponding `impl` method's own signature instead — …
+```
+
+The remedy is the `impl` method's own signature, and it is stated for **both
+positions** because they are enforced under different conditions:
+
+```march
+interface Bumper(a) do
+  fn bump : a -> Int -> Int              -- leave the signature unrefined
+end
+
+impl Bumper(Box) do
+  fn bump(_b : Box, n : {Int | _ > 0}) : Int do n end   -- enforced here
+end
+```
+
+- A refinement on the `impl` method's **return type** is always checked — the
+  postcondition check runs on every method body unconditionally.
+- A refinement on a **parameter** is enforced only when the method name is
+  **unambiguous**: exactly one `impl` defines it and no top-level `fn` shares
+  the name. Otherwise a call resolved by name cannot tell which contract
+  applies, so the contract is adopted nowhere and the body is walked with the
+  parameter refinements stripped. (The full adoption rule is under
+  [`@[trusted]` — a scoped, loud escape hatch](#trusted--a-scoped-loud-escape-hatch),
+  in the "What 'walked' does and does not buy you" note.)
+
+The typechecker accepts a refined `impl` parameter against a plain type in the
+interface, so following this advice needs no change to the interface — and the
+resulting contract really is enforced: `bump(Box(1), 0 - 5)` is a refinement
+error.
+
+Like the qualified-spelling warning, this is a warning rather than an error on
+purpose: the shape compiles today, and the defect being fixed is the *silence*.
+Making an interface signature actually enforce — obliging every call dispatched
+through the interface and checking it against every `impl` — is a much larger
+change and stays open in `specs/todos/`. Witnessed by `accept/t137` (whose
+exit code is the point: it pins that the program stays exit 0) and by
+`test_refinecheck.ml`'s `interface-signature-refinement` suite, which pins the
+warning text, the return-position case, and a false-positive control that a
+refinement on an `impl` method is *not* reported as inert.
+
 ---
 
 ## A Parameter's Own Contract Is a Fact Inside Its Body
@@ -311,7 +456,7 @@ fn main() : Int do outer([1]) end
 ```
 
 Both call sites are **proved** — `--refine-report` on that program reports
-`2 proved, 0 violated, 0 skipped` for user code (verified 2026-07-29). Before
+`2 proved, 0 violated, 0 trusted, 0 skipped` for user code (verified 2026-07-29). Before
 this, `outer([1])` proved on the literal while `inner(ys)` was silently
 *skipped*, so the practical ceiling was that a non-empty contract could not be
 threaded any further than one hop. The stdlib's own contracts now compose the
@@ -327,10 +472,10 @@ mod Y do
 end
 ```
 
-That program exits 0 under `cap verified` (`2 proved, 0 violated, 0 skipped`).
+That program exits 0 under `cap verified` (`2 proved, 0 violated, 0 trusted, 0 skipped`).
 
 **Every refined form composes.** All verified 2026-07-29 at
-`2 proved, 0 violated, 0 skipped`: `Int` (`{Int | _ > 0}`), `Float`, `Bool`,
+`2 proved, 0 violated, 0 trusted, 0 skipped`: `Int` (`{Int | _ > 0}`), `Float`, `Bool`,
 `String` (`{String | len(_) > 0}`), a record field
 (`{v : Config | v.port >= 1}`), the built-in list `len`, a user `@[measure]`
 over an ADT (`{Tree(Int) | size(_) > 0}`), and a **constructor tag**
@@ -645,7 +790,7 @@ end
 ```
 
 Verified 2026-07-28: `--refine-report` on that program reports `1 proved,
-0 violated, 0 skipped` for user code. The contradictory `String.byte_size(t) == 0`
+0 violated, 0 trusted, 0 skipped` for user code. The contradictory `String.byte_size(t) == 0`
 form is reported as a violation.
 
 Only byte-valued spellings are aliased, because `len` is a byte count:
@@ -668,7 +813,8 @@ method — rebinds `String` via `alias`/`use`, or binds the name
 an import, a `let`, a lambda or `fn` parameter, or a match binder — loses the
 alias for the whole **compilation unit** (prepended stdlib and every
 `MARCH_LIB_PATH` dependency included), and the obligation returns to being
-skipped. A glob import withdraws only if its resolved target really provides the
+skipped. A glob import — and, since 2026-07-31, a selector-less `use X.String`
+— withdraws only if its resolved target really provides the
 competitor; see
 [`List.length` is an alias of the `len` measure](#listlength-is-an-alias-of-the-len-measure).
 
@@ -921,11 +1067,13 @@ passes look identical from outside.
 
 ```
 $ march --check --refine-report stdlib/list.march
-refinement obligations (user code): 0 proved, 0 violated, 5 skipped
+refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 5 skipped
   skipped (solver-undecided): 5
-refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
+  by kind: 5 precondition, 0 postcondition
+refinement obligations (user + stdlib): 8 proved, 0 violated, 0 trusted, 28 skipped
   skipped (unreflectable-predicate): 1
   skipped (solver-undecided): 27
+  by kind: 36 precondition, 0 postcondition
 ```
 
 > **Clear `.march/cas/artifacts-v2` first.** A `--check` run whose sources hash to
@@ -964,7 +1112,7 @@ Each skip is attributed to one of six reasons:
 | `unreflectable-subject` | the argument's own value did not translate, so no goal was built |
 | `sort-conflict` | reflecting it would declare one symbol at two different sorts |
 | `float-sort-gate` | the float wellsortedness gate rejected the formula |
-| `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`) that this compilation unit had withdrawn, because something in the unit binds that name |
+| `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`) — directly, or through one `let` (`let n = List.length(ys)` then `if n > 0`) — that this compilation unit had withdrawn, because something in the unit binds that name |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
 
 `alias-withdrawn` is a refinement of `solver-undecided`, not a separate failure:
@@ -973,9 +1121,13 @@ have discharged it. It is reported separately because the *action* differs — t
 call is already guarded, and what has to change is a name binding elsewhere in
 the unit. See [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 
-The ledger records **precondition obligations raised at call sites**. Return
-refinements go through a separate path that does not file a record, so a
-postcondition the checker could not discharge does not appear in these counts.
+The ledger records both **precondition obligations raised at call sites** and
+**postcondition obligations** — a function's own return value checked against
+its declared return refinement. Each obligation carries a `kind` (precondition
+or postcondition), printed as a `by kind` breakdown line under each slice's
+headline; the headline totals themselves do not distinguish kinds; a proved
+postcondition is a proved obligation like any other. `cap verified` still
+escalates precondition obligations only — see below.
 
 ---
 
@@ -1079,7 +1231,15 @@ message stands:
    cannot cause an earlier reflection or sort failure);
 2. the predicate applies the measure the alias routes to;
 3. a **positive** path condition applies the withdrawn spelling **to this
-   obligation's own argument**;
+   obligation's own argument** — either directly, or laundered through exactly
+   **one** `let`: `let n = List.length(ys)` followed by `if n > 0` is the same
+   author intent stopped by the same withdrawal. The laundered walk re-checks
+   the *recorded application* against the obligation's own argument (so
+   `let n = List.length(zs)` is not a guard on `ys`), and the recorded fact is
+   shadow-disciplined: rebinding either the laundering name (`let n = 5` in
+   between) or the collection itself (`let ys = zs` in between) retires it,
+   and a two-`let` chain (`let a = List.length(ys)` then `let n = a`) stays
+   general;
 4. the spelling measures the same kind of thing as that argument — `List.length`
    for a list, `String.byte_size` / `string_byte_length` for a String.
 
@@ -1093,15 +1253,79 @@ refinement violation, so it is never dressed up as a shadowing story. And since
 all three spellings route to the single name `len`, condition 4 is what stops a
 withdrawn `List.length` being blamed for an undischarged `{String | len(_) > 0}`.
 
-The cost is coverage: a guard laundered through a local (`let n =
-List.length(ys)`), applied to a non-variable actual, or established in a caller
-falls back to the general message. That is the intended trade — the reason
-exists to explain one specific confusion, not to claim every skip.
+The cost is coverage: a guard laundered through a **chain** of locals
+(`let a = List.length(ys)` then `let n = a`), applied to a non-variable actual,
+or established in a caller falls back to the general message. That is the
+intended trade — the reason exists to explain one specific confusion, not to
+claim every skip.
 
 Verified 2026-07-29 (both triggers report `alias-withdrawn` with the causing
 span; an unguarded call, a guard on a different variable, a cross-measure guard,
 and a negated guard all still report `solver-undecided`, each matched against a
-control with the competing binding deleted).
+control with the competing binding deleted). The one-`let` laundered walk was
+added and verified 2026-07-31: the laundered witness reports `alias-withdrawn`,
+and its four wrong-attribution controls — a laundered guard on a *different*
+collection, a rebound laundering name, a rebound collection, and a two-level
+chain — all keep `solver-undecided`, with the negated laundered guard never
+blamed.
+
+### `@[trusted]` — a scoped, loud escape hatch
+
+`cap verified` is all-or-nothing at the module level: one obligation the
+checker cannot discharge forces the author to either rewrite the predicate,
+strengthen what the call site knows, or drop `cap verified` for the *entire*
+module — even if every other function in it verifies cleanly. `@[trusted]` is
+a per-**function** escape hatch: it accepts, as an assertion, whatever the
+checker could not discharge inside that one function, without disarming the
+capability for its siblings.
+
+```march
+mod Trusted1 do
+  cap verified
+
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+
+  @[trusted]
+  fn go(zs : List(Int)) : Int do
+    inner(zs)   -- SKIPPED (nothing here proves len(zs) > 0) --
+                -- accepted as an assertion, not an error, because `go` is trusted
+  end
+
+  fn main() : Int do go([1]) end
+end
+```
+
+Without `@[trusted]` the call inside `go` would be the exact `head_of`-style
+error above. With it, the obligation is still recorded — as its **own**
+verdict, `Trusted`, never folded into `proved` — so `--refine-report` shows
+exactly how much of a module's "verification" is actually an assertion rather
+than a proof:
+
+```
+refinement obligations (user code): 0 proved, 0 violated, 1 trusted, 0 skipped
+```
+
+**This is a deliberate soundness hole, and it is scoped as narrowly as
+possible on purpose:**
+
+- **Only a `Skipped` obligation is eligible.** `@[trusted]` never suppresses a
+  `Violated` — a predicate the solver *proved* can never hold is a bug in the
+  annotation, not an incompleteness to wave through. `go() do inner(0 - 5) end`
+  under `@[trusted]` still reports the refinement violation exactly as it
+  would without the attribute.
+- **Scoped to the one function that carries the attribute.** A sibling
+  function in the same `cap verified` module that is not itself `@[trusted]`
+  is unaffected — one annotation does not silently disarm the module.
+- **A no-op outside `cap verified` warns.** `@[trusted]` only changes anything
+  inside the `strict_verified` escalation path; on a function in a module that
+  never declares `cap verified` it warns that the attribute has no effect,
+  rather than silently doing nothing — the exact failure mode (an attribute
+  that changes no behaviour, mistaken for one that does) this subsystem keeps
+  producing.
+
+Verified 2026-07-30. Corpus: `accept/t132` (an otherwise-undischargeable
+`cap verified` module rescued by `@[trusted]`), `reject/t133` (a definite
+violation inside a `@[trusted]` function is still reported).
 
 **Scope and limits.** State these plainly before relying on it:
 
@@ -1113,9 +1337,19 @@ control with the competing binding deleted).
   entire standard library as sibling module declarations, so an inherited flag
   would turn every stdlib module strict the moment one user module asked for
   verification.
-- **Precondition obligations at call sites only.** Same ledger as
-  `--refine-report`: a postcondition the checker cannot discharge is neither
-  recorded nor escalated.
+- **Both preconditions and postconditions escalate (since 2026-07-30).** The
+  ledger records both kinds (see `--refine-report` above), and `cap verified`
+  now escalates a `Skipped` obligation raised at a call site *or* on a
+  function's own return refinement — an undischarged postcondition is a
+  compile error under `cap verified`, exactly like an undischarged
+  precondition. This is the last place a fact was granted without obliging
+  anyone; `cap verified`'s promise — "if it compiles, it is proved" — now
+  covers return refinements too. `@[trusted]` reaches this escalation the same
+  way it reaches `check_call`'s. Bracketed by
+  `reject/t134_refine_postcondition_strict_undischarged` (an undecidable
+  return refinement under `cap verified`) and
+  `accept/t135_refine_postcondition_strict_trusted` (the same function rescued
+  by `@[trusted]`).
 - **Every declaration form is walked** (since 2026-07-29). The pass once walked
   only `DFn` and nested `DMod` and ended in a `| _ -> ()` wildcard, so calls
   inside an `impl` method, an `interface` default body, a top-level `let`, an
@@ -1132,10 +1366,29 @@ control with the competing binding deleted).
 
   - The contract is adopted — registered so every caller must establish it —
     only when the method name unambiguously denotes it: no `fn` in the same
-    module owns the name, and only one `impl` defines the method. A call
+    module owns the name, only one `impl` defines the method, and (since
+    2026-07-30) no `use` in the same declaration list imports the name. A call
     resolved by NAME cannot tell two impls' contracts apart, and checking
     correct code against a predicate it never touches is the failure this
     subsystem must never have.
+  - The `use` half of that test **fails closed on a glob**. `use Other.{run}`
+    is an enumerated import, so only `run` is withdrawn. `use Other.*`,
+    `import Other` (a bare `import` parses to the *same* `UseAll`) and
+    `import Other, except: [f]` name a module this pass cannot see, so whether
+    they bind the method name is undecidable here and **every** `impl` method
+    in that declaration list is withdrawn. `use Other` with no selector binds
+    the module, not any bare name, and withdraws nothing. Failing closed costs
+    silence; failing open would cost a false positive.
+  - The competition is judged over **one declaration list**, and the review of
+    this change probed both cross-list nestings end-to-end (2026-07-31). An
+    enclosing `use` over a nested `impl` turned out NOT to be a hole: the call
+    inside the nested module really dispatches to the impl, so adoption matches
+    dispatch. The live defect is the **mirror** shape — a `use` in a *nested*
+    module shadowing an *enclosing* contract — where the call dispatches to the
+    import but `resolve_call` tries the lexical enclosing lookup first and
+    rejects correct code against a contract it never touches. That is
+    pre-existing, reaches plain `fn` contracts (no `impl` involved), and is
+    tracked in `specs/todos/` as the cardinal-sin-direction item.
   - When the name is ambiguous the refinement binds **nobody**: the body is
     walked with it stripped, so it cannot discharge anything either. Unenforced
     means unusable in both directions — never "assumed in the body but demanded
@@ -1146,7 +1399,9 @@ control with the competing binding deleted).
     (`fn run : a -> {Int | _ > 0} -> Int`) is still **not** enforced at call
     sites. Nothing assumes it either, so it is a missing check rather than an
     unsound one, but do not rely on it. Put the refinement on the `impl`
-    method's parameter instead.
+    method's own signature instead. Since 2026-07-30 the pass **warns** rather
+    than staying silent about it — see
+    [A refinement in an interface signature enforces nothing](#a-refinement-in-an-interface-signature-enforces-nothing).
 - **`cap no_panic`'s divisor check tries to DISCHARGE before it rejects**
   (since 2026-07-29). Every outcome short of `Refine.Verified` is an error —
   that is what the capability promises — but "we could not reflect the
@@ -1169,17 +1424,16 @@ control with the competing binding deleted).
   where dropping a fact means silence, dropping one here means an ERROR, so the
   retirement is deliberately over-approximate — a guard is re-established by
   re-stating it inside the rebinding scope. `reject/t123`.
-- **There is no `@[trusted]` escape hatch yet.** The only way to accept an
-  obligation the checker cannot discharge is `assert`, or removing
-  `cap verified` from the module. Until an escape hatch exists, `cap verified`
-  is a tool for small, deliberately-verified modules rather than a whole-codebase
-  setting.
+- **`@[trusted]` (since 2026-07-30) is a per-function escape hatch.** See
+  [above](#trusted--a-scoped-loud-escape-hatch). It accepts a `Skipped`
+  obligation as an assertion — recorded as its own `Trusted` verdict, never a
+  `Violated` — scoped to the one function that carries the attribute.
 
 ### Open holes, stated as of 2026-07-29
 
 Everything above says what these capabilities *do*. This is the complementary
 list — what a reader must not assume — kept here rather than only in
-`specs/todos.md` so that nobody reads a guarantee out of the absence of a
+`specs/todos/` so that nobody reads a guarantee out of the absence of a
 caveat. None of these is known to be *unsound* in the "assumed but unchecked"
 sense; each is a check that does not happen.
 
@@ -1191,28 +1445,53 @@ sense; each is a check that does not happen.
    `string_byte_length` as measure aliases for the entire program. Under the
    default stance that is silence; under `cap verified` it is a build failure,
    which is why the `alias-withdrawn` reason exists.
-3. **Postconditions are outside the ledger.** `check_post` neither records an
-   obligation nor escalates one, so `--refine-report` *undercounts* by every
-   return refinement it could not discharge, and a `cap verified` module
-   silently permits an undischarged **return** refinement. `cap verified` is a
-   guarantee about preconditions at call sites only. The 2026-07-29 composition
-   work is confined to `check_call` for the same reason: a parameter's promise
-   composes into a *call* in the body, but `check_post` composes no list or ADT
-   measure through a **postcondition**.
-4. **There is no `@[trusted]`.**
-5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
-   wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified
-   spellings `strip_entry_self_qual` rewrites, so an entry module that declares
-   the name in some other form keeps the qualified spelling — which is what
-   makes `accept/t126` / `t127` discriminating, but is a hole of the same
-   family as the four that were closed.
-6. **Impl-method contract adoption ignores `use`-imported impl methods** when
-   judging whether a method name is ambiguous. The judgement is made over the
-   compilation unit's own declarations; an impl brought in under a `use` is not
-   counted as a competitor for the name.
-7. **`alias-withdrawn` attribution does not follow a laundered guard.**
-   `let n = List.length(ys)` followed by `if n > 0` falls back to the general
-   `solver-undecided` message even when a withdrawal really was the cause.
+3. **Postconditions are in the ledger and escalated (since 2026-07-30).**
+   `check_post` records an obligation at every exit (proved, violated, or
+   skipped with a reason), so `--refine-report` counts return refinements too,
+   and `cap verified` now escalates an undischarged **return** refinement
+   exactly as it already escalated an undischarged precondition. The
+   2026-07-29 composition work remains confined to `check_call`, though: a
+   parameter's promise composes into a *call* in the body, but `check_post`
+   still composes no list or ADT measure through a **postcondition** — that is
+   a separate, still-open gap from escalation.
+4. **`@[trusted]` now reaches postconditions too (since 2026-07-30).** It
+   suppresses the escalation both `check_call`'s and `check_post`'s `note`
+   perform, scoped to the one function that carries the attribute.
+5. **`collect_direct_names` in `lib/desugar/desugar.ml` is exhaustive over
+   `A.decl` (since 2026-07-30) but still does not cover `interface`/`impl`
+   METHOD names.** It decides which self-qualified spellings
+   `strip_entry_self_qual` rewrites, so an entry module that declares the name
+   only as a method keeps the qualified spelling — which is what makes
+   `accept/t126` / `t127` discriminating. Whoever closes that residual must
+   re-verify those two by mutation: folding method names in makes the entry
+   module's `List.length(ys)` rewrite to a bare `length(ys)`, and both
+   witnesses would then pass regardless of the behaviour they pin.
+6. **A `use` in a NESTED module shadowing an enclosing contract is a live
+   false positive.** The call dispatches to the import, but `resolve_call`
+   consults the lexical enclosing-module lookup before `use`-imported names,
+   so correct code is rejected against a contract it never touches — with a
+   plain `fn` as well as an impl method. Pre-existing (confirmed at the
+   pre-2026-07-30 parent); the cardinal-sin direction. (The opposite nesting —
+   enclosing `use` over a nested `impl` — was probed and is NOT a hole:
+   adoption matches dispatch there. Since 2026-07-30 a `use` in the *same*
+   declaration list competes for adoption, glob imports failing closed.)
+7. **`alias-withdrawn` attribution follows a laundered guard one `let` deep,
+   and no deeper.** `let n = List.length(ys)` followed by `if n > 0` is
+   attributed to the withdrawal (closed 2026-07-31); a chain
+   (`let a = List.length(ys)` then `let n = a`) still falls back to the
+   general `solver-undecided` message even when the withdrawal really was the
+   cause. A related pre-existing approximation is unchanged: condition 3
+   checks that the guard *applies the spelling to the argument*, not that the
+   guard would have *discharged* the obligation, so `if List.length(ys) >= 0`
+   is attributed to the withdrawal although `len >= 0` proves nothing about
+   `len > 0` — identically in the direct and laundered spellings. On the
+   laundered path, a mention of the laundering name is counted only when it is
+   FREE — a lambda parameter in the guard that merely collides with the name
+   is not evidence (fixed 2026-07-31 after review; `expr_mentions_free`). The
+   DIRECT path retains the mirror-image pre-existing hole: an application
+   under a binder that shadows the subject (`fn ys -> List.length(ys) > 0`
+   passed to a combinator) still counts. Filed in `specs/todos/`; fixing it
+   changes direct-path behavior that predates the laundering work.
 
 ---
 

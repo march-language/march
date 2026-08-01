@@ -890,8 +890,8 @@ Directly callable without module qualification (built into the evaluator).
 | `char_is_alpha(c)` / `char_is_digit` / `char_is_alphanumeric` | Category |
 | `char_is_whitespace(c)` / `char_is_uppercase` / `char_is_lowercase` | Category |
 | `char_to_uppercase(c)` / `char_to_lowercase` | Case |
-| `char_to_int(c)` / `char_from_int(n)` | Code point |
-| `byte_to_char(b)` | Byte to char |
+| `char_to_int(c)` / `char_from_int(n)` | Byte value (`char_from_int` is `n & 0xFF`, wraps; not a code point) |
+| `byte_to_char(b)` | Byte to char (same payload; errors outside 0–255 instead of wrapping) |
 
 ### List (primitive)
 

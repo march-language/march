@@ -1,0 +1,1 @@
+- ✅ **LSP test suite** — `lsp/test/test_lsp.ml` (84 tests); was the merge blocker for the LSP branch; expanded with 27 new tests for doc strings, find-refs, rename, sig-help, code actions

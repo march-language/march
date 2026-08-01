@@ -1,0 +1,63 @@
+-- A refinement written in an `interface` METHOD SIGNATURE enforces nothing.
+-- Nothing in `lib/refinecheck` reads `A.method_decl`'s `md_ty`: the pass's
+-- `DInterface` arm descends only into a method's DEFAULT body, and the two
+-- other walks that touch `iface_methods` read method NAMES only. Nor does the
+-- front end carry it anywhere -- `Desugar.inject_defaults` synthesises a
+-- default method's `fn_def` with `fn_ret_ty = None` and parameters taken from
+-- the default lambda, which carry no `param_ty`, so even that one path drops
+-- the predicate on the floor.
+--
+-- So the contract obliges no call site AND lets no body assume anything: a
+-- MISSING check, not an unsound one. Until Task 5 of the 2026-07-30
+-- refinement backlog it was also SILENT, which is the failure mode this area
+-- keeps producing -- it parses, typechecks, and reads exactly like a working
+-- contract. It now emits a WARNING naming the method and the `impl`-side
+-- spelling that works.
+--
+-- This is an `accept/` witness on purpose, and its exit code is the point.
+-- A warning does not change `--check`'s exit status, so this program must
+-- stay exit 0: making an interface-signature refinement a hard ERROR is a
+-- separate decision (it would break code that compiles today), and making it
+-- actually ENFORCE is a much larger one. This witness guards against doing
+-- either by accident. The warning TEXT is pinned in `test/test_refinecheck.ml`'s
+-- `interface-signature-refinement` suite instead -- `check_types.sh` asserts
+-- only exit 0 for `accept/`, and pins substrings for `reject/` alone.
+--
+-- The remedy the warning names is deliberately stated for BOTH positions,
+-- since they are enforced under different conditions: a RETURN refinement on
+-- an `impl` method is always checked (`check_fn_post` runs unconditionally),
+-- while a PARAMETER refinement is enforced only when the method name is
+-- adoptable. `Bumper`/`Box` below is the working spelling alongside the inert
+-- one, so this file witnesses the contrast rather than only the defect.
+--
+-- See specs/lang/refinement-types.md, "A refinement in an interface signature
+-- enforces nothing".
+mod T137 do
+
+  -- INERT: the predicate here is never read by the refinement checker.
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int
+  end
+
+  type Box = Box(Int)
+
+  -- ENFORCED: the same predicate on the `impl` method's own parameter. `bump`
+  -- is adoptable (exactly one impl defines it, no top-level `fn` shares the
+  -- name), so callers are obliged and the body may assume it.
+  -- The interface signature stays UNREFINED (so this half warns nothing); the
+  -- refinement goes on the impl method, which the typechecker accepts against
+  -- the plain `Int` in the interface. `bump(Box(1), 0 - 5)` is a refinement
+  -- ERROR, which is the difference between this half and the one above.
+  interface Bumper(a) do
+    fn bump : a -> Int -> Int
+  end
+
+  impl Bumper(Box) do
+    fn bump(_b : Box, n : {Int | _ > 0}) : Int do n end
+  end
+
+  fn main() : Int do
+    bump(Box(1), 5)
+  end
+
+end

@@ -1,0 +1,1 @@
+- ✅ **stdlib: Random module** — `stdlib/random.march`: purely-functional pseudorandom number generation using xoshiro256** algorithm; `Rng` state record; `seed/next_int/next_float/next_bool/next_range/shuffle`; all functions pure (take Rng, return `(value, Rng)`); no global mutable state; registered in `bin/main.ml` stdlib load order.

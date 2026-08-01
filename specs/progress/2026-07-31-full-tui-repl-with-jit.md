@@ -1,0 +1,1 @@
+- ✅ Full TUI REPL with JIT

@@ -1,0 +1,34 @@
+-- EXPECT-ERROR: cap verified
+--
+-- `cap verified` escalates an undischarged POSTCONDITION, not just an
+-- undischarged precondition (Task 3 of the 2026-07-30 refinement backlog).
+-- Until this fix, a return refinement the checker could neither prove nor
+-- refute was silently SKIPPED, even inside `cap verified` -- the one mode
+-- whose entire premise is "if it compiles, it is proved". A `cap verified`
+-- module with an undischargeable return contract exited 0.
+--
+-- `mk` declares `{Int | _ > 0}` as its return type but simply returns its
+-- unconstrained parameter `z`. The checker cannot decide whether `z` is
+-- positive (no guard, no fact), so the obligation is SKIPPED
+-- (solver-undecided) -- and under `cap verified` that skip is now an error,
+-- exactly as an undischarged precondition already was (see
+-- `check_call`'s escalation, which this mirrors for the return position).
+--
+-- Companion accept witness `accept/t135_refine_postcondition_strict_trusted`
+-- is the same module with `@[trusted]` added to `mk`, which rescues the skip
+-- instead of escalating it.
+--
+-- See specs/lang/refinement-types.md.
+mod T134 do
+
+  cap verified
+
+  fn mk(z : Int) : {Int | _ > 0} do
+    z
+  end
+
+  fn main() : Int do
+    mk(1)
+  end
+
+end

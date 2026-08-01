@@ -1,0 +1,35 @@
+-- The `extern` arm of `stdlib_member_defs_ok`'s member scan, kept covered after
+-- `t126` had to stop using one (2026-07-30).  An `extern` block declares its
+-- functions as members of the enclosing module, so a nested `mod List` with a
+-- foreign `length` is a competing definition of `List.length` and the measure
+-- alias must be WITHDRAWN — a foreign C `length` may return anything at all.
+--
+-- The competing declaration lives in a NESTED module here, not the entry
+-- module, for a specific reason: `strip_entry_self_qual` rewrites a
+-- self-qualified reference to the ENTRY module's own members, extern members
+-- included as of 2026-07-30, so an entry-level extern `length` would leave the
+-- guard below spelled bare `length` and the alias would never have been
+-- consulted at all — the witness would pass whatever the gate did.  A nested
+-- module's name is not stripped, so `List.length(ys)` survives to the gate.
+--
+-- With the alias withdrawn, `List.length(ys) == 0` says nothing about
+-- `len(ys)` and the right answer is SILENCE.  Verified by mutation: with
+-- `stdlib_member_defs_ok`'s `A.DExtern` arm deleted, this program is rejected
+-- with a FALSE `refinement violation: ... (e.g. len(ys) = 0)` on `head(ys)`.
+mod App do
+  mod List do
+    needs IO.Foreign
+
+    extern "c" : Cap(IO.Foreign) do
+      fn length(xs : List(Int)) : Int = "march_shim_list_length"
+    end
+  end
+
+  fn head(xs : {List(Int) | len(_) > 0}) : List(Int) do xs end
+
+  fn go(ys : List(Int)) : List(Int) do
+    if List.length(ys) == 0 do head(ys) else ys end
+  end
+
+  fn main() : List(Int) do go([1]) end
+end

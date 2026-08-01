@@ -1,0 +1,1 @@
+- ✅ **Cross-module Boxed-vs-Niche `Option` repr mismatch resolved** — validated by removing forgepm's `force_copy` workaround (isolated worktree only) and running the full Playwright suite: 7/7 publish tests, 29/30 overall. See `specs/2026-06-30-mono-cross-module-option-repr-bug.md`.

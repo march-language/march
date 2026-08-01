@@ -1,0 +1,1 @@
+- ✅ **New March-native stdlib test files** — `test/stdlib/test_random.march`, `test_stats.march`, `test_plot.march`, `test_bigint.march`, `test_decimal.march`, `test_enum.march`, `test_math.march`, `test_queue.march`, `test_string.march` added.

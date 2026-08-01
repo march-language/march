@@ -1,0 +1,1 @@
+- ✅ Zed editor extension (Tree-sitter grammar)

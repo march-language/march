@@ -51,7 +51,7 @@ end
 > correct). This is unrelated to the old `Eq`-name-collision mechanism (it
 > reproduces identically for a user interface with no built-in-name collision
 > at all, and `Ord`'s `cmp`-calling defaults are affected too, contrary to what
-> this callout previously claimed). See `specs/todos.md` ("Compiler:
+> this callout previously claimed). See `specs/todos/` ("Compiler:
 > interfaces/impls declaration checking, Task 6 closeout") for the live repro
 > and citations; see `core-march.md` §4.4.2 for how method dispatch actually
 > works operationally.

@@ -1,0 +1,1 @@
+- ✅ **List comprehensions** — `[expr for pat in list]` and `[expr for pat in list, pred]` syntax. Parser-level desugaring to `List.map`/`List.filter` + `List.map` in `lib/parser/parser.mly`. Requires `List` in scope. 4 new tests.

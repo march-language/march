@@ -1,0 +1,41 @@
+-- `@[trusted]` rescues an otherwise-undischargeable `cap verified` obligation
+-- (§`@[trusted] — a scoped, loud escape hatch`, 2026-07-30), without dropping
+-- `cap verified` for the whole module.
+--
+-- `inner` demands `len(_) > 0` on its argument. `go` calls it on a bare
+-- `List(Int)` parameter with no guard establishing that fact, so the
+-- obligation is SKIPPED (solver-undecided). Under `cap verified` that skip
+-- is ordinarily escalated to a compile error -- see the discriminating
+-- companion `reject/t131_refine_let_annotation_false` for what an
+-- undischarged obligation looks like when nothing rescues it. Here `go` is
+-- annotated `@[trusted]`, so the escalation is suppressed and the obligation
+-- is recorded as `Trusted` instead: an assertion, not a proof, but not a
+-- compile error either.
+--
+-- `not_ok` (deliberately absent from this file) would still error without
+-- `@[trusted]` -- see `reject/t133_refine_trusted_violation_not_rescued` for
+-- the load-bearing limit (a definite VIOLATION is never rescued), and the
+-- `trusted` suite in `test/test_refinecheck.ml` for the sibling-scoping case
+-- (a `cap verified` module with one `@[trusted]` function and one ordinary
+-- one: only the ordinary one still errors).
+--
+-- See specs/lang/refinement-types.md, "`@[trusted]` — a scoped, loud escape
+-- hatch".
+mod T132 do
+
+  cap verified
+
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do
+    0
+  end
+
+  @[trusted]
+  fn go(zs : List(Int)) : Int do
+    inner(zs)
+  end
+
+  fn main() : Int do
+    go([1])
+  end
+
+end

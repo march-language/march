@@ -1,0 +1,1 @@
+- ✅ **Actor compilation tests** — 8 tests in `actor_compile` group verifying LLVM IR output for actor programs (dispatch, spawn, handlers, supervisor, monitor, link)

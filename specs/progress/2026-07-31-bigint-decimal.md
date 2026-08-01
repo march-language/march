@@ -1,0 +1,1 @@
+- ✅ **`BigInt` / `Decimal`** — `stdlib/bigint.march` (470 lines), `stdlib/decimal.march` (277 lines); registered in `bin/main.ml` load order

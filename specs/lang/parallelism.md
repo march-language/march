@@ -188,7 +188,7 @@ interpreted and compiled (stress-verified 0/15 crashes) — the first compiled
 witness for the `Parallel` module. One documented exception: **`psum_float`
 is not backend-portable** — IEEE-754 `+.` is not associative, and the two
 backends pick different worker/chunk counts, so results can differ in the
-last bit (finding P1, `specs/todos.md`). Prefer `psum`/integer accumulation,
+last bit (finding P1, `specs/todos/`). Prefer `psum`/integer accumulation,
 or pin `psum_float` inputs that are exact in binary, when portability matters.
 
 ---

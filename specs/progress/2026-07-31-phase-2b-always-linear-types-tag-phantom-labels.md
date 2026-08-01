@@ -1,0 +1,1 @@
+- ✅ **Phase 2b always-linear types + `tag` phantom labels** — `always_linear type T(params) = ...` (unconditional linearity, no per-site annotation); `tag Foo` parser sugar (≡ `type Foo = Foo`); `stdlib/handle.march` `Handle(r, s)` typestate type; thread-through idiom validated. 319 tests pass.

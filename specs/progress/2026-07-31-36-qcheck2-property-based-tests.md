@@ -1,0 +1,1 @@
+- ✅ 36 QCheck2 property-based tests

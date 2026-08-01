@@ -10626,6 +10626,81 @@ let test_compiled_entry_self_qual_no_overstrip_parity () =
     ~expected:"6\n6"
     ()
 
+(** [DExtern] arm of {!test_compiled_entry_self_qual_parity}: an `extern`
+    block's `fn`s are ordinary lowercase value names of the declaring module,
+    so `Foo.my_abs(-7)` inside entry `mod Foo` must strip to `my_abs(-7)` just
+    like a `DFn` does.  Pre-fix, desugar's [collect_direct_names] ended in
+    `| _ -> []` and so knew only about `DFn`/`DLet`: the strip pass's
+    must-name-something-of-ours guard did not recognise `my_abs` as a member,
+    left the reference as `Foo.my_abs`, and it never converged on the
+    definition — `unbound variable: Foo.my_abs` (interp) /
+    `Undefined symbols: _Foo.my_abs` (compiled), on BOTH backends.
+
+    The explicit `= "labs"` symbol binds C's `labs` so the program actually
+    links and runs on both backends (the default `<lib>_<fn>` mangling would
+    look for a nonexistent `libc_my_abs`). *)
+let test_compiled_entry_self_qual_extern_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_extern"
+    ~src:"mod Foo do\n\
+         \  needs IO.Foreign\n\
+         \  needs IO.FileSystem\n\
+         \  extern \"libc\": Cap(IO.FileSystem) do\n\
+         \    fn my_abs(x : Int) : Int = \"labs\"\n\
+         \  end\n\
+         \  fn main() do println(int_to_string(Foo.my_abs(0 - 7))) end\n\
+          end\n"
+    ~expected:"7"
+    ()
+
+(** Over-qualification guard for {!test_compiled_entry_self_qual_extern_parity}:
+    [collect_direct_names] also feeds [qualify_module_refs], which rewrites
+    BARE intra-module calls inside a NESTED module to `Outer.Inner.name`.  An
+    extern `fn` called bare from inside the nested module that declares it must
+    still reach the foreign symbol after that rewrite, not get qualified into
+    nothing. *)
+let test_compiled_entry_self_qual_extern_nested_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_extern_nested"
+    ~src:"mod Foo do\n\
+         \  mod Bar do\n\
+         \    needs IO.Foreign\n\
+         \    needs IO.FileSystem\n\
+         \    extern \"libc\": Cap(IO.FileSystem) do\n\
+         \      fn my_abs(x : Int) : Int = \"labs\"\n\
+         \    end\n\
+         \    fn go(x) do my_abs(x) end\n\
+         \  end\n\
+         \  fn main() do println(int_to_string(Bar.go(0 - 7))) end\n\
+          end\n"
+    ~expected:"7"
+    ()
+
+(** Guard that an interface method name stays OUT of [collect_direct_names].
+    Interface methods resolve through interface dispatch, not module member
+    lookup — `Bar.greet(1)` never resolves for any module — so adding them
+    would make [qualify_module_refs] rewrite the bare `greet(1)` inside the
+    nested module that DECLARES the interface into `Foo.Bar.greet(1)`, which
+    resolves to nothing.  This program prints `hi-nested` today and must keep
+    doing so. *)
+let test_compiled_nested_interface_dispatch_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_nested_interface_dispatch"
+    ~src:"mod Foo do\n\
+         \  mod Bar do\n\
+         \    interface Greeter(a) do\n\
+         \      fn greet : a -> String\n\
+         \    end\n\
+         \    impl Greeter(Int) do\n\
+         \      fn greet(_x) do \"hi-nested\" end\n\
+         \    end\n\
+         \    fn go() : String do greet(1) end\n\
+         \  end\n\
+         \  fn main() do println(Bar.go()) end\n\
+          end\n"
+    ~expected:"hi-nested"
+    ()
+
 (** MPST (multiparty session types), 3-role Relay — the FIRST MPST test that
     RUNS the compiled binary (the [test_session_compile_*] tests only grep IR,
     so they never caught this).
@@ -13419,6 +13494,12 @@ let codegen_suites =
             test_compiled_entry_self_qual_nested_parity;
           Alcotest.test_case "compiled entry-module self-qual no-overstrip parity" `Quick
             test_compiled_entry_self_qual_no_overstrip_parity;
+          Alcotest.test_case "compiled entry-module self-qual of an extern fn parity" `Quick
+            test_compiled_entry_self_qual_extern_parity;
+          Alcotest.test_case "compiled nested-module bare extern call parity (no over-qualification)" `Quick
+            test_compiled_entry_self_qual_extern_nested_parity;
+          Alcotest.test_case "compiled nested-module interface dispatch parity (methods stay unqualified)" `Quick
+            test_compiled_nested_interface_dispatch_parity;
           Alcotest.test_case "compiled MPST 3-role Relay parity (runs binary; layout+role-index fix)" `Quick
             test_compiled_mpst_relay_parity;
           Alcotest.test_case "compiled MPST Relay distinct-payload parity (runs binary; role name->index)" `Quick

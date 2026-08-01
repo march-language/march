@@ -1,0 +1,1 @@
+- ✅ **stdlib: Stats module** — `stdlib/stats.march`: descriptive statistics over `List(Float)`; `mean/variance/std_dev/median/mode/min/max/range/percentile/covariance/pearson_correlation`; pure functional, no external dependencies; registered in `bin/main.ml`.

@@ -1,0 +1,1 @@
+- ✅ **SRec multi-turn testing** — 10 new tests: unfold, ping-pong (1+2 steps), nested SRec, finite protocol, choose-loop, dual, typecheck

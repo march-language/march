@@ -1,0 +1,1 @@
+- [ ] **Cap(IO.Timer) — scheduled callback capability** — New leaf under `IO`. Wire `timer_after`, `timer_interval`, `timer_cancel`, `sleep_ms`. Blocked on confirming these builtin names in the runtime. Spec: `specs/capability-system-design.md §Future Capabilities §4`.

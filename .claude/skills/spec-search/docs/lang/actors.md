@@ -13,7 +13,7 @@ March's concurrency model is built on **actors** and **tasks**. Actors are isola
 
 **Compiled-actor status:** the core actor message plane runs both in the tree-walking interpreter and in ahead-of-time-compiled (native) binaries. In the compiled runtime, both actors and tasks run on an M:N green-thread scheduler (`runtime/march_scheduler.c`) — multiple OS threads, each running many lightweight green threads, with work-stealing across threads. Actor declarations lower to TIR (`lib/tir/lower_actor.ml`) and emit LLVM IR that calls the public C API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`, `runtime/march_runtime.c`); each actor runs as its own green thread. Actors park cooperatively when their mailbox is empty; tasks park when awaiting a result.
 
-**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](core-march.md) §4.10.5). Three *other* planes **diverge compiled** and are documented interpreter-first below, each a filed open finding (`specs/todos.md`):
+**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](core-march.md) §4.10.5). Three *other* planes **diverge compiled** and are documented interpreter-first below, each a filed open finding (`specs/todos/`):
 
 - **Capabilities / dead-`send`** (`get_cap`, `send_checked`, plain `send` to a *dead* pid): compiled `send_checked` performs no epoch validation and returns an uninterned garbage atom for every cap; a plain `send` to a dead pid returns `Some` compiled but `None` interpreted. See [`core-march.md`](core-march.md) §4.10.6.
 - **`Actor.call` timeout**: the `timeout_ms` argument is accepted for API compatibility but **not enforced** in the compiled runtime (`runtime/march_runtime.c:1809–1810`) — a `call` cannot actually time out compiled.
@@ -205,7 +205,7 @@ Use capabilities when you hold a reference across an actor restart boundary and 
 > (hence the `_` catch-all above rather than a `:error` arm) — and `get_cap` does not gate
 > on liveness. The entire capability mechanism is therefore non-functional in compiled
 > binaries today; it is a filed open finding ([`core-march.md`](core-march.md) §4.10.6, and
-> `specs/todos.md`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
+> `specs/todos/`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
 > additionally not registered in the typechecker, so they are not surface-callable at all.
 > Use plain `send`/`is_alive` if you need behavior that agrees on both backends.
 
@@ -267,12 +267,12 @@ There is no `Call` wrapper constructor, and the call handler takes exactly one a
 > **Two caveats.** (1) The `timeout_ms` argument is accepted for API compatibility but is
 > **not enforced in the compiled runtime** (`runtime/march_runtime.c:1809–1810`) — a `call`
 > that blocks indefinitely will not be interrupted by its stated timeout compiled (a filed
-> open finding, `specs/todos.md`). (2) The **interpreter dispatches `Actor.call`
+> open finding, `specs/todos/`). (2) The **interpreter dispatches `Actor.call`
 > differently**: it wraps the message as `Call(ref, msg)` and delivers it to a two-argument
 > handler matching `on Call(ref, msg)` (`lib/eval/eval.ml`), rather than tag-routing a
 > zero-arg sentinel to a one-argument handler. The compiled-canonical example above
 > therefore returns `Err("no reply …")` under the interpreter — this interpreter/compiled
-> `Actor.call` dispatch-form divergence is a filed open finding (`specs/todos.md`).
+> `Actor.call` dispatch-form divergence is a filed open finding (`specs/todos/`).
 
 `Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
 
@@ -467,7 +467,7 @@ The `app` declaration integrates with the supervision system. See [Supervision](
 > — reading its pid out of the supervisor state via `get_actor_field(sup, …)` +
 > `pid_of_int(…)` — **SIGSEGVs compiled** (`examples/supervision_strategies.march` exits
 > 139), and the compiled supervisor does not even run its children's `init` at
-> `spawn(Sup)`. Both are filed open findings (`specs/todos.md`). Supervised-actor programs
+> `spawn(Sup)`. Both are filed open findings (`specs/todos/`). Supervised-actor programs
 > run correctly under the interpreter; treat compiled supervision as not-yet-observable.
 
 ---

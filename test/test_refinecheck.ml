@@ -3372,6 +3372,138 @@ mod QGAlias do
   fn main() : Int do go([1]) end
 end|}));
 
+    (* ── The UseSingle pair: LOOK, don't assume (Task 9, 2026-07-31) ───────
+       `use X.List` (UseSingle) used to withdraw purely syntactically on its
+       last path segment, while the two glob forms already RESOLVED their
+       target and checked it.  Measured cost (MARCH_LIB_PATH fixture, ledger
+       report): one nested `use Extras.Deep.List` in a dependency — whose
+       target has NO `length` member at all, so it cannot make `List.length`
+       denote anything non-stdlib at ANY call site — flipped the entry's
+       obligation from `1 proved` to `1 skipped (alias-withdrawn)`.
+
+       The narrowed arm resolves the use's target (from EVERY module scope of
+       the unit, ALL matches) and withdraws only when some match provides a
+       member named `length` — where "provides" is fail-closed over the
+       target's own use-forms — or when nothing resolves.  Soundness does not
+       rest on resolver semantics: rebinding `List` to a module that provably
+       provides nothing named `length` cannot make `List.length` denote a
+       non-stdlib function anywhere.  A target that provides it via a DIRECT
+       member decl is a `mod List` with that member, which the member gate
+       withdraws independently — so the cases this arm alone must keep are
+       the re-export and unresolvable shapes below. *)
+    gated "`use X.List` whose target provably lacks `length` keeps the alias"
+      (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QUKeep do
+  mod Shim do
+    mod List do
+      fn size(xs : List(Int)) : Int do 0 end
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* The member gate is silent here — a `use Helpers.{length}` inside the
+       target is not a member DECL — so this fixture discriminates the
+       provides-walk itself: drop its UseNames arm and the alias is wrongly
+       kept, and this correct program is reported. *)
+    gated "`use X.List` whose target re-exports a `length` withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUReex do
+  mod Helpers do
+    fn length(xs : List(Int)) : Int do 99 end
+  end
+  mod Shim do
+    mod List do
+      use Helpers.{length}
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "`use X.List` with an UNRESOLVABLE target withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUUnres do
+  use Ghost.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "`use X.List` whose target holds an unenumerable glob withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUGlob do
+  mod Shim do
+    mod List do
+      import Unknowable
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* Two modules answer to the path `Shim.List` — a top-level one that lacks
+       `length` and a nested one that re-exports it.  Which one the `use`
+       semantically binds is exactly the question this pass cannot answer, so
+       resolution must consider ALL matches from EVERY scope and withdraw if
+       ANY provides: a first-match-from-root implementation keeps the alias
+       here and reports this correct program. *)
+    gated "`use X.List` withdraws when ANY same-path module provides `length`"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QUDup do
+  mod Helpers do
+    fn length(xs : List(Int)) : Int do 99 end
+  end
+  mod Shim do
+    mod List do
+      fn size(xs : List(Int)) : Int do 0 end
+    end
+  end
+  mod Outer do
+    mod Shim do
+      mod List do
+        use Helpers.{length}
+      end
+    end
+  end
+  use Shim.List
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
     (* ── The ENABLING branch ───────────────────────────────────────────────
        Every case above reaches its verdict WITHOUT a `List.length` definition
        in scope at all, i.e. via the gate's "no defs -> allow" path.  None of
@@ -3681,6 +3813,28 @@ mod QSGClean do
     fn helper(x : Int) : Int do x end
   end
   import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The UseSingle narrowing, string side — the gate is one parameterised
+       function, so the `use X.String` arm is pinned symmetrically with the
+       list side's QUKeep. *)
+    gated "`use X.String` whose target provably lacks `byte_size` keeps the alias"
+      (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QSUKeep do
+  mod Shim do
+    mod String do
+      fn size(s : String) : Int do 0 end
+    end
+  end
+  use Shim.String
   fn slug(s : {String | len(_) > 0}) : Int do 1 end
   fn go(t : String) : Int do
     if String.byte_size(t) == 0 do slug(t) else 0 end
@@ -4977,6 +5131,232 @@ end|}
         Alcotest.(check bool)
           "so the withdrawal is not blamed" false
           (contains witness "alias-withdrawn"));
+    (* ── A guard LAUNDERED through one `let` ──────────────────────────────
+       `let n = List.length(ys)` then `if n > 0` is the same author intent as
+       guarding directly, and the same withdrawal stopped the same proof — so
+       it earns the same attribution.  ONE level only, and every control below
+       is a way the laundered walk could attribute WRONGLY rather than merely
+       vaguely: through a rebinding of the laundering name, through a rebinding
+       of the collection itself, through a different collection, or through a
+       second hop. *)
+    gated "a guard laundered through one `let` is attributed to the withdrawal"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod LA1 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let n = List.length(ys)
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "a lambda param COLLIDING with the laundering name is not evidence"
+      (fun () ->
+        (* Review probe PE (2026-07-31): the guard's `n` is the lambda's own
+           parameter — the guard never uses the laundered length at all, so
+           blaming the withdrawal is a WRONG attribution, not a vague one.
+           The discard-only [expr_mentions] counted the param as a mention;
+           the accepting position must use the free-occurrence check. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA7 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_pos(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if any_pos(zs, fn n -> n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "a FREE occurrence under a non-colliding binder still attributes"
+      (fun () ->
+        (* The companion pin: `q > n` inside the lambda is a genuine free use
+           of the laundered length, so the attribution must still fire — the
+           free-occurrence fix must not over-retire. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA8 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_over(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if any_over(zs, fn q -> q > n) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "a laundered guard on a DIFFERENT collection is not this guard"
+      (fun () ->
+        (* The laundered analogue of the WA control: the walk must consult
+           [expr_applies_to] with the ORIGINAL argument (`zs`), never the
+           let-bound name — `n` guards `zs`, and the obligation is about
+           `ys`. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA2 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(zs)
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a REBOUND laundering name is not the launder"
+      (fun () ->
+        (* `let n = 5` between the laundering `let` and the guard: the guard's
+           `n` is the literal, not the length.  The fact must retire exactly
+           as a path fact would (see [path_shadow]) — surviving it would
+           attribute an unrelated comparison to the withdrawal. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA3 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let n = List.length(ys)
+    let n = 5
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a REBOUND collection retires the laundered fact"
+      (fun () ->
+        (* The collection itself rebinds between the `let` and the call: `n`
+           measures the OUTER `ys`, the obligation is about the new one.  The
+           laundered fact's RHS mentions the rebound name, so it must retire —
+           the same both-channels discipline every binding construct already
+           applies to [scope] and [path]. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA4 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    let ys = zs
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "TWO-level laundering stays general"
+      (fun () ->
+        (* `let a = List.length(ys)` then `let n = a`: the walk is one level
+           deep on purpose — a chain is where "the guard is about this value"
+           stops being syntactically evident, and the fallback is the honest
+           general message, not a guess. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA5 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let a = List.length(ys)
+    let n = a
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a NEGATED laundered guard is not read as a guard that proved nothing"
+      (fun () ->
+        (* The laundered analogue of WC: in the else-branch the guard
+           DISPROVES the predicate; the existing polarity gate must apply to
+           the laundered walk exactly as to the direct one. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA6 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let n = List.length(ys)
+    if n > 0 do 0 else head(ys) end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the withdrawal is not blamed" false (contains msg "alias-withdrawn"));
     (* Suppression itself is untouched: with nothing competing, the same guarded
        call still PROVES and reports nothing at all. *)
     gated "the guarded call still proves when no alias was withdrawn" (fun () ->
@@ -5590,6 +5970,600 @@ end|});
         Alcotest.(check int) "the false annotation is now caught" 1 violated)
   ]
 
+let postcond_ledger_suite =
+  let summary () = March_refinecheck.Obligation.summary () in
+  let skip_count skips = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+  [ gated "a PROVED postcondition is recorded" (fun () ->
+        (* PRE-FIX: 0 proved, 0 violated, 0 skipped — check_post records
+           nothing at all, so a function whose entire contract is its return
+           type is invisible to --refine-report. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL1 do
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do mk() end
+end|});
+        let proved, violated, _ = summary () in
+        Alcotest.(check int) "the postcondition proves" 1 proved;
+        Alcotest.(check int) "violated" 0 violated)
+
+  ; gated "a VIOLATED postcondition is recorded" (fun () ->
+        (* PRE-FIX: 0 proved, 0 violated, 0 skipped, but exit 1 — the error
+           IS emitted, it just never reaches the ledger. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL2 do
+  fn mk() : {Int | _ > 0} do 0 - 5 end
+  fn main() : Int do mk() end
+end|});
+        let _, violated, _ = summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "an UNDECIDABLE postcondition is recorded as skipped" (fun () ->
+        (* PRE-FIX: 0 proved, 0 violated, 0 skipped, exit 0. This is the case
+           Task 3 will escalate; it must be countable first. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL3 do
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|});
+        let proved, violated, skips = summary () in
+        Alcotest.(check int) "proved" 0 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 1 (skip_count skips))
+
+  ; gated "a postcondition is recorded ONCE, not twice" (fun () ->
+        (* THE DOUBLE-COUNT GUARD. check_fn_post_verdict runs twice per
+           refined-return function: once from gate_unverified_posts with
+           ~emit:false (the propagation gate pre-pass) and once from
+           check_fn_post during the walk with emit=true. Recording in
+           check_post unconditionally counts every postcondition twice.
+           Without this case that bug ships and only shows up as inflated
+           --refine-report totals nobody cross-checks. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL4 do
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do mk() end
+end|});
+        let proved, _, _ = summary () in
+        Alcotest.(check int) "exactly one record" 1 proved)
+
+  ; gated "a precondition and a postcondition are both counted" (fun () ->
+        (* Interaction: the two paths are independent and must not clobber
+           one another. 2 = mk's return refinement + take_pos's precondition. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod PL5 do
+  fn take_pos(n : {Int | _ > 0}) : Int do n end
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do take_pos(mk()) end
+end|});
+        let proved, violated, _ = summary () in
+        Alcotest.(check int) "both counted" 2 proved;
+        Alcotest.(check int) "violated" 0 violated)
+  ]
+
+(* ── `@[trusted]` (Task 2) ──────────────────────────────────────────────────
+   A per-function escape hatch from `cap verified`'s escalation: an obligation
+   the checker cannot discharge inside a `@[trusted]` function is accepted as
+   an ASSERTION, recorded as its own [Trusted] verdict, rather than forcing the
+   author to drop `cap verified` for the whole module.  Deliberately loud (see
+   [Obligation.Trusted]) and deliberately narrow: it must never suppress a
+   [Violated] and must never leak to a sibling function. *)
+let trusted_suite =
+  let summary_full () = March_refinecheck.Obligation.all () in
+  let count_trusted () =
+    List.length (List.filter (fun (o : March_refinecheck.Obligation.t) ->
+      o.verdict = March_refinecheck.Obligation.Trusted) (summary_full ()))
+  in
+  [ gated "@[trusted] suppresses a cap-verified skip" (fun () ->
+        (* PRE-FIX: exit 1 — the skip is escalated and there is no way out
+           short of dropping cap verified for the whole module. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod TR1 do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn go(zs : List(Int)) : Int do inner(zs) end
+  fn main() : Int do go([1]) end
+end|}))
+
+  ; gated "a trusted obligation is NOT counted as proved" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TR2 do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn go(zs : List(Int)) : Int do inner(zs) end
+  fn main() : Int do go([1]) end
+end|});
+        let proved, _, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not laundered into proved" 0 proved;
+        Alcotest.(check int) "counted as trusted" 1 (count_trusted ()))
+
+  ; gated "@[trusted] does NOT suppress a definite violation" (fun () ->
+        (* The load-bearing limit. A predicate that can never hold is a bug in
+           the annotation; waving it through would make @[trusted] a way to
+           ship known-false contracts. *)
+        Alcotest.(check bool) "still errors" true
+          (has_refine_error_d {|
+mod TR3 do
+  cap verified
+  fn inner(n : {Int | _ > 0}) : Int do n end
+  @[trusted]
+  fn go() : Int do inner(0 - 5) end
+  fn main() : Int do go() end
+end|}))
+
+  ; gated "@[trusted] is scoped to its own function" (fun () ->
+        (* A sibling function in the same cap verified module must still be
+           strict — otherwise one annotation silently disarms the module. *)
+        Alcotest.(check bool) "sibling still errors" true
+          (has_refine_error_d {|
+mod TR4 do
+  cap verified
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn ok(zs : List(Int)) : Int do inner(zs) end
+  fn not_ok(ws : List(Int)) : Int do inner(ws) end
+  fn main() : Int do ok([1]) + not_ok([1]) end
+end|}))
+
+  ; (* Step 5: an attribute that silently does nothing is exactly the failure
+       mode this subsystem keeps producing (Tasks 4/5). No solver needed —
+       this fires before any obligation is even checked — so unlike the four
+       cases above this one is NOT gated on z3. *)
+    Alcotest.test_case "@[trusted] without cap verified warns that it does nothing"
+      `Quick (fun () ->
+        Alcotest.(check bool) "warns" true
+          (has_refine_warning {|
+mod TR5 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  @[trusted]
+  fn go(zs : List(Int)) : Int do inner(zs) end
+  fn main() : Int do go([1]) end
+end|}))
+  ]
+
+let postcond_strict_suite =
+  [ gated "cap verified escalates an undischarged postcondition" (fun () ->
+        (* PRE-FIX: exit 0 — silently permitted. This is the last place a fact
+           is granted without obliging anyone. *)
+        Alcotest.(check bool) "errors" true
+          (has_refine_error_d {|
+mod PS1 do
+  cap verified
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|}))
+
+  ; gated "a PROVED postcondition under cap verified stays silent" (fun () ->
+        (* The false-positive control. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod PS2 do
+  cap verified
+  fn mk() : {Int | _ > 0} do 100 end
+  fn main() : Int do mk() end
+end|}))
+
+  ; gated "@[trusted] rescues an undischarged postcondition" (fun () ->
+        (* Arc A's payoff: the escape hatch has to reach the newly-strict
+           obligations, or Task 3 makes cap verified less adoptable. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod PS3 do
+  cap verified
+  @[trusted]
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|}))
+
+  ; gated "a non-cap-verified module is unaffected" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod PS4 do
+  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn main() : Int do mk(1) end
+end|}))
+  ]
+
+(* Task 4: a QUALIFIED spelling inside a predicate (`List.length(_)`) parses
+   and typechecks, but predicates are never desugared, so `List.length` stays
+   an `EField` chain rather than the dotted `EVar` the measure alias keys on
+   — the contract enforces NOTHING, silently.  This suite pins a WARNING
+   (not an error — the module still compiles) naming both the qualified
+   spelling found and the bare spelling that would actually work. *)
+let qualified_pred_suite =
+  [ gated "a qualified spelling in a predicate warns" (fun () ->
+        (* PRE-FIX: silent. The contract parses, typechecks, and enforces
+           NOTHING, because predicates are never desugared so List.length
+           stays an EField chain rather than the dotted EVar the alias keys
+           on. Looks like it works; doesn't. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP1 do
+  fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
+  fn main() : Int do inner([1]) end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        (* Pin the SUGGESTION, not just the spelling. `contains m "len"` would
+           be vacuous here — "len" is a substring of "List.length", so that
+           conjunct is implied by the first and the test would stay green if
+           the remedy said `length`, or said nothing at all. Match the whole
+           remedy clause instead. *)
+        Alcotest.(check bool) "warns about the qualified spelling" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             let m = d.March_errors.Errors.message in
+             contains m "List.length"
+             && contains m "Use the bare spelling `len` instead") msgs))
+
+  ; gated "the bare spelling does NOT warn" (fun () ->
+        (* The false-positive control: the supported spelling must stay quiet. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP2 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn main() : Int do inner([1]) end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length (ctx.March_errors.Errors.diagnostics)))
+
+  ; gated "a WITHDRAWN alias still suggests `len`, not the last segment" (fun () ->
+        (* A competing `List.length` withdraws the alias, so `measure_alias`
+           returns None. Deriving the suggestion from the last dotted segment
+           there yields `length` — NOT predicate vocabulary, so following the
+           advice just swaps this warning for the unknown-name one and the
+           contract still enforces nothing. The remedy must not depend on
+           whether the alias is currently withdrawn. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP3 do
+  mod List do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
+  fn main() : Int do inner([1]) end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        let qualified_warnings =
+          List.filter
+            (fun (d : March_errors.Errors.diagnostic) ->
+              contains d.March_errors.Errors.message "qualified call")
+            msgs
+        in
+        Alcotest.(check bool) "still suggests `len`" true
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               contains d.March_errors.Errors.message
+                 "Use the bare spelling `len` instead")
+             qualified_warnings);
+        Alcotest.(check bool) "never suggests `length`" false
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               contains d.March_errors.Errors.message
+                 "Use the bare spelling `length` instead")
+             qualified_warnings))
+
+  ; gated "a record FIELD call is not reported as a qualified call" (fun () ->
+        (* `c.cb(1)` is a field call on a value, not a qualified call on a
+           module. It enforces nothing either way (`smt_of` has no arm for an
+           applied field access), but calling it "qualified" and offering the
+           field name as a "bare spelling" is wrong on both counts — a false
+           explanation costs more than silence. `qualified_name` therefore
+           mirrors desugar's `flatten_module_path`, which bottoms out at an
+           uppercase `ECon` and never at a bare `EVar`. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod QP4 do
+  type Cfg = { port : Int, cb : (Int) -> Int }
+  fn ok(c : {Cfg | c.cb(1) > 0}) : Int do c.port end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no qualified-call warning" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  contains d.March_errors.Errors.message "qualified call")
+                ctx.March_errors.Errors.diagnostics)))
+  ]
+
+let iface_refine_suite =
+  [ gated "a refinement in an interface signature is diagnosed" (fun () ->
+        (* PRE-FIX: silent. It obliges no call site AND assumes nothing, so it
+           is a missing check rather than an unsound one -- but it silently
+           does nothing, which is the failure mode this area keeps producing.
+           The supported spelling is a refinement on the corresponding impl
+           method's OWN SIGNATURE -- stated that way, not as "the impl
+           parameter", because the two positions are enforced under different
+           conditions: a return refinement there is always checked, while a
+           parameter one is enforced only when the method name is unambiguous
+           (adoptable_impl_methods). *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR1 do
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "diagnosed" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "impl") msgs);
+        (* `contains m "impl"` alone is weak — "impl" is a substring of plenty
+           of unrelated prose, so it would stay green if the remedy drifted to
+           something useless. Pin the two clauses that make the advice
+           ACTIONABLE, and the naming of the method. *)
+        Alcotest.(check bool) "names the method" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`run`") msgs);
+        Alcotest.(check bool) "remedy names the impl method's own signature" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message
+               "Write the refinement on the corresponding `impl` method's own signature")
+            msgs);
+        (* The parameter half of the remedy is CONDITIONAL — an impl parameter
+           refinement is only enforced when [adoptable_impl_methods] adopts the
+           name. Stating it unconditionally would send an author with an
+           ambiguous method name from one silent no-op to another, so the
+           caveat is part of the contract this test pins. *)
+        Alcotest.(check bool) "remedy states the adoption caveat" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "when the method name is unambiguous")
+            msgs))
+
+  ; gated "a RETURN-position interface refinement is diagnosed too" (fun () ->
+        (* The return position is as inert as a parameter, and the remedy must
+           still be right for it — which is why the message covers the return
+           type explicitly rather than naming only the impl PARAMETER
+           spelling. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR3 do
+  interface Sizer(a) do
+    fn size : a -> {Int | _ >= 0}
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "diagnosed" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`size`") msgs);
+        Alcotest.(check bool) "remedy covers the return position" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "return type is always checked") msgs))
+
+  ; gated "a refinement on an `impl` method is NOT reported as inert" (fun () ->
+        (* False-positive control, and the sharper half of the pair: the walk
+           must fire on a genuine `interface` method SIGNATURE only. An `impl`
+           method's parameter refinement is the very spelling the warning
+           recommends — warning on it too would be self-contradictory advice.
+           `bump` is adoptable here (one impl defines it, no top-level `fn`
+           owns the name), so the contract really is enforced -- confirmed
+           end-to-end by `specs/lang/types/accept/t137`, whose sibling probe
+           `bump(Box(1), 0 - 5)` is a refinement ERROR. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR4 do
+  interface Bumper(a) do
+    fn bump : a -> Int -> Int
+  end
+  type Box = Box(Int)
+  impl Bumper(Box) do
+    fn bump(_b : Box, n : {Int | _ > 0}) : Int do n end
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no inert-signature warning" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  contains d.March_errors.Errors.message "enforces nothing: an interface")
+                ctx.March_errors.Errors.diagnostics)))
+
+  ; gated "an unrefined interface signature stays quiet" (fun () ->
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR2 do
+  interface Runner(a) do
+    fn run : a -> Int -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length (ctx.March_errors.Errors.diagnostics)))
+  ]
+
+(* ── `use` competes with an impl method for its name ───────────────────────
+   [adoptable_impl_methods] counted only the decls it could SEE defining a
+   name — sibling `fn`s and other `impl`s — so a `use Other.{run}` beside
+   `impl Runner(Box) do fn run` left `run` looking unambiguous and its contract
+   was adopted.  A call the import resolves elsewhere was then checked against
+   a predicate it never touches: the false positive this subsystem must never
+   have.
+
+   EVERY case here asserts obligation COUNTS, not the presence or absence of a
+   diagnostic, because withdrawal is SILENT and so is a satisfied contract.  A
+   withdrawn method registers no signature at all, so the call site raises no
+   obligation and the ledger is EMPTY — that zero is the whole assertion, and
+   `has_refine_error_d` returning false cannot distinguish it from a proof. *)
+let total_obligations () =
+  List.length (March_refinecheck.Obligation.all ())
+
+let use_adoption_suite =
+  [ gated "a `use`-imported name of the same spelling withdraws adoption" (fun () ->
+        (* The `use` binds a bare `run` in exactly the scope the impl method is
+           callable from, so `run(Box(4), 0)` may not denote this contract. No
+           obligation may be raised for it. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UAD do
+  use Other.{run}
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "no obligation raised at all" 0 (total_obligations ()))
+
+  ; gated "the SAME program without the `use` still adopts the contract" (fun () ->
+        (* The non-vacuity anchor for every zero above. Identical source minus
+           one line: the contract IS adopted, the call IS obliged, and the
+           violation IS found. Without this, the tests above could pass because
+           the fixture never produced an obligation in the first place. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADC do
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "a `use` naming SOMETHING ELSE does not withdraw adoption" (fun () ->
+        (* The over-shoot control. Failing closed on an enumerated selector must
+           mean "this name is imported", not "some import exists". If this drops
+           to 0 the rule has become `any DUse withdraws everything`, which would
+           make the withdrawal tests above pass for the wrong reason. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADN do
+  use Other.{helper}
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "still obliged" 1 (total_obligations ()))
+
+  ; gated "a glob `use` withdraws adoption — the import set is unknowable here"
+      (fun () ->
+        (* `use Other.*` names a module this pass cannot see, so whether it
+           binds `run` is undecidable at this point. Fail CLOSED: withdraw. The
+           cost is silence; the alternative is a false positive. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADG do
+  use Other.*
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "no obligation raised at all" 0 (total_obligations ()))
+
+  ; gated "a bare `import Other` withdraws adoption too" (fun () ->
+        (* `import Mod` with no selector parses to the SAME UseAll as
+           `use Mod.*` (parser.mly, import_path_tail's empty alternative) — the
+           Elixir-style spelling is the one real programs use, and reading only
+           `use ... .*` would leave it open. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADI do
+  import Other
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "no obligation raised at all" 0 (total_obligations ()))
+
+  ; gated "a selector-less `use Other` keeps adoption" (fun () ->
+        (* `use Other` (UseSingle) binds the MODULE, not any bare name, so it
+           competes with nothing. Second over-shoot control, and the one that
+           pins the UseSingle arm specifically: deleting it would make this 0. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod UADS do
+  use Other
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do Box(m) -> m / k end
+    end
+  end
+  fn main() do println(int_to_string(run(Box(4), 0))) end
+end|});
+        Alcotest.(check int) "still obliged" 1 (total_obligations ()))
+
+    (* Not [gated]: this half needs no solver, and gating a fail-closed test
+       would disable it exactly on the machines where verification is
+       unavailable. *)
+  ; Alcotest.test_case
+      "a `use`-withdrawn impl method may not ASSUME its own refinement" `Quick
+      (fun () ->
+        (* Withdrawal must be symmetric. If the contract binds no caller, the
+           BODY may not treat it as a fact either — otherwise `m / k` is
+           discharged by a predicate nothing enforces, which is the
+           assume-without-check hole that made an earlier widening unsound.
+           [Division_safety] consults [adoptable_impl_methods] directly, so this
+           also pins that the two passes did not drift apart. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error {|
+mod UADD do
+  cap no_panic
+  use Other.{run}
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+end|}))
+
+  ; Alcotest.test_case
+      "without the `use` the same division is still discharged" `Quick (fun () ->
+        (* Negative control for the strip: an adopted contract IS enforced at
+           call sites, so its body may assume it. Without this the case above
+           could be satisfied by stripping unconditionally. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error {|
+mod UADDC do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int -> Int end
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+  end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5634,4 +6608,10 @@ let () =
       ("compose", compose_suite);
       ("compose-adt", compose_adt_suite);
       ("compose-tag", compose_tag_suite);
-      ("let-annotation", let_annotation_suite) ]
+      ("let-annotation", let_annotation_suite);
+      ("postcond-ledger", postcond_ledger_suite);
+      ("trusted", trusted_suite);
+      ("postcond-strict", postcond_strict_suite);
+      ("qualified-predicate", qualified_pred_suite);
+      ("interface-signature-refinement", iface_refine_suite);
+      ("use-impl-adoption", use_adoption_suite) ]

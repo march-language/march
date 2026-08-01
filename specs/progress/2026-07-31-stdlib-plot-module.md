@@ -1,0 +1,1 @@
+- ✅ **stdlib: Plot module** — `stdlib/plot.march`: SVG chart generation; `Color`/`Style`/`Series`/`Chart` types; `line_series/scatter_series/bar_series/histogram_series`; `new/add_series/set_title/set_size/set_padding/to_svg`; self-contained pure string building, no external dependencies; registered in `bin/main.ml`.

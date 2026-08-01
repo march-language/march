@@ -1,0 +1,25 @@
+-- Regression: an `extern` whose name collides with a prelude function.
+--
+-- The entry module's decl list has the prelude spliced into it, so this
+-- module's extern `length` sits next to prelude's `fn length` — and prelude's
+-- `length` is implemented with a local helper `fn go`, which collides with the
+-- top-level `go` below.  The tail-call checker's call-graph builder ignored
+-- local scoping, so prelude's `go(xs, 0)` forged a `length -> go` edge; with
+-- the real `go -> length` edge that made a bogus SCC {length, go}, and `go`
+-- was told its call to `length` was a "recursive call not in tail position".
+--
+-- `go` is not recursive and `length` here is an extern with no body at all.
+-- `--check` must exit 0.
+mod EsExternLength do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn length(xs : List(Int)) : Int = "march_shim_list_length"
+  end
+
+  fn go(ys : List(Int)) : List(Int) do
+    if length(ys) == 0 do ys else ys end
+  end
+
+  fn main() : List(Int) do go([1]) end
+end

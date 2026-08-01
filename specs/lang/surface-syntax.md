@@ -1138,7 +1138,7 @@ parenthesize/terminate the prior expression so the next line can't attach.
 
 (The compiled-crash half of this section — named `eq`/`compare`/`hash` on
 `Newtype`-repr variants SIGSEGV'ing or panicking — was fixed 2026-07-04; see
-`specs/todos.md`'s Done section for the root cause and fix. The
+`specs/progress/` for the root cause and fix. The
 payload-ignoring `Ord`/`Hash` *semantics* below are unchanged and intentional.)
 
 **Semantics (interpreter, and compiled where it doesn't crash):** `derive Ord
@@ -1170,7 +1170,7 @@ end
 
 Interpreter output: `0` / `0` / `0` — payload ignored. Compiled output is
 identical (this used to crash on single-ctor single-field — `Newtype`-repr —
-variants; fixed 2026-07-04, see `specs/todos.md` Done section).
+variants; fixed 2026-07-04, see `specs/progress/`).
 
 Records are unaffected: derived `Ord`/`Hash` for `TDRecord` compares/hashes
 field-by-field as expected. Do not rely on derived `Ord`/`Hash` for any
@@ -1184,7 +1184,7 @@ Nested default-arg functions used to silently drop their default values (a
 desugar path that stripped every default down to a required parameter), and
 separately, a default-arg function's own bare name couldn't be resolved from
 source at any arity (`I cannot find `add`` under `--check`). Both were fixed
-in the same slice (`specs/todos.md`, 2026-07-15, open-items plan Phase 7.1):
+in the same slice (`specs/todos/`, 2026-07-15, open-items plan Phase 7.1):
 `expand_defaults_decl` now recurses into nested modules, and the typechecker
 redirects an unbound `foo(args)` call to its arity-specific variant. Nested
 default-arg functions now behave identically to top-level ones, on both

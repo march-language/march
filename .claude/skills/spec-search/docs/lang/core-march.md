@@ -622,7 +622,7 @@ Concretely, `{ record_from_list([("a", 1)]) with z: 99 }` used to panic
 compiled (`no field "z" in record`, clean exit 1) while succeeding
 interpreted (`Some(99)` printed via `record_get`, exit 0) — confirmed by hand
 before this task's fix (see the golden-corpus verification note below).
-This was filed as an open bug (`specs/todos.md`, "Interpreter/compiled
+This was filed as an open bug (`specs/todos/`, "Interpreter/compiled
 divergence: `ERecordUpdate` on a missing field") and pinned by a dedicated
 unit test (`test/test_properties.ml`,
 `test_record_update_missing_field_on_erased_base_...`) rather than generated
@@ -657,7 +657,7 @@ the one test built to pin the divergence itself, which was updated to
 assert convergence instead (see `test/test_properties.ml`,
 `test_record_update_missing_field_on_erased_base_converged`, and
 `test/test_codegen.ml`'s `test_erased_update_missing_field_panics_compiled`
-doc comment). The `specs/todos.md` open-divergence entry and the informal
+doc comment). The `specs/todos/` open-divergence entry and the informal
 "known divergence" framing around this bug are both retired by this
 convergence; §5's golden corpus documents the now-agreeing behavior as a
 prose note (not a golden MATCH program — see §5's caveat on why this
@@ -1480,7 +1480,7 @@ impls.** Two further probes, same methodology, both confirmed live this task:
 situation as §4.2.1's `ERecordUpdate` case.** §4.2.1 documents a divergence
 that this reference project **adjudicated and converged**: the compiled
 panic-on-unknown-field behavior was declared normative, the interpreter was
-changed to match it, both backends now agree, and its `specs/todos.md` entry
+changed to match it, both backends now agree, and its `specs/todos/` entry
 is closed. The impl-coherence divergence documented here is different in
 kind: there is no "obviously correct" backend to converge on (first-wins and
 last-wins are both defensible policies, and neither implements real
@@ -1501,7 +1501,7 @@ value equality for RECORD types" and "`to_string` on any non-primitive type
 already-filed, open compiler bug reproduce in the `@oracle` conformance sweep
 as a loud `KNOWN_DIVERGENCE` (not a silent skip, not a hard failure) until it
 is either fixed or the design question above is resolved. This finding is
-filed in that same spirit — see `specs/todos.md`'s new entry (filed by this
+filed in that same spirit — see `specs/todos/`'s new entry (filed by this
 task) — deliberately left open, not folded into a false convergence the way
 §4.2.1 was.
 
@@ -1528,7 +1528,7 @@ the "divergence, not a clean accept/reject" bucket
 `.superpowers/sdd/interface-impl-survey.md` §4/§9 already names and
 recommends deferring rather than forcing into the existing two-bucket
 harness. This documentation slice therefore pins the divergence in prose
-(this subsection) and in `specs/todos.md` (the filed bug, with the repro and
+(this subsection) and in `specs/todos/` (the filed bug, with the repro and
 both outputs), not as a new corpus file.
 
 ### 4.4.4 `derive`/`satisfy`-generated impls run through the SAME dispatch rules as hand-written ones
@@ -2426,7 +2426,7 @@ run byte-identically on both backends (that path is not supervisor-mediated), so
 the divergence is specifically the supervisor-child-spawn plane, not `init`
 bodies in general. Both the `get_actor_field`/`pid_of_int` compiled crash and
 the `Actor.call` timeout gap encountered nearby are filed as open findings in
-`specs/todos.md`. Consequently the supervision restart semantics are documented
+`specs/todos/`. Consequently the supervision restart semantics are documented
 here in prose + `eval.ml` citations, and **no `one_for_one` restart golden was
 added** — the same class of "the observation surface diverges/crashes compiled,
 so it cannot be a `MATCH`" as the §4.10.6 capability/dead-`send` plane and the
@@ -2441,7 +2441,7 @@ pins the **runtime** side: what a channel actually IS at runtime, how the four
 core operations reduce in `eval.ml`, and — the point of adding channel
 programs to the golden corpus at all — that a program using only the binary
 channel plane is **byte-identical interpreted vs compiled**, now that the
-concurrent codegen fix (F1/F2, `specs/todos.md`) tags payloads symmetrically
+concurrent codegen fix (F1/F2, `specs/todos/`) tags payloads symmetrically
 at the send site.
 
 **The runtime model in one line:** a channel is a pair of synchronous,
@@ -2543,7 +2543,7 @@ channel plane (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads,
 correctly interleaved (every `send` textually before its matching `recv` —
 §4.11.6/F6), the interpreted and compiled outputs are **byte-identical**.
 This was NOT true before the concurrent codegen fix filed as F1/F2 in
-`specs/todos.md`: `march_chan_send` used to receive its payload as a bare
+`specs/todos/`: `march_chan_send` used to receive its payload as a bare
 untagged `i64` while `march_chan_recv`'s result went through the standard
 conditional erased-i64 untag (`ashr` iff the low bit is set) — an asymmetry
 that corrupted every **odd** `Int` payload (`43` came back `21`) and flipped
@@ -2605,7 +2605,7 @@ docs-widening slice:
   advancing state" guarantee therefore only actually holds for `let`-bound
   continuations threaded through in the same scope.
 
-Both are filed in `specs/todos.md` with live repros; neither blocks a golden
+Both are filed in `specs/todos/` with live repros; neither blocks a golden
 witness (every witness here is written to avoid both shapes on purpose:
 every channel is closed, and every continuation is threaded through fresh
 `let` bindings rather than re-read from a stale parameter or `let`).
@@ -2724,9 +2724,9 @@ confirmed by hand, not assumed:** (1) no golden program prints a whole
 `VRecord` via `to_string`/`println`/`hash` — confirmed by hand that
 `to_string({x: 1, y: 2})` prints `{ x: 1, y: 2 }` interpreted but `#<tag:0>`
 compiled (the same `to_string`-on-container class already in
-`specs/todos.md`'s P1 and `test/test_oracle.ml`'s `known_divergence` list),
+`specs/todos/`'s P1 and `test/test_oracle.ml`'s `known_divergence` list),
 and that `hash({x: 1, y: 2})` differs across backends entirely by design
-(`specs/todos.md`, "Compiled and interpreted `hash()` use different,
+(`specs/todos/`, "Compiled and interpreted `hash()` use different,
 backend-specific algorithms ... for RECORD types") — every golden program
 here prints only extracted `Int` FIELD VALUES (via `int_to_string`), never a
 record value itself. (2) no golden program generates the missing-field
@@ -2764,11 +2764,11 @@ pattern (rather than a block `let`) also compiles and runs correctly
 `nested PatTuple` × `ELet` specifically, not `PatTuple` or `nesting` or `ELet`
 in isolation. This is outside this task's scope (documenting the interpreter
 faithfully, not fixing the compiler) and is a **new** divergence, not the
-already-filed whole-tuple-`Show` bug (`specs/todos.md`, "Tuples have no `Show`
+already-filed whole-tuple-`Show` bug (`specs/todos/`, "Tuples have no `Show`
 impl") — `g16` was rewritten to destructure the nested tuple in a `match`
 instead of a `let` specifically to route around it while still exercising
 nested tuple construction and componentwise matching. Flagged here for
-separate triage; not filed as a `specs/todos.md` entry by this task (spec-only
+separate triage; not filed as a `specs/todos/` entry by this task (spec-only
 scope) but should be by a follow-up.
 
 **A third divergence — this one ADJUDICATED and CONVERGED by this task, not
@@ -2871,7 +2871,7 @@ Phase-1 tasks did):**
   divergence between the two backends when the SAME `(iface, type)` has more
   than one impl in scope (last-registered-wins interpreted vs.
   first-registered-wins compiled — an OPEN, deliberately-left-unfixed
-  divergence, filed in `specs/todos.md`, not a corpus accept/reject). §4.4.4
+  divergence, filed in `specs/todos/`, not a corpus accept/reject). §4.4.4
   documents `derive`/`satisfy`'s operational consequence — a generated impl
   runs through the identical dispatch rules as a hand-written one, plus
   `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case
