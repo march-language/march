@@ -589,7 +589,7 @@
 (test
  (name test_search)
  (modules test_search)
- (libraries march_search alcotest unix))
+ (libraries march_search march_typecheck march_parser march_lexer march_desugar march_ast alcotest unix))
 
 ; ── Core-AST -> JSON serializer smoke tests (emit-core-ast-a0 Task 1) ─────
 (test

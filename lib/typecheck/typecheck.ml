@@ -4719,11 +4719,37 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.EVar name ->
       record_use name.txt name.span env;
       (match lookup_var name.txt env with
-       | Some sch -> instantiate ~use_span:name.span env.level env sch
+       | Some sch ->
+         (if StrMap.mem name.txt env.local_fns then
+            env.refs := { callee = env.current_module ^ "." ^ name.txt;
+                          caller = !(env.current_decl);
+                          ref_kind = `Call;
+                          ref_file = name.span.Ast.file;
+                          ref_line = name.span.Ast.start_line } :: !(env.refs)
+          else if String.contains name.txt '.' then
+            (* Already-qualified "Mod.name" resolved directly out of env.vars —
+               this is how same-compilation cross-module DMod exports work (see
+               the [Ast.DMod] branch of [check_decl], which binds "Mod.member"
+               straight into the outer env.vars rather than routing through
+               [resolve_qualified_var]/[Module_registry]). A dotted name can
+               never be a local `let`-bound variable, so this is always a
+               genuine cross-module reference. *)
+            env.refs := { callee = name.txt;
+                          caller = !(env.current_decl);
+                          ref_kind = `Call;
+                          ref_file = name.span.Ast.file;
+                          ref_line = name.span.Ast.start_line } :: !(env.refs));
+         instantiate ~use_span:name.span env.level env sch
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
-         | _, Some sch -> instantiate ~use_span:name.span env.level env sch
+         | _, Some sch ->
+           env.refs := { callee = name.txt;
+                         caller = !(env.current_decl);
+                         ref_kind = `Call;
+                         ref_file = name.span.Ast.file;
+                         ref_line = name.span.Ast.start_line } :: !(env.refs);
+           instantiate ~use_span:name.span env.level env sch
          | _ when is_confirmed_private_qualified name.txt env ->
            (* A confirmed privacy violation (`Mod.priv_fn`) must be reported
               as such — falling through to the dot-suffix fallback below would
@@ -6710,6 +6736,7 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
     5. Leave level and generalize the function type.
     6. Return the scheme so the caller can update the env. *)
 let check_fn env (def : Ast.fn_def) fn_span : scheme =
+  env.current_decl := env.current_module ^ "." ^ def.fn_name.txt;
   let env'    = enter_level env in
   (* Self-reference for recursion — a fresh var that will get unified
      with the actual type as the body is checked.
@@ -11145,6 +11172,14 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let (errs, type_map, _env) = check_module_core ?errors m in
   (errs, type_map)
+
+(** Like [check_module], but also returns every resolved call/ctor/type
+    reference recorded during checking — used by [forge search --callers].
+    Order is call-order, most-recent-first is reversed back to source order. *)
+let check_module_with_refs ?errors (m : Ast.module_)
+    : Err.ctx * (Ast.span, ty) Hashtbl.t * ref_record list =
+  let (errs, type_map, final_env) = check_module_core ?errors m in
+  (errs, type_map, List.rev !(final_env.refs))
 
 (** Like [check_module] but starts from a pre-built environment.
     Used by the REPL JIT to typecheck user expressions incrementally

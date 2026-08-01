@@ -33,6 +33,52 @@ let test_levenshtein_kitten_sitting () =
     (Search.levenshtein "kitten" "sitting")
 
 (* ------------------------------------------------------------------ *)
+(* Reference tracking (forge search --callers)                        *)
+(* ------------------------------------------------------------------ *)
+
+module TC = March_typecheck.Typecheck
+module Ast = March_ast.Ast
+
+(** Parse + desugar a source string into decls wrapped in a DMod, mirroring
+    [Search.parse_file]'s handling of a real .march file. *)
+let decls_of_source ~(file : string) (mod_name : string) (src : string) : Ast.decl list =
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
+  let m = March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let m = March_desugar.Desugar.desugar_module m in
+  ignore mod_name;
+  [Ast.DMod (m.Ast.mod_name, Ast.Public, m.Ast.mod_decls, Ast.dummy_span)]
+
+let check_refs (files : (string * string * string) list) : TC.ref_record list =
+  (* [files] is (file, mod_name, src) list. *)
+  let all_decls = List.concat_map (fun (file, mod_name, src) ->
+      decls_of_source ~file mod_name src) files in
+  let synth : Ast.module_ =
+    { mod_name = { txt = "__test__"; span = Ast.dummy_span }; mod_decls = all_decls } in
+  let (_errors, _type_map, refs) = TC.check_module_with_refs synth in
+  refs
+
+let test_call_ref_same_module () =
+  let refs = check_refs [
+    ("a.march", "A", "mod A do\n  fn helper() do 1 end\n  fn main() do helper() end\nend\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Call) refs in
+  Alcotest.(check bool) "helper call recorded" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "A.helper" && r.caller = "A.main") calls)
+
+let test_call_ref_cross_module () =
+  let refs = check_refs [
+    ("b.march", "B", "mod B do\n  fn util() do 1 end\nend\n");
+    ("a.march", "A", "mod A do\n  fn main() do B.util() end\nend\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Call) refs in
+  Alcotest.(check bool) "cross-module B.util call recorded" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "B.util" && r.caller = "A.main") calls)
+
+(* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
 
@@ -321,6 +367,11 @@ let integration_tests = [
   "stdlib_list_module",   `Slow, test_stdlib_search_list_module;
 ]
 
+let references_tests = [
+  "same-module call",   `Quick, test_call_ref_same_module;
+  "cross-module call",  `Quick, test_call_ref_cross_module;
+]
+
 let () =
   Alcotest.run "march_search" [
     "levenshtein",   levenshtein_tests;
@@ -330,4 +381,5 @@ let () =
     "combined",      combined_search_tests;
     "json",          json_tests;
     "integration",   integration_tests;
+    "references",    references_tests;
   ]
