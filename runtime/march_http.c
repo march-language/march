@@ -1965,98 +1965,6 @@ void march_http_pool_stop(void) {
     fprintf(stderr, "march: HTTP thread pool stopped\n");
 }
 
-/* ── Sharded accept (SO_REUSEPORT) ───────────────────────────────────── */
-
-/* A listening socket with SO_REUSEPORT set, so several accept threads can each
- * own an independent listener on the same port and let the KERNEL distribute
- * incoming connections between them — instead of one thread funnelling every
- * accept() through a single fd.
- *
- * Deliberately self-contained rather than reusing march_http_evloop.c's
- * create_reuseport_listener(): that one is static, and it also sets the
- * listener non-blocking for an edge-triggered kqueue/epoll loop. This one is
- * consumed by a select()-gated blocking accept, which wants different
- * semantics.
- *
- * Returns -1 on failure; the caller degrades to however many listeners it did
- * get (one is exactly the old behaviour). */
-static int pool_create_reuseport_listener(int64_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#if defined(SO_REUSEPORT)
-    /* Without this the second and later binds fail with EADDRINUSE and we
-     * simply run with fewer shards. */
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons((uint16_t)port);
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(fd); return -1; }
-    if (listen(fd, 1024) < 0)                                 { close(fd); return -1; }
-    return fd;
-}
-
-/* Push an accepted fd onto the shared work queue, blocking while the queue is
- * full rather than dropping the connection. */
-static void pool_enqueue_fd(int client_fd) {
-    pthread_mutex_lock(&g_pool.queue.lock);
-    while (g_pool.queue.count == MARCH_HTTP_QUEUE_CAPACITY &&
-           !atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
-        pthread_cond_wait(&g_pool.queue.not_full, &g_pool.queue.lock);
-    }
-    if (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
-        g_pool.queue.fds[g_pool.queue.tail] = client_fd;
-        g_pool.queue.tail = (g_pool.queue.tail + 1) % MARCH_HTTP_QUEUE_CAPACITY;
-        g_pool.queue.count++;
-        pthread_cond_signal(&g_pool.queue.not_empty);
-    } else {
-        close(client_fd);
-    }
-    pthread_mutex_unlock(&g_pool.queue.lock);
-}
-
-/* One accept loop over one listener.  select() with a 1s timeout so shutdown
- * is noticed even on an idle port.
- *
- * SAFE ON A RAW PTHREAD: this touches only file descriptors and the work
- * queue — never a March heap value — so unlike a pool worker (which runs
- * compiled handlers and must call march_rc_set_thread_concurrent(1)) it needs
- * no scheduler or refcount context.  Do not add anything here that allocates
- * or refcounts a March value without revisiting that. */
-static void pool_accept_loop(int listen_fd) {
-    while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(listen_fd, &rfds);
-        struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
-        int r = select(listen_fd + 1, &rfds, NULL, NULL, &tv);
-        if (r < 0) { if (errno == EINTR) continue; break; }
-        if (r == 0) continue;   /* timeout — re-check shutdown */
-
-        int64_t client_fd = tcp_accept_raw((int64_t)listen_fd);
-        if (client_fd < 0) continue;
-        pool_enqueue_fd((int)client_fd);
-    }
-}
-
-typedef struct { int listen_fd; } accept_thread_arg_t;
-
-static void *accept_thread(void *arg) {
-    accept_thread_arg_t *a = (accept_thread_arg_t *)arg;
-    int fd = a->listen_fd;
-    free(a);
-    pool_accept_loop(fd);
-    close(fd);
-    return NULL;
-}
-
 void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline) {
     if (!pipeline) return;
@@ -2080,16 +1988,11 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
 #endif
 
     /* ── Fallback: thread-per-connection with work queue ─────────── */
-    /* Sequential mode needs the single inline listener below (it runs handlers
-     * on this scheduler green thread); the sharded path is pool-only. */
-    int64_t listen_fd = -1;
-    if (getenv("MARCH_HTTP_SEQUENTIAL") != NULL) {
-        listen_fd = tcp_listen_raw(port);
-        if (listen_fd < 0) {
-            fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
-                    (long long)port, strerror(errno));
-            return;
-        }
+    int64_t listen_fd = tcp_listen_raw(port);
+    if (listen_fd < 0) {
+        fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
+                (long long)port, strerror(errno));
+        return;
     }
 
     /* Handler execution model.
@@ -2123,98 +2026,51 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
                 (long long)port);
     }
 
-    if (sequential) {
-        /* Single inline accept loop on this scheduler green thread. */
-        while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET((int)listen_fd, &rfds);
-            struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
-            int r = select((int)listen_fd + 1, &rfds, NULL, NULL, &tv);
-            if (r < 0) { if (errno == EINTR) continue; break; }
-            if (r == 0) continue;
+    while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET((int)listen_fd, &rfds);
+        struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+        int r = select((int)listen_fd + 1, &rfds, NULL, NULL, &tv);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) continue;   /* timeout — check g_http_shutdown and loop */
 
-            int64_t client_fd = tcp_accept_raw(listen_fd);
-            if (client_fd < 0) continue;
+        int64_t client_fd = tcp_accept_raw(listen_fd);
+        if (client_fd < 0) continue;
 
+        if (sequential) {
+            /* Handle inline on this (scheduler green-thread) accept loop. */
             conn_thread_arg_t *a = malloc(sizeof(conn_thread_arg_t));
             if (!a) { close((int)client_fd); continue; }
             a->client_fd = (int)client_fd;
             a->pipeline  = pipeline;
             connection_thread(a);   /* handles fd and frees a */
+            continue;
         }
-        close((int)listen_fd);
-        return;
-    }
 
-    /* ── Sharded accept ──────────────────────────────────────────────────
-     * One listener + accept thread per shard, each with SO_REUSEPORT so the
-     * kernel spreads incoming connections across them instead of funnelling
-     * every accept() through one fd and one thread.
-     *
-     * MARCH_HTTP_ACCEPT_SHARDS overrides the count; 1 reproduces the previous
-     * single-listener behaviour exactly and is the knob to A/B against. */
-    int shards = (int)sysconf(_SC_NPROCESSORS_ONLN);
-    if (shards <= 0) shards = 4;
-    if (shards > 16) shards = 16;      /* accept is cheap; more adds no value */
-    {
-        const char *env = getenv("MARCH_HTTP_ACCEPT_SHARDS");
-        if (env && *env) {
-            int v = atoi(env);
-            if (v >= 1 && v <= 64) shards = v;
+        /* Pool path: enqueue the accepted fd for a worker.
+         * Block if the queue is full rather than dropping the connection. */
+        pthread_mutex_lock(&g_pool.queue.lock);
+        while (g_pool.queue.count == MARCH_HTTP_QUEUE_CAPACITY &&
+               !atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+            pthread_cond_wait(&g_pool.queue.not_full, &g_pool.queue.lock);
         }
-    }
-
-    pthread_t *acceptors = (pthread_t *)malloc(sizeof(pthread_t) * (size_t)shards);
-    if (!acceptors) {
-        fprintf(stderr, "march: acceptor array alloc failed\n");
-        march_http_pool_stop();
-        return;
-    }
-
-    int started = 0;
-    for (int i = 0; i < shards; i++) {
-        int lfd = pool_create_reuseport_listener(port);
-        if (lfd < 0) {
-            /* Expected when SO_REUSEPORT is unavailable: only shard 0 binds.
-               Report once, then run with what we have. */
-            if (i == 0) {
-                fprintf(stderr, "march_http_server_listen: bind(%lld) failed: %s\n",
-                        (long long)port, strerror(errno));
-            }
-            break;
+        if (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+            g_pool.queue.fds[g_pool.queue.tail] = (int)client_fd;
+            g_pool.queue.tail = (g_pool.queue.tail + 1) % MARCH_HTTP_QUEUE_CAPACITY;
+            g_pool.queue.count++;
+            pthread_cond_signal(&g_pool.queue.not_empty);
+        } else {
+            close((int)client_fd);
         }
-        accept_thread_arg_t *targ = (accept_thread_arg_t *)malloc(sizeof(*targ));
-        if (!targ) { close(lfd); break; }
-        targ->listen_fd = lfd;
-        if (pthread_create(&acceptors[started], NULL, accept_thread, targ) != 0) {
-            fprintf(stderr, "march: acceptor[%d] create failed: %s\n",
-                    i, strerror(errno));
-            free(targ);
-            close(lfd);
-            break;
-        }
-        started++;
+        pthread_mutex_unlock(&g_pool.queue.lock);
     }
 
-    if (started == 0) {
-        fprintf(stderr, "march: no acceptors started on port %lld\n", (long long)port);
-        free(acceptors);
-        march_http_pool_stop();
-        return;
-    }
-    fprintf(stderr, "march: %d accept shard%s (SO_REUSEPORT)\n",
-            started, started == 1 ? "" : "s");
-
-    for (int i = 0; i < started; i++) pthread_join(acceptors[i], NULL);
-    free(acceptors);
-
-    /* Wake any worker blocked on a full queue so pool_stop can drain. */
-    pthread_mutex_lock(&g_pool.queue.lock);
-    pthread_cond_broadcast(&g_pool.queue.not_full);
-    pthread_mutex_unlock(&g_pool.queue.lock);
-
-    march_http_pool_stop();
+    close((int)listen_fd);
+    if (!sequential) march_http_pool_stop();
 }
 
 /* ── spawn_n / wait ──────────────────────────────────────────────────── */
