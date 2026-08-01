@@ -63,6 +63,36 @@ git log is authoritative for exact commits.
   a readable message (e.g. `DecodeError("missing field",
   [JPathField("age")], -1)`), but code that expected a plain error string
   should switch to `Json.decode_error_to_string(e)`.
+### Changed
+
+- **The event-loop HTTP server is now selectable at RUN TIME, not build time.**
+  Both server implementations have always been compiled into every March
+  binary (`march_http_evloop.c` is unconditionally in the runtime link), but
+  reaching the faster one required recompiling your program with
+  `MARCH_HTTP_EVLOOP=1` set at *build* time — so in practice the faster server
+  was unreachable in every binary already shipped. `MARCH_HTTP_EVLOOP=1` is now
+  read at startup and picks the implementation for that process.
+  `-DMARCH_HTTP_USE_EVLOOP` still forces it on unconditionally, so existing
+  build recipes are unaffected.
+
+  This matters more than it sounds, because the event loop is **much** faster
+  on Linux than the earlier macOS measurements suggested. Idle 4-vCPU Ubuntu
+  24.04 (kernel 6.8, epoll), wrk `-c256`, order-swapped, one binary switching
+  at runtime:
+
+  | server | req/s | CPU-µs/req |
+  |---|---:|---:|
+  | thread pool (default) | 45,990 / 51,018 | 47.46 / 43.04 |
+  | event loop | 76,488 / 80,416 | 27.35 / 24.76 |
+
+  **+61% throughput, −42% CPU per request.** On macOS/kqueue the same
+  comparison showed only 21% CPU and the event loop *losing* on req/s.
+
+  It remains opt-in rather than the default because the constraint that made
+  it opt-in is real: event-loop threads must not block, so a handler doing
+  synchronous I/O — a blocking DB call — stalls every other connection on that
+  thread. Enable it for I/O-light, high-concurrency workloads; leave it off if
+  your handlers block.
 
 ### Fixed
 

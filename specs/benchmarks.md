@@ -1,5 +1,239 @@
 # March Benchmarks
 
+## HTTP benchmark: Run 5 (2026-08-01) — LINUX, quiet box. The macOS numbers were a platform artifact.
+
+Every HTTP figure before this section was measured on macOS/arm64 on a shared,
+heavily loaded machine. This run is an idle 4-vCPU DigitalOcean droplet
+(Ubuntu 24.04, kernel 6.8, epoll), load < 1. **Three earlier conclusions do not
+survive it.**
+
+### 1. The "~30k req/s ceiling" was macOS loopback, not March
+
+| | macOS (contended) | Linux (idle) |
+|---|---:|---:|
+| req/s, c=64 | ~30,000 | **72,703 / 62,951** |
+| req/s, c=256 | ~30,000 | **47,418** |
+
+Linux does 2.1–2.4× the throughput. Earlier text calling this ceiling
+"client/kernel-side, not March" was right about the cause and wrong to imply it
+was a property of the workload — it is a property of *Darwin*.
+
+### 2. The event loop is far better on Linux than the macOS numbers suggested
+
+wrk `-c256`, order-swapped, one binary switching implementation at runtime:
+
+| server | req/s | CPU-µs/req |
+|---|---:|---:|
+| thread pool (default) | 45,990 / 51,018 | 47.46 / 43.04 |
+| event loop | 76,488 / 80,416 | **27.35 / 24.76** |
+
+**+61% throughput and −42% CPU per request.** On macOS/kqueue the gap was 21%
+CPU and the event loop actually *lost* on req/s to a scheduling artifact. This
+is a Linux-specific win, and Linux is where servers run.
+
+### 3. SO_REUSEPORT accept sharding does nothing — built, measured, reverted
+
+Sharding the thread pool's accept loop across per-thread `SO_REUSEPORT`
+listeners was implemented and then reverted, because on the box and in the
+regime most favourable to it, it produced nothing:
+
+| | shards=1 | shards=4 | effect |
+|---|---:|---:|---:|
+| connection-close (**treatment**) | 106.7 µs | 107.5 µs | +0.7% |
+| keep-alive (**control**) | 32.6 µs | 37.6 µs | +15.5% |
+
+The control is the result. In keep-alive, accept happens ~64 times in ten
+seconds and sharding *cannot* matter — yet it moved 15.5%. That is the noise
+floor, and the treatment effect is twenty times smaller than it. The
+within-arm spread on shards=1 close (13.1 µs) is itself larger than the whole
+treatment effect. Reverted in the commit following its own.
+
+### 7. Hoisting per-connection setsockopt onto the listener — verified inheritable, measured no effect
+
+Followed up on the syscall inventory in §6: does Linux inherit `TCP_NODELAY`
+/ `SO_SNDBUF` / `SO_RCVTIMEO` from the listening socket onto `accept()`ed
+sockets, which would let `connection_thread` skip all three per connection?
+
+**Inheritance itself is real** — verified with a standalone probe
+(`getsockopt` on an accepted socket after setting all three only on the
+listener): all three inherited exactly, unlike the *documented* POSIX
+behavior (there is none; this is Linux-kernel-specific and not guaranteed on
+BSD/macOS, so any implementation must stay Linux-gated).
+
+**But it does not measurably help.** Env-gated single-binary A/B
+(`MARCH_ABL_HOIST_SOCKOPT`, not merged), connection-close, order-swapped:
+
+| | baseline (per-connection) | hoisted (listener-only) |
+|---|---:|---:|
+| CPU-µs/req | 98.61 / 86.09 (mean 92.4) | 100.66 / 90.10 (mean 95.4) |
+
+Hoisted is *slightly worse*, well inside the run-to-run spread. Three fewer
+syscalls out of the seven counted in §6 produced no measurable change —
+consistent with §6's own caveat that `setsockopt` is cheap relative to
+`accept`/`close` socket-lifecycle and TCP state-machine work, which this
+change does not touch. Not implemented.
+
+**Pattern across §5-§7:** three independent "obviously true" micro-costs —
+per-request header allocation, listener sharding, per-connection
+`setsockopt` — each measured and each showed no effect above noise on this
+hardware. The connection-close overhead itself (§6) is real and large
+(~90-100 µs against keep-alive's ~24-27), but none of these syscall-count
+reductions touch it; whatever the real cost is, it lives inside `accept`/
+`close`/the kernel's TCP connection lifecycle, not in the small number of
+option-setting calls around it. That points toward eliminating connections
+entirely (HTTP/1.1 keep-alive already does this when the client cooperates;
+HTTP/2 multiplexing would force it) rather than making individual
+connections cheaper to set up.
+
+### 6. TCP_FASTOPEN — investigated, not implemented: unmeasurable in this rig
+
+Considered as a way to cut the connection-close cost (Run 5 measured ~94-107
+CPU-us/request for a fresh connection per request, against keep-alive's
+~24-27). Not built, because two independent facts make it unverifiable here,
+either one alone sufficient:
+
+1. **`wrk` has no TFO support** — no `--fastopen` flag, and `strings` on the
+   binary shows no `MSG_FASTOPEN` anywhere. TFO's saving only exists when the
+   *client* sends data in the SYN packet; our load generator can never
+   exercise that path, so a correct server-side implementation would be
+   invisible to every benchmark this project runs.
+2. **Loopback has no RTT to amortize.** Measured `ping -c3 127.0.0.1`:
+   0.027-0.054 ms round trip. TFO's entire mechanism is skipping the wait for
+   a handshake ACK before sending data; on a real network with 20-50 ms RTT
+   that is decisive, but the maximum theoretical saving over a sub-millisecond
+   loopback round trip is a few tens of microseconds. The technique's value
+   only exists over real network latency, which this rig cannot produce.
+
+**What actually explains the connection-close cost, from `strace -f -c`
+(counts, not the reported timings — `strace`'s ptrace-trap overhead inflates
+per-syscall timing by an unknown, large factor, so only call COUNTS are
+trustworthy here):**
+
+| syscall | connection-close | keep-alive |
+|---|---:|---:|
+| accept | 1/request | amortized over the connection |
+| setsockopt (NODELAY + SNDBUF + RCVTIMEO) | 3/request | amortized |
+| recv | 1/request | 1/request |
+| writev | 1/request | 1/request |
+| close | 1/request | amortized |
+
+**7 syscalls/request against keep-alive's 2.** The gap is syscall COUNT, not
+RTT — every one of those extra 5 is real kernel work (socket alloc, TCP state
+machine, buffer setup, fd teardown) that has to happen once per TCP
+connection regardless of how fast the network is. Nothing under consideration
+here removes that work; TFO specifically only removes a WAIT, not the work
+itself, which is why it would not have helped even if it were measurable.
+
+Not investigated: whether `SO_SNDBUF` set on the *listening* socket is
+inherited by `accept()`ed sockets on Linux, which would drop one of the three
+per-connection `setsockopt` calls if so. Flagged as a small, real, but
+unverified follow-up rather than the primary throughput lever.
+
+### 5. Header allocation is not a measurable cost, even at a realistic count
+
+`march_conn_from_parsed` (`runtime/march_http.c`) allocates a March string,
+`Header` cell, and `Cons` cell per request header — flagged earlier as
+possibly under-costed because wrk's default request carries only 2-3 headers
+against a realistic browser's 12-15. Re-measured directly: an env-gated
+ablation (`MARCH_ABL_NOHDR`, measurement-only, not merged) that skips the
+header-list build entirely, against 12 realistic headers (~550 bytes:
+Accept/Accept-Language/Accept-Encoding/Cache-Control/Sec-Fetch-*/Cookie/
+X-Request-Id) on the idle Linux droplet, order-swapped:
+
+| | with headers | headers skipped |
+|---|---:|---:|
+| 2-3 headers (wrk default) | 25.11 / 22.43 µs | 23.60 / 23.81 µs |
+| 12 headers (~550 bytes) | 24.75 / 23.09 µs | 23.91 / 23.75 µs |
+
+The "effect" (≤0.1 µs) is an order of magnitude smaller than the spread
+*within* either arm (up to 2.7 µs run-to-run). Lazy or borrowed headers would
+not be a measurable win at realistic request sizes on this hardware — the
+allocator is simply fast enough for a dozen small, short-lived strings.
+Superseded, not merely unconfirmed: this closes the question raised after the
+macOS thread-pool sweep, which had only 2-3 headers to work with and
+correctly flagged the gap rather than asserting a conclusion from it.
+
+### 4. `rrb_bench` parallel-vs-sequential: the earlier lead was contention
+
+Recorded in the 2026-07-31 sweep as "parallel ~22% slower, needs a quiet-box
+re-run before anyone concludes the parallel machinery costs more than it
+saves." It does not:
+
+| | contended macOS (14 cores, load 15) | idle Linux (4 cores) |
+|---|---:|---:|
+| `seq_fold_left` | 1011 / 1012 / 1015 ms | 5229 / 4850 / 5230 ms |
+| `psum` | 1225 / 1252 / 1245 ms | **2460 / 2320 / 2528 ms** |
+| `preduce` | 1228 / 1204 / 1268 ms | **2472 / 2368 / 2531 ms** |
+
+On an idle box the parallel arms are **2.1× faster** than sequential, not 22%
+slower. The macOS reading was entirely an artifact of a parallel arm being
+unable to get cores on a machine at load 15 while the sequential arm needed
+only one. Filing it as a lead rather than a finding was the right call.
+
+**Methodology, restated:** measure HTTP on Linux. A macOS laptop cannot tell
+you what a server does, and a contended box cannot tell you what a parallel
+algorithm does.
+
+---
+
+## Compute-benchmark sweep, 2026-07-31 — and why absolute-ms baselines cannot detect regressions
+
+All 31 non-network benchmarks compiled at `--opt 2` and ran clean: 31/31 exit 0,
+every documented checksum correct (`fib` 102334155, `tree_transform` 104857600,
+`list_ops` 333333666666, `merkle` 6400 — not the 51200 that would flag the
+pointer-equality bug, `string_build` 2888895, `string_pipeline` 644449).
+
+**The methodology finding is the important one.** `hash_map_bench` measured
+~25–29% above its documented 2026-06-24 baseline, on all nine workload/size
+combinations, with tight variance (best-of-3 spread ~4%). Nine out of nine in
+the same direction, and stable across repeats — the signature of a real
+regression rather than noise.
+
+It was not a regression. Built at the baseline commit (`79d10f06`) in a scratch
+worktree, confirmed the benchmark source is byte-identical, and A/B'd the two
+compilers on the same box at the same moment, order-swapped:
+
+| workload | n | June compiler | today | delta |
+|---|---:|---:|---:|---:|
+| put/get | 10000 | 36 ms | 31 ms | **−14%** |
+| put/get | 50000 | 239 ms | 206 ms | **−14%** |
+| put/get | 100000 | 531 ms | 475 ms | **−11%** |
+| uniq | 10000 | 19 ms | 16 ms | **−16%** |
+| uniq | 50000 | 117 ms | 104 ms | **−11%** |
+| uniq | 100000 | 275 ms | 239 ms | **−13%** |
+| frequencies | 10000 | 38 ms | 33 ms | **−13%** |
+| frequencies | 50000 | 213 ms | 184 ms | **−14%** |
+| frequencies | 100000 | 452 ms | 395 ms | **−13%** |
+
+**Today is 13% faster than June.** The documented numbers were simply taken on
+a quieter machine. The same trap caught `string_small_churn`: a single run read
+1021 ms against a documented 741 ms (+38%), but best-of-3 gave 761 ms (+3%) —
+and non-March controls built from `bench/c` and `bench/cpp` were themselves
++7% and +13% over *their* documented numbers, i.e. March was the least affected
+of the three.
+
+**So: an absolute millisecond figure in this file is a record of one machine on
+one day, not a regression detector.** To decide whether a change regressed
+something, do not compare against the numbers here. Instead:
+
+```bash
+git worktree add /tmp/base <baseline-commit> --detach
+cd /tmp/base && dune build --root . bin/main.exe && dune build --root . @install
+./_build/default/bin/main.exe --compile --opt 2 bench/<name>.march -o /tmp/base-bin
+# then A/B /tmp/base-bin against today's binary, same box, same minute,
+# order-swapped A,B,B,A, and diff the benchmark source first to confirm it
+# has not changed underneath you.
+```
+
+**One open lead — since RESOLVED, see Run 5 above.** `bench/rrb_bench.march`'s
+parallel arms measured ~22% *slower* than its sequential one here, tight enough
+to look structural, but on a 14-core box at load 15. It was filed as a lead
+rather than a finding pending a quiet-box re-run. That re-run (idle 4-core
+Linux) shows the parallel arms **2.1× FASTER** than sequential. The macOS
+reading was entirely contention.
+
+---
+
 All benchmarks live in `bench/`. Run the full suite:
 
 ```
@@ -404,6 +638,103 @@ Rust not included (SHA-256 crate requires `Cargo.toml`).
 a real bug (fixed in `lib/tir/llvm_emit.ml`, TVar equality dispatch now routes to
 `march_poly_eq`). A regression in SHA-256 throughput points to `Crypto.sha256`
 or the C `mbedtls_sha256` binding.
+
+---
+
+## HTTP benchmark: Run 4 (2026-07-31) — readiness-gated pool: BUILT, MEASURED, REJECTED
+
+A negative result, recorded so it is not rebuilt. **Do not re-attempt this
+without first reading the attribution table below.**
+
+**Hypothesis.** Run 3 left the default thread pool at ~36 CPU-µs/request against
+the opt-in event loop's ~28. The suspected cause was the threading model:
+`conn_serve` owns a connection for its whole keep-alive lifetime and blocks in
+`recv()` between requests, so a thread is parked per open *connection* rather
+than per in-flight *request* — 256 mostly-asleep threads at c=256. The proposed
+fix was a **readiness-gated pool**: a poller thread owns idle connections and
+waits on them with one `poll()`, pushes a connection onto the work queue only
+when it is actually readable, and a worker runs one dispatch cycle and hands it
+straight back. Workers stay ordinary blocking OS threads, so handlers may still
+block — the property that makes the pool, not the event loop, the default.
+
+**It was built in full** (poller thread, self-pipe wakeup, `MSG_DONTWAIT`
+dispatch cycle, poller-enforced idle sweep, drain-based elastic growth) and it
+is **functionally correct**: 256 concurrent connections served by 28 workers +
+1 poller (34 threads total vs 256 before), zero persistently-unread Recv-Q,
+pipelining and keep-alive intact, clean shutdown, and blocking handlers still
+get concurrency (120 blocking handlers grew the pool to 152 threads and all 120
+completed).
+
+**It is also 66% more expensive per request, so it was not kept.**
+
+**Machine:** macOS Darwin 25.5.0, 14 logical CPUs, heavily contended — load
+average 91–140 and **0.0% idle** for every run below. **Tool:** wrk 4.2.0,
+`-t4 -c256 -d10s`, 3 s warm-up, order-swapped A,B,B,A. Metric is CPU-µs per
+request (server-process CPU-time delta ÷ completed requests); req/s is not a
+valid metric on this box (see Run 3).
+
+| Order | Server | CPU-µs/req |
+|---|---|---:|
+| 1 | parked-thread pool (kept) | 36.99 |
+| 2 | readiness-gated pool | 61.45 |
+| 3 | readiness-gated pool | 60.76 |
+| 4 | parked-thread pool (kept) | 36.11 |
+
+The parked-thread numbers reproduce Run 3's 35.70/36.16, so the harness is sound.
+
+**Independently reproduced** on a second harness, both binaries rebuilt from the
+two branches and confirmed to differ (`cmp`), order-swapped A,B,B,A, load 64–74
+at 0.0% idle:
+
+| Order | Server | threads | CPU-µs/req |
+|---|---|---:|---:|
+| 1 | parked-thread pool | 262 | 36.63 |
+| 2 | readiness-gated pool | 34 | 62.03 |
+| 3 | readiness-gated pool | 34 | 62.85 |
+| 4 | parked-thread pool | 262 | 36.89 |
+
+Same direction, same magnitude (~69%), from a separate measurement script. A
+negative result is only worth acting on if it reproduces off its author's
+harness — this one does, which is what licenses not rebuilding this design.
+
+The thread counts in that table are the other half of the trade and are worth
+reading alongside the CPU column: readiness gating really does deliver what it
+promised on thread count (**34 threads for 256 connections, versus 262**). It
+simply costs ~70% more CPU per request to get there. That makes it a lever for
+a machine where threads or their stacks are the binding constraint, not one for
+throughput or latency.
+
+**Attribution — why `kqueue`/`epoll` would not have rescued it.** `poll()` is
+O(n) in registered descriptors, so the obvious rebuttal is that the poller, not
+the design, is at fault. Re-measured at two connection counts:
+
+| Connections | parked-thread | readiness-gated | penalty |
+|---|---:|---:|---:|
+| c=32  | 36.01 / 34.28 | 62.73 / 70.46 | ~+31 µs |
+| c=256 | 37.41 / 39.26 | 61.66 / 63.17 | ~+24 µs |
+
+The penalty does not grow with the number of polled descriptors — it is
+slightly *smaller* at c=256. So it is not the O(n) scan, and swapping in
+kqueue/epoll would not recover it. The cost is the **per-request thread
+handoff**, which is structural to any readiness-gated pool.
+
+**What the parked-thread pool is actually doing right.** Its per-request path is
+close to minimal: the kernel wakes the one thread already blocked in `recv()` on
+that socket and copies the data straight into its buffer. One wakeup, no queue,
+no lock, no readiness syscall. Readiness gating replaces that single wakeup with
+a `poll()` return, poller-side bookkeeping, a mutex + condvar handoff (a *second*
+thread wakeup), an extra `EAGAIN` `recv()`, and a re-arm — roughly +25–30 CPU-µs.
+
+**Corollary: the event loop's ~8 µs advantage is not the parked threads.** That
+hypothesis is now refuted. The remaining candidates are that the evloop runs the
+handler directly on the loop thread with *zero* cross-thread handoff, and its
+`SO_REUSEPORT` listener sharding. Any future attempt at closing the gap should
+start there — and must not reintroduce a queue between readiness and handler.
+
+The parked-thread pool's real cost is memory and scheduler pressure from holding
+a thread per connection (256 threads vs 34), not CPU per request. If that ever
+becomes the binding constraint, this trade is worth revisiting — but it is a
+trade, not a win.
 
 ---
 

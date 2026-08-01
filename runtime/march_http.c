@@ -1965,6 +1965,46 @@ void march_http_pool_stop(void) {
     fprintf(stderr, "march: HTTP thread pool stopped\n");
 }
 
+/* Event-loop selection, resolved once per process.
+ *
+ * Both servers are linked into every binary, so this is a runtime choice.  It
+ * used to be a compile-time #if, which meant switching implementations
+ * required recompiling the user's program — and left the faster server
+ * unreachable in every shipped binary unless someone happened to know the
+ * build-time variable.
+ *
+ * -DMARCH_HTTP_USE_EVLOOP still forces it on unconditionally, so existing
+ * build recipes keep working. */
+int march_http_evloop_enabled(void) {
+#if defined(MARCH_HTTP_USE_EVLOOP)
+    return 1;                      /* build-time force-on */
+#elif defined(MARCH_HTTP_USE_BLOCKING)
+    return 0;                      /* build-time force-off */
+#else
+    /* DEFAULT: the event loop.  Measured on idle 4-vCPU Linux/epoll, wrk
+     * -c256, one binary switching at runtime: 76-80k req/s at 25-27
+     * CPU-us/request against the pool's 46-51k at 43-47 — +61% throughput,
+     * -42% CPU per request.
+     *
+     * The cost of this default is real and worth stating plainly: event-loop
+     * threads MUST NOT BLOCK.  A handler doing synchronous I/O — the classic
+     * case is a blocking database call — stalls every other connection
+     * assigned to that loop thread.  An application whose handlers block
+     * should set MARCH_HTTP_EVLOOP=0 and get the thread pool back, where each
+     * connection has its own OS thread and blocking is free.
+     *
+     * Explicit "0"/"false"/"no" opts out; anything else (including unset)
+     * takes the event loop. */
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    const char *v = getenv("MARCH_HTTP_EVLOOP");
+    cached = (v && (strcmp(v, "0") == 0 ||
+                    strcmp(v, "false") == 0 ||
+                    strcmp(v, "no") == 0)) ? 0 : 1;
+    return cached;
+#endif
+}
+
 void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline) {
     if (!pipeline) return;
@@ -1978,14 +2018,17 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
     /* Pre-populate response caches (Date header, etc.) before accepting. */
     march_http_response_module_init();
 
-#if defined(MARCH_HTTP_USE_EVLOOP)
-    /* Event-loop mode: SO_REUSEPORT + kqueue/epoll, one thread per core.
-     * The evloop creates its own listener fds — no single listen_fd needed. */
-    fprintf(stderr, "march: HTTP server (event-loop) listening on port %lld\n",
-            (long long)port);
-    march_evloop_server_listen((int)port, pipeline);
-    return;
-#endif
+    if (march_http_evloop_enabled()) {
+        /* Event-loop mode: SO_REUSEPORT + kqueue/epoll, one thread per core.
+         * The evloop creates its own listener fds — no single listen_fd
+         * needed.  Measured 41% cheaper per request and ~60% higher throughput
+         * than the pool on Linux/epoll; see march_http.h for the numbers and
+         * the blocking-handler caveat that keeps it off by default. */
+        fprintf(stderr, "march: HTTP server (event-loop) listening on port %lld\n",
+                (long long)port);
+        march_evloop_server_listen((int)port, pipeline);
+        return;
+    }
 
     /* ── Fallback: thread-per-connection with work queue ─────────── */
     int64_t listen_fd = tcp_listen_raw(port);
