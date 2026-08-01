@@ -96,6 +96,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Six stdlib modules (`ConsistentHash`, `WorkDispatch`, `RingBuf`,
+  `Compress`, `DistLink`, `DistSupervisor`) no longer silently return garbage
+  values from compiled programs.** Any stdlib module not registered in the
+  compiler's eager-load list is typechecked for its export *shapes* only, not
+  its body — so a generic `Option`/`Result`-returning function in that module
+  (e.g. `ConsistentHash.get`) reached monomorphization with an unresolved
+  call-site type and fell back to a boxed representation, while the caller
+  (compiled at a concrete, niche-eligible type like `Option(Int)`) expected
+  the unboxed niche encoding and read the discarded box's heap address as the
+  payload — wrong value, no diagnostic, compiled only; the interpreter was
+  unaffected. Same bug class as the pre-existing `Deque`/`ClusterLoad` fixes;
+  these six were the remaining stdlib modules with the same shape. The
+  general class of bug (a *future* stdlib module can reintroduce this by
+  omission) remains open — see
+  `specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md`.
 - **A local helper whose name collides with a top-level function no longer
   invents recursion.** The tail-call checker built its call graph by matching
   bare call names against the set of top-level function names, ignoring scope,

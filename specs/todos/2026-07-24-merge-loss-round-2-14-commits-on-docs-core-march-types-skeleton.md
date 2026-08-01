@@ -21,15 +21,14 @@ to_string-via-Show scores 0% but was superseded by `6d2eed85`, and to_string
 on containers verifiably works). Every claim below is a *behavioural* probe,
 not a line count.
 
-- [ ] **CLASS BUG behind the deque case, still open: lazy vs eager stdlib
-  loading changes REPRESENTATION decisions.** Eager-loading one module is a
-  point fix; any other lazily-loaded module exporting a generic function over
-  a niche-able type (`Option`/`Result`) has the same latent
-  boxed-vs-niche decode mismatch, and it fails SILENTLY (wrong value, no
-  diagnostic). Either make lazy loading typecheck enough to resolve caller
-  binders, or make mono refuse to emit a call it could not specialize
-  instead of falling back to the generic body. Audit the rest of
-  `stdlib_file_list`'s complement for the same shape.
+- [x] **CLASS BUG behind the deque case — confirmed live and split out
+  2026-08-01, see `specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md`.**
+  Reproduced fresh via `ConsistentHash.get` (compiled returns a garbage
+  pointer instead of the stored `Int`); point-fixed 6 more affected modules
+  by adding them to `stdlib_file_list`, same as the original `deque.march`
+  fix. The general class bug (nothing stops a *future* stdlib module from
+  reintroducing this by omission) is still open — tracked in the new file,
+  not here.
 
 **Probed and NOT reproducing** (superseded, or the probe doesn't hit it):
 `d2d0a3a3` (`examples/stats_basic.march` interp==compiled parity ok),
