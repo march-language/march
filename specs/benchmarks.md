@@ -1,5 +1,76 @@
 # March Benchmarks
 
+## HTTP benchmark: Run 5 (2026-08-01) — LINUX, quiet box. The macOS numbers were a platform artifact.
+
+Every HTTP figure before this section was measured on macOS/arm64 on a shared,
+heavily loaded machine. This run is an idle 4-vCPU DigitalOcean droplet
+(Ubuntu 24.04, kernel 6.8, epoll), load < 1. **Three earlier conclusions do not
+survive it.**
+
+### 1. The "~30k req/s ceiling" was macOS loopback, not March
+
+| | macOS (contended) | Linux (idle) |
+|---|---:|---:|
+| req/s, c=64 | ~30,000 | **72,703 / 62,951** |
+| req/s, c=256 | ~30,000 | **47,418** |
+
+Linux does 2.1–2.4× the throughput. Earlier text calling this ceiling
+"client/kernel-side, not March" was right about the cause and wrong to imply it
+was a property of the workload — it is a property of *Darwin*.
+
+### 2. The event loop is far better on Linux than the macOS numbers suggested
+
+wrk `-c256`, order-swapped, one binary switching implementation at runtime:
+
+| server | req/s | CPU-µs/req |
+|---|---:|---:|
+| thread pool (default) | 45,990 / 51,018 | 47.46 / 43.04 |
+| event loop | 76,488 / 80,416 | **27.35 / 24.76** |
+
+**+61% throughput and −42% CPU per request.** On macOS/kqueue the gap was 21%
+CPU and the event loop actually *lost* on req/s to a scheduling artifact. This
+is a Linux-specific win, and Linux is where servers run.
+
+### 3. SO_REUSEPORT accept sharding does nothing — built, measured, reverted
+
+Sharding the thread pool's accept loop across per-thread `SO_REUSEPORT`
+listeners was implemented and then reverted, because on the box and in the
+regime most favourable to it, it produced nothing:
+
+| | shards=1 | shards=4 | effect |
+|---|---:|---:|---:|
+| connection-close (**treatment**) | 106.7 µs | 107.5 µs | +0.7% |
+| keep-alive (**control**) | 32.6 µs | 37.6 µs | +15.5% |
+
+The control is the result. In keep-alive, accept happens ~64 times in ten
+seconds and sharding *cannot* matter — yet it moved 15.5%. That is the noise
+floor, and the treatment effect is twenty times smaller than it. The
+within-arm spread on shards=1 close (13.1 µs) is itself larger than the whole
+treatment effect. Reverted in the commit following its own.
+
+### 4. `rrb_bench` parallel-vs-sequential: the earlier lead was contention
+
+Recorded in the 2026-07-31 sweep as "parallel ~22% slower, needs a quiet-box
+re-run before anyone concludes the parallel machinery costs more than it
+saves." It does not:
+
+| | contended macOS (14 cores, load 15) | idle Linux (4 cores) |
+|---|---:|---:|
+| `seq_fold_left` | 1011 / 1012 / 1015 ms | 5229 / 4850 / 5230 ms |
+| `psum` | 1225 / 1252 / 1245 ms | **2460 / 2320 / 2528 ms** |
+| `preduce` | 1228 / 1204 / 1268 ms | **2472 / 2368 / 2531 ms** |
+
+On an idle box the parallel arms are **2.1× faster** than sequential, not 22%
+slower. The macOS reading was entirely an artifact of a parallel arm being
+unable to get cores on a machine at load 15 while the sequential arm needed
+only one. Filing it as a lead rather than a finding was the right call.
+
+**Methodology, restated:** measure HTTP on Linux. A macOS laptop cannot tell
+you what a server does, and a contended box cannot tell you what a parallel
+algorithm does.
+
+---
+
 ## Compute-benchmark sweep, 2026-07-31 — and why absolute-ms baselines cannot detect regressions
 
 All 31 non-network benchmarks compiled at `--opt 2` and ran clean: 31/31 exit 0,
@@ -49,14 +120,12 @@ cd /tmp/base && dune build --root . bin/main.exe && dune build --root . @install
 # has not changed underneath you.
 ```
 
-**One open lead.** `bench/rrb_bench.march`'s parallel arms are consistently
-*slower* than its sequential one — `seq_fold_left` 1011/1012/1015 ms against
-`psum` 1225/1252/1245 ms and `preduce` 1228/1204/1268 ms, so ~+22% with under
-5% variance. Tight enough to look structural rather than noisy, but it was
-measured at load 15 on a 14-core box shared with other work, where a parallel
-arm cannot get cores and a sequential one only needs a single core. **Not yet a
-finding** — it needs a quiet-box re-run before anyone concludes the parallel
-machinery costs more than it saves.
+**One open lead — since RESOLVED, see Run 5 above.** `bench/rrb_bench.march`'s
+parallel arms measured ~22% *slower* than its sequential one here, tight enough
+to look structural, but on a 14-core box at load 15. It was filed as a lead
+rather than a finding pending a quiet-box re-run. That re-run (idle 4-core
+Linux) shows the parallel arms **2.1× FASTER** than sequential. The macOS
+reading was entirely contention.
 
 ---
 

@@ -1965,6 +1965,30 @@ void march_http_pool_stop(void) {
     fprintf(stderr, "march: HTTP thread pool stopped\n");
 }
 
+/* Event-loop selection, resolved once per process.
+ *
+ * Both servers are linked into every binary, so this is a runtime choice.  It
+ * used to be a compile-time #if, which meant switching implementations
+ * required recompiling the user's program — and left the faster server
+ * unreachable in every shipped binary unless someone happened to know the
+ * build-time variable.
+ *
+ * -DMARCH_HTTP_USE_EVLOOP still forces it on unconditionally, so existing
+ * build recipes keep working. */
+int march_http_evloop_enabled(void) {
+#if defined(MARCH_HTTP_USE_EVLOOP)
+    return 1;
+#else
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    const char *v = getenv("MARCH_HTTP_EVLOOP");
+    cached = (v && (strcmp(v, "1") == 0 ||
+                    strcmp(v, "true") == 0 ||
+                    strcmp(v, "yes") == 0)) ? 1 : 0;
+    return cached;
+#endif
+}
+
 void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline) {
     if (!pipeline) return;
@@ -1978,14 +2002,17 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
     /* Pre-populate response caches (Date header, etc.) before accepting. */
     march_http_response_module_init();
 
-#if defined(MARCH_HTTP_USE_EVLOOP)
-    /* Event-loop mode: SO_REUSEPORT + kqueue/epoll, one thread per core.
-     * The evloop creates its own listener fds — no single listen_fd needed. */
-    fprintf(stderr, "march: HTTP server (event-loop) listening on port %lld\n",
-            (long long)port);
-    march_evloop_server_listen((int)port, pipeline);
-    return;
-#endif
+    if (march_http_evloop_enabled()) {
+        /* Event-loop mode: SO_REUSEPORT + kqueue/epoll, one thread per core.
+         * The evloop creates its own listener fds — no single listen_fd
+         * needed.  Measured 41% cheaper per request and ~60% higher throughput
+         * than the pool on Linux/epoll; see march_http.h for the numbers and
+         * the blocking-handler caveat that keeps it off by default. */
+        fprintf(stderr, "march: HTTP server (event-loop) listening on port %lld\n",
+                (long long)port);
+        march_evloop_server_listen((int)port, pipeline);
+        return;
+    }
 
     /* ── Fallback: thread-per-connection with work queue ─────────── */
     int64_t listen_fd = tcp_listen_raw(port);
