@@ -48,6 +48,30 @@ floor, and the treatment effect is twenty times smaller than it. The
 within-arm spread on shards=1 close (13.1 µs) is itself larger than the whole
 treatment effect. Reverted in the commit following its own.
 
+### 5. Header allocation is not a measurable cost, even at a realistic count
+
+`march_conn_from_parsed` (`runtime/march_http.c`) allocates a March string,
+`Header` cell, and `Cons` cell per request header — flagged earlier as
+possibly under-costed because wrk's default request carries only 2-3 headers
+against a realistic browser's 12-15. Re-measured directly: an env-gated
+ablation (`MARCH_ABL_NOHDR`, measurement-only, not merged) that skips the
+header-list build entirely, against 12 realistic headers (~550 bytes:
+Accept/Accept-Language/Accept-Encoding/Cache-Control/Sec-Fetch-*/Cookie/
+X-Request-Id) on the idle Linux droplet, order-swapped:
+
+| | with headers | headers skipped |
+|---|---:|---:|
+| 2-3 headers (wrk default) | 25.11 / 22.43 µs | 23.60 / 23.81 µs |
+| 12 headers (~550 bytes) | 24.75 / 23.09 µs | 23.91 / 23.75 µs |
+
+The "effect" (≤0.1 µs) is an order of magnitude smaller than the spread
+*within* either arm (up to 2.7 µs run-to-run). Lazy or borrowed headers would
+not be a measurable win at realistic request sizes on this hardware — the
+allocator is simply fast enough for a dozen small, short-lived strings.
+Superseded, not merely unconfirmed: this closes the question raised after the
+macOS thread-pool sweep, which had only 2-3 headers to work with and
+correctly flagged the gap rather than asserting a conclusion from it.
+
 ### 4. `rrb_bench` parallel-vs-sequential: the earlier lead was contention
 
 Recorded in the 2026-07-31 sweep as "parallel ~22% slower, needs a quiet-box
