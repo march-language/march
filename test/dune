@@ -862,6 +862,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/import_shadow\" %{exe:../bin/main.exe} --check \"$PWD/imports/import_shadow/is_entry.march\"")))
 
+; ── Regression: tail-call enforcement must respect local scoping ──
+; The call-graph builder matched bare call names against the set of TOP-LEVEL
+; function names with no regard for scope, so a call to a LOCAL helper whose
+; name collided with a top-level function forged a call-graph edge and invented
+; an SCC.  Prelude's `length`/`reverse`/`map`/... are all written with a local
+; `fn go` helper and the entry module's decls have the prelude spliced in, so
+; any program with its own top-level `go` calling one of them was rejected with
+; "recursive call to `length` is not in tail position" — for a `go` that is not
+; recursive, against a `length` that may not even have a body (extern case).
+; Both fixtures must `--check` clean.  These need the real stdlib (the bug only
+; appears once the prelude is injected), hence (source_tree ../stdlib).
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file imports/extern_shadow/es_extern_length.march)
+       (source_tree ../stdlib))
+ (action (run %{exe:../bin/main.exe} --check
+              imports/extern_shadow/es_extern_length.march)))
+
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file imports/extern_shadow/es_prelude_helper.march)
+       (source_tree ../stdlib))
+ (action (run %{exe:../bin/main.exe} --check
+              imports/extern_shadow/es_prelude_helper.march)))
+
 ; ── Regression: native codegen must not drop non-pointer tuple fields ──
 ; A module-nested fn with default-arg params desugars to a body that builds a
 ; tuple of its args and immediately destructures it.  The native tuple

@@ -10247,9 +10247,41 @@ let warn_unused_imports env =
    §16  Tail-call enforcement
    ================================================================= *)
 
+(** Collect all variable names bound by a pattern (used to find structurally
+    smaller variables introduced by pattern matching, and to retire shadowed
+    names from the call-graph name set). *)
+let rec collect_pattern_vars (pat : Ast.pattern) : StringSet.t =
+  match pat with
+  | Ast.PatWild _ | Ast.PatLit _ -> StringSet.empty
+  | Ast.PatVar v -> StringSet.singleton v.txt
+  | Ast.PatCon (_, pats) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+  | Ast.PatAtom (_, pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+  | Ast.PatTuple (pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+  | Ast.PatRecord (fields, _) ->
+    List.fold_left (fun acc (_, p) -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty fields
+  | Ast.PatAs (p, v, _) -> StringSet.add v.txt (collect_pattern_vars p)
+  | Ast.PatOr (pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+
 (** Collect all names from [fn_names] that are called directly (not through
     lambdas or local [ELetFn] bodies) in [e].  Used to build the call graph
-    for SCC / mutual-recursion detection. *)
+    for SCC / mutual-recursion detection.
+
+    [fn_names] is a SCOPE, not a flat name list: a local binder (an inner
+    [ELetFn], or a [let] whose pattern binds the name) retires that name for
+    the rest of the enclosing block.  Without this, a local helper whose name
+    collides with a top-level function forges a call-graph edge and invents an
+    SCC that does not exist — e.g. prelude's [length] uses a local [fn go], so
+    any program with its own top-level [go] was told its calls were "recursive
+    calls not in tail position". *)
 let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : StringSet.t =
   match e with
   | Ast.EApp (Ast.EVar fn, args, _) ->
@@ -10278,15 +10310,30 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
     ) StringSet.empty arms
   | Ast.EMatch (scrut, branches, _) ->
     List.fold_left (fun acc br ->
+      (* Arm-bound names shadow same-named top-level functions inside the arm. *)
+      let names =
+        StringSet.diff fn_names (collect_pattern_vars br.Ast.branch_pat) in
       let g = Option.fold ~none:StringSet.empty
-                ~some:(collect_direct_fn_calls fn_names) br.Ast.branch_guard in
+                ~some:(collect_direct_fn_calls names) br.Ast.branch_guard in
       StringSet.union acc
-        (StringSet.union g (collect_direct_fn_calls fn_names br.Ast.branch_body))
+        (StringSet.union g (collect_direct_fn_calls names br.Ast.branch_body))
     ) (collect_direct_fn_calls fn_names scrut) branches
+  (* A block is the one place where a binder's scope extends to SIBLING
+     expressions: [ELetFn]/[ELet] carry no continuation of their own, so the
+     shadowing has to be applied here, to the rest of the block. *)
   | Ast.EBlock (exprs, _) ->
-    List.fold_left (fun acc ex ->
-      StringSet.union acc (collect_direct_fn_calls fn_names ex)
-    ) StringSet.empty exprs
+    let (acc, _) =
+      List.fold_left (fun (acc, names) ex ->
+        let acc' = StringSet.union acc (collect_direct_fn_calls names ex) in
+        let names' = match ex with
+          | Ast.ELetFn (iname, _, _, _, _) -> StringSet.remove iname.txt names
+          | Ast.ELet (b, _) -> StringSet.diff names (collect_pattern_vars b.Ast.bind_pat)
+          | _ -> names
+        in
+        (acc', names')
+      ) (StringSet.empty, fn_names) exprs
+    in
+    acc
   | Ast.ELet (b, _) -> collect_direct_fn_calls fn_names b.Ast.bind_expr
   | Ast.ELetFn (_, _, _, _, _) -> StringSet.empty   (* new scope *)
   | Ast.ELam (_, _, _)         -> StringSet.empty   (* new scope *)
@@ -10316,9 +10363,10 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
                     (collect_direct_fn_calls fn_names b)
   | Ast.ESpawn (ex, _)       -> collect_direct_fn_calls fn_names ex
   | Ast.EDbg (Some ex, _)    -> collect_direct_fn_calls fn_names ex
-  | Ast.ELetQ (_, r, c, _) ->
+  | Ast.ELetQ (pat, r, c, _) ->
     StringSet.union (collect_direct_fn_calls fn_names r)
-                    (collect_direct_fn_calls fn_names c)
+      (collect_direct_fn_calls
+         (StringSet.diff fn_names (collect_pattern_vars pat)) c)
   | Ast.EAssert (ex, _) -> collect_direct_fn_calls fn_names ex
   | Ast.ESigil (_, content, _) -> collect_direct_fn_calls fn_names content
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
@@ -10380,29 +10428,6 @@ let is_infix_op name =
   | "==" | "!=" | "&&" | "||" | "+." | "-." | "*." | "/." -> true
   | _ -> false
 
-(** Collect all variable names bound by a pattern (used to find structurally
-    smaller variables introduced by pattern matching). *)
-let rec collect_pattern_vars (pat : Ast.pattern) : StringSet.t =
-  match pat with
-  | Ast.PatWild _ | Ast.PatLit _ -> StringSet.empty
-  | Ast.PatVar v -> StringSet.singleton v.txt
-  | Ast.PatCon (_, pats) ->
-    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
-      StringSet.empty pats
-  | Ast.PatAtom (_, pats, _) ->
-    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
-      StringSet.empty pats
-  | Ast.PatTuple (pats, _) ->
-    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
-      StringSet.empty pats
-  | Ast.PatRecord (fields, _) ->
-    List.fold_left (fun acc (_, p) -> StringSet.union acc (collect_pattern_vars p))
-      StringSet.empty fields
-  | Ast.PatAs (p, v, _) -> StringSet.add v.txt (collect_pattern_vars p)
-  | Ast.PatOr (pats, _) ->
-    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
-      StringSet.empty pats
-
 (** True if [expr] is provably structurally smaller than some function parameter.
     - [params]: the set of function parameter variable names.
     - [smaller]: variables known to be sub-components of a parameter (from pattern matching).
@@ -10438,7 +10463,12 @@ let scrutinee_is_param_or_smaller (params : StringSet.t) (smaller : StringSet.t)
     terminate because every argument is provably smaller than a parameter).
     Emits [Error] diagnostics only for truly unbounded non-tail recursion.
     [fn_name] is the enclosing function (for readable error messages).
-    [fn_params] is the set of parameter variable names for [fn_name]. *)
+    [fn_params] is the set of parameter variable names for [fn_name].
+
+    [recursive_names] is a SCOPE, threaded through [chk] as [names]: a local
+    binder (inner [fn], [let], [let?], a match arm's pattern) retires that name
+    for its extent, so a call to a shadowing local is not misattributed to the
+    same-named recursive function. *)
 let rec check_tail_position
     (errors : Err.ctx)
     (recursive_names : StringSet.t)
@@ -10447,10 +10477,10 @@ let rec check_tail_position
     (body : Ast.expr) : unit =
   (* [smaller] accumulates variables known to be structurally smaller than a
      function parameter (introduced by pattern-matching on a parameter). *)
-  let rec chk in_tail (smaller : StringSet.t) ctx expr =
+  let rec chk in_tail (names : StringSet.t) (smaller : StringSet.t) ctx expr =
     match expr with
     (* ── Recursive call ── *)
-    | Ast.EApp (Ast.EVar fn, args, sp) when StringSet.mem fn.txt recursive_names ->
+    | Ast.EApp (Ast.EVar fn, args, sp) when StringSet.mem fn.txt names ->
       if not in_tail then begin
         (* Allow if at least one argument is provably structurally smaller:
            this covers structural recursion on sub-trees/sub-lists and
@@ -10494,7 +10524,7 @@ let rec check_tail_position
         end
       end;
       List.iteri (fun i arg ->
-        chk false smaller
+        chk false names smaller
           (Printf.sprintf "argument #%d in call to `%s`" (i + 1) fn.txt)
           arg
       ) args
@@ -10506,46 +10536,47 @@ let rec check_tail_position
         | Ast.EVar fn_n -> Printf.sprintf "passed as argument to `%s`" fn_n.txt
         | _ -> "passed as argument to a function"
       in
-      chk false smaller "function part of application" f;
-      List.iter (chk false smaller arg_ctx) args
+      chk false names smaller "function part of application" f;
+      List.iter (chk false names smaller arg_ctx) args
     (* ── Constructor ── *)
     | Ast.ECon (name, args, _) ->
       let arg_ctx = Printf.sprintf "wrapped in constructor `%s`" name.txt in
-      List.iter (chk false smaller arg_ctx) args
+      List.iter (chk false names smaller arg_ctx) args
     (* ── if/do/else/end: condition not tail; branches inherit ── *)
     | Ast.EIf (cond, then_, else_, _) ->
-      chk false smaller "condition of `if`" cond;
-      chk in_tail smaller ctx then_;
-      chk in_tail smaller ctx else_
+      chk false names smaller "condition of `if`" cond;
+      chk in_tail names smaller ctx then_;
+      chk in_tail names smaller ctx else_
     (* ── match do cond_arm* end ── *)
     | Ast.ECond (arms, _) ->
       List.iter (fun (ce, be) ->
-        chk false smaller "condition in `match do`" ce;
-        chk in_tail smaller ctx be
+        chk false names smaller "condition in `match do`" ce;
+        chk in_tail names smaller ctx be
       ) arms
     (* ── match: scrutinee not tail; if scrutinee is a parameter or smaller
           variable, extend [smaller] with all vars bound in each arm's pattern ── *)
     | Ast.EMatch (scrut, branches, _) ->
-      chk false smaller "scrutinee of `match`" scrut;
+      chk false names smaller "scrutinee of `match`" scrut;
       let scrut_is_smaller = scrutinee_is_param_or_smaller fn_params smaller scrut in
       List.iter (fun (br : Ast.branch) ->
+        let arm_pat_vars = collect_pattern_vars br.branch_pat in
         let arm_smaller =
-          if scrut_is_smaller
-          then StringSet.union smaller (collect_pattern_vars br.branch_pat)
-          else smaller
+          if scrut_is_smaller then StringSet.union smaller arm_pat_vars else smaller
         in
-        Option.iter (chk false arm_smaller "match guard") br.branch_guard;
-        chk in_tail arm_smaller ctx br.branch_body
+        (* Arm-bound names shadow the recursive names inside the arm. *)
+        let arm_names = StringSet.diff names arm_pat_vars in
+        Option.iter (chk false arm_names arm_smaller "match guard") br.branch_guard;
+        chk in_tail arm_names arm_smaller ctx br.branch_body
       ) branches
     (* ── block: only last expression is in tail position.
           Propagate structural smallness: if a let binding assigns a variable
           to a structurally-smaller expression, that variable is also smaller. ── *)
     | Ast.EBlock (exprs, _) ->
-      let rec go s = function
+      let rec go ns s = function
         | [] -> ()
-        | [last] -> chk in_tail s ctx last
+        | [last] -> chk in_tail ns s ctx last
         | hd :: tl ->
-          chk false s "non-final expression in block" hd;
+          chk false ns s "non-final expression in block" hd;
           let s' = match hd with
             | Ast.ELet (b, _) ->
               (match b.Ast.bind_pat with
@@ -10555,12 +10586,19 @@ let rec check_tail_position
                | _ -> s)
             | _ -> s
           in
-          go s' tl
+          (* A local binder shadows a same-named recursive function for the
+             rest of the block — calls to it are not recursive calls. *)
+          let ns' = match hd with
+            | Ast.ELetFn (iname, _, _, _, _) -> StringSet.remove iname.txt ns
+            | Ast.ELet (b, _) -> StringSet.diff ns (collect_pattern_vars b.Ast.bind_pat)
+            | _ -> ns
+          in
+          go ns' s' tl
       in
-      go smaller exprs
+      go names smaller exprs
     (* ── let binding: RHS is never tail ── *)
     | Ast.ELet (b, _) ->
-      chk false smaller "right-hand side of `let` binding" b.Ast.bind_expr
+      chk false names smaller "right-hand side of `let` binding" b.Ast.bind_expr
     (* ── inner named function: check its own self-recursion in its own scope ── *)
     | Ast.ELetFn (iname, iparams, _, ibody, _) ->
       let iparams_set =
@@ -10571,42 +10609,57 @@ let rec check_tail_position
     (* ── lambda: new scope, skip outer recursive-name check ── *)
     | Ast.ELam _ -> ()
     (* ── transparent ── *)
-    | Ast.EAnnot (ex, _, _) -> chk in_tail smaller ctx ex
+    | Ast.EAnnot (ex, _, _) -> chk in_tail names smaller ctx ex
     (* ── non-tail contexts ── *)
     | Ast.ETuple (es, _) ->
-      List.iter (chk false smaller "tuple element") es
+      List.iter (chk false names smaller "tuple element") es
     | Ast.ERecord (fields, _) ->
       List.iter (fun ((nm : Ast.name), ex) ->
-        chk false smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
+        chk false names smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
       ) fields
     | Ast.ERecordUpdate (base, fields, _) ->
-      chk false smaller "base of record update" base;
+      chk false names smaller "base of record update" base;
       List.iter (fun ((nm : Ast.name), ex) ->
-        chk false smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
+        chk false names smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
       ) fields
-    | Ast.EField (ex, _, _)  -> chk false smaller "object of field access" ex
-    | Ast.EPipe  (l, r, _)   -> chk false smaller "left side of pipe" l;
-                                 chk false smaller "right side of pipe" r
-    | Ast.EAtom (_, args, _) -> List.iter (chk false smaller "atom argument") args
+    | Ast.EField (ex, _, _)  -> chk false names smaller "object of field access" ex
+    | Ast.EPipe  (l, r, _)   -> chk false names smaller "left side of pipe" l;
+                                 chk false names smaller "right side of pipe" r
+    | Ast.EAtom (_, args, _) -> List.iter (chk false names smaller "atom argument") args
     | Ast.ESend (cap, msg, _) ->
-      chk false smaller "capability in `send`" cap;
-      chk false smaller "message in `send`" msg
-    | Ast.ESpawn (ex, _)      -> chk false smaller "argument to `spawn`" ex
-    | Ast.EDbg (Some ex, _)   -> chk false smaller "argument to `dbg`" ex
-    | Ast.ELetQ (_, r, cont, _) ->
-      chk false smaller "right-hand side of `let?`" r;
-      chk in_tail smaller ctx cont
-    | Ast.EAssert (ex, _)     -> chk false smaller "assert expression" ex
-    | Ast.ESigil (_, content, _) -> chk false smaller "sigil content" content
+      chk false names smaller "capability in `send`" cap;
+      chk false names smaller "message in `send`" msg
+    | Ast.ESpawn (ex, _)      -> chk false names smaller "argument to `spawn`" ex
+    | Ast.EDbg (Some ex, _)   -> chk false names smaller "argument to `dbg`" ex
+    | Ast.ELetQ (pat, r, cont, _) ->
+      chk false names smaller "right-hand side of `let?`" r;
+      chk in_tail (StringSet.diff names (collect_pattern_vars pat))
+        smaller ctx cont
+    | Ast.EAssert (ex, _)     -> chk false names smaller "assert expression" ex
+    | Ast.ESigil (_, content, _) -> chk false names smaller "sigil content" content
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()
   in
-  chk true StringSet.empty "" body
+  chk true recursive_names StringSet.empty "" body
 
 (** Run tail-call enforcement for all [DFn] declarations in [decls]
     (at a single scope level).  Recurses into [DMod] sub-modules. *)
 let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) : unit =
+  (* Names declared in an [extern] block at this level.  An extern has no
+     body, so it can never recurse; a bare call to one must not be resolved
+     against a same-named ordinary function (the entry module's decls include
+     the injected prelude, so e.g. an extern `length` sat next to prelude's
+     `fn length`). *)
+  let extern_names =
+    List.fold_left (fun acc d ->
+      match d with
+      | Ast.DExtern (ext, _) ->
+        List.fold_left (fun acc ef -> StringSet.add ef.Ast.ef_name.txt acc)
+          acc ext.Ast.ext_fns
+      | _ -> acc
+    ) StringSet.empty decls
+  in
   (* Collect function names at this level *)
   let fn_names =
     List.fold_left (fun acc d ->
@@ -10615,6 +10668,7 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
       | _ -> acc
     ) StringSet.empty decls
   in
+  let fn_names = StringSet.diff fn_names extern_names in
   (* Build call graph *)
   let adj = List.filter_map (function
     | Ast.DFn (def, _) ->
