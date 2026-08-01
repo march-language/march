@@ -995,7 +995,12 @@
 <a class="sl" href="Iterable.html#fn-take"><span class="sb-kind" style="color:var(--fn)">F</span>take</a>
 <a class="sl" href="Iterable.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Json.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Json.html">Json</a></div><div class="sb-sub"><a class="sl" href="Json.html#type-JsonValue"><span class="sb-kind" style="color:var(--ty)">T</span>JsonValue</a>
+<a class="sl" href="Json.html#type-JsonPathStep"><span class="sb-kind" style="color:var(--ty)">T</span>JsonPathStep</a>
+<a class="sl" href="Json.html#type-DecodeError"><span class="sb-kind" style="color:var(--ty)">T</span>DecodeError</a>
 <a class="sl" href="Json.html#type-JsonPath"><span class="sb-kind" style="color:var(--ty)">T</span>JsonPath</a>
+<a class="sl" href="Json.html#fn-decode_error_at"><span class="sb-kind" style="color:var(--fn)">F</span>decode_error_at</a>
+<a class="sl" href="Json.html#fn-decode_error_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>decode_error_to_string</a>
+<a class="sl" href="Json.html#fn-decode_error_under"><span class="sb-kind" style="color:var(--fn)">F</span>decode_error_under</a>
 <a class="sl" href="Json.html#fn-encode_array"><span class="sb-kind" style="color:var(--fn)">F</span>encode_array</a>
 <a class="sl" href="Json.html#fn-encode_bool"><span class="sb-kind" style="color:var(--fn)">F</span>encode_bool</a>
 <a class="sl" href="Json.html#fn-encode_int"><span class="sb-kind" style="color:var(--fn)">F</span>encode_int</a>
@@ -1005,6 +1010,7 @@
 <a class="sl" href="Json.html#fn-encode_string"><span class="sb-kind" style="color:var(--fn)">F</span>encode_string</a>
 <a class="sl" href="Json.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Json.html#fn-get_at"><span class="sb-kind" style="color:var(--fn)">F</span>get_at</a>
+<a class="sl" href="Json.html#fn-get_field"><span class="sb-kind" style="color:var(--fn)">F</span>get_field</a>
 <a class="sl" href="Json.html#fn-get_in"><span class="sb-kind" style="color:var(--fn)">F</span>get_in</a>
 <a class="sl" href="Json.html#fn-get_path"><span class="sb-kind" style="color:var(--fn)">F</span>get_path</a>
 <a class="sl" href="Json.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
@@ -1020,6 +1026,7 @@
 <a class="sl" href="JsonStream.html#type-JsFrame"><span class="sb-kind" style="color:var(--ty)">T</span>JsFrame</a>
 <a class="sl" href="JsonStream.html#fn-build"><span class="sb-kind" style="color:var(--fn)">F</span>build</a>
 <a class="sl" href="JsonStream.html#fn-default_limits"><span class="sb-kind" style="color:var(--fn)">F</span>default_limits</a>
+<a class="sl" href="JsonStream.html#fn-each_typed"><span class="sb-kind" style="color:var(--fn)">F</span>each_typed</a>
 <a class="sl" href="JsonStream.html#fn-each_value"><span class="sb-kind" style="color:var(--fn)">F</span>each_value</a>
 <a class="sl" href="JsonStream.html#fn-err_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>err_to_string</a>
 <a class="sl" href="JsonStream.html#fn-feed"><span class="sb-kind" style="color:var(--fn)">F</span>feed</a>
@@ -1956,6 +1963,7 @@
 <div class="item" id="type-JsState"><div class="ih"><span class="badge bpt">ptype</span><span class="name">JsState</span><span class="sig"><a href="#type-JsState">JsState</a> = StOk(<a href="#type-JsCfg">JsCfg</a>, <a href="#type-JsMode">JsMode</a>, List(<a href="#type-JsMode">JsMode</a>), Int, <a href="#type-JsPartial">JsPartial</a>, Int)</span><a class="anchor-link" href="#type-JsState" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-JsFrame"><div class="ih"><span class="badge bpt">ptype</span><span class="name">JsFrame</span><span class="sig"><a href="#type-JsFrame">JsFrame</a> =</span><a class="anchor-link" href="#type-JsFrame" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-build"><div class="ih"><span class="badge bfn">fn</span><span class="name">build</span><span class="sig">build(chunks)</span><a class="anchor-link" href="#fn-build" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-default_limits"><div class="ih"><span class="badge bfn">fn</span><span class="name">default_limits</span><span class="sig">default_limits() do <a href="#type-JsonLimits">JsonLimits</a>(512, 8000000) end</span><a class="anchor-link" href="#fn-default_limits" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-each_typed"><div class="ih"><span class="badge bfn">fn</span><span class="name">each_typed</span><span class="sig">each_typed(path, cb)</span><a class="anchor-link" href="#fn-each_typed" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-each_value"><div class="ih"><span class="badge bfn">fn</span><span class="name">each_value</span><span class="sig">each_value(path, cb)</span><a class="anchor-link" href="#fn-each_value" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-err_to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">err_to_string</span><span class="sig">err_to_string(e)</span><a class="anchor-link" href="#fn-err_to_string" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-feed"><div class="ih"><span class="badge bfn">fn</span><span class="name">feed</span><span class="sig">feed(st, chunk)</span><a class="anchor-link" href="#fn-feed" title="Link">#</a></div><div class="ib"></div></div>

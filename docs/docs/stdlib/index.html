@@ -995,7 +995,12 @@
 <a class="sl" href="Iterable.html#fn-take"><span class="sb-kind" style="color:var(--fn)">F</span>take</a>
 <a class="sl" href="Iterable.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Json.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Json.html">Json</a></div><div class="sb-sub"><a class="sl" href="Json.html#type-JsonValue"><span class="sb-kind" style="color:var(--ty)">T</span>JsonValue</a>
+<a class="sl" href="Json.html#type-JsonPathStep"><span class="sb-kind" style="color:var(--ty)">T</span>JsonPathStep</a>
+<a class="sl" href="Json.html#type-DecodeError"><span class="sb-kind" style="color:var(--ty)">T</span>DecodeError</a>
 <a class="sl" href="Json.html#type-JsonPath"><span class="sb-kind" style="color:var(--ty)">T</span>JsonPath</a>
+<a class="sl" href="Json.html#fn-decode_error_at"><span class="sb-kind" style="color:var(--fn)">F</span>decode_error_at</a>
+<a class="sl" href="Json.html#fn-decode_error_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>decode_error_to_string</a>
+<a class="sl" href="Json.html#fn-decode_error_under"><span class="sb-kind" style="color:var(--fn)">F</span>decode_error_under</a>
 <a class="sl" href="Json.html#fn-encode_array"><span class="sb-kind" style="color:var(--fn)">F</span>encode_array</a>
 <a class="sl" href="Json.html#fn-encode_bool"><span class="sb-kind" style="color:var(--fn)">F</span>encode_bool</a>
 <a class="sl" href="Json.html#fn-encode_int"><span class="sb-kind" style="color:var(--fn)">F</span>encode_int</a>
@@ -1005,6 +1010,7 @@
 <a class="sl" href="Json.html#fn-encode_string"><span class="sb-kind" style="color:var(--fn)">F</span>encode_string</a>
 <a class="sl" href="Json.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Json.html#fn-get_at"><span class="sb-kind" style="color:var(--fn)">F</span>get_at</a>
+<a class="sl" href="Json.html#fn-get_field"><span class="sb-kind" style="color:var(--fn)">F</span>get_field</a>
 <a class="sl" href="Json.html#fn-get_in"><span class="sb-kind" style="color:var(--fn)">F</span>get_in</a>
 <a class="sl" href="Json.html#fn-get_path"><span class="sb-kind" style="color:var(--fn)">F</span>get_path</a>
 <a class="sl" href="Json.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
@@ -1020,6 +1026,7 @@
 <a class="sl" href="JsonStream.html#type-JsFrame"><span class="sb-kind" style="color:var(--ty)">T</span>JsFrame</a>
 <a class="sl" href="JsonStream.html#fn-build"><span class="sb-kind" style="color:var(--fn)">F</span>build</a>
 <a class="sl" href="JsonStream.html#fn-default_limits"><span class="sb-kind" style="color:var(--fn)">F</span>default_limits</a>
+<a class="sl" href="JsonStream.html#fn-each_typed"><span class="sb-kind" style="color:var(--fn)">F</span>each_typed</a>
 <a class="sl" href="JsonStream.html#fn-each_value"><span class="sb-kind" style="color:var(--fn)">F</span>each_value</a>
 <a class="sl" href="JsonStream.html#fn-err_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>err_to_string</a>
 <a class="sl" href="JsonStream.html#fn-feed"><span class="sb-kind" style="color:var(--fn)">F</span>feed</a>
@@ -1999,8 +2006,8 @@
 <a href="IO.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>IO</h3><p>IO module: explicit I/O operations separate from Process.</p><div class="st"><span>8 functions</span><span>0 types</span></div></div></a>
 <a href="IOList.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>IOList</h3><p>IOList module: lazy, tree-structured string builder.</p><div class="st"><span>10 functions</span><span>1 types</span></div></div></a>
 <a href="Iterable.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Iterable</h3><p>Iterable module: sequence operations over List(a).</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
-<a href="Json.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Json</h3><p>Json module: JSON encoding and decoding.</p><div class="st"><span>13 functions</span><span>2 types</span></div></div></a>
-<a href="JsonStream.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>JsonStream</h3><p>JsonStream: resumable, total, constant-memory streaming JSON tokenizer.</p><div class="st"><span>12 functions</span><span>9 types</span></div></div></a>
+<a href="Json.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Json</h3><p>Json module: JSON encoding and decoding.</p><div class="st"><span>17 functions</span><span>4 types</span></div></div></a>
+<a href="JsonStream.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>JsonStream</h3><p>JsonStream: resumable, total, constant-memory streaming JSON tokenizer.</p><div class="st"><span>13 functions</span><span>9 types</span></div></div></a>
 <a href="LazyNicheProbe.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>LazyNicheProbe</h3><p>REGRESSION FIXTURE for the lazy-load niche codegen path.</p><div class="st"><span>1 functions</span><span>0 types</span></div></div></a>
 <a href="List.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>List</h3><p>List module: immutable singly-linked list operations.</p><div class="st"><span>53 functions</span><span>0 types</span></div></div></a>
 <a href="Logger.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Logger</h3><p>Logger module: structured logging with levels, scoped context, and</p><div class="st"><span>54 functions</span><span>5 types</span></div></div></a>
