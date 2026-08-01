@@ -151,6 +151,13 @@ git log is authoritative for exact commits.
   `derive Json`-derived type — the recursive encode call resolved back into
   the enclosing type's own encoder instead of the field's. Interpreter only;
   `from_json` is a separate, still-open issue.
+- **A module member bound by a record-pattern `let` can now be referred to by
+  its qualified name.** `let { port, host } = …` at the top of `mod Foo`
+  bound `port` and `host`, but the desugarer's list of "names this module
+  defines" skipped record patterns, so the bare spelling `port` resolved while
+  the self-qualified `Foo.port` failed at run time with
+  `unbound variable: Foo.port`. Record, atom, as- and or-patterns are all
+  recognised now; the tuple form already worked.
 
 - **The default HTTP server no longer strands connections past its worker
   count.** A pool worker owns a connection for that connection's entire

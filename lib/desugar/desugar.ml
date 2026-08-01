@@ -2536,11 +2536,21 @@ let collect_direct_names ~(externs : bool) (decls : decl list) : string list =
   List.concat_map (function
     | DFn (def, _) -> [def.fn_name.txt]
     | DLet (_, b, _) ->
+      (* Exhaustive with NO wildcard, for the same reason the outer decl match
+         is: this list decides which names [strip_entry_self_qual] rewrites and
+         which bare calls [qualify_level] qualifies, so a pattern form silently
+         dropped here makes `Mod.name` fail to resolve while bare `name` works.
+         [add_pat_vars] below is the reference for the full constructor set. *)
       let rec from_pat = function
         | PatVar n -> [n.txt]
-        | PatTuple (ps, _) -> List.concat_map from_pat ps
-        | PatCon (_, ps) -> List.concat_map from_pat ps
-        | _ -> []
+        | PatCon (_, ps) | PatTuple (ps, _) | PatAtom (_, ps, _) ->
+          List.concat_map from_pat ps
+        | PatRecord (fs, _) -> List.concat_map (fun (_, p) -> from_pat p) fs
+        | PatAs (p, n, _) -> n.txt :: from_pat p
+        (* An or-pattern binds the same names in every alternative, so the first
+           alternative suffices; unioning all of them would be equivalent. *)
+        | PatOr (ps, _) -> (match ps with [] -> [] | p :: _ -> from_pat p)
+        | PatWild _ | PatLit _ -> []
       in
       from_pat b.bind_pat
     | DExtern (ext, _) ->

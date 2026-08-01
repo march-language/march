@@ -9819,6 +9819,37 @@ let test_tce_real_mutual_recursion_still_errors () =
   Alcotest.(check bool) "genuine mutual recursion still reported"
     true (has_error_with ctx "not in tail position")
 
+(* ── collect_direct_names: the inner pattern walk must be exhaustive ─────── *)
+
+(* `collect_direct_names`' inner pattern walk feeds `strip_entry_self_qual`. Its
+   wildcard dropped PatRecord binders, so a module member bound by a top-level
+   record-pattern `let` was invisible to the self-qualification rewrite: bare
+   `port` resolved but `Foo.port` did not — the same asymmetry the extern fix
+   closed in #146, one level down.
+
+   The gate is EVAL, not typecheck: `--check` on this shape exits 0 pre-fix and
+   the failure surfaces only when the body runs (`unbound variable: Foo.port`).
+   A `has_errors (typecheck ...)` assertion would be green on both sides and
+   would prove nothing. *)
+let test_record_pattern_let_is_a_module_member () =
+  let env = eval_module {|mod Foo do
+    let { port, host } = { port: 8080, host: "h" }
+    fn run() : Int do Foo.port end
+  end|} in
+  Alcotest.(check int)
+    "a record-pattern top-level let binds a self-qualifiable member"
+    8080 (vint (call_fn env "run" []))
+
+(* CONTROL — the tuple form was always handled; it must stay handled. *)
+let test_tuple_pattern_let_is_a_module_member () =
+  let env = eval_module {|mod Foo do
+    let (a, b) = (1, 2)
+    fn run() : Int do Foo.a + Foo.b end
+  end|} in
+  Alcotest.(check int)
+    "a tuple-pattern top-level let still binds self-qualifiable members"
+    3 (vint (call_fn env "run" []))
+
 (* A match in CHECKING position (function with a declared return type) must
    still get redundant-arm warnings.  check_expr's EMatch arm called only
    check_exhaustiveness, never check_redundant_arms, so every match inside an
@@ -11143,6 +11174,8 @@ let compiler_suites =
           Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
           Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
           Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;
+          Alcotest.test_case "record-pattern top-level let is a module member"   `Quick test_record_pattern_let_is_a_module_member;
+          Alcotest.test_case "tuple-pattern top-level let is a module member"    `Quick test_tuple_pattern_let_is_a_module_member;
         ] );
       ( "tail_call_enforcement", [
           Alcotest.test_case "local `fn` helper shadowing a top-level fn: no error"  `Quick test_tce_local_helper_shadow_no_false_recursion;
