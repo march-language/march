@@ -59,6 +59,133 @@ mod TestJsonTyped do
     Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
     end
 
+  -- ── Phase B: from_json_events, the differential oracle (Task 7) ──────
+  -- `derive Json for Flat` also generates `from_json_events`, a SECOND
+  -- decoder that consumes JsonStream's `Event` list directly instead of
+  -- building a JsonValue tree first (lib/desugar/desugar.ml's
+  -- from_json_events_impl). It must be probed here, immediately after
+  -- Flat's own `derive Json`, for the exact same cross-type-shadowing
+  -- reason as everything else in this file: the bare `from_json_events`
+  -- name is rebound by every subsequent `derive Json`, so a call made
+  -- lazily (e.g. inside a `describe`/`test` block below, which runs after
+  -- the whole module has loaded) would resolve to whichever type derived
+  -- Json LAST, not to Flat's own decoder.
+  --
+  -- `events_of(s)` turns a whole JSON document into its flat `Event`
+  -- list via JsonStream's own feed/finish (NOT reimplementing the
+  -- tokenizer -- JsonStream's tokenizer is frozen and this is only ever
+  -- a consumer of the events it already produces).
+  pfn events_of(s) do
+    match JsonStream.feed(JsonStream.start(), s) do
+    Err(e) -> Err(e)
+    Ok((evs1, st2)) ->
+      match JsonStream.finish(st2) do
+      Err(e) -> Err(e)
+      Ok(evs2) -> Ok(List.append(evs1, evs2))
+      end
+    end
+  end
+
+  -- Render the TREE decoder's verdict as one comparable string: on
+  -- success, re-encode the decoded value via `to_json` (so the oracle
+  -- compares VALUES, not just verdicts) -- on failure, the rendered
+  -- DecodeError (message AND path, per Json.decode_error_to_string).
+  pfn render_tree(s) do
+    match Json.parse(s) do
+    Err(e) -> "PARSEERR:" ++ e
+    Ok(v) -> match from_json(v) do
+      Ok(r) -> "OK:" ++ Json.to_string(to_json(r))
+      Err(e) -> "ERR:" ++ Json.decode_error_to_string(e)
+      end
+    end
+  end
+
+  -- Same, but via the EVENT decoder -- decodes straight off `events_of`'s
+  -- Event list, never touching Json.parse or a JsonValue tree.
+  pfn render_events(s) do
+    match events_of(s) do
+    Err(e) -> "PARSEERR:" ++ JsonStream.err_to_string(e)
+    Ok(evs) -> match from_json_events(evs) do
+      Ok((r, _rest)) -> "OK:" ++ Json.to_string(to_json(r))
+      Err(e) -> "ERR:" ++ Json.decode_error_to_string(e)
+      end
+    end
+  end
+
+  -- Compare the two decoders' rendered verdicts for one document,
+  -- printing a diagnostic on any mismatch (both verdict AND message must
+  -- agree, since `render_tree`/`render_events` fold verdict and message
+  -- into one string).
+  pfn agree_one(s) do
+    let a = render_tree(s)
+    let b = render_events(s)
+    if a == b do true
+    else do
+      IO.puts("ORACLE MISMATCH for " ++ s ++ " -- tree=" ++ a ++ " events=" ++ b)
+      false
+    end
+    end
+  end
+
+  -- No `&&` short-circuiting: every document is checked (and any
+  -- mismatch printed) even after an earlier one has already failed.
+  pfn agree_all(docs) do
+    match docs do
+    Nil -> true
+    Cons(d, rest) -> do
+      let ok1 = agree_one(d)
+      let ok2 = agree_all(rest)
+      ok1 && ok2
+    end
+    end
+  end
+
+  -- The corpus: task-7-brief.md's Step 1 example, PLUS a duplicate-key
+  -- document (Step 4 requires the oracle to cover it explicitly).
+  let json_events_corpus =
+    Cons("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}",
+    Cons("{\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5,\"zzz\":9}",
+    Cons("{\"age\":3,\"name\":\"a\",\"score\":1.5,\"active\":true}",
+    Cons("{\"name\":1,\"age\":3,\"active\":true,\"score\":1.5}",
+    Cons("{\"name\":\"a\",\"active\":true,\"score\":1.5}",
+    Cons("[1,2]",
+    Cons("{\"name\":\"a\",\"name\":\"b\",\"age\":3,\"active\":true,\"score\":1.5}",
+    Nil)))))))
+  let json_events_corpus_agrees_r = agree_all(json_events_corpus)
+
+  -- ── Unknown-field subtree skipping: depth-counting tests (Task 7 Step 3)
+  -- The single most likely way a generated event decoder goes wrong: if
+  -- `skip_value` desynchronizes the stream (e.g. by counting only "the
+  -- next event" instead of tracking container depth explicitly), it does
+  -- NOT raise an error -- it silently reads the following KNOWN field's
+  -- events as if they were the unknown field's remaining subtree, so the
+  -- next field decodes to a WRONG VALUE with no error at all. So each
+  -- case below has an unknown field (whose value is itself a container)
+  -- immediately followed by Flat's normal fields, and the assertions
+  -- below check every one of those fields' ACTUAL DECODED VALUES -- not
+  -- merely that decoding succeeded -- which is what would actually catch
+  -- a desynchronized skip.
+  let skip_nested_object_r =
+    match events_of("{\"zzz\":{\"a\":{\"b\":1}},\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+  let skip_nested_array_r =
+    match events_of("{\"zzz\":[[1,2],[3,4]],\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+  let skip_array_of_objects_r =
+    match events_of("{\"zzz\":[{\"x\":1},{\"y\":2}],\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+  let skip_empty_object_r =
+    match events_of("{\"zzz\":{},\"name\":\"a\",\"age\":3,\"active\":true,\"score\":1.5}") do
+    Err(e) -> Err(Json.DecodeError("stream: " ++ JsonStream.err_to_string(e), Nil, 0 - 1))
+    Ok(evs) -> from_json_events(evs)
+    end
+
   -- A second, nested record pair, to probe path composition across a
   -- record boundary (Json.decode_error_under). PathOuter must derive Json
   -- LAST (of this pair) so the bare `from_json` called just below resolves
@@ -477,6 +604,55 @@ mod TestJsonTyped do
       let outer = Json.decode_error_under(Json.JPathField("user"), inner)
       assert (Json.decode_error_to_string(outer) == "$.user.id: expected Int")
     end
+  end
+
+  describe "event decoder matches the tree decoder" do
+    -- For every corpus document, from_json(build(doc)) (tree) and
+    -- from_json_events(events(doc)) (Task 7's new event decoder) must
+    -- agree: same value on success, same rendered error on failure. The
+    -- corpus covers an unknown field, a reordered object, a missing
+    -- field, a wrong type, a non-object, and a duplicate key -- the
+    -- cases where a generated state machine is most likely to diverge
+    -- from a tree walk.
+    test "tree and event decoders agree over the corpus" do
+      assert (json_events_corpus_agrees_r)
+    end
+  end
+
+  describe "unknown-field subtree skipping (depth counting)" do
+    -- These do NOT merely check "no error was raised" -- a desynchronized
+    -- skip produces a WRONG VALUE with no error, so each assertion checks
+    -- the actual decoded value of every field that follows the skipped
+    -- unknown one.
+
+    test "unknown field holding a nested object, followed by known fields" do
+      match skip_nested_object_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP NESTED OBJECT ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
+    test "unknown field holding a nested array, followed by known fields" do
+      match skip_nested_array_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP NESTED ARRAY ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
+    test "unknown field holding an array of objects, followed by known fields" do
+      match skip_array_of_objects_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP ARRAY-OF-OBJECTS ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
+    test "unknown field holding an empty object, followed by known fields" do
+      match skip_empty_object_r do
+      Ok((r, _rest)) -> assert (r.name == "a" && r.age == 3 && r.active == true && r.score == 1.5)
+      Err(e) -> do IO.puts("SKIP EMPTY OBJECT ERR: " ++ Json.decode_error_to_string(e)) assert (false) end
+      end
+    end
+
   end
 
 end

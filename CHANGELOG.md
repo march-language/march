@@ -13,6 +13,25 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`derive Json for T` (record types) now also generates
+  `from_json_events(events) : Result((T, List(JsonStream.Event)),
+  Json.DecodeError)`, a second decoder that consumes `JsonStream`'s
+  `Event` list directly instead of building a `JsonValue` tree first.**
+  A record can now be decoded straight off the token stream — useful for
+  a single huge top-level JSON object, where the existing tree-based
+  `from_json` would otherwise have to materialize the whole thing as a
+  `JsonValue` first. Generated as a small state machine: one `Option`
+  slot per field, filled opportunistically as `EvKey` events arrive in
+  whatever order the JSON object happens to use; a nested field whose
+  type also derives Json recurses into its own `from_json_events`,
+  composing the error path across the boundary exactly like the tree
+  decoder does. Unknown fields (and duplicate keys, which keep
+  first-occurrence-wins, matching the tree decoder) are skipped by
+  consuming their WHOLE value — including nested containers — via
+  explicit depth counting, so the event stream never desynchronizes.
+  Scope: record types only; `TDVariant`/`TDAlias` are unchanged and do
+  not get this second decoder.
+
 - **`JsonStream.each_typed(path, cb)` decodes an NDJSON file straight to
   typed records via `derive Json`'s `from_json`, and attaches the
   decoding record's absolute byte offset to any failure.** A driver built
@@ -28,6 +47,22 @@ git log is authoritative for exact commits.
   Int"`. `test/stdlib/test_json_stream.march` (phase 1/2's tokenizer
   suite) is unchanged and stays green — `each_typed` does not touch
   `feed`/`finish`/`go` or any tokenizer internals.
+
+### Changed
+
+- **`derive Json`'s generated `from_json` now returns
+  `Result(T, Json.DecodeError)` instead of `Result(T, String)` — a
+  breaking change for any caller matching on the old bare-`String` error.**
+  `Json.DecodeError(message, path, byte_offset)` carries a JSONPath-style
+  path (`Json.JPathField`/`Json.JPathIndex` steps, e.g.
+  `"$.users[3].id: expected Int"`) and an optional byte offset (`-1` when
+  none applies), rendered via `Json.decode_error_to_string`. Every
+  in-repo caller (`JsonStream.each_value`/`each_typed`,
+  `test/stdlib/test_json_typed.march`) was migrated in the same set of
+  commits that introduced the type. A bare `to_string(e)` still produces
+  a readable message (e.g. `DecodeError("missing field",
+  [JPathField("age")], -1)`), but code that expected a plain error string
+  should switch to `Json.decode_error_to_string(e)`.
 
 ### Fixed
 

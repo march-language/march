@@ -1794,8 +1794,295 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
       } in
       DImpl (idef, sp)
     in
+    (* ── from_json_events (Task 7 / Phase B) ───────────────────────────
+       A second, event-consuming decoder, generated ONLY for TDRecord
+       types (task-7-brief.md's Step 2 illustrates a record-specific state
+       machine; TDVariant/TDAlias keep only the tree-based to_json/
+       from_json above -- extending the event path to variants is
+       explicitly out of this task's scope).
+
+       from_json_events(events : List(JsonStream.Event))
+         : Result((T, List(JsonStream.Event)), Json.DecodeError)
+
+       consumes exactly the events belonging to one value of type T off
+       the FRONT of [events] and returns the decoded value paired with
+       whatever events remain -- this is what lets a nested derived-Json
+       field recurse by calling its own from_json_events on the same
+       stream and threading the remainder back out, without ever
+       building a JsonValue tree. This mirrors the "JsonFrom"/"JsonTo"
+       pseudo-interface trick above: iface name "JsonFromEvents" starts
+       with "Json", so eval.ml's/typecheck.ml's [is_json_iface]/
+       [is_json_derive] prefix checks treat it exactly like from_json --
+       skip interface-existence validation, bind the bare method name in
+       the local env (not impl_tbl-dispatched), self-recursive closure --
+       with NO changes needed to either file. This also means
+       from_json_events inherits the SAME cross-type shadowing caveat as
+       bare from_json (lib/eval/eval.ml's DImpl handling name-binds it
+       per-derive, so the LAST type to derive Json in a module owns the
+       bare name) -- a known, separately-tracked issue, not a new one.
+
+       Two helpers are generated as LOCAL recursive functions (`ELetFn`,
+       scoped to this from_json_events body) rather than extra top-level
+       `pfn` declarations, so that two types deriving Json in the same
+       module never collide on a shared top-level helper name -- unlike
+       the shared bare `from_json`/`to_json` names (which tolerate
+       last-wins shadowing by design), a stray collision on an internal
+       helper would be a new, gratuitous bug.
+
+       - skip(events, depth): unknown-field subtree skip. Tracks
+         container depth EXPLICITLY (EvObjStart/EvArrStart increment,
+         EvObjEnd/EvArrEnd decrement) and stops only when depth returns
+         to the level it started at -- see task-7-brief.md's Step 3 for
+         why counting only "the next event" would silently desynchronize
+         the stream instead of erroring.
+       - loop(events, slot_f1, slot_f2, ...): one Option slot per field
+         (all None initially). On EvKey(k) matching a field whose slot is
+         still None, decode that field's value and recurse with the slot
+         filled; on EvKey(k) matching a field whose slot is ALREADY Some
+         (a duplicate key) or matching no field at all (an unknown key),
+         skip the value via `skip` and recurse UNCHANGED --
+         first-occurrence-wins for duplicates, matching the tree
+         decoder's Json.get_field/Json.parse behavior (the capability
+         map), which the oracle in test_json_typed.march requires the two
+         decoders to agree on. On EvObjEnd, every slot must be Some, else
+         `DecodeError("missing field", ...)`. *)
+    let from_json_events_impl : decl option =
+      match td with
+      | TDRecord fields ->
+        let ev_field_slots = List.mapi (fun i (f : field) ->
+            (i, f, mk_name (Printf.sprintf "_evf_%s" f.fld_name.txt))
+          ) fields
+        in
+        let skip_name = mk_name "_ev_skip" in
+        let loop_name = mk_name "_ev_loop" in
+        let sk_events = mk_name "_sk_events" in
+        let sk_depth  = mk_name "_sk_depth" in
+        let sk_rest   = mk_name "_sk_rest" in
+        let depth_e = EVar sk_depth in
+        let depth_plus1  = EApp (EVar (mk_name "+"), [depth_e; ELit (LitInt 1, sp)], sp) in
+        let depth_minus1 = EApp (EVar (mk_name "-"), [depth_e; ELit (LitInt 1, sp)], sp) in
+        let depth_eq n = EApp (EVar (mk_name "=="), [depth_e; ELit (LitInt n, sp)], sp) in
+        let sk_recurse events_e depth_e2 =
+          EApp (EVar skip_name, [events_e; depth_e2], sp)
+        in
+        let sk_ok_rest = ECon (mk_name "Ok", [EVar sk_rest], sp) in
+        let sk_close_branch =
+          EIf (depth_eq 1, sk_ok_rest, sk_recurse (EVar sk_rest) depth_minus1, sp)
+        in
+        let skip_body =
+          EMatch (EVar sk_events, [
+              { branch_pat = PatCon (mk_name "Nil", []);
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "truncated while skipping an unknown field's value" nil_path], sp) };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjStart", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_recurse (EVar sk_rest) depth_plus1 };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvArrStart", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_recurse (EVar sk_rest) depth_plus1 };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjEnd", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_close_branch };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvArrEnd", []); PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = sk_close_branch };
+              { branch_pat = PatCon (mk_name "Cons", [PatWild sp; PatVar sk_rest]);
+                branch_guard = None;
+                branch_body = EIf (depth_eq 0, sk_ok_rest, sk_recurse (EVar sk_rest) depth_e, sp) };
+            ], sp)
+        in
+        let skip_fn_letfn =
+          ELetFn (skip_name,
+            [ { param_name = sk_events; param_ty = None; param_lin = Unrestricted };
+              { param_name = sk_depth;  param_ty = None; param_lin = Unrestricted } ],
+            None, skip_body, sp)
+        in
+        (* Decode one field's value out of the events immediately
+           following its EvKey, mirroring decode_value_at above but
+           consuming events instead of a JsonValue -- see
+           decode_value_at's comment for why a nested derived-Json field
+           recurses via decode_error_under. Returns
+           Result((value, remaining_events), DecodeError). *)
+        let decode_field_from_events (fty : ty) (events_e : expr)
+            (step : expr) (single_path : expr) : expr =
+          let scalar_case (ctor : string) (msg : string) (conv : expr -> expr) : expr =
+            let bound = mk_name "_evsv" in
+            let rest3 = mk_name "_evsrest" in
+            EMatch (events_e, [
+                { branch_pat = PatCon (mk_name "Cons",
+                    [PatCon (mk_name ctor, [PatVar bound]); PatVar rest3]);
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Ok",
+                    [ETuple ([conv (EVar bound); EVar rest3], sp)], sp) };
+                { branch_pat = PatWild sp;
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Err", [mk_decode_err msg single_path], sp) };
+              ], sp)
+          in
+          match fty with
+          | TyCon ({txt = "String"; _}, []) ->
+            scalar_case "EvStr" "expected String" (fun e -> e)
+          | TyCon ({txt = "Int"; _}, []) ->
+            scalar_case "EvNum" "expected Int"
+              (fun e -> EApp (EVar (mk_name "float_to_int"), [e], sp))
+          | TyCon ({txt = "Float"; _}, []) ->
+            scalar_case "EvNum" "expected Float" (fun e -> e)
+          | TyCon ({txt = "Bool"; _}, []) ->
+            scalar_case "EvBool" "expected Bool" (fun e -> e)
+          | _ ->
+            (* Assume the field's type also derives Json and recurses via
+               ITS OWN generated from_json_events, threading the
+               remaining-events tuple straight through on success and
+               prefixing this field's path step on failure. *)
+            let inner_ok = mk_name "_evok" in
+            let inner_rest = mk_name "_evokrest" in
+            let inner_err = mk_name "_everr" in
+            EMatch (EApp (EVar (mk_name "from_json_events"), [events_e], sp), [
+                { branch_pat = PatCon (mk_name "Ok",
+                    [PatTuple ([PatVar inner_ok; PatVar inner_rest], sp)]);
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Ok",
+                    [ETuple ([EVar inner_ok; EVar inner_rest], sp)], sp) };
+                { branch_pat = PatCon (mk_name "Err", [PatVar inner_err]);
+                  branch_guard = None;
+                  branch_body = ECon (mk_name "Err",
+                    [EApp (EVar (mk_name "Json.decode_error_under"),
+                           [step; EVar inner_err], sp)], sp) };
+              ], sp)
+        in
+        let cursor = mk_name "_ev_cursor" in
+        let all_slots = List.map (fun (_, _, s) -> s) ev_field_slots in
+        let slots_as_evars = List.map (fun s -> EVar s) all_slots in
+        let key_v = mk_name "_evk" in
+        let after_key_v = mk_name "_evrestk" in
+        let tail_v = mk_name "_evtail" in
+        (* Skip one whole value (unknown key, or a duplicate of a
+           known key), then resume the loop with the slots UNCHANGED. *)
+        let skip_and_continue (events_after_e : expr) (slot_args : expr list) : expr =
+          let sk2_ok = mk_name "_evskrest" in
+          let sk2_err = mk_name "_evskerr" in
+          EMatch (EApp (EVar skip_name, [events_after_e; ELit (LitInt 0, sp)], sp), [
+              { branch_pat = PatCon (mk_name "Ok", [PatVar sk2_ok]);
+                branch_guard = None;
+                branch_body = EApp (EVar loop_name, EVar sk2_ok :: slot_args, sp) };
+              { branch_pat = PatCon (mk_name "Err", [PatVar sk2_err]);
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err", [EVar sk2_err], sp) };
+            ], sp)
+        in
+        let is_some_expr (e : expr) : expr =
+          EMatch (e, [
+              { branch_pat = PatCon (mk_name "Some", [PatWild sp]);
+                branch_guard = None; branch_body = ELit (LitBool true, sp) };
+              { branch_pat = PatWild sp;
+                branch_guard = None; branch_body = ELit (LitBool false, sp) };
+            ], sp)
+        in
+        let rec build_key_chain (remaining : (int * field * name) list) : expr =
+          match remaining with
+          | [] ->
+            (* No field matched this key: unknown field. *)
+            skip_and_continue (EVar after_key_v) slots_as_evars
+          | (i, f, slot) :: rest ->
+            let key_eq = EApp (EVar (mk_name "=="),
+              [EVar key_v; ELit (LitString f.fld_name.txt, sp)], sp) in
+            let decode_and_set =
+              let decoded = decode_field_from_events f.fld_ty (EVar after_key_v)
+                  (jpath_field_step f.fld_name.txt) (single_step_path f.fld_name.txt) in
+              let dv = mk_name "_evdv" in
+              let drest = mk_name "_evdrest" in
+              let derr = mk_name "_evderr" in
+              EMatch (decoded, [
+                  { branch_pat = PatCon (mk_name "Ok",
+                      [PatTuple ([PatVar dv; PatVar drest], sp)]);
+                    branch_guard = None;
+                    branch_body =
+                      let new_args = List.mapi (fun j s ->
+                          if j = i then ECon (mk_name "Some", [EVar dv], sp)
+                          else EVar s) all_slots in
+                      EApp (EVar loop_name, EVar drest :: new_args, sp) };
+                  { branch_pat = PatCon (mk_name "Err", [PatVar derr]);
+                    branch_guard = None;
+                    branch_body = ECon (mk_name "Err", [EVar derr], sp) };
+                ], sp)
+            in
+            EIf (key_eq,
+              (* Duplicate key (slot already filled): first-wins, so skip
+                 this occurrence's value instead of overwriting. *)
+              EIf (is_some_expr (EVar slot),
+                   skip_and_continue (EVar after_key_v) slots_as_evars,
+                   decode_and_set, sp),
+              build_key_chain rest, sp)
+        in
+        let rec build_finish_chain (remaining : (int * field * name) list)
+            (decoded : (name * expr) list) (tail_e : expr) : expr =
+          match remaining with
+          | [] -> ECon (mk_name "Ok",
+              [ETuple ([ERecord (List.rev decoded, sp); tail_e], sp)], sp)
+          | (_, f, slot) :: rest ->
+            let bv = mk_name (Printf.sprintf "_evfv_%s" f.fld_name.txt) in
+            EMatch (EVar slot, [
+                { branch_pat = PatCon (mk_name "Some", [PatVar bv]);
+                  branch_guard = None;
+                  branch_body = build_finish_chain rest
+                    ((f.fld_name, EVar bv) :: decoded) tail_e };
+                { branch_pat = PatCon (mk_name "None", []);
+                  branch_guard = None;
+                  branch_body = err_at_field "missing field" f.fld_name.txt };
+              ], sp)
+        in
+        let loop_body =
+          EMatch (EVar cursor, [
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjEnd", []); PatVar tail_v]);
+                branch_guard = None;
+                branch_body = build_finish_chain ev_field_slots [] (EVar tail_v) };
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvKey", [PatVar key_v]); PatVar after_key_v]);
+                branch_guard = None;
+                branch_body = build_key_chain ev_field_slots };
+              { branch_pat = PatCon (mk_name "Nil", []);
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "truncated while decoding an object" nil_path], sp) };
+              { branch_pat = PatWild sp;
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "expected a field name or end of object" nil_path], sp) };
+            ], sp)
+        in
+        let loop_params =
+          { param_name = cursor; param_ty = None; param_lin = Unrestricted }
+          :: List.map (fun s -> { param_name = s; param_ty = None; param_lin = Unrestricted }) all_slots
+        in
+        let loop_fn_letfn = ELetFn (loop_name, loop_params, None, loop_body, sp) in
+        let rest0 = mk_name "_ev_rest0" in
+        let all_none_args = List.map (fun _ -> ECon (mk_name "None", [], sp)) all_slots in
+        let top_body =
+          EMatch (EVar (mk_name "events"), [
+              { branch_pat = PatCon (mk_name "Cons",
+                  [PatCon (mk_name "EvObjStart", []); PatVar rest0]);
+                branch_guard = None;
+                branch_body = EApp (EVar loop_name, EVar rest0 :: all_none_args, sp) };
+              { branch_pat = PatWild sp;
+                branch_guard = None;
+                branch_body = ECon (mk_name "Err",
+                  [mk_decode_err "expected an object" nil_path], sp) };
+            ], sp)
+        in
+        let full_body = EBlock ([skip_fn_letfn; loop_fn_letfn; top_body], sp) in
+        let from_json_events_fn = mk_fn_def "from_json_events" ["events"] full_body in
+        Some (mk_json_impl "JsonFromEvents" "from_json_events" from_json_events_fn)
+      | TDVariant _ | TDAlias _ -> None
+    in
     [mk_json_impl "JsonTo" "to_json" to_json_fn;
      mk_json_impl "JsonFrom" "from_json" from_json_fn]
+    @ (match from_json_events_impl with Some d -> [d] | None -> [])
 
   | _ ->
     Err.error errors ~span:iface_span

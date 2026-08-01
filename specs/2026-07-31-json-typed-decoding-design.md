@@ -1,6 +1,7 @@
 # Typed JSON Decoding — design
 
-**Status:** draft, not yet implemented
+**Status:** implemented (Tasks 1-7 complete; combinators remain an open,
+unmotivated non-goal — see `specs/todos.md`)
 **Date:** 2026-07-31
 **Scope:** the "type safety at the edge" goal from
 `specs/2026-07-30-json-streaming-design.md` (its Component 4), rescoped after
