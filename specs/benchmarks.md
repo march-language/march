@@ -48,6 +48,43 @@ floor, and the treatment effect is twenty times smaller than it. The
 within-arm spread on shards=1 close (13.1 µs) is itself larger than the whole
 treatment effect. Reverted in the commit following its own.
 
+### 7. Hoisting per-connection setsockopt onto the listener — verified inheritable, measured no effect
+
+Followed up on the syscall inventory in §6: does Linux inherit `TCP_NODELAY`
+/ `SO_SNDBUF` / `SO_RCVTIMEO` from the listening socket onto `accept()`ed
+sockets, which would let `connection_thread` skip all three per connection?
+
+**Inheritance itself is real** — verified with a standalone probe
+(`getsockopt` on an accepted socket after setting all three only on the
+listener): all three inherited exactly, unlike the *documented* POSIX
+behavior (there is none; this is Linux-kernel-specific and not guaranteed on
+BSD/macOS, so any implementation must stay Linux-gated).
+
+**But it does not measurably help.** Env-gated single-binary A/B
+(`MARCH_ABL_HOIST_SOCKOPT`, not merged), connection-close, order-swapped:
+
+| | baseline (per-connection) | hoisted (listener-only) |
+|---|---:|---:|
+| CPU-µs/req | 98.61 / 86.09 (mean 92.4) | 100.66 / 90.10 (mean 95.4) |
+
+Hoisted is *slightly worse*, well inside the run-to-run spread. Three fewer
+syscalls out of the seven counted in §6 produced no measurable change —
+consistent with §6's own caveat that `setsockopt` is cheap relative to
+`accept`/`close` socket-lifecycle and TCP state-machine work, which this
+change does not touch. Not implemented.
+
+**Pattern across §5-§7:** three independent "obviously true" micro-costs —
+per-request header allocation, listener sharding, per-connection
+`setsockopt` — each measured and each showed no effect above noise on this
+hardware. The connection-close overhead itself (§6) is real and large
+(~90-100 µs against keep-alive's ~24-27), but none of these syscall-count
+reductions touch it; whatever the real cost is, it lives inside `accept`/
+`close`/the kernel's TCP connection lifecycle, not in the small number of
+option-setting calls around it. That points toward eliminating connections
+entirely (HTTP/1.1 keep-alive already does this when the client cooperates;
+HTTP/2 multiplexing would force it) rather than making individual
+connections cheaper to set up.
+
 ### 6. TCP_FASTOPEN — investigated, not implemented: unmeasurable in this rig
 
 Considered as a way to cut the connection-close cost (Run 5 measured ~94-107
