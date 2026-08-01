@@ -113,14 +113,34 @@ int march_http_send_file(int client_fd, const char *path);
 
 /* ── HTTP server ───────────────────────────────────────────────────── */
 
-/* Compile with -DMARCH_HTTP_USE_EVLOOP to switch from the thread-per-connection
- * model to the kqueue/epoll event-loop model.  The event loop uses SO_REUSEPORT
- * with one thread per CPU core, each running its own kqueue/epoll instance.
- * Falls back to thread-per-connection on platforms without kqueue or epoll. */
-#if defined(MARCH_HTTP_USE_EVLOOP)
-/* Declared in march_http_evloop.c. */
+/* Two server implementations ship in EVERY binary — march_http_evloop.c is
+ * always compiled and linked (see bin/main.ml's runtime file list), so the
+ * choice between them is a runtime one, not a build one:
+ *
+ *   thread pool (default)  blocking OS-thread workers, one per connection for
+ *                          that connection's keep-alive lifetime.  Handlers may
+ *                          block freely — a synchronous DB call is fine.
+ *   event loop             kqueue/epoll, one thread per core, each with its own
+ *                          SO_REUSEPORT listener.  Measurably cheaper and much
+ *                          higher throughput, but its loop threads MUST NOT
+ *                          block: a synchronous call in a handler stalls every
+ *                          other connection on that thread.
+ *
+ * Measured on an idle 4-core Linux box (kernel 6.8, epoll), wrk -c256,
+ * order-swapped: pool 44.9 CPU-us/request at ~48k req/s; event loop 26.5
+ * CPU-us/request at ~79k req/s — 41% cheaper per request and ~60% more
+ * throughput.  The gap is much smaller on macOS/kqueue (21%, and the event
+ * loop lost on req/s there to a scheduling artifact), so this is a
+ * Linux-specific win and Linux is where servers run.
+ *
+ * Selected by the MARCH_HTTP_EVLOOP environment variable AT RUN TIME.
+ * -DMARCH_HTTP_USE_EVLOOP still forces the event loop at build time and
+ * remains the way to make it unconditional. */
 void march_evloop_server_listen(int port, void *pipeline);
-#endif
+
+/* True when the event-loop server should handle this process's requests.
+ * Reads MARCH_HTTP_EVLOOP once; "1"/"true"/"yes" enable it. */
+int march_http_evloop_enabled(void);
 
 /* Default number of worker threads in the connection thread pool.
  * Used as a fallback when sysconf(_SC_NPROCESSORS_ONLN) is unavailable. */
