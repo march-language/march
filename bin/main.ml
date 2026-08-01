@@ -277,6 +277,7 @@ let stdlib_file_list = [
   "duration.march";
   "bytes.march";
   "msgpack.march";
+  "compress.march";
   "toml.march";
   "xml.march";
   "yaml.march";
@@ -287,6 +288,17 @@ let stdlib_file_list = [
   "system.march";
   "cluster.march";
   "cluster_load.march";
+  (* consistent_hash.march and work_dispatch.march must load EAGERLY, same
+     class of bug as the deque.march note above: a lazily-loaded module's
+     generic Option/Result-returning functions (e.g. ConsistentHash.get,
+     WorkDispatch functions) reach mono with unresolved call-site tvars and
+     default to a Boxed representation, while a concrete caller (e.g.
+     Option(Int)) expects the niche encoding — the caller then reads the
+     box's heap address as the payload. Confirmed live 2026-08-01 via
+     ConsistentHash.get returning a garbage pointer instead of the stored
+     Int, compiled only. *)
+  "consistent_hash.march";
+  "work_dispatch.march";
   "logger.march";
   "actor.march";
   "flow.march";
@@ -295,6 +307,7 @@ let stdlib_file_list = [
   "regex.march";
   "datetime.march";
   "queue.march";
+  "ring_buf.march";
   "enum.march";
   "random.march";
   "gen.march";
@@ -349,6 +362,12 @@ let stdlib_file_list = [
   "global_registry.march";
   "cluster_conn.march";
   "node_call.march";
+  (* dist_link.march / dist_supervisor.march: same lazy-load representation
+     bug as above (see the deque.march / consistent_hash.march notes) — both
+     export Option/Result-returning generics over concrete node/monitor
+     types. dist_supervisor depends on dist_link, so it must come after. *)
+  "dist_link.march";
+  "dist_supervisor.march";
 ]
 
 (** Stdlib modules only loaded for --target js builds.
