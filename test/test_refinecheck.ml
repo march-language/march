@@ -6387,6 +6387,131 @@ end|}));
           (List.length (ctx.March_errors.Errors.diagnostics)))
   ]
 
+(* ── `sig` / `extern` signature refinements ────────────────────────────────
+   The same silent-no-op shape as `iface_refine_suite`, in the two other decl
+   forms that carry a `ty` the checker never reads.  Both were probed silent
+   before the fix: `--check` on either fixture exited 0 with ZERO diagnostics.
+
+   These assert over `ctx.diagnostics` directly rather than through
+   `refine_error_text_d`, which filters to `Error` severity and would therefore
+   be green on both sides of a fix that ships a WARNING — pinning nothing. *)
+let sig_extern_refine_suite =
+  [ gated "a refinement in a `sig` signature is diagnosed" (fun () ->
+        (* PRE-FIX: silent. `sig_fns`' types were never walked. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR1 do
+  sig Store do
+    fn put : Int -> {Int | _ > 0}
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "names the signature function" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`put`") msgs);
+        (* Naming the enclosing `sig` too: a module may declare several, and
+           "`put` enforces nothing" is not locatable without it. *)
+        Alcotest.(check bool) "names the enclosing sig" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`sig Store`") msgs);
+        (* The remedy must be the sig-specific one, NOT the interface message's
+           "put it on the `impl` method" — there is no impl here and that
+           advice would be actively wrong. *)
+        Alcotest.(check bool) "remedy names the module's own `fn` definition" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message
+               "Write the refinement on the module's own `fn` definition") msgs);
+        Alcotest.(check bool) "does not give the interface remedy" false
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message
+               "corresponding `impl` method's own signature") msgs))
+
+  ; gated "a refinement in an `extern` signature is diagnosed" (fun () ->
+        (* The plan's fixture for this case did not compile: it wrote
+           `Cap(IO.FileSystem)` with no `needs`, which `--check` rejects with
+           two hard errors before refinecheck is reached.  Corrected to
+           `needs IO.Foreign` + `Cap(IO.Foreign)`, matching
+           `specs/lang/types/accept/t139`. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR2 do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn take(n : {Int | _ > 0}) : Int = "take"
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "names the extern function" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`take`") msgs);
+        (* The extern reason is NOT the sig reason. A foreign return refinement
+           is unverifiable in principle, not merely unwalked, so the message
+           must say the callee is not March code — advice that told the author
+           to move the predicate somewhere it would be "checked" is wrong for
+           the return position. *)
+        Alcotest.(check bool) "states the callee is not March code" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "the callee is not March code") msgs);
+        Alcotest.(check bool) "remedy names a March wrapper" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "Wrap the extern in a March `fn`") msgs))
+
+  ; gated "a RETURN-position `extern` refinement is diagnosed too" (fun () ->
+        (* `ef_ret_ty` is a separate field from `ef_params`; a detector that
+           only walked the parameters would be green on the case above and
+           silent here. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR4 do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn count(s : String) : {Int | _ >= 0} = "strlen"
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check bool) "diagnosed" true
+          (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             contains d.March_errors.Errors.message "`count`")
+            ctx.March_errors.Errors.diagnostics))
+
+  ; gated "an UNREFINED sig signature stays quiet" (fun () ->
+        (* The false-positive control: it must be the REFINEMENT that fires,
+           not the mere presence of a `sig`. Green on both sides of the fix. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR3 do
+  sig Store do
+    fn put : Int -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics))
+
+  ; gated "an UNREFINED extern signature stays quiet" (fun () ->
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod SR5 do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn count(s : String) : Int = "strlen"
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics))
+  ]
+
 (* ── `use` competes with an impl method for its name ───────────────────────
    [adoptable_impl_methods] counted only the decls it could SEE defining a
    name — sibling `fn`s and other `impl`s — so a `use Other.{run}` beside
@@ -6614,4 +6739,5 @@ let () =
       ("postcond-strict", postcond_strict_suite);
       ("qualified-predicate", qualified_pred_suite);
       ("interface-signature-refinement", iface_refine_suite);
+      ("sig-extern-refinement", sig_extern_refine_suite);
       ("use-impl-adoption", use_adoption_suite) ]

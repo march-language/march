@@ -5226,6 +5226,58 @@ let warn_iface_method_refinement (errctx : Err.ctx) (m : A.method_decl) : unit =
         (exactly one `impl` defines it and no top-level `fn` shares the name)."
        m.A.md_name.A.txt)
 
+(* ── `sig` signature refinement warning ────────────────────────────────────
+   A refinement in a `sig` module signature (`A.sig_def`'s [sig_fns]) is inert
+   for the same structural reason the interface one is: nothing in this pass
+   reads [sig_fns].  [visit_decl] has no `DSig` arm that descends, and the
+   signature is an ASCRIPTION — it constrains what a module exports, not what
+   any particular function body does, so there is no `fn_def` for the predicate
+   to attach to and no call site that consults it.
+
+   The remedy is the module's own `fn` definition, where a parameter refinement
+   obliges callers and a return refinement is discharged against the body.
+
+   Emits unconditionally: the caller has already established
+   [ty_has_refinement]. *)
+let warn_sig_fn_refinement (errctx : Err.ctx) (sig_name : A.name) (fn_name : A.name) : unit =
+  Err.warning errctx ~span:fn_name.A.span
+    (Printf.sprintf
+       "the `sig %s` signature of `%s` carries a refinement, which enforces \
+        nothing: a `sig` signature is never read by the refinement checker, so \
+        no call site is obliged by this predicate and no body may assume it. \
+        Write the refinement on the module's own `fn` definition instead, where \
+        a parameter refinement obliges callers and a return refinement is \
+        checked against the body."
+       sig_name.A.txt fn_name.A.txt)
+
+(* ── `extern` signature refinement warning ─────────────────────────────────
+   A refinement on an `extern` function's parameter or return type is inert,
+   and here the reason is not merely that the pass does not walk it — it is
+   that it CANNOT be honoured.  The callee is foreign C, so:
+     · a RETURN refinement is an unverifiable claim: there is no March body to
+       discharge it against, and assuming it would be UNSOUND rather than
+       merely missing;
+     · a PARAMETER refinement has a March-side call site that could in
+       principle be obliged, but the extern declaration is not a `fn_def` and
+       registers no contract, so today it obliges nothing.
+   The remedy is a March wrapper: put the parameter refinement on the wrapper,
+   where callers are obliged, and CHECK the foreign result at runtime rather
+   than asserting it in a type.
+
+   Emits unconditionally: the caller has already established
+   [ty_has_refinement]. *)
+let warn_extern_fn_refinement (errctx : Err.ctx) (ef : A.extern_fn) : unit =
+  Err.warning errctx ~span:ef.A.ef_name.A.span
+    (Printf.sprintf
+       "the `extern` signature of `%s` carries a refinement, which enforces \
+        nothing: the callee is not March code, so the refinement checker \
+        obliges no caller with it and can discharge no claim about the value it \
+        returns. Wrap the extern in a March `fn` and write the parameter \
+        refinement there, where call sites are obliged; a foreign RESULT cannot \
+        be verified at all and must be checked at runtime rather than asserted \
+        in its type."
+       ef.A.ef_name.A.txt)
+
 let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
   let ge = warn_predicate_expr_tys errctx in
   match e with
@@ -5320,24 +5372,37 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
         Option.iter expr app.A.app_on_stop
       | A.DTest (t, _) -> expr t.A.test_body
       | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
+      (* `DSig` and `DExtern` used to sit in the "not walked" list below under
+         the label "inert: no type annotation or expression that can carry a
+         refinement predicate".  That label was FALSE for both and was
+         demonstrated so by probe: `sig Store do fn put : Int -> {Int | _ > 0}
+         end` exited 0 with no diagnostic at all.  Both are now walked, on the
+         same footing as `DInterface` — same shape, same reason, and the same
+         either/or between the inert-signature warning and the vocabulary one
+         (running both would append "annotate the function `@[measure]`" to a
+         position where no annotation can help). *)
+      | A.DSig (sig_name, sd, _) ->
+        List.iter
+          (fun ((fn_name : A.name), (t : A.ty)) ->
+            if ty_has_refinement t then warn_sig_fn_refinement errctx sig_name fn_name
+            else warn_predicate_ty errctx t)
+          sd.A.sig_fns
+      | A.DExtern (ed, _) ->
+        List.iter
+          (fun (ef : A.extern_fn) ->
+            let tys = ef.A.ef_ret_ty :: List.map snd ef.A.ef_params in
+            if List.exists ty_has_refinement tys then warn_extern_fn_refinement errctx ef
+            else List.iter (warn_predicate_ty errctx) tys)
+          ed.A.ext_fns
       (* ── Not walked.  Named so a new decl form breaks the build. ──
-
-         This list was previously labelled "inert: no type annotation or
-         expression that can carry a refinement predicate".  That is FALSE for
-         two of its members and was demonstrated so by probe: `DSig` carries
-         `sig_fns : (name * ty) list` and `DExtern` carries `extern_fn`'s
-         `ef_params`/`ef_ret_ty`, any of which can be a `TyRefine`.  A
-         refinement written there is accepted in silence today —
-
-             sig Store do fn put : Int -> {Int | _ > 0} end   -- exit 0, no diagnostic
-
-         which is exactly the shape the `DInterface` arm above was just made
-         loud about.  Left silent deliberately for now (tracked in
-         `specs/todos.md`), but do not re-derive "inert" from this list: the
-         label was load-bearing and wrong. ── *)
+         Genuinely inert: none of these carries a type annotation or expression
+         that can hold a refinement predicate.  Do not re-derive that claim by
+         eyeballing the list — it was load-bearing and wrong for `DSig`/`DExtern`
+         until they were moved out of it above.  Probe a candidate before adding
+         it here. ── *)
       | A.DType _ | A.DAlwaysLinearType _  (* refinements in a type DEFINITION
                                               are checked where they are used *)
-      | A.DSig _ | A.DProtocol _ | A.DTransitions _ | A.DExtern _
+      | A.DProtocol _ | A.DTransitions _
       | A.DNeeds _ | A.DProofCap _ | A.DOpts _
       | A.DDeriving _ | A.DSatisfy _       (* desugared into DImpl before this *)
       | A.DUse _ | A.DAlias _ -> ())

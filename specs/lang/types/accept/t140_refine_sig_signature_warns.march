@@ -1,0 +1,68 @@
+-- A refinement written in a `sig` module signature, or in an `extern` FFI
+-- signature, enforces nothing -- and as of 2026-07-31 no longer does so
+-- silently. Both are the same failure mode `accept/t137` pins for `interface`
+-- method signatures: the shape parses, typechecks, and reads exactly like a
+-- working contract while obliging no call site and letting no body assume
+-- anything.
+--
+-- `sig`: nothing in `lib/refinecheck` reads `A.sig_def`'s `sig_fns`.
+-- `visit_decl` has no `DSig` arm that descends, and a `sig` is an ASCRIPTION
+-- -- it constrains what a module exports, not what any particular function
+-- body does -- so there is no `fn_def` for the predicate to attach to and no
+-- call site that consults it. A MISSING check, not an unsound one. The
+-- warning's remedy is the module's own `fn` definition, where a parameter
+-- refinement obliges callers and a return refinement is discharged against
+-- the body.
+--
+-- `extern`: the reason is stronger here, and the warning says a DIFFERENT
+-- thing on purpose. A refinement on `ef_ret_ty` is not merely unwalked, it is
+-- unverifiable in principle -- the callee is foreign C, there is no March body
+-- to discharge the claim against, and ASSUMING it would be unsound rather than
+-- merely missing. So the remedy cannot be "move it somewhere it gets checked":
+-- it is a March wrapper carrying the PARAMETER refinement (where call sites
+-- really are obliged), with the foreign RESULT checked at runtime rather than
+-- asserted in a type. Reusing `t137`'s "put it on the `impl` method"
+-- phrasing here would be actively wrong advice.
+--
+-- This is an `accept/` witness and its EXIT CODE is the content. A warning
+-- does not change `--check`'s status, so this program must stay exit 0.
+-- Promoting either shape to a hard error would break code that compiles
+-- today, and making a `sig` ascription or an FFI boundary actually ENFORCE a
+-- refinement is a much larger question; this witness guards against doing
+-- either by accident. The warning TEXT is pinned in
+-- `test/test_refinecheck.ml`'s `sig-extern-refinement` suite instead --
+-- `check_types.sh` asserts only exit 0 for `accept/`, and pins substrings for
+-- `reject/` alone.
+--
+-- The ENFORCED contrast is deliberately included below: `clamp` is an ordinary
+-- top-level `fn` carrying the very same predicate, and there the refinement is
+-- real (a violating call is a refinement error). Without it this file would
+-- witness only the defect, not the remedy.
+--
+-- See specs/lang/refinement-types.md.
+mod T140 do
+  needs IO.Foreign
+
+  -- INERT: `sig_fns`' types are never read by the refinement checker.
+  sig Store do
+    fn put : Int -> {Int | _ > 0}
+  end
+
+  -- INERT, and unverifiable in principle: the callee is not March code.
+  -- Both positions carry a predicate, since `ef_params` and `ef_ret_ty` are
+  -- separate fields and a detector that walked only one would be silent on
+  -- the other.
+  extern "c" : Cap(IO.Foreign) do
+    fn take(n : {Int | _ > 0}) : Int = "take"
+    fn count(s : String) : {Int | _ >= 0} = "strlen"
+  end
+
+  -- ENFORCED: the same predicate on a real `fn` definition's own parameter.
+  -- `clamp(0)` is a refinement ERROR, which is the difference between this
+  -- declaration and the two above.
+  fn clamp(n : {Int | _ > 0}) : Int do n end
+
+  fn main() : Int do
+    clamp(5)
+  end
+end

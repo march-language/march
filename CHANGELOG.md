@@ -151,6 +151,17 @@ git log is authoritative for exact commits.
   `derive Json`-derived type — the recursive encode call resolved back into
   the enclosing type's own encoder instead of the field's. Interpreter only;
   `from_json` is a separate, still-open issue.
+- **A refinement written in a `sig` or `extern` signature is no longer
+  silent.** `sig Store do fn put : Int -> {Int | _ > 0} end`, and an `extern`
+  function with a refined parameter or return type, both compiled with zero
+  diagnostics while enforcing nothing — reading exactly like a working
+  contract. Both now emit a warning naming the declaration and the spelling
+  that does work. The two messages differ deliberately: a `sig` refinement is
+  simply never read, and the remedy is the module's own `fn` definition; an
+  `extern` refinement cannot be honoured *in principle*, because the callee is
+  not March code, so the remedy is a March wrapper carrying the parameter
+  refinement with the foreign result checked at run time. These shapes still
+  compile — this makes the no-op audible, it does not make it an error.
 - **A module member bound by a record-pattern `let` can now be referred to by
   its qualified name.** `let { port, host } = …` at the top of `mod Foo`
   bound `port` and `host`, but the desugarer's list of "names this module
