@@ -485,6 +485,18 @@ type proto_info = {
 
 module StrMap = Map.Make(String)
 
+(** A resolved reference recorded during typechecking: [callee] used a
+    declaration that [caller] (both fully-qualified "Mod.name") owns, at
+    [ref_file]:[ref_line]. Populated only where resolution already succeeds —
+    never a textual guess. *)
+type ref_record = {
+  callee   : string;
+  caller   : string;
+  ref_kind : [ `Call | `Ctor | `TypeRef ];
+  ref_file : string;
+  ref_line : int;
+}
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
@@ -496,6 +508,15 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  refs : ref_record list ref;
+  (** Resolved call/ctor/type references accumulated during checking, for
+      `forge search --callers`. Shared (mutable) across all env copies
+      derived from the same root, same as [import_tracker]. *)
+  current_decl : string ref;
+  (** Fully-qualified name ("Mod.fn") of the top-level fn/impl-method whose
+      body is currently being checked. Set by [check_fn]; read wherever a
+      [ref_record] is recorded so it knows its caller. Empty string before
+      the first fn is entered. *)
   scheme_witnesses : (int list, constraint_ list * ty) Hashtbl.t;
   (** A1 (--emit-core-ast v2): every HM scheme instantiated during checking,
       deduped by its quantified-id list -> (constraints, body). Populated at
@@ -709,6 +730,7 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
+  refs = ref []; current_decl = ref "";
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
