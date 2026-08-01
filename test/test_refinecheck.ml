@@ -6689,6 +6689,106 @@ mod UADDC do
 end|}))
   ]
 
+(* ── A nested `use` must not be shadowed by an enclosing contract ──────────
+   [resolve_call]'s step 1 (lexical enclosing-module lookup) used to run
+   BEFORE step 3 (`use`-imported names), so a call inside a module that
+   `use`-imports a name was checked against an ENCLOSING module's
+   same-named function — a contract the call never actually dispatches to
+   at runtime.  That is a false positive on correct code, the one failure
+   this subsystem must never have.
+
+   The fix must not introduce the mirror-image bug: an ENCLOSING module's
+   `use` must not be allowed to beat an INNER module's own definition — see
+   case 3.  `ctx.uses` inherits into nested modules while declaration-list
+   competition does not, so the fix has to be scope-aware: at each level of
+   the modpath walk, consult that level's own `use`s before falling
+   outward.
+
+   EVERY case asserts obligation COUNTS via [total_obligations] /
+   [Obligation.summary], not the presence of a diagnostic — modeled on
+   [use_adoption_suite] above, since a correctly-resolved call and a
+   silently-skipped one are both quiet. *)
+let resolve_precedence_suite =
+  [ gated "a nested `use` beats an enclosing contract of the same name (the fix)"
+      (fun () ->
+        (* `Inner.go`'s `run(7, 0)` dispatches to `Other.run` (unrefined) at
+           runtime, per the `MARCH_LIB_PATH` ground-truth fixture. Pre-fix,
+           step 1 resolved it to the ENCLOSING `run` (`k != 0`) instead and
+           raised+violated an obligation against a contract this call never
+           touches. Post-fix: no obligation at all. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN1 do
+  mod Other do fn run(a : Int, k : Int) : Int do a / k end end
+  fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+  mod Inner do
+    use Other.{run}
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "no obligation raised against the enclosing contract"
+          0 (total_obligations ()))
+
+  ; gated "CONTROL: with no `use`, the enclosing contract still applies" (fun () ->
+        (* Must NOT regress: absent any shadowing import, the nearest
+           enclosing definition is still the right resolution, and a
+           violating call is still caught. Green on both sides of the fix. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN2 do
+  fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+  mod Inner do
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "CONTROL: an outer module's `use` must not beat an inner module's own def"
+      (fun () ->
+        (* The mirror-image direction the naive "move step 3 first" fix would
+           have broken. The OUTER (top-level) scope imports `run` via `use`;
+           `Inner` defines its OWN refined `run`. `Inner.go`'s call must
+           still resolve to Inner's own definition — declaration-list
+           competition (nearest enclosing def) already got this right before
+           the fix (defs are consulted across every prefix before uses), so
+           this must stay green on both sides. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN3 do
+  mod Other do fn run(a : Int, k : Int) : Int do a / k end end
+  use Other.{run}
+  mod Inner do
+    fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+
+  ; gated "CONTROL: a selector-less `use Other` binds the module, not the bare name"
+      (fun () ->
+        (* `use Other` (no `.{...}` selector) parses to `UseSingle`, which
+           binds the module name itself, not any bare function name — so it
+           competes with nothing and the enclosing contract still applies.
+           Green on both sides; pins the `UseSingle` arm specifically. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod RPN4 do
+  mod Other do fn run(a : Int, k : Int) : Int do a / k end end
+  fn run(a : Int, k : {Int | k != 0}) : Int do a / k end
+  mod Inner do
+    use Other
+    fn go() : Int do run(7, 0) end
+  end
+end|});
+        Alcotest.(check int) "one obligation" 1 (total_obligations ());
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -6740,4 +6840,5 @@ let () =
       ("qualified-predicate", qualified_pred_suite);
       ("interface-signature-refinement", iface_refine_suite);
       ("sig-extern-refinement", sig_extern_refine_suite);
-      ("use-impl-adoption", use_adoption_suite) ]
+      ("use-impl-adoption", use_adoption_suite);
+      ("resolve-precedence", resolve_precedence_suite) ]

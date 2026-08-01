@@ -2184,7 +2184,16 @@ let dotted (path : A.name list) : string = String.concat "." (List.map (fun n ->
 type rctx = {
   modpath : string;                       (* enclosing module prefix, "" at top *)
   aliases : (string * string) list;       (* (alias short, original dotted prefix) *)
-  uses : (string * A.use_selector) list;  (* (exporting module dotted, selector) *)
+  (* (exporting module dotted, selector, scope) — [scope] is the modpath of
+     the module that OWNS this `use` (recorded at [A.DUse]-gathering time,
+     where [ctx.modpath] is exactly that module).  Needed because [ctx.uses]
+     inherits into nested modules while declaration-list competition does
+     not: without a scope tag, [resolve_call] cannot tell an inner module's
+     own `use` from an enclosing one, and either always preferring defs over
+     uses (the pre-fix bug: an enclosing def wrongly beats a nearer `use`) or
+     always preferring uses over defs (the mirror-image bug: an outer `use`
+     wrongly beats an inner module's own def) is wrong in one direction. *)
+  uses : (string * A.use_selector * string) list;
   (* Names bound by an ENCLOSING BINDER (parameter, `let`, `let?`, lambda
      parameter, local `fn` name/parameter, `match` arm binder).  See
      [local_shadow]. *)
@@ -2242,9 +2251,40 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
         resolution steps below, alias- and `use`-imported names included. *)
   if List.mem fname ctx.locals then None
   else
-  (* 1. Lexical scope: the nearest enclosing module that defines [fname] wins
-        (shadowing any same-named function further out). *)
-  match List.find_map (fun p -> lookup (qualify p fname)) (modpath_prefixes ctx.modpath) with
+  (* 1. Scope-aware walk: at each prefix `p` of [ctx.modpath], from innermost
+        to outermost, that prefix's own DEFINITION wins first, then that
+        SAME prefix's own `use`-imports, before falling outward to the next
+        prefix.  This is what makes a nested `use` beat an enclosing
+        definition (the fix — the `use` is recorded at the inner prefix, so
+        it is consulted before the walk ever reaches the outer prefix that
+        owns the shadowed definition) while an outer module's `use` still
+        loses to an inner module's own definition (the inner prefix's own
+        def is found before the walk ever reaches the outer prefix that owns
+        the `use`). *)
+  let use_at prefix =
+    (* `use`-imported names are always bare (never dotted) — see the old
+       step 3's guard, preserved here. *)
+    if String.contains fname '.' then None
+    else
+      List.find_map
+        (fun (m, sel, scope) ->
+          if scope <> prefix then None
+          else
+            let imported =
+              match sel with
+              | A.UseAll -> true
+              | A.UseNames ns -> List.exists (fun (n : A.name) -> n.A.txt = fname) ns
+              | A.UseExcept ns -> not (List.exists (fun (n : A.name) -> n.A.txt = fname) ns)
+              | A.UseSingle -> false
+            in
+            if imported then lookup (qualify m fname) else None)
+        ctx.uses
+  in
+  match
+    List.find_map
+      (fun p -> match lookup (qualify p fname) with Some r -> Some r | None -> use_at p)
+      (modpath_prefixes ctx.modpath)
+  with
   | Some r -> Some r
   | None ->
     (* 2. Alias-qualified `P.rest` with `alias X.Y as P` -> `X.Y.rest`. *)
@@ -2256,23 +2296,7 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
         (match List.assoc_opt head ctx.aliases with Some orig -> lookup (orig ^ "." ^ rest) | None -> None)
       | None -> None
     in
-    (match aliased with
-     | Some r -> Some r
-     | None ->
-       (* 3. `use`-imported bare name. *)
-       if String.contains fname '.' then None
-       else
-         List.find_map
-           (fun (m, sel) ->
-             let imported =
-               match sel with
-               | A.UseAll -> true
-               | A.UseNames ns -> List.exists (fun (n : A.name) -> n.A.txt = fname) ns
-               | A.UseExcept ns -> not (List.exists (fun (n : A.name) -> n.A.txt = fname) ns)
-               | A.UseSingle -> false
-             in
-             if imported then lookup (qualify m fname) else None)
-           ctx.uses)
+    aliased
 
 (* True iff a call written as the bare [name] from inside [ctx]'s module
    resolves to exactly [sg] — i.e. the contract every caller is obliged to
@@ -5457,7 +5481,13 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
       (fun ctx d ->
         match d with
         | A.DAlias (ad, _) -> { ctx with aliases = (ad.A.alias_name.A.txt, dotted ad.A.alias_path) :: ctx.aliases }
-        | A.DUse (ud, _) -> { ctx with uses = (dotted ud.A.use_path, ud.A.use_sel) :: ctx.uses }
+        | A.DUse (ud, _) ->
+          (* [ctx.modpath] here is exactly the module that OWNS this `use` —
+             [visit_decls]'s caller ([visit_decl]'s [A.DMod] arm) extends
+             [modpath] BEFORE recursing into this fold, so tagging with the
+             current [ctx.modpath] needs no extra plumbing.  See the [uses]
+             field comment. *)
+          { ctx with uses = (dotted ud.A.use_path, ud.A.use_sel, ctx.modpath) :: ctx.uses }
         | _ -> ctx)
       ctx decls
   in

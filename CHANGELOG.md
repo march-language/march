@@ -151,6 +151,16 @@ git log is authoritative for exact commits.
   `derive Json`-derived type — the recursive encode call resolved back into
   the enclosing type's own encoder instead of the field's. Interpreter only;
   `from_json` is a separate, still-open issue.
+- **A `use`-imported name in a nested module is no longer checked against an
+  enclosing module's same-named function.** `resolve_call` (refinement
+  checking) tried the lexical enclosing-module lookup before `use`-imported
+  names, so a call inside a module that `use`-imports a name was rejected
+  against an ENCLOSING function's contract — one the call never actually
+  dispatches to at runtime. The lookup is now scope-aware: at each level of
+  the enclosing-module walk, that level's own `use`s are consulted before
+  falling outward, so a nested `use` correctly beats an enclosing definition
+  while an outer module's `use` still loses to an inner module's own
+  definition.
 - **A refinement written in a `sig` or `extern` signature is no longer
   silent.** `sig Store do fn put : Int -> {Int | _ > 0} end`, and an `extern`
   function with a refined parameter or return type, both compiled with zero
