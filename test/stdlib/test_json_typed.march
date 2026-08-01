@@ -91,6 +91,21 @@ mod TestJsonTyped do
     Ok(v) -> from_json(v)
     end
 
+  -- ── Variant decode errors carry a path (Task 5) ──────────────────────
+  -- Same wire shape the encoder produces for Shape (see `variant_r` above:
+  -- {"tag": "...", "0": ..., "1": ...}) -- these two probes must be
+  -- computed here, right after Shape's own `derive Json`, for the same
+  -- cross-type-shadowing reason as the Task 4 `path_*` bindings above.
+
+  let variant_unknown_tag_r = match Json.parse("{\"tag\":\"Purple\"}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+  let variant_wrong_arg_type_r = match Json.parse("{\"tag\":\"Circle\",\"0\":\"nope\"}") do
+    Ok(v) -> from_json(v)
+    Err(e) -> Err(Json.DecodeError(e, Nil, 0 - 1))
+    end
+
   describe "derive Json capability map" do
 
     test "flat record round-trips" do
@@ -207,6 +222,25 @@ mod TestJsonTyped do
       match path_nested_r do
       Ok(_) -> assert (false)
       Err(e) -> assert (Json.decode_error_to_string(e) == "$.inner.label: missing field")
+      end
+    end
+
+  end
+
+  describe "variant decode errors carry a path" do
+
+    test "unknown tag" do
+      match variant_unknown_tag_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$.tag: unknown variant `Purple`")
+      end
+    end
+
+    test "variant argument of the wrong type names its index" do
+      -- Circle(Int) given a string argument at position 0
+      match variant_wrong_arg_type_r do
+      Ok(_) -> assert (false)
+      Err(e) -> assert (Json.decode_error_to_string(e) == "$[0]: expected Int")
       end
     end
 
