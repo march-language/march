@@ -34,6 +34,22 @@ mod Json do
     | Array(List(JsonValue))
     | Object(List((String, JsonValue)))
 
+  -- One step of a JSONPath. Steps are stored OUTERMOST-FIRST, so a decoder
+  -- descending into a field prepends -- see decode_error_under.
+  type JsonPathStep = JPathField(String) | JPathIndex(Int)
+
+  -- A typed decoding failure: what was wrong, where in the document
+  -- structure, and (when known) the absolute byte offset of the record it
+  -- came from. The offset is 0 - 1 when unknown -- decoding a value already
+  -- in memory has no byte position.
+  --
+  -- Path shape follows aeson and Jackson: a flat list of steps rendered
+  -- JSONPath-style. Elm's recursive error tree exists to support `oneOf`,
+  -- which reports several failed branches at one position; with no
+  -- combinator layer a flat list carries the same information for less.
+  -- Revisit if `oneOf` is ever added.
+  type DecodeError = DecodeError(String, List(JsonPathStep), Int)
+
   -- ── Private helpers ───────────────────────────────────────────────────────
 
   pfn rev(xs, acc) do
@@ -652,5 +668,46 @@ mod Json do
 
   doc "Construct a JSON object value from a list of (key, value) pairs."
   fn encode_object(kvs) do Object(kvs) end
+
+  doc "Push `step` onto the front of a DecodeError's path, as a decoder does when it descends."
+  fn decode_error_under(step, e) do
+    match e do
+    DecodeError(msg, path, off) -> DecodeError(msg, Cons(step, path), off)
+    end
+  end
+
+  doc "Attach an absolute byte offset to a DecodeError."
+  fn decode_error_at(off, e) do
+    match e do
+    DecodeError(msg, path, _) -> DecodeError(msg, path, off)
+    end
+  end
+
+  pfn render_path(steps, acc) do
+    match steps do
+    Nil -> acc
+    Cons(h, t) -> do
+      let new_acc = match h do
+        JPathField(f) -> acc ++ "." ++ f
+        JPathIndex(i) -> acc ++ "[" ++ to_string(i) ++ "]"
+      end
+      render_path(t, new_acc)
+    end
+    end
+  end
+
+  doc """
+  Render a `DecodeError` as `$.users[3].id: expected Int`, with the byte
+  offset when known: `$.id (byte 4096): expected Int`.
+  """
+  fn decode_error_to_string(e) do
+    match e do
+    DecodeError(msg, path, off) -> do
+      let p = render_path(path, "$")
+      if off < 0 do p ++ ": " ++ msg
+      else p ++ " (byte " ++ to_string(off) ++ "): " ++ msg end
+    end
+    end
+  end
 
 end

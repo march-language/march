@@ -275,4 +275,33 @@ mod TestJsonTyped do
 
   end
 
+  describe "DecodeError rendering" do
+    test "bare message renders with the root path" do
+      let e = Json.DecodeError("expected Int", Nil, 0 - 1)
+      assert (Json.decode_error_to_string(e) == "$: expected Int")
+    end
+    test "field path renders JSONPath-style" do
+      let e = Json.DecodeError("expected Int",
+                Cons(Json.JPathField("id"), Nil), 0 - 1)
+      assert (Json.decode_error_to_string(e) == "$.id: expected Int")
+    end
+    test "nested field and index render in order" do
+      -- $.users[3].id -- steps are stored outermost-first.
+      let p = Cons(Json.JPathField("users"),
+              Cons(Json.JPathIndex(3),
+              Cons(Json.JPathField("id"), Nil)))
+      let e = Json.DecodeError("expected Int", p, 0 - 1)
+      assert (Json.decode_error_to_string(e) == "$.users[3].id: expected Int")
+    end
+    test "byte offset is included when present" do
+      let e = Json.DecodeError("expected Int", Cons(Json.JPathField("id"), Nil), 4096)
+      assert (Json.decode_error_to_string(e) == "$.id (byte 4096): expected Int")
+    end
+    test "prepending a step builds the path outermost-first" do
+      let inner = Json.DecodeError("expected Int", Cons(Json.JPathField("id"), Nil), 0 - 1)
+      let outer = Json.decode_error_under(Json.JPathField("user"), inner)
+      assert (Json.decode_error_to_string(outer) == "$.user.id: expected Int")
+    end
+  end
+
 end
