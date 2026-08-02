@@ -39,7 +39,16 @@ question Hoogle answers: "what function has *this shape*?"
   binary; no partial credit.
 - **Index schema**: unchanged. `entry.params : (string * string) list` and
   `entry.return_type : string option` already carry per-position argument types
-  and the return type. No cache-version bump is needed.
+  and the return type. **Correction (post-implementation):** schema being
+  unchanged does NOT mean no cache-version bump is needed — this line
+  originally said so, and that reasoning was wrong. The *content* of stored
+  strings changed: AST-fallback entries (constructors, plus any fn whose span
+  misses `type_map`) now store canonicalized `a`/`b`/`c` variable names
+  instead of author-written ones. A cache written by a pre-rewrite binary
+  has the same shape but its strings never match a structural query, so
+  `--type` silently returns "no results found" (exit 0) forever. `--type`
+  search is worthless until `Search.current_index_version` is bumped (done:
+  bumped to 3) and old caches are treated as a miss.
 
 ## Non-goals
 

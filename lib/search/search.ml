@@ -45,13 +45,25 @@ type index = {
 }
 
 (** The [index.version] a freshly-[build_index]'d index carries. Bumped
-    whenever the on-disk cache's shape changes in a way an old cache can't
-    satisfy (e.g. the [references] table added in this feature) — a cache
-    reader (see [forge/lib/cmd_search.ml]'s [load_or_build_index]) MUST
-    compare a loaded index's [version] against this constant and treat a
-    mismatch as a cache miss (rebuild), or a stale pre-existing cache from
-    before the bump silently keeps serving without the new data forever. *)
-let current_index_version = 2
+    whenever the on-disk cache's shape OR CONTENT SEMANTICS changes in a way
+    an old cache can't satisfy — a cache reader (see [forge/lib/cmd_search.ml]'s
+    [load_or_build_index]) MUST compare a loaded index's [version] against
+    this constant and treat a mismatch as a cache miss (rebuild), or a stale
+    pre-existing cache from before the bump silently keeps serving without
+    the new data forever.
+
+    Bumped to 3 for the structural [--type] rewrite: the JSON *schema* (the
+    [references] table added at version 2) didn't change again, but the
+    *content* of stored strings did — every AST-fallback entry (constructors,
+    plus any fn whose span misses [type_map]) now stores canonicalized
+    [a]/[b]/[c] type-variable names instead of author-written ones. A
+    version-2 cache built by a pre-rewrite binary still loads (same shape)
+    but its strings don't match structural queries, so `--type` silently
+    returns "no results found" (exit 0) forever until `--rebuild` is passed
+    by hand. Don't repeat the mistake of reasoning "schema is unchanged, no
+    bump needed" — a content-format change is just as cache-poisoning as a
+    schema change and must bump this constant too. *)
+let current_index_version = 3
 
 let ref_kind_to_string = function
   | `Call    -> "call"
@@ -592,7 +604,41 @@ let parse_type_query (q : string) : (type_query, string) result =
       Ok (QFull (args, ret))
     end
   with _ ->
-    Error (Printf.sprintf "could not parse type query: %S" q)
+    Error (Printf.sprintf
+      "could not parse type query: %S \
+       (hint: query arguments are separated by `->`, not `,` — search results \
+       print params comma-separated, e.g. `List.map(xs: List(a), f: a -> b) -> \
+       List(b)`, but the equivalent --type query is \
+       `List(a) -> (a -> b) -> List(b)`, with every argument AND the return \
+       type chained by `->`; a leading `-> T` matches the return type alone \
+       at any arity)"
+      q)
+
+(** Re-canonicalize a stored return-type string IN ISOLATION: reparse it and
+    reprint it with a fresh variable-name table, so its variables are
+    renumbered from `a` in first-appearance order within just that type —
+    independent of whatever letters they held in the full signature they
+    were originally printed from.
+
+    This exists because [entry.return_type] is canonicalized alongside its
+    function's parameters (one shared [make_ty_printer]/[make_ast_ty_printer]
+    table per [resolve_fn_types]/[collect_entries] call — see those), so its
+    first variable is often NOT `a` (e.g. `Option.map : (a -> b), Option(a)
+    -> Option(b)` stores return type `Option(b)`). A [QReturnOnly] query,
+    canonicalized alone, always starts its first variable at `a`. Comparing
+    the two directly would make such entries permanently unmatchable by any
+    query spelling. Re-deriving an alpha-equivalent form of just the return
+    type closes that gap.
+
+    Returns [None] if the stored string fails to reparse (should not happen
+    for anything [search.ml] itself produced, but a corrupt/foreign cache
+    entry shouldn't crash search). *)
+let canonicalize_return_type_alone (s : string) : string option =
+  try
+    let ty = parse_ty_query_string s in
+    let pp = make_ast_ty_printer () in
+    Some (pp ty)
+  with _ -> None
 
 (** Search by type signature: structural matching against each entry's
     [params]/[return_type], positional and arity-sensitive — not substring
@@ -602,10 +648,22 @@ let search_type (idx : index) (type_query : string) : (entry * float) list =
   match parse_type_query type_query with
   | Error _ -> []
   | Ok (QReturnOnly ret) ->
+    (* [ret] was canonicalized alone (see [parse_type_query]), so an entry's
+       return type must ALSO be re-canonicalized alone before comparing —
+       NOT compared as stored, which is canonicalized jointly with the
+       entry's params and so may carry different variable letters for an
+       alpha-equivalent type. This must stay scoped to [QReturnOnly]: full
+       [QFull] matching below intentionally keeps the joint (whole-signature)
+       canonicalization, because there a variable's identity across params
+       AND return type is meaningful (`List(a) -> a` must NOT match an entry
+       whose return type is `List(a) -> b`). *)
     List.filter_map (fun entry ->
       match entry.return_type with
-      | Some r when r = ret -> Some (entry, 1.0)
-      | _ -> None
+      | Some r ->
+        (match canonicalize_return_type_alone r with
+         | Some r' when r' = ret -> Some (entry, 1.0)
+         | _ -> None)
+      | None -> None
     ) idx.entries
   | Ok (QFull (args, ret)) ->
     List.filter_map (fun entry ->
