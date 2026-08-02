@@ -68,6 +68,20 @@ git log is authoritative for exact commits.
   a readable message (e.g. `DecodeError("missing field",
   [JPathField("age")], -1)`), but code that expected a plain error string
   should switch to `Json.decode_error_to_string(e)`.
+
+- `forge search --type` now performs structural type matching (exact arity,
+  per-position argument types, canonical type variables) instead of
+  substring matching. A leading `->` queries by return type alone, and now
+  matches regardless of what letter that variable holds in an entry's full
+  signature (e.g. `--type="-> Option(a)"` finds `Option.map`, whose full
+  signature is `Option(a), (a -> b) -> Option(b)`). Malformed type queries
+  are now reported as errors — including a hint that arguments are chained
+  with `->`, not the `,` search results print them with — rather than
+  silently returning loose matches. The on-disk search-index cache format
+  bumped (version 3): a cache built before this rewrite is now correctly
+  treated as stale and rebuilt, instead of `--type` silently returning no
+  results forever.
+
 ### Changed
 
 - **The event-loop HTTP server is now selectable at RUN TIME, not build time.**
