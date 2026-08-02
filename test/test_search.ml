@@ -137,6 +137,22 @@ let test_ctor_ref_recorded () =
     (List.exists (fun (r : TC.ref_record) ->
          r.callee = "A.Full" && r.caller = "A.main") ctors)
 
+(** A cross-module QUALIFIED constructor use (`B.Full(1)`) must be recorded
+    with callee = "B.Full" — exercising the [String.contains name.txt '.']
+    stripping branch in the [ECon] hook, which extracts the bare ctor name
+    ("Full") from the already-dotted [name.txt] ("B.Full") before
+    re-qualifying with [ci.ci_module] ("B"). Without the strip, this would
+    double-qualify to "B.B.Full". *)
+let test_ctor_ref_qualified_cross_module () =
+  let refs = check_refs [
+    ("b.march", "B", "mod B do\n  type Box = Full(Int)\nend\n");
+    ("a.march", "A", "mod A do\n  fn main() do B.Full(1) end\nend\n");
+  ] in
+  let ctors = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Ctor) refs in
+  Alcotest.(check bool) "B.Full qualified ctor use recorded without double-qualification" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "B.Full" && r.caller = "A.main") ctors)
+
 (* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
@@ -433,6 +449,8 @@ let references_tests = [
   "qualified interface-method call recorded",
                                     `Quick, test_qualified_iface_method_call_ref;
   "ctor use recorded",             `Quick, test_ctor_ref_recorded;
+  "qualified cross-module ctor use recorded",
+                                    `Quick, test_ctor_ref_qualified_cross_module;
 ]
 
 let () =
