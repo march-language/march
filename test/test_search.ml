@@ -153,6 +153,20 @@ let test_ctor_ref_qualified_cross_module () =
     (List.exists (fun (r : TC.ref_record) ->
          r.callee = "B.Full" && r.caller = "A.main") ctors)
 
+(** A qualified type annotation (`w: B.Widget`) must be recorded as a
+    [`TypeRef] reference. Bare (unqualified) type annotations are an
+    explicitly accepted out-of-scope gap for this task — see the
+    [Ast.TyCon] hook in [surface_ty]. *)
+let test_typeref_qualified_recorded () =
+  let refs = check_refs [
+    ("b.march", "B", "mod B do\n  type Widget = Widget(Int)\nend\n");
+    ("a.march", "A", "mod A do\n  fn make(w: B.Widget) do w end\nend\n");
+  ] in
+  let tyrefs = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `TypeRef) refs in
+  Alcotest.(check bool) "B.Widget annotation recorded" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "B.Widget" && r.caller = "A.make") tyrefs)
+
 (* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
@@ -451,6 +465,8 @@ let references_tests = [
   "ctor use recorded",             `Quick, test_ctor_ref_recorded;
   "qualified cross-module ctor use recorded",
                                     `Quick, test_ctor_ref_qualified_cross_module;
+  "qualified type-annotation recorded",
+                                    `Quick, test_typeref_qualified_recorded;
 ]
 
 let () =

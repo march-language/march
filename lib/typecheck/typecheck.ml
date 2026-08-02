@@ -3094,6 +3094,12 @@ let name_is_variant env name =
 let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   match s with
   | Ast.TyCon (name, args) ->
+    (if String.contains name.Ast.txt '.' then
+       env.refs := { callee = name.Ast.txt;
+                     caller = !(env.current_decl);
+                     ref_kind = `TypeRef;
+                     ref_file = name.Ast.span.Ast.file;
+                     ref_line = name.Ast.span.Ast.start_line } :: !(env.refs));
     (* Special case: Chan(Role, Proto) — session-typed channel endpoint.
        Users write Chan(RoleName, ProtoName) in type annotations.
        The parser produces TyCon("Chan", [TyCon("Role",[]), TyCon("Proto",[])]).
