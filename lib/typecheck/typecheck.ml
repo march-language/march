@@ -5510,6 +5510,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let _, resolved = resolve_qualified_ctor name.txt env in
            resolved
        in
+       (match ci_opt with
+        | Some ci ->
+          env.refs := { callee = ci.ci_module ^ "." ^
+                          (if String.contains name.txt '.'
+                           then (let i = String.rindex name.txt '.' in
+                                 String.sub name.txt (i + 1) (String.length name.txt - i - 1))
+                           else name.txt);
+                        caller = !(env.current_decl);
+                        ref_kind = `Ctor;
+                        ref_file = sp.Ast.file;
+                        ref_line = sp.Ast.start_line } :: !(env.refs)
+        | None -> ());
        match ci_opt with
        | None ->
          let candidates = suggest_ctors name.txt env in

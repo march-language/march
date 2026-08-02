@@ -127,6 +127,16 @@ let test_qualified_iface_method_call_ref () =
     (List.exists (fun (r : TC.ref_record) ->
          r.callee = "Show2.show" && r.caller = "A.main") calls)
 
+let test_ctor_ref_recorded () =
+  let refs = check_refs [
+    ("a.march", "A",
+     "mod A do\n  type Box = Empty | Full(Int)\n  fn main() do Full(1) end\nend\n");
+  ] in
+  let ctors = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Ctor) refs in
+  Alcotest.(check bool) "Full ctor use recorded" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "A.Full" && r.caller = "A.main") ctors)
+
 (* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
@@ -422,6 +432,7 @@ let references_tests = [
   "qualified let-const excluded",  `Quick, test_qualified_let_const_not_call_ref;
   "qualified interface-method call recorded",
                                     `Quick, test_qualified_iface_method_call_ref;
+  "ctor use recorded",             `Quick, test_ctor_ref_recorded;
 ]
 
 let () =
