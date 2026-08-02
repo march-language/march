@@ -457,6 +457,20 @@ let test_type_search_empty_query () =
   Alcotest.(check int) "empty type query returns 0" 0 (List.length results)
 
 (* ------------------------------------------------------------------ *)
+(* Type parsing (standalone `ty_eof` start symbol)                     *)
+(* ------------------------------------------------------------------ *)
+
+let parse_ty_str (s : string) : March_ast.Ast.ty =
+  let lexbuf = Lexing.from_string s in
+  March_parser.Parser.ty_eof
+    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+
+let test_parse_ty_eof_arrow () =
+  match parse_ty_str "List(a) -> Int" with
+  | March_ast.Ast.TyArrow (_, _) -> ()
+  | _ -> Alcotest.fail "expected TyArrow for `List(a) -> Int`"
+
+(* ------------------------------------------------------------------ *)
 (* Doc search                                                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -717,6 +731,10 @@ let type_search_tests = [
   "empty_query",   `Quick, test_type_search_empty_query;
 ]
 
+let type_parsing_tests = [
+  "ty_eof arrow", `Quick, test_parse_ty_eof_arrow;
+]
+
 let doc_search_tests = [
   "keyword",          `Quick, test_doc_search_keyword;
   "multi_word",       `Quick, test_doc_search_multi_word;
@@ -785,6 +803,7 @@ let () =
     "levenshtein",   levenshtein_tests;
     "name_search",   name_search_tests;
     "type_search",   type_search_tests;
+    "type_parsing",  type_parsing_tests;
     "doc_search",    doc_search_tests;
     "combined",      combined_search_tests;
     "json",          json_tests;

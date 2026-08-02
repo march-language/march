@@ -249,6 +249,7 @@
 %start <March_ast.Ast.expr> expr_eof
 %start <March_ast.Ast.repl_input> repl_input
 %start <March_ast.Ast.repl_input list> repl_sequence
+%start <March_ast.Ast.ty> ty_eof
 
 %%
 
@@ -964,6 +965,9 @@ ret_annot:
 
 type_params:
   | LPAREN; ps = separated_nonempty_list(COMMA, lower_name); RPAREN { ps }
+
+ty_eof:
+  | t = ty EOF { t }
 
 ty:
   | t = ty_nat_add ARROW u = ty { TyArrow (t, u) }
