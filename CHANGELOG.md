@@ -68,6 +68,13 @@ git log is authoritative for exact commits.
   a readable message (e.g. `DecodeError("missing field",
   [JPathField("age")], -1)`), but code that expected a plain error string
   should switch to `Json.decode_error_to_string(e)`.
+
+- `forge search --type` now performs structural type matching (exact arity,
+  per-position argument types, canonical type variables) instead of
+  substring matching. A leading `->` queries by return type alone.
+  Malformed type queries are now reported as errors rather than silently
+  returning loose matches.
+
 ### Changed
 
 - **The event-loop HTTP server is now selectable at RUN TIME, not build time.**

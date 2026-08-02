@@ -396,7 +396,7 @@ forge install PATH_OR_URL   # install as system CLI tool
 forge search map                               # name search (fuzzy)
 forge search "" --type "String -> Int"         # type signature search
 forge search "" --doc "concatenate"            # doc keyword search
-forge search fold --type List --pretty         # combined, table output
+forge search fold --type "List(a) -> b -> (b -> a -> b) -> b"  # combined: name + exact type signature
 forge search "" --json > out.json              # JSON output
 forge search sort --rebuild                    # force index rebuild
 forge search map --limit 5
@@ -432,15 +432,19 @@ Index cached at `.march/search-index.json`, built from stdlib.
 forge search filter             # finds "filter", "filter_map", etc.
 forge search flt                # fuzzy: finds "filter", "flat_map"
 
-# Type signature (all components must appear in signature)
-forge search "" --type "String -> Int"
-forge search "" --type "List(a), a -> Bool"
+# Type signature: structural match, not substring — exact arity, each
+# argument type matches positionally (order-sensitive), type variables are
+# canonicalized (so `a -> a` and `x -> x` are the same query). Use `-> T` to
+# match by return type alone, at any arity.
+forge search "" --type "String -> Int"          # 1-arg fn: String -> Int
+forge search "" --type "List(a) -> a -> Bool"   # 2-arg fn: List(a), a -> Bool
+forge search "" --type "-> Int"                 # any arity, returns Int
 
 # Doc keyword (all keywords must appear in doc string)
 forge search "" --doc "sort stable"
 
 # Combined
-forge search fold --type "List" --doc "accumulator"
+forge search fold --type "List(a) -> b -> (b -> a -> b) -> b" --doc "accumulator"
 
 # Reverse reference: who calls/uses this? (distinct mode — ignores the other filters)
 forge search --callers List.map       # every resolved call site
