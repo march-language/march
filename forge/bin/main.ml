@@ -501,6 +501,10 @@ let search_cmd =
     Arg.(value & opt string "" &
          info ["doc"; "d"] ~docv:"KEYWORDS" ~doc:"Keywords to search in doc strings")
   in
+  let callers =
+    Arg.(value & opt string "" &
+         info ["callers"] ~docv:"NAME" ~doc:"Find call sites that reference NAME (reverse-reference search)")
+  in
   let limit =
     Arg.(value & opt int 20 &
          info ["limit"; "n"] ~docv:"N" ~doc:"Maximum number of results (default 20)")
@@ -514,13 +518,13 @@ let search_cmd =
   let rebuild =
     Arg.(value & flag & info ["rebuild"] ~doc:"Rebuild the search index before searching")
   in
-  let run q t d n j p r =
-    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~limit:n ~as_json:j ~plain:p ~rebuild:r ()
+  let run q t d c n j p r =
+    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~callers:c ~limit:n ~as_json:j ~plain:p ~rebuild:r ()
   in
   Cmd.v
     (Cmd.info "search"
        ~doc:"Search stdlib and dependencies for functions, types, and constructors")
-    Term.(const run $ query $ type_sig $ doc_query $ limit $ as_json $ plain $ rebuild)
+    Term.(const run $ query $ type_sig $ doc_query $ callers $ limit $ as_json $ plain $ rebuild)
 
 (* --------------------------------------------------------------- forge publish *)
 
