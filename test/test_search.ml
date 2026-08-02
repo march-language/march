@@ -477,6 +477,41 @@ let test_pp_ast_ty_canonicalizes_vars () =
     "List(a) -> b" (Search.pp_ast_ty ty)
 
 (* ------------------------------------------------------------------ *)
+(* AST-fallback signature building: shared renaming table              *)
+(* ------------------------------------------------------------------ *)
+
+(** Builds an index entirely through the AST-fallback path (an empty
+    [type_map] — [Search.build_index]'s own default — means
+    [resolve_fn_types] never finds a typechecker entry and falls straight
+    through to the AST-rendered params/return pair unchanged). This exercises
+    the real [collect_entries] call sites, not [pp_ast_ty] directly: a
+    single-call recursive printer would already get "List(a) -> b" right
+    (see [test_pp_ast_ty_canonicalizes_vars] above) even with no persistent
+    table at all, because one recursive descent naturally shares its own
+    local closure. What's only exercised by going through [build_index] is
+    whether *two separate calls* through the same closure — here,
+    [extract_fn_params]'s per-param renders and the later
+    [Option.map ast_pp fn.fn_ret_ty] — agree on the letter for a variable
+    that appears in both a parameter and the return type. *)
+let test_ast_fallback_signature_shares_var_table () =
+  let file = "fallback_share.march" in
+  let decls =
+    decls_of_source ~file "Test"
+      "mod Test do\n  fn const_(x : a, y : b) : b do y end\nend\n"
+  in
+  let idx = Search.build_index [decls] ~source_files:[file] () in
+  let entry =
+    match List.find_opt (fun (e : Search.entry) -> e.name = "const_") idx.entries with
+    | Some e -> e
+    | None -> Alcotest.fail "const_ entry not found in AST-fallback index"
+  in
+  Alcotest.(check (list (pair string string))) "params: x renamed a, y renamed b"
+    [("x", "a"); ("y", "b")] entry.params;
+  Alcotest.(check (option string))
+    "return type reuses y's letter (b), not a fresh table's a"
+    (Some "b") entry.return_type
+
+(* ------------------------------------------------------------------ *)
 (* Doc search                                                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -740,6 +775,8 @@ let type_search_tests = [
 let type_parsing_tests = [
   "ty_eof arrow",                `Quick, test_parse_ty_eof_arrow;
   "pp_ast_ty canonicalizes vars", `Quick, test_pp_ast_ty_canonicalizes_vars;
+  "AST-fallback signature shares var table across params/return",
+                                  `Quick, test_ast_fallback_signature_shares_var_table;
 ]
 
 let doc_search_tests = [
