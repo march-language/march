@@ -167,6 +167,36 @@ let test_typeref_qualified_recorded () =
     (List.exists (fun (r : TC.ref_record) ->
          r.callee = "B.Widget" && r.caller = "A.make") tyrefs)
 
+(** Fix round 1 regression: a qualified type used ONLY in an interface
+    method signature — which has no enclosing function — must never be
+    recorded with a [caller] borrowed from some unrelated function that
+    happened to be checked earlier in the same module (see
+    [with_no_caller]/the [`TyCon] hook's `caller <> ""` gate). Before the
+    fix, `B.Widget` here was recorded twice: once with `caller = ""` (the
+    lazy cross-module injection path) and once with `caller = "A.helper"`
+    (the direct [DInterface] path, misattributed because [helper]'s body was
+    the last thing checked before the interface). After the fix, no
+    [`TypeRef] for `B.Widget` is recorded at all — a missing reference is
+    honest; a wrong caller is not. *)
+let test_typeref_interface_sig_no_stale_caller () =
+  let refs = check_refs [
+    ("b.march", "B", "mod B do\n  type Widget = Widget(Int)\nend\n");
+    ("a.march", "A",
+     "mod A do\n\
+     \  fn helper() do 1 end\n\
+     \  interface Foo(a) do\n\
+     \    fn conv: a -> B.Widget\n\
+     \  end\n\
+      end\n");
+  ] in
+  let tyrefs = List.filter (fun (r : TC.ref_record) ->
+      r.ref_kind = `TypeRef && r.callee = "B.Widget") refs in
+  Alcotest.(check bool)
+    "B.Widget in interface signature never attributed to A.helper" false
+    (List.exists (fun (r : TC.ref_record) -> r.caller = "A.helper") tyrefs);
+  Alcotest.(check int) "B.Widget in interface signature not recorded at all"
+    0 (List.length tyrefs)
+
 (* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
@@ -467,6 +497,8 @@ let references_tests = [
                                     `Quick, test_ctor_ref_qualified_cross_module;
   "qualified type-annotation recorded",
                                     `Quick, test_typeref_qualified_recorded;
+  "interface-signature type-ref has no stale caller",
+                                    `Quick, test_typeref_interface_sig_no_stale_caller;
 ]
 
 let () =

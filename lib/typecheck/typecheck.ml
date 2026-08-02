@@ -781,6 +781,25 @@ let make_env errors type_map = {
 let enter_level env = { env with level = env.level + 1 }
 let leave_level env = { env with level = env.level - 1 }
 
+(** Run [f] with [env.current_decl] temporarily blanked to "" — for
+    [surface_ty] calls that check a type with NO enclosing function (an
+    interface method signature, an impl header/when-constraint type): without
+    this, [env.current_decl] is left over from whatever [DFn] happened to be
+    checked immediately before in module order (it is set only by [check_fn]
+    and never reset — see [current_decl]'s doc comment), so a qualified
+    `TyCon` reference recorded there would be silently misattributed to an
+    unrelated function.  The [`TyCon] hook in [surface_ty] skips recording
+    entirely when [caller = ""], so blanking here means "don't record a
+    reference for this callerless type position" rather than emitting a
+    deliberately-empty [caller].  [current_decl] is a mutable ref shared
+    across all [env] copies (like [import_tracker]), so this must restore the
+    prior value afterward — including when [f] raises — rather than leaving
+    it blanked for whatever is checked next. *)
+let with_no_caller (env : env) (f : unit -> 'a) : 'a =
+  let saved = !(env.current_decl) in
+  env.current_decl := "";
+  Fun.protect ~finally:(fun () -> env.current_decl := saved) f
+
 (** Is [r] an [offer] continuation still awaiting per-arm refinement?
     Physical identity on purpose: [env.offer_unrefined] tracks the exact ref
     [Chan.offer] minted, and the ref cell IS the channel's identity for the
@@ -3094,7 +3113,13 @@ let name_is_variant env name =
 let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   match s with
   | Ast.TyCon (name, args) ->
-    (if String.contains name.Ast.txt '.' then
+    (* Skip when [caller = ""]: either no fn has been entered yet, or (since
+       Fix round 1) a callerless surface_ty call site — interface method
+       signature, impl header/when-constraint — deliberately blanked
+       [current_decl] via [with_no_caller] to suppress recording rather than
+       misattribute to an unrelated function. Either way, an empty caller was
+       never a meaningful attribution for `forge search --callers`. *)
+    (if String.contains name.Ast.txt '.' && !(env.current_decl) <> "" then
        env.refs := { callee = name.Ast.txt;
                      caller = !(env.current_decl);
                      ref_kind = `TypeRef;
@@ -3306,7 +3331,9 @@ let () = inject_iface_exports_ref := (fun mod_name exports env ->
           (* Use level 1 for the interface type parameter so generalize 0 quantifies it. *)
           let a = fresh_var 1 in
           let tvars = ref [(idef.iface_param.txt, a)] in
-          let ty = surface_ty env ~tvars m.md_ty in
+          (* No enclosing function checks a cross-module interface's own
+             method signature — see [with_no_caller]. *)
+          let ty = with_no_caller env (fun () -> surface_ty env ~tvars m.md_ty) in
           let a_id = match a with
             | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
             | _ -> 0
@@ -7358,7 +7385,12 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
       let tmp_env = { e with errors = tmp_errors } in
       let a = fresh_var 1 in
       let tvars = ref [(idef.iface_param.txt, a)] in
-      let ty = surface_ty tmp_env ~tvars m.md_ty in
+      (* Prebinding an interface method's own signature has no enclosing
+         function either — see [with_no_caller]. [tmp_env] shares [refs] and
+         [current_decl] with [e] (record-copy, not clone of the ref cells),
+         so blanking through [tmp_env] is equally visible to the [TyCon]
+         hook. *)
+      let ty = with_no_caller tmp_env (fun () -> surface_ty tmp_env ~tvars m.md_ty) in
       let a_id = match a with
         | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
         | _ -> 0
@@ -9836,7 +9868,9 @@ let rec check_decl env (d : Ast.decl) : env =
         (* Use level+1 so the interface type parameter gets quantified by generalize. *)
         let a = fresh_var (env.level + 1) in
         let tvars = ref [(idef.iface_param.txt, a)] in
-        let ty = surface_ty env ~tvars m.md_ty in
+        (* An interface method signature has no enclosing function — see
+           [with_no_caller]. *)
+        let ty = with_no_caller env (fun () -> surface_ty env ~tvars m.md_ty) in
         let a_id = match a with
           | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
           | _ -> 0
@@ -9860,7 +9894,9 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Instantiate the impl type, sharing tvars so the 'when' constraints
        can reference the same type variables as the impl type itself. *)
     let tvars = ref [] in
-    let inst_ty = surface_ty env ~tvars idef.impl_ty in
+    (* The impl header's own type (`impl Iface(T)`) has no enclosing
+       function — see [with_no_caller]. *)
+    let inst_ty = with_no_caller env (fun () -> surface_ty env ~tvars idef.impl_ty) in
     (* Register this implementation so CInterface constraints can be discharged. *)
     let env_with_impl = { env with impls =
       (let key = idef.impl_iface.txt in
@@ -9870,7 +9906,9 @@ let rec check_decl env (d : Ast.decl) : env =
        StrMap.add key ((inst_ty, idef.impl_iface.span, None) :: lst) env.impls) } in
     (* Check 'when' constraints: each C(T) must already be implemented. *)
     List.iter (fun ((cname : Ast.name), ctys) ->
-        match List.map (surface_ty env ~tvars) ctys with
+        (* A `when C(T)` constraint type is also part of the impl header,
+           with no enclosing function — see [with_no_caller]. *)
+        match with_no_caller env (fun () -> List.map (surface_ty env ~tvars) ctys) with
         | [cty] ->
           let cty = repr cty in
           (match cty with
