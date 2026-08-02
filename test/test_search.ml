@@ -100,6 +100,33 @@ let test_qualified_let_const_not_call_ref () =
   Alcotest.(check bool) "B.some_const (a DLet, not a DFn) never recorded as Call" false
     (List.exists (fun (r : TC.ref_record) -> r.callee = "B.some_const") calls)
 
+(** A qualified interface-method call (`Show2.show(x)`) must still be
+    recorded as a [`Call] reference. [prebind_interface_decl] binds an
+    interface method's dot-qualified name ("Iface.method") directly into
+    [env.vars] — a THIRD source of qualified names, independent of both
+    [Ast.DMod] exports and registry [ExFn] entries (the two sources
+    [qual_fn_names] was originally populated from). Pins the fix that
+    registers interface-method qualified names into [qual_fn_names] too, so
+    the [DLet]-exclusion gate (see [test_qualified_let_const_not_call_ref])
+    doesn't also swallow this genuine function call as a false negative. *)
+let test_qualified_iface_method_call_ref () =
+  let refs = check_refs [
+    ("b.march", "B",
+     "mod B do\n\
+     \  interface Show2(a) do\n\
+     \    fn show: a -> String\n\
+     \  end\n\
+     \  impl Show2(Int) do\n\
+     \    fn show(x) do \"n\" end\n\
+     \  end\n\
+      end\n");
+    ("a.march", "A", "mod A do\n  fn main() do Show2.show(5) end\nend\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Call) refs in
+  Alcotest.(check bool) "Show2.show interface-method call recorded" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "Show2.show" && r.caller = "A.main") calls)
+
 (* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
@@ -390,9 +417,11 @@ let integration_tests = [
 ]
 
 let references_tests = [
-  "same-module call",         `Quick, test_call_ref_same_module;
-  "cross-module call",        `Quick, test_call_ref_cross_module;
-  "qualified let-const excluded", `Quick, test_qualified_let_const_not_call_ref;
+  "same-module call",              `Quick, test_call_ref_same_module;
+  "cross-module call",             `Quick, test_call_ref_cross_module;
+  "qualified let-const excluded",  `Quick, test_qualified_let_const_not_call_ref;
+  "qualified interface-method call recorded",
+                                    `Quick, test_qualified_iface_method_call_ref;
 ]
 
 let () =

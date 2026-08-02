@@ -569,15 +569,19 @@ type env = {
       reject wrong-arity calls of these functions at the call site. *)
   qual_fn_names : unit StrMap.t;
   (** Qualified ("Mod.name") keys in [vars] that denote a genuine top-level
-      function — i.e. a [DFn] (or a registry [ExFn] export), never a [DLet]
-      value/constant. Populated at two sites: the [Ast.DMod] export step
-      (mirrors [new_names], restricted to keys already known to be functions
-      via [local_fns]/[qual_fn_names] of the inner env — so it composes
-      correctly across nested modules) and [load_module_into_env]'s [ExFn]
-      arm (registry-loaded modules). Consulted by the [Ast.EVar] reference-
-      recording hook so a qualified value reference (`Mod.SOME_CONST`) is
-      never recorded as a `` `Call `` reference — see [local_fns] for the
-      bare-name analogue of this same distinction. *)
+      function — i.e. a [DFn], an interface method, or a registry [ExFn]
+      export — never a [DLet] value/constant. Populated at three sites: the
+      [Ast.DMod] export step (mirrors [new_names], restricted to keys
+      already known to be functions via [local_fns]/[qual_fn_names] of the
+      inner env — so it composes correctly across nested modules),
+      [load_module_into_env]'s [ExFn] arm (registry-loaded modules), and
+      [prebind_interface_decl] (interface methods, bound as both
+      "Iface.method" and "Mod.Iface.method" — a call-syntax reference to
+      these bypasses both other sources entirely). Consulted by the
+      [Ast.EVar] reference-recording hook so a qualified value reference
+      (`Mod.SOME_CONST`) is never recorded as a `` `Call `` reference, while
+      a qualified function/interface-method call still is — see [local_fns]
+      for the bare-name analogue of this same distinction. *)
   plain_let_names : StringSet.t;
   (** Names most recently bound by a simple, unrestricted `let name = expr`
       (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
@@ -7346,9 +7350,23 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
         | Poly (ids, cs, t) -> Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
         | Mono t -> Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
       in
-      let e1 = { e with vars = StrMap.add full_qualified sch e.vars } in
+      (* Both dotted keys bound here ([full_qualified] = "Mod.Iface.method",
+         [iface_qualified] = "Iface.method") are genuine function bindings —
+         an interface method, never a [DLet] value — so both are also
+         registered in [qual_fn_names]. This is a THIRD source of qualified
+         function names (alongside [Ast.DMod] exports and registry [ExFn]
+         entries): call syntax like `Show.show(x)` normalizes to
+         [Ast.EVar "Show.show"] (the [Ast.EApp (Ast.EField (Ast.ECon ...))]
+         rule) and resolves straight out of [env.vars] here, bypassing both
+         of the other two sources entirely — so without this, the [EVar]
+         reference-recording hook's [qual_fn_names] gate would wrongly treat
+         every qualified interface-method call as non-function-backed and
+         silently drop it. See [qual_fn_names]'s doc comment. *)
+      let e1 = { e with vars = StrMap.add full_qualified sch e.vars;
+                        qual_fn_names = StrMap.add full_qualified () e.qual_fn_names } in
       let e1 = if StrMap.mem iface_qualified e1.vars then e1
-               else { e1 with vars = StrMap.add iface_qualified sch e1.vars } in
+               else { e1 with vars = StrMap.add iface_qualified sch e1.vars;
+                              qual_fn_names = StrMap.add iface_qualified () e1.qual_fn_names } in
       if StrMap.mem m.md_name.txt e1.vars then e1
       else { e1 with vars = StrMap.add m.md_name.txt sch e1.vars }
     end
