@@ -480,6 +480,43 @@ let test_search_callers_bare_name_merges_modules () =
   Alcotest.(check bool) "A.main present" true (List.mem "A.main" callers_names);
   Alcotest.(check bool) "B.main present" true (List.mem "B.main" callers_names)
 
+(** Regression guard for the class of bug on record in project memory
+    (`project_ambiguous_ctor_current_module.md`): two modules that share a
+    bare constructor name at different tags miscompiled because
+    [lookup_ctor] didn't prefer the current module. This proves
+    reference-tracking inherits that same current-module preference rather
+    than reintroducing the bug at the reference layer — [Y.main]'s bare
+    [Active] must resolve (and be recorded) as [Y.Active], never as the
+    same-named [X.Active] from the other module. *)
+let test_ambiguous_ctor_ref_prefers_current_module () =
+  let refs = check_refs [
+    ("x.march", "X", "mod X do\n  type Status = Active | Done\nend\n");
+    ("y.march", "Y",
+     "mod Y do\n  type Status = Active | Done\n  fn main() do Active end\nend\n");
+  ] in
+  let ctors = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Ctor) refs in
+  Alcotest.(check bool) "Y.main's Active resolves to Y.Active, not X.Active" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "Y.Active" && r.caller = "Y.main") ctors);
+  Alcotest.(check bool) "no false X.Active reference from Y.main" false
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "X.Active" && r.caller = "Y.main") ctors)
+
+(** An unreferenced declaration must resolve to an empty caller list, not an
+    error — consistent with the "no results" UX elsewhere in [forge search]. *)
+let test_no_references_is_empty_not_error () =
+  let refs = check_refs [
+    ("a.march", "A", "mod A do\n  fn unused() do 1 end\n  fn main() do 2 end\nend\n");
+  ] in
+  let tbl = Search.references_of_list
+      (List.map (fun (r : TC.ref_record) ->
+           { Search.callee = r.callee; caller = r.caller;
+             kind = Search.ref_kind_to_string r.ref_kind;
+             file = r.ref_file; line = r.ref_line })
+          refs) in
+  Alcotest.(check int) "unused fn has zero recorded callers" 0
+    (List.length (Search.callers_of { (sample_index ()) with Search.references = tbl } "A.unused"))
+
 (* ------------------------------------------------------------------ *)
 (* Test suite registration                                             *)
 (* ------------------------------------------------------------------ *)
@@ -548,6 +585,10 @@ let references_tests = [
                                     `Quick, test_index_from_json_missing_references;
   "search_callers merges bare-name matches across modules",
                                     `Quick, test_search_callers_bare_name_merges_modules;
+  "ambiguous ctor ref prefers current module",
+                                    `Quick, test_ambiguous_ctor_ref_prefers_current_module;
+  "no references is empty not error",
+                                    `Quick, test_no_references_is_empty_not_error;
 ]
 
 let () =

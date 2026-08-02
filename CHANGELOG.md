@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- `forge search --callers NAME`: reverse-reference search — find every
+  resolved call, constructor use, or qualified type reference to a
+  declaration, using the typechecker's own name resolution (not textual
+  matching).
+
 - **`derive Json for T` (record types) now also generates
   `from_json_events(events) : Result((T, List(JsonStream.Event)),
   Json.DecodeError)`, a second decoder that consumes `JsonStream`'s
