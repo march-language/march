@@ -376,6 +376,29 @@ let sample_index () : Search.index =
         ~return_type:(Some "String")
         ~file:"stdlib/int.march";
 
+      (* Structural-search fixture: a single-arg `String -> Int` entry,
+         deliberately the reverse of `to_string`'s `Int -> String`, so
+         order-sensitivity can be tested without ambiguity. *)
+      make_entry "to_int"
+        ~module_name:"String"
+        ~signature:"String.to_int(s: String) -> Int"
+        ~doc:(Some "Parse a string as an integer.")
+        ~params:[("s", "String")]
+        ~return_type:(Some "Int")
+        ~file:"stdlib/string.march";
+
+      (* Structural-search fixture: an `Int -> Int` entry, so a query of
+         `Int -> Int` has a genuine positive match to find (and the old
+         substring matcher would have also wrongly matched `to_string` /
+         `to_int` here, since both signatures contain the substring "Int"). *)
+      make_entry "negate"
+        ~module_name:"Int"
+        ~signature:"Int.negate(n: Int) -> Int"
+        ~doc:(Some "Negate an integer.")
+        ~params:[("n", "Int")]
+        ~return_type:(Some "Int")
+        ~file:"stdlib/int.march";
+
       make_entry "Option"
         ~kind:Search.Type_
         ~signature:"Option"
@@ -439,22 +462,78 @@ let test_name_sorted_by_score () =
 (* Type signature search                                               *)
 (* ------------------------------------------------------------------ *)
 
-let test_type_search_return_type () =
+let test_type_search_return_only_mode () =
   let idx = sample_index () in
+  (* Leading `->` = return-type-only query, matches at any arity. *)
   let results = Search.search_type idx "-> Int" in
   let names = List.map (fun (e, _) -> e.Search.name) results in
   Alcotest.(check bool) "length (-> Int) found" true (List.mem "length" names)
 
-let test_type_search_param_type () =
+(** Was [test_type_search_param_type]: a bare `"String"` query used to match
+    [split] via substring matching against its printed signature. Under
+    structural matching a bare type with no `->` is a zero-argument query
+    (see [test_type_search_zero_arg_not_return_only]), so this is rewritten
+    as the full structural query that actually describes [split]'s
+    signature: two `String` params returning `List(String)`. *)
+let test_type_search_multi_arg_match () =
   let idx = sample_index () in
-  let results = Search.search_type idx "String" in
+  let results = Search.search_type idx "String -> String -> List(String)" in
   let names = List.map (fun (e, _) -> e.Search.name) results in
-  Alcotest.(check bool) "split (String) found" true (List.mem "split" names)
+  Alcotest.(check bool) "split (String, String) -> List(String) found" true
+    (List.mem "split" names)
 
 let test_type_search_empty_query () =
   let idx = sample_index () in
   let results = Search.search_type idx "" in
   Alcotest.(check int) "empty type query returns 0" 0 (List.length results)
+
+let test_type_search_order_sensitive () =
+  let idx = sample_index () in
+  (* `to_string` is `Int -> String`; `to_int` is the reverse, `String ->
+     Int`. Querying one order must not match the other. *)
+  let results = Search.search_type idx "String -> Int" in
+  let names = List.map (fun (e, _) -> e.Search.name) results in
+  Alcotest.(check bool) "to_string (Int -> String) not matched by reversed query"
+    false (List.mem "to_string" names);
+  Alcotest.(check bool) "to_int (String -> Int) matched" true
+    (List.mem "to_int" names)
+
+let test_type_search_arity_discriminates () =
+  let idx = sample_index () in
+  (* A 1-arg query must not match a 2-arg entry, even if the types appear. *)
+  let results = Search.search_type idx "String -> Int" in
+  List.iter (fun (e, _) ->
+      Alcotest.(check int) ("arity 1 for " ^ e.Search.name)
+        1 (List.length e.Search.params))
+    results
+
+let test_type_search_no_substring_bleed () =
+  let idx = sample_index () in
+  (* `Int` must not match `Int64` / `Integer` / `List(Int)`, and the
+     substring "Int" appearing in `Int.to_string`'s module prefix or
+     `to_int`'s param must not leak either. *)
+  let results = Search.search_type idx "Int -> Int" in
+  Alcotest.(check bool) "negate (Int -> Int) matched" true
+    (List.mem "negate" (List.map (fun (e, _) -> e.Search.name) results));
+  List.iter (fun (e, _) ->
+      Alcotest.(check bool) ("exact param type for " ^ e.Search.name)
+        true (List.for_all (fun (_, t) -> t = "Int") e.Search.params))
+    results
+
+let test_type_search_unparseable_is_error () =
+  match Search.parse_type_query "List( ->" with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "expected a parse error for a malformed type query"
+
+let test_type_search_zero_arg_not_return_only () =
+  (* A zero-argument query is QFull ([], _), NOT QReturnOnly — it must match
+     only zero-argument entries, unlike the `-> T` form. *)
+  match Search.parse_type_query "Int" with
+  | Ok (Search.QFull ([], _)) -> ()
+  | Ok (Search.QReturnOnly _) ->
+    Alcotest.fail "bare `Int` must not be treated as a return-only query"
+  | Ok _ -> Alcotest.fail "expected QFull ([], _) for a bare type"
+  | Error m -> Alcotest.fail ("unexpected parse error: " ^ m)
 
 (* ------------------------------------------------------------------ *)
 (* Type parsing (standalone `ty_eof` start symbol)                     *)
@@ -540,8 +619,11 @@ let test_doc_search_no_doc_entries () =
 
 let test_combined_name_and_type () =
   let idx = sample_index () in
-  (* Name "split" AND type contains "String" *)
-  let results = Search.search_combined idx ~name:"split" ~type_sig:"String" () in
+  (* Name "split" AND type is exactly (String, String) -> List(String) *)
+  let results =
+    Search.search_combined idx ~name:"split"
+      ~type_sig:"String -> String -> List(String)" ()
+  in
   let names = List.map (fun (e, _) -> e.Search.name) results in
   Alcotest.(check bool) "combined: split with String type" true
     (List.mem "split" names)
@@ -767,9 +849,14 @@ let name_search_tests = [
 ]
 
 let type_search_tests = [
-  "return_type",   `Quick, test_type_search_return_type;
-  "param_type",    `Quick, test_type_search_param_type;
-  "empty_query",   `Quick, test_type_search_empty_query;
+  "return_only_mode",       `Quick, test_type_search_return_only_mode;
+  "multi_arg_match",        `Quick, test_type_search_multi_arg_match;
+  "empty_query",            `Quick, test_type_search_empty_query;
+  "order_sensitive",        `Quick, test_type_search_order_sensitive;
+  "arity_discriminates",    `Quick, test_type_search_arity_discriminates;
+  "no_substring_bleed",     `Quick, test_type_search_no_substring_bleed;
+  "unparseable_is_error",   `Quick, test_type_search_unparseable_is_error;
+  "zero_arg_not_return_only", `Quick, test_type_search_zero_arg_not_return_only;
 ]
 
 let type_parsing_tests = [

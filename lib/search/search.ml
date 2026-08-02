@@ -545,30 +545,76 @@ let search_name (idx : index) (query : string) : (entry * float) list =
     |> List.sort (fun (_, s1) (_, s2) -> compare s2 s1)
   end
 
-(** Search by type signature.  Checks if query type components appear in
-    the indexed signature string (v1: component-based string matching). *)
+(** A parsed `--type` query.  A leading `->` means "match the return type at
+    any arity" and is kept as a distinct constructor rather than collapsed
+    into an empty argument list, because a genuine zero-argument query
+    ([QFull ([], _)]) must match ONLY zero-argument entries. *)
+type type_query =
+  | QFull of string list * string   (** canonical arg types, canonical return type *)
+  | QReturnOnly of string           (** `-> T` form: canonical return type, any arity *)
+
+(** Flatten a (right-associative) curried arrow type into its argument types
+    and final return type: [A -> B -> C] becomes [([A; B], C)]. *)
+let flatten_arrow (ty : Ast.ty) : Ast.ty list * Ast.ty =
+  let rec go acc = function
+    | Ast.TyArrow (a, b) -> go (a :: acc) b
+    | t -> (List.rev acc, t)
+  in
+  go [] ty
+
+let parse_ty_query_string (s : string) : Ast.ty =
+  let lexbuf = Lexing.from_string s in
+  March_parser.Parser.ty_eof
+    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+
+(** Parse a type query, canonicalizing every part through one shared
+    variable-renaming table so `a` denotes the same variable everywhere in the
+    query (mirrors the discipline in [make_ast_ty_printer] / [collect_entries]).
+
+    A query beginning with `->` is a return-type-only query, matched at any
+    arity. This is a distinct constructor rather than an empty argument list,
+    because a zero-argument query also has no arguments and must NOT match at
+    any arity. *)
+let parse_type_query (q : string) : (type_query, string) result =
+  let trimmed = String.trim q in
+  try
+    if String.length trimmed >= 2 && String.sub trimmed 0 2 = "->" then begin
+      let rest = String.trim (String.sub trimmed 2 (String.length trimmed - 2)) in
+      let ty = parse_ty_query_string rest in
+      let pp = make_ast_ty_printer () in
+      Ok (QReturnOnly (pp ty))
+    end else begin
+      let ty = parse_ty_query_string trimmed in
+      let (arg_tys, ret_ty) = flatten_arrow ty in
+      let pp = make_ast_ty_printer () in
+      let args = List.map pp arg_tys in
+      let ret = pp ret_ty in
+      Ok (QFull (args, ret))
+    end
+  with _ ->
+    Error (Printf.sprintf "could not parse type query: %S" q)
+
+(** Search by type signature: structural matching against each entry's
+    [params]/[return_type], positional and arity-sensitive — not substring
+    matching against the printed signature. *)
 let search_type (idx : index) (type_query : string) : (entry * float) list =
   if String.length type_query = 0 then [] else
-  let ql = normalize type_query in
-  (* Split on arrows and commas for component matching *)
-  let parts =
-    String.split_on_char ' ' ql
-    |> List.concat_map (String.split_on_char ',')
-    |> List.map String.trim
-    |> List.filter (fun s -> s <> "" && s <> "->" && s <> "-")
-  in
-  if parts = [] then [] else
-  List.filter_map (fun entry ->
-    let sig_l = normalize entry.signature in
-    let matched = List.filter (fun p -> contains_substr sig_l p) parts in
-    let total = List.length parts in
-    let n_matched = List.length matched in
-    if n_matched = 0 then None
-    else
-      let score = float_of_int n_matched /. float_of_int total in
-      Some (entry, score)
-  ) idx.entries
-  |> List.sort (fun (_, s1) (_, s2) -> compare s2 s1)
+  match parse_type_query type_query with
+  | Error _ -> []
+  | Ok (QReturnOnly ret) ->
+    List.filter_map (fun entry ->
+      match entry.return_type with
+      | Some r when r = ret -> Some (entry, 1.0)
+      | _ -> None
+    ) idx.entries
+  | Ok (QFull (args, ret)) ->
+    List.filter_map (fun entry ->
+      if List.length args = List.length entry.params
+         && List.for_all2 (fun a (_, t) -> a = t) args entry.params
+         && (match entry.return_type with Some r -> r = ret | None -> false)
+      then Some (entry, 1.0)
+      else None
+    ) idx.entries
 
 (** Search by keyword in doc strings. *)
 let search_docs (idx : index) (keywords : string) : (entry * float) list =
