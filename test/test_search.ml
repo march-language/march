@@ -470,6 +470,12 @@ let test_parse_ty_eof_arrow () =
   | March_ast.Ast.TyArrow (_, _) -> ()
   | _ -> Alcotest.fail "expected TyArrow for `List(a) -> Int`"
 
+let test_pp_ast_ty_canonicalizes_vars () =
+  (* `xs` and `acc` must print as `a` and `b`, matching make_ty_printer. *)
+  let ty = parse_ty_str "List(xs) -> acc" in
+  Alcotest.(check string) "author var names normalized"
+    "List(a) -> b" (Search.pp_ast_ty ty)
+
 (* ------------------------------------------------------------------ *)
 (* Doc search                                                          *)
 (* ------------------------------------------------------------------ *)
@@ -732,7 +738,8 @@ let type_search_tests = [
 ]
 
 let type_parsing_tests = [
-  "ty_eof arrow", `Quick, test_parse_ty_eof_arrow;
+  "ty_eof arrow",                `Quick, test_parse_ty_eof_arrow;
+  "pp_ast_ty canonicalizes vars", `Quick, test_pp_ast_ty_canonicalizes_vars;
 ]
 
 let doc_search_tests = [

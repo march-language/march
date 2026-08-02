@@ -97,29 +97,54 @@ let levenshtein s t =
 (* AST surface-type pretty printer                                     *)
 (* ------------------------------------------------------------------ *)
 
-let rec pp_ast_ty = function
-  | Ast.TyCon ({txt; _}, []) -> txt
-  | Ast.TyCon ({txt; _}, args) ->
-    txt ^ "(" ^ String.concat ", " (List.map pp_ast_ty args) ^ ")"
-  | Ast.TyVar {txt; _} -> txt
-  | Ast.TyArrow (a, b) ->
-    let a_str = match a with
-      | Ast.TyArrow _ -> "(" ^ pp_ast_ty a ^ ")"
-      | _ -> pp_ast_ty a
-    in
-    a_str ^ " -> " ^ pp_ast_ty b
-  | Ast.TyTuple ts ->
-    "(" ^ String.concat ", " (List.map pp_ast_ty ts) ^ ")"
-  | Ast.TyRecord fields ->
-    "{ " ^
-    String.concat ", "
-      (List.map (fun ({Ast.txt; _}, t) -> txt ^ ": " ^ pp_ast_ty t) fields)
-    ^ " }"
-  | Ast.TyLinear (_, t) -> pp_ast_ty t
-  | Ast.TyNat n -> string_of_int n
-  | Ast.TyNatOp _ -> "_"
-  | Ast.TyChan _ -> "Chan"
-  | Ast.TyRefine (base, _, _) -> pp_ast_ty base
+(** Create a printer that assigns clean variable names (a, b, c, …) in order
+    of first appearance among an AST type's surface `TyVar` names, shared
+    across multiple calls — so all parts of one signature (e.g. a function's
+    params and its return type, or a variant's args listed twice) use the
+    same name mapping. Mirrors [make_ty_printer] below, but keyed by the
+    author-written variable text rather than a unification-engine id. *)
+let make_ast_ty_printer () : Ast.ty -> string =
+  let tbl  : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  let next = ref 0 in
+  let varname txt =
+    match Hashtbl.find_opt tbl txt with
+    | Some n -> n
+    | None ->
+      let n = if !next < 26 then String.make 1 (Char.chr (97 + !next))
+              else "t" ^ string_of_int (!next - 25) in
+      incr next; Hashtbl.add tbl txt n; n
+  in
+  let rec go = function
+    | Ast.TyCon ({txt; _}, []) -> txt
+    | Ast.TyCon ({txt; _}, args) ->
+      txt ^ "(" ^ String.concat ", " (List.map go args) ^ ")"
+    | Ast.TyVar {txt; _} -> varname txt
+    | Ast.TyArrow (a, b) ->
+      let a_str = match a with
+        | Ast.TyArrow _ -> "(" ^ go a ^ ")"
+        | _ -> go a
+      in
+      a_str ^ " -> " ^ go b
+    | Ast.TyTuple ts ->
+      "(" ^ String.concat ", " (List.map go ts) ^ ")"
+    | Ast.TyRecord fields ->
+      "{ " ^
+      String.concat ", "
+        (List.map (fun ({Ast.txt; _}, t) -> txt ^ ": " ^ go t) fields)
+      ^ " }"
+    | Ast.TyLinear (_, t) -> go t
+    | Ast.TyNat n -> string_of_int n
+    | Ast.TyNatOp _ -> "_"
+    | Ast.TyChan _ -> "Chan"
+    | Ast.TyRefine (base, _, _) -> go base
+  in
+  go
+
+(** Standalone entry point: renders one type with a fresh (single-call)
+    name table. Call sites that print several parts of the SAME signature
+    must instead share one [make_ast_ty_printer ()] closure — see
+    [collect_entries] below. *)
+let pp_ast_ty (ty : Ast.ty) : string = make_ast_ty_printer () ty
 
 (* ------------------------------------------------------------------ *)
 (* Canonical type printer (clean a/b/c variable names)                *)
@@ -171,17 +196,20 @@ let pp_ty_canonical (ty : TC.ty) : string = make_ty_printer () ty
 (* Index building from AST declarations                                *)
 (* ------------------------------------------------------------------ *)
 
-let extract_fn_params (fn : Ast.fn_def) : (string * string) list =
+(** [pp] must be shared with whoever prints this function's return type
+    (see the [Ast.DFn] case in [collect_entries]), so a type variable that
+    appears in both a parameter and the return type gets the same letter. *)
+let extract_fn_params (pp : Ast.ty -> string) (fn : Ast.fn_def) : (string * string) list =
   match fn.fn_clauses with
   | [] -> []
   | clause :: _ ->
     List.map (function
       | Ast.FPNamed p ->
         (p.param_name.txt,
-         match p.param_ty with Some t -> pp_ast_ty t | None -> "_")
+         match p.param_ty with Some t -> pp t | None -> "_")
       | Ast.FPDefault (p, _) ->
         (p.param_name.txt,
-         match p.param_ty with Some t -> pp_ast_ty t | None -> "_")
+         match p.param_ty with Some t -> pp t | None -> "_")
       | Ast.FPPat (Ast.PatVar n) -> (n.txt, "_")
       | Ast.FPPat _ -> ("_", "_")
     ) clause.fc_params
@@ -239,8 +267,12 @@ let make_fn_signature ~module_name (fn : Ast.fn_def) (params : (string * string)
 let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
   match decl with
   | Ast.DFn (fn, span) ->
-    let ast_params = extract_fn_params fn in
-    let ast_ret = Option.map pp_ast_ty fn.fn_ret_ty in
+    (* One shared table so an AST-fallback variable name (e.g. the `a` in
+       `xs: List(a)`) matches the same letter if it recurs in the return
+       type — mirrors the TC-side sharing in [resolve_fn_types] below. *)
+    let ast_pp = make_ast_ty_printer () in
+    let ast_params = extract_fn_params ast_pp fn in
+    let ast_ret = Option.map ast_pp fn.fn_ret_ty in
     let (params, ret) = resolve_fn_types type_map fn ast_params ast_ret in
     let signature = make_fn_signature ~module_name fn params ret in
     let entry = {
@@ -274,9 +306,12 @@ let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
     let ctor_entries = match typedef with
       | Ast.TDVariant variants ->
         List.map (fun (v : Ast.variant) ->
+          (* Shared table: args_str and params both render v.var_args, and
+             must agree on the letter assigned to each variable. *)
+          let pp = make_ast_ty_printer () in
           let args_str =
             if v.var_args = [] then ""
-            else "(" ^ String.concat ", " (List.map pp_ast_ty v.var_args) ^ ")"
+            else "(" ^ String.concat ", " (List.map pp v.var_args) ^ ")"
           in
           { name        = v.var_name.txt;
             module_name;
@@ -285,7 +320,7 @@ let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
             doc         = None;
             file;
             line        = v.var_name.span.Ast.start_line;
-            params      = List.mapi (fun i t -> (string_of_int i, pp_ast_ty t)) v.var_args;
+            params      = List.mapi (fun i t -> (string_of_int i, pp t)) v.var_args;
             return_type = Some name.txt;
           }
         ) variants
