@@ -210,6 +210,7 @@ let sample_index () : Search.index =
   Search.{
     version      = 1;
     generated_at = "2026-01-01T00:00:00Z";
+    references   = Hashtbl.create 0;
     entries      = [
       make_entry "map"
         ~signature:"List.map(xs: List(a), f: fn(a) -> b) -> List(b)"
@@ -436,6 +437,49 @@ let test_stdlib_search_list_module () =
   Alcotest.(check bool) "List.map found in stdlib" true
     (List.length list_results > 0)
 
+let test_index_references_roundtrip () =
+  let refs : Search.ref_entry list = [
+    { Search.callee = "A.helper"; caller = "A.main"; kind = "call"; file = "a.march"; line = 3 };
+  ] in
+  let idx = Search.{ (sample_index ()) with references = Search.references_of_list refs } in
+  let json = Search.index_to_json idx in
+  let idx2 = Search.index_from_json json in
+  let looked_up = Search.callers_of idx2 "A.helper" in
+  Alcotest.(check int) "one caller round-tripped" 1 (List.length looked_up)
+
+let test_index_from_json_missing_references () =
+  (* Old cache files predate the "references" key entirely. *)
+  let idx = sample_index () in
+  let json_without_refs = Search.index_to_json idx in
+  (* index_to_json always includes "references" now; simulate an old cache by
+     stripping the key so index_from_json's tolerance is actually exercised. *)
+  let j = Yojson.Basic.from_string json_without_refs in
+  let stripped = match j with
+    | `Assoc kvs -> `Assoc (List.filter (fun (k, _) -> k <> "references") kvs)
+    | other -> other
+  in
+  let idx2 = Search.index_from_json (Yojson.Basic.to_string stripped) in
+  Alcotest.(check int) "missing references key yields empty table"
+    0 (List.length (Search.callers_of idx2 "anything"))
+
+let test_search_callers_bare_name_merges_modules () =
+  let idx = Search.{
+    (sample_index ()) with
+    references = Search.references_of_list [
+      { Search.callee = "A.helper"; caller = "A.main"; kind = "call"; file = "a.march"; line = 1 };
+      { Search.callee = "B.helper"; caller = "B.main"; kind = "call"; file = "b.march"; line = 2 };
+    ];
+    entries = [
+      make_entry "helper" ~module_name:"A";
+      make_entry "helper" ~module_name:"B";
+    ];
+  } in
+  let callers = Search.search_callers idx "helper" in
+  let callers_names = List.map (fun (r : Search.ref_entry) -> r.caller) callers in
+  Alcotest.(check int) "bare name merges both modules' callers" 2 (List.length callers);
+  Alcotest.(check bool) "A.main present" true (List.mem "A.main" callers_names);
+  Alcotest.(check bool) "B.main present" true (List.mem "B.main" callers_names)
+
 (* ------------------------------------------------------------------ *)
 (* Test suite registration                                             *)
 (* ------------------------------------------------------------------ *)
@@ -499,6 +543,11 @@ let references_tests = [
                                     `Quick, test_typeref_qualified_recorded;
   "interface-signature type-ref has no stale caller",
                                     `Quick, test_typeref_interface_sig_no_stale_caller;
+  "index references roundtrip",    `Quick, test_index_references_roundtrip;
+  "index_from_json tolerates missing references key",
+                                    `Quick, test_index_from_json_missing_references;
+  "search_callers merges bare-name matches across modules",
+                                    `Quick, test_search_callers_bare_name_merges_modules;
 ]
 
 let () =
