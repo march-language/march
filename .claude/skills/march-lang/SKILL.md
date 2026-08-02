@@ -400,6 +400,7 @@ forge search fold --type List --pretty         # combined, table output
 forge search "" --json > out.json              # JSON output
 forge search sort --rebuild                    # force index rebuild
 forge search map --limit 5
+forge search --callers List.map                # reverse reference: who calls/uses it
 
 # Benchmarks
 forge bench                      # compile and run benchmarks under bench/
@@ -440,9 +441,18 @@ forge search "" --doc "sort stable"
 
 # Combined
 forge search fold --type "List" --doc "accumulator"
+
+# Reverse reference: who calls/uses this? (distinct mode — ignores the other filters)
+forge search --callers List.map       # every resolved call site
+forge search --callers Widget         # constructor uses and qualified type references too
 ```
 
 Search is forge-only — there is no `-search` flag on the `march` compiler.
+
+`--callers` resolves through the typechecker, so it distinguishes same-named
+declarations in different modules instead of matching text. Qualified type
+references inside interface method signatures and impl headers are not tracked
+(no enclosing function to attribute them to).
 
 ---
 
