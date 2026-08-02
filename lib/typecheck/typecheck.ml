@@ -567,6 +567,17 @@ type env = {
       number of arguments panics at runtime (and the compiler miscompiles
       under-application into a body call with a garbage argument).  Used to
       reject wrong-arity calls of these functions at the call site. *)
+  qual_fn_names : unit StrMap.t;
+  (** Qualified ("Mod.name") keys in [vars] that denote a genuine top-level
+      function — i.e. a [DFn] (or a registry [ExFn] export), never a [DLet]
+      value/constant. Populated at two sites: the [Ast.DMod] export step
+      (mirrors [new_names], restricted to keys already known to be functions
+      via [local_fns]/[qual_fn_names] of the inner env — so it composes
+      correctly across nested modules) and [load_module_into_env]'s [ExFn]
+      arm (registry-loaded modules). Consulted by the [Ast.EVar] reference-
+      recording hook so a qualified value reference (`Mod.SOME_CONST`) is
+      never recorded as a `` `Call `` reference — see [local_fns] for the
+      bare-name analogue of this same distinction. *)
   plain_let_names : StringSet.t;
   (** Names most recently bound by a simple, unrestricted `let name = expr`
       (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
@@ -739,6 +750,7 @@ let make_env errors type_map = {
   import_idx = make_import_index ();
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
+  qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
   proof_caps = [];
   always_linear_types = [];
@@ -1155,11 +1167,19 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
          [ExCtor] path already produces for private constructors.
          [ExType]/[ExRecord] stay UNGATED on purpose: March uses the opaque-type
          pattern, where a private [ptype]'s bare NAME stays referenceable across
-         modules (e.g. `ConsistentHash.HashRing(String)` on a public param) while
-         only its CONSTRUCTOR is hidden — enforced by the [ExCtor] gate below. *)
+         modules (e.g. `ConsistentHash.HashRing(String)` on a param) while
+         only its CONSTRUCTOR is hidden — enforced by the [ExCtor] gate below.
+         [ExFn] additionally seeds [qual_fn_names] so the [EVar] reference-
+         recording hook can tell a genuine function export (`ExFn`) apart
+         from a plain value/constant export (`ExValue`) — see
+         [qual_fn_names]'s doc comment. *)
       if not entry.ex_public then env
       else if StrMap.mem qname env.vars then env
-      else { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars }
+      else
+        let env = { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars } in
+        (match entry.ex_kind with
+         | ExFn -> { env with qual_fn_names = StrMap.add qname () env.qual_fn_names }
+         | _ -> env)
     | ExType arity ->
       (* Register the qualified name AND the BARE type name.  March uses a single
          global type namespace (see [surface_ty]'s [canon_name]): a type's bare
@@ -4726,14 +4746,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
                           ref_kind = `Call;
                           ref_file = name.span.Ast.file;
                           ref_line = name.span.Ast.start_line } :: !(env.refs)
-          else if String.contains name.txt '.' then
+          else if String.contains name.txt '.' && StrMap.mem name.txt env.qual_fn_names then
             (* Already-qualified "Mod.name" resolved directly out of env.vars —
                this is how same-compilation cross-module DMod exports work (see
                the [Ast.DMod] branch of [check_decl], which binds "Mod.member"
                straight into the outer env.vars rather than routing through
-               [resolve_qualified_var]/[Module_registry]). A dotted name can
-               never be a local `let`-bound variable, so this is always a
-               genuine cross-module reference. *)
+               [resolve_qualified_var]/[Module_registry]). The [qual_fn_names]
+               membership check excludes a qualified reference to a public
+               top-level [DLet] constant/value — [DMod]'s export step binds
+               those into [env.vars] the exact same way it binds a [DFn], so a
+               bare dotted-name check alone cannot tell them apart; only
+               [qual_fn_names] (populated exclusively from [DFn]s, see its doc
+               comment) can. *)
             env.refs := { callee = name.txt;
                           caller = !(env.current_decl);
                           ref_kind = `Call;
@@ -4743,12 +4767,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
-         | _, Some sch ->
-           env.refs := { callee = name.txt;
-                         caller = !(env.current_decl);
-                         ref_kind = `Call;
-                         ref_file = name.span.Ast.file;
-                         ref_line = name.span.Ast.start_line } :: !(env.refs);
+         | env', Some sch ->
+           (* [env'] is the env AFTER [load_module_into_env] merged the
+              resolved module's exports — [qual_fn_names] is only populated
+              there for the ExFn case, so this correctly excludes a qualified
+              reference to a registry-loaded module's public [DLet]
+              value/constant (ExValue). See [qual_fn_names]'s doc comment. *)
+           (if StrMap.mem name.txt env'.qual_fn_names then
+              env.refs := { callee = name.txt;
+                            caller = !(env.current_decl);
+                            ref_kind = `Call;
+                            ref_file = name.span.Ast.file;
+                            ref_line = name.span.Ast.start_line } :: !(env.refs));
            instantiate ~use_span:name.span env.level env sch
          | _ when is_confirmed_private_qualified name.txt env ->
            (* A confirmed privacy violation (`Mod.priv_fn`) must be reported
@@ -9541,6 +9571,19 @@ let rec check_decl env (d : Ast.decl) : env =
         then (name.txt ^ "." ^ k, sch) :: acc
         else acc
       ) inner_env.vars [] in
+    (* Of the newly-exported qualified names, which denote a genuine function
+       (as opposed to a plain [DLet] value/constant)?  A key [k] is
+       function-backed either because it's one of THIS module's own [DFn]s
+       (tracked bare in [inner_env.local_fns]) or because it is itself an
+       already-qualified key re-exported from a nested public [DMod] (tracked
+       in [inner_env.qual_fn_names], populated by that nested module's own
+       pass through this same branch) — see [qual_fn_names]'s doc comment. *)
+    let new_fn_quals = StrMap.fold (fun k _sch acc ->
+        if is_pub_key k &&
+           (StrMap.mem k inner_env.local_fns || StrMap.mem k inner_env.qual_fn_names)
+        then StrMap.add (name.txt ^ "." ^ k) () acc
+        else acc
+      ) inner_env.vars StrMap.empty in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed.
@@ -9606,6 +9649,7 @@ let rec check_decl env (d : Ast.decl) : env =
                       else ci :: acc) new_cis old_cis in
                     Some merged) all_new env'.ctors);
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
+      qual_fn_names = StrMap.union (fun _k a _ -> Some a) new_fn_quals env'.qual_fn_names;
       module_caps = (name.txt, inner_needs) :: env'.module_caps;
       proof_caps = inner_env.proof_caps;
       always_linear_types = inner_env.always_linear_types;

@@ -78,6 +78,28 @@ let test_call_ref_cross_module () =
     (List.exists (fun (r : TC.ref_record) ->
          r.callee = "B.util" && r.caller = "A.main") calls)
 
+(** A public top-level `let` (a [DLet], not a [DFn]) must never be recorded as
+    a [`Call] reference, even when it is referenced through call syntax
+    (`B.some_const()`) from another module. [DMod]'s export step binds a
+    public [DLet] into the outer [env.vars] under "Mod.name" the exact same
+    way it binds a public [DFn] (see [new_names] in the [Ast.DMod] arm of
+    [check_decl]), so a bare "does this dotted name resolve" check cannot
+    distinguish them — only [qual_fn_names] (populated exclusively from
+    [DFn]s/registry [ExFn]s) can. Call syntax is used here (rather than a
+    bare `B.some_const` value reference) because a qualified name only ever
+    becomes an [Ast.EVar] — the code path this task's hook lives on — via the
+    `Mod.member(args)` call-normalization in [infer_expr]; a bare qualified
+    VALUE reference parses as [Ast.EField] instead, a wholly separate
+    (unhooked, out-of-scope) code path. *)
+let test_qualified_let_const_not_call_ref () =
+  let refs = check_refs [
+    ("b.march", "B", "mod B do\n  let some_const = 42\nend\n");
+    ("a.march", "A", "mod A do\n  fn main() do B.some_const() end\nend\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Call) refs in
+  Alcotest.(check bool) "B.some_const (a DLet, not a DFn) never recorded as Call" false
+    (List.exists (fun (r : TC.ref_record) -> r.callee = "B.some_const") calls)
+
 (* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
@@ -368,8 +390,9 @@ let integration_tests = [
 ]
 
 let references_tests = [
-  "same-module call",   `Quick, test_call_ref_same_module;
-  "cross-module call",  `Quick, test_call_ref_cross_module;
+  "same-module call",         `Quick, test_call_ref_same_module;
+  "cross-module call",        `Quick, test_call_ref_cross_module;
+  "qualified let-const excluded", `Quick, test_qualified_let_const_not_call_ref;
 ]
 
 let () =
