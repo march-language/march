@@ -435,10 +435,12 @@ forge search flt                # fuzzy: finds "filter", "flat_map"
 # Type signature: structural match, not substring — exact arity, each
 # argument type matches positionally (order-sensitive), type variables are
 # canonicalized (so `a -> a` and `x -> x` are the same query). Use `-> T` to
-# match by return type alone, at any arity.
+# match by return type alone, at any arity. A value starting with `-` (like
+# `-> T`) MUST use `--type=VALUE`, not a space — `--type "-> Int"` is parsed
+# as two separate options and fails with `unknown option '->'`.
 forge search "" --type "String -> Int"          # 1-arg fn: String -> Int
 forge search "" --type "List(a) -> a -> Bool"   # 2-arg fn: List(a), a -> Bool
-forge search "" --type "-> Int"                 # any arity, returns Int
+forge search "" --type="-> Int"                 # any arity, returns Int
 
 # Doc keyword (all keywords must appear in doc string)
 forge search "" --doc "sort stable"
