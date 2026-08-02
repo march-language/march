@@ -197,6 +197,130 @@ let test_typeref_interface_sig_no_stale_caller () =
   Alcotest.(check int) "B.Widget in interface signature not recorded at all"
     0 (List.length tyrefs)
 
+(** Final-review Critical 2: a Call reference in a top-level `let` body (a
+    [DLet], never checked via [check_fn]) must never be attributed to
+    whatever [DFn] happened to be checked last in module order. Before the
+    fix, [env.current_decl] was set-and-never-restored by [check_fn], so it
+    leaked across the rest of the module; this reference would have been
+    wrongly recorded with caller = "A.unrelated" (the last fn checked before
+    the `let`). *)
+let test_call_ref_toplevel_let_no_stale_caller () =
+  let refs = check_refs [
+    ("a.march", "A",
+     "mod A do\n\
+     \  fn unrelated() do 1 end\n\
+     \  fn helper() do 2 end\n\
+     \  let x = helper()\n\
+      end\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) ->
+      r.ref_kind = `Call && r.callee = "A.helper") refs in
+  Alcotest.(check bool) "A.helper call from the top-level `let` never attributed to A.unrelated"
+    false (List.exists (fun (r : TC.ref_record) -> r.caller = "A.unrelated") calls)
+
+(** Same scenario, but cross-file/cross-module: a `let` in a SEPARATE module
+    checked after another module's `fn` must not inherit that other
+    module's function as its caller. This is the reviewer's reproduction of
+    the leak crossing file boundaries in multi-file compilation. *)
+let test_call_ref_toplevel_let_no_stale_caller_cross_module () =
+  let refs = check_refs [
+    ("a.march", "A", "mod A do\n  fn unrelated() do 1 end\nend\n");
+    ("b.march", "B",
+     "mod B do\n  fn helper() do 2 end\n  let x = helper()\nend\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) ->
+      r.ref_kind = `Call && r.callee = "B.helper") refs in
+  Alcotest.(check bool)
+    "B.helper call from B's top-level `let` never attributed to A.unrelated"
+    false (List.exists (fun (r : TC.ref_record) -> r.caller = "A.unrelated") calls)
+
+(** A recursive call from inside a top-level `fn` checked AFTER an unrelated
+    `let` must still resolve to its own fn as caller (not "" and not the
+    unrelated `let`'s non-existent caller) — proving the [check_fn]
+    save/restore doesn't overcorrect into losing legitimate attribution. *)
+let test_call_ref_fn_after_let_still_attributed () =
+  let refs = check_refs [
+    ("a.march", "A",
+     "mod A do\n\
+     \  let y = 1\n\
+     \  fn helper() do 1 end\n\
+     \  fn main() do helper() end\n\
+      end\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) -> r.ref_kind = `Call) refs in
+  Alcotest.(check bool) "A.main -> A.helper still recorded after an unrelated `let`" true
+    (List.exists (fun (r : TC.ref_record) ->
+         r.callee = "A.helper" && r.caller = "A.main") calls)
+
+(** Final-review Important 4: a function PARAMETER that shadows a top-level
+    fn name must resolve as the local parameter, not the shadowed top-level
+    fn — a bare-name Call reference here would otherwise be a textual match,
+    not a resolution-based one (this feature's core precision constraint). *)
+let test_call_ref_param_shadow_not_recorded_as_toplevel_call () =
+  let refs = check_refs [
+    ("a.march", "A",
+     "mod A do\n\
+     \  fn helper() do 1 end\n\
+     \  fn wrapper(helper) do helper() end\n\
+      end\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) ->
+      r.ref_kind = `Call && r.callee = "A.helper") refs in
+  Alcotest.(check int)
+    "wrapper's shadowed local `helper` param is never recorded as a call to A.helper"
+    0 (List.length calls)
+
+(** Companion positive case: with NO shadowing, the exact same call shape
+    must still be recorded — pinning that the [bind_var]/[local_fns] fix
+    only suppresses the shadowed case, not genuine top-level recursive/
+    self-referential calls. *)
+let test_call_ref_no_shadow_still_recorded () =
+  let refs = check_refs [
+    ("a.march", "A",
+     "mod A do\n\
+     \  fn helper() do 1 end\n\
+     \  fn wrapper() do helper() end\n\
+      end\n");
+  ] in
+  let calls = List.filter (fun (r : TC.ref_record) ->
+      r.ref_kind = `Call && r.callee = "A.helper") refs in
+  Alcotest.(check bool) "wrapper -> A.helper recorded when there is no shadowing" true
+    (List.exists (fun (r : TC.ref_record) -> r.caller = "A.wrapper") calls)
+
+(** Final-review Important 3: no recorded callee/caller should ever start
+    with a literal "." (the tell for an empty-module ad-hoc
+    `modname ^ "." ^ name` concatenation, e.g. a prelude ctor whose
+    [ci_module] is "") nor contain the "__stdlib__" synthetic wrapper module
+    name (see [Search.synthetic_module_name]) that [typecheck_decls]'s
+    outer synthetic module can leak into a reference recorded from
+    [prelude.march]'s deliberately-unwrapped top-level decls. Cheap,
+    high-value regression guard the reviewer suggested directly. *)
+let test_no_leading_dot_or_synthetic_module_in_refs () =
+  let refs = check_refs [
+    ("a.march", "A",
+     "mod A do\n\
+     \  fn main() do Some(1) end\n\
+      end\n");
+  ] in
+  List.iter (fun (r : TC.ref_record) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "callee %S does not start with '.'" r.callee)
+        false (String.length r.callee > 0 && r.callee.[0] = '.');
+      Alcotest.(check bool)
+        (Printf.sprintf "caller %S does not start with '.'" r.caller)
+        false (String.length r.caller > 0 && r.caller.[0] = '.');
+      let contains_stdlib s =
+        let needle = "__stdlib__" in
+        let nlen = String.length needle in
+        let slen = String.length s in
+        let rec go i = i + nlen <= slen &&
+                       (String.sub s i nlen = needle || go (i + 1)) in
+        slen >= nlen && go 0
+      in
+      Alcotest.(check bool) "callee has no __stdlib__ leak" false (contains_stdlib r.callee);
+      Alcotest.(check bool) "caller has no __stdlib__ leak" false (contains_stdlib r.caller)
+    ) refs
+
 (* ------------------------------------------------------------------ *)
 (* Build a small in-memory index for search tests                     *)
 (* ------------------------------------------------------------------ *)
@@ -428,6 +552,34 @@ let test_stdlib_search_map () =
   Alcotest.(check bool) "found map in stdlib" true
     (List.length results > 0)
 
+(** Final-review Important 3, exercised against the REAL stdlib build (the
+    [check_refs] unit-test helper always wraps decls in a [DMod], so it can
+    never reproduce the [prelude.march]-unwrapping leak path — only
+    [Search.build_stdlib_index]'s real [typecheck_decls] call, which uses the
+    actual "__stdlib__" synthetic wrapper module, can). No recorded
+    callee/caller may start with "." or contain "__stdlib__". *)
+let test_stdlib_refs_no_synthetic_module_leak () =
+  let idx = Search.build_stdlib_index () in
+  let contains_stdlib s =
+    let needle = "__stdlib__" in
+    let nlen = String.length needle in
+    let slen = String.length s in
+    let rec go i = i + nlen <= slen &&
+                   (String.sub s i nlen = needle || go (i + 1)) in
+    slen >= nlen && go 0
+  in
+  let bad = ref [] in
+  Hashtbl.iter (fun callee entries ->
+      if (String.length callee > 0 && callee.[0] = '.') || contains_stdlib callee then
+        bad := ("callee:" ^ callee) :: !bad;
+      List.iter (fun (e : Search.ref_entry) ->
+          if (String.length e.caller > 0 && e.caller.[0] = '.') || contains_stdlib e.caller then
+            bad := ("caller:" ^ e.caller) :: !bad
+        ) entries
+    ) idx.Search.references;
+  Alcotest.(check (list string)) "no leading-dot or __stdlib__ leaks in stdlib references"
+    [] (List.sort_uniq String.compare !bad)
+
 let test_stdlib_search_list_module () =
   let idx = Search.build_stdlib_index () in
   let results = Search.search_name idx "map" in
@@ -479,6 +631,27 @@ let test_search_callers_bare_name_merges_modules () =
   Alcotest.(check int) "bare name merges both modules' callers" 2 (List.length callers);
   Alcotest.(check bool) "A.main present" true (List.mem "A.main" callers_names);
   Alcotest.(check bool) "B.main present" true (List.mem "B.main" callers_names)
+
+(** Final-review Important 7: a type and a same-named constructor (the
+    common `type Foo = Foo(...)` newtype pattern — ~80 occurrences in the
+    real stdlib per the reviewer) are TWO separate [entries] that qualify to
+    the same name. Before deduping the candidate list, [search_callers]
+    called [callers_of] once per entry, so every reference to that one
+    qualified name was double-counted in the output. *)
+let test_search_callers_dedupes_type_and_ctor_same_name () =
+  let idx = Search.{
+    (sample_index ()) with
+    references = Search.references_of_list [
+      { Search.callee = "A.Widget"; caller = "A.main"; kind = "call"; file = "a.march"; line = 1 };
+    ];
+    entries = [
+      make_entry "Widget" ~module_name:"A" ~kind:Search.Type_;
+      make_entry "Widget" ~module_name:"A" ~kind:Search.Constructor;
+    ];
+  } in
+  let callers = Search.search_callers idx "Widget" in
+  Alcotest.(check int) "one reference to A.Widget is reported once, not twice"
+    1 (List.length callers)
 
 (** Regression guard for the class of bug on record in project memory
     (`project_ambiguous_ctor_current_module.md`): two modules that share a
@@ -565,6 +738,8 @@ let integration_tests = [
   "stdlib_nonempty",      `Slow, test_stdlib_index_nonempty;
   "stdlib_search_map",    `Slow, test_stdlib_search_map;
   "stdlib_list_module",   `Slow, test_stdlib_search_list_module;
+  "stdlib refs: no synthetic-module leak",
+                           `Slow, test_stdlib_refs_no_synthetic_module_leak;
 ]
 
 let references_tests = [
@@ -585,10 +760,24 @@ let references_tests = [
                                     `Quick, test_index_from_json_missing_references;
   "search_callers merges bare-name matches across modules",
                                     `Quick, test_search_callers_bare_name_merges_modules;
+  "search_callers dedupes type+ctor same-name candidates",
+                                    `Quick, test_search_callers_dedupes_type_and_ctor_same_name;
   "ambiguous ctor ref prefers current module",
                                     `Quick, test_ambiguous_ctor_ref_prefers_current_module;
   "no references is empty not error",
                                     `Quick, test_no_references_is_empty_not_error;
+  "toplevel let: no stale caller from a prior unrelated fn",
+                                    `Quick, test_call_ref_toplevel_let_no_stale_caller;
+  "toplevel let: no stale caller across module/file boundary",
+                                    `Quick, test_call_ref_toplevel_let_no_stale_caller_cross_module;
+  "fn checked after an unrelated let still gets its own caller",
+                                    `Quick, test_call_ref_fn_after_let_still_attributed;
+  "param shadowing a top-level fn name is not recorded as a call",
+                                    `Quick, test_call_ref_param_shadow_not_recorded_as_toplevel_call;
+  "no shadowing: call still recorded",
+                                    `Quick, test_call_ref_no_shadow_still_recorded;
+  "no leading-dot or __stdlib__ leak in recorded refs",
+                                    `Quick, test_no_leading_dot_or_synthetic_module_in_refs;
 ]
 
 let () =

@@ -44,6 +44,15 @@ type index = {
   generated_at : string;
 }
 
+(** The [index.version] a freshly-[build_index]'d index carries. Bumped
+    whenever the on-disk cache's shape changes in a way an old cache can't
+    satisfy (e.g. the [references] table added in this feature) — a cache
+    reader (see [forge/lib/cmd_search.ml]'s [load_or_build_index]) MUST
+    compare a loaded index's [version] against this constant and treat a
+    mismatch as a cache miss (rebuild), or a stale pre-existing cache from
+    before the bump silently keeps serving without the new data forever. *)
+let current_index_version = 2
+
 let ref_kind_to_string = function
   | `Call    -> "call"
   | `Ctor    -> "ctor"
@@ -313,7 +322,7 @@ let build_index (decl_lists : Ast.decl list list) ~(source_files : string list)
       (tm.Unix.tm_year + 1900) (tm.Unix.tm_mon + 1) tm.Unix.tm_mday
       tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec
   in
-  { entries; references = Hashtbl.create 0; version = 2; generated_at = now }
+  { entries; references = Hashtbl.create 0; version = current_index_version; generated_at = now }
 
 (* ------------------------------------------------------------------ *)
 (* Stdlib loading (mirrors lsp/lib/analysis.ml)                       *)
@@ -379,17 +388,41 @@ let load_stdlib () : Ast.decl list list * string list =
     let decls = List.map parse_file paths in
     (decls, paths)
 
+(** Synthetic outer module name [typecheck_decls] wraps every decl list in
+    (below) so [TC.check_module_with_refs] has a single module to check.
+    Every actual stdlib/project file is itself wrapped in its own [DMod] by
+    [parse_file], so this name is invisible almost everywhere — EXCEPT
+    [prelude.march], whose decls [parse_file] deliberately unwraps to
+    top-level (prelude names are meant to be bare, unqualified), which
+    leaves them checked with [env.current_module] equal to THIS synthetic
+    name rather than a real module. Without stripping it back out here, a
+    prelude-defined fn/ctor/type reference would surface as a callee/caller
+    like "__stdlib__.map" instead of the correct bare "map". *)
+let synthetic_module_name = "__stdlib__"
+
+(** Strip a leading [synthetic_module_name ^ "."] qualifier some
+    [TC.ref_record]'s [callee]/[caller] may carry (see [synthetic_module_name]),
+    so it never leaks into a user-visible reference string. *)
+let unqualify_synthetic_module (s : string) : string =
+  let prefix = synthetic_module_name ^ "." in
+  let plen = String.length prefix in
+  if s = synthetic_module_name then ""
+  else if String.length s > plen && String.sub s 0 plen = prefix then
+    String.sub s plen (String.length s - plen)
+  else s
+
 (** Typecheck a flat list of stdlib decls and return the span→type map plus
     the reference table (calls/ctor uses/type refs) recorded along the way. *)
 let typecheck_decls (all_decls : Ast.decl list)
     : (Ast.span, TC.ty) Hashtbl.t * ref_entry list =
   let synth : Ast.module_ = {
-    mod_name  = { txt = "__stdlib__"; span = Ast.dummy_span };
+    mod_name  = { txt = synthetic_module_name; span = Ast.dummy_span };
     mod_decls = all_decls;
   } in
   let (_errors, type_map, tc_refs) = TC.check_module_with_refs synth in
   let refs = List.map (fun (r : TC.ref_record) ->
-      { callee = r.callee; caller = r.caller;
+      { callee = unqualify_synthetic_module r.callee;
+        caller = unqualify_synthetic_module r.caller;
         kind = ref_kind_to_string r.ref_kind;
         file = r.ref_file; line = r.ref_line }
     ) tc_refs in
@@ -584,6 +617,12 @@ let search_callers (idx : index) (query : string) : ref_entry list =
       idx.entries
       |> List.filter (fun e -> e.name = query)
       |> List.map qualified_of
+      (* A type and a same-named constructor (the common `type Foo = Foo(...)`
+         newtype pattern — ~80 occurrences in the real stdlib) are separate
+         [entries] that qualify to the same name. Without deduping, [callers_of]
+         gets called twice for that one qualified name and every reference to
+         it is double-counted in the output. *)
+      |> List.sort_uniq String.compare
   in
   List.concat_map (callers_of idx) candidates
 

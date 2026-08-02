@@ -40,13 +40,20 @@ let base_env () : Tc.env =
    give fresh mutable state so layering user decls cannot mutate the shared
    base. [type_map] is COPIED so stdlib span->type entries survive for
    cross-stdlib hover. Mutable fields per typecheck.ml:359-391:
-   errors, type_map, pending_constraints, import_tracker. *)
+   errors, type_map, pending_constraints, import_tracker, refs, current_decl.
+   Every mutable [Tc.env] field MUST be listed here — this is a process-
+   lifetime LSP server, so any field left off this list quietly accumulates
+   forever across every keystroke's re-analysis instead of being scoped to
+   one analysis (e.g. [refs] before this fix: nothing in the LSP ever reads
+   it, so it just grew, unbounded, for the life of the server). *)
 let derive (base : Tc.env) : Tc.env =
   { base with
     Tc.errors           = Err.create ();
     type_map            = Hashtbl.copy base.Tc.type_map;
     pending_constraints = ref [];
-    import_tracker      = ref [] }
+    import_tracker      = ref [];
+    refs                = ref [];
+    current_decl        = ref "" }
 
 (* ── stdlib + deps env ───────────────────────────────────────────────────── *)
 

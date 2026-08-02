@@ -523,7 +523,13 @@ let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
       mod_decls = [d]
     } in
     let errors = March_errors.Errors.create () in
-    let env = { tc_env with March_typecheck.Typecheck.errors } in
+    let env = { tc_env with March_typecheck.Typecheck.errors;
+      (* Reset per-call — this env is reused across the whole REPL/JIT
+         session, so without this [refs] would accumulate unboundedly
+         across every fragment typed at the REPL (nothing reads it here);
+         see [Typecheck_cache.derive]'s identical reset for the LSP's
+         analogous reused env. *)
+      refs = ref []; current_decl = ref "" } in
     (try
       let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
       let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
@@ -548,7 +554,13 @@ let run_expr ctx ~tc_env m =
   (* Typecheck and lower BEFORE advancing the counter so a failure leaves no gap. *)
   let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
-  let env = { tc_env with March_typecheck.Typecheck.errors } in
+  let env = { tc_env with March_typecheck.Typecheck.errors;
+      (* Reset per-call — this env is reused across the whole REPL/JIT
+         session, so without this [refs] would accumulate unboundedly
+         across every fragment typed at the REPL (nothing reads it here);
+         see [Typecheck_cache.derive]'s identical reset for the LSP's
+         analogous reused env. *)
+      refs = ref []; current_decl = ref "" } in
   let (_, type_map) = time_phase "typecheck"
     (fun () -> March_typecheck.Typecheck.check_module_with_env env m) in
   let tir = time_phase "lower+mono+opt"
@@ -663,7 +675,13 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
   (* Typecheck and lower BEFORE advancing the counter — failures leave no gap. *)
   let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
-  let env = { tc_env with March_typecheck.Typecheck.errors } in
+  let env = { tc_env with March_typecheck.Typecheck.errors;
+      (* Reset per-call — this env is reused across the whole REPL/JIT
+         session, so without this [refs] would accumulate unboundedly
+         across every fragment typed at the REPL (nothing reads it here);
+         see [Typecheck_cache.derive]'s identical reset for the LSP's
+         analogous reused env. *)
+      refs = ref []; current_decl = ref "" } in
   let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
