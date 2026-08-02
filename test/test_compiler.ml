@@ -9156,6 +9156,320 @@ let test_return_infer_if_guard_infers_pos () =
     Alcotest.(check bool) "abs via if-guard infers r > 0" true
       (has_pred infers "abs" "r > 0")
 
+(* ── precond_infer: propose the parameter refinement that discharges a body ── *)
+
+module PI = March_refinecheck.Precond_infer
+
+(* Span-insensitive structural equality over the tiny predicate grammar the
+   candidates use.  Needed because a candidate carries its predicate TWICE —
+   once as source text (what `--apply` writes into the file) and once as an AST
+   (what the prover actually saw) — and nothing else forces the two to agree. *)
+let rec pred_eq (a : March_ast.Ast.expr) (b : March_ast.Ast.expr) : bool =
+  let open March_ast.Ast in
+  match a, b with
+  | ELit (LitInt x, _), ELit (LitInt y, _) -> x = y
+  | ELit (LitFloat x, _), ELit (LitFloat y, _) -> x = y
+  | EVar x, EVar y -> x.txt = y.txt
+  | EApp (f, xs, _), EApp (g, ys, _) ->
+    pred_eq f g
+    && List.length xs = List.length ys
+    && List.for_all2 pred_eq xs ys
+  | _ -> false
+
+(* Parse a predicate the way a user writes one — inside a real refinement
+   annotation — and hand back the AST the parser produced. *)
+let parse_predicate (text : string) : March_ast.Ast.expr option =
+  let src =
+    Printf.sprintf "mod PredParse do\n  fn f(x : {Int | %s}, xs : List(Int)) : Int do x end\nend"
+      text
+  in
+  let m = Test_helpers.parse_and_desugar src in
+  let rec find (decls : March_ast.Ast.decl list) =
+    List.fold_left
+      (fun acc (d : March_ast.Ast.decl) ->
+        match acc, d with
+        | Some _, _ -> acc
+        | None, March_ast.Ast.DFn (fd, _) ->
+          List.fold_left
+            (fun acc (c : March_ast.Ast.fn_clause) ->
+              match acc with
+              | Some _ -> acc
+              | None ->
+                List.fold_left
+                  (fun acc p ->
+                    match acc, p with
+                    | Some _, _ -> acc
+                    | None,
+                      March_ast.Ast.FPNamed
+                        { March_ast.Ast.param_ty =
+                            Some (March_ast.Ast.TyRefine (_, _, pred)); _ } ->
+                      Some pred
+                    | _ -> None)
+                  None c.March_ast.Ast.fc_params)
+            None fd.March_ast.Ast.fn_clauses
+        | None, March_ast.Ast.DMod (_, _, inner, _) -> find inner
+        | _ -> None)
+      None decls
+  in
+  find m.March_ast.Ast.mod_decls
+
+(* Every candidate's text must parse to the same predicate the prover saw.  A
+   mismatch would make `--apply` write a contract the solver never verified —
+   the one failure a "suggest" tool cannot be allowed to have, because a wrong
+   suggestion still looks exactly like a right one. *)
+let test_precond_infer_candidate_text_matches_ast () =
+  let candidates =
+    PI.int_candidates ~measurable:[ "xs" ] @ PI.float_candidates
+    @ PI.measured_candidates
+  in
+  Alcotest.(check bool) "grammar is non-empty" true (candidates <> []);
+  List.iter
+    (fun (c : PI.candidate) ->
+      match parse_predicate c.PI.c_text with
+      | None ->
+        Alcotest.failf "candidate %S does not parse as a refinement predicate"
+          c.PI.c_text
+      | Some parsed ->
+        Alcotest.(check bool)
+          (Printf.sprintf "candidate %S: text and AST agree" c.PI.c_text)
+          true
+          (pred_eq parsed (c.PI.c_pred March_ast.Ast.dummy_span)))
+    candidates
+
+(* Run the whole pipeline the CLI runs: check the module (which populates the
+   registration globals every probe reflects against), then infer. *)
+let suggest_in src ~target =
+  let m = Test_helpers.parse_and_desugar src in
+  let errctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module errctx m;
+  PI.suggest ~root:(Sys.getcwd ()) ~is_user:(fun _ -> true) ~target m
+
+let sugg_preds (r : PI.t) =
+  List.map (fun (s : PI.suggestion) -> (s.PI.sg_param, s.PI.sg_pred))
+    r.PI.rs_suggestions
+
+let test_precond_infer_positive_param () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"caller"
+        {|mod PC do
+            fn need_pos(n : {Int | _ > 0}) : Int do n end
+            fn caller(n : Int) : Int do need_pos(n) end
+          end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check string) "status" "solved" (PI.status_name r.PI.rs_status);
+      Alcotest.(check (list (pair string string)))
+        "suggests n > 0" [ ("n", "_ > 0") ] (sugg_preds r)
+    | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+  end
+
+(* The weakest candidate that works is the one to propose: a divisor contract
+   must not also forbid negatives, or the suggestion silently rejects callers
+   the function would have accepted. *)
+let test_precond_infer_prefers_the_weakest () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"caller"
+        {|mod PW do
+            fn need_nonzero(n : {Int | _ != 0}) : Int do n end
+            fn caller(n : Int) : Int do need_nonzero(n) end
+          end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check (list (pair string string)))
+        "suggests != 0, not > 0" [ ("n", "_ != 0") ] (sugg_preds r)
+    | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+  end
+
+(* Silence must be unambiguous: a function with no unproven obligation reports
+   [No_debt], NOT an empty suggestion list that a caller could misread as "the
+   checker had nothing to say". *)
+let test_precond_infer_no_debt_is_its_own_status () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"plain" {|mod PN do fn plain(a : Int) : Int do a + 1 end end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check string) "status" "no-debt" (PI.status_name r.PI.rs_status);
+      Alcotest.(check int) "no suggestions" 0 (List.length r.PI.rs_suggestions)
+    | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+  end
+
+(* A truncated search must not report itself as a complete one: with a budget
+   too small to reach the working candidate, the answer is `budget-exhausted`,
+   NOT `no-candidate`. Those are different facts about different things — the
+   second blames the user's code for a limit the tool imposed. *)
+let test_precond_infer_budget_exhaustion_is_not_no_candidate () =
+  if not (z3_available ()) then ()
+  else begin
+    let src =
+      {|mod PB do
+          fn need_pos(n : {Int | _ > 0}) : Int do n end
+          fn caller(n : Int) : Int do need_pos(n) end
+        end|}
+    in
+    let m = Test_helpers.parse_and_desugar src in
+    let errctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module errctx m;
+    let starved =
+      PI.suggest ~root:(Sys.getcwd ()) ~budget:1 ~is_user:(fun _ -> true)
+        ~target:"caller" m
+    in
+    (match starved with
+     | [ r ] ->
+       Alcotest.(check string) "starved status" "budget-exhausted"
+         (PI.status_name r.PI.rs_status)
+     | _ -> Alcotest.failf "expected one result, got %d" (List.length starved));
+    (* Control: the same function with room to search does find the contract,
+       so the status above is about the budget and not about the code. *)
+    March_refinecheck.Refine_check.check_module errctx m;
+    match
+      PI.suggest ~root:(Sys.getcwd ()) ~is_user:(fun _ -> true) ~target:"caller" m
+    with
+    | [ r ] ->
+      Alcotest.(check string) "with budget" "solved" (PI.status_name r.PI.rs_status)
+    | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)
+  end
+
+(* A candidate can be provably debt-discharging and still be WRONG advice.
+   Found on the real stdlib: `Stats.mean_safe` is documented "returning Err on
+   empty list" and opens with `match xs do Nil -> Err(…)`.  `len(_) > 0`
+   discharges its debt and simultaneously forbids the input the function exists
+   to accept, killing the `Nil` arm and pushing the obligation onto callers.
+   Three of four suggestions in a full stdlib sweep were this shape. *)
+let test_precond_infer_respects_a_handled_empty_case () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"avg_safe"
+        {|mod PH do
+            fn mean_of(xs : {List(Float) | len(_) > 0}) : Float do 1.0 end
+            fn avg_safe(xs : List(Float)) : Result(Float, String) do
+              match xs do
+                Nil -> Err("empty")
+                _   -> Ok(mean_of(xs))
+              end
+            end
+          end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check (list (pair string string)))
+        "no contract proposed over a deliberately handled empty case" []
+        (sugg_preds r)
+    | _ -> Alcotest.failf "expected one result, got %d" (List.length rs)
+  end
+
+(* The counter-case, and the reason the guard tests the BRANCH rather than just
+   the presence of a match: a branch that panics is exactly the case a
+   refinement should convert into a compile error, so it must still be
+   proposed.  Without this test the guard could silently over-suppress and look
+   like an improvement. *)
+let test_precond_infer_still_proposes_over_a_panicking_case () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"avg_panicky"
+        {|mod PP do
+            fn mean_of(xs : {List(Float) | len(_) > 0}) : Float do 1.0 end
+            fn avg_panicky(xs : List(Float)) : Float do
+              match xs do
+                Nil -> panic("empty list")
+                _   -> mean_of(xs)
+              end
+            end
+          end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check (list (pair string string)))
+        "a panicking empty case still gets the contract"
+        [ ("xs", "len(_) > 0") ] (sugg_preds r)
+    | _ -> Alcotest.failf "expected one result, got %d" (List.length rs)
+  end
+
+let test_precond_infer_unknown_target () =
+  let rs = suggest_in ~target:"nope" {|mod PU do fn f(a : Int) : Int do a end end|} in
+  match rs with
+  | [ r ] ->
+    Alcotest.(check string) "status" "not-found" (PI.status_name r.PI.rs_status)
+  | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+
+(* An already-refined parameter is never re-proposed: this tool proposes
+   contracts, it does not second-guess declared ones. *)
+let test_precond_infer_skips_refined_params () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"caller"
+        {|mod PR do
+            fn need_pos(n : {Int | _ > 0}) : Int do n end
+            fn caller(n : {Int | _ > 0}) : Int do need_pos(n) end
+          end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check int) "nothing proposed" 0 (List.length r.PI.rs_suggestions)
+    | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+  end
+
+(* ── refine_edit: the annotation splice shared by forge and the LSP ───────── *)
+
+let src_two_params =
+  "mod E do\n\
+  \  fn grouped(m : Map(String, Int), n : Int) : Int do\n\
+  \    n\n\
+  \  end\n\
+  end\n"
+
+(* The type before the parameter contains a comma; a scanner that split on
+   commas without tracking bracket depth would cut `Map(String` here. *)
+let test_refine_edit_splices_past_nested_commas () =
+  match
+    March_refactor.Refine_edit.splice ~src:src_two_params ~line:2 ~fn:"grouped"
+      ~param:"n" ~annotation:"{Int | _ > 0}"
+  with
+  | None -> Alcotest.fail "expected a splice"
+  | Some out ->
+    Alcotest.(check bool) "annotation written" true
+      (let re = Str.regexp_string "n : {Int | _ > 0}" in
+       try ignore (Str.search_forward re out 0); true with Not_found -> false);
+    Alcotest.(check bool) "earlier parameter untouched" true
+      (let re = Str.regexp_string "m : Map(String, Int)" in
+       try ignore (Str.search_forward re out 0); true with Not_found -> false)
+
+let test_refine_edit_declines_unannotated_param () =
+  let src = "mod E2 do\n  fn f(a, b : Int) : Int do b end\nend\n" in
+  Alcotest.(check bool) "no splice for an unannotated parameter" true
+    (March_refactor.Refine_edit.splice ~src ~line:2 ~fn:"f" ~param:"a"
+       ~annotation:"{Int | _ > 0}"
+     = None)
+
+let test_refine_edit_declines_unknown_param () =
+  Alcotest.(check bool) "no splice for a parameter that is not there" true
+    (March_refactor.Refine_edit.splice ~src:src_two_params ~line:2 ~fn:"grouped"
+       ~param:"zzz" ~annotation:"{Int | _ > 0}"
+     = None)
+
+(* The byte range must cover exactly the annotation text — this is what the LSP
+   turns into a TextEdit range, so an off-by-one here corrupts the buffer. *)
+let test_refine_edit_range_covers_only_the_type () =
+  match
+    March_refactor.Refine_edit.byte_range_of_param ~src:src_two_params ~line:2
+      ~fn:"grouped" ~param:"n"
+  with
+  | None -> Alcotest.fail "expected a range"
+  | Some (a, b) ->
+    Alcotest.(check string) "range text" " Int"
+      (String.sub src_two_params a (b - a))
+
 
 (* B15: a raw newline inside a plain "..." string literal must advance the
    lexer's line tracking (Lexing.new_line), matching the triple-string rule's
@@ -11132,6 +11446,23 @@ let compiler_suites =
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "precond_infer", [
+          Alcotest.test_case "candidate text and AST agree"                 `Quick test_precond_infer_candidate_text_matches_ast;
+          Alcotest.test_case "positive-param callee → _ > 0"                `Quick test_precond_infer_positive_param;
+          Alcotest.test_case "prefers the weakest candidate that works"     `Quick test_precond_infer_prefers_the_weakest;
+          Alcotest.test_case "no debt is its own status, not silence"       `Quick test_precond_infer_no_debt_is_its_own_status;
+          Alcotest.test_case "budget exhaustion is not 'no candidate'"        `Quick test_precond_infer_budget_exhaustion_is_not_no_candidate;
+          Alcotest.test_case "no contract over a handled empty case"          `Quick test_precond_infer_respects_a_handled_empty_case;
+          Alcotest.test_case "still proposes over a panicking empty case"     `Quick test_precond_infer_still_proposes_over_a_panicking_case;
+          Alcotest.test_case "unknown target reports not-found"             `Quick test_precond_infer_unknown_target;
+          Alcotest.test_case "already-refined params are left alone"        `Quick test_precond_infer_skips_refined_params;
+        ] );
+      ( "refine_edit", [
+          Alcotest.test_case "splices past a nested comma in an earlier type" `Quick test_refine_edit_splices_past_nested_commas;
+          Alcotest.test_case "declines an unannotated parameter"              `Quick test_refine_edit_declines_unannotated_param;
+          Alcotest.test_case "declines a parameter that is not there"         `Quick test_refine_edit_declines_unknown_param;
+          Alcotest.test_case "range covers exactly the annotation text"       `Quick test_refine_edit_range_covers_only_the_type;
         ] );
       ( "lexer_line_tracking", [
           Alcotest.test_case "B15: raw newline in string literal tracks line"      `Quick test_string_literal_raw_newline_tracks_line;

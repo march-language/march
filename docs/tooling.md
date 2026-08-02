@@ -483,6 +483,69 @@ sqlite3 ~/.claude/skills/spec-search/spec-search.db "SELECT * FROM meta;"
 
 ---
 
+## forge refine — Suggest a refinement type
+
+`forge refine <fn>` proposes the parameter refinement that discharges the
+refinement obligations a function's body leaves unproven. If `n` is handed to a
+callee declaring `{Int | _ > 0}`, the contract `n` itself has to carry is the
+thing the tool works out for you:
+
+```sh
+forge refine split           # one function (bare or qualified name)
+forge refine split --apply   # write the annotation into the source
+forge refine --all           # sweep every function in the project
+```
+
+```
+lib/text.march:10  split
+    n : Int  ->  n : {Int | _ > 0}
+  discharges all 1 unproven obligation(s)
+```
+
+**A suggestion is never a guess.** Each candidate is hypothesised onto the
+signature and the *real* refinement checker is re-run over the function; the
+candidate is proposed only if the checker discharges obligations under it and
+introduces no new violation. So `march check` after `--apply` agrees with what
+was printed, and there is no second implementation of the prover to drift.
+
+When several candidates work, the **weakest** wins — a divisor contract is
+reported as `_ != 0` rather than `_ > 0`, so accepting the suggestion does not
+quietly reject callers the function would have accepted.
+
+Silence is never ambiguous. Every function reports one of:
+
+| Outcome | Meaning |
+|---|---|
+| a proposal | the listed annotations discharge the listed obligations |
+| `nothing to prove` | the body has no unproven obligation |
+| `no candidate…` | there is debt, but nothing in the grammar shifts it |
+| partial | some obligations discharged; the rest are counted |
+| `search stopped at the probe budget…` | the search was **truncated**, not exhausted — raise `--budget` and ask again |
+
+**A contract that contradicts the function is not proposed.** A `_safe` wrapper that
+matches `Nil -> Err(...)` and does the real work in the other arm carries genuine
+unproven debt, and `{List(a) | len(_) > 0}` would discharge it — by forbidding the
+exact input the function exists to accept. `forge refine` suppresses that: if the
+function handles the excluded case **non-fatally**, no contract is proposed. If it
+handles it by **panicking**, the contract still is — turning that panic into a compile
+error is the whole point.
+
+The candidate grammar covers sign and non-zero contracts on `Int` and `Float`,
+`len(_) > 0` on `List`/`String`, and index contracts (`_ >= 0 && _ < len(xs)`)
+against each list or string parameter in the same signature. A parameter with
+no type annotation, or one that is already refined, is left alone.
+
+Requires Z3 on `PATH`, like the rest of refinement checking. `--budget N` caps
+how many hypothesis re-checks the inference may spend **per function** (default
+200), so a `--all` sweep cannot have its answers silently truncated by whichever
+functions happen to be visited first.
+
+In an editor, the same inference is available as the **"Suggest a refinement
+type for `f`"** code action on a function's name; accepting it applies the
+identical edit.
+
+---
+
 ## forge cap — Capability and typestate inspection
 
 `forge cap query` prints a capability and typestate summary across all `.march` files in your project. It parses (but does not typecheck) each file and reports every `needs`, `always_linear type`, `transitions`, and `proof cap` declaration.

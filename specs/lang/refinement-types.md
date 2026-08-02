@@ -1176,6 +1176,53 @@ escalates precondition obligations only — see below.
 
 ---
 
+## Getting a contract proposed for you — `forge refine`
+
+`--refine-report` tells you an obligation went unproven; it does not tell you
+what contract would have proved it. `forge refine <fn>` (equivalently
+`march --refine-suggest <fn>`) answers that question:
+
+```
+$ forge refine split
+lib/text.march:10  split
+    n : Int  ->  n : {Int | _ > 0}
+  discharges all 1 unproven obligation(s)
+```
+
+The mechanism matters more than the output. The obligation ledger records a
+span, a callee and a verdict — it does **not** record which parameter is to
+blame, and there is no honest way to recover that after the fact, since an
+argument is an arbitrary expression over several parameters. So the tool does
+not attribute anything. It hypothesises a refinement onto the signature,
+re-runs the *real* checker over the function, and keeps the candidate only if
+the ledger's debt actually shrank and no new violation appeared.
+
+Two consequences follow, both deliberate:
+
+- **A suggestion cannot over-claim.** It exists because `Refine_check` proved
+  something under it, so `march check` after applying it says what the tool
+  predicted. There is no parallel VC generator to drift.
+- **A suggestion cannot exceed the checker.** Where the checker is incomplete —
+  a `len(xs)` fact that does not propagate from a caller to a callee, say — the
+  tool reports `no candidate refinement discharges any of them` rather than
+  proposing a contract that would not, in fact, help.
+
+Where several candidates verify, the **weakest** is proposed: `_ != 0` before
+`_ > 0`, `_ >= 0` before `_ > 0`, `_ < len(xs)` before
+`_ >= 0 && _ < len(xs)`. A contract narrows the set of callers a function
+accepts, so proposing a stronger one than the body needs is a real cost, not a
+harmless conservatism.
+
+The grammar is finite by design (sign and non-zero contracts on `Int`/`Float`,
+`len(_) > 0` on `List`/`String`, index contracts against each list or string
+parameter in the same signature). It will miss contracts it cannot spell; it
+will not invent one it did not prove.
+
+See [docs/tooling.md](https://github.com/march-language/march/blob/main/docs/tooling.md)
+for the full command surface, including `--apply` and the editor code action.
+
+---
+
 ## `cap verified` — turning silence into an error
 
 March's default stance is **definite failure only**: a false positive on correct
