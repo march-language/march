@@ -29,11 +29,46 @@ type entry = {
   return_type : string option;
 }
 
+type ref_entry = {
+  callee : string;   (* qualified name of the referenced declaration *)
+  caller : string;   (* qualified name of the enclosing declaration *)
+  kind   : string;   (* "call" | "ctor" | "type" *)
+  file   : string;
+  line   : int;
+}
+
 type index = {
   entries      : entry list;
+  references   : (string, ref_entry list) Hashtbl.t;
   version      : int;
   generated_at : string;
 }
+
+(** The [index.version] a freshly-[build_index]'d index carries. Bumped
+    whenever the on-disk cache's shape changes in a way an old cache can't
+    satisfy (e.g. the [references] table added in this feature) — a cache
+    reader (see [forge/lib/cmd_search.ml]'s [load_or_build_index]) MUST
+    compare a loaded index's [version] against this constant and treat a
+    mismatch as a cache miss (rebuild), or a stale pre-existing cache from
+    before the bump silently keeps serving without the new data forever. *)
+let current_index_version = 2
+
+let ref_kind_to_string = function
+  | `Call    -> "call"
+  | `Ctor    -> "ctor"
+  | `TypeRef -> "type"
+
+(** Group a flat list of ref_entry into the callee-keyed table [index.references] expects. *)
+let references_of_list (refs : ref_entry list) : (string, ref_entry list) Hashtbl.t =
+  let tbl : (string, ref_entry list) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun (r : ref_entry) ->
+      let existing = Option.value ~default:[] (Hashtbl.find_opt tbl r.callee) in
+      Hashtbl.replace tbl r.callee (r :: existing)
+    ) refs;
+  tbl
+
+let callers_of (idx : index) (callee : string) : ref_entry list =
+  Option.value ~default:[] (Hashtbl.find_opt idx.references callee)
 
 (* ------------------------------------------------------------------ *)
 (* Levenshtein distance                                                *)
@@ -287,7 +322,7 @@ let build_index (decl_lists : Ast.decl list list) ~(source_files : string list)
       (tm.Unix.tm_year + 1900) (tm.Unix.tm_mon + 1) tm.Unix.tm_mday
       tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec
   in
-  { entries; version = 1; generated_at = now }
+  { entries; references = Hashtbl.create 0; version = current_index_version; generated_at = now }
 
 (* ------------------------------------------------------------------ *)
 (* Stdlib loading (mirrors lsp/lib/analysis.ml)                       *)
@@ -353,20 +388,52 @@ let load_stdlib () : Ast.decl list list * string list =
     let decls = List.map parse_file paths in
     (decls, paths)
 
-(** Typecheck a flat list of stdlib decls and return the span→type map. *)
-let typecheck_decls (all_decls : Ast.decl list) : (Ast.span, TC.ty) Hashtbl.t =
+(** Synthetic outer module name [typecheck_decls] wraps every decl list in
+    (below) so [TC.check_module_with_refs] has a single module to check.
+    Every actual stdlib/project file is itself wrapped in its own [DMod] by
+    [parse_file], so this name is invisible almost everywhere — EXCEPT
+    [prelude.march], whose decls [parse_file] deliberately unwraps to
+    top-level (prelude names are meant to be bare, unqualified), which
+    leaves them checked with [env.current_module] equal to THIS synthetic
+    name rather than a real module. Without stripping it back out here, a
+    prelude-defined fn/ctor/type reference would surface as a callee/caller
+    like "__stdlib__.map" instead of the correct bare "map". *)
+let synthetic_module_name = "__stdlib__"
+
+(** Strip a leading [synthetic_module_name ^ "."] qualifier some
+    [TC.ref_record]'s [callee]/[caller] may carry (see [synthetic_module_name]),
+    so it never leaks into a user-visible reference string. *)
+let unqualify_synthetic_module (s : string) : string =
+  let prefix = synthetic_module_name ^ "." in
+  let plen = String.length prefix in
+  if s = synthetic_module_name then ""
+  else if String.length s > plen && String.sub s 0 plen = prefix then
+    String.sub s plen (String.length s - plen)
+  else s
+
+(** Typecheck a flat list of stdlib decls and return the span→type map plus
+    the reference table (calls/ctor uses/type refs) recorded along the way. *)
+let typecheck_decls (all_decls : Ast.decl list)
+    : (Ast.span, TC.ty) Hashtbl.t * ref_entry list =
   let synth : Ast.module_ = {
-    mod_name  = { txt = "__stdlib__"; span = Ast.dummy_span };
+    mod_name  = { txt = synthetic_module_name; span = Ast.dummy_span };
     mod_decls = all_decls;
   } in
-  let (_errors, type_map) = TC.check_module synth in
-  type_map
+  let (_errors, type_map, tc_refs) = TC.check_module_with_refs synth in
+  let refs = List.map (fun (r : TC.ref_record) ->
+      { callee = unqualify_synthetic_module r.callee;
+        caller = unqualify_synthetic_module r.caller;
+        kind = ref_kind_to_string r.ref_kind;
+        file = r.ref_file; line = r.ref_line }
+    ) tc_refs in
+  (type_map, refs)
 
 (** Build a search index from all stdlib files, with typechecker-inferred types. *)
 let build_stdlib_index () : index =
   let (decl_lists, source_files) = load_stdlib () in
-  let type_map = typecheck_decls (List.concat decl_lists) in
-  build_index decl_lists ~source_files ~type_map ()
+  let (type_map, refs) = typecheck_decls (List.concat decl_lists) in
+  let idx = build_index decl_lists ~source_files ~type_map () in
+  { idx with references = references_of_list refs }
 
 (** Build an index from all .march files found in [dirs] (non-recursive). *)
 let build_index_from_dirs (dirs : string list) : index =
@@ -381,11 +448,18 @@ let build_index_from_dirs (dirs : string list) : index =
   in
   let paths = List.concat_map march_files_in dirs in
   let decls = List.map parse_file paths in
-  build_index decls ~source_files:paths ()
+  let (type_map, refs) = typecheck_decls (List.concat decls) in
+  let idx = build_index decls ~source_files:paths ~type_map () in
+  { idx with references = references_of_list refs }
 
 (** Merge two indices into one. *)
 let merge_indices (a : index) (b : index) : index =
-  { a with entries = a.entries @ b.entries }
+  let merged = Hashtbl.copy a.references in
+  Hashtbl.iter (fun k v ->
+      let existing = Option.value ~default:[] (Hashtbl.find_opt merged k) in
+      Hashtbl.replace merged k (v @ existing)
+    ) b.references;
+  { a with entries = a.entries @ b.entries; references = merged }
 
 (* ------------------------------------------------------------------ *)
 (* Search helpers                                                      *)
@@ -529,6 +603,46 @@ let search_combined (idx : index)
     ) idx.entries
     |> List.sort (fun (_, s1) (_, s2) -> compare s2 s1)
 
+(** Resolve [query] (bare or qualified) to every matching entry's qualified
+    name, then return their combined caller list. Bare names may match
+    entries in more than one module; all matches are merged rather than
+    treated as an error, consistent with [search_name]'s existing UX. *)
+let search_callers (idx : index) (query : string) : ref_entry list =
+  let qualified_of (e : entry) =
+    if e.module_name = "" then e.name else e.module_name ^ "." ^ e.name
+  in
+  let candidates =
+    if String.contains query '.' then [query]
+    else
+      idx.entries
+      |> List.filter (fun e -> e.name = query)
+      |> List.map qualified_of
+      (* A type and a same-named constructor (the common `type Foo = Foo(...)`
+         newtype pattern — ~80 occurrences in the real stdlib) are separate
+         [entries] that qualify to the same name. Without deduping, [callers_of]
+         gets called twice for that one qualified name and every reference to
+         it is double-counted in the output. *)
+      |> List.sort_uniq String.compare
+  in
+  List.concat_map (callers_of idx) candidates
+
+let format_ref_entry (r : ref_entry) : string =
+  Printf.sprintf "%s  %s:%d  (%s)" r.caller r.file r.line r.kind
+
+let format_references_plain (refs : ref_entry list) : unit =
+  if refs = [] then print_endline "no references found"
+  else List.iter (fun r -> print_endline (format_ref_entry r)) refs
+
+let format_references_colored (refs : ref_entry list) : unit =
+  if refs = [] then Printf.printf "\027[2mno references found\027[0m\n"
+  else begin
+    let bold = "\027[1m" and dim = "\027[2m" and reset = "\027[0m" in
+    List.iter (fun r ->
+        Printf.printf "%s%s%s  %s%s:%d%s  %s(%s)%s\n"
+          bold r.caller reset dim r.file r.line reset dim r.kind reset
+      ) refs
+  end
+
 (* ------------------------------------------------------------------ *)
 (* JSON serialization                                                  *)
 (* ------------------------------------------------------------------ *)
@@ -573,20 +687,58 @@ let entry_of_json (j : Yojson.Basic.t) : entry =
     return_type = j |> member "return_type" |> to_string_option;
   }
 
+let ref_entry_to_json (r : ref_entry) : Yojson.Basic.t =
+  `Assoc [
+    "caller", `String r.caller;
+    "file",   `String r.file;
+    "line",   `Int r.line;
+    "kind",   `String r.kind;
+  ]
+
+let ref_entry_of_json (callee : string) (j : Yojson.Basic.t) : ref_entry =
+  let open Yojson.Basic.Util in
+  { callee;
+    caller = j |> member "caller" |> to_string;
+    file   = j |> member "file"   |> to_string;
+    line   = j |> member "line"   |> to_int;
+    kind   = j |> member "kind"   |> to_string;
+  }
+
 let index_to_json (idx : index) : string =
+  let refs_json : Yojson.Basic.t =
+    `Assoc (Hashtbl.fold (fun callee entries acc ->
+        (callee, `List (List.map ref_entry_to_json entries)) :: acc
+      ) idx.references [])
+  in
   let j : Yojson.Basic.t = `Assoc [
     "version",      `Int idx.version;
     "generated_at", `String idx.generated_at;
     "entries",      `List (List.map entry_to_json idx.entries);
+    "references",   refs_json;
   ] in
   Yojson.Basic.pretty_to_string j
 
 let index_from_json (s : string) : index =
   let open Yojson.Basic.Util in
   let j = Yojson.Basic.from_string s in
+  let references =
+    match j |> member "references" with
+    | `Null -> Hashtbl.create 0  (* old cache predating this field *)
+    | refs_json ->
+      let tbl = Hashtbl.create 64 in
+      (match refs_json with
+       | `Assoc kvs ->
+         List.iter (fun (callee, entries_json) ->
+             let entries = entries_json |> to_list |> List.map (ref_entry_of_json callee) in
+             Hashtbl.replace tbl callee entries
+           ) kvs
+       | _ -> ());
+      tbl
+  in
   { version      = j |> member "version"      |> to_int;
     generated_at = j |> member "generated_at" |> to_string;
     entries      = j |> member "entries"      |> to_list |> List.map entry_of_json;
+    references;
   }
 
 (* ------------------------------------------------------------------ *)
@@ -622,7 +774,7 @@ let format_results_colored (results : (entry * float) list) : unit =
       | Some s -> (try int_of_string s with _ -> 80)
       | None   -> 80
     in
-    List.iter (fun (e, _) ->
+    List.iter (fun ((e : entry), _) ->
       let loc = Printf.sprintf "%s:%d" (Filename.basename e.file) e.line in
       let name_visible =
         (if e.module_name = "" then "" else e.module_name ^ ".") ^ e.name

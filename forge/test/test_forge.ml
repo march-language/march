@@ -1392,6 +1392,126 @@ let test_branch_legacy_manifest_forces_activate3 () =
   Alcotest.(check bool) "ACTIVATE3 forced by legacy manifest (no caps= anywhere)" false
     (activate4_selected ~manifest:legacy_manifest ~no_cap_gate:false)
 
+(* ------------------------------------------------------- search index cache *)
+
+(** Final-review Critical 1: a cache written before [Search.current_index_version]
+    was bumped (e.g. a v1 cache predating the `references` table) must be
+    treated as a cache miss and rebuilt, not loaded as-is forever. Writes a
+    hand-crafted stale-version cache file, then asserts [load_or_build_index]
+    silently rebuilds it to the current version rather than returning it
+    unchanged. *)
+let test_load_or_build_index_rebuilds_on_stale_version () =
+  let tmpdir = Filename.temp_dir "test_search_cache_" "" in
+  Fun.protect
+    ~finally:(fun () ->
+        ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir))))
+    (fun () ->
+       let cache_path = Cmd_search.index_cache_path tmpdir in
+       Project.mkdir_p (Filename.dirname cache_path);
+       let oc = open_out cache_path in
+       (* Shape of a pre-[references] cache: version 1, no "references" key. *)
+       output_string oc
+         {|{"version":1,"generated_at":"2020-01-01T00:00:00Z","entries":[]}|};
+       close_out oc;
+       match Cmd_search.load_or_build_index ~verbose:false ~root:tmpdir [] with
+       | Error msg -> Alcotest.fail msg
+       | Ok idx ->
+         Alcotest.(check bool) "stale v1 cache is rebuilt to the current version" true
+           (idx.March_search.Search.version = March_search.Search.current_index_version);
+         Alcotest.(check bool) "rebuilt index has real entries, not the stale empty stub" true
+           (List.length idx.March_search.Search.entries > 0))
+
+(** Companion to the above: a cache that's already current must be loaded
+    as-is (no unnecessary rebuild) — pins that the version check only
+    triggers on an actual mismatch. *)
+let test_load_or_build_index_reuses_fresh_cache () =
+  let tmpdir = Filename.temp_dir "test_search_cache_fresh_" "" in
+  Fun.protect
+    ~finally:(fun () ->
+        ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir))))
+    (fun () ->
+       let cache_path = Cmd_search.index_cache_path tmpdir in
+       Project.mkdir_p (Filename.dirname cache_path);
+       let refs = March_search.Search.references_of_list
+           [ { March_search.Search.callee = "A.helper"; caller = "A.main";
+               kind = "call"; file = "a.march"; line = 1 } ] in
+       let idx = March_search.Search.{
+           version = current_index_version;
+           generated_at = "2026-01-01T00:00:00Z";
+           references = refs;
+           entries = [];
+         } in
+       let oc = open_out cache_path in
+       output_string oc (March_search.Search.index_to_json idx);
+       close_out oc;
+       match Cmd_search.load_or_build_index ~verbose:false ~root:tmpdir [] with
+       | Error msg -> Alcotest.fail msg
+       | Ok idx2 ->
+         Alcotest.(check int) "fresh cache loaded as-is (not rebuilt over)" 0
+           (List.length idx2.March_search.Search.entries);
+         Alcotest.(check int) "fresh cache's references survive the load" 1
+           (List.length (March_search.Search.callers_of idx2 "A.helper")))
+
+(** Final-review Important 6: `--limit` was applied to the name/type/doc
+    search path (via [print_results]'s [take]) but never to the `--callers`
+    branch, so `--limit` silently had no effect on reverse-reference
+    queries. Runs [Cmd_search.run] end-to-end with a pre-seeded fresh-version
+    cache (avoiding a real stdlib rebuild) containing 3 references to one
+    callee, with `--limit 1`, and captures stdout (the command prints
+    directly rather than returning a value) to confirm only 1 comes back. *)
+let test_callers_respects_limit () =
+  let tmpdir = Filename.temp_dir "test_search_limit_" "" in
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir))))
+    (fun () ->
+       Unix.chdir tmpdir;
+       let cache_path = Cmd_search.index_cache_path "." in
+       Project.mkdir_p (Filename.dirname cache_path);
+       let refs = March_search.Search.references_of_list [
+           { March_search.Search.callee = "A.helper"; caller = "A.one";
+             kind = "call"; file = "a.march"; line = 1 };
+           { March_search.Search.callee = "A.helper"; caller = "A.two";
+             kind = "call"; file = "a.march"; line = 2 };
+           { March_search.Search.callee = "A.helper"; caller = "A.three";
+             kind = "call"; file = "a.march"; line = 3 };
+         ] in
+       let idx = March_search.Search.{
+           version = current_index_version;
+           generated_at = "2026-01-01T00:00:00Z";
+           references = refs;
+           entries = [];
+         } in
+       let oc = open_out cache_path in
+       output_string oc (March_search.Search.index_to_json idx);
+       close_out oc;
+       (* Capture stdout: [Cmd_search.run] prints directly rather than
+          returning a value. *)
+       let out_path = Filename.temp_file "test_search_limit_stdout_" ".json" in
+       Fun.protect
+         ~finally:(fun () -> (try Sys.remove out_path with Sys_error _ -> ()))
+         (fun () ->
+            let saved_stdout = Unix.dup Unix.stdout in
+            let out_fd = Unix.openfile out_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o600 in
+            Unix.dup2 out_fd Unix.stdout;
+            Unix.close out_fd;
+            Fun.protect
+              ~finally:(fun () ->
+                  Unix.dup2 saved_stdout Unix.stdout;
+                  Unix.close saved_stdout)
+              (fun () ->
+                 Cmd_search.run ~query:"" ~type_sig:"" ~doc_query:"" ~callers:"A.helper"
+                   ~limit:1 ~as_json:true ~plain:true ~rebuild:false ());
+            let captured = read_file out_path in
+            let j = Yojson.Basic.from_string captured in
+            match j with
+            | `List items ->
+              Alcotest.(check int) "--limit 1 truncates 3 references down to 1"
+                1 (List.length items)
+            | _ -> Alcotest.fail "expected a JSON list from --callers --json"))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -1553,5 +1673,13 @@ let () =
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;
       Alcotest.test_case "branch: --no-cap-gate forces ACTIVATE3" `Quick test_branch_no_cap_gate_flag_forces_activate3;
       Alcotest.test_case "branch: legacy manifest forces ACTIVATE3" `Quick test_branch_legacy_manifest_forces_activate3;
+    ];
+    "search_index_cache", [
+      Alcotest.test_case "stale version cache is rebuilt" `Quick
+        test_load_or_build_index_rebuilds_on_stale_version;
+      Alcotest.test_case "fresh version cache is reused" `Quick
+        test_load_or_build_index_reuses_fresh_cache;
+      Alcotest.test_case "--callers respects --limit" `Quick
+        test_callers_respects_limit;
     ];
   ]

@@ -485,6 +485,31 @@ type proto_info = {
 
 module StrMap = Map.Make(String)
 
+(** A resolved reference recorded during typechecking: [callee] used a
+    declaration that [caller] (both fully-qualified "Mod.name") owns, at
+    [ref_file]:[ref_line]. Populated only where resolution already succeeds —
+    never a textual guess. *)
+type ref_record = {
+  callee   : string;
+  caller   : string;
+  ref_kind : [ `Call | `Ctor | `TypeRef ];
+  ref_file : string;
+  ref_line : int;
+}
+
+(** Qualify [name] with [modname] the one way every [ref_record] site should:
+    ["Mod.name"], or bare [name] when [modname] is empty. An empty module
+    name shows up for prelude constructors ([Cons]/[Nil]/[Some]/[None]/[Ok]/
+    [Err], whose [ci_module] is "") and for the bare-module case generally —
+    without this, ad-hoc `modname ^ "." ^ name` concatenation at each
+    recording site produces a callee/caller literally starting with "." for
+    those references, which [Search.search_callers]'s query-side lookup can
+    never match (its own [qualified_of] already treats an empty module name
+    this way). Shared by the [EVar]/[ECon]/[TyCon] reference-recording hooks
+    so the convention can't drift between them. *)
+let qualify_ref_name (modname : string) (name : string) : string =
+  if modname = "" then name else modname ^ "." ^ name
+
 type env = {
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
@@ -496,6 +521,15 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  refs : ref_record list ref;
+  (** Resolved call/ctor/type references accumulated during checking, for
+      `forge search --callers`. Shared (mutable) across all env copies
+      derived from the same root, same as [import_tracker]. *)
+  current_decl : string ref;
+  (** Fully-qualified name ("Mod.fn") of the top-level fn/impl-method whose
+      body is currently being checked. Set by [check_fn]; read wherever a
+      [ref_record] is recorded so it knows its caller. Empty string before
+      the first fn is entered. *)
   scheme_witnesses : (int list, constraint_ list * ty) Hashtbl.t;
   (** A1 (--emit-core-ast v2): every HM scheme instantiated during checking,
       deduped by its quantified-id list -> (constraints, body). Populated at
@@ -546,6 +580,21 @@ type env = {
       number of arguments panics at runtime (and the compiler miscompiles
       under-application into a body call with a garbage argument).  Used to
       reject wrong-arity calls of these functions at the call site. *)
+  qual_fn_names : unit StrMap.t;
+  (** Qualified ("Mod.name") keys in [vars] that denote a genuine top-level
+      function — i.e. a [DFn], an interface method, or a registry [ExFn]
+      export — never a [DLet] value/constant. Populated at three sites: the
+      [Ast.DMod] export step (mirrors [new_names], restricted to keys
+      already known to be functions via [local_fns]/[qual_fn_names] of the
+      inner env — so it composes correctly across nested modules),
+      [load_module_into_env]'s [ExFn] arm (registry-loaded modules), and
+      [prebind_interface_decl] (interface methods, bound as both
+      "Iface.method" and "Mod.Iface.method" — a call-syntax reference to
+      these bypasses both other sources entirely). Consulted by the
+      [Ast.EVar] reference-recording hook so a qualified value reference
+      (`Mod.SOME_CONST`) is never recorded as a `` `Call `` reference, while
+      a qualified function/interface-method call still is — see [local_fns]
+      for the bare-name analogue of this same distinction. *)
   plain_let_names : StringSet.t;
   (** Names most recently bound by a simple, unrestricted `let name = expr`
       (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
@@ -709,6 +758,7 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
+  refs = ref []; current_decl = ref "";
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
@@ -717,6 +767,7 @@ let make_env errors type_map = {
   import_idx = make_import_index ();
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
+  qual_fn_names = StrMap.empty;
   plain_let_names = StringSet.empty;
   proof_caps = [];
   always_linear_types = [];
@@ -742,6 +793,25 @@ let make_env errors type_map = {
 
 let enter_level env = { env with level = env.level + 1 }
 let leave_level env = { env with level = env.level - 1 }
+
+(** Run [f] with [env.current_decl] temporarily blanked to "" — for
+    [surface_ty] calls that check a type with NO enclosing function (an
+    interface method signature, an impl header/when-constraint type): without
+    this, [env.current_decl] is left over from whatever [DFn] happened to be
+    checked immediately before in module order (it is set only by [check_fn]
+    and never reset — see [current_decl]'s doc comment), so a qualified
+    `TyCon` reference recorded there would be silently misattributed to an
+    unrelated function.  The [`TyCon] hook in [surface_ty] skips recording
+    entirely when [caller = ""], so blanking here means "don't record a
+    reference for this callerless type position" rather than emitting a
+    deliberately-empty [caller].  [current_decl] is a mutable ref shared
+    across all [env] copies (like [import_tracker]), so this must restore the
+    prior value afterward — including when [f] raises — rather than leaving
+    it blanked for whatever is checked next. *)
+let with_no_caller (env : env) (f : unit -> 'a) : 'a =
+  let saved = !(env.current_decl) in
+  env.current_decl := "";
+  Fun.protect ~finally:(fun () -> env.current_decl := saved) f
 
 (** Is [r] an [offer] continuation still awaiting per-arm refinement?
     Physical identity on purpose: [env.offer_unrefined] tracks the exact ref
@@ -1133,11 +1203,19 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
          [ExCtor] path already produces for private constructors.
          [ExType]/[ExRecord] stay UNGATED on purpose: March uses the opaque-type
          pattern, where a private [ptype]'s bare NAME stays referenceable across
-         modules (e.g. `ConsistentHash.HashRing(String)` on a public param) while
-         only its CONSTRUCTOR is hidden — enforced by the [ExCtor] gate below. *)
+         modules (e.g. `ConsistentHash.HashRing(String)` on a param) while
+         only its CONSTRUCTOR is hidden — enforced by the [ExCtor] gate below.
+         [ExFn] additionally seeds [qual_fn_names] so the [EVar] reference-
+         recording hook can tell a genuine function export (`ExFn`) apart
+         from a plain value/constant export (`ExValue`) — see
+         [qual_fn_names]'s doc comment. *)
       if not entry.ex_public then env
       else if StrMap.mem qname env.vars then env
-      else { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars }
+      else
+        let env = { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars } in
+        (match entry.ex_kind with
+         | ExFn -> { env with qual_fn_names = StrMap.add qname () env.qual_fn_names }
+         | _ -> env)
     | ExType arity ->
       (* Register the qualified name AND the BARE type name.  March uses a single
          global type namespace (see [surface_ty]'s [canon_name]): a type's bare
@@ -1390,10 +1468,21 @@ let suggest_ctors (name : string) (env : env) : (string * string) list =
    based on a label the peer never actually returned: the exact `Chan.offer`
    soundness hole this file's [offer_unrefined] field exists to close, just
    reached through a shadowed name instead of a bare missing `match`. *)
+(* [local_fns] shadowing discipline (mirrors the [fn_arities]/[plain_let_names]
+   removals above): [local_fns] marks a name as "genuinely the current
+   module's own top-level fn" and the [EVar] Call-ref-recording hook
+   (`forge search --callers`) trusts that membership check alone to decide
+   whether a bare-name use is a real call to that top-level fn. Without
+   retiring the entry here, a parameter or local `let` that shadows a
+   top-level fn name (e.g. `fn wrapper(helper) do helper() end` when `helper`
+   is also a top-level fn) would have its LOCAL variable's use misrecorded as
+   a call to the shadowed top-level fn — a textual name match masquerading as
+   a resolution-based one. *)
 let bind_var name sch env =
   { env with vars = StrMap.add name sch env.vars;
              fn_arities = StrMap.remove name env.fn_arities;
              plain_let_names = StringSet.remove name env.plain_let_names;
+             local_fns = StrMap.remove name env.local_fns;
              offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 let bind_vars bindings env =
@@ -3048,6 +3137,18 @@ let name_is_variant env name =
 let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   match s with
   | Ast.TyCon (name, args) ->
+    (* Skip when [caller = ""]: either no fn has been entered yet, or (since
+       Fix round 1) a callerless surface_ty call site — interface method
+       signature, impl header/when-constraint — deliberately blanked
+       [current_decl] via [with_no_caller] to suppress recording rather than
+       misattribute to an unrelated function. Either way, an empty caller was
+       never a meaningful attribution for `forge search --callers`. *)
+    (if String.contains name.Ast.txt '.' && !(env.current_decl) <> "" then
+       env.refs := { callee = name.Ast.txt;
+                     caller = !(env.current_decl);
+                     ref_kind = `TypeRef;
+                     ref_file = name.Ast.span.Ast.file;
+                     ref_line = name.Ast.span.Ast.start_line } :: !(env.refs));
     (* Special case: Chan(Role, Proto) — session-typed channel endpoint.
        Users write Chan(RoleName, ProtoName) in type annotations.
        The parser produces TyCon("Chan", [TyCon("Role",[]), TyCon("Proto",[])]).
@@ -3254,7 +3355,9 @@ let () = inject_iface_exports_ref := (fun mod_name exports env ->
           (* Use level 1 for the interface type parameter so generalize 0 quantifies it. *)
           let a = fresh_var 1 in
           let tvars = ref [(idef.iface_param.txt, a)] in
-          let ty = surface_ty env ~tvars m.md_ty in
+          (* No enclosing function checks a cross-module interface's own
+             method signature — see [with_no_caller]. *)
+          let ty = with_no_caller env (fun () -> surface_ty env ~tvars m.md_ty) in
           let a_id = match a with
             | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
             | _ -> 0
@@ -4697,11 +4800,48 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.EVar name ->
       record_use name.txt name.span env;
       (match lookup_var name.txt env with
-       | Some sch -> instantiate ~use_span:name.span env.level env sch
+       | Some sch ->
+         (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
+            env.refs := { callee = qualify_ref_name env.current_module name.txt;
+                          caller = !(env.current_decl);
+                          ref_kind = `Call;
+                          ref_file = name.span.Ast.file;
+                          ref_line = name.span.Ast.start_line } :: !(env.refs)
+          else if String.contains name.txt '.' && StrMap.mem name.txt env.qual_fn_names
+                  && !(env.current_decl) <> "" then
+            (* Already-qualified "Mod.name" resolved directly out of env.vars —
+               this is how same-compilation cross-module DMod exports work (see
+               the [Ast.DMod] branch of [check_decl], which binds "Mod.member"
+               straight into the outer env.vars rather than routing through
+               [resolve_qualified_var]/[Module_registry]). The [qual_fn_names]
+               membership check excludes a qualified reference to a public
+               top-level [DLet] constant/value — [DMod]'s export step binds
+               those into [env.vars] the exact same way it binds a [DFn], so a
+               bare dotted-name check alone cannot tell them apart; only
+               [qual_fn_names] (populated exclusively from [DFn]s, see its doc
+               comment) can. *)
+            env.refs := { callee = name.txt;
+                          caller = !(env.current_decl);
+                          ref_kind = `Call;
+                          ref_file = name.span.Ast.file;
+                          ref_line = name.span.Ast.start_line } :: !(env.refs));
+         instantiate ~use_span:name.span env.level env sch
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
-         | _, Some sch -> instantiate ~use_span:name.span env.level env sch
+         | env', Some sch ->
+           (* [env'] is the env AFTER [load_module_into_env] merged the
+              resolved module's exports — [qual_fn_names] is only populated
+              there for the ExFn case, so this correctly excludes a qualified
+              reference to a registry-loaded module's public [DLet]
+              value/constant (ExValue). See [qual_fn_names]'s doc comment. *)
+           (if StrMap.mem name.txt env'.qual_fn_names && !(env.current_decl) <> "" then
+              env.refs := { callee = name.txt;
+                            caller = !(env.current_decl);
+                            ref_kind = `Call;
+                            ref_file = name.span.Ast.file;
+                            ref_line = name.span.Ast.start_line } :: !(env.refs));
+           instantiate ~use_span:name.span env.level env sch
          | _ when is_confirmed_private_qualified name.txt env ->
            (* A confirmed privacy violation (`Mod.priv_fn`) must be reported
               as such — falling through to the dot-suffix fallback below would
@@ -5428,6 +5568,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let _, resolved = resolve_qualified_ctor name.txt env in
            resolved
        in
+       (match ci_opt with
+        | Some ci when !(env.current_decl) <> "" ->
+          env.refs := { callee = qualify_ref_name ci.ci_module
+                          (if String.contains name.txt '.'
+                           then (let i = String.rindex name.txt '.' in
+                                 String.sub name.txt (i + 1) (String.length name.txt - i - 1))
+                           else name.txt);
+                        caller = !(env.current_decl);
+                        ref_kind = `Ctor;
+                        ref_file = sp.Ast.file;
+                        ref_line = sp.Ast.start_line } :: !(env.refs)
+        | Some _ | None -> ());
        match ci_opt with
        | None ->
          let candidates = suggest_ctors name.txt env in
@@ -6688,7 +6840,23 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
     5. Leave level and generalize the function type.
     6. Return the scheme so the caller can update the env. *)
 let check_fn env (def : Ast.fn_def) fn_span : scheme =
+  (* [current_decl] is a single shared ref, not a stack — save/restore around
+     the whole body so it never leaks into whatever gets checked next once
+     this fn's body is done (nested fns, a later top-level decl, etc.). This
+     mirrors [with_no_caller]'s save/restore pattern but restores the PREVIOUS
+     caller rather than blanking to "", since [check_fn] can itself be nested
+     (a closure body containing a locally-defined named fn). *)
+  let saved_caller = !(env.current_decl) in
+  env.current_decl := qualify_ref_name env.current_module def.fn_name.txt;
+  Fun.protect ~finally:(fun () -> env.current_decl := saved_caller) (fun () ->
   let env'    = enter_level env in
+  (* Captured BEFORE the self-bind below (which unconditionally clears any
+     [local_fns] entry for this name, per [bind_var]'s shadowing discipline)
+     so we know whether to restore it afterward — this fn is only a genuine
+     top-level Call-recording target if it already was one; an impl method
+     (checked via [check_fn] too, but never registered in [local_fns] to
+     begin with) must not spuriously become one. *)
+  let was_local_fn = StrMap.mem def.fn_name.txt env'.local_fns in
   (* Self-reference for recursion — a fresh var that will get unified
      with the actual type as the body is checked.
      For default-arg wrappers (multiple DFn with the same name), the full-arity
@@ -6719,15 +6887,23 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       let sv = fresh_var env'.level in
       (sv, bind_var def.fn_name.txt (Mono sv) env', None)
   in
-  (* The self-bind above cleared any fn_arities entry for this name (shadow
-     semantics — correct when a NESTED fn shadows a top-level fn of different
-     arity).  Re-register the CURRENT def's own arity so recursive calls in the
-     body are still arity-checked, against the right arity either way. *)
+  (* The self-bind above cleared any fn_arities/local_fns entry for this name
+     (shadow semantics — correct when a NESTED fn shadows a top-level fn of
+     different arity).  Re-register the CURRENT def's own arity so recursive
+     calls in the body are still arity-checked, against the right arity
+     either way — and re-register [local_fns] so a recursive call to this
+     same top-level fn is still recorded as a genuine Call reference (see
+     [bind_var]'s [local_fns] shadowing-discipline comment; [check_fn] is
+     only ever called for actual top-level/impl-method fns, never a nested
+     local `fn`, so it is always correct to restore this membership here). *)
   let env_rec =
     let arity = match def.fn_clauses with
       | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
     { env_rec with fn_arities =
-        StrMap.add def.fn_name.txt (arity, def.fn_name.span) env_rec.fn_arities } in
+        StrMap.add def.fn_name.txt (arity, def.fn_name.span) env_rec.fn_arities;
+      local_fns =
+        if was_local_fn then StrMap.add def.fn_name.txt () env_rec.local_fns
+        else env_rec.local_fns } in
 
   let sch = match def.fn_clauses with
     | [] ->
@@ -7016,7 +7192,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
    | _ -> ());
 
   ignore (leave_level env');
-  sch
+  sch)
 
 (** [impl_matches_ty impl_ty target_ty] returns true if [target_ty] could be
     satisfied by an implementation typed as [impl_ty].  Free unification
@@ -7257,7 +7433,12 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
       let tmp_env = { e with errors = tmp_errors } in
       let a = fresh_var 1 in
       let tvars = ref [(idef.iface_param.txt, a)] in
-      let ty = surface_ty tmp_env ~tvars m.md_ty in
+      (* Prebinding an interface method's own signature has no enclosing
+         function either — see [with_no_caller]. [tmp_env] shares [refs] and
+         [current_decl] with [e] (record-copy, not clone of the ref cells),
+         so blanking through [tmp_env] is equally visible to the [TyCon]
+         hook. *)
+      let ty = with_no_caller tmp_env (fun () -> surface_ty tmp_env ~tvars m.md_ty) in
       let a_id = match a with
         | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
         | _ -> 0
@@ -7267,9 +7448,23 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
         | Poly (ids, cs, t) -> Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
         | Mono t -> Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
       in
-      let e1 = { e with vars = StrMap.add full_qualified sch e.vars } in
+      (* Both dotted keys bound here ([full_qualified] = "Mod.Iface.method",
+         [iface_qualified] = "Iface.method") are genuine function bindings —
+         an interface method, never a [DLet] value — so both are also
+         registered in [qual_fn_names]. This is a THIRD source of qualified
+         function names (alongside [Ast.DMod] exports and registry [ExFn]
+         entries): call syntax like `Show.show(x)` normalizes to
+         [Ast.EVar "Show.show"] (the [Ast.EApp (Ast.EField (Ast.ECon ...))]
+         rule) and resolves straight out of [env.vars] here, bypassing both
+         of the other two sources entirely — so without this, the [EVar]
+         reference-recording hook's [qual_fn_names] gate would wrongly treat
+         every qualified interface-method call as non-function-backed and
+         silently drop it. See [qual_fn_names]'s doc comment. *)
+      let e1 = { e with vars = StrMap.add full_qualified sch e.vars;
+                        qual_fn_names = StrMap.add full_qualified () e.qual_fn_names } in
       let e1 = if StrMap.mem iface_qualified e1.vars then e1
-               else { e1 with vars = StrMap.add iface_qualified sch e1.vars } in
+               else { e1 with vars = StrMap.add iface_qualified sch e1.vars;
+                              qual_fn_names = StrMap.add iface_qualified () e1.qual_fn_names } in
       if StrMap.mem m.md_name.txt e1.vars then e1
       else { e1 with vars = StrMap.add m.md_name.txt sch e1.vars }
     end
@@ -9142,14 +9337,26 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DFn (def, sp) ->
     let sch = check_fn env def sp in
     discharge_constraints env sp;
+    let was_local_fn = StrMap.mem def.fn_name.txt env.local_fns in
     let env = bind_var def.fn_name.txt sch env in
-    (* bind_var cleared this fn's own fn_arities entry (shadow semantics);
-       restore it so later same-module calls keep the direct-call arity check. *)
+    (* bind_var cleared this fn's own fn_arities/local_fns entries (shadow
+       semantics); restore them so later same-module calls keep the
+       direct-call arity check AND keep being recorded as genuine Call
+       references (see [bind_var]'s [local_fns] shadowing-discipline
+       comment — this is [check_fn]'s post-hoc mirror site: the module's
+       pass-1 prebind put this fn's name in [local_fns] before [check_fn]
+       ran; without restoring it here, EVERY same-module call to a fn
+       checked later than its own definition would silently stop being
+       recorded, since [bind_var]'s unconditional removal has nothing left
+       to re-add it). *)
     let env =
       let arity = match def.fn_clauses with
         | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
       { env with fn_arities =
-          StrMap.add def.fn_name.txt (arity, def.fn_name.span) env.fn_arities } in
+          StrMap.add def.fn_name.txt (arity, def.fn_name.span) env.fn_arities;
+        local_fns =
+          if was_local_fn then StrMap.add def.fn_name.txt () env.local_fns
+          else env.local_fns } in
     (* Reconcile the QUALIFIED prebind (`Mod.fn`) with the fn's REAL body-checked
        scheme.  desugar's [qualify_module_refs] (lib/desugar/desugar.ml) rewrites
        every intra-nested-module reference to the qualified form (e.g. `App.id`),
@@ -9204,7 +9411,12 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DLet (_vis, b, sp) ->
     let env' = enter_level env in
-    let rhs_ty = infer_expr env' b.bind_expr in
+    (* A top-level `let` binding's RHS has no enclosing function — see
+       [with_no_caller]. Without this, any Call/Ctor reference in the RHS
+       gets misattributed to whatever [DFn] [check_decl] happened to check
+       last in module order (or a stale caller from an earlier file in a
+       multi-file compilation). *)
+    let rhs_ty = with_no_caller env' (fun () -> infer_expr env' b.bind_expr) in
     Hashtbl.replace env.type_map sp (repr rhs_ty);
     let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
@@ -9327,9 +9539,12 @@ let rec check_decl env (d : Ast.decl) : env =
                    ci_arg_tys = arg_tys; ci_module = env.current_module; ci_vis = Ast.Public } in
         { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
-    (* Check init expression — must return the state record type *)
-    check_expr env_with_ctors actor.actor_init state_ty
-      ~reason:(Some (RBuiltin "actor init must return the initial state record"));
+    (* Check init expression — must return the state record type.  Neither
+       the init expr nor any handler body below is checked via [check_fn], so
+       there is no enclosing function — see [with_no_caller]. *)
+    with_no_caller env_with_ctors (fun () ->
+      check_expr env_with_ctors actor.actor_init state_ty
+        ~reason:(Some (RBuiltin "actor init must return the initial state record")));
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
@@ -9348,8 +9563,9 @@ let rec check_decl env (d : Ast.decl) : env =
                 e
             ) handler_env h.ah_params
         in
-        (* Handler body must return the state record type — emit rich diagnostic *)
-        let inferred = infer_expr handler_env h.ah_body in
+        (* Handler body must return the state record type — emit rich
+           diagnostic. No enclosing function — see [with_no_caller]. *)
+        let inferred = with_no_caller handler_env (fun () -> infer_expr handler_env h.ah_body) in
         let shadow_env = { handler_env with errors = Err.create () } in
         (* Note: pending_constraints and type_map are shared (shallow copy) —
            intentional; only error reporting is isolated. *)
@@ -9492,6 +9708,19 @@ let rec check_decl env (d : Ast.decl) : env =
         then (name.txt ^ "." ^ k, sch) :: acc
         else acc
       ) inner_env.vars [] in
+    (* Of the newly-exported qualified names, which denote a genuine function
+       (as opposed to a plain [DLet] value/constant)?  A key [k] is
+       function-backed either because it's one of THIS module's own [DFn]s
+       (tracked bare in [inner_env.local_fns]) or because it is itself an
+       already-qualified key re-exported from a nested public [DMod] (tracked
+       in [inner_env.qual_fn_names], populated by that nested module's own
+       pass through this same branch) — see [qual_fn_names]'s doc comment. *)
+    let new_fn_quals = StrMap.fold (fun k _sch acc ->
+        if is_pub_key k &&
+           (StrMap.mem k inner_env.local_fns || StrMap.mem k inner_env.qual_fn_names)
+        then StrMap.add (name.txt ^ "." ^ k) () acc
+        else acc
+      ) inner_env.vars StrMap.empty in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed.
@@ -9557,6 +9786,7 @@ let rec check_decl env (d : Ast.decl) : env =
                       else ci :: acc) new_cis old_cis in
                     Some merged) all_new env'.ctors);
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
+      qual_fn_names = StrMap.union (fun _k a _ -> Some a) new_fn_quals env'.qual_fn_names;
       module_caps = (name.txt, inner_needs) :: env'.module_caps;
       proof_caps = inner_env.proof_caps;
       always_linear_types = inner_env.always_linear_types;
@@ -9707,7 +9937,9 @@ let rec check_decl env (d : Ast.decl) : env =
         (* Use level+1 so the interface type parameter gets quantified by generalize. *)
         let a = fresh_var (env.level + 1) in
         let tvars = ref [(idef.iface_param.txt, a)] in
-        let ty = surface_ty env ~tvars m.md_ty in
+        (* An interface method signature has no enclosing function — see
+           [with_no_caller]. *)
+        let ty = with_no_caller env (fun () -> surface_ty env ~tvars m.md_ty) in
         let a_id = match a with
           | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
           | _ -> 0
@@ -9731,7 +9963,9 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Instantiate the impl type, sharing tvars so the 'when' constraints
        can reference the same type variables as the impl type itself. *)
     let tvars = ref [] in
-    let inst_ty = surface_ty env ~tvars idef.impl_ty in
+    (* The impl header's own type (`impl Iface(T)`) has no enclosing
+       function — see [with_no_caller]. *)
+    let inst_ty = with_no_caller env (fun () -> surface_ty env ~tvars idef.impl_ty) in
     (* Register this implementation so CInterface constraints can be discharged. *)
     let env_with_impl = { env with impls =
       (let key = idef.impl_iface.txt in
@@ -9741,7 +9975,9 @@ let rec check_decl env (d : Ast.decl) : env =
        StrMap.add key ((inst_ty, idef.impl_iface.span, None) :: lst) env.impls) } in
     (* Check 'when' constraints: each C(T) must already be implemented. *)
     List.iter (fun ((cname : Ast.name), ctys) ->
-        match List.map (surface_ty env ~tvars) ctys with
+        (* A `when C(T)` constraint type is also part of the impl header,
+           with no enclosing function — see [with_no_caller]. *)
+        match with_no_caller env (fun () -> List.map (surface_ty env ~tvars) ctys) with
         | [cty] ->
           let cty = repr cty in
           (match cty with
@@ -9832,11 +10068,14 @@ let rec check_decl env (d : Ast.decl) : env =
                 use check_expr directly against the expected type. *)
              (match def.fn_clauses with
               | [{ fc_params = []; fc_body; _ }] when iface_method.md_default <> None ->
-                (* Default method injected by desugar — just check the body expr *)
-                check_expr env fc_body expected_ty
-                  ~reason:(Some (RBuiltin
-                    (Printf.sprintf "default `%s` in interface `%s`"
-                       mname.txt idef.impl_iface.txt)))
+                (* Default method injected by desugar — just check the body
+                   expr. This bypasses [check_fn], so there is no enclosing
+                   function — see [with_no_caller]. *)
+                with_no_caller env (fun () ->
+                  check_expr env fc_body expected_ty
+                    ~reason:(Some (RBuiltin
+                      (Printf.sprintf "default `%s` in interface `%s`"
+                         mname.txt idef.impl_iface.txt))))
               | _ ->
                 let actual_sch = check_fn env def _sp in
                 let actual_ty = instantiate env.level env actual_sch in
@@ -9867,11 +10106,14 @@ let rec check_decl env (d : Ast.decl) : env =
     end
 
   | Ast.DExtern (edef, _sp) ->
-    (* Register each foreign function as a monomorphic binding. *)
+    (* Register each foreign function as a monomorphic binding. An extern
+       fn's own signature has no enclosing function — see [with_no_caller]. *)
     List.fold_left (fun env (ef : Ast.extern_fn) ->
         let tvars = ref [] in
-        let param_tys = List.map (fun (_, t) -> surface_ty env ~tvars t) ef.ef_params in
-        let ret_ty = surface_ty env ~tvars ef.ef_ret_ty in
+        let param_tys, ret_ty = with_no_caller env (fun () ->
+            let param_tys = List.map (fun (_, t) -> surface_ty env ~tvars t) ef.ef_params in
+            let ret_ty = surface_ty env ~tvars ef.ef_ret_ty in
+            (param_tys, ret_ty)) in
         let ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
         bind_var ef.ef_name.txt (Mono ty) env
       ) env edef.ext_fns
@@ -10117,9 +10359,11 @@ let rec check_decl env (d : Ast.decl) : env =
     env
 
   | Ast.DTest (tdef, sp) ->
-    (* Typecheck the test body; it must be Unit. *)
-    check_expr env tdef.test_body t_unit
-      ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name)));
+    (* Typecheck the test body; it must be Unit. No enclosing function — see
+       [with_no_caller]. *)
+    with_no_caller env (fun () ->
+      check_expr env tdef.test_body t_unit
+        ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name))));
     Hashtbl.replace env.type_map sp t_unit;
     env
 
@@ -10129,12 +10373,16 @@ let rec check_decl env (d : Ast.decl) : env =
     env'
 
   | Ast.DSetup (body, sp) ->
-    check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit"));
+    (* No enclosing function — see [with_no_caller]. *)
+    with_no_caller env (fun () ->
+      check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit")));
     Hashtbl.replace env.type_map sp t_unit;
     env
 
   | Ast.DSetupAll (body, sp) ->
-    check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit"));
+    (* No enclosing function — see [with_no_caller]. *)
+    with_no_caller env (fun () ->
+      check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit")));
     Hashtbl.replace env.type_map sp t_unit;
     env
 
@@ -11123,6 +11371,14 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let (errs, type_map, _env) = check_module_core ?errors m in
   (errs, type_map)
+
+(** Like [check_module], but also returns every resolved call/ctor/type
+    reference recorded during checking — used by [forge search --callers].
+    Order is call-order, most-recent-first is reversed back to source order. *)
+let check_module_with_refs ?errors (m : Ast.module_)
+    : Err.ctx * (Ast.span, ty) Hashtbl.t * ref_record list =
+  let (errs, type_map, final_env) = check_module_core ?errors m in
+  (errs, type_map, List.rev !(final_env.refs))
 
 (** Like [check_module] but starts from a pre-built environment.
     Used by the REPL JIT to typecheck user expressions incrementally
