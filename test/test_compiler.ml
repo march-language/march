@@ -9989,6 +9989,68 @@ let assert_stdlib_file_typechecks_cleanly name =
     (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
     false (has_errors errors)
 
+(* ── The stdlib load manifest must be exhaustive ─────────────────────────────
+
+   A file under stdlib/ that is missing from `stdlib_file_list` is reachable
+   only via [Module_registry.ensure_loaded], which extracts export SHAPES
+   without running the body through inference in its caller's context.  A
+   generic `Option`/`Result` it exports then reaches monomorphization with an
+   unresolved tvar, falls back to a boxed representation, and is read by a
+   concrete caller expecting the niche encoding: a WRONG VALUE, no diagnostic,
+   compiled only, different garbage on every run.
+
+   That class has been point-fixed three times by hand-adding the newly-noticed
+   files (deque, cluster_load, then six more on 2026-08-01).  Each of those was
+   restoring this invariant without stating it.  The list is exhaustive as of
+   2026-08-03, so this test locks in a good state rather than codifying a mess.
+
+   Reads the directory at test time on purpose — a hardcoded count is the thing
+   that goes stale.  See
+   specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md *)
+let stdlib_dir_for_test () =
+  let candidates = [ "stdlib"; "../../../stdlib"; "../../stdlib" ] in
+  match List.find_opt Sys.file_exists candidates with
+  | Some d -> d
+  | None ->
+    Alcotest.failf "cannot find the stdlib directory (searched: %s)"
+      (String.concat ", " candidates)
+
+let test_stdlib_manifest_is_exhaustive () =
+  let dir = stdlib_dir_for_test () in
+  let on_disk =
+    Sys.readdir dir |> Array.to_list
+    |> List.filter (fun f -> Filename.check_suffix f ".march")
+    |> List.sort String.compare
+  in
+  Alcotest.(check bool) "found stdlib modules on disk" true (List.length on_disk > 50);
+  let known = March_modules.Stdlib_manifest.all_known in
+  let missing = List.filter (fun f -> not (List.mem f known)) on_disk in
+  if missing <> [] then
+    Alcotest.failf
+      "These stdlib modules are in no load list: %s\n\n\
+       A module absent from `stdlib_file_list` (bin/main.ml, defined in\n\
+       lib/modules/stdlib_manifest.ml) is loaded for its export SHAPES only — its\n\
+       body never goes through type inference in its caller's context. If it\n\
+       exports a generic Option/Result and a caller uses it at a concrete\n\
+       niche-eligible type, the call silently produces a WRONG VALUE: no\n\
+       diagnostic, compiled builds only, different garbage on every run.\n\n\
+       Add each file to `stdlib_file_list`. Only add it to\n\
+       `lazily_loaded_allowlist` if it must stay lazy AND you have understood\n\
+       that consequence."
+      (String.concat ", " missing)
+
+(* The other direction: a name in the manifest with no file behind it is a typo
+   or a deletion nobody finished, and it would silently load nothing. *)
+let test_stdlib_manifest_has_no_phantom_entries () =
+  let dir = stdlib_dir_for_test () in
+  let phantom =
+    List.filter
+      (fun f -> not (Sys.file_exists (Filename.concat dir f)))
+      March_modules.Stdlib_manifest.all_known
+  in
+  Alcotest.(check (list string))
+    "every manifest entry has a file behind it" [] phantom
+
 let test_stdlib_prelude_fold_left_curried () =
   assert_stdlib_file_typechecks_cleanly "prelude.march"
 
@@ -11456,6 +11518,10 @@ let compiler_suites =
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "stdlib-manifest", [
+          Alcotest.test_case "the load manifest is exhaustive over stdlib/"  `Quick test_stdlib_manifest_is_exhaustive;
+          Alcotest.test_case "the load manifest has no phantom entries"      `Quick test_stdlib_manifest_has_no_phantom_entries;
         ] );
       ( "precond_infer", [
           Alcotest.test_case "candidate text and AST agree"                 `Quick test_precond_infer_candidate_text_matches_ast;

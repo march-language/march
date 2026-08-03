@@ -133,7 +133,53 @@ deliberately lazy and you have understood that consequence.*
 Non-vacuity check: remove one entry from `stdlib_file_list` and confirm the test fails.
 The list is exhaustive today, so a broken test would otherwise pass silently forever.
 
-## Step 2 — make the failure loud instead of silent (the real class fix)
+## Step 1 — DONE 2026-08-03
+
+`stdlib_file_list` / `js_only_stdlib_file_list` moved to
+`lib/modules/stdlib_manifest.ml` (a library, so a test can reach them) alongside a new
+`lazily_loaded_allowlist`. Two tests in `test/test_compiler.ml` under `stdlib-manifest`:
+the manifest is exhaustive over `stdlib/`, and every manifest entry has a file behind it
+(a phantom entry would silently load nothing). Non-vacuity confirmed by removing
+`consistent_hash.march` and checking the failure carries the full explanation, not just a
+diff.
+
+## Step 2 — measurement taken 2026-08-03; the naive predicate is REFUTED
+
+The fallback is `lib/tir/mono.ml`, the `subst = []` branch of the `EApp` case. Its own
+comment names the conflation: *"No specialization needed (monomorphic or unresolved TVar
+args)"*. Those are two very different situations sharing one branch.
+
+Instrumented it temporarily and measured:
+
+| Corpus | Fallbacks | With `args_unresolved=true` |
+|---|---|---|
+| 11 bench programs | 0 | 0 |
+| 46 golden conformance programs | 8 | **1** |
+| the `ConsistentHash` repro, module removed from the manifest | 8 | **1** |
+
+The repro's risky hit is exactly the miscompiling call —
+`ConsistentHash.get callee_poly=true args_unresolved=true` — and the binary prints
+`SOME 2174096712`. So the site is right and the instrumentation finds the bug.
+
+**But the golden corpus's one risky hit is benign.**
+`CRDT.ORSet.union_tags` in `g44_crdt_convergence.march` also reports
+`args_unresolved=true`, and its compiled output is byte-identical to its interpreted
+output. So `args_unresolved=true` **cannot** be the error condition: erroring on it would
+break a passing golden test that is not miscompiling.
+
+This confirms the thing the spec flagged as the real content of the fix, with a concrete
+counter-example to test against: the predicate must be *the caller's chosen representation
+differs from the callee's*, not merely *specialization failed*. `union_tags` is the case
+where the fallback is correct because caller and callee agree; `ConsistentHash.get` is the
+case where they do not.
+
+Next step for whoever picks this up: work out where the caller's representation choice is
+observable at that point in `mono.ml` (`lib/tir/rc_types.ml`'s niche-eligibility logic is
+the likely source), and gate the error on the disagreement. The two programs above are
+your accept/reject pair — `g44_crdt_convergence.march` must keep compiling, and the
+`ConsistentHash` repro must become a compile error.
+
+## Step 3 — give lazy modules real inference (option 1, only if step 2 proves too coarse)
 
 Option 2 from the original analysis, and the one to take: **monomorphization refuses to
 emit a call it could not specialize**, rather than falling back to a generic boxed body

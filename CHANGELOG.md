@@ -166,6 +166,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The stdlib load manifest is now guarded against going stale.** A file under
+  `stdlib/` missing from `stdlib_file_list` is loaded for export shapes only —
+  its body never goes through inference in its caller's context — so a generic
+  `Option`/`Result` it exports silently produces a **wrong value** at a concrete
+  niche-eligible call site: no diagnostic, compiled builds only, different
+  garbage each run. That class had been point-fixed three times by hand-adding
+  whichever files someone happened to notice. The manifest moved to
+  `lib/modules/stdlib_manifest.ml` and two tests now hold the invariant: it is
+  exhaustive over `stdlib/`, and every entry has a file behind it. Deliberately
+  lazy modules go in an explicit allowlist.
+
 - **LSP semantic tokens: the `linear` and `affine` modifiers now follow the
   type system instead of use counts.** They were previously derived from how
   many times a name appeared — a binding mentioned exactly once was painted
