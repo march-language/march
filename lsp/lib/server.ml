@@ -357,6 +357,97 @@ class march_server =
     method config_symbol =
       Some (`Bool true)
 
+
+    (* ── workspace/executeCommand ────────────────────────────────────────────
+       This MUST be [on_req_execute_command]. linol dispatches
+       `workspace/executeCommand` as a KNOWN client request, so it never reaches
+       [on_unknown_request] — where this logic previously lived, which made the
+       whole feature dead code returning linol's default `null`. Nothing caught
+       it because a command is only observable through a live editor session:
+       the runnable "Run test" / "Debug" code lenses had therefore never worked
+       either, and neither had `march.suggestRefinement`. Found by driving the
+       protocol over stdio; see specs/progress/2026-08-03-lsp-execute-command.md.
+
+       RUN commands shell out to forge and return a summary. DEBUG commands do
+       NOT block on an interactive debugger — launching a DAP session is the
+       editor's job — so they return a structured echo the client uses to start
+       its own session. `march.suggestRefinement` runs the refinement inference
+       and pushes the result back as a workspace/applyEdit, so the edit lands in
+       the user's BUFFER; writing the file underneath an editor with unsaved
+       changes would lose their work. *)
+    method! on_req_execute_command ~notify_back ~id:_ ~workDoneToken:_
+        (command : string) (args : Yojson.Safe.t list option) =
+      let args = Option.value args ~default:[] in
+
+        (* Runnable code lenses dispatch here. RUN commands (march.runTest /
+           march.run) shell out to forge and return a short summary. DEBUG
+           commands (march.debugTest / march.debug) do NOT block on an
+           interactive debugger — launching a DAP session is the editor's job —
+           so we return a structured echo (command id + args + the `march dap`
+           invocation) that the client uses to start its own debug session. *)
+        (* Refinement inference is far too expensive to run while building the
+           code-action list, so that action carries a COMMAND and the work
+           happens here, once, after the user picks it.  The inference itself
+           lives in the compiler (`march --refine-suggest`) because it needs a
+           fully resolved, typechecked module — the same reason `forge refine`
+           shells out.  The edit goes back through workspace/applyEdit so it
+           lands in the user's BUFFER; writing the file underneath an editor
+           with unsaved changes would lose their work. *)
+        if command = "march.suggestRefinement" then
+          match args with
+          | [ `String file; `String fn ] ->
+            let (payload, edit) = Refine_command.run ~file ~fn in
+            (match edit with
+             | None -> Lwt.return payload
+             | Some we ->
+               Lwt.bind
+                 (notify_back#send_request
+                    (Lsp.Server_request.WorkspaceApplyEdit
+                       (Lsp.Types.ApplyWorkspaceEditParams.create ~edit:we
+                          ~label:"Suggest a refinement type" ()))
+                    (fun _ -> Lwt.return ()))
+                 (fun _ -> Lwt.return payload))
+          | _ ->
+            Lwt.return
+              (`Assoc
+                [ ("status", `String "error");
+                  ("kind", `String "suggestRefinement");
+                  ("message",
+                   `String "march.suggestRefinement expects [file, function]") ])
+        else
+        let result =
+          match Analysis.resolve_lens_command ~command ~args with
+          | Analysis.RunShell { description; shell } ->
+            let rc = Sys.command shell in
+            `Assoc [
+              ("status",   `String (if rc = 0 then "ok" else "error"));
+              ("kind",     `String "run");
+              ("command",  `String command);
+              ("shell",    `String shell);
+              ("exitCode", `Int rc);
+              ("message",  `String
+                 (Printf.sprintf "%s — %s (exit %d)" description
+                    (if rc = 0 then "passed" else "failed") rc))
+            ]
+          | Analysis.DebugEcho { description; debug_command; dap; args } ->
+            `Assoc [
+              ("status",  `String "debug");
+              ("kind",    `String "debug");
+              ("command", `String debug_command);
+              ("dap",     `String dap);
+              ("arguments", `List args);
+              ("message", `String description)
+            ]
+          | Analysis.Unknown c ->
+            `Assoc [
+              ("status",  `String "error");
+              ("kind",    `String "unknown");
+              ("command", `String c);
+              ("message", `String (Printf.sprintf "Unknown command: %s" c))
+            ]
+        in
+        Lwt.return result
+
     method config_code_action_provider =
       `CodeActionOptions (Lsp.Types.CodeActionOptions.create
         ~codeActionKinds:[Lsp.Types.CodeActionKind.QuickFix;
@@ -675,7 +766,7 @@ class march_server =
     (* Semantic tokens (full) — dispatched via on_unknown_request     *)
     (* -------------------------------------------------------------- *)
 
-    method on_unknown_request ~notify_back ~server_request:_ ~id:_ meth params =
+    method on_unknown_request ~notify_back:_ ~server_request:_ ~id:_ meth params =
       (* ---- helpers ---- *)
       let get_td_uri () =
         match params with
@@ -1174,85 +1265,6 @@ class march_server =
         if ranges = [] then Lwt.return `Null
         else Lwt.return (`Assoc [("ranges", `List (List.map json_range ranges))])
 
-      end else if meth = "workspace/executeCommand" then begin
-        (* Runnable code lenses dispatch here. RUN commands (march.runTest /
-           march.run) shell out to forge and return a short summary. DEBUG
-           commands (march.debugTest / march.debug) do NOT block on an
-           interactive debugger — launching a DAP session is the editor's job —
-           so we return a structured echo (command id + args + the `march dap`
-           invocation) that the client uses to start its own debug session. *)
-        let command, args =
-          match params with
-          | Some (`Assoc fields) ->
-            let c = match List.assoc_opt "command" fields with
-              | Some (`String s) -> s | _ -> "" in
-            let a = match List.assoc_opt "arguments" fields with
-              | Some (`List l) -> l | _ -> [] in
-            (c, a)
-          | _ -> ("", [])
-        in
-        (* Refinement inference is far too expensive to run while building the
-           code-action list, so that action carries a COMMAND and the work
-           happens here, once, after the user picks it.  The inference itself
-           lives in the compiler (`march --refine-suggest`) because it needs a
-           fully resolved, typechecked module — the same reason `forge refine`
-           shells out.  The edit goes back through workspace/applyEdit so it
-           lands in the user's BUFFER; writing the file underneath an editor
-           with unsaved changes would lose their work. *)
-        if command = "march.suggestRefinement" then
-          match args with
-          | [ `String file; `String fn ] ->
-            let (payload, edit) = Refine_command.run ~file ~fn in
-            (match edit with
-             | None -> Lwt.return payload
-             | Some we ->
-               Lwt.bind
-                 (notify_back#send_request
-                    (Lsp.Server_request.WorkspaceApplyEdit
-                       (Lsp.Types.ApplyWorkspaceEditParams.create ~edit:we
-                          ~label:"Suggest a refinement type" ()))
-                    (fun _ -> Lwt.return ()))
-                 (fun _ -> Lwt.return payload))
-          | _ ->
-            Lwt.return
-              (`Assoc
-                [ ("status", `String "error");
-                  ("kind", `String "suggestRefinement");
-                  ("message",
-                   `String "march.suggestRefinement expects [file, function]") ])
-        else
-        let result =
-          match Analysis.resolve_lens_command ~command ~args with
-          | Analysis.RunShell { description; shell } ->
-            let rc = Sys.command shell in
-            `Assoc [
-              ("status",   `String (if rc = 0 then "ok" else "error"));
-              ("kind",     `String "run");
-              ("command",  `String command);
-              ("shell",    `String shell);
-              ("exitCode", `Int rc);
-              ("message",  `String
-                 (Printf.sprintf "%s — %s (exit %d)" description
-                    (if rc = 0 then "passed" else "failed") rc))
-            ]
-          | Analysis.DebugEcho { description; debug_command; dap; args } ->
-            `Assoc [
-              ("status",  `String "debug");
-              ("kind",    `String "debug");
-              ("command", `String debug_command);
-              ("dap",     `String dap);
-              ("arguments", `List args);
-              ("message", `String description)
-            ]
-          | Analysis.Unknown c ->
-            `Assoc [
-              ("status",  `String "error");
-              ("kind",    `String "unknown");
-              ("command", `String c);
-              ("message", `String (Printf.sprintf "Unknown command: %s" c))
-            ]
-        in
-        Lwt.return result
       end else if meth = "textDocument/inlineValue" then begin
         (* DAP inline values: while stopped at a breakpoint, the editor asks for
            the in-scope variables in the visible [range]; we return one

@@ -9338,7 +9338,17 @@ let test_precond_infer_budget_exhaustion_is_not_no_candidate () =
     | rs -> Alcotest.failf "expected one result, got %d" (List.length rs)
   end
 
-(* A candidate can be provably debt-discharging and still be WRONG advice.
+(* NOTE ON THE SHAPES BELOW.  Both use a GUARDED `Nil when flag ->` arm, which
+   looks gratuitous and is not.  Arm-order exclusion (see the `arm-exclusion`
+   suite in test_refinecheck.ml) now derives `len(xs) > 0` in the `_` arm of a
+   plain `match xs do Nil -> … | _ -> …`, which discharges the debt outright —
+   so on the obvious shape there is nothing left to propose and BOTH of these
+   tests would pass while exercising none of the guard.  A guarded arm licenses
+   no exclusion, so the debt survives and the guard is actually the thing under
+   test.  Verified: the plain shape reports `no-debt`, the guarded one reports
+   2 unproven obligations.
+
+   A candidate can be provably debt-discharging and still be WRONG advice.
    Found on the real stdlib: `Stats.mean_safe` is documented "returning Err on
    empty list" and opens with `match xs do Nil -> Err(…)`.  `len(_) > 0`
    discharges its debt and simultaneously forbids the input the function exists
@@ -9348,13 +9358,13 @@ let test_precond_infer_respects_a_handled_empty_case () =
   if not (z3_available ()) then ()
   else begin
     let rs =
-      suggest_in ~target:"avg_safe"
+      suggest_in ~target:"soft"
         {|mod PH do
             fn mean_of(xs : {List(Float) | len(_) > 0}) : Float do 1.0 end
-            fn avg_safe(xs : List(Float)) : Result(Float, String) do
+            fn soft(xs : List(Float), flag : Bool) : Result(Float, String) do
               match xs do
-                Nil -> Err("empty")
-                _   -> Ok(mean_of(xs))
+                Nil when flag -> Err("empty")
+                _ -> Ok(mean_of(xs))
               end
             end
           end|}
@@ -9376,13 +9386,13 @@ let test_precond_infer_still_proposes_over_a_panicking_case () =
   if not (z3_available ()) then ()
   else begin
     let rs =
-      suggest_in ~target:"avg_panicky"
+      suggest_in ~target:"hard"
         {|mod PP do
             fn mean_of(xs : {List(Float) | len(_) > 0}) : Float do 1.0 end
-            fn avg_panicky(xs : List(Float)) : Float do
+            fn hard(xs : List(Float), flag : Bool) : Float do
               match xs do
-                Nil -> panic("empty list")
-                _   -> mean_of(xs)
+                Nil when flag -> panic("empty list")
+                _ -> mean_of(xs)
               end
             end
           end|}
