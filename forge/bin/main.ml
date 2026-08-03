@@ -7,9 +7,14 @@ let handle = function
   | Ok ()   -> ()
   | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
 
+(* Same contract as [handle] for commands whose success carries a summary line. *)
+let handle_msg = function
+  | Ok msg  -> Printf.printf "%s\n%!" msg
+  | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+
 let known_builtin_names =
   [ "new"; "init"; "build"; "check"; "run"; "compile"; "test"; "lint"; "refactor"; "format";
-    "interactive"; "i"; "clean"; "deps"; "add"; "publish"; "retire";
+    "refine"; "interactive"; "i"; "clean"; "deps"; "add"; "publish"; "retire";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
@@ -300,6 +305,40 @@ let lint_cmd =
   in
   Cmd.v (Cmd.info "lint" ~doc:"Run the coding-standard rule checker")
     Term.(const run $ strict $ all $ workspace_package_flag)
+
+(* ---------------------------------------------------------------- forge refine *)
+
+let refine_cmd =
+  let target =
+    Arg.(value & pos 0 string "" & info [] ~docv:"FN"
+           ~doc:"Function to refine; a bare or qualified name (Module.fn)") in
+  let all =
+    Arg.(value & flag & info ["all"]
+           ~doc:"Sweep every function in the project instead of one named function") in
+  let apply =
+    Arg.(value & flag & info ["apply"]
+           ~doc:"Write the proposed annotations into the source (default: print only)") in
+  let budget =
+    Arg.(value & opt int Cmd_refine.default_budget &
+         info ["budget"] ~docv:"N"
+           ~doc:"Cap the hypothesis re-checks the inference may spend per function") in
+  let run t a ap b =
+    if t = "" && not a then begin
+      Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
+      exit 1
+    end;
+    handle_msg (Cmd_refine.run ~all:a ~apply:ap ~budget:b ~target:t ())
+  in
+  Cmd.v
+    (Cmd.info "refine"
+       ~doc:"Suggest a refinement type for a function's parameters"
+       ~man:[ `S Manpage.s_description;
+              `P "Proposes the parameter refinement that discharges the \
+                  refinement obligations a function's body leaves unproven. \
+                  A suggestion is only made when the checker itself proves the \
+                  obligations under it, so `march check` after --apply agrees \
+                  with what was printed." ])
+    Term.(const run $ target $ all $ apply $ budget)
 
 (* -------------------------------------------------------------- forge refactor *)
 
@@ -1163,7 +1202,7 @@ let default_term =
 
 let () =
   let cmds =
-    [ new_cmd; init_cmd; build_cmd; check_cmd; fix_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; refactor_cmd; format_cmd;
+    [ new_cmd; init_cmd; build_cmd; check_cmd; fix_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; refine_cmd; refactor_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd; retire_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;

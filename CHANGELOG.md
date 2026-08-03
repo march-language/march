@@ -13,6 +13,35 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge refine <fn>`: suggest a refinement type.** Proposes the parameter
+  refinement that discharges the obligations a function's body leaves
+  unproven — `n : Int` → `n : {Int | _ > 0}` when `n` reaches a callee that
+  requires a positive argument. Prints by default; `--apply` writes the
+  annotation into the source, and `--all` sweeps the whole project. The
+  editor gets the same thing as a "Suggest a refinement type for `f`" code
+  action on the function's name.
+
+  A suggestion is only made when the refinement checker itself proves the
+  obligations under it: each candidate is hypothesised onto the signature and
+  the real checker is re-run, so `march check` after `--apply` agrees with
+  what was printed. Where several candidates work, the **weakest** is proposed
+  — a divisor contract comes back as `_ != 0`, not `_ > 0`, so the suggestion
+  does not silently reject callers the function would have accepted. Where
+  nothing works, the command says so rather than going quiet: `no-debt`,
+  `no-candidate`, and a partial discharge are distinct outcomes.
+
+  It also declines to propose a contract that contradicts the function: a
+  `_safe` wrapper handling `Nil -> Err(...)` is left alone, because forbidding
+  the empty list would kill the branch the author wrote on purpose — while a
+  branch that *panics* still gets the contract, since converting that panic to
+  a compile error is the point. A sweep over all 112 stdlib modules is what
+  found this; without the guard, three of its four suggestions were of that
+  wrong shape.
+
+  Also exposed on the compiler as `march --refine-suggest <fn>`,
+  `--refine-suggest-all`, and `--refine-suggest-json`. Needs Z3, like the rest
+  of refinement checking.
+
 - `forge search --callers NAME`: reverse-reference search — find every
   resolved call, constructor use, or qualified type reference to a
   declaration, using the typechecker's own name resolution (not textual
