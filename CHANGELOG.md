@@ -13,6 +13,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --refine-suggest-post <fn>`: suggest a postcondition.** Where
+  `--refine-suggest` proposes the parameter contract that discharges a
+  function's own unproven obligations, this proposes the *return* contract that
+  lets its **callers** discharge theirs — the other direction of the same
+  propagation. Verified end to end: applying the suggestion takes the worked
+  example from 1 proved / 1 skipped to 3 proved / 0 skipped.
+
+  A postcondition discharges nothing in its own function, so two independent
+  questions are both answered before anything is proposed: is the candidate
+  *true* (asked of the checker's own postcondition oracle, not a second prover),
+  and is it *useful* (does any caller's obligation actually become provable). A
+  true-but-useless postcondition is not proposed — a sweep full of true
+  irrelevancies is indistinguishable from a broken one. Outcomes stay
+  distinguishable rather than collapsing into silence: `no-callers`,
+  `no-debt`, `no-candidate` and `already-refined` are separate answers.
+
 - **Consuming-call inlay hints: the editor now marks which arguments a call
   takes ownership of (`⊗ consumed`).** Ownership transfer was previously
   invisible at the place it happens — you had to read the callee's signature,

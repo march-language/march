@@ -10051,6 +10051,129 @@ let test_stdlib_manifest_has_no_phantom_entries () =
   Alcotest.(check (list string))
     "every manifest entry has a file behind it" [] phantom
 
+(* ── postcond_infer: propose a RETURN refinement that helps the CALLERS ──────
+
+   Unlike a precondition, a postcondition discharges nothing in its own
+   function — it discharges obligations in the callers. So two independent
+   questions must both be answered, and the REJECT witnesses below are the half
+   that constrains the feature:
+
+     TRUE?    `check_fn_post_verdict` — the real checker's own oracle, not a
+              second prover that could disagree with it.
+     USEFUL?  the ledger delta over the callers. A true-but-useless
+              postcondition is noise, and a sweep full of true irrelevancies
+              looks exactly like a working one. *)
+
+module PO = March_refinecheck.Postcond_infer
+
+let suggest_post_in src ~target =
+  let m = Test_helpers.parse_and_desugar src in
+  let errctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module errctx m;
+  PO.suggest ~root:(Sys.getcwd ()) ~is_user:(fun _ -> true) ~target m
+
+let one_post rs =
+  match rs with
+  | [ r ] -> r
+  | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+
+let test_postcond_proposes_what_the_caller_needs () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"produce"
+           {|mod POA do
+               fn need_pos(n : {Int | _ > 0}) : Int do n end
+               fn produce(x : {Int | _ > 0}) : Int do x end
+               fn consume(x : {Int | _ > 0}) : Int do need_pos(produce(x)) end
+             end|})
+    in
+    Alcotest.(check string) "status" "solved" (PO.status_name r.PO.rs_status);
+    Alcotest.(check string) "predicate" "_ > 0" r.PO.rs_pred;
+    Alcotest.(check int) "one caller" 1 r.PO.rs_callers;
+    Alcotest.(check int) "caller debt cleared" 0 r.PO.rs_debt_after
+  end
+
+(* REJECT WITNESS (usefulness). The postcondition is provable, and no caller
+   needs it. Proposing it would be noise indistinguishable from working. *)
+let test_postcond_declines_a_true_but_useless_candidate () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"helper"
+           {|mod POB do
+               fn helper(x : {Int | _ > 0}) : Int do x end
+               fn user(x : {Int | _ > 0}) : Int do helper(x) + 1 end
+             end|})
+    in
+    Alcotest.(check string) "no proposal" "" r.PO.rs_pred;
+    Alcotest.(check string) "and says why" "no-debt" (PO.status_name r.PO.rs_status)
+  end
+
+(* REJECT WITNESS. The caller genuinely has debt, but the callee returns 0, so
+   no postcondition that would discharge it is true. Reporting one here would
+   produce an annotation `gate_unverified_posts` strips — i.e. one that silently
+   does nothing.
+
+   HONEST NOTE ON WHAT THIS DOES *NOT* PIN. Neutering `post_holds` to `true`
+   does not flip this case, nor any other case I could construct: the candidate
+   turns the postcondition obligation VIOLATED, and the admissibility rule
+   already refuses a candidate that raises the violated count. `post_holds` is
+   therefore defense-in-depth mirroring `gate_unverified_posts`, not a uniquely
+   load-bearing check — it is kept because it is the semantically correct gate
+   and costs one solver call, but do not read this test as evidence that it
+   fires. If you remove it, this suite will stay green; verify the drift
+   property some other way before concluding it is dead. *)
+let test_postcond_declines_when_nothing_true_helps () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"maybe"
+           {|mod POC do
+               fn need_pos(n : {Int | _ > 0}) : Int do n end
+               fn maybe(x : Int) : Int do 0 end
+               fn consume(x : Int) : Int do need_pos(maybe(x)) end
+             end|})
+    in
+    Alcotest.(check string) "no proposal" "" r.PO.rs_pred;
+    Alcotest.(check string) "status" "no-candidate" (PO.status_name r.PO.rs_status);
+    Alcotest.(check int) "the debt is real and still there" 1 r.PO.rs_debt_before
+  end
+
+(* A function nothing calls cannot have a useful postcondition, and saying
+   "no-callers" rather than "no-candidate" is the difference between "there is
+   nothing to help" and "I could not find help". *)
+let test_postcond_reports_no_callers_distinctly () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"lonely"
+           {|mod POD do
+               fn lonely(x : {Int | _ > 0}) : Int do x end
+             end|})
+    in
+    Alcotest.(check string) "status" "no-callers" (PO.status_name r.PO.rs_status)
+  end
+
+let test_postcond_leaves_a_declared_return_alone () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"produce"
+           {|mod POE do
+               fn need_pos(n : {Int | _ > 0}) : Int do n end
+               fn produce(x : {Int | _ > 0}) : {Int | _ > 0} do x end
+               fn consume(x : {Int | _ > 0}) : Int do need_pos(produce(x)) end
+             end|})
+    in
+    Alcotest.(check string) "status" "already-refined" (PO.status_name r.PO.rs_status)
+  end
+
 let test_stdlib_prelude_fold_left_curried () =
   assert_stdlib_file_typechecks_cleanly "prelude.march"
 
@@ -11518,6 +11641,13 @@ let compiler_suites =
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "postcond_infer", [
+          Alcotest.test_case "proposes what the caller needs"                `Quick test_postcond_proposes_what_the_caller_needs;
+          Alcotest.test_case "REJECT: true but useless is not proposed"      `Quick test_postcond_declines_a_true_but_useless_candidate;
+          Alcotest.test_case "REJECT: nothing true helps -> no candidate"    `Quick test_postcond_declines_when_nothing_true_helps;
+          Alcotest.test_case "no callers is its own outcome"                 `Quick test_postcond_reports_no_callers_distinctly;
+          Alcotest.test_case "a declared return is left alone"               `Quick test_postcond_leaves_a_declared_return_alone;
         ] );
       ( "stdlib-manifest", [
           Alcotest.test_case "the load manifest is exhaustive over stdlib/"  `Quick test_stdlib_manifest_is_exhaustive;

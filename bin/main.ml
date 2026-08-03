@@ -852,9 +852,15 @@ let refine_suggest_target = ref None   (* Some fn-name (possibly qualified) *)
 let refine_suggest_all    = ref false
 let refine_suggest_json   = ref false
 let refine_suggest_budget = ref March_refinecheck.Precond_infer.default_budget
+(* --refine-suggest-post: propose the RETURN refinement that lets a function's
+   CALLERS discharge obligations.  Separate from the precondition flags because
+   it answers a different question — see lib/refinecheck/postcond_infer.ml. *)
+let refine_suggest_post = ref None
+let refine_suggest_post_all = ref false
 
 let refine_suggest_active () =
   !refine_suggest_target <> None || !refine_suggest_all
+  || !refine_suggest_post <> None || !refine_suggest_post_all
 
 let json_escape s =
   let b = Buffer.create (String.length s + 8) in
@@ -945,6 +951,72 @@ let print_refine_suggestions ~filename ~user_files desugared =
               r.PI.rs_debt_before r.PI.rs_debt_after)
       results;
     if results = [] then Printf.printf "no suggestions\n"
+  end
+
+let print_refine_postconditions ~filename ~user_files desugared =
+  let module PO = March_refinecheck.Postcond_infer in
+  let is_user (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || List.mem f user_files
+  in
+  let root = Sys.getcwd () in
+  let budget = !refine_suggest_budget in
+  let results =
+    if !refine_suggest_post_all then PO.suggest_all ~root ~budget ~is_user desugared
+    else
+      match !refine_suggest_post with
+      | None -> []
+      | Some target -> PO.suggest ~root ~budget ~is_user ~target desugared
+  in
+  if !refine_suggest_json then begin
+    let one (r : PO.t) =
+      Printf.sprintf
+        {|{"fn":"%s","file":"%s","line":%d,"col":%d,"status":"%s","base":"%s","predicate":"%s","annotation":"{%s | %s}","callers":%d,"debt_before":%d,"debt_after":%d,"queries":%d}|}
+        (json_escape r.PO.rs_fn)
+        (json_escape r.PO.rs_span.March_ast.Ast.file)
+        r.PO.rs_span.March_ast.Ast.start_line
+        r.PO.rs_span.March_ast.Ast.start_col
+        (PO.status_name r.PO.rs_status)
+        (json_escape r.PO.rs_base) (json_escape r.PO.rs_pred)
+        (json_escape r.PO.rs_base) (json_escape r.PO.rs_pred)
+        r.PO.rs_callers r.PO.rs_debt_before r.PO.rs_debt_after r.PO.rs_queries
+    in
+    Printf.printf "{\"postconditions\":[%s]}\n%!"
+      (String.concat "," (List.map one results))
+  end
+  else begin
+    List.iter
+      (fun (r : PO.t) ->
+        match r.PO.rs_status with
+        | PO.Not_found -> Printf.printf "no user function named `%s`\n" r.PO.rs_fn
+        | PO.No_return_type ->
+          Printf.printf "%s: no declared return type to refine\n" r.PO.rs_fn
+        | PO.Already_refined ->
+          Printf.printf "%s: its return is already refined\n" r.PO.rs_fn
+        | PO.No_callers ->
+          Printf.printf
+            "%s: nothing calls it here, so there is no obligation a postcondition could discharge\n"
+            r.PO.rs_fn
+        | PO.No_debt ->
+          Printf.printf "%s: its callers have no unproven obligations\n" r.PO.rs_fn
+        | PO.No_candidate ->
+          Printf.printf
+            "%s: %d unproven obligation(s) in %d caller(s), but no candidate postcondition is both provable and useful\n"
+            r.PO.rs_fn r.PO.rs_debt_before r.PO.rs_callers
+        | PO.Solved | PO.Partial ->
+          Printf.printf "%s (%s:%d)\n" r.PO.rs_fn
+            r.PO.rs_span.March_ast.Ast.file r.PO.rs_span.March_ast.Ast.start_line;
+          Printf.printf "    returns %s  ->  returns {%s | %s}\n"
+            r.PO.rs_base r.PO.rs_base r.PO.rs_pred;
+          if r.PO.rs_status = PO.Solved then
+            Printf.printf "  discharges all %d obligation(s) across %d caller(s)\n"
+              r.PO.rs_debt_before r.PO.rs_callers
+          else
+            Printf.printf "  discharges %d of %d across %d caller(s); %d still unproven\n"
+              (r.PO.rs_debt_before - r.PO.rs_debt_after) r.PO.rs_debt_before
+              r.PO.rs_callers r.PO.rs_debt_after)
+      results;
+    if results = [] then Printf.printf "no postcondition suggestions\n"
   end
 
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
@@ -1843,8 +1915,10 @@ let compile filename =
   (* Precondition suggestion.  Must follow the report: every hypothesis probe
      resets the obligation ledger, so a report printed after this one would
      describe the last hypothesis rather than the program. *)
-  if refine_suggest_active () then
+  if !refine_suggest_target <> None || !refine_suggest_all then
     print_refine_suggestions ~filename ~user_files desugared;
+  if !refine_suggest_post <> None || !refine_suggest_post_all then
+    print_refine_postconditions ~filename ~user_files desugared;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
@@ -3868,6 +3942,10 @@ let () =
      " Propose parameter refinements for every function in user code that has unproven obligations");
     ("--refine-suggest-json", Arg.Set refine_suggest_json,
      " Emit --refine-suggest results as JSON on stdout (for tooling such as forge refine)");
+    ("--refine-suggest-post", Arg.String (fun s -> refine_suggest_post := Some s),
+     "<fn>  Propose the return refinement that lets <fn>'s callers discharge their obligations");
+    ("--refine-suggest-post-all", Arg.Set refine_suggest_post_all,
+     " Propose return refinements for every function in user code whose callers have unproven obligations");
     ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
      "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
