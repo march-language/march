@@ -39,3 +39,82 @@ headers (there is no enclosing function to name as `caller` — the natural
 `Mod.fn` name). Scoped out of the `forge search --callers` v1 plan (Tasks
 1-7) as a follow-up; revisit if/when interface/impl-header references turn
 out to matter in practice.
+
+---
+
+# Implementation spec (added 2026-08-03)
+
+## The blocker is a type, not an algorithm
+
+`ref_record.caller` is a `string` documented as a fully-qualified `Mod.name`
+(`lib/typecheck/typecheck.ml:494`). Interface and impl headers have no such name, which is
+why `with_no_caller` blanks the field and the `` `TyCon `` hook then skips recording
+entirely. Every route to closing this gap goes through widening that field first.
+
+Widen it to a variant rather than encoding a second kind of thing into the string — a
+`"impl Show for B.Widget"` caller would be indistinguishable from a function actually named
+that, and every consumer would need to re-parse it:
+
+```ocaml
+type ref_owner =
+  | Fn of string            (* "Mod.fn" — today's only case *)
+  | Interface of string     (* "Mod.Foo" *)
+  | Impl of { iface : string; ty : string }
+```
+
+`env.current_decl` becomes a `ref_owner option ref` (or keeps `""` meaning "not recording"
+and gains the variant alongside — decide by what reads it; check every `current_decl` use
+before choosing).
+
+## Then the recording sites
+
+Replace `with_no_caller` at the three sites it currently guards with a `with_owner`
+that sets the appropriate variant:
+
+- `Ast.DInterface` in `check_decl` → `Interface "Mod.Foo"`
+- its cross-module twins `prebind_interface_decl` / `inject_iface_exports_ref` → same
+- `Ast.DImpl` header and `when`-constraint types → `Impl { iface; ty }`
+
+The `` `TyCon `` hook's `caller = ""` skip then becomes "skip only when there is genuinely
+no owner", which after this change should be a much smaller set — audit what remains, since
+anything still hitting it is a position nobody has thought about.
+
+## Rendering
+
+`forge search --callers` prints the caller. Decide the surface spelling once, in
+`forge/lib/cmd_search.ml`, and keep the variant intact everywhere upstream:
+
+```
+B.Widget
+  A.convert                     lib/a.march:12          (call)
+  interface A.Renderable        lib/a.march:4           (type)
+  impl Show for B.Widget        lib/b.march:31          (type)
+```
+
+## Why this is P3, and the honest case for leaving it
+
+The current behaviour is *silent under-reporting*: a legitimate reference is simply absent
+from the results. That is the safe direction — a reverse-lookup that misses a hit sends
+someone to grep, whereas one that reports a wrong caller (which is what this position did
+before the `with_no_caller` fix) sends them to the wrong file with confidence.
+
+So the question to answer before spending the day is whether interface/impl-header
+references matter in practice. A cheap way to find out: count them. Grep the stdlib and a
+couple of real projects for qualified types appearing only in interface signatures or impl
+headers. If that number is small, close this as won't-fix and say so in the file rather
+than leaving it open indefinitely.
+
+## Acceptance
+
+- `forge search --callers B.Widget` reports a hit for a `B.Widget` used only in
+  `interface Foo(a) do fn conv: a -> B.Widget end` and one used only in
+  `impl Show(B.Widget) do … end`, each with a caller that names the interface or impl
+  rather than a function.
+- REJECT witness — the one that must not regress:
+  `test_typeref_interface_sig_no_stale_caller` (`test/test_search.ml`) currently pins that
+  these positions do NOT attribute to whatever function was checked just before them. Any
+  fix must keep that property; the failure mode being prevented is a *confidently wrong*
+  caller, which is worse than the missing one this todo is about.
+- A second REJECT witness: a qualified type inside a plain function body still attributes
+  to that function, not to an enclosing interface/impl owner left set by a missing restore.
+  `with_owner` must be `Fun.protect`-scoped exactly as `with_no_caller` is.

@@ -176,9 +176,56 @@ let test_execute_command_dispatches () =
     "workspace/executeCommand reaches on_req_execute_command (not linol's null default)"
     true (run_execute_command ())
 
+(* ── shutdown/exit must actually terminate the process ────────────────────────
+
+   `Jsonrpc2.run` takes a `?shutdown` predicate whose own documentation says it
+   should be `s#get_status = `ReceivedExit`. march-lsp passed none, so it
+   defaulted to `fun _ -> false`: after handling the `exit` notification the
+   loop went straight back to `read_msg` and blocked on stdin forever. The
+   client has said goodbye and is waiting for the process to go away; instead it
+   hangs until the editor's timeout kills it.
+
+   Invisible to every other test here, because they all end with
+   `close_process_full` — closing the pipes ends the server via EOF whether or
+   not `exit` is honoured. This one must therefore NOT close the pipes, and
+   instead observe the server closing its own stdout. *)
+let run_exit_terminates () =
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null; "rootUri", `Null;
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 2;
+                    "method", `String "shutdown"; "params", `Null ]);
+  ignore (read_until ic ~max:30 (is_id 2));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle
+       (fun _ -> failwith "march-lsp did not exit after the `exit` notification"));
+  ignore (Unix.alarm 10);
+  let exited =
+    match input_line ic with
+    | exception End_of_file -> true   (* server closed its stdout: it exited *)
+    | _ -> false                      (* still talking: it is still alive *)
+  in
+  ignore (Unix.alarm 0);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  exited
+
+let test_exit_terminates () =
+  Alcotest.(check bool)
+    "the `exit` notification terminates the server without closing its pipes"
+    true (run_exit_terminates ())
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
       [ Alcotest.test_case "initialize/didOpen/hover" `Quick test_full_session;
         Alcotest.test_case "workspace/executeCommand is dispatched" `Quick
-          test_execute_command_dispatches ] ]
+          test_execute_command_dispatches;
+        Alcotest.test_case "exit notification terminates the server" `Quick
+          test_exit_terminates ] ]

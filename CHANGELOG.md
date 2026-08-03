@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --refine-suggest-post <fn>`: suggest a postcondition.** Where
+  `--refine-suggest` proposes the parameter contract that discharges a
+  function's own unproven obligations, this proposes the *return* contract that
+  lets its **callers** discharge theirs — the other direction of the same
+  propagation. Verified end to end: applying the suggestion takes the worked
+  example from 1 proved / 1 skipped to 3 proved / 0 skipped.
+
+  A postcondition discharges nothing in its own function, so two independent
+  questions are both answered before anything is proposed: is the candidate
+  *true* (asked of the checker's own postcondition oracle, not a second prover),
+  and is it *useful* (does any caller's obligation actually become provable). A
+  true-but-useless postcondition is not proposed — a sweep full of true
+  irrelevancies is indistinguishable from a broken one. Outcomes stay
+  distinguishable rather than collapsing into silence: `no-callers`,
+  `no-debt`, `no-candidate` and `already-refined` are separate answers.
 - **A missing capability now shows the call chain from `main` that forced it.**
   A capability is a property of a whole path, not of the single call that
   happens to need it — `needs` has to be threaded through every function in
@@ -238,6 +253,23 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march-lsp` now exits when the client tells it to.** The server handled the
+  `exit` notification and then went straight back to reading stdin, so it hung
+  until the editor's timeout killed it — `Jsonrpc2.run`'s `?shutdown` predicate,
+  which is what actually ends the loop, was never passed. Every existing
+  protocol test ended by closing the pipes, which stops the server via EOF
+  whether or not `exit` is honoured, so none of them could see it.
+
+- **The stdlib load manifest is now guarded against going stale.** A file under
+  `stdlib/` missing from `stdlib_file_list` is loaded for export shapes only —
+  its body never goes through inference in its caller's context — so a generic
+  `Option`/`Result` it exports silently produces a **wrong value** at a concrete
+  niche-eligible call site: no diagnostic, compiled builds only, different
+  garbage each run. That class had been point-fixed three times by hand-adding
+  whichever files someone happened to notice. The manifest moved to
+  `lib/modules/stdlib_manifest.ml` and two tests now hold the invariant: it is
+  exhaustive over `stdlib/`, and every entry has a file behind it. Deliberately
+  lazy modules go in an explicit allowlist.
 - **The LSP's TIR pass is now idempotent — performance insights no longer
   duplicate.** Re-running it on an analysis it had already processed appended
   its perf insights to a list that already contained them, so a function could
