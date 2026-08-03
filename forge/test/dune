@@ -1,9 +1,9 @@
 (tests
  (names test_forge test_resolver test_solver test_cas_package test_patch
-        test_api_surface test_properties test_regression)
+        test_api_surface test_properties test_regression test_cap_binary)
  (modules test_forge test_resolver test_solver test_cas_package test_patch
-          test_api_surface test_properties test_regression)
- (libraries march_forge march_search alcotest unix qcheck-core qcheck-alcotest march_cas))
+          test_api_surface test_properties test_regression test_cap_binary)
+ (libraries march_forge march_search march_caps alcotest unix qcheck-core qcheck-alcotest march_cas))
 
 ; QUARANTINED from `runtest` (2026-07-24): test_build_check.ml's "forge check"/
 ; "forge build" cases shell out to a real `march check` subprocess
