@@ -2792,6 +2792,77 @@ let expr_applies_to (name : string) (subject : string) (e : A.expr) : bool =
     e;
   !found
 
+(* [expr_applies_to], but only counting an occurrence of [subject] that is
+   FREE — not captured by an intervening binder of the same name.
+
+   Same hazard as [expr_mentions_free] above, one level up the stack:
+   [expr_applies_to] is a discard-only helper (built with [iter_all], which
+   has no shadowing awareness at all) and is safe only in a DISCARDING
+   position.  [guard_applies] uses it in an ACCEPTING one — "this guard
+   applies the withdrawn spelling to the subject" is evidence FOR an
+   attribution, so a false hit here is a wrong attribution, not merely a
+   vague one.  `if check(fn ys -> List.length(ys) > 0, zs) do head(ys) …`
+   must not read as "the guard applies List.length to ys": the guard's `ys`
+   is the lambda's own parameter, and the guard says nothing about the outer
+   `ys` that `head`'s argument names.  Mirror image of the laundered-path bug
+   fixed 2026-07-31 (probe PE) — same fix, direct path, one level of AST
+   deeper because the thing that must stay free is the ARGUMENT reference,
+   not the applied function's own name. *)
+let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : bool =
+  let free = expr_applies_to_free name subject in
+  let any = List.exists free in
+  let binds ps = List.mem subject ps in
+  let pbinds ps = List.exists (fun (p : A.param) -> p.A.param_name.A.txt = subject) ps in
+  match e with
+  | A.EVar _ -> false
+  | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+  | A.EApp (f, args, _) ->
+    (match f with
+     | A.EVar n
+       when n.A.txt = name
+            && List.exists (function A.EVar v -> v.A.txt = subject | _ -> false) args ->
+       true
+     | _ -> false)
+    || free f || any args
+  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+  | A.ELam (ps, body, _) -> if pbinds ps then false else free body
+  | A.EBlock (es, _) ->
+    (* Sequential: a `let` (or `let fn`) rebinding [subject] shadows the REST
+       of the block, but its own RHS still sees the outer [subject]. *)
+    let rec go = function
+      | [] -> false
+      | e :: rest ->
+        free e
+        ||
+        (match e with
+         | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
+         | A.ELetFn (n, _, _, _, _) when n.A.txt = subject -> false
+         | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+         | _ -> go rest)
+    in
+    go es
+  | A.ELet (b, _) -> free b.A.bind_expr
+  | A.ELetFn (n, ps, _, body, _) ->
+    if n.A.txt = subject || pbinds ps then false else free body
+  | A.ELetQ (p, e1, e2, _) -> free e1 || (if binds (pat_binders p) then false else free e2)
+  | A.EMatch (subj, brs, _) ->
+    free subj
+    || List.exists
+         (fun (br : A.branch) ->
+           if binds (pat_binders br.A.branch_pat) then false
+           else
+             (match br.A.branch_guard with Some g -> free g | None -> false)
+             || free br.A.branch_body)
+         brs
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> free v) fs
+  | A.ERecordUpdate (r, fs, _) -> free r || List.exists (fun (_, v) -> free v) fs
+  | A.EField (r, _, _) -> free r
+  | A.EIf (c, t, el, _) -> any [ c; t; el ]
+  | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EDbg (Some e, _) -> free e
+
 (* ── Attributing a skip to a withdrawn alias ───────────────────────────────
    A withdrawn alias is only ONE of the reasons an obligation can go
    undischarged, and a wrong attribution is worse than a vague one: it sends
@@ -2863,16 +2934,16 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
   match (r, subject) with
   | Obligation.Solver_undecided, Some (A.EVar sn) ->
     let guard_applies (w : withdrawal) (cond : A.expr) : bool =
-      expr_applies_to w.wd_spelling sn.A.txt cond
+      (* FREE occurrence only, on both the direct condition and the laundered
+         RHS: this is an ACCEPTING position, so the discard-only
+         [expr_applies_to] is the wrong tool on either path — a lambda
+         parameter in the guard that merely collides with the subject's own
+         name must not read as evidence (review 2026-07-31, probe PE, and its
+         mirror image on the direct path). *)
+      expr_applies_to_free w.wd_spelling sn.A.txt cond
       || List.exists
            (fun (m, rhs) ->
-             (* FREE mention only: this is an ACCEPTING position, so the
-                discard-only [expr_mentions] is the wrong tool — a lambda
-                parameter in the guard that merely collides with the
-                laundering name must not read as evidence (review 2026-07-31,
-                probe PE). *)
-             expr_mentions_free m cond
-             && expr_applies_to w.wd_spelling sn.A.txt rhs)
+             expr_mentions_free m cond && expr_applies_to_free w.wd_spelling sn.A.txt rhs)
            lets
     in
     List.find_opt

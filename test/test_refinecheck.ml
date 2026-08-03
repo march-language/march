@@ -5454,6 +5454,56 @@ end|}
         in
         Alcotest.(check bool)
           "still falls back to solver-undecided" true
+          (contains msg "solver-undecided"));
+    gated "a guard's lambda param colliding with the subject name is not evidence"
+      (fun () ->
+        (* Mirror-image of probe PE (2026-07-31), on the DIRECT path instead of
+           the laundered one. The guard's `ys` here is the lambda's own
+           parameter — it never applies List.length to the OUTER ys that
+           `head`'s argument names. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA11 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn check(f : (List(Int)) -> Bool, zs : List(Int)) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    if check(fn ys -> List.length(ys) > 0, zs) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "a FREE occurrence of the subject under a non-colliding binder still attributes"
+      (fun () ->
+        (* Companion control: a genuine free use of the withdrawn spelling
+           applied to the real subject, merely sitting inside an unrelated
+           lambda, must still attribute -- the fix must not over-retire. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA12 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn check(f : (List(Int)) -> Bool, zs : List(Int)) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    if check(fn q -> List.length(ys) > 0, zs) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
           (contains msg "solver-undecided"))
   ]
 
