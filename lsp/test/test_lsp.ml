@@ -3216,6 +3216,93 @@ end
   Alcotest.(check bool) "code_lens_items is a list" true
     (List.length a2.An.code_lens_items >= 0)
 
+(* ------------------------------------------------------------------ *)
+(* Consuming-call inlay hints                                          *)
+(* ------------------------------------------------------------------ *)
+
+let hint_labels (hs : Lsp.Types.InlayHint.t list) =
+  List.filter_map (fun (h : Lsp.Types.InlayHint.t) ->
+      match h.label with `String s -> Some s | _ -> None) hs
+
+let full_range () =
+  Lsp.Types.Range.create
+    ~start:(Lsp.Types.Position.create ~line:0 ~character:0)
+    ~end_:(Lsp.Types.Position.create ~line:200 ~character:0)
+
+(** `wrap` stores its argument into a returned list, so it takes ownership —
+    borrow inference reports the parameter as owned, and the call site should
+    say so. *)
+let test_consume_hint_on_owning_call () =
+  let src = {|mod Test do
+  fn wrap(s : String) : List(String) do
+    [s]
+  end
+
+  fn main() : Int do
+    let msg = "hello"
+    let boxed = wrap(msg)
+    List.length(boxed)
+  end
+end|} in
+  let a = An.run_tir_pass (analyse src) in
+  (* Non-vacuity: the TIR pass bails out and returns the analysis untouched if
+     the source failed to typecheck, which would make every assertion below
+     pass for the wrong reason. Prove the pass actually ran and classified
+     `wrap` before trusting the hint. *)
+  Alcotest.(check bool) "TIR pass produced consume modes (guards vacuity)" true
+    (a.An.consume_modes <> []);
+  Alcotest.(check bool) "`wrap` records a consuming parameter" true
+    (List.exists (fun (cm : An.consume_modes) ->
+         cm.An.cm_fn_name = "wrap" && List.mem true cm.An.cm_consumes)
+       a.An.consume_modes);
+  let labels = hint_labels (An.inlay_hints_for a (full_range ())) in
+  Alcotest.(check bool) "a consumed hint is emitted at the call site" true
+    (List.exists (fun s -> s = "⊗ consumed") labels)
+
+(** REGRESSION GUARD. The borrow map initialises every non-borrow-eligible
+    parameter to "not borrowed", so an Int parameter reads as nominally owned.
+    Without the needs_rc filter this hint would fire on every numeric argument
+    in the file and drown the real signal. *)
+let test_no_consume_hint_on_scalar_arg () =
+  let src = {|mod Test do
+  fn double(x : Int) : Int do
+    x * 2
+  end
+
+  fn main() : Int do
+    let n = 21
+    double(n)
+  end
+end|} in
+  let a = An.run_tir_pass (analyse src) in
+  let labels = hint_labels (An.inlay_hints_for a (full_range ())) in
+  (* The hint list must be non-empty (type hints exist), else "no consumed
+     hint" would hold trivially on an empty analysis. *)
+  Alcotest.(check bool) "hints were produced at all (guards vacuity)" true
+    (labels <> []);
+  Alcotest.(check bool) "no consumed hint on an Int argument" false
+    (List.exists (fun s -> s = "⊗ consumed") labels)
+
+(** A temporary has no name to lose, so annotating it is noise; the hint is
+    restricted to plain variable arguments. *)
+let test_no_consume_hint_on_temporary_arg () =
+  let src = {|mod Test do
+  fn wrap(s : String) : List(String) do
+    [s]
+  end
+
+  fn main() : Int do
+    let boxed = wrap("literal")
+    List.length(boxed)
+  end
+end|} in
+  let a = An.run_tir_pass (analyse src) in
+  Alcotest.(check bool) "TIR pass ran (guards vacuity)" true
+    (a.An.consume_modes <> []);
+  let labels = hint_labels (An.inlay_hints_for a (full_range ())) in
+  Alcotest.(check bool) "no consumed hint on a literal argument" false
+    (List.exists (fun s -> s = "⊗ consumed") labels)
+
 (** Test 2: run_tir_pass is idempotent (running twice gives same result). *)
 let test_tir_pass_idempotent () =
   let src = {|
@@ -6524,6 +6611,9 @@ let () =
     ];
     "perf insights phase 3: TIR pipeline", [
       "run_tir_pass does not crash",            `Quick, test_tir_pass_does_not_crash;
+      "consumed hint on an owning call",        `Quick, test_consume_hint_on_owning_call;
+      "no consumed hint on a scalar arg",       `Quick, test_no_consume_hint_on_scalar_arg;
+      "no consumed hint on a temporary",        `Quick, test_no_consume_hint_on_temporary_arg;
       "run_tir_pass is idempotent",             `Quick, test_tir_pass_idempotent;
       "TIR pass skipped when source has errors",`Quick, test_tir_pass_skipped_on_error;
       "HOF indirect-call insight",              `Quick, test_tir_indirect_call_insight;

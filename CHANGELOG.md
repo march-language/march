@@ -13,6 +13,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Consuming-call inlay hints: the editor now marks which arguments a call
+  takes ownership of (`⊗ consumed`).** Ownership transfer was previously
+  invisible at the place it happens — you had to read the callee's signature,
+  and often its body, to know whether passing a value ended its life. The hint
+  is read off the compiler's own borrow inference (`Borrow.infer_module`), the
+  same map Perceus consults when deciding which arguments need a reference-count
+  bump, so it reports the decision the compiler actually made rather than a
+  re-derivation of it. Two deliberate restrictions keep it a signal instead of
+  decoration: only RC-tracked parameters qualify (the borrow map initialises
+  non-borrow-eligible parameters to "not borrowed", so without this filter every
+  `Int` argument would read as consumed), and only plain variable arguments are
+  annotated (a temporary has no name to lose). The effect is that a borrowing
+  call and a consuming call on the same variable look different one line apart.
+  Also adds `march-lsp query inlay <file>`, which dumps the hints as JSON so
+  they can be inspected without an editor.
+
 - **`forge refine <fn>`: suggest a refinement type.** Proposes the parameter
   refinement that discharges the obligations a function's body leaves
   unproven — `n : Int` → `n : {Int | _ > 0}` when `n` reaches a callee that
