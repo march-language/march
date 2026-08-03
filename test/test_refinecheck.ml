@@ -6571,6 +6571,43 @@ end|}));
                d.March_errors.Errors.severity = March_errors.Errors.Warning
                && contains d.March_errors.Errors.message "enforces nothing")
              msgs))
+
+  ; gated "cap verified does NOT leak strictness into a nested mod lacking its own"
+      (fun () ->
+        (* Pins non-inheritance: [strict_verified] (and the [~strict] flag
+           threaded through [warn_predicate_decls]) is scoped to the decl
+           list that declares `cap verified`, exactly like every other
+           `cap verified` obligation in this file -- a nested `mod` re-derives
+           its own strictness rather than inheriting the enclosing module's.
+           This is load-bearing for the whole codebase, not just this test:
+           the standard library arrives as sibling `DMod` decls, so a leak
+           here would make the entire stdlib strict the moment any one
+           top-level module opted into `cap verified`. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR6 do
+  cap verified
+  mod Inner do
+    interface Runner(a) do
+      fn run : a -> {Int | _ > 0} -> Int
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "no ERROR-severity diagnostic (no strictness leak)" true
+          (not
+             (List.exists
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity = March_errors.Errors.Error)
+                msgs));
+        Alcotest.(check bool) "still a WARNING" true
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               d.March_errors.Errors.severity = March_errors.Errors.Warning
+               && contains d.March_errors.Errors.message "enforces nothing")
+             msgs))
   ]
 
 (* ── `sig` / `extern` signature refinements ────────────────────────────────
