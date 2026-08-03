@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge cap run [--allow-only CAPS] BINARY`: run a compiled binary under an
+  OS-enforced capability sandbox.** The policy is imposed from outside, so
+  nothing in the binary is trusted — `--allow-only` lets you supply the policy
+  for untrusted code, since a policy derived from the binary's own claim only
+  defeats under-claiming. macOS uses `sandbox-exec` (SBPL), Linux uses
+  bubblewrap. Which capabilities are genuinely enforceable was measured, not
+  assumed: network, file-write and process-spawn are enforced, while
+  `IO.FileRead`, `IO.Clock`, `IO.Spawn` and `IO.Random` are reported as
+  **advisory** (denying them aborts the runtime — the loader must read system
+  libraries, and clock/thread syscalls are indistinguishable from the GC and
+  scheduler's own). Advisory capabilities are printed before the run so a clean
+  run is never mistaken for full containment.
+
 - **`forge cap audit <binary>`: list the capabilities of a compiled March
   executable.** Executables are now linked with dead-strip (72–79% smaller),
   so unused capability runtime code is physically absent, and codegen embeds

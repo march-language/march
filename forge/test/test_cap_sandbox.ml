@@ -71,8 +71,32 @@ let test_unenforceable_caps_are_declared_advisory () =
   | Cap_sandbox.Advisory _ ->
     Alcotest.fail "IO.Network is enforceable and must be reported as such"
 
+
+(* Linux backend: the same capability decisions expressed as bubblewrap
+   flags.  Tested independently of which backend this host actually has, so
+   the Linux mapping is covered when developing on macOS. *)
+let test_bwrap_withholds_and_grants () =
+  let pure = Cap_sandbox.bwrap_args ~caps:[ "IO.Console" ] in
+  Alcotest.(check bool) "no network cap => --unshare-net" true
+    (List.mem "--unshare-net" pure);
+  Alcotest.(check bool) "no write cap => read-only root" true
+    (List.mem "--ro-bind / /" pure);
+  Alcotest.(check bool) "no write cap => still a writable /tmp" true
+    (List.mem "--tmpfs /tmp" pure);
+  let net = Cap_sandbox.bwrap_args ~caps:[ "IO.NetListen" ] in
+  Alcotest.(check bool) "network child grant => no --unshare-net" false
+    (List.mem "--unshare-net" net);
+  let w = Cap_sandbox.bwrap_args ~caps:[ "IO.FileWrite" ] in
+  Alcotest.(check bool) "write grant => writable bind" true
+    (List.mem "--dev-bind / /" w);
+  let root = Cap_sandbox.bwrap_args ~caps:[ "IO" ] in
+  Alcotest.(check bool) "root grant => nothing withheld" true
+    (root = [ "--dev-bind / /" ])
+
 let tests =
   [
+    Alcotest.test_case "bwrap withholds and grants correctly" `Quick
+      test_bwrap_withholds_and_grants;
     Alcotest.test_case "withheld network is denied" `Quick
       test_withheld_network_is_denied;
     Alcotest.test_case "granted child keeps parent class" `Quick

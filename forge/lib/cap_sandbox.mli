@@ -27,6 +27,9 @@ val profile_for : caps:string list -> binary:string -> string
     [caps]. [binary] is allowed to be exec'd and read — denying either
     prevents the process from starting at all. *)
 
+val bwrap_args : caps:string list -> string list
+(** Bubblewrap flags (Linux) for the same capability set. *)
+
 val supported : bool
 (** Whether external enforcement is available on this platform. *)
 
