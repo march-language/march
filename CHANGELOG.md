@@ -182,6 +182,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march-lsp` now exits when the client tells it to.** The server handled the
+  `exit` notification and then went straight back to reading stdin, so it hung
+  until the editor's timeout killed it — `Jsonrpc2.run`'s `?shutdown` predicate,
+  which is what actually ends the loop, was never passed. Every existing
+  protocol test ended by closing the pipes, which stops the server via EOF
+  whether or not `exit` is honoured, so none of them could see it.
+
 - **The stdlib load manifest is now guarded against going stale.** A file under
   `stdlib/` missing from `stdlib_file_list` is loaded for export shapes only —
   its body never goes through inference in its caller's context — so a generic
