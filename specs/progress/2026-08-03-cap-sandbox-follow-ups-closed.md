@@ -1,12 +1,15 @@
 # Capability sandbox follow-ups (Phase 4 remainder)
 
-Shipped 2026-08-03: `forge cap run [--allow-only CAPS] BINARY` — external,
-OS-enforced capability sandbox (`forge/lib/cap_sandbox.ml`). Design:
-`specs/2026-08-03-forge-cap-audit-design.md` §4.3 mechanism B.
+**Status 2026-08-03: all four items CLOSED.** Kept as the record of what was
+measured, because three of the four originally-stated conclusions were wrong.
 
-The enforceable/advisory split below was **measured**, not assumed. Do not
-"fix" an advisory capability by asserting it — confirm the denial actually
-holds first, or the report becomes false assurance (design §8).
+Shipped: `forge cap run [--allow-only CAPS] BINARY` (external enforcement) and
+`march --cap-sandbox` (opt-in self-imposed profile).
+Design: `specs/2026-08-03-forge-cap-audit-design.md` §4.3 mechanism B.
+
+The enforceable/advisory split was **measured**, not assumed. Do not "fix" an
+advisory capability by asserting it — confirm the denial actually holds first,
+or the report becomes false assurance (design §8).
 
 | capability | macOS (SBPL) | Linux (bwrap) |
 |---|---|---|
@@ -14,42 +17,71 @@ holds first, or the report becomes false assurance (design §8).
 | `IO.NetConnect` / TLS / WebSocket | enforced | enforced (`--unshare-net`) |
 | `IO.NetListen` | enforced | **advisory** — netns isolates, `bind()` still succeeds |
 | `IO.Process` | enforced (fork) | enforced (`--unshare-pid`) |
-| `IO.FileRead` | **advisory** — dyld must map libs first | **advisory** — scopable but not yet wired |
+| `IO.FileRead` | **advisory** — dyld must map libs first | **enforced** — allow-list mount namespace |
 | `IO.Clock`, `IO.Spawn`, `IO.Random` | advisory — indistinguishable from runtime baseline | same |
 | `IO.Foreign` | outside the model entirely | same |
 
-## Open items
+## Closed items
 
-- [ ] **Wire filesystem read scoping on Linux (Landlock).** This is the one
-  advisory that is genuinely fixable. Measured working in a 6.12 container:
-  `bwrap --tmpfs /etc` makes `/etc/hosts` unreadable while the program still
-  runs, so read denial is achievable on Linux where it is structurally
-  impossible on macOS (the loader reads `/usr/lib` before user code exists).
-  `landlock.h` is present in the toolchain image. Wire path scoping, then flip
-  `IO.FileRead` to `Enforced` on the Bwrap backend **only after** a test proves
-  a read is actually denied while a granted read still succeeds.
+- [x] **Linux filesystem read scoping.** Done, and it went further than
+  planned: rather than Landlock, bwrap's mount namespace gives a genuine
+  allow-list — only the loader's paths and the binary are bound in, so
+  everything else is *absent* rather than forbidden. Verified end-to-end in a
+  6.12 container with the flags the code emits: `/etc/hosts` DENIED without the
+  cap, OK with it, OK under a root `IO` grant. `IO.FileRead` is now `Enforced`
+  on bwrap.
 
-- [ ] **`--cap-sandbox`: the self-imposed, in-binary variant** (plan Task 9).
-  Deliberately not built yet — it is the *weaker* mechanism (a binary that
-  installs its own sandbox can also be built not to) and requires a runtime
-  `march_sandbox.c`, a compile-time define, and a `cas_flags` entry. The
-  external `forge cap run` delivers the security property without any of that.
-  Build this only if there is a concrete need for containment when forge is not
-  the launcher; the value is defense-in-depth, not a new guarantee.
+- [x] **Deny-default profile on macOS.** **The earlier conclusion was wrong.**
+  Deny-default is entirely feasible; the first attempt failed because the
+  baseline lacked `mach*`, `sysctl-read` and `ipc-posix-shm`, not because the
+  approach was infeasible. The profile is now a true allow-list, so resources
+  the capability lattice never modelled (IPC, IOKit, mach services) are refused
+  too. Gating verified in both directions live.
 
-- [ ] **Deny-default profile on macOS.** The shipped SBPL profile is
-  allow-default with per-class denies, which constrains the categories the
-  capability lattice models but not novel resources (mach services, IPC). A
-  true `(deny default)` allow-list was attempted and aborted the runtime
-  (SIGABRT) even with hand-built allow-lists for `/usr/lib`, `/System`,
-  `/dev/urandom` and the binary itself; `(trace ...)` mode did not produce a
-  profile and unified-log denial queries returned nothing. Closing this needs a
-  proper baseline characterization of what the March runtime touches at
-  startup. Worth doing — it is the difference between "constrains the modelled
-  categories" and "allow-list" — but it is not a small task.
+- [x] **`--cap-sandbox` self-imposed variant.** Built, having found a concrete
+  need the original note missed: a deployed server is launched by systemd or a
+  supervisor, so `forge cap run` never reaches it. Its value is narrower than
+  "containment" and is documented as such — the profile is derived from what
+  the program *does*, so it cannot restrict the program's intended behaviour,
+  only escalation beyond it (the Chrome-renderer threat model).
 
-- [ ] **`forge cap run` on a binary whose caps cannot be read.** Currently the
-  policy falls back to the binary's claim, and an unreadable/stripped binary
-  yields an empty cap set, i.e. the *tightest* policy. That fails safe, but it
-  fails confusingly ("why did my program break?"). Report the reason explicitly
-  rather than silently running with nothing granted.
+- [x] **Empty/unreadable capability policy.** `cap run` now names the reason —
+  stripped symbols, an unstripped build whose list was withheld, a genuinely
+  capability-free binary, or an empty `--allow-only`.
+
+## Regression found and fixed after the fact
+
+Putting the sandbox in its own `runtime/march_sandbox.c` broke **`march repl`
+and 33 tests**: `march_spawn_main` calls `march_sandbox_install`
+unconditionally, and every harness that links the runtime keeps its OWN source
+list — `bin/main.ml`, four rules in `test/dune`, `test/test_helpers.ml`, and the
+REPL's JIT `.so` builder. A new translation unit has to be added to all of them
+or the link fails with an undefined symbol.
+
+The fix was not to add it to each list but to delete the file and inline the
+function into `march_runtime.c` behind `#ifdef MARCH_CAP_PROFILE`, which
+removes the class of breakage. **A new runtime `.c` file is a multi-site
+change; a new function in an existing one is not.** Note the failure was NOT
+silent here only because a prior fix had made JIT link errors loud — the
+comment in `test_helpers.ml` describing that exact vacuous-green class was
+already there, warning about this.
+
+## Open follow-ups
+
+- [ ] **`IO.NetListen` on Linux.** A netns isolates rather than refuses, so a
+  contained server binds a port nothing can reach. Closing this properly needs
+  a seccomp filter on `bind`/`listen`, which is more machinery than the netns
+  and only sharpens an already-contained case. Low priority; the exfiltration
+  path (outbound connect) is enforced today.
+
+- [ ] **Linux `--cap-sandbox`.** Self-sandboxing on Linux needs an in-process
+  seccomp-bpf filter; the mount-namespace allow-list forge uses externally is
+  unavailable to a process sandboxing itself post-exec. Currently refuses with
+  a pointer to `forge cap run`. Build only if there is demand for deployed
+  Linux binaries that self-contain without a supervisor.
+
+- [ ] **Keep the two SBPL baselines in step.** `forge/lib/cap_sandbox.ml`'s
+  `sbpl_baseline` and `bin/main.ml`'s `cap_sandbox_define` build the same
+  profile independently. They are short and commented as mirrors, but nothing
+  mechanically enforces it — a drift test (compile with `--cap-sandbox`, diff
+  the embedded profile against `Cap_sandbox.profile_for`) would close it.

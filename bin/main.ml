@@ -2997,7 +2997,6 @@ let compile filename =
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
-              ^ (opt_file2 (Filename.concat runtime_dir "march_sandbox.c")) (* --cap-sandbox self-imposed profile; no-op without MARCH_CAP_PROFILE *)
             in
             (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
             let user_ffi_c =
@@ -3112,7 +3111,7 @@ let compile filename =
               (* --cap-sandbox: embed a DENY-DEFAULT SBPL profile derived from
                  this module's own inferred capabilities, applied by
                  march_sandbox_install() before any user code runs
-                 (runtime/march_sandbox.c).
+                 (the MARCH_CAP_PROFILE block in runtime/march_runtime.c).
 
                  Defense in depth only: whoever builds the binary chooses
                  whether to compile it in, so a hostile publisher omits it.
@@ -3316,7 +3315,7 @@ let compile filename =
                   (* cap_sandbox_define MUST be here, not only on the link
                      line: these objects are precompiled and cached, so a
                      define applied at link time never reaches
-                     march_sandbox.c and --cap-sandbox silently becomes a
+                     the runtime and --cap-sandbox silently becomes a
                      no-op.  Runtime_archive.ensure keys on cflags, so
                      including it also invalidates objects built without it. *)
                   Printf.sprintf

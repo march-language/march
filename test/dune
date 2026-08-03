@@ -153,6 +153,7 @@
           ../runtime/march_extras.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+         
           ../runtime/march_remote_registry.c)
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
@@ -163,6 +164,7 @@
                ../runtime/march_extras.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
                ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+              
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -260,6 +262,7 @@
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
           ../runtime/march_monitor_registry.c ../runtime/march_monitor_registry.h
+         
           ../lib/cas/blake3_cflags.sexp ../lib/cas/blake3_libs.sexp
           (glob_files ../runtime/*.h))
  (action
@@ -347,6 +350,7 @@
           ../runtime/march_gc.c
           ../runtime/march_monitor_registry.c
           ../runtime/march_monitor_registry.h
+         
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -I../runtime -O2
@@ -360,6 +364,7 @@
                ../runtime/march_heap.c
                ../runtime/march_gc.c
                ../runtime/march_monitor_registry.c
+              
                -lpthread -lm)))
 
 (rule
