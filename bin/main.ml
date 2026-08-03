@@ -1800,6 +1800,13 @@ let compile filename =
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              (* capstrip: the dead-strip link mode (strip_flag/section_cflags
+                 below) changes the emitted binary's contents; a pre-strip
+                 cached artifact must never satisfy a post-strip build or the
+                 cap audit silently reports every capability. Mirrors the
+                 eligibility condition on strip_flag. *)
+              @ (if !compile_so || !hot_reload_prefix <> None
+                 then [] else ["capstrip"])
               @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -2785,6 +2792,13 @@ let compile filename =
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              (* capstrip: the dead-strip link mode (strip_flag/section_cflags
+                 below) changes the emitted binary's contents; a pre-strip
+                 cached artifact must never satisfy a post-strip build or the
+                 cap audit silently reports every capability. Mirrors the
+                 eligibility condition on strip_flag. *)
+              @ (if !compile_so || !hot_reload_prefix <> None
+                 then [] else ["capstrip"])
               @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
@@ -3025,6 +3039,32 @@ let compile filename =
               (* -ldl is needed on Linux for dlopen; macOS has it in libc. *)
               if !hot_reload_prefix <> None && not !compile_so
                  && link_is_linux then " -ldl" else "" in
+            let strip_flag =
+              (* Capability-by-absence (specs/2026-08-03-forge-cap-audit-design.md
+                 §4.1): drop runtime functions the program never references, so a
+                 binary physically cannot perform a capability it does not use —
+                 and `forge cap audit` can read capabilities from what remains.
+
+                 Executables only.  A hot-reload .so resolves __march_init and
+                 __migrate_<Actor> via dlsym (runtime/march_reload.c:318-351),
+                 which the linker cannot see, so stripping would break hot
+                 deploy; the --hot-reload server build likewise exports symbols
+                 (-Wl,--export-dynamic above) for the dlopen'd patch .so to
+                 resolve against. *)
+              if !compile_so || !hot_reload_prefix <> None then ""
+              else if link_is_linux then " -Wl,--gc-sections"
+              else " -Wl,-dead_strip" in
+            let section_cflags =
+              (* ELF --gc-sections only drops whole sections; without
+                 -ffunction-sections each object's .text is one section and
+                 individual functions survive (verified with gcc 11 and
+                 clang 18 — design §4.1).  Mach-O gets function granularity
+                 for free via .subsections_via_symbols.  Runtime_archive.ensure
+                 folds cflags into its cache key, so stale non-sectioned
+                 runtime objects are invalidated automatically. *)
+              if strip_flag <> "" && link_is_linux
+              then " -ffunction-sections -fdata-sections"
+              else "" in
             let signing_define =
               if !hot_reload_prefix <> None && not !compile_so && !signing_pubkey <> "" then
                 match b64_decode_pubkey !signing_pubkey with
@@ -3156,8 +3196,8 @@ let compile filename =
                    genuinely affect codegen and so must be in the key. *)
                 let cflags =
                   Printf.sprintf
-                    "%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s"
-                    opt_flag dbg_flag san_flag arch_cflags
+                    "%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s"
+                    opt_flag dbg_flag san_flag arch_cflags section_cflags
                     openssl_flags2 compress_flags2 blake3_flags2 in
                 match March_cas.Runtime_archive.ensure ~cc:cc_driver ~cflags ~sources:srcs with
                 | Ok objs ->
@@ -3177,8 +3217,8 @@ let compile filename =
               | None      -> runtime ^ extra_c_files
             in
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s %s%s%s%s%s %s -o %s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s %s%s%s%s%s %s -o %s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
