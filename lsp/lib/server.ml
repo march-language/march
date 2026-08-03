@@ -231,18 +231,26 @@ let semantic_tokens_data (a : Analysis.t) : int array =
   let mod_linear      = 8 in
   let mod_affine      = 16 in
 
-  (* Ownership modifiers, read off the linear-consumption analysis: a value
-     binding consumed exactly once is `linear`; one consumed zero times is
-     `affine` (used at most once). Bindings used 2+ times carry neither.
+  (* Ownership modifiers, read off the TYPE SYSTEM (Analysis.build_linearity_map):
+     a binding is `linear`/`affine` because it was declared so — an explicit
+     qualifier, a `linear T`/`affine T` annotation, or a type declared
+     `always_linear type`.
+
+     This used to be derived from use COUNTS instead (consumed once = linear,
+     zero = affine), which tagged every ordinary once-used binding `linear`.
+     Use count answers a different question than linearity does, and painting a
+     plain `let x = 1` as linear misrepresents the one guarantee a reader is
+     opening the editor to check. Bindings whose linearity is only inferred are
+     now left uncolored rather than guessed at.
+
      Keyed by name, matching the rest of the LSP's name-based symbol model. *)
   let ownership = Hashtbl.create 32 in
-  List.iter (fun (c : Analysis.consumption) ->
-      match List.length c.Analysis.con_uses with
-      | 1 -> Hashtbl.replace ownership c.Analysis.con_name mod_linear
-      | 0 -> if not (Hashtbl.mem ownership c.Analysis.con_name) then
-               Hashtbl.replace ownership c.Analysis.con_name mod_affine
-      | _ -> Hashtbl.remove ownership c.Analysis.con_name
-    ) a.Analysis.consumption;
+  List.iter (fun (name, (lin : March_ast.Ast.linearity)) ->
+      match lin with
+      | March_ast.Ast.Linear -> Hashtbl.replace ownership name mod_linear
+      | March_ast.Ast.Affine -> Hashtbl.replace ownership name mod_affine
+      | March_ast.Ast.Unrestricted -> ()
+    ) (Analysis.build_linearity_map a.Analysis.decls a.Analysis.always_linear_names);
   let ownership_mod name =
     match Hashtbl.find_opt ownership name with Some m -> m | None -> 0
   in

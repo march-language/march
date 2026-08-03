@@ -908,6 +908,103 @@ let build_consumption_map (_type_map : (Ast.span, Tc.ty) Hashtbl.t)
   ) decls;
   !result
 
+(** Names whose binding is linear or affine {i according to the type system}.
+
+    This is the source for the [linear]/[affine] semantic-token modifiers.
+
+    It deliberately does NOT use [build_consumption_map]'s use counts. Use
+    counts answer "how many times does this name appear?", which is a different
+    question from "is this value linear?" — an ordinary [let x = 1] mentioned
+    once is not linear, and painting it [linear] in the editor misrepresents
+    the exact guarantee a reader is trying to verify. Linearity here comes from
+    the three places the language actually states it:
+
+    - an explicit [linear] / [affine] qualifier on a binding or parameter
+      ([bind_lin] / [param_lin]),
+    - a [linear T] / [affine T] type annotation ([TyLinear]),
+    - a type declared [always_linear type], which makes every binding of that
+      type linear with no per-site annotation ([always_linear] argument).
+
+    A binding whose linearity is only {i inferred} (unannotated, of a type not
+    declared always-linear) is not reported. That is a deliberate
+    false-negative: under-reporting leaves a token uncolored, while
+    over-reporting asserts a guarantee the compiler never made. *)
+let build_linearity_map (decls : Ast.decl list) (always_linear : string list)
+  : (string * Ast.linearity) list =
+  let result = ref [] in
+  let rec lin_of_ty (t : Ast.ty) : Ast.linearity option =
+    match t with
+    | Ast.TyLinear (Ast.Unrestricted, inner) -> lin_of_ty inner
+    | Ast.TyLinear (l, _) -> Some l
+    | Ast.TyCon (n, _) when List.mem n.Ast.txt always_linear -> Some Ast.Linear
+    | Ast.TyRefine (inner, _, _) -> lin_of_ty inner
+    | _ -> None
+  in
+  (* An explicit qualifier wins; otherwise fall back to the annotation. *)
+  let resolve (lin : Ast.linearity) (ty : Ast.ty option) : Ast.linearity option =
+    match lin with
+    | Ast.Linear | Ast.Affine -> Some lin
+    | Ast.Unrestricted -> (match ty with Some t -> lin_of_ty t | None -> None)
+  in
+  let record name lin = result := (name, lin) :: !result in
+  let rec pat_names (p : Ast.pattern) acc =
+    match p with
+    | Ast.PatVar n -> n.Ast.txt :: acc
+    | Ast.PatAs (p2, n, _) -> n.Ast.txt :: pat_names p2 acc
+    | Ast.PatTuple (ps, _) | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) ->
+      List.fold_left (fun a p -> pat_names p a) acc ps
+    | Ast.PatRecord (fs, _) ->
+      List.fold_left (fun a (_, p) -> pat_names p a) acc fs
+    | _ -> acc
+  in
+  let check_binding (b : Ast.binding) =
+    match resolve b.Ast.bind_lin b.Ast.bind_ty with
+    | Some l -> List.iter (fun n -> record n l) (pat_names b.Ast.bind_pat [])
+    | None -> ()
+  in
+  let check_param (p : Ast.param) =
+    match resolve p.Ast.param_lin p.Ast.param_ty with
+    | Some l -> record p.Ast.param_name.Ast.txt l
+    | None -> ()
+  in
+  (* A clause parameter is a bare pattern (no type to read), a named param, or
+     a named param with a default — only the latter two can carry linearity. *)
+  let check_fn_param (fp : Ast.fn_param) =
+    match fp with
+    | Ast.FPNamed p | Ast.FPDefault (p, _) -> check_param p
+    | Ast.FPPat _ -> ()
+  in
+  let rec scan_expr (e : Ast.expr) =
+    match e with
+    | Ast.ELet (b, _) -> check_binding b; scan_expr b.Ast.bind_expr
+    | Ast.EBlock (es, _) -> List.iter scan_expr es
+    | Ast.ELam (ps, body, _) -> List.iter check_param ps; scan_expr body
+    | Ast.ELetFn (_, ps, _, body, _) -> List.iter check_param ps; scan_expr body
+    | Ast.EMatch (subj, brs, _) ->
+      scan_expr subj;
+      List.iter (fun (br : Ast.branch) -> scan_expr br.Ast.branch_body) brs
+    | Ast.EApp (f, args, _) -> scan_expr f; List.iter scan_expr args
+    | Ast.EIf (c, t, f, _) -> scan_expr c; scan_expr t; scan_expr f
+    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> scan_expr a; scan_expr b
+    | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
+    | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) -> scan_expr e
+    | _ -> ()
+  in
+  let rec scan_decls ds =
+    List.iter (function
+      | Ast.DFn (fn, _) ->
+        List.iter (fun (cl : Ast.fn_clause) ->
+            List.iter check_fn_param cl.Ast.fc_params;
+            scan_expr cl.Ast.fc_body)
+          fn.Ast.fn_clauses
+      | Ast.DLet (_, b, _) -> check_binding b; scan_expr b.Ast.bind_expr
+      | Ast.DMod (_, _, inner, _) -> scan_decls inner
+      | _ -> ()
+    ) ds
+  in
+  scan_decls decls;
+  !result
+
 (** Variable-name spans of bindings eligible for FBIP in-place reuse: a value
     binding whose right-hand side allocates (constructor / record / tuple) and
     that is consumed exactly once in its scope. The single last use lets Perceus

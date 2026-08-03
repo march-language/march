@@ -53,6 +53,22 @@ git log is authoritative for exact commits.
   suite) is unchanged and stays green — `each_typed` does not touch
   `feed`/`finish`/`go` or any tokenizer internals.
 
+### Documentation
+
+- **The memory-model page no longer claims March is pauseless, and now
+  documents drop cascades and cycles.** "No GC pauses" overstated the
+  guarantee: March has no tracing collector and no collection stall, but
+  freeing is inline work proportional to what died, so releasing a large
+  structure walks it. The page now frames the property as *deterministic, not
+  pauseless*, adds a **Drop cascades** section (destructuring vs. synthesized
+  deep drop, why long spines don't overflow the stack, and how to schedule the
+  cost out of a latency-critical path), and adds a **Cycles** section stating
+  the real answer: there is no cycle collector, a cycle would leak silently,
+  and the reason that is not a practical hazard is a design argument
+  (immutability, linearity, no shared pointers across actors) rather than a
+  mechanized proof. Same corrections applied to the README and docs index
+  summaries.
+
 ### Changed
 
 - **`derive Json`'s generated `from_json` now returns
@@ -114,6 +130,18 @@ git log is authoritative for exact commits.
   your handlers block.
 
 ### Fixed
+
+- **LSP semantic tokens: the `linear` and `affine` modifiers now follow the
+  type system instead of use counts.** They were previously derived from how
+  many times a name appeared — a binding mentioned exactly once was painted
+  `linear`, one never mentioned was painted `affine` — so an ordinary
+  `let x = 1` was highlighted in the editor as though the compiler had made a
+  linearity guarantee about it. The modifier now comes from the three places
+  the language actually states linearity: an explicit `linear` / `affine`
+  qualifier, a `linear T` / `affine T` annotation, or a type declared
+  `always_linear type`. Bindings whose linearity is only inferred are left
+  uncolored rather than guessed at — under-reporting shows nothing, whereas
+  over-reporting asserted a guarantee that was never made.
 
 - **Six stdlib modules (`ConsistentHash`, `WorkDispatch`, `RingBuf`,
   `Compress`, `DistLink`, `DistSupervisor`) no longer silently return garbage

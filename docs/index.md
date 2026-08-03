@@ -177,7 +177,7 @@ end
 - **Structured concurrency** via `Task(a)` and `Future(a)`
 
 ### Runtime and performance
-- **Perceus reference counting** — deterministic, no GC pauses
+- **Perceus reference counting** — deterministic, no tracing collector; freeing is inline work at a point you choose ([memory model]({{ site.baseurl }}/docs/memory-model/))
 - **FBIP** — in-place reuse of memory when the compiler can prove unique ownership
 - **LLVM backend** — whole-program monomorphization, defunctionalization, native binaries
 - **Work-stealing scheduler** — cooperative + preemptive, scales across cores
