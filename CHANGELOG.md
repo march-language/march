@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march --cap-sandbox`: opt-in self-imposed capability sandbox.** Embeds a
+  deny-default profile derived from the module's own inferred capabilities and
+  applies it before any user code runs, so a binary deployed where forge is not
+  the launcher (systemd, a container supervisor) still drops the privileges it
+  never needed. Defense in depth rather than a new guarantee — whoever builds
+  the binary chooses whether to compile it in, and the profile grants exactly
+  what the program does, so it constrains escalation beyond the program's
+  intended behaviour, not the behaviour itself. Off by default; default builds
+  are unchanged. macOS only; on other platforms it refuses rather than
+  installing a filter weaker than it claims.
+
 - **`forge cap run [--allow-only CAPS] BINARY`: run a compiled binary under an
   OS-enforced capability sandbox.** The policy is imposed from outside, so
   nothing in the binary is trusted — `--allow-only` lets you supply the policy

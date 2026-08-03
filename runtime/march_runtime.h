@@ -405,6 +405,9 @@ void   *march_send(void *actor, void *msg);
 /* Process all actors in the run queue (called automatically by march_send). */
 void    march_run_scheduler(void);
 /* Spawn a no-arg C function as a green thread (for the main entrypoint). */
+/* Self-imposed capability sandbox (opt-in, --cap-sandbox). No-op unless
+ * MARCH_CAP_PROFILE was defined at build time. See runtime/march_sandbox.c. */
+void    march_sandbox_install(void);
 void    march_spawn_main(void (*fn)(void));
 /* Signal.watch (stdlib/signal.march): register/remove a deferred OS-signal
  * watcher (closure passed OWNED), send a signal to self, and drain pending

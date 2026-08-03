@@ -1661,6 +1661,9 @@ static void main_fn_green_thread(void *arg) {
  * scheduler and can use actor_call / task_await without blocking the OS thread.
  * Call this before march_run_scheduler(); the scheduler loop picks it up. */
 void march_spawn_main(void (*fn)(void)) {
+    /* Drop privileges before the scheduler starts and before any user code
+     * runs.  No-op unless built with --cap-sandbox. */
+    march_sandbox_install();
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
             &g_sched_initialized, &expected, 1,

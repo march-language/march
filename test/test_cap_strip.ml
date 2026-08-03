@@ -167,3 +167,99 @@ let tests =
     Alcotest.test_case "actor program survives dead-strip" `Slow
       test_actor_program_survives_strip;
   ]
+
+(* ── --cap-sandbox: self-imposed profile (design §4.3 B, opt-in) ────────
+   The embedded profile must be derived from the module's OWN capabilities.
+   Passing the whole closure table yields the app-invariant "needs
+   everything" set, which would grant a pure program network and write
+   access — a sandbox that sandboxes nothing. That shipped once; this test
+   is why it will not again. *)
+
+let binary_contains bin needle =
+  let out = Filename.temp_file "capstr" ".txt" in
+  ignore
+    (Sys.command
+       (Printf.sprintf "strings %s > %s 2>/dev/null" (Filename.quote bin)
+          (Filename.quote out)));
+  let ic = open_in out in
+  let found = ref false in
+  (try
+     while true do
+       let line = input_line ic in
+       let n = String.length needle and l = String.length line in
+       let rec go i =
+         i + n <= l && (String.sub line i n = needle || go (i + 1))
+       in
+       if go 0 then found := true
+     done
+   with End_of_file -> ());
+  close_in ic;
+  Sys.remove out;
+  !found
+
+let compile_sandboxed src_text out_bin =
+  let src = Filename.temp_file "cap_sb" ".march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let log = Filename.temp_file "cap_sb" ".log" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s --compile --cap-sandbox -o %s %s > %s 2>&1"
+         compiler_exe (Filename.quote out_bin) (Filename.quote src)
+         (Filename.quote log))
+  in
+  if rc <> 0 then begin
+    let ic = open_in log in
+    let tail = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    Alcotest.failf "--cap-sandbox compile failed (rc=%d):\n%s" rc tail
+  end;
+  Sys.remove src;
+  Sys.remove log
+
+let sb_net_src =
+  {|
+mod SbNetApp do
+  needs IO.NetListen
+  fn main() : () do
+    match tcp_listen(19097) do
+      Ok(_)  -> println("BOUND")
+      Err(_) -> println("BIND-FAILED")
+    end
+  end
+end
+|}
+
+let test_cap_sandbox_profile_is_module_specific () =
+  let pure_bin = Filename.temp_file "sb_pure" ".bin" in
+  let net_bin = Filename.temp_file "sb_net" ".bin" in
+  compile_sandboxed pure_src pure_bin;
+  compile_sandboxed sb_net_src net_bin;
+  Alcotest.(check bool) "pure binary embeds a deny-default profile" true
+    (binary_contains pure_bin "deny default");
+  Alcotest.(check bool) "net binary embeds a deny-default profile" true
+    (binary_contains net_bin "deny default");
+  (* The discriminating assertion: a pure program must NOT be granted
+     network, or the profile is the app-invariant union. *)
+  Alcotest.(check bool) "pure binary is NOT granted network" false
+    (binary_contains pure_bin "allow network");
+  Alcotest.(check bool) "net binary IS granted network" true
+    (binary_contains net_bin "allow network");
+  (* And both must still run: a sandbox that breaks the program is not
+     enforcement. *)
+  let rc_p, out_p = run_capture pure_bin in
+  Alcotest.(check int) "sandboxed pure program exits 0" 0 rc_p;
+  Alcotest.(check string) "sandboxed pure program still prints" "2\n" out_p;
+  let rc_n, out_n = run_capture net_bin in
+  Alcotest.(check int) "sandboxed net program exits 0" 0 rc_n;
+  Alcotest.(check string) "granted network still binds" "BOUND\n" out_n;
+  Sys.remove pure_bin;
+  Sys.remove net_bin
+
+let tests =
+  tests
+  @ [
+      Alcotest.test_case "--cap-sandbox profile is module-specific" `Slow
+        test_cap_sandbox_profile_is_module_specific;
+    ]
