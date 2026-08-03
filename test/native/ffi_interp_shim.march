@@ -15,5 +15,14 @@ mod Test do
     println(int_to_string(shim_add(3, 4)))
     println(int_to_string(shim_mul(6, 7)))
     println(int_to_string(shim_strlen("hello")))
+    -- Regression: an Int argument is marshaled untagged, so a large even
+    -- value is bit-identical to a heap pointer.  The post-call cleanup used
+    -- to decide what to drop from the bit pattern alone and decremented the
+    -- integer as if it were a refcounted object, crashing on anything even
+    -- and >= 4096 (the runtime's IS_HEAP_PTR floor) — which is every file
+    -- chunk size and every FILE* handle.  Only ownership tracking fixes it.
+    println(int_to_string(shim_add(65536, 1)))
+    println(int_to_string(shim_mul(4096, 2)))
+    println(int_to_string(shim_add(65536, 65536)))
   end
 end

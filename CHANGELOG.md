@@ -144,6 +144,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Interpreted `extern` calls no longer crash when an `Int` argument is even
+  and at least 4096.** The post-call cleanup in the interpreter's FFI bridge
+  decided which arguments to release by looking at the marshalled bit pattern.
+  `Int` arguments are marshalled untagged, so any even value at or above the
+  runtime's `IS_HEAP_PTR` floor was indistinguishable from a pointer and got
+  reference-count-decremented as though it were a heap object — dereferencing
+  the integer and segfaulting. The bridge now tracks whether marshalling
+  actually allocated each argument and drops only those. This mainly hit
+  file-I/O externs, whose arguments are chunk sizes (`4096`, `65536`, …) and
+  native handles cast to `Int`; an extern taking only `0`/`1` flags could
+  never trip it. Because `forge test --coverage` runs on the interpreter, it
+  showed up as coverage "breaking" on FFI file operations — but the crash was
+  present with plain `MARCH_TEST_INTERPRETER=1` too and had nothing to do with
+  coverage instrumentation.
+
 - **Six stdlib modules (`ConsistentHash`, `WorkDispatch`, `RingBuf`,
   `Compress`, `DistLink`, `DistSupervisor`) no longer silently return garbage
   values from compiled programs.** Any stdlib module not registered in the

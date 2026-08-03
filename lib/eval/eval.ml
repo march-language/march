@@ -1819,6 +1819,32 @@ let rec ffi_marshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (v : value) : int6
 and ffi_marshal_field ty v = ffi_marshal_iv `Raw ty v
 and ffi_marshal_payload ty v = ffi_marshal_iv `Tagged ty v
 
+(** Does marshalling [v] at type [ty] hand back an *owned* march_value that the
+    caller must [drop] after the call?  Mirrors [ffi_marshal_iv]'s allocation
+    cases above — keep the two in sync.
+
+    This must be decided from the static type and value shape, never from the
+    marshaled bit pattern.  [Int]/[Char]/[Bool] arguments are marshaled `Raw`
+    (untagged), so an even value is bit-identical to a heap pointer: reading
+    ownership off the bits made every even [Int] argument >= 4096 (the
+    runtime's [IS_HEAP_PTR] floor) get decremented as if it were a refcounted
+    object.  Chunk sizes and native handles are exactly that shape, so any
+    extern doing file I/O crashed while one taking only 0/1 flags survived. *)
+and ffi_marshal_owns (ty : ty) (v : value) : bool =
+  match ty, v with
+  (* Dup'd on the way in (see the VResource case above); the drop balances it. *)
+  | _, VResource _ -> true
+  | TyCon ({txt = "Int"|"Char"|"Bool"|"Float"|"Unit"; _}, []), _ -> false
+  (* Niche Option is the payload's representation, so it inherits its
+     ownership; the boxed form always allocates a cell. *)
+  | TyCon ({txt = "Option"; _}, [p_ty]), VCon ("None", []) ->
+    ffi_payload_is_boxed p_ty
+  | TyCon ({txt = "Option"; _}, [p_ty]), VCon ("Some", [x]) ->
+    ffi_payload_is_boxed p_ty || ffi_marshal_owns p_ty x
+  (* String/Bytes/Result/record/variant all allocate; anything else would have
+     raised in ffi_marshal_iv before reaching the drop loop. *)
+  | _ -> true
+
 (* Unmarshal: int64 march_value → interpreter value. *)
 let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : value =
   match ty with
@@ -1889,7 +1915,10 @@ let dynamic_ffi_call (lib : string) (sym : string)
   let h = _ffi_get_handle () in
   Ffi_marshal.reset ();   (* invalidate pointer cache if a new .so was just loaded *)
   (* Classify each arg as GP (int64) or FP (float) based on its static type. *)
-  let classify_arg ty v : [`GP of int64 | `FP of float | `Err] =
+  (* [`GP (word, owned)] — [owned] records whether marshalling allocated a
+     reference we must drop after the call.  It is computed from the static
+     type, not from [word]'s bits: see [ffi_marshal_owns]. *)
+  let classify_arg ty v : [`GP of int64 * bool | `FP of float | `Err] =
     match ty with
     | TyCon ({txt = "Float"; _}, []) ->
       (match v with VFloat f -> `FP f | VInt n -> `FP (Float.of_int n) | _ -> `Err)
@@ -1902,7 +1931,7 @@ let dynamic_ffi_call (lib : string) (sym : string)
          C function pointers here, enabling interpreter upcalls. *)
       `Err
     | _ ->
-      (try `GP (ffi_marshal_field ty v)
+      (try `GP (ffi_marshal_field ty v, ffi_marshal_owns ty v)
        with Eval_error _ -> `Err)
   in
   let classified = List.map2 classify_arg param_tys args in
@@ -1924,7 +1953,7 @@ let dynamic_ffi_call (lib : string) (sym : string)
     let gp_prefix = match env_ptr with
       | Some p -> [Ffi_marshal.env_ptr_i64 p] | None -> [] in
     let gp_args = Array.of_list (gp_prefix @
-      List.filter_map (function `GP i -> Some i | _ -> None) classified) in
+      List.filter_map (function `GP (i, _) -> Some i | _ -> None) classified) in
     let fp_args = Array.of_list (
       List.filter_map (function `FP f -> Some f | _ -> None) classified) in
     let ni = Array.length gp_args in
@@ -1972,9 +2001,11 @@ let dynamic_ffi_call (lib : string) (sym : string)
         Some v
       end
     in
-    (* Drop all heap args we built during marshalling. *)
+    (* Drop only the references marshalling actually allocated.  The [is_heap]
+       check stays as a defensive second gate, but [owned] is what makes this
+       correct — an unowned scalar can look heap-shaped. *)
     List.iter (function
-      | `GP i when Ffi_marshal.is_heap i -> Ffi_marshal.drop i
+      | `GP (i, true) when Ffi_marshal.is_heap i -> Ffi_marshal.drop i
       | _ -> ()) classified;
     result
   end
