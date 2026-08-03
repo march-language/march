@@ -42,6 +42,31 @@ design. It just isn't what happens — Check 1b anchors its warning at the call
 site too, so both land in the same place and the "second, finer-grained anchor"
 is the same anchor.
 
+## Update 2026-08-03: substantially reduced, not closed
+
+The call-chain work landed afterwards, and the two diagnostics no longer carry
+the same payload:
+
+```
+-- WARNING --  (carries the mechanical `needs …` insertion fix)
+function body calls a builtin that requires `Cap(IO.Random)` but `CapErr` does
+not declare `needs IO.Random`.
+
+-- HINT --
+call to `random_bytes` requires `needs IO.Random` — add `needs IO.Random` to
+module `CapErr`
+reached from `main`: main → issue → make_token
+```
+
+The warning says *where to add the declaration*; the hint says *which path
+forced it*. That is the division of labour the header comment intended, arrived
+at by giving the hint new information rather than by moving a span.
+
+What remains is cosmetic: both still anchor at the same span, and their first
+lines overlap heavily. Worth a tidy — the hint's "add `needs X` to module `Y`"
+clause is now redundant with the warning and could be dropped in favour of the
+chain alone — but this is no longer a case of one fact printed twice.
+
 ## Options (a design decision, not a mechanical fix)
 
 1. **Realise the original intent** — move Check 1b's warning span to the module
