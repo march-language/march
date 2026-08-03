@@ -144,6 +144,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Every LSP command was dead code; `workspace/executeCommand` is now
+  dispatched.** The handler sat in `on_unknown_request`, but linol routes that
+  method as a *known* client request to `on_req_execute_command`, which the
+  server never overrode — so linol's default returned `null` for all of them.
+  The runnable code lenses shipped earlier (`march.runTest`, `march.debugTest`,
+  `march.run`, `march.debug`) had therefore never worked: clicking "Run test"
+  did nothing and said nothing. `march.suggestRefinement` now applies its edit
+  through `workspace/applyEdit`, so it lands in the buffer rather than on disk.
+  Found by driving the real binary over stdio, which is the only place a command
+  is observable; guarded by a protocol-level regression test.
+
 - **A function's own parameter refinement no longer vanishes when it mentions
   another name.** `fn pick(n : Int, i : {Int | _ < n})` calling `at(n, i)` left
   its precondition unproven: the assumption-side resolver mapped every name that
