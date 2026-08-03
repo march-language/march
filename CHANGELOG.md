@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- `forge refine --fixpoint` (with `--apply`): repeat until a round applies
+  nothing. A contract only becomes visible to a caller once the callee carries
+  it, so each round propagates exactly one call hop. Bounded at 10 rounds, and
+  hitting that bound is reported as its own outcome rather than passed off as
+  convergence.
+
 - **`forge refine <fn>`: suggest a refinement type.** Proposes the parameter
   refinement that discharges the obligations a function's body leaves
   unproven — `n : Int` → `n : {Int | _ > 0}` when `n` reaches a callee that
@@ -143,6 +149,29 @@ git log is authoritative for exact commits.
   your handlers block.
 
 ### Fixed
+
+- **A `match` arm now knows what the earlier arms excluded.** In the safe-wrapper
+  idiom — `match xs do Nil -> Err(…) | _ -> Ok(mean(xs)) end` — the `_` arm could
+  not see that `Nil` had been ruled out, so a `len(_) > 0` precondition in it
+  never discharged. Every such wrapper in a standard library carried permanent
+  unprovable debt, and worse, `forge refine` could "fix" it by proposing
+  `{List(a) | len(_) > 0}` — forbidding the exact input the function exists to
+  accept. Reaching a later arm now contributes `not is_Ctor(s)` for each earlier
+  arm whose failure is decided purely by the tag, and a tag test on a list is
+  translated onto the same length symbol the obligation uses
+  (`is_Nil(xs) <-> len(xs) = 0`).
+
+  An earlier arm licenses nothing if it carries a guard or a refutable
+  sub-pattern, since either can fail with the tag still matching. `stats.march`
+  goes from 0 to 4 proved; the one function that still abstains is the one
+  needing `len > 1`, which these facts genuinely do not give.
+
+- **`Logger.random_hex` no longer drops the contract it forwards into.** A
+  private wrapper passed its argument straight to `Crypto.random_hex`, whose
+  parameter is `{Int | _ >= 0}`, without carrying that requirement — so every
+  caller of the wrapper went unchecked. Found by `forge refine` sweeping the
+  stdlib.
+
 
 - **Every LSP command was dead code; `workspace/executeCommand` is now
   dispatched.** The handler sat in `on_unknown_request`, but linol routes that

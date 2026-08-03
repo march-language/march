@@ -322,12 +322,17 @@ let refine_cmd =
     Arg.(value & opt int Cmd_refine.default_budget &
          info ["budget"] ~docv:"N"
            ~doc:"Cap the hypothesis re-checks the inference may spend per function") in
-  let run t a ap b =
+  let fixpoint =
+    Arg.(value & flag & info ["fixpoint"]
+           ~doc:"With --apply, repeat until a round applies nothing. A contract only \
+                 becomes visible to a caller once the callee carries it, so each round \
+                 propagates one call hop.") in
+  let run t a ap fx b =
     if t = "" && not a then begin
       Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
       exit 1
     end;
-    handle_msg (Cmd_refine.run ~all:a ~apply:ap ~budget:b ~target:t ())
+    handle_msg (Cmd_refine.run ~all:a ~apply:ap ~fixpoint:fx ~budget:b ~target:t ())
   in
   Cmd.v
     (Cmd.info "refine"
@@ -338,7 +343,7 @@ let refine_cmd =
                   A suggestion is only made when the checker itself proves the \
                   obligations under it, so `march check` after --apply agrees \
                   with what was printed." ])
-    Term.(const run $ target $ all $ apply $ budget)
+    Term.(const run $ target $ all $ apply $ fixpoint $ budget)
 
 (* -------------------------------------------------------------- forge refactor *)
 

@@ -673,7 +673,7 @@ mod Logger do
     log_value_as_string(find_field_value(current_fields(), "parent_span_id"))
   end
 
-  pfn random_hex(n : Int) : String do
+  pfn random_hex(n : {Int | _ >= 0}) : String do
     -- 16-char span id / 32-char trace id from /dev/urandom.
     Crypto.random_hex(n)
   end

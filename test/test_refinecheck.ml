@@ -6799,6 +6799,93 @@ mod CPS do
 end|});
   ]
 
+(* ── An earlier arm's failure narrows the later arms ───────────────────────
+   The safe-wrapper idiom — match the empty case, return Err, do the real work
+   in the other arm — is what every standard library is full of, and until this
+   it carried permanent unprovable debt: the `_` arm could not see that `Nil`
+   had been excluded, so a `len > 0` precondition in it never discharged. It
+   also produced actively WRONG advice, because `forge refine` could discharge
+   that debt by proposing `{List(a) | len(_) > 0}` — forbidding the exact input
+   the function exists to accept.
+
+   Two pieces, and neither works alone: reaching a later arm pushes
+   `not is_Ctor(s)` for each earlier arm whose failure is decided purely by the
+   tag, and a tag test on a LIST translates onto the same `len$x` symbol the
+   goal uses (`is_Nil(xs) <-> len(xs) = 0`).
+
+   The REJECT witnesses below are the load-bearing half. An earlier arm can fail
+   with its tag still matching — via a guard, or a refutable sub-pattern — and
+   concluding anything from those would be unsound. *)
+let arm_exclusion_suite =
+  [ gated "the `_` arm knows the empty case was excluded" (fun () ->
+        check_ledger "safe-wrapper" ~proved:1 ~skipped:0 {|
+mod AE1 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn mean_safe(xs : List(Int)) : Result(Int, String) do
+    match xs do
+      Nil -> Err("empty")
+      _   -> Ok(mean_of(xs))
+    end
+  end
+end|});
+
+    gated "a Cons arm knows the list is non-empty" (fun () ->
+        check_ledger "cons-arm" ~proved:1 ~skipped:0 {|
+mod AE2 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, _) -> mean_of(xs)
+    end
+  end
+end|});
+
+    (* REJECT WITNESS. The earlier arm carries a GUARD, so reaching the later arm
+       does not mean the tag differed — the guard may simply have been false with
+       `Nil` matching. Concluding `len > 0` here would be unsound. *)
+    gated "REJECT: a guarded earlier arm excludes nothing" (fun () ->
+        check_ledger "guarded" ~proved:0 ~skipped:1 {|
+mod AE3 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(xs : List(Int), flag : Bool) : Int do
+    match xs do
+      Nil when flag -> 0
+      _ -> mean_of(xs)
+    end
+  end
+end|});
+
+    (* REJECT WITNESS. The earlier arm's sub-pattern is refutable, so it can fail
+       with the tag still matching: `Cons(0, _)` does not match `Cons(1, [])`,
+       which is nonetheless a Cons. *)
+    gated "REJECT: a refutable sub-pattern excludes nothing" (fun () ->
+        check_ledger "refutable" ~proved:0 ~skipped:1 {|
+mod AE4 do
+  fn tail_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(xs : List(Int)) : Int do
+    match xs do
+      Cons(0, _) -> 0
+      _ -> tail_of(xs)
+    end
+  end
+end|});
+
+    (* REJECT WITNESS. The arm REBINDS the scrutinee's name, so the narrowing
+       would be recorded against a different value entirely. *)
+    gated "REJECT: an arm rebinding the scrutinee excludes nothing" (fun () ->
+        check_ledger "rebound" ~proved:0 ~skipped:1 {|
+mod AE5 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(ys : List(Int)) : Int do
+    match ys do
+      Nil -> 0
+      ys -> mean_of(ys)
+    end
+  end
+end|});
+  ]
+
 let resolve_precedence_suite =
   [ gated "a nested `use` beats an enclosing contract of the same name (the fix)"
       (fun () ->
@@ -6933,4 +7020,5 @@ let () =
       ("sig-extern-refinement", sig_extern_refine_suite);
       ("use-impl-adoption", use_adoption_suite);
       ("resolve-precedence", resolve_precedence_suite);
-      ("caller-promise", caller_promise_suite) ]
+      ("caller-promise", caller_promise_suite);
+      ("arm-exclusion", arm_exclusion_suite) ]
