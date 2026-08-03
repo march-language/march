@@ -6520,6 +6520,57 @@ mod IR2 do
 end|}));
         Alcotest.(check int) "no diagnostics" 0
           (List.length (ctx.March_errors.Errors.diagnostics)))
+
+  ; gated "cap verified escalates an inert interface-signature refinement to an error"
+      (fun () ->
+        (* Decision recorded in
+           specs/progress/2026-08-03-cap-verified-interface-signature-decision.md:
+           under `cap verified` this is an ERROR, not a warning -- matching
+           `check_call`/`check_post`'s own escalation.  [refine_error_text_d]
+           filters strictly to [Error] severity (see its doc comment above), so
+           asserting through it is NOT vacuous here the way it would be against
+           today's plain-warning behaviour -- confirmed by the companion test
+           below, which pins that the SAME fixture without `cap verified`
+           produces no error, only a warning. *)
+        let msg =
+          refine_error_text_d
+            {|mod T do
+  cap verified
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int
+  end
+  fn main() : Int do 0 end
+end|}
+        in
+        Alcotest.(check bool) "reported as an error" true (contains msg "enforces nothing"))
+
+  ; gated "without cap verified the same fixture is only a warning, not an error"
+      (fun () ->
+        (* Companion/control for the test above: proves [refine_error_text_d]
+           genuinely distinguishes the two cases here rather than always
+           finding SOME error text for unrelated reasons. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR5 do
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "no ERROR-severity diagnostic" true
+          (not
+             (List.exists
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity = March_errors.Errors.Error)
+                msgs));
+        Alcotest.(check bool) "still a WARNING" true
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               d.March_errors.Errors.severity = March_errors.Errors.Warning
+               && contains d.March_errors.Errors.message "enforces nothing")
+             msgs))
   ]
 
 (* ── `sig` / `extern` signature refinements ────────────────────────────────

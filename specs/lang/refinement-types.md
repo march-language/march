@@ -425,15 +425,41 @@ interface, so following this advice needs no change to the interface — and the
 resulting contract really is enforced: `bump(Box(1), 0 - 5)` is a refinement
 error.
 
-Like the qualified-spelling warning, this is a warning rather than an error on
-purpose: the shape compiles today, and the defect being fixed is the *silence*.
-Making an interface signature actually enforce — obliging every call dispatched
-through the interface and checking it against every `impl` — is a much larger
-change and stays open in `specs/todos/`. Witnessed by `accept/t137` (whose
-exit code is the point: it pins that the program stays exit 0) and by
-`test_refinecheck.ml`'s `interface-signature-refinement` suite, which pins the
-warning text, the return-position case, and a false-positive control that a
-refinement on an `impl` method is *not* reported as inert.
+Outside `cap verified` this is a warning rather than an error on purpose: the
+shape compiles today, and the defect being fixed is the *silence*. Making an
+interface signature actually enforce — obliging every call dispatched through
+the interface and checking it against every `impl` — is a much larger change
+and stays open in `specs/todos/`. Witnessed by `accept/t137` (whose exit code
+is the point: it pins that the program stays exit 0 outside `cap verified`)
+and by `test_refinecheck.ml`'s `interface-signature-refinement` suite, which
+pins the warning text, the return-position case, and a false-positive control
+that a refinement on an `impl` method is *not* reported as inert.
+
+**Under `cap verified` this is an error.** Decided 2026-08-03
+(`specs/progress/2026-08-03-cap-verified-interface-signature-decision.md`):
+`cap verified`'s escalation machinery otherwise fires only on undischarged
+*obligations*, and an inert interface signature raises none, so this is new
+machinery rather than a flipped flag — but the mode's whole promise is "if it
+compiles, it is proved," and every other inert-refinement shape this project
+has found (the qualified-spelling case above, `sig`/`extern` signatures below)
+already warns specifically because silence was judged worse. An inert
+`interface` signature under `cap verified` is exactly the shape the
+capability exists to catch:
+
+```march
+mod P do
+  cap verified
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int    -- ERROR under cap verified
+  end
+  fn main() : Int do 0 end
+end
+```
+
+exits 1 with the same message, promoted to an error. Outside `cap verified`
+the fixture above is unaffected and still exits 0 with a warning — pinned by
+the paired tests in `test_refinecheck.ml`'s `interface-signature-refinement`
+suite.
 
 ### The same holds for a `sig` or an `extern` signature
 
@@ -1523,8 +1549,10 @@ violation inside a `@[trusted]` function is still reported).
     (`fn run : a -> {Int | _ > 0} -> Int`) is still **not** enforced at call
     sites. Nothing assumes it either, so it is a missing check rather than an
     unsound one, but do not rely on it. Put the refinement on the `impl`
-    method's own signature instead. Since 2026-07-30 the pass **warns** rather
-    than staying silent about it — see
+    method's own signature instead. Since 2026-07-30 the pass warns about it
+    outside `cap verified`; since 2026-08-03, inside a `cap verified` module
+    this is promoted to an **error** — the same asymmetric-silence reasoning
+    as the `check_call`/`check_post` escalation elsewhere in this section — see
     [A refinement in an interface signature enforces nothing](#a-refinement-in-an-interface-signature-enforces-nothing).
   - The same is true of a refinement in a **`sig`** signature or an **`extern`**
     signature, and since 2026-07-31 both **warn** as well. A `sig` refinement is

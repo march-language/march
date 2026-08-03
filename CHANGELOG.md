@@ -316,6 +316,17 @@ git log is authoritative for exact commits.
   here``. Attribution is path-correct: match arms are mutually exclusive, so
   consuming the same value once per arm stays legal, and a double-use inside one
   arm is labelled against that arm rather than a sibling that never ran.
+- **`cap verified` now rejects an inert `interface`-signature refinement as an
+  error instead of only warning.** A refinement written on an `interface`
+  method's own signature (e.g. `fn run : a -> {Int | _ > 0} -> Int`) has
+  always been inert — the refinement checker never reads a method
+  declaration's type, so no call site is obliged and no body may assume it —
+  and has warned about it since 2026-07-30. Under `cap verified`, whose whole
+  promise is "if it compiles, it is proved," that silent-no-op shape is now a
+  compile error instead, matching how the capability already escalates every
+  other undischarged obligation. Outside `cap verified` the behavior is
+  unchanged (still a warning). See
+  `specs/progress/2026-08-03-cap-verified-interface-signature-decision.md`.
 
 - **`derive Json`'s generated `from_json` now returns
   `Result(T, Json.DecodeError)` instead of `Result(T, String)` — a

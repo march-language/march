@@ -5566,19 +5566,30 @@ let rec ty_has_refinement (t : A.ty) : bool =
    Saying "put it on the impl parameter" flatly would send an author with an
    ambiguous method name from one silent no-op to another.
 
-   Emits unconditionally: the caller has already established
-   [ty_has_refinement m.md_ty] and branches on it. *)
-let warn_iface_method_refinement (errctx : Err.ctx) (m : A.method_decl) : unit =
-  Err.warning errctx ~span:m.A.md_name.A.span
-    (Printf.sprintf
-       "the interface signature of `%s` carries a refinement, which enforces \
-        nothing: an interface method signature is never read by the refinement \
-        checker, so no call site is obliged by this predicate and no body may \
-        assume it. Write the refinement on the corresponding `impl` method's own \
-        signature instead — a refinement on its return type is always checked, \
-        and one on a parameter is enforced when the method name is unambiguous \
-        (exactly one `impl` defines it and no top-level `fn` shares the name)."
-       m.A.md_name.A.txt)
+   The caller has already established [ty_has_refinement m.md_ty] and branches
+   on it.  [strict] is the module's own `cap verified` status — NOT read from
+   the [strict_verified] ref, which by the time [warn_predicate_decls] runs
+   has already been restored by [visit_decls]'s [Fun.protect] (it is scoped to
+   the walk, and this vocabulary pass runs after the walk finishes).  The
+   caller threads the flag through explicitly for that reason; see
+   [warn_predicate_decls]. `cap verified` promises "if it compiles, it is
+   proved" — a contract that provably enforces nothing is exactly the shape
+   that promise exists to rule out, so under `cap verified` this is an error,
+   matching [check_call]/[check_post]'s own escalation. *)
+let warn_iface_method_refinement (errctx : Err.ctx) ~(strict : bool) (m : A.method_decl) : unit =
+  let msg =
+    Printf.sprintf
+      "the interface signature of `%s` carries a refinement, which enforces \
+       nothing: an interface method signature is never read by the refinement \
+       checker, so no call site is obliged by this predicate and no body may \
+       assume it. Write the refinement on the corresponding `impl` method's own \
+       signature instead — a refinement on its return type is always checked, \
+       and one on a parameter is enforced when the method name is unambiguous \
+       (exactly one `impl` defines it and no top-level `fn` shares the name)."
+      m.A.md_name.A.txt
+  in
+  if strict then Err.error errctx ~span:m.A.md_name.A.span msg
+  else Err.warning errctx ~span:m.A.md_name.A.span msg
 
 (* ── `sig` signature refinement warning ────────────────────────────────────
    A refinement in a `sig` module signature (`A.sig_def`'s [sig_fns]) is inert
@@ -5675,7 +5686,21 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
    warning never fired for a refinement written on an `impl` or `interface`
    method — precisely where the widened checks now CONSUME such predicates, so
    an unrecognized one there was both unchecked and unmentioned. *)
-let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
+(* Whether [decls] itself declares `cap verified` — the same test
+   [visit_decls] applies, extracted so [warn_predicate_decls] (which runs
+   AFTER [visit_decls] has already restored [strict_verified], see that
+   function's [Fun.protect]) can recompute the same fact independently rather
+   than reading a ref that no longer holds it. *)
+let decls_declare_verified (decls : A.decl list) : bool =
+  List.exists (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false) decls
+
+(* [strict]: whether the ENCLOSING decl list (module or `describe` block) is
+   under `cap verified`.  Mirrors [strict_verified]'s own scoping rule from
+   [visit_decls]: a nested `mod` does not inherit its parent's `cap verified`
+   and recomputes from its own decls (below); a `describe` block is not a
+   module and inherits the flag unchanged, matching [visit_decl]'s own
+   [visit_group] treatment of `DDescribe`. *)
+let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl list) : unit =
   let warn_fn (fd : A.fn_def) =
     Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
     List.iter
@@ -5693,7 +5718,8 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
   List.iter
     (function
       | A.DFn (fd, _) -> warn_fn fd
-      | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> warn_predicate_decls errctx ds
+      | A.DMod (_, _, ds, _) -> warn_predicate_decls errctx ~strict:(decls_declare_verified ds) ds
+      | A.DDescribe (_, ds, _) -> warn_predicate_decls errctx ~strict ds
       | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> warn_fn fd) idf.A.impl_methods
       | A.DInterface (idf, _) ->
         List.iter
@@ -5707,7 +5733,7 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
                the same, and a misleading remedy costs more here than a missing
                one.  The vocabulary warning still fires once the predicate is
                moved to the `impl` method, which is where it can act. *)
-            if ty_has_refinement m.A.md_ty then warn_iface_method_refinement errctx m
+            if ty_has_refinement m.A.md_ty then warn_iface_method_refinement errctx ~strict m
             else warn_predicate_ty errctx m.A.md_ty;
             (* A DEFAULT body is real code; it is walked as such and is not
                part of the signature this warning is about. *)
@@ -5825,10 +5851,7 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
      restored here so a nested module neither inherits it nor leaks its own
      back out.  See [strict_verified] for why inheritance would be wrong. *)
   let saved_strict = !strict_verified in
-  strict_verified :=
-    List.exists
-      (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
-      decls;
+  strict_verified := decls_declare_verified decls;
   (* Per-decl-list, for the same reason [strict_verified] is: a nested module is
      its own unit of advice, and one hint there should not silence the parent's
      (or vice versa). *)
@@ -6727,4 +6750,4 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)
-  warn_predicate_decls errctx m.A.mod_decls
+  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls

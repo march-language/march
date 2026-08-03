@@ -866,6 +866,16 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
   > and one on a parameter is enforced when the method name is unambiguous
   > (exactly one `impl` defines it and no top-level `fn` shares the name).
 
+  **Inside a `cap verified` module this is an error, not a warning** (decided
+  2026-08-03; see `specs/progress/2026-08-03-cap-verified-interface-signature-decision.md`).
+  `cap verified`'s escalation otherwise fires only on undischarged obligations
+  in the ledger, and an inert interface signature raises none — but the
+  capability's whole promise is "if it compiles, it is proved," and this is
+  exactly the shape of silent-no-op contract it exists to catch, the same
+  reasoning that already made the `sig`/`extern` case below a warning
+  everywhere. Outside `cap verified` the message above is unchanged and still
+  only a warning.
+
   The same silent-no-op shape exists for a `sig` ascription and an `extern`
   declaration, and both warn too since 2026-08-01: `sig Store do fn put :
   Int -> {Int | _ > 0} end` compiles clean while enforcing nothing, because
