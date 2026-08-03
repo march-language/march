@@ -11805,6 +11805,45 @@ let test_compiled_helper_name_collision () =
     Alcotest.(check int)
       "stdlib List.length works despite a user top-level `go`" 0 run_rc
 
+(* Regression: a builtin passed as a first-class value and later invoked
+   through call_ptr SIGBUSed when compiled.  Root cause: the emit_atom arm
+   for "builtin used as a first-class value" emitted the bare C-extern
+   address (@march_string_byte_length) instead of a proper closure — unlike
+   the sibling arm for a top-level March fn used as a value, which wraps it
+   in a {header, fn_ptr} closure with a $clo_wrap trampoline.  Once the raw
+   extern address was let-bound to a local, later ECallPtr dispatch on that
+   local read a "field" off the *code* address as if it were a heap closure
+   header and jumped to the garbage result. Fix: build the same closure +
+   $clo_wrap trampoline for builtins, sourcing the trampoline's concrete
+   param/return types from the builtin's own declare_sig (not the generic
+   March fn conversion) so the coercions match the real C ABI. *)
+let test_compiled_builtin_first_class_value () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_builtinfc" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "bfc.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod BuiltinFirstClass do\n\
+    \  fn apply1(f : (String) -> Int, s : String) : Int do\n\
+    \    f(s)\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    if apply1(string_length, \"hello\") == 5 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "bfcbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "builtin passed as a first-class value dispatches correctly, no SIGBUS" 0 run_rc
+
 (* Regression: a scalar (Bool/Int) stored in a Vault read back WRONG when
    compiled.  Root cause: the value arg to march_vault_set (declared ptr value,
    a heterogeneous slot) was passed with its natural llvm type — a Bool as raw
@@ -13398,6 +13437,8 @@ let stdlib_suites =
           test_compiled_aliased_arg_no_double_free;
         Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Slow
           test_compiled_helper_name_collision;
+        Alcotest.test_case "builtin passed as first-class value + call_ptr: no SIGBUS" `Slow
+          test_compiled_builtin_first_class_value;
         Alcotest.test_case "P12 copy-prop type-preserving: List.length(range(0,5))==5 compiled" `Slow
           test_compiled_p12_type_preserving_alias;
         Alcotest.test_case "List.pmap/pfilter match map/filter (compiled, parallel path)" `Slow

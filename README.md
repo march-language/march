@@ -40,7 +40,7 @@ end
 **Backend**
 - Compiles to LLVM IR, linked to native binaries via `clang` — or to `.wasm` via `--target wasm64-wasi`
 - Cross-compiles Linux binaries (`linux/amd64`, `linux/arm64`) from any host via `zig cc`, Go's `GOOS=linux` style
-- Perceus reference counting — deterministic memory management, no GC pauses
+- Perceus reference counting — deterministic memory management: no tracing collector and no collection pauses, though freeing a large structure is inline work proportional to its size, at a point you control
 - **FBIP (Functional But In-Place)** — when the reference count on a pattern-matched value is 1, destructured nodes are reused in-place rather than freed and reallocated (see below)
 - Escape analysis promotes allocations to the stack where possible
 - Defunctionalization: closures compiled to structs + dispatch, no indirect call overhead

@@ -5,7 +5,7 @@
 
 (generate_opam_files true)
 
-(source (github march-lang/march))
+(source (github march-language/march))
 (license MIT)
 (authors "March Contributors")
 (maintainers "March Contributors")

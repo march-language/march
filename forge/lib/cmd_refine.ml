@@ -229,8 +229,63 @@ let print_result ~root (r : fn_result) =
 
 let default_budget = 200
 
-let run ?(all = false) ?(apply = false) ?(budget = default_budget)
-    ~(target : string) () : (string, string) result =
+(* One discover-and-maybe-apply pass.  Returns how many functions were applied,
+   so the fixpoint loop can tell "made progress" from "converged". *)
+let run_once ~root ~lib_path_env ~files ~all ~apply ~budget ~target ~quiet :
+    (int, string) result =
+  let mode =
+    if all then "--refine-suggest-all"
+    else Printf.sprintf "--refine-suggest %s" (Filename.quote target)
+  in
+  (* For a named target, stop at the first file that knows the function: the
+     answer costs a full check per file, and asking the rest cannot change an
+     answer already found. *)
+  let rec sweep acc = function
+    | [] -> List.rev acc
+    | f :: tl ->
+      let rs =
+        List.filter (fun r -> r.rs_status <> "not-found") (ask ~lib_path_env ~budget ~mode f)
+      in
+      if rs <> [] && not all then List.rev_append acc rs else sweep (List.rev_append rs acc) tl
+  in
+  let results = sweep [] files in
+  if results = [] then
+    (* Deliberately NOT "everything is already discharged": --all reports only
+       functions that HAVE a proposal, so an empty sweep also covers functions
+       with debt the grammar cannot shift.  Claiming the stronger thing would
+       turn "I found nothing" into "there is nothing". *)
+    if all then Ok 0
+    else Error (Printf.sprintf "no user function named `%s` in this project" target)
+  else begin
+    if not quiet then List.iter (print_result ~root) results;
+    let applicable = List.filter (fun r -> r.rs_suggestions <> []) results in
+    if not apply then Ok 0
+    else begin
+      let failures = ref [] in
+      List.iter
+        (fun r ->
+          match apply_result r with
+          | Ok msg -> Printf.printf "%s\n%!" msg
+          | Error msg -> failures := msg :: !failures)
+        applicable;
+      match !failures with
+      | [] -> Ok (List.length applicable)
+      | fs -> Error (String.concat "\n" (List.rev fs))
+    end
+  end
+
+(* A contract only becomes visible to a CALLER once the callee carries it, so one
+   pass propagates exactly one call hop.  `--fixpoint` repeats until a pass
+   applies nothing.
+
+   The cap is not decoration.  A loop that silently stopped would report
+   "converged" for a run that was actually truncated — the same failure mode as
+   a budget that reports "no candidate", and the reason [Budget_exhausted]
+   exists.  So exhausting the cap is its own message. *)
+let max_rounds = 10
+
+let run ?(all = false) ?(apply = false) ?(fixpoint = false)
+    ?(budget = default_budget) ~(target : string) () : (string, string) result =
   match P.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -251,54 +306,47 @@ let run ?(all = false) ?(apply = false) ?(budget = default_budget)
     if files = [] then Error (Printf.sprintf "no .march files found under %s" root)
     else begin
       let lib_path_env = Cmd_build.lib_path_env proj in
-      let mode =
-        if all then "--refine-suggest-all"
-        else Printf.sprintf "--refine-suggest %s" (Filename.quote target)
+      let once ?(quiet = false) () =
+        run_once ~root ~lib_path_env ~files ~all ~apply ~budget ~target ~quiet
       in
-      (* For a named target, stop at the first file that knows the function: the
-         answer costs a full check per file, and asking the rest cannot change
-         an answer already found. *)
-      let rec sweep acc = function
-        | [] -> List.rev acc
-        | f :: tl ->
-          let rs =
-            List.filter (fun r -> r.rs_status <> "not-found") (ask ~lib_path_env ~budget ~mode f)
-          in
-          if rs <> [] && not all then List.rev_append acc rs else sweep (List.rev_append rs acc) tl
-      in
-      let results = sweep [] files in
-      if results = [] then
-        (* Deliberately NOT "everything is already discharged": --all reports
-           only functions that HAVE a proposal, so an empty sweep also covers
-           functions with debt the grammar cannot shift.  Claiming the stronger
-           thing would turn "I found nothing" into "there is nothing". *)
-        if all then Ok "no function in this project has a proposable refinement"
-        else Error (Printf.sprintf "no user function named `%s` in this project" target)
-      else begin
-        List.iter (print_result ~root) results;
-        let applicable = List.filter (fun r -> r.rs_suggestions <> []) results in
-        if not apply then
-          if applicable = [] then Ok "no annotation to propose"
+      if not (fixpoint && apply) then
+        match once () with
+        | Error _ as e -> e
+        | Ok applied ->
+          if not apply then
+            if applied = 0 then
+              (* Distinguish "nothing proposed" from "proposals are waiting". *)
+              Ok "run with --apply to write the annotations, if any were proposed above"
+            else Ok "done"
+          else if applied = 0 then Ok "nothing to apply"
           else
             Ok
               (Printf.sprintf
-                 "%d function(s) with a proposal; re-run with --apply to write the annotations"
-                 (List.length applicable))
-        else begin
-          if applicable = [] then Ok "nothing to apply"
+                 "applied %d function(s) — contracts propagate one call hop per \
+                  round, so re-run (or use --fixpoint) to catch newly-exposed callers"
+                 applied)
+      else begin
+        let total = ref 0 in
+        let rec loop round =
+          if round > max_rounds then
+            Error
+              (Printf.sprintf
+                 "stopped at the %d-round cap with a round still applying changes — \
+                  re-run to continue (applied %d function(s) so far)"
+                 max_rounds !total)
           else begin
-            let failures = ref [] in
-            List.iter
-              (fun r ->
-                match apply_result r with
-                | Ok msg -> Printf.printf "%s\n%!" msg
-                | Error msg -> failures := msg :: !failures)
-              applicable;
-            match !failures with
-            | [] ->
-              Ok (Printf.sprintf "applied %d function(s)" (List.length applicable))
-            | fs -> Error (String.concat "\n" (List.rev fs))
+            Printf.printf "round %d:\n%!" round;
+            match once () with
+            | Error _ as e -> e
+            | Ok 0 ->
+              Ok
+                (Printf.sprintf "fixpoint reached after %d round(s); applied %d function(s)"
+                   (round - 1) !total)
+            | Ok n ->
+              total := !total + n;
+              loop (round + 1)
           end
-        end
+        in
+        loop 1
       end
     end

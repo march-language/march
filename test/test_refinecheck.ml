@@ -6708,6 +6708,184 @@ end|}))
    [Obligation.summary], not the presence of a diagnostic — modeled on
    [use_adoption_suite] above, since a correctly-resolved call and a
    silently-skipped one are both quiet. *)
+(* ── A caller's own refinement must survive mentioning another name ────────
+
+   Filed as "`len` facts don't propagate", which measurement refuted: `len` is
+   incidental. Four shapes distinguish the real defect —
+
+     A  `{Int | _ < n}` forwarded to a callee with the same contract   was: skipped
+     B  `{List(Int) | len(_) > 0}` forwarded likewise                  was: PROVED
+     C  `{Int | _ < len(xs)}` forwarded likewise                       was: skipped
+     D  A's fact arriving as a PATH GUARD instead                      was: PROVED
+
+   B proves, so measure composition works. D proves, so the solver, the
+   cross-parameter goal reflection and the VC machinery all work. A and C differ
+   from D only in the CHANNEL the fact arrives through: `reflect_scalar`'s
+   assumption-side resolver mapped every non-binder name to None, so ONE foreign
+   name discarded the whole predicate and the VC carried nothing but its negated
+   goal.
+
+   Every case asserts the LEDGER, never silence — a skip and a proof are
+   indistinguishable from outside, which is the confusion the ledger exists to
+   end. B and D are kept as regression guards precisely because they already
+   passed: a fix that broke them would otherwise look like a win. *)
+let ledger_of src =
+  March_refinecheck.Obligation.reset ();
+  let err = has_refine_error_d src in
+  let proved, violated, skips = March_refinecheck.Obligation.summary () in
+  (err, proved, violated, List.fold_left (fun a (_, n) -> a + n) 0 skips)
+
+let check_ledger label ~proved ~skipped src =
+  let (err, p, v, s) = ledger_of src in
+  Alcotest.(check bool) (label ^ ": no error") false err;
+  Alcotest.(check int) (label ^ ": proved") proved p;
+  Alcotest.(check int) (label ^ ": violated") 0 v;
+  Alcotest.(check int) (label ^ ": skipped") skipped s
+
+let caller_promise_suite =
+  [ gated "A: a cross-parameter scalar contract composes" (fun () ->
+        check_ledger "A" ~proved:1 ~skipped:0 {|
+mod CPA do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn pick(n : Int, i : {Int | _ < n}) : Int do at(n, i) end
+end|});
+
+    gated "C: a cross-parameter MEASURE contract composes" (fun () ->
+        check_ledger "C" ~proved:1 ~skipped:0 {|
+mod CPC do
+  fn at(xs : List(Int), i : {Int | _ < len(xs)}) : Int do i end
+  fn pick(xs : List(Int), i : {Int | _ < len(xs)}) : Int do at(xs, i) end
+end|});
+
+    gated "B: a self-measure contract still composes (regression)" (fun () ->
+        check_ledger "B" ~proved:1 ~skipped:0 {|
+mod CPB do
+  fn need(ys : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn fwd(ys : {List(Int) | len(_) > 0}) : Int do need(ys) end
+end|});
+
+    gated "D: the same fact via a path guard still composes (regression)" (fun () ->
+        check_ledger "D" ~proved:1 ~skipped:0 {|
+mod CPD do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn go(n : Int, i : Int) : Int do
+    if i < n do at(n, i) else 0 end
+  end
+end|});
+
+    (* REJECT WITNESS. A caller that promises NOTHING about `i` must still be
+       skipped. If this starts proving, the fix is laundering the goal rather
+       than carrying a fact — the failure mode that makes a contract look
+       enforced while checking nothing. *)
+    gated "REJECT: an unpromised caller is still not proved" (fun () ->
+        check_ledger "unpromised" ~proved:0 ~skipped:1 {|
+mod CPR do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn bad(n : Int, i : Int) : Int do at(n, i) end
+end|});
+
+    (* REJECT WITNESS. The name the promise mentions is REBOUND before the call,
+       so the outer fact says nothing about the value actually passed.
+       Attributing an outer fact to an inner binding is the cardinal false
+       positive this subsystem keeps re-introducing. *)
+    gated "REJECT: a shadowed name does not borrow the outer fact" (fun () ->
+        check_ledger "shadowed" ~proved:0 ~skipped:1 {|
+mod CPS do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn bad(n : Int, i : {Int | _ < n}) : Int do
+    let n = 0
+    at(n, i)
+  end
+end|});
+  ]
+
+(* ── An earlier arm's failure narrows the later arms ───────────────────────
+   The safe-wrapper idiom — match the empty case, return Err, do the real work
+   in the other arm — is what every standard library is full of, and until this
+   it carried permanent unprovable debt: the `_` arm could not see that `Nil`
+   had been excluded, so a `len > 0` precondition in it never discharged. It
+   also produced actively WRONG advice, because `forge refine` could discharge
+   that debt by proposing `{List(a) | len(_) > 0}` — forbidding the exact input
+   the function exists to accept.
+
+   Two pieces, and neither works alone: reaching a later arm pushes
+   `not is_Ctor(s)` for each earlier arm whose failure is decided purely by the
+   tag, and a tag test on a LIST translates onto the same `len$x` symbol the
+   goal uses (`is_Nil(xs) <-> len(xs) = 0`).
+
+   The REJECT witnesses below are the load-bearing half. An earlier arm can fail
+   with its tag still matching — via a guard, or a refutable sub-pattern — and
+   concluding anything from those would be unsound. *)
+let arm_exclusion_suite =
+  [ gated "the `_` arm knows the empty case was excluded" (fun () ->
+        check_ledger "safe-wrapper" ~proved:1 ~skipped:0 {|
+mod AE1 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn mean_safe(xs : List(Int)) : Result(Int, String) do
+    match xs do
+      Nil -> Err("empty")
+      _   -> Ok(mean_of(xs))
+    end
+  end
+end|});
+
+    gated "a Cons arm knows the list is non-empty" (fun () ->
+        check_ledger "cons-arm" ~proved:1 ~skipped:0 {|
+mod AE2 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, _) -> mean_of(xs)
+    end
+  end
+end|});
+
+    (* REJECT WITNESS. The earlier arm carries a GUARD, so reaching the later arm
+       does not mean the tag differed — the guard may simply have been false with
+       `Nil` matching. Concluding `len > 0` here would be unsound. *)
+    gated "REJECT: a guarded earlier arm excludes nothing" (fun () ->
+        check_ledger "guarded" ~proved:0 ~skipped:1 {|
+mod AE3 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(xs : List(Int), flag : Bool) : Int do
+    match xs do
+      Nil when flag -> 0
+      _ -> mean_of(xs)
+    end
+  end
+end|});
+
+    (* REJECT WITNESS. The earlier arm's sub-pattern is refutable, so it can fail
+       with the tag still matching: `Cons(0, _)` does not match `Cons(1, [])`,
+       which is nonetheless a Cons. *)
+    gated "REJECT: a refutable sub-pattern excludes nothing" (fun () ->
+        check_ledger "refutable" ~proved:0 ~skipped:1 {|
+mod AE4 do
+  fn tail_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(xs : List(Int)) : Int do
+    match xs do
+      Cons(0, _) -> 0
+      _ -> tail_of(xs)
+    end
+  end
+end|});
+
+    (* REJECT WITNESS. The arm REBINDS the scrutinee's name, so the narrowing
+       would be recorded against a different value entirely. *)
+    gated "REJECT: an arm rebinding the scrutinee excludes nothing" (fun () ->
+        check_ledger "rebound" ~proved:0 ~skipped:1 {|
+mod AE5 do
+  fn mean_of(xs : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn go(ys : List(Int)) : Int do
+    match ys do
+      Nil -> 0
+      ys -> mean_of(ys)
+    end
+  end
+end|});
+  ]
+
 let resolve_precedence_suite =
   [ gated "a nested `use` beats an enclosing contract of the same name (the fix)"
       (fun () ->
@@ -6841,4 +7019,6 @@ let () =
       ("interface-signature-refinement", iface_refine_suite);
       ("sig-extern-refinement", sig_extern_refine_suite);
       ("use-impl-adoption", use_adoption_suite);
-      ("resolve-precedence", resolve_precedence_suite) ]
+      ("resolve-precedence", resolve_precedence_suite);
+      ("caller-promise", caller_promise_suite);
+      ("arm-exclusion", arm_exclusion_suite) ]

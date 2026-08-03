@@ -164,10 +164,31 @@ let run_to_string (args : string list) ~src_override : string =
          jstr it.Lsp.Types.CompletionItem.label
        in
        "{\"completions\":[" ^ String.concat "," (List.map label items) ^ "]}"
+     | "inlay" ->
+       (* Inlay hints for the whole file. Needs [run_tir_pass]: the ownership
+          ("⊗ consumed") annotations come from borrow inference, which the plain
+          [analyse] does not run. Makes the ownership hints inspectable without
+          an editor — useful for debugging them and for capturing what an editor
+          will show. *)
+       let a = Analysis.run_tir_pass a in
+       let whole = Lsp.Types.Range.create
+           ~start:(Lsp.Types.Position.create ~line:0 ~character:0)
+           ~end_:(Lsp.Types.Position.create ~line:1_000_000 ~character:0) in
+       let hs = Analysis.inlay_hints_for a whole in
+       let one (h : Lsp.Types.InlayHint.t) =
+         let p = h.Lsp.Types.InlayHint.position in
+         Printf.sprintf "{\"line\":%d,\"col\":%d,\"label\":%s}"
+           (p.Lsp.Types.Position.line + 1)
+           p.Lsp.Types.Position.character
+           (jstr (match h.Lsp.Types.InlayHint.label with
+                  | `String s -> s
+                  | _ -> ""))
+       in
+       "{\"hints\":[" ^ String.concat "," (List.map one hs) ^ "]}"
      | other -> Printf.sprintf "{\"error\":%s}" (jstr ("unknown query: " ^ other)))
   | _ ->
     "{\"error\":\"usage: march-lsp query \
-     <hover|type|definition|references|completions|diagnostics|symbols|format> \
+     <hover|type|definition|references|completions|diagnostics|symbols|format|inlay> \
      <file> [--line N --col M] [--stdin]  (line/col are 1-based)\"}"
 
 let main (argv : string array) : int =

@@ -125,7 +125,60 @@ let test_full_session () =
     true diags_nonempty;
   Alcotest.(check bool) "hover on a function returns contents" true hover_ok
 
+(* ── workspace/executeCommand reaches a real handler ──────────────────────────
+   Regression guard for a whole feature that shipped dead. linol dispatches
+   `workspace/executeCommand` as a KNOWN client request, so a handler placed in
+   [on_unknown_request] is never reached and linol's default returns `null`.
+   Both the runnable code lenses (`march.runTest`, `march.debug`, …) and
+   `march.suggestRefinement` were in that position, so NONE of them had ever
+   worked — invisible to every unit test, because a command is only observable
+   through a live protocol session.
+
+   Asserting on a DELIBERATELY UNKNOWN command id is the point: it needs no
+   project on disk, no solver and no shell-out, yet it can only produce the
+   structured payload below if [on_req_execute_command] is actually being
+   dispatched to. A `null` here means the handler has come unwired again. *)
+let run_execute_command () =
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
+  ignore (Unix.alarm 25);
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null; "rootUri", `Null;
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 2;
+    "method", `String "workspace/executeCommand";
+    "params", `Assoc [ "command", `String "march.definitelyNotACommand";
+                       "arguments", `List [] ] ]);
+  let reply = read_until ic ~max:30 (is_id 2) in
+  let dispatched =
+    match reply with
+    | Some j ->
+      let r = member "result" j in
+      r <> `Null && member "kind" r = `String "unknown"
+    | None -> false
+  in
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 3;
+                    "method", `String "shutdown"; "params", `Null ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  ignore (Unix.alarm 0);
+  dispatched
+
+let test_execute_command_dispatches () =
+  Alcotest.(check bool)
+    "workspace/executeCommand reaches on_req_execute_command (not linol's null default)"
+    true (run_execute_command ())
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
-      [ Alcotest.test_case "initialize/didOpen/hover" `Quick test_full_session ] ]
+      [ Alcotest.test_case "initialize/didOpen/hover" `Quick test_full_session;
+        Alcotest.test_case "workspace/executeCommand is dispatched" `Quick
+          test_execute_command_dispatches ] ]

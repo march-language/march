@@ -494,7 +494,13 @@ thing the tool works out for you:
 forge refine split           # one function (bare or qualified name)
 forge refine split --apply   # write the annotation into the source
 forge refine --all           # sweep every function in the project
+forge refine --all --apply --fixpoint   # …and keep going until nothing changes
 ```
+
+A contract only becomes visible to a *caller* once the callee carries it, so one
+`--apply` pass propagates exactly one call hop. `--fixpoint` repeats until a round
+applies nothing (bounded at 10 rounds; hitting the bound is reported as such, not
+mistaken for convergence).
 
 ```
 lib/text.march:10  split
