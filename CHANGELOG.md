@@ -13,6 +13,18 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge cap audit <binary>`: list the capabilities of a compiled March
+  executable.** Executables are now linked with dead-strip (72–79% smaller),
+  so unused capability runtime code is physically absent, and codegen embeds
+  `__march_cap_*` marker symbols for the capabilities the emitted code
+  actually references. The audit reads both channels, renders witnesses
+  (which runtime entries back each cap), and gates CI with `--deny CAP` /
+  `--allow-only CAPS` through the capability lattice (denying `IO` catches
+  `IO.FileRead`). Foreign code (FFI) is reported as a scope limitation —
+  analysis stops at the C boundary — and the gate fails closed on it unless
+  `--allow-foreign` is passed; the same fail-closed rule applies to stripped
+  or unstripped binaries (`--json` always includes a `coverage` field).
+
 - **`forge refine <fn>`: suggest a refinement type.** Proposes the parameter
   refinement that discharges the obligations a function's body leaves
   unproven — `n : Int` → `n : {Int | _ > 0}` when `n` reaches a callee that

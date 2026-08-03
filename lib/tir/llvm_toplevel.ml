@@ -1194,6 +1194,19 @@ let emit_module ~emit_expr
   (let caps =
      Llvm_builtins.called_c_symbols ()
      |> List.filter_map March_caps.Cap_symbols.cap_of_symbol
+     (* FFI is self-declaring: extern decls mean the module contains C code
+        the cap analysis cannot see.  The audit renders IO.Foreign as a
+        scope limitation, not a capability row (design §5.2) — but the
+        marker must exist in the binary or a stripped-manifest binary could
+        hide its foreign code entirely. *)
+     |> (fun l ->
+          if m.Tir.tm_externs = [] then l
+          else
+            "IO.Foreign"
+            :: (if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_blocking)
+                     m.Tir.tm_externs
+                then [ "IO.Foreign.Blocking" ] else [])
+            @ l)
      |> List.sort_uniq String.compare
    in
    if caps <> [] then begin
