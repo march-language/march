@@ -158,7 +158,32 @@ let suite =
     gated "refined-local propagation passes" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
-             (decl "  fn fwd(m : {Int | _ >= 0}) : Int do take_n(m) end"))) ]
+             (decl "  fn fwd(m : {Int | _ >= 0}) : Int do take_n(m) end")));
+
+    (* The message used to open with a bare "argument", which on a call with
+       several arguments does not say which one — and the predicate's binder is
+       usually the anonymous `_`, so nothing else in the message identified it
+       either. It now names the parameter and the callee. *)
+    gated "violation names the offending parameter and callee" (fun () ->
+        let text =
+          refine_error_text_d (decl "  fn main() : Int do nonzero(0) end") in
+        Alcotest.(check bool) "names the parameter" true
+          (contains text "argument `d`");
+        Alcotest.(check bool) "names the callee" true
+          (contains text "of `nonzero`");
+        Alcotest.(check bool) "still quotes the predicate" true
+          (contains text "_ != 0"));
+
+    (* A definite violation whose model has a free variable should still carry
+       the solver's counterexample — the parameter naming must not displace it. *)
+    gated "violation keeps the solver counterexample" (fun () ->
+        let text =
+          refine_error_text_d
+            (decl "  fn f(k : {Int | _ < 0}) : Int do take_n(k) end") in
+        Alcotest.(check bool) "reports a violation" true
+          (contains text "refinement violation");
+        Alcotest.(check bool) "includes a counterexample" true
+          (contains text "e.g. k = ")) ]
 
 (* A2: the `len` measure + cross-argument bounds.  `at` indexes a list with a
    bounds-refined index; we check calls against list literals (statically sized). *)

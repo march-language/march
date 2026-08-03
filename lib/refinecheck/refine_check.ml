@@ -2887,6 +2887,21 @@ type check_subject =
   | Argument
   | Bound_expr
 
+(* Span of an expression, for pointing a diagnostic at ONE argument instead of
+   the whole call. [refinecheck] does not depend on [march_typecheck], so this
+   mirrors its [span_of_expr] rather than importing it; only the forms that can
+   appear in argument position need to be precise, and anything unlisted falls
+   back to the caller-supplied call span (never a dummy, which would render as
+   a phantom location at line 0). *)
+let arg_span (fallback : A.span) : A.expr -> A.span = function
+  | A.ELit (_, sp) | A.EApp (_, _, sp) | A.ECon (_, _, sp)
+  | A.ETuple (_, sp) | A.ERecord (_, sp) | A.EField (_, _, sp)
+  | A.EIf (_, _, _, sp) | A.EPipe (_, _, sp) | A.EAnnot (_, _, sp)
+  | A.EBlock (_, sp) | A.EMatch (_, _, sp) | A.ELam (_, _, sp)
+  | A.EAtom (_, _, sp) -> sp
+  | A.EVar name -> name.A.span
+  | _ -> fallback
+
 let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
     ?(verdict_out : Obligation.verdict option ref option) ~(lets : launder)
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
@@ -4081,20 +4096,50 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
           (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
            | Refine.Verified ->
              note Obligation.Violated;
-             Err.error errctx ~span
-               (Printf.sprintf "refinement violation: %s does not satisfy %s `%s`%s\n%s"
-                  subject_noun obligation_noun (pred_str rp.pred)
-                  (format_cx (model_of first))
-                  (match subject with
-                   | Argument ->
-                     Printf.sprintf
-                       "note: guard the call (e.g. `if %s do …`) or pass a value known to \
-                        satisfy it"
-                       (pred_str rp.pred)
-                   | Bound_expr ->
-                     "note: a refined annotation on a `let` is CHECKED against the \
-                      expression it annotates, not assumed — bind a value that satisfies \
-                      it, or weaken the annotation"))
+             (* Name the parameter and callee rather than saying "argument".
+                On a call with several arguments, "argument does not satisfy
+                `_ != 0`" leaves the reader to work out WHICH one, and the
+                predicate's binder is usually the anonymous `_`, so the message
+                alone does not identify it. *)
+             let param_label =
+               match subject, List.nth_opt sg.param_names rp.idx with
+               | Argument, Some pname when pname <> "" ->
+                 Printf.sprintf "argument `%s` of `%s`" pname callee
+               | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
+               | Bound_expr, _ -> subject_noun
+             in
+             (* Point at the offending argument itself. The call span covers the
+                whole expression, which on a multi-argument call underlines
+                everything and singles out nothing. *)
+             let labels =
+               match subject, List.nth_opt args rp.idx with
+               | Argument, Some a ->
+                 let sp = arg_span span a in
+                 if sp = span then []
+                 else
+                   [{ Err.lbl_span = sp;
+                      Err.lbl_message =
+                        Printf.sprintf "this argument must satisfy `%s`"
+                          (pred_str rp.pred) }]
+               | _ -> []
+             in
+             Err.report errctx
+               { Err.severity = Err.Error; span;
+                 message = Printf.sprintf
+                   "refinement violation: %s does not satisfy %s `%s`%s\n%s"
+                   param_label obligation_noun (pred_str rp.pred)
+                   (format_cx (model_of first))
+                   (match subject with
+                    | Argument ->
+                      Printf.sprintf
+                        "note: guard the call (e.g. `if %s do …`) or pass a value known to \
+                         satisfy it"
+                        (pred_str rp.pred)
+                    | Bound_expr ->
+                      "note: a refined annotation on a `let` is CHECKED against the \
+                       expression it annotates, not assumed — bind a value that satisfies \
+                       it, or weaken the annotation");
+                 labels; notes = []; code = None; fix = None }
            | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
 
 (* ── Postconditions: a function's return value must satisfy its return

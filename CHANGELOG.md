@@ -122,6 +122,16 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Refinement violations now name the offending parameter and callee, and
+  underline that argument.** The message opened with a bare "argument does not
+  satisfy precondition `_ != 0`" — on a call with several arguments that does
+  not say which one, and since the predicate's binder is usually the anonymous
+  `_`, nothing else in the message identified it either. It now reads
+  ``argument `d` of `safe_div` ``, and a second labelled span underlines the
+  argument itself rather than the whole call. The solver's counterexample
+  (`e.g. n = -1`), which only appears when the failing model has a free
+  variable, is unchanged.
+
 - **Linearity errors now point at the earlier consumption site, not just the
   reuse.** "The linear value `token` is used more than once here" told you the
   value was already gone but not what took it, leaving the reader to find the
