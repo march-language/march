@@ -1453,6 +1453,102 @@ let test_linear_pattern_match_double_use () =
   end|} in
   Alcotest.(check bool) "linear pattern binding used twice: error" true (has_errors ctx)
 
+(* A double-use is a relationship between two sites, so the diagnostic carries a
+   label pointing at the earlier one. These tests read the label rather than
+   just [has_errors]: the error already existed, what is new is that it says
+   where the value went. *)
+let linear_double_use_labels src =
+  let ctx = typecheck src in
+  List.concat_map (fun (d : March_errors.Errors.diagnostic) ->
+      List.map (fun (l : March_errors.Errors.label) ->
+          (l.March_errors.Errors.lbl_message, l.March_errors.Errors.lbl_span))
+        d.March_errors.Errors.labels)
+    ctx.March_errors.Errors.diagnostics
+
+let test_linear_double_use_points_at_first_use () =
+  let src = {|mod Test do
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main() do
+      linear let token = "secret"
+      let a = consume(token)
+      let b = consume(token)
+      println(int_to_string(a + b))
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "double use of a linear value is an error" true
+    (has_errors ctx);
+  let labels = linear_double_use_labels src in
+  Alcotest.(check bool) "the error labels the earlier consumption site" true
+    (List.exists (fun (msg, _) ->
+         msg = "`token` was already consumed here") labels);
+  (* The label must point at the FIRST call (line 8), not repeat the second
+     (line 9) — pointing at the reuse twice would look right and help nobody. *)
+  Alcotest.(check bool) "the label points at the first use, not the second" true
+    (List.exists (fun (msg, (sp : March_ast.Ast.span)) ->
+         msg = "`token` was already consumed here" && sp.March_ast.Ast.start_line = 8)
+       labels)
+
+(* REGRESSION GUARD for the match-arm snapshot. Arms are mutually exclusive, so
+   consuming the same outer linear value once per arm is legal, and
+   [iter_arms_linear] saves/restores the use flag to allow it. [le_first_use]
+   has to be saved and restored in step: if it is not, the first arm leaves its
+   span behind and a later genuine double-use points into an arm that never ran
+   on the same path. *)
+let test_linear_match_arms_each_consume_once_ok () =
+  let ctx = typecheck {|mod Test do
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main() do
+      linear let token = "secret"
+      let flag = true
+      let r = match flag do
+        true -> consume(token)
+        false -> consume(token)
+      end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "one consumption per arm is accepted" false (has_errors ctx)
+
+let test_linear_double_use_within_arm_labels_same_arm () =
+  (* The arrangement that actually catches a missing save/restore: an EARLIER
+     arm consumes the value legally (line 10), and a LATER arm double-uses it
+     (line 11). If [le_first_use] survived across arms, the label would point at
+     line 10 — a line that never executes on the same path as the error. It must
+     point at line 11. *)
+  let src = {|mod Test do
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main() do
+      linear let token = "secret"
+      let flag = true
+      let r = match flag do
+        true -> consume(token)
+        false -> consume(token) + consume(token)
+      end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "double use inside one arm is an error" true
+    (has_errors (typecheck src));
+  let labels = linear_double_use_labels src in
+  Alcotest.(check bool) "the label is present" true
+    (List.exists (fun (msg, _) -> msg = "`token` was already consumed here") labels);
+  Alcotest.(check bool)
+    "the label points inside the offending arm, not the sibling arm" true
+    (List.for_all (fun ((msg : string), (sp : March_ast.Ast.span)) ->
+         msg <> "`token` was already consumed here"
+         || sp.March_ast.Ast.start_line = 11)
+       labels)
+
 let test_linear_closure_capture_error () =
   (* Capturing a linear value in a closure should error. *)
   let ctx = typecheck {|mod Test do
@@ -10992,6 +11088,9 @@ let compiler_suites =
           (* Fix 2: Linear type enforcement *)
           Alcotest.test_case "linear pattern match ok"       `Quick test_linear_pattern_match_ok;
           Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;
+          Alcotest.test_case "double use labels first use"   `Quick test_linear_double_use_points_at_first_use;
+          Alcotest.test_case "match arms each consume once"  `Quick test_linear_match_arms_each_consume_once_ok;
+          Alcotest.test_case "double use in arm stays in arm" `Quick test_linear_double_use_within_arm_labels_same_arm;
           Alcotest.test_case "linear closure capture"        `Quick test_linear_closure_capture_error;
           Alcotest.test_case "linear field let binding"       `Quick test_linear_field_let_binding;
           (* H6: Linear field direct field-access tracking *)

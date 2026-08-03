@@ -122,6 +122,15 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Linearity errors now point at the earlier consumption site, not just the
+  reuse.** "The linear value `token` is used more than once here" told you the
+  value was already gone but not what took it, leaving the reader to find the
+  first use by hand — which on a long function is the entire search. The
+  diagnostic now carries a second labelled span: ``​`token` was already consumed
+  here``. Attribution is path-correct: match arms are mutually exclusive, so
+  consuming the same value once per arm stays legal, and a double-use inside one
+  arm is labelled against that arm rather than a sibling that never ran.
+
 - **`derive Json`'s generated `from_json` now returns
   `Result(T, Json.DecodeError)` instead of `Result(T, String)` — a
   breaking change for any caller matching on the old bare-`String` error.**
