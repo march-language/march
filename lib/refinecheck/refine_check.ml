@@ -1003,6 +1003,48 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
             (Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n"
                adt name name))
       axiomatized;
+    (* … then base-case linking axioms: for a measure whose base-case arm is a
+       concrete integer literal, link that constructor's tester directly to the
+       measure's value.
+
+       This closes the same gap that motivated `path_resolve_tester`'s
+       `is_Nil(xs) <-> len(xs) = 0` translation (see the comment there), but
+       for a general user `@[measure]` rather than the one built-in measure
+       (`len` over the built-in `List`) that hack special-cases.  A match arm
+       reachable only because an earlier sibling's tag was excluded carries a
+       bare `((_ is Ctor) x)` fact about a FREE variable (pushed by [visit]'s
+       `A.EMatch` case's arm-order-exclusion narrowing).  For a user measure
+       that has no `path_resolve_tester`-style hardcoding, the ordinary
+       recursion-equation axiom cannot pick that up: its trigger pattern is the
+       CONSTRUCTED term `(name (Ctor v1 v2 …))`, which never E-matches against
+       a tester over a free variable.  (A NULLARY base case is already a ground
+       fact via [arm_axiom]'s `vars = []` branch and needs no axiom of its own;
+       this one is for a base case whose constructor takes fields but whose
+       body is still a plain literal, e.g. `Cons(_, _) -> 0`.)
+
+       Confirmed empirically to be the whole fix needed for the `len`/`List`
+       shape — no change to the arm-order-exclusion narrowing itself was
+       required, since it already pushes the negative tag fact; the missing
+       piece was only ever the axiom connecting a tester over a free variable
+       to the measure's value, and for `len` specifically that connection is
+       `path_resolve_tester`'s hardcoded translation, not this axiom.  This
+       axiom's own effect is currently a no-op across the stdlib (a full sweep
+       before/after showed a byte-identical `--refine-report` on all 112
+       modules — no proof gained, no proof lost); it exists to close the
+       general case for the next user-defined measure that hits this shape. *)
+    List.iter
+      (fun (name, adt, _) ->
+        match Hashtbl.find_opt measure_base_cases name with
+        | None -> ()
+        | Some bases ->
+          List.iter
+            (fun (ctor, n) ->
+              Buffer.add_string buf
+                (Printf.sprintf
+                   "(assert (forall ((x %s)) (! (=> ((_ is %s) x) (= (%s x) %d)) :pattern ((%s x)))))\n"
+                   adt ctor name n name))
+            bases)
+      axiomatized;
     (* … then the recursion-equation axioms. *)
     List.iter
       (fun (name, _, arms) ->

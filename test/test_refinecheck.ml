@@ -7107,6 +7107,62 @@ mod AE5 do
     end
   end
 end|});
+
+    (* Count-based pin of the exact `stats.march` repro (Float list, Result
+       wrapper), using Obligation.reset/summary directly rather than
+       check_ledger, so the obligation ledger's shape is asserted precisely:
+       ONE precondition, PROVED, nothing skipped. The `_` arm's own
+       arm-order-exclusion fact (`not is_Nil(xs)`, already landed — see
+       [arm_exclusion_suite] above) reaches `path_resolve_tester`'s
+       is_Nil/is_Cons <-> len(x) translation, which reaches the base-case
+       linking axiom this task added in [build_measure_preamble]. *)
+    gated "excluding Nil in a match gives the other arm len(xs) > 0" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod MA1 do
+  fn mean(xs : {List(Float) | len(_) > 0}) : Float do 0.0 end
+  fn mean_safe(xs : List(Float)) : Result(Float, String) do
+    match xs do
+    Nil -> Err("empty")
+    _   -> Ok(mean(xs))
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "the mean(xs) call is proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
+
+    (* REJECT CONTROL. No `Nil` arm exists to exclude anything, so `mean`'s
+       precondition must stay unproven. This is the discriminating test: it is
+       what tells a genuine fact-propagation fix apart from one that
+       accidentally proves the precondition unconditionally (laundering the
+       goal rather than deriving it from the exclusion). *)
+    gated "with no Nil arm, the obligation is still unproven" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod MA2 do
+  fn mean(xs : {List(Float) | len(_) > 0}) : Float do 0.0 end
+  fn always_call(xs : List(Float)) : Result(Float, String) do
+    Ok(mean(xs))
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics (skip is silent, not an error)" 0
+          (List.length ctx.March_errors.Errors.diagnostics);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "still NOT proved -- no Nil arm to exclude" 0 proved;
+        Alcotest.(check int) "not falsely reported as violated either" 0 violated;
+        Alcotest.(check int) "the obligation is skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
   ]
 
 let resolve_precedence_suite =

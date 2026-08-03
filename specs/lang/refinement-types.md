@@ -1099,6 +1099,17 @@ end
 
 still abstains on a `len > 1` requirement, which is the honest answer.
 
+The same idea generalizes to a user `@[measure]`, not just the built-in `len`.
+An excluded constructor's tester over the scrutinee (a free variable) does not
+by itself reach a quantified recursion-equation axiom — those trigger only on
+a *constructed* term (`size(Cons(h, t))`), never on `((_ is Nil) xs)` — so
+`build_measure_preamble` also emits a base-case linking axiom for every
+constructor whose arm body is a literal, tying the tester directly to the
+measure's value: `(_ is Nil) x => size(x) = 0`. A nullary base case needs no
+axiom of its own (it is already a ground fact); this covers a base case whose
+constructor takes fields but whose body is still a plain literal, e.g.
+`Cons(_, _) -> 0`.
+
 Narrowing is deliberately conservative, and where it stops is where the checker
 goes quiet rather than guessing:
 

@@ -695,6 +695,42 @@ quiet rather than guessing — so these are all *silence*, never false alarms:
 As everywhere else, the definite-failure stance applies: an `Option` whose tag
 the checker can't determine is not an error.
 
+Later arms also learn what the earlier ones ruled out. Reaching an arm means
+every arm above it failed to match, so for each of those whose failure is
+decided purely by the tag, the scrutinee is known *not* to carry it:
+
+```march
+fn mean_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  Nil -> Err("empty")
+  _   -> Ok(mean(xs))   -- `mean` needs len > 0; the `_` arm has it
+  end
+end
+```
+
+For a **list**, a tag test is a statement about length — `is_Nil(xs)` means
+`len(xs) = 0` and `is_Cons(xs)` means `len(xs) > 0` — so the exclusion above
+discharges a `len`-bearing precondition directly. This is what makes the
+safe-wrapper idiom (match the empty case, return `Err`/`None`, do the real work
+in the other arm) check out. The same idea generalizes to a user `@[measure]`:
+a base-case arm whose body is a literal gets an axiom linking its constructor's
+tester directly to the measure's value, so the exclusion connects there too.
+
+An earlier arm licenses **nothing** if it carries a guard or a refutable
+sub-pattern, because either can fail with the tag still matching:
+`Cons(0, _)` does not match `Cons(1, [])`, which is nonetheless a `Cons`, and
+`Nil when flag` fails whenever `flag` is false. So
+
+```march
+match xs do
+Nil -> Err(…)
+Cons(_, Nil) -> Err("need at least 2")
+_ -> Ok(std_dev(xs))     -- knows only len > 0, NOT len > 1
+end
+```
+
+still abstains on a `len > 1` requirement, which is the honest answer.
+
 ---
 
 ## Seeing What Got Checked — `--refine-report`

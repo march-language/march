@@ -446,6 +446,17 @@ git log is authoritative for exact commits.
   goes from 0 to 4 proved; the one function that still abstains is the one
   needing `len > 1`, which these facts genuinely do not give.
 
+- **A match arm's excluded-constructor fact now reaches a user `@[measure]`,
+  not only the built-in `len`.** The `len`/`List` case above is discharged by
+  a hardcoded `is_Nil(xs) <-> len(xs) = 0` translation, which does not exist
+  for a measure the author defines. `build_measure_preamble` now also emits a
+  base-case linking axiom for any axiomatized measure whose base-case arm body
+  is a literal — `(_ is Nil) x => size(x) = 0` — so the same exclusion fact
+  connects for those too. A full stdlib `--refine-report` sweep is
+  byte-identical before/after (no current stdlib measure has this shape), so
+  this closes the general case ahead of the next measure that hits it rather
+  than fixing an observed regression.
+
 - **`Logger.random_hex` no longer drops the contract it forwards into.** A
   private wrapper passed its argument straight to `Crypto.random_hex`, whose
   parameter is `{Int | _ >= 0}`, without carrying that requirement — so every

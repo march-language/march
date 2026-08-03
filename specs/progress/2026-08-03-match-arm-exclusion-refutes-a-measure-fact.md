@@ -103,6 +103,49 @@ False positives: **0** refinement violations across all 112 stdlib modules.
   stay quiet on those five functions (the guard stays, but should become unreachable
   for them).
 
+## Addendum (2026-08-03): generalized to a user `@[measure]`
+
+The fix above discharges `len`/`List` specifically, via a hardcoded
+`is_Nil(xs) <-> len(xs) = 0` translation in `path_resolve_tester` — there is
+no equivalent hardcoding for a measure the author defines. `build_measure_preamble`
+now also emits a base-case linking axiom for any axiomatized measure whose
+base-case arm body is a plain integer literal:
+
+```
+(assert (forall ((x adt)) (! (=> ((_ is Ctor) x) (= (measure x) n)) :pattern ((measure x)))))
+```
+
+This is what an arm-order-exclusion fact (a bare `((_ is Ctor) x)` over a free
+variable) needs to connect to for a general measure: the ordinary
+recursion-equation axiom's trigger pattern is the *constructed* term
+`(measure (Ctor v1 v2 …))`, which never E-matches against a tester over a free
+variable. A nullary base case (`Leaf -> 0`) already reaches Z3 as a ground
+fact via the existing `vars = []` arm-axiom branch and needs nothing new; this
+covers a base case whose constructor still takes fields but whose body is a
+plain literal regardless of them, e.g. `Cons(_, _) -> 0`.
+
+Verified two things empirically before landing this:
+
+- **No arm-order-exclusion code needed changing.** The narrowing added above
+  already pushes the negative tag fact for every excluded earlier arm; the
+  `len`/`List` repro proves with that fact alone plus `path_resolve_tester`'s
+  existing hardcoded translation, confirmed by running the exact
+  `mean_safe`/`Result` repro against a build carrying no code changes at all.
+  A plan draft for this addendum initially proposed also reshaping the
+  `A.EMatch` branch walk into an explicit `(excluded, acc)` fold — that would
+  have been redundant with the fold already there and was dropped (YAGNI): the
+  walk already threads `earlier : A.branch list` and the soundness lives in
+  `arm_excludes_tag`, unchanged.
+- **The new axiom is currently a no-op for real code.** A full
+  `--refine-report` sweep of all 112 stdlib modules is byte-identical
+  before/after (224 obligation rows across both, differing only in a sweep
+  sentinel), and the REJECT control — a caller of a measure-guarded function
+  with no excluding arm — stays unproven. The instrument is not vacuous: the
+  same before/after pair independently flips `0 proved -> 1 proved` on a
+  purpose-built `size`/`Tree` repro exercising the new base-case shape, so a
+  byte-identical stdlib sweep is genuine evidence of "no regression," not a
+  broken measurement.
+
 ## Related
 
 - `specs/todos/2026-08-02-caller-refinement-dropped-when-it-mentions-another-name.md`
