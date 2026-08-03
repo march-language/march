@@ -2740,6 +2740,20 @@ let sort_of_ctor (ctor : string) : string option =
        module strict the moment one user module asked for verification. *)
 let strict_verified = ref false
 
+(* Whether this decl list has already been told that some contract in it went
+   unverified. Scoped and restored exactly like [strict_verified].
+
+   The default stance is "definite failure only" — an undecidable obligation
+   stays silent rather than risk a false positive on correct code. That is the
+   right default, but silence is indistinguishable from "checked and fine": a
+   reader who never learns the checker gave up believes a contract is enforced
+   when it is not, and `cap verified` (the opt-in that turns exactly this
+   silence into an error) is only discoverable if you already know to look for
+   it. One hint per decl list names the first such contract and points at the
+   escalation — enough to be findable, not so much that a module with many
+   undecidable predicates becomes a wall of text. *)
+let unverified_hinted = ref false
+
 (* Scoped exactly like [strict_verified], but to a single `fn` rather than a
    decl list: true while [visit_fn] is walking a function whose [fn_attrs]
    carry `@[trusted]`.  Consulted only by [check_call]'s [note] — see there for
@@ -3031,6 +3045,23 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
            "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
            obligation_noun (pred_str rp.pred) callee (Obligation.reason_name r)
            (Obligation.reason_detail r) remedy)
+    (* Outside `cap verified`, a skip stays non-fatal — but say once per module
+       that it happened, so "no diagnostic" cannot be read as "checked". A
+       withdrawn alias is excluded: it has its own dedicated explanation and is
+       not the checker running out of road. *)
+    | Obligation.Skipped r
+      when (not !strict_verified) && (not !unverified_hinted)
+           && (match r with Obligation.Alias_withdrawn _ -> false | _ -> true) ->
+      unverified_hinted := true;
+      Err.hint errctx ~span
+        (Printf.sprintf
+           "%s `%s` on `%s` was NOT verified here (%s: %s).\n\
+            note: March reports only definite failures, so an undecidable \
+            contract is accepted in silence — add `cap verified` to this module \
+            to make every unverifiable obligation an error instead. \
+            `--refine-report` lists them all."
+           obligation_noun (pred_str rp.pred) callee
+           (Obligation.reason_name r) (Obligation.reason_detail r))
     | _ -> ()
   in
   match List.nth_opt args rp.idx with
@@ -5720,8 +5751,16 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
     List.exists
       (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
       decls;
-  Fun.protect ~finally:(fun () -> strict_verified := saved_strict) (fun () ->
-    List.iter (visit_decl ~root errctx defs ctx) decls)
+  (* Per-decl-list, for the same reason [strict_verified] is: a nested module is
+     its own unit of advice, and one hint there should not silence the parent's
+     (or vice versa). *)
+  let saved_hinted = !unverified_hinted in
+  unverified_hinted := false;
+  Fun.protect
+    ~finally:(fun () ->
+      strict_verified := saved_strict;
+      unverified_hinted := saved_hinted)
+    (fun () -> List.iter (visit_decl ~root errctx defs ctx) decls)
 
 (* One declaration.  Every constructor of [A.decl] is named — there is NO
    wildcard, deliberately: for years this walk descended only into [DFn] and

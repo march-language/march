@@ -13,6 +13,25 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An unverified refinement contract now says so, once per module.** March
+  reports only definite failures — an obligation the solver cannot decide is
+  accepted in silence, which is the right default (a false positive on correct
+  code is the worse error) but leaves no way to tell "checked and fine" apart
+  from "gave up". A single hint per module now names the first such contract
+  and its reason, and points at `cap verified`, the existing opt-in that turns
+  every unverifiable obligation into an error:
+
+  ```
+  precondition `_ != 0` on `safe_div` was NOT verified here
+  (solver-undecided: the solver proved neither the predicate nor its negation).
+  note: … add `cap verified` to this module to make every unverifiable
+  obligation an error instead. `--refine-report` lists them all.
+  ```
+
+  Code the checker can discharge stays completely silent, a module with three
+  undecidable calls still gets one hint, and inside `cap verified` the existing
+  error is unchanged rather than joined by a hint.
+
 - **Consuming-call inlay hints: the editor now marks which arguments a call
   takes ownership of (`⊗ consumed`).** Ownership transfer was previously
   invisible at the place it happens — you had to read the callee's signature,
