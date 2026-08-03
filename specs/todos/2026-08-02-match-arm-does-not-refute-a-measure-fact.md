@@ -61,5 +61,5 @@ tester to the measure.
 
 ## Related
 
-- `specs/todos/2026-08-02-len-fact-does-not-propagate-caller-to-callee-precondition.md`
-  — the caller→callee half of the same missing `len` reasoning.
+- `specs/todos/2026-08-02-caller-refinement-dropped-when-it-mentions-another-name.md`
+  — a caller promise that is derived and then DROPPED, rather than never derived.
