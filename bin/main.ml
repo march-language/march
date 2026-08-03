@@ -231,149 +231,15 @@ let load_stdlib_file path =
      | exn ->
        Printf.eprintf "[stdlib] error in %s: %s\n%!" path (Printexc.to_string exn); [])
 
-(** The ordered list of stdlib file names. *)
-let stdlib_file_list = [
-  "prelude.march";
-  "option.march";
-  "result.march";
-  "list.march";
-  "hamt.march";
-  "map.march";
-  "math.march";
-  "string.march";
-  "iolist.march";
-  (* deque.march must load EAGERLY (full body typecheck), not lazily.  A
-     lazily-loaded module's call sites leave the caller's let-binders as
-     unresolved '_ tvars in the type_map, so monomorphization cannot
-     specialize a generic function like Deque.pop_front : Deque(a) ->
-     (Option(a), Deque(a)) — the generic body then allocates a BOXED
-     Some cell while the concrete caller decodes the tuple field as a
-     NICHE Option(Int), reading the box's heap ADDRESS as the payload.
-     Symptom: bench/deque_ops.march printed a raw pointer for a popped
-     Int interpreted correctly, and its drain loop never terminated
-     ("deque_ops hangs compiled").  The lazy-vs-eager split changing
-     REPRESENTATION decisions is a compiler bug class of its own, filed
-     in specs/todos.md; eager-loading Deque removes this instance. *)
-  "deque.march";
-  "html.march";
-  "sigil.march";
-  "http.march";
-  "http_transport.march";
-  "http_client.march";
-  "seq.march";
-  "path.march";
-  "file.march";
-  "dir.march";
-  "sort.march";
-  "csv.march";
-  "websocket.march";
-  "http_server.march";
-  "iterable.march";
-  "set.march";
-  "hash_map.march";
-  "array.march";
-  "bigint.march";
-  "decimal.march";
-  "duration.march";
-  "bytes.march";
-  "msgpack.march";
-  "compress.march";
-  "toml.march";
-  "xml.march";
-  "yaml.march";
-  "socket.march";
-  "dns.march";
-  "process.march";
-  "io.march";
-  "system.march";
-  "cluster.march";
-  "cluster_load.march";
-  (* consistent_hash.march and work_dispatch.march must load EAGERLY, same
-     class of bug as the deque.march note above: a lazily-loaded module's
-     generic Option/Result-returning functions (e.g. ConsistentHash.get,
-     WorkDispatch functions) reach mono with unresolved call-site tvars and
-     default to a Boxed representation, while a concrete caller (e.g.
-     Option(Int)) expects the niche encoding — the caller then reads the
-     box's heap address as the payload. Confirmed live 2026-08-01 via
-     ConsistentHash.get returning a garbage pointer instead of the stored
-     Int, compiled only. *)
-  "consistent_hash.march";
-  "work_dispatch.march";
-  "logger.march";
-  "actor.march";
-  "flow.march";
-  "json.march";
-  "json_stream.march";
-  "regex.march";
-  "datetime.march";
-  "queue.march";
-  "ring_buf.march";
-  "enum.march";
-  "random.march";
-  "gen.march";
-  "check.march";
-  "stats.march";
-  "plot.march";
-  "dataframe.march";
-  "tls.march";
-  "uuid.march";
-  "vault.march";
-  "channel.march";
-  "pubsub.march";
-  "channel_server.march";
-  "channel_socket.march";
-  "presence.march";
-  "env.march";
-  "config.march";
-  "cli.march";
-  "test.march";
-  "tuple.march";
-  "char.march";
-  "ordered_map.march";
-  "sorted_set.march";
-  "range.march";
-  "crypto.march";
-  "base64.march";
-  "native_array.march";
-  "task.march";
-  "signal.march";
-  "rrb_vec.march";
-  "parallel.march";
-  "uri.march";
-  "forge_nb.march";
-  "handle.march";
-  (* CRDT primitives — loaded before distributed OTP modules that depend on them *)
-  "vector_clock.march";
-  "crdt.march";
-  "merkle.march";
-  (* Distributed OTP — added after all other stdlib deps are loaded *)
-  "net_frame.march";
-  "cluster_auth.march";
-  "node_identity.march";
-  "handshake.march";
-  "global_pid.march";
-  "remote_call.march";
-  "node_rpc.march";
-  "peer_registry.march";
-  "net_kernel.march";
-  "membership.march";
-  "swim.march";
-  "swim_driver.march";
-  "global_registry.march";
-  "cluster_conn.march";
-  "node_call.march";
-  (* dist_link.march / dist_supervisor.march: same lazy-load representation
-     bug as above (see the deque.march / consistent_hash.march notes) — both
-     export Option/Result-returning generics over concrete node/monitor
-     types. dist_supervisor depends on dist_link, so it must come after. *)
-  "dist_link.march";
-  "dist_supervisor.march";
-]
+(* The manifest moved to lib/modules/stdlib_manifest.ml so a test can assert it
+   is exhaustive over stdlib/ — a file missing from it miscompiles silently at a
+   concrete niche-eligible type.  See that module's header. *)
+let stdlib_file_list = March_modules.Stdlib_manifest.stdlib_file_list
 
 (** Stdlib modules only loaded for --target js builds.
     These have externs with no native C symbols, so including them in native/JIT
     builds would cause dlopen(RTLD_NOW) to fail at link time. *)
-let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]
+let js_only_stdlib_file_list = March_modules.Stdlib_manifest.js_only_stdlib_file_list
 
 (** Read all stdlib source files and compute a hash of their contents.
     Returns (stdlib_dir, source_hash, file_paths). *)
@@ -986,9 +852,15 @@ let refine_suggest_target = ref None   (* Some fn-name (possibly qualified) *)
 let refine_suggest_all    = ref false
 let refine_suggest_json   = ref false
 let refine_suggest_budget = ref March_refinecheck.Precond_infer.default_budget
+(* --refine-suggest-post: propose the RETURN refinement that lets a function's
+   CALLERS discharge obligations.  Separate from the precondition flags because
+   it answers a different question — see lib/refinecheck/postcond_infer.ml. *)
+let refine_suggest_post = ref None
+let refine_suggest_post_all = ref false
 
 let refine_suggest_active () =
   !refine_suggest_target <> None || !refine_suggest_all
+  || !refine_suggest_post <> None || !refine_suggest_post_all
 
 let json_escape s =
   let b = Buffer.create (String.length s + 8) in
@@ -1079,6 +951,72 @@ let print_refine_suggestions ~filename ~user_files desugared =
               r.PI.rs_debt_before r.PI.rs_debt_after)
       results;
     if results = [] then Printf.printf "no suggestions\n"
+  end
+
+let print_refine_postconditions ~filename ~user_files desugared =
+  let module PO = March_refinecheck.Postcond_infer in
+  let is_user (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || List.mem f user_files
+  in
+  let root = Sys.getcwd () in
+  let budget = !refine_suggest_budget in
+  let results =
+    if !refine_suggest_post_all then PO.suggest_all ~root ~budget ~is_user desugared
+    else
+      match !refine_suggest_post with
+      | None -> []
+      | Some target -> PO.suggest ~root ~budget ~is_user ~target desugared
+  in
+  if !refine_suggest_json then begin
+    let one (r : PO.t) =
+      Printf.sprintf
+        {|{"fn":"%s","file":"%s","line":%d,"col":%d,"status":"%s","base":"%s","predicate":"%s","annotation":"{%s | %s}","callers":%d,"debt_before":%d,"debt_after":%d,"queries":%d}|}
+        (json_escape r.PO.rs_fn)
+        (json_escape r.PO.rs_span.March_ast.Ast.file)
+        r.PO.rs_span.March_ast.Ast.start_line
+        r.PO.rs_span.March_ast.Ast.start_col
+        (PO.status_name r.PO.rs_status)
+        (json_escape r.PO.rs_base) (json_escape r.PO.rs_pred)
+        (json_escape r.PO.rs_base) (json_escape r.PO.rs_pred)
+        r.PO.rs_callers r.PO.rs_debt_before r.PO.rs_debt_after r.PO.rs_queries
+    in
+    Printf.printf "{\"postconditions\":[%s]}\n%!"
+      (String.concat "," (List.map one results))
+  end
+  else begin
+    List.iter
+      (fun (r : PO.t) ->
+        match r.PO.rs_status with
+        | PO.Not_found -> Printf.printf "no user function named `%s`\n" r.PO.rs_fn
+        | PO.No_return_type ->
+          Printf.printf "%s: no declared return type to refine\n" r.PO.rs_fn
+        | PO.Already_refined ->
+          Printf.printf "%s: its return is already refined\n" r.PO.rs_fn
+        | PO.No_callers ->
+          Printf.printf
+            "%s: nothing calls it here, so there is no obligation a postcondition could discharge\n"
+            r.PO.rs_fn
+        | PO.No_debt ->
+          Printf.printf "%s: its callers have no unproven obligations\n" r.PO.rs_fn
+        | PO.No_candidate ->
+          Printf.printf
+            "%s: %d unproven obligation(s) in %d caller(s), but no candidate postcondition is both provable and useful\n"
+            r.PO.rs_fn r.PO.rs_debt_before r.PO.rs_callers
+        | PO.Solved | PO.Partial ->
+          Printf.printf "%s (%s:%d)\n" r.PO.rs_fn
+            r.PO.rs_span.March_ast.Ast.file r.PO.rs_span.March_ast.Ast.start_line;
+          Printf.printf "    returns %s  ->  returns {%s | %s}\n"
+            r.PO.rs_base r.PO.rs_base r.PO.rs_pred;
+          if r.PO.rs_status = PO.Solved then
+            Printf.printf "  discharges all %d obligation(s) across %d caller(s)\n"
+              r.PO.rs_debt_before r.PO.rs_callers
+          else
+            Printf.printf "  discharges %d of %d across %d caller(s); %d still unproven\n"
+              (r.PO.rs_debt_before - r.PO.rs_debt_after) r.PO.rs_debt_before
+              r.PO.rs_callers r.PO.rs_debt_after)
+      results;
+    if results = [] then Printf.printf "no postcondition suggestions\n"
   end
 
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
@@ -1977,8 +1915,10 @@ let compile filename =
   (* Precondition suggestion.  Must follow the report: every hypothesis probe
      resets the obligation ledger, so a report printed after this one would
      describe the last hypothesis rather than the program. *)
-  if refine_suggest_active () then
+  if !refine_suggest_target <> None || !refine_suggest_all then
     print_refine_suggestions ~filename ~user_files desugared;
+  if !refine_suggest_post <> None || !refine_suggest_post_all then
+    print_refine_postconditions ~filename ~user_files desugared;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
@@ -4002,6 +3942,10 @@ let () =
      " Propose parameter refinements for every function in user code that has unproven obligations");
     ("--refine-suggest-json", Arg.Set refine_suggest_json,
      " Emit --refine-suggest results as JSON on stdout (for tooling such as forge refine)");
+    ("--refine-suggest-post", Arg.String (fun s -> refine_suggest_post := Some s),
+     "<fn>  Propose the return refinement that lets <fn>'s callers discharge their obligations");
+    ("--refine-suggest-post-all", Arg.Set refine_suggest_post_all,
+     " Propose return refinements for every function in user code whose callers have unproven obligations");
     ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
      "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
