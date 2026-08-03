@@ -92,3 +92,87 @@ Split out of `specs/todos/2026-07-24-merge-loss-round-2-14-commits-on-docs-core-
 which first named this class bug (found while auditing a lost-commit branch)
 but never independently reproduced or scoped it. This file supersedes that
 bullet.
+
+---
+
+# Implementation spec (added 2026-08-03)
+
+Do these in order. Step 1 is an afternoon and stops the bleeding permanently; steps 2-3 are
+the class fix and can follow at leisure. Doing 2 or 3 first, without 1, leaves the door
+open the whole time.
+
+## Step 1 — the exhaustiveness guardrail (do this first, regardless)
+
+Measured on `origin/main` today, `stdlib_file_list` **is currently exhaustive**, with
+exactly four files on disk absent from it:
+
+| File | Why absent | Where it belongs |
+|---|---|---|
+| `dom.march`, `canvas.march`, `audio.march` | JS-only | already in `js_only_stdlib_file_list` |
+| `lazy_niche_probe.march` | regression fixture that MUST stay lazy | explicit allowlist |
+
+So the invariant to lock in is exactly:
+
+```
+{stdlib/*.march}  ==  stdlib_file_list
+                    ∪ js_only_stdlib_file_list
+                    ∪ {lazy_niche_probe.march}
+```
+
+Write it as a test in `test/test_compiler.ml` (not doc-lint — this is a property of a
+compiler data structure, and it must fail the build). Read the directory at test time; do
+not hardcode a count, or the test becomes the thing that goes stale.
+
+**The failure message is the deliverable.** Someone adding a stdlib module a year from now
+will hit this test with no context, so it has to say: *this file is not in
+`bin/main.ml`'s `stdlib_file_list`; a module outside that list is loaded for export shapes
+only, and a generic `Option`/`Result` it exports will silently miscompile to a wrong value
+at a concrete niche-eligible type — add it to the list, or to the allowlist here if it is
+deliberately lazy and you have understood that consequence.*
+
+Non-vacuity check: remove one entry from `stdlib_file_list` and confirm the test fails.
+The list is exhaustive today, so a broken test would otherwise pass silently forever.
+
+## Step 2 — make the failure loud instead of silent (the real class fix)
+
+Option 2 from the original analysis, and the one to take: **monomorphization refuses to
+emit a call it could not specialize**, rather than falling back to a generic boxed body
+that then disagrees with a concrete caller's representation.
+
+The bug is not that specialization failed; it is that failing was indistinguishable from
+succeeding. Today the fallback produces a program that runs and prints garbage — no crash,
+no diagnostic, different garbage per run. A compile error naming the call site and the
+unresolved type variable turns a silent wrong-value class into a build failure.
+
+Where: `lib/tir/mono.ml`, at the point where a call's callee type still contains an
+unresolved tvar and the generic body is selected. Two things to establish before writing
+the error, because they decide whether this is viable:
+
+1. **How often does the fallback fire legitimately today?** If a large corpus compiles
+   with hundreds of unspecialized calls, an error is a non-starter and this becomes a
+   warning plus a `--strict-mono` gate. Instrument first: count fallbacks across the
+   stdlib and the golden corpus, and put the number in the progress entry. Do not guess.
+2. **Is the boxed fallback ever CORRECT?** It is, whenever the caller also uses the boxed
+   representation. The error must fire only where the caller's chosen representation
+   differs from the callee's — that predicate is the actual content of this fix, and
+   `lib/tir/rc_types.ml` / the niche-eligibility logic is where to find it.
+
+## Step 3 — give lazy modules real inference (option 1, only if step 2 proves too coarse)
+
+Make `Module_registry.ensure_loaded` (`lib/modules/module_registry.ml:227`) run enough type
+inference to resolve a caller's binders, not just extract export shapes. Strictly better
+than step 2 — it makes the code *work* rather than making the failure visible — but it is
+also the expensive one, and it partially defeats the purpose of lazy loading. Only worth it
+if step 2's measurement shows the fallback firing on code that genuinely must keep working.
+
+## Acceptance
+
+- Step 1: removing any entry from `stdlib_file_list` fails the suite with the message above.
+- Step 2: the `ConsistentHash` repro in this file, with `consistent_hash.march` REMOVED
+  from `stdlib_file_list`, becomes a compile error rather than `SOME 2197058856`. That is
+  the REJECT witness, and it is the whole point — a fix that merely makes the repro print
+  `SOME 42` (because the module got eagerly loaded again) has tested nothing.
+- `lazy_niche_probe.march` still compiles and still demonstrates the lazy path, since it is
+  the fixture the class depends on. Check its doc comment before touching anything near it.
+- Full suite green, and the golden corpus compiles with no new errors — step 2 can only be
+  landed with evidence that its error fires exclusively on genuinely-broken calls.
