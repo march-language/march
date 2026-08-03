@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """Render March's real diagnostic output as HTML cards, for the site.
 
-Run from anywhere:
-
-    python3 docs/assets/errors/render.py [path/to/march]
+    python3 scripts/error-cards/render.py [--out DIR] [path/to/march]
 
 For each source in ./src it runs `march --check` with MARCH_COLOR=always,
 converts the ANSI the compiler actually emitted, and writes a self-contained
-card next to this script. Nothing about the text is hand-edited — if a message
-changes, re-running this is the whole update, and a card that no longer matches
-the compiler is a bug in the card rather than something to patch by hand.
+card. Nothing about the text is hand-edited — if a message changes, re-running
+this is the whole update, and a card that no longer matches the compiler is a
+bug in the card rather than something to patch by hand.
+
+Output goes to a temp directory by default and is deliberately NOT committed:
+
+  - a generated file under `docs/` joins the published site's Pagefind search
+    index, so the cards' compiler-error text and this file's instructions would
+    turn up in site search results, and every regeneration would additionally
+    require rebuilding and committing that index
+    (`scripts/gen-docs-search-index.sh`);
+  - a committed rendering silently drifts from the compiler that produced it,
+    which is the exact failure this script exists to prevent.
+
+When the site embeds these, render them as part of the site build and index
+them deliberately.
 
 Sources live in ./src and are compiled from THAT directory, so the filename in
 the header stays short instead of an absolute path.
@@ -19,6 +30,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 SRC = HERE / "src"
@@ -124,7 +136,16 @@ PAGE = """<meta charset="utf-8">
 
 
 def main() -> int:
-    march = sys.argv[1] if len(sys.argv) > 1 else "march"
+    args = sys.argv[1:]
+    out_dir = pathlib.Path(tempfile.gettempdir()) / "march-error-cards"
+    if args and args[0] == "--out":
+        if len(args) < 2:
+            print("--out needs a directory", file=sys.stderr)
+            return 2
+        out_dir = pathlib.Path(args[1]).resolve()
+        args = args[2:]
+    march = args[0] if args else "march"
+    out_dir.mkdir(parents=True, exist_ok=True)
     for stem, tag, caption in CARDS:
         src = SRC / f"{stem}.march"
         if not src.exists():
@@ -141,9 +162,9 @@ def main() -> int:
             print(f"{stem}: compiler produced no diagnostic — the sample no "
                   f"longer demonstrates anything", file=sys.stderr)
             return 1
-        (HERE / f"{stem}.html").write_text(
+        (out_dir / f"{stem}.html").write_text(
             PAGE.format(tag=tag, body=ansi_to_html(raw), caption=caption))
-        print(f"wrote {stem}.html")
+        print(f"wrote {out_dir / (stem + '.html')}")
     return 0
 
 
