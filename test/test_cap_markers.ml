@@ -70,10 +70,42 @@ let test_marker_absent_for_unused_cap () =
   Alcotest.(check bool) "no IO.FileRead marker for a pure program" false
     (contains ir "@__march_cap_IO_FileRead")
 
+(* The hardest routing case: a builtin passed DIRECTLY as a first-class value,
+   never syntactically applied in the caller.  Codegen builds a
+   closure + $clo_wrap trampoline for it (fixed upstream in 57376dce, which
+   also fixed a SIGBUS here) — the marker must still be recorded, or a program
+   can perform a capability the audit never reports.  This is the routing that
+   defeated the call-site scanning approach entirely (design §3). *)
+let direct_pass_src =
+  {|
+mod MarkerDirectPassApp do
+  needs IO.FileRead
+
+  fn apply1(f : (String) -> a, p : String) : a do
+    f(p)
+  end
+
+  fn main() : () do
+    match apply1(file_read, "/etc/hosts") do
+      Ok(_)  -> println("ok")
+      Err(_) -> println("err")
+    end
+  end
+end
+|}
+
+let test_marker_for_directly_passed_builtin () =
+  let ir = emit_ir direct_pass_src in
+  Alcotest.(check bool)
+    "IO.FileRead marker emitted for a builtin passed as a bare value" true
+    (contains ir "@__march_cap_IO_FileRead")
+
 let tests =
   [
     Alcotest.test_case "marker emitted for used capability" `Slow
       test_marker_present_for_used_cap;
+    Alcotest.test_case "marker for directly-passed builtin value" `Slow
+      test_marker_for_directly_passed_builtin;
     Alcotest.test_case "no marker for unused capability" `Slow
       test_marker_absent_for_unused_cap;
   ]
