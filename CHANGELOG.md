@@ -13,6 +13,24 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A missing capability now shows the call chain from `main` that forced it.**
+  A capability is a property of a whole path, not of the single call that
+  happens to need it — `needs` has to be threaded through every function in
+  between — but the diagnostic named only the far end:
+
+  ```
+  call to `random_bytes` requires `needs IO.Random` — add `needs IO.Random` to module `CapErr`
+  reached from `main`: main → issue → make_token
+  ```
+
+  The chain crosses module boundaries (a qualified `M.f` resolves to the simple
+  name its definition declares) and terminates on recursive call graphs. It is
+  omitted rather than guessed when there is nothing to say: a library with no
+  `main`, a call sitting in `main` itself, or a callee reached only through a
+  function value. Because the edges are syntactic, the chain is a witness rather
+  than a proof — two modules defining the same function name share a node, so an
+  unusual program can get a plausible sibling in the path.
+
 - **An unverified refinement contract now says so, once per module.** March
   reports only definite failures — an obligation the solver cannot decide is
   accepted in silence, which is the right default (a false positive on correct

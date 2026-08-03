@@ -8627,6 +8627,99 @@ let check_cap_infer src =
   March_refinecheck.Cap_infer.check_module errors m;
   errors
 
+(* A capability is a property of the whole path from the entry point, not of the
+   one call that needs it: `needs` has to be threaded through every function in
+   between. The hint now shows that path. These tests pin both that it appears
+   and that it is OMITTED rather than guessed when there is nothing to show. *)
+let cap_hint_messages src =
+  let ctx = check_cap_infer src in
+  List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Hint
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
+let test_cap_chain_from_main () =
+  let hints = cap_hint_messages {|mod CapChain do
+    fn make_token() : String do
+      Bytes.to_string(random_bytes(16))
+    end
+    fn issue() : String do
+      make_token()
+    end
+    fn main() do
+      println(issue())
+    end
+  end|} in
+  Alcotest.(check bool) "a capability hint is emitted" true
+    (List.exists (fun h -> contains "IO.Random" h) hints);
+  Alcotest.(check bool) "the hint shows the path from main" true
+    (List.exists (fun h -> contains "main \xe2\x86\x92 issue \xe2\x86\x92 make_token" h) hints)
+
+(* The chain has to survive a module boundary — a qualified call `M.f` is one
+   EVar carrying the prefix, while graph nodes are keyed by the simple name a
+   definition declares. Unnormalised, the path breaks exactly at the boundary,
+   which is the case most worth explaining. *)
+let test_cap_chain_crosses_module_boundary () =
+  let hints = cap_hint_messages {|mod CapOuter do
+    mod Crypto do
+      fn token() : String do
+        Bytes.to_string(random_bytes(16))
+      end
+    end
+    fn issue() : String do
+      Crypto.token()
+    end
+    fn main() do
+      println(issue())
+    end
+  end|} in
+  Alcotest.(check bool) "the chain crosses into the nested module" true
+    (List.exists (fun h -> contains "main \xe2\x86\x92 issue \xe2\x86\x92 token" h) hints)
+
+let test_cap_chain_absent_without_main () =
+  (* A library has no entry point, so there is no chain to report — the hint
+     must still fire, just without inventing a path. *)
+  let hints = cap_hint_messages {|mod CapLib do
+    fn helper() : String do
+      Bytes.to_string(random_bytes(8))
+    end
+  end|} in
+  Alcotest.(check bool) "the capability is still reported" true
+    (List.exists (fun h -> contains "IO.Random" h) hints);
+  Alcotest.(check bool) "no chain is invented without an entry point" false
+    (List.exists (fun h -> contains "reached from" h) hints)
+
+let test_cap_chain_absent_when_call_is_in_main () =
+  (* Path of length one says nothing the span does not already say. *)
+  let hints = cap_hint_messages {|mod CapMain do
+    fn main() do
+      println(Bytes.to_string(random_bytes(8)))
+    end
+  end|} in
+  Alcotest.(check bool) "the capability is still reported" true
+    (List.exists (fun h -> contains "IO.Random" h) hints);
+  Alcotest.(check bool) "no trivial one-node chain" false
+    (List.exists (fun h -> contains "reached from" h) hints)
+
+let test_cap_chain_terminates_on_recursion =
+  (* A cycle in the call graph must not hang the BFS. Alcotest has no timeout,
+     so an infinite loop here would wedge the suite rather than fail it — which
+     is precisely why the visited set is worth a test. *)
+  fun () ->
+    let hints = cap_hint_messages {|mod CapRec do
+      fn loop_it(n : Int) : String do
+        if n <= 0 do
+          Bytes.to_string(random_bytes(4))
+        else
+          loop_it(n - 1)
+        end
+      end
+      fn start() : String do loop_it(3) end
+      fn main() do println(start()) end
+    end|} in
+    Alcotest.(check bool) "recursive call graph still yields a chain" true
+      (List.exists (fun h -> contains "main \xe2\x86\x92 start \xe2\x86\x92 loop_it" h) hints)
+
 let test_cap_infer_random_missing () =
   (* random_bytes without needs IO.Random → hint from cap_infer *)
   let ctx = check_cap_infer {|mod M do
@@ -11491,6 +11584,11 @@ let compiler_suites =
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
         ] );
       ( "cap_infer", [
+          Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;
+          Alcotest.test_case "cap chain crosses module boundary"            `Quick test_cap_chain_crosses_module_boundary;
+          Alcotest.test_case "cap chain omitted without main"               `Quick test_cap_chain_absent_without_main;
+          Alcotest.test_case "cap chain omitted when call is in main"       `Quick test_cap_chain_absent_when_call_is_in_main;
+          Alcotest.test_case "cap chain terminates on recursion"            `Quick test_cap_chain_terminates_on_recursion;
           Alcotest.test_case "random_bytes missing needs: hint emitted"     `Quick test_cap_infer_random_missing;
           Alcotest.test_case "random_bytes with needs IO.Random: no hint"   `Quick test_cap_infer_random_declared;
           Alcotest.test_case "file_write missing needs: hint emitted"       `Quick test_cap_infer_filewrite_missing;
