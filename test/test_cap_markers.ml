@@ -6,7 +6,15 @@
    every builtin unconditionally and must never produce markers (that would
    re-create the app-invariance trap, design §3). *)
 
+(* Exe-relative, for the same reason as test_cap_strip.ml: a CWD-relative
+   path returns 127 under dune's test runner. *)
+let compiler_exe =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
 let emit_ir src_text =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
   let src = Filename.temp_file "cap_marker" ".march" in
   let oc = open_out src in
   output_string oc src_text;
@@ -16,8 +24,8 @@ let emit_ir src_text =
   let ll = Filename.remove_extension src ^ ".ll" in
   let rc =
     Sys.command
-      (Printf.sprintf "./_build/default/bin/main.exe --emit-llvm %s > /dev/null 2>&1"
-         (Filename.quote src))
+      (Printf.sprintf "%s --emit-llvm %s > /dev/null 2>&1"
+         (Filename.quote compiler_exe) (Filename.quote src))
   in
   if rc <> 0 then Alcotest.failf "emit-llvm failed (rc=%d)" rc;
   let ic = open_in ll in

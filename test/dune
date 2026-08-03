@@ -46,10 +46,16 @@
 ; ── Parallel test runners (dune executes these concurrently) ─────────────
 ; -e: show test-case error details inline (no digging through log files).
 ; Run binaries directly for agent-safe, RPC-free execution: see scripts/run-tests.sh.
+; cap_strip / cap_markers shell out to the real compiler and inspect the
+; linked binary, so main.exe AND the staged runtime tree must exist before
+; this runner starts.  Without these deps the tests resolved nothing and
+; returned 127 in CI while passing locally (where the repo root happened to
+; be the CWD).
 (test
  (name run_compiler)
  (modules run_compiler)
  (libraries march_test_compiler alcotest)
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (run %{test} -e)))
 
 (test

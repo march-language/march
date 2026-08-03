@@ -11,9 +11,24 @@
    with nm, so they are tagged `Slow` (skipped by run-tests.sh -q), matching
    the existing compiled-adversarial-test convention. *)
 
-let compiler_exe = "./_build/default/bin/main.exe"
+(* Resolve the compiler relative to THIS executable, not the CWD: dune runs
+   test binaries from _build/default/test/, so a "./_build/..." path resolves
+   only when invoked from the repo root (it worked locally and returned 127 in
+   CI).  test/dune declares bin/main.exe as a dep of this runner, so a missing
+   binary is a real breakage — fail loudly rather than skip, which would make
+   every test here vacuously green. *)
+let compiler_exe =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
+let require_compiler () =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf
+      "compiler not found at %s — test/dune must declare bin/main.exe as a \
+       dep of run_compiler" compiler_exe
 
 let compile src_text out_bin =
+  require_compiler ();
   let src = Filename.temp_file "cap_strip" ".march" in
   let oc = open_out src in
   output_string oc src_text;
@@ -198,6 +213,7 @@ let binary_contains bin needle =
   !found
 
 let compile_sandboxed src_text out_bin =
+  require_compiler ();
   let src = Filename.temp_file "cap_sb" ".march" in
   let oc = open_out src in
   output_string oc src_text;
