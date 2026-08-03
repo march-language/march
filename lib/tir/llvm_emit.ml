@@ -483,18 +483,58 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     ("ptr", "@" ^ llvm_name v.Tir.v_name)
   | Tir.AVar v when is_builtin_fn v.Tir.v_name
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
-    (* Builtin function used as a first-class value (e.g. iolist_hash_fnv1a passed
-       to a HOF).  These map to C-runtime externs via mangle_extern — never in
-       var_slot or compiled_fns — so the alloca-bridge path would generate an
-       invalid "%builtin.addr" load.  Emit the mangled global address directly.
+    (* Builtin function used as a first-class value (e.g. iolist_hash_fnv1a
+       passed to a HOF, or `apply1(file_read, path)` binding the builtin to a
+       local that is later invoked via call_ptr).  A builtin is a C-runtime
+       extern with its own concrete ABI (raw ptr/i64/double args per
+       declare_sig, never the closure-dispatch calling convention) — so,
+       exactly like the top_fns TFn arm above, this MUST allocate a real
+       closure {header, fn_ptr} whose fn_ptr is a $clo_wrap trampoline
+       presenting the uniform-ptr ABI ECallPtr dispatch expects, coercing
+       to/from the builtin's real signature internally.  Emitting the bare
+       extern address here (as before) let a downstream call_ptr on the
+       let-bound local dispatch as a closure — loading a "field" off the
+       *code* address as if it were a heap closure header and jumping to
+       the garbage result — which SIGBUSed on
+       `apply1(file_read, "/etc/hosts")` (first-class builtin regression).
        A LOCAL binding whose name happens to collide with a builtin (e.g. a
        user variable named `link`, which is also the actor-linking builtin)
        lives in var_slot and must shadow the builtin — fall through to the
        local-load path so we load the local value instead of emitting the
-       runtime global @march_link.  (Without this guard the local `link` was
-       compiled as the global function pointer @march_link, then read as a
-       string → heap corruption / use-after-free.) *)
-    ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+       runtime global @march_link. *)
+    let fn_name = llvm_name (mangle_extern v.Tir.v_name) in
+    let wrap_name = fn_name ^ "$clo_wrap" in
+    if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
+      Hashtbl.add ctx.emitted_wraps wrap_name ();
+      let param_ltys =
+        match Llvm_builtins.builtin_param_llvm_tys v.Tir.v_name with
+        | Some ps -> ps
+        | None ->
+          (match v.Tir.v_ty with
+           | Tir.TFn (ps, _) -> List.map llvm_ty ps
+           | _ -> [])
+      in
+      let target_ret =
+        match builtin_ret_ty v.Tir.v_name with
+        | Some t -> llvm_ret_ty t
+        | None -> llvm_ret_ty (fn_ret_tir v.Tir.v_ty)
+      in
+      Buffer.add_string ctx.extra_fns
+        (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_ltys target_ret fn_name)
+    end;
+    if static_closure_ok ctx v.Tir.v_name then
+      ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
+    else begin
+      let hp = fresh ctx "cwrap" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
+      let tgp = fresh ctx "cwt" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tgp hp);
+      emit ctx (Printf.sprintf "store i32 0, ptr %s, align 4" tgp);
+      let fp = fresh ctx "cwf" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
+      emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+      ("ptr", hp)
+    end
   (* ── AVar with no registered alloca slot ────────────────────────── *)
   (* If var_slot has no entry for this name, there is no alloca in the
      current function — it cannot be a locally-bound variable.  This

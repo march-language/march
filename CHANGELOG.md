@@ -171,6 +171,18 @@ git log is authoritative for exact commits.
   `always_linear type`. Bindings whose linearity is only inferred are left
   uncolored rather than guessed at — under-reporting shows nothing, whereas
   over-reporting asserted a guarantee that was never made.
+
+- **A builtin passed as a first-class value (e.g. `apply1(file_read, path)`)
+  no longer SIGBUSes when compiled.** The codegen arm handling "builtin used
+  as a value" emitted the raw C-extern address instead of wrapping it in a
+  proper closure. Once that address was bound to a local, a later call
+  through it dispatched as if it were a heap closure struct — reading
+  garbage off the code address and jumping to it. Builtins used this way now
+  get the same closure + trampoline treatment as ordinary top-level
+  functions used as values, with the trampoline's argument/return coercions
+  sourced from the builtin's own C signature. Interpreted execution was
+  never affected.
+
 - **Interpreted `extern` calls no longer crash when an `Int` argument is even
   and at least 4096.** The post-call cleanup in the interpreter's FFI bridge
   decided which arguments to release by looking at the marshalled bit pattern.
