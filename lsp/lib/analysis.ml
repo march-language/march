@@ -74,7 +74,10 @@ type match_site = {
 (** What kind of annotation site this is. *)
 type annotation_kind =
   | AnnLet       (** let x = e  →  let x: T = e *)
-  | AnnFnReturn  (** fn foo(x) do e end  →  fn foo(x) -> T do e end *)
+  | AnnFnReturn  (** fn foo(x) do e end  →  fn foo(x) : T do e end.
+                     Not `-> T`: that is a parse error in March, and this
+                     comment described the arrow form for a while after the
+                     emitter itself was corrected (see the `: ` edit below). *)
   | AnnFnParam   (** fn foo(x) do e end  →  fn foo(x: T) do e end *)
 
 (** A site where a type annotation can be inserted. *)
