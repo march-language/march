@@ -6,8 +6,12 @@
 
 open March_forge
 
-let mk ?(caps = []) ?(markers = []) ?(rt_symbols = [])
+(* A current-compiler binary carries markers for the caps it holds; [markers]
+   defaults to [caps] so fixtures model that.  Pass ~markers:[] explicitly to
+   model a pre-marker or non-March binary. *)
+let mk ?(caps = []) ?markers ?(rt_symbols = [])
     ?(build = Cap_binary.Dead_stripped) () =
+  let markers = match markers with Some m -> m | None -> caps in
   { Cap_binary.caps; markers; rt_symbols; build; manifest = None }
 
 let test_deny_uses_lattice_subsumption () =
@@ -75,8 +79,25 @@ let test_foreign_is_not_gated_as_a_cap () =
   Alcotest.(check (list string)) "no denied-capability violation for IO.Foreign"
     [] vs
 
+let test_symbols_alone_never_certify () =
+  (* Regression: a real forgepm hot-reload .so carrying 79 of 82 cap symbols
+     and NO markers reported coverage:full — maximum false assurance on an
+     artifact whose symbol set says nothing about usage.  Without markers,
+     coverage must never be full, and the gate must fail closed. *)
+  let no_markers = mk ~caps:[ "IO.Console" ] ~markers:[] () in
+  Alcotest.(check bool) "gate fails closed without markers" true
+    (Cmd_cap.gate_violations ~deny:[] ~allow_only:None ~allow_foreign:false
+       no_markers
+    <> []);
+  Alcotest.(check bool) "--allow-foreign does not excuse missing markers" true
+    (Cmd_cap.gate_violations ~deny:[] ~allow_only:None ~allow_foreign:true
+       no_markers
+    <> [])
+
 let tests =
   [
+    Alcotest.test_case "symbols alone never certify full coverage" `Quick
+      test_symbols_alone_never_certify;
     Alcotest.test_case "deny uses lattice subsumption" `Quick
       test_deny_uses_lattice_subsumption;
     Alcotest.test_case "allow-only rejects outside set" `Quick

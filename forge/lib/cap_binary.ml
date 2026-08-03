@@ -149,22 +149,50 @@ let read path : (t, string) result =
                 syms
               |> List.sort_uniq String.compare
             in
-            let all_cap_syms = List.map fst March_caps.Cap_symbols.table in
-            let every_cap_sym_present =
-              List.for_all (fun s -> List.mem s rt_symbols) all_cap_syms
+            let all_cap_syms =
+              List.sort_uniq String.compare
+                (List.map fst March_caps.Cap_symbols.table)
+            in
+            let n_total = List.length all_cap_syms in
+            let n_present =
+              List.length (List.filter (fun s -> List.mem s rt_symbols) all_cap_syms)
+            in
+            (* Classification.  Markers are the only channel we can trust:
+               they are emitted from the symbols codegen actually resolved,
+               and pinned through dead-strip.  Raw symbol presence cannot
+               distinguish "stripped, genuinely uses this" from "linked whole".
+
+               An exact all-symbols-present test is far too brittle — a real
+               unstripped artifact measured 79/82 (a forgepm hot-reload .so;
+               only IO.Signal absent) and slipped through as Dead_stripped
+               with coverage:full.  Use a bulk-presence ratio instead, and
+               treat the absence of markers as itself disqualifying. *)
+            let bulk_cap_symbols =
+              n_total > 0 && n_present * 2 >= n_total (* >= 50% of the table *)
             in
             let build =
               if markers = [] && rt_symbols = [] then Symbols_removed
-              else if every_cap_sym_present then Unstripped
+              else if markers = [] then
+                (* No markers: either a pre-marker compiler, a non-March
+                   binary, or a .so (carved out of dead-strip).  Whether the
+                   symbol set reflects usage is unknowable — never certify. *)
+                if bulk_cap_symbols then Unstripped else Symbols_removed
+              else if bulk_cap_symbols then Unstripped
               else Dead_stripped
             in
             match build with
+            (* caps are reported SPECIFIC, not lattice-normalized.
+               normalize collapses IO.NetConnect.TLS/IO.NetListen/
+               IO.WebSocket under IO.Network, which for an audit destroys
+               exactly the information the reader wants ("does TLS and
+               listens on ports" >> "networking"), and orphans the witness
+               symbols of every collapsed cap.  Gate checks use
+               Cap_lattice.cap_subsumes and work on the specific set. *)
             | Unstripped ->
                 (* Reporting the full symbol set as "capabilities" would be
                    the app-invariance failure; report the build kind and no
                    cap list. Markers, if present, are still trustworthy. *)
-                Ok { caps = March_caps.Cap_lattice.normalize markers;
-                     markers; rt_symbols; build; manifest }
+                Ok { caps = markers; markers; rt_symbols; build; manifest }
             | Symbols_removed ->
                 Ok { caps = []; markers; rt_symbols; build; manifest }
             | Dead_stripped ->
@@ -175,5 +203,4 @@ let read path : (t, string) result =
                       rt_symbols
                     |> List.sort_uniq String.compare
                 in
-                Ok { caps = March_caps.Cap_lattice.normalize caps;
-                     markers; rt_symbols; build; manifest }))
+                Ok { caps; markers; rt_symbols; build; manifest }))

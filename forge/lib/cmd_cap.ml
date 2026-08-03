@@ -360,8 +360,15 @@ let coverage_of (t : Cap_binary.t) =
   | Cap_binary.Unstripped -> `Limited "unstripped build"
   | Cap_binary.Symbols_removed -> `Limited "symbols removed"
   | Cap_binary.Dead_stripped ->
-    if List.exists is_foreign t.Cap_binary.caps
-    then `Partial "foreign code"
+    if List.exists is_foreign t.Cap_binary.caps then `Partial "foreign code"
+    else if t.Cap_binary.markers = [] then
+      (* Symbols alone never certify.  Raw symbol presence cannot separate
+         "stripped, genuinely uses this" from "linked whole by a compiler
+         that predates markers" — measured on a real artifact carrying 79 of
+         82 cap symbols while reporting coverage:full.  Only markers, emitted
+         from the symbols codegen resolved and pinned through dead-strip,
+         support a full-coverage claim. *)
+      `Limited "no capability markers (pre-marker compiler, or not a March binary)"
     else `Full
 
 let coverage_str = function
