@@ -6786,6 +6786,57 @@ let code_actions_at (a : t) ~line ~character
         end
       ) a.match_sites
   in
+  (* ---- Suggest-a-refinement action ----
+
+     Offered on a function's own name, for any function with an annotated,
+     not-yet-refined parameter.  This test is deliberately syntactic and
+     solver-free: computing the actual suggestion costs a full checked module
+     plus a series of Z3 queries, which is far too much to spend on every
+     cursor movement.  So the action carries a COMMAND rather than an edit —
+     the server runs the inference only once the user picks it, and applies the
+     result via workspace/applyEdit.  See [March_refinecheck.Precond_infer] for
+     the inference and server.ml's `march.suggestRefinement` for the handler. *)
+  let refine_actions =
+    let refinable (fd : Ast.fn_def) =
+      List.exists
+        (fun (c : Ast.fn_clause) ->
+          List.exists
+            (function
+              | Ast.FPNamed { Ast.param_ty = Some t; _ }
+              | Ast.FPDefault ({ Ast.param_ty = Some t; _ }, _) ->
+                (match t with Ast.TyRefine _ -> false | _ -> true)
+              | _ -> false)
+            c.Ast.fc_params)
+        fd.Ast.fn_clauses
+    in
+    let rec collect prefix (decls : Ast.decl list) =
+      List.concat_map
+        (function
+          | Ast.DFn (fd, _) ->
+            let sp = fd.Ast.fn_name.Ast.span in
+            if Pos.span_contains sp ~line ~character && refinable fd then
+              [ (if prefix = "" then fd.Ast.fn_name.Ast.txt
+                 else prefix ^ "." ^ fd.Ast.fn_name.Ast.txt) ]
+            else []
+          | Ast.DMod (n, _, inner, _) ->
+            collect
+              (if prefix = "" then n.Ast.txt else prefix ^ "." ^ n.Ast.txt)
+              inner
+          | _ -> [])
+        decls
+    in
+    List.map
+      (fun qname ->
+        CodeAction.create
+          ~title:(Printf.sprintf "Suggest a refinement type for `%s`" qname)
+          ~kind:CodeActionKind.RefactorRewrite
+          ~command:
+            (Command.create ~title:"Suggest a refinement type"
+               ~command:"march.suggestRefinement"
+               ~arguments:[ `String a.filename; `String qname ] ())
+          ())
+      (collect "" a.decls)
+  in
   (* ---- Add-type-annotation actions (P1.7 enhanced) ---- *)
   (* Look up the smallest type_map entry containing a point. *)
   let type_at_point rhs_sp =
@@ -7495,6 +7546,7 @@ let code_actions_at (a : t) ~line ~character
   @ registry_actions
   @ html_close_actions
   @ parallelize_actions
+  @ refine_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->

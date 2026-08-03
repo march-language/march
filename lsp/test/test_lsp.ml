@@ -3087,6 +3087,54 @@ end
   in
   Alcotest.(check bool) "parallelizable hint present in diagnostics" true has_hint
 
+(* ── "Suggest a refinement type" code action ────────────────────────────── *)
+
+(* The action must be a COMMAND, not an edit: computing the actual suggestion
+   costs a checked module plus Z3 queries, which cannot run on every cursor
+   movement.  An action carrying an `edit` here would mean that work had been
+   done eagerly. *)
+let refine_action_at src needle =
+  let a = analyse src in
+  let (line, col) = pos_of src needle in
+  An.code_actions_at a ~line ~character:col ()
+  |> List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+         match ca.Lsp.Types.CodeAction.command with
+         | Some c -> c.Lsp.Types.Command.command = "march.suggestRefinement"
+         | None -> false)
+
+let test_refine_action_offered_on_annotated_param () =
+  let src = {|
+mod RA do
+  fn split(xs : List(Int), n : Int) : Int do
+    n
+  end
+end
+|} in
+  match refine_action_at src "split" with
+  | None -> Alcotest.fail "expected a suggestRefinement action on `split`"
+  | Some ca ->
+    Alcotest.(check bool) "carries no eager edit" true
+      (ca.Lsp.Types.CodeAction.edit = None);
+    (match ca.Lsp.Types.CodeAction.command with
+     | Some c ->
+       Alcotest.(check int) "command carries file and fn" 2
+         (List.length (Option.value ~default:[] c.Lsp.Types.Command.arguments))
+     | None -> Alcotest.fail "expected a command")
+
+(* Every parameter already refined → nothing to propose, so the action must not
+   appear.  Offering it anyway would spend a full checked module and a Z3 run to
+   report "nothing to do". *)
+let test_refine_action_absent_when_all_params_refined () =
+  let src = {|
+mod RB do
+  fn only(n : {Int | _ > 0}) : Int do
+    n
+  end
+end
+|} in
+  Alcotest.(check bool) "no action when every param is refined" true
+    (refine_action_at src "only" = None)
+
 let test_perf_parallelizable_code_action () =
   let src = {|
 mod Test do
@@ -6437,6 +6485,10 @@ let () =
       "List.fold_left never flagged",                 `Quick, test_perf_parallelizable_fold_not_flagged;
       "parallelizable hint in diagnostics",           `Quick, test_perf_parallelizable_hint_in_diagnostics;
       "convert-to-pmap code action",                  `Quick, test_perf_parallelizable_code_action;
+    ];
+    "suggest-refinement code action", [
+      "offered on a function with an annotated param", `Quick, test_refine_action_offered_on_annotated_param;
+      "absent when every param is already refined",    `Quick, test_refine_action_absent_when_all_params_refined;
     ];
     "perf insights phase 2: indirect calls + recursive alloc", [
       "calling a parameter is indirect",              `Quick, test_perf_indirect_call_on_param;

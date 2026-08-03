@@ -13,6 +13,35 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge refine <fn>`: suggest a refinement type.** Proposes the parameter
+  refinement that discharges the obligations a function's body leaves
+  unproven — `n : Int` → `n : {Int | _ > 0}` when `n` reaches a callee that
+  requires a positive argument. Prints by default; `--apply` writes the
+  annotation into the source, and `--all` sweeps the whole project. The
+  editor gets the same thing as a "Suggest a refinement type for `f`" code
+  action on the function's name.
+
+  A suggestion is only made when the refinement checker itself proves the
+  obligations under it: each candidate is hypothesised onto the signature and
+  the real checker is re-run, so `march check` after `--apply` agrees with
+  what was printed. Where several candidates work, the **weakest** is proposed
+  — a divisor contract comes back as `_ != 0`, not `_ > 0`, so the suggestion
+  does not silently reject callers the function would have accepted. Where
+  nothing works, the command says so rather than going quiet: `no-debt`,
+  `no-candidate`, and a partial discharge are distinct outcomes.
+
+  It also declines to propose a contract that contradicts the function: a
+  `_safe` wrapper handling `Nil -> Err(...)` is left alone, because forbidding
+  the empty list would kill the branch the author wrote on purpose — while a
+  branch that *panics* still gets the contract, since converting that panic to
+  a compile error is the point. A sweep over all 112 stdlib modules is what
+  found this; without the guard, three of its four suggestions were of that
+  wrong shape.
+
+  Also exposed on the compiler as `march --refine-suggest <fn>`,
+  `--refine-suggest-all`, and `--refine-suggest-json`. Needs Z3, like the rest
+  of refinement checking.
+
 - `forge search --callers NAME`: reverse-reference search — find every
   resolved call, constructor use, or qualified type reference to a
   declaration, using the typechecker's own name resolution (not textual
@@ -142,6 +171,20 @@ git log is authoritative for exact commits.
   `always_linear type`. Bindings whose linearity is only inferred are left
   uncolored rather than guessed at — under-reporting shows nothing, whereas
   over-reporting asserted a guarantee that was never made.
+- **Interpreted `extern` calls no longer crash when an `Int` argument is even
+  and at least 4096.** The post-call cleanup in the interpreter's FFI bridge
+  decided which arguments to release by looking at the marshalled bit pattern.
+  `Int` arguments are marshalled untagged, so any even value at or above the
+  runtime's `IS_HEAP_PTR` floor was indistinguishable from a pointer and got
+  reference-count-decremented as though it were a heap object — dereferencing
+  the integer and segfaulting. The bridge now tracks whether marshalling
+  actually allocated each argument and drops only those. This mainly hit
+  file-I/O externs, whose arguments are chunk sizes (`4096`, `65536`, …) and
+  native handles cast to `Int`; an extern taking only `0`/`1` flags could
+  never trip it. Because `forge test --coverage` runs on the interpreter, it
+  showed up as coverage "breaking" on FFI file operations — but the crash was
+  present with plain `MARCH_TEST_INTERPRETER=1` too and had nothing to do with
+  coverage instrumentation.
 
 - **Six stdlib modules (`ConsistentHash`, `WorkDispatch`, `RingBuf`,
   `Compress`, `DistLink`, `DistSupervisor`) no longer silently return garbage

@@ -977,6 +977,110 @@ let print_refine_report ~filename ~user_files () =
   let user_obligations = List.filter (fun (o : March_refinecheck.Obligation.t) -> is_user_span o.span) all_obligations in
   print_block "user code" user_obligations;
   print_block "user + stdlib" all_obligations
+
+(* --refine-suggest <FN> / --refine-suggest-all: propose the parameter
+   refinement that discharges what a function's body leaves unproven.
+   See lib/refinecheck/precond_infer.ml for the inference itself; this is
+   only the reporting surface (`forge refine` consumes the JSON form). *)
+let refine_suggest_target = ref None   (* Some fn-name (possibly qualified) *)
+let refine_suggest_all    = ref false
+let refine_suggest_json   = ref false
+let refine_suggest_budget = ref March_refinecheck.Precond_infer.default_budget
+
+let refine_suggest_active () =
+  !refine_suggest_target <> None || !refine_suggest_all
+
+let json_escape s =
+  let b = Buffer.create (String.length s + 8) in
+  String.iter
+    (fun c ->
+      match c with
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | '\n' -> Buffer.add_string b "\\n"
+      | c when Char.code c < 0x20 ->
+        Buffer.add_string b (Printf.sprintf "\\u%04x" (Char.code c))
+      | c -> Buffer.add_char b c)
+    s;
+  Buffer.contents b
+
+let print_refine_suggestions ~filename ~user_files desugared =
+  let module PI = March_refinecheck.Precond_infer in
+  let is_user (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || List.mem f user_files
+  in
+  let root = Sys.getcwd () in
+  let budget = !refine_suggest_budget in
+  let results =
+    if !refine_suggest_all then PI.suggest_all ~root ~budget ~is_user desugared
+    else
+      match !refine_suggest_target with
+      | None -> []
+      | Some target -> PI.suggest ~root ~budget ~is_user ~target desugared
+  in
+  if !refine_suggest_json then begin
+    let sug_json (s : PI.suggestion) =
+      Printf.sprintf
+        {|{"param":"%s","base":"%s","predicate":"%s","discharged":%d,"annotation":"{%s | %s}"}|}
+        (json_escape s.PI.sg_param) (json_escape s.PI.sg_base)
+        (json_escape s.PI.sg_pred) s.PI.sg_discharged
+        (json_escape s.PI.sg_base) (json_escape s.PI.sg_pred)
+    in
+    let one (r : PI.t) =
+      Printf.sprintf
+        {|{"fn":"%s","file":"%s","line":%d,"col":%d,"status":"%s","debt_before":%d,"debt_after":%d,"queries":%d,"suggestions":[%s]}|}
+        (json_escape r.PI.rs_fn)
+        (json_escape r.PI.rs_span.March_ast.Ast.file)
+        r.PI.rs_span.March_ast.Ast.start_line
+        r.PI.rs_span.March_ast.Ast.start_col
+        (PI.status_name r.PI.rs_status)
+        r.PI.rs_debt_before r.PI.rs_debt_after r.PI.rs_queries
+        (String.concat "," (List.map sug_json r.PI.rs_suggestions))
+    in
+    Printf.printf "{\"suggestions\":[%s]}\n%!"
+      (String.concat "," (List.map one results))
+  end
+  else begin
+    (* Human form.  Only the CHANGED parameters are re-spelled: rendering a
+       whole signature would need a full type printer whose only job is to be
+       wrong about the one type it cannot spell. *)
+    List.iter
+      (fun (r : PI.t) ->
+        match r.PI.rs_status with
+        | PI.Not_found ->
+          Printf.printf "no user function named `%s`\n" r.PI.rs_fn
+        | PI.No_debt ->
+          Printf.printf "%s: nothing to prove — every obligation in this body is already discharged\n"
+            r.PI.rs_fn
+        | PI.No_candidate ->
+          Printf.printf
+            "%s: %d unproven obligation(s), but no candidate refinement discharges any of them\n"
+            r.PI.rs_fn r.PI.rs_debt_before
+        | PI.Budget_exhausted ->
+          Printf.printf
+            "%s: search stopped at the probe budget with %d obligation(s) still unproven — \
+             re-run with a larger --refine-suggest-budget\n"
+            r.PI.rs_fn r.PI.rs_debt_after
+        | PI.Solved | PI.Partial ->
+          Printf.printf "%s (%s:%d)\n" r.PI.rs_fn
+            r.PI.rs_span.March_ast.Ast.file r.PI.rs_span.March_ast.Ast.start_line;
+          List.iter
+            (fun (s : PI.suggestion) ->
+              Printf.printf "    %s : %s  ->  %s : {%s | %s}\n" s.PI.sg_param
+                s.PI.sg_base s.PI.sg_param s.PI.sg_base s.PI.sg_pred)
+            r.PI.rs_suggestions;
+          if r.PI.rs_status = PI.Solved then
+            Printf.printf "  discharges all %d unproven obligation(s)\n"
+              r.PI.rs_debt_before
+          else
+            Printf.printf "  discharges %d of %d; %d still unproven\n"
+              (r.PI.rs_debt_before - r.PI.rs_debt_after)
+              r.PI.rs_debt_before r.PI.rs_debt_after)
+      results;
+    if results = [] then Printf.printf "no suggestions\n"
+  end
+
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
 let debug_mode     = ref false
@@ -1612,7 +1716,13 @@ let compile filename =
      This fires for both --check (exit 0) and --compile (copy + exit 0).
      Moving it before the parse+resolve pipeline saves ~0.25s on cache hits. *)
   let early_cas =
-    if not !do_compile && not !do_check then None
+    (* An artifact hit exits BEFORE the refinement passes run, so any flag whose
+       whole output comes from those passes must suppress the early exit or it
+       silently prints nothing on a warm cache — which is exactly how
+       --refine-report came to look broken.  Correctness of a diagnostic flag
+       beats a cache hit on the run that asked for the diagnostic. *)
+    if refine_suggest_active () || !refine_report then None
+    else if not !do_compile && not !do_check then None
     else begin
       let buf = Buffer.create (256 * 1024) in
       Buffer.add_string buf src;
@@ -1864,6 +1974,11 @@ let compile filename =
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
+  (* Precondition suggestion.  Must follow the report: every hypothesis probe
+     resets the obligation ledger, so a report printed after this one would
+     describe the last hypothesis rather than the program. *)
+  if refine_suggest_active () then
+    print_refine_suggestions ~filename ~user_files desugared;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
@@ -3881,6 +3996,14 @@ let () =
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
+    ("--refine-suggest", Arg.String (fun s -> refine_suggest_target := Some s),
+     "<fn>  Propose the parameter refinement that discharges what <fn>'s body leaves unproven");
+    ("--refine-suggest-all", Arg.Set refine_suggest_all,
+     " Propose parameter refinements for every function in user code that has unproven obligations");
+    ("--refine-suggest-json", Arg.Set refine_suggest_json,
+     " Emit --refine-suggest results as JSON on stdout (for tooling such as forge refine)");
+    ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
+     "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");

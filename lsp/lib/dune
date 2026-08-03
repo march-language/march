@@ -14,6 +14,7 @@
   march_refactor
   march_tir
   march_cas
+  yojson
   linol.lsp
   linol
   linol-lwt

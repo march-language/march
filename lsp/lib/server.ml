@@ -430,7 +430,8 @@ class march_server =
         ServerCapabilities.executeCommandProvider =
           Some (Lsp.Types.ExecuteCommandOptions.create
                   ~commands:[ "march.runTest"; "march.debugTest";
-                              "march.run";     "march.debug" ] ());
+                              "march.run";     "march.debug";
+                              "march.suggestRefinement" ] ());
         (* Auto-close HTML tags inside ~H sigils when the user types '>'. *)
         ServerCapabilities.documentOnTypeFormattingProvider =
           Some (Lsp.Types.DocumentOnTypeFormattingOptions.create
@@ -674,7 +675,7 @@ class march_server =
     (* Semantic tokens (full) — dispatched via on_unknown_request     *)
     (* -------------------------------------------------------------- *)
 
-    method on_unknown_request ~notify_back:_ ~server_request:_ ~id:_ meth params =
+    method on_unknown_request ~notify_back ~server_request:_ ~id:_ meth params =
       (* ---- helpers ---- *)
       let get_td_uri () =
         match params with
@@ -1190,6 +1191,36 @@ class march_server =
             (c, a)
           | _ -> ("", [])
         in
+        (* Refinement inference is far too expensive to run while building the
+           code-action list, so that action carries a COMMAND and the work
+           happens here, once, after the user picks it.  The inference itself
+           lives in the compiler (`march --refine-suggest`) because it needs a
+           fully resolved, typechecked module — the same reason `forge refine`
+           shells out.  The edit goes back through workspace/applyEdit so it
+           lands in the user's BUFFER; writing the file underneath an editor
+           with unsaved changes would lose their work. *)
+        if command = "march.suggestRefinement" then
+          match args with
+          | [ `String file; `String fn ] ->
+            let (payload, edit) = Refine_command.run ~file ~fn in
+            (match edit with
+             | None -> Lwt.return payload
+             | Some we ->
+               Lwt.bind
+                 (notify_back#send_request
+                    (Lsp.Server_request.WorkspaceApplyEdit
+                       (Lsp.Types.ApplyWorkspaceEditParams.create ~edit:we
+                          ~label:"Suggest a refinement type" ()))
+                    (fun _ -> Lwt.return ()))
+                 (fun _ -> Lwt.return payload))
+          | _ ->
+            Lwt.return
+              (`Assoc
+                [ ("status", `String "error");
+                  ("kind", `String "suggestRefinement");
+                  ("message",
+                   `String "march.suggestRefinement expects [file, function]") ])
+        else
         let result =
           match Analysis.resolve_lens_command ~command ~args with
           | Analysis.RunShell { description; shell } ->
