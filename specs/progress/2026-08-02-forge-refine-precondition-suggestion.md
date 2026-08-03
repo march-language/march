@@ -110,12 +110,15 @@ PANICKING, still propose — converting that panic into a compile error is the e
 and a guard that suppressed those would over-correct while looking like an improvement.
 Both directions are pinned by tests.
 
-The real fix is in the checker (`specs/todos/2026-08-02-match-arm-does-not-refute-a-measure-fact.md`):
-with arm-exclusion propagating to the `len` measure, those five functions have no debt and
-there is nothing to suppress.
+The real fix was in the checker, and it landed:
+`specs/progress/2026-08-03-match-arm-exclusion-refutes-a-measure-fact.md`. With
+arm-exclusion propagating to the `len` measure, four of those five functions have no debt
+at all and there is nothing to suppress — a post-fix sweep of the stdlib returns zero
+suggestions. The guard stays, because it is cheap and covers shapes the checker fix does
+not reach.
 
 Also learned: contracts propagate one call hop per round, so `--all --apply` must be run to
-a fixpoint (three rounds on the 7-case project). Worth a `--fixpoint` flag.
+a fixpoint (three rounds on the 7-case project). Now built as `--fixpoint`.
 
 ## Two traps hit on the way
 
@@ -129,17 +132,22 @@ a fixpoint (three rounds on the 7-case project). Worth a `--fixpoint` flag.
    by `test_precond_infer_candidate_text_matches_ast`, which parses every candidate's text
    through the real parser and compares it structurally to the AST.
 
-## Known gap (checker, not tool)
+## Known gap at the time — since fixed
 
 ```march
 fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do … end
 fn pick(xs : List(Int), i : Int) : Int do at(xs, i) end
 ```
 
-`pick` reports `no-candidate`. Writing the ideal contract on `pick` **by hand** leaves the
-obligation `solver-undecided` too, so this is a `Refine_check` incompleteness in
-propagating a caller's `len(xs)` fact to a callee's `len`-bearing precondition — the tool
-is correctly declining to propose a contract that would not help. Worth its own todo.
+`pick` reported `no-candidate`, and writing the ideal contract by hand left the obligation
+`solver-undecided` too — so the tool was correctly declining to propose something that
+would not have helped.
+
+Filed as a `len`-propagation bug, which measurement then refuted: `len` was incidental. A
+caller's promise was dropped whenever it mentioned **any** name other than its own subject,
+measure or not. Fixed in
+`specs/progress/2026-08-03-caller-refinement-survives-mentioning-another-name.md`;
+`forge refine pick` now proposes `{Int | _ >= 0 && _ < len(xs)}`.
 
 ## Tests
 

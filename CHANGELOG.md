@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- `forge refine --fixpoint` (with `--apply`): repeat until a round applies
+  nothing. A contract only becomes visible to a caller once the callee carries
+  it, so each round propagates exactly one call hop. Bounded at 10 rounds, and
+  hitting that bound is reported as its own outcome rather than passed off as
+  convergence.
+
 - **`forge refine <fn>`: suggest a refinement type.** Proposes the parameter
   refinement that discharges the obligations a function's body leaves
   unproven — `n : Int` → `n : {Int | _ > 0}` when `n` reaches a callee that
@@ -171,6 +177,29 @@ git log is authoritative for exact commits.
   `always_linear type`. Bindings whose linearity is only inferred are left
   uncolored rather than guessed at — under-reporting shows nothing, whereas
   over-reporting asserted a guarantee that was never made.
+- **A `match` arm now knows what the earlier arms excluded.** In the safe-wrapper
+  idiom — `match xs do Nil -> Err(…) | _ -> Ok(mean(xs)) end` — the `_` arm could
+  not see that `Nil` had been ruled out, so a `len(_) > 0` precondition in it
+  never discharged. Every such wrapper in a standard library carried permanent
+  unprovable debt, and worse, `forge refine` could "fix" it by proposing
+  `{List(a) | len(_) > 0}` — forbidding the exact input the function exists to
+  accept. Reaching a later arm now contributes `not is_Ctor(s)` for each earlier
+  arm whose failure is decided purely by the tag, and a tag test on a list is
+  translated onto the same length symbol the obligation uses
+  (`is_Nil(xs) <-> len(xs) = 0`).
+
+  An earlier arm licenses nothing if it carries a guard or a refutable
+  sub-pattern, since either can fail with the tag still matching. `stats.march`
+  goes from 0 to 4 proved; the one function that still abstains is the one
+  needing `len > 1`, which these facts genuinely do not give.
+
+- **`Logger.random_hex` no longer drops the contract it forwards into.** A
+  private wrapper passed its argument straight to `Crypto.random_hex`, whose
+  parameter is `{Int | _ >= 0}`, without carrying that requirement — so every
+  caller of the wrapper went unchecked. Found by `forge refine` sweeping the
+  stdlib.
+
+
 - **Every LSP command was dead code; `workspace/executeCommand` is now
   dispatched.** The handler sat in `on_unknown_request`, but linol routes that
   method as a *known* client request to `on_req_execute_command`, which the
@@ -181,17 +210,6 @@ git log is authoritative for exact commits.
   through `workspace/applyEdit`, so it lands in the buffer rather than on disk.
   Found by driving the real binary over stdio, which is the only place a command
   is observable; guarded by a protocol-level regression test.
-
-- **A function's own parameter refinement no longer vanishes when it mentions
-  another name.** `fn pick(n : Int, i : {Int | _ < n})` calling `at(n, i)` left
-  its precondition unproven: the assumption-side resolver mapped every name that
-  was not the refinement's own subject to nothing, and one such name discarded
-  the entire predicate, so the verification condition consisted of its negated
-  goal and nothing else. The identical fact arriving as a path guard
-  (`if i < n do at(n, i)`) proved, which is what localised the defect to the
-  channel rather than the solver. Cross-parameter and measure-bearing contracts —
-  `{Int | _ >= 0 && _ < len(xs)}`, the canonical bounds contract — now forward
-  through a call.
 
 - **A builtin passed as a first-class value (e.g. `apply1(file_read, path)`)
   no longer SIGBUSes when compiled.** The codegen arm handling "builtin used
@@ -218,6 +236,26 @@ git log is authoritative for exact commits.
   showed up as coverage "breaking" on FFI file operations — but the crash was
   present with plain `MARCH_TEST_INTERPRETER=1` too and had nothing to do with
   coverage instrumentation.
+- **A function's own parameter refinement no longer vanishes when it mentions
+  another name.** `fn pick(n : Int, i : {Int | _ < n})` calling `at(n, i)` left
+  its precondition unproven: the assumption-side resolver mapped every name that
+  was not the refinement's own subject to nothing, and one such name discarded
+  the entire predicate, so the verification condition consisted of its negated
+  goal and nothing else. The identical fact arriving as a path guard
+  (`if i < n do at(n, i)`) proved, which is what localised the defect to the
+  channel rather than the solver. Cross-parameter and measure-bearing contracts —
+  `{Int | _ >= 0 && _ < len(xs)}`, the canonical bounds contract — now forward
+  through a call.
+
+  Making those promises live exposed a shadowing hole in the same change: a
+  promise mentioning a name that is later rebound (`let n = 0`) would attach the
+  stale fact to the new binding and unsoundly discharge the call. Scope entries
+  are now retired when their predicate mentions a rebound name, not only when
+  their own name is rebound.
+
+  Checked for the failure mode that matters: 0 refinement violations across all
+  112 stdlib modules and 0 on a 43-file external project, so no correct code
+  started failing.
 
 - **Six stdlib modules (`ConsistentHash`, `WorkDispatch`, `RingBuf`,
   `Compress`, `DistLink`, `DistSupervisor`) no longer silently return garbage

@@ -1039,6 +1039,40 @@ fn f(x : Option(Int)) : Int do
 end
 ```
 
+Later arms also learn what the earlier ones ruled out. Reaching an arm means
+every arm above it failed to match, so for each of those whose failure is decided
+purely by the tag, the scrutinee is known *not* to carry it:
+
+```march
+fn mean_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  Nil -> Err("empty")
+  _   -> Ok(mean(xs))   -- `mean` needs len > 0; the `_` arm has it
+  end
+end
+```
+
+For a **list**, a tag test is a statement about length — `is_Nil(xs)` means
+`len(xs) = 0` and `is_Cons(xs)` means `len(xs) > 0` — so the exclusion above
+discharges a `len`-bearing precondition directly. This is what makes the
+safe-wrapper idiom check out; before 2026-08-03 it could not, and every such
+function carried permanently unprovable debt.
+
+An earlier arm licenses **nothing** if it carries a guard or a refutable
+sub-pattern, because either can fail with the tag still matching:
+`Cons(0, _)` does not match `Cons(1, [])`, which is nonetheless a `Cons`, and
+`Nil when flag` fails whenever `flag` is false. So
+
+```march
+match xs do
+Nil -> Err(…)
+Cons(_, Nil) -> Err("need at least 2")
+_ -> Ok(std_dev(xs))     -- knows only len > 0, NOT len > 1
+end
+```
+
+still abstains on a `len > 1` requirement, which is the honest answer.
+
 Narrowing is deliberately conservative, and where it stops is where the checker
 goes quiet rather than guessing:
 
@@ -1667,6 +1701,14 @@ edges:
   code and its obligation is discharged against an unsatisfiable path. This is
   expected and safe-direction — the call can never execute with a violating
   value — not a gap in checking.
+- **A caller's own contract forwards through a call, including when it mentions
+  another parameter.** `fn pick(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)})`
+  calling `at(xs, i)` — where `at` declares the same contract — *proves*. Until
+  2026-08-03 it did not: the assumption side mapped every name that was not the
+  refinement's own subject to nothing, and a single such name discarded the whole
+  predicate, so the call was silently unchecked. A promise is retired when any
+  name it mentions is rebound between the parameter and the call, so a shadowed
+  name never lends its fact to a new binding.
 - **A local `let` does not carry a fact forward, for any type.** The pass
   propagates no local binding's value into a later goal, so `let u = 5` then
   `take_pos(u)` against `{Int | _ > 0}` is skipped, and the `List` analogue
