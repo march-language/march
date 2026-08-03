@@ -3194,27 +3194,36 @@ end
 (* Phase 3: TIR pipeline tests                                         *)
 (* ------------------------------------------------------------------ *)
 
-(** Test 1: run_tir_pass does not crash on clean source. *)
+(** Test 1: run_tir_pass produces insights on clean source.
+
+    This test used to assert [List.length ... >= 0], which is true of every
+    list, over a source written with `-> Int` return syntax that March does not
+    accept. So it proved nothing twice over: the pipeline bailed out on the
+    parse error and returned the analysis untouched, and the assertions would
+    have held even then. It now uses parseable source that allocates (so the
+    pipeline has something to report) and asserts insights actually arrived. *)
 let test_tir_pass_does_not_crash () =
   let src = {|
 mod Test do
-  fn double(x: Int) -> Int do
-    x * 2
+  fn build(n : Int) : List(Int) do
+    Cons(n, Cons(n + 1, Nil))
   end
 
-  fn main() -> Int do
-    double(21)
+  fn main() : Int do
+    List.length(build(1))
   end
 end
 |} in
   let a = analyse src in
+  Alcotest.(check bool) "source typechecks (guards vacuity)" false
+    (List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+         d.severity = Some Lsp.Types.DiagnosticSeverity.Error) a.An.diagnostics);
   let a2 = An.run_tir_pass a in
-  (* The key invariant: tir_fn_insights and code_lens_items are lists
-     (may be empty for trivial functions with no interesting TIR nodes). *)
-  Alcotest.(check bool) "tir_fn_insights is a list" true
-    (List.length a2.An.tir_fn_insights >= 0);
-  Alcotest.(check bool) "code_lens_items is a list" true
-    (List.length a2.An.code_lens_items >= 0)
+  Alcotest.(check bool) "the TIR pass produced per-function insights" true
+    (a2.An.tir_fn_insights <> []);
+  Alcotest.(check bool) "every insight names a function" true
+    (List.for_all (fun (tfi : An.tir_fn_insight) ->
+         String.length tfi.An.tfi_fn_name > 0) a2.An.tir_fn_insights)
 
 (* ------------------------------------------------------------------ *)
 (* Consuming-call inlay hints                                          *)
@@ -3303,30 +3312,47 @@ end|} in
   Alcotest.(check bool) "no consumed hint on a literal argument" false
     (List.exists (fun s -> s = "⊗ consumed") labels)
 
-(** Test 2: run_tir_pass is idempotent (running twice gives same result). *)
+(** Test 2: run_tir_pass is idempotent (running twice gives the same result).
+
+    Previously written with `-> Int` and `[x, ..rest]`, neither of which parses,
+    so both passes ran on a failed analysis and returned it unchanged — two
+    empty results compare equal, which is how the old bound (`<= n + 3`) held.
+    Now the source parses and the check is equality, not a slack bound: a second
+    pass must add nothing at all. *)
 let test_tir_pass_idempotent () =
   let src = {|
 mod Test do
-  fn sum(xs: List(Int), acc: Int) -> Int do
+  fn sum(xs : List(Int), acc : Int) : Int do
     match xs do
-      [] -> acc
-      [x, ..rest] -> sum(rest, acc + x)
+      Nil -> acc
+      Cons(x, rest) -> sum(rest, acc + x)
     end
+  end
+
+  fn main() : Int do
+    sum(Cons(1, Cons(2, Nil)), 0)
   end
 end
 |} in
   let a = analyse src in
   let a2 = An.run_tir_pass a in
+  Alcotest.(check bool) "first pass produced insights (guards vacuity)" true
+    (a2.An.tir_fn_insights <> []);
   let a3 = An.run_tir_pass a2 in
-  (* Perf insights should not double-accumulate on a second pass *)
-  Alcotest.(check bool) "insights do not double on second pass" true
-    (List.length a3.An.perf_insights <= List.length a2.An.perf_insights + 3)
+  Alcotest.(check int) "perf insights do not accumulate on a second pass"
+    (List.length a2.An.perf_insights) (List.length a3.An.perf_insights);
+  Alcotest.(check int) "fn insights are stable across passes"
+    (List.length a2.An.tir_fn_insights) (List.length a3.An.tir_fn_insights)
 
 (** Test 3: run_tir_pass on source with errors returns analysis unchanged. *)
 let test_tir_pass_skipped_on_error () =
+  (* The error must be the one this test is about — an unresolved name — not an
+     incidental parse failure. The old source used `-> Int`, so it exercised the
+     skip path via a syntax error while claiming to test a semantic one, and its
+     else-branch asserted `true = true` if no error appeared at all. *)
   let src = {|
 mod Test do
-  fn broken() -> Int do
+  fn broken() : Int do
     this_does_not_exist()
   end
 end
@@ -3336,82 +3362,100 @@ end
       d.severity = Some Lsp.Types.DiagnosticSeverity.Error
     ) a.An.diagnostics
   in
+  Alcotest.(check bool) "the source really does error (guards vacuity)" true
+    has_errors;
   let a2 = An.run_tir_pass a in
-  (* When there are errors, TIR pass should be skipped (no extra insights) *)
-  if has_errors then
-    Alcotest.(check bool) "TIR pass skipped on error" true
-      (List.length a2.An.tir_fn_insights = 0)
-  else
-    (* No error in this env (stdlib may provide it) — just check no crash *)
-    Alcotest.(check bool) "TIR pass did not crash" true true
+  Alcotest.(check bool) "TIR pass is skipped when the source has errors" true
+    (a2.An.tir_fn_insights = [])
 
 (** Test 4: HOF with function parameter produces indirect-call insight. *)
 let test_tir_indirect_call_insight () =
+  (* Calling a function-typed parameter dispatches through a pointer, which the
+     TIR pass reports as an indirect call. The old version guarded the real
+     assertion behind "if the pipeline produced data", and its source did not
+     parse — so it always took the else branch and asserted `true = true`. *)
   let src = {|
 mod Test do
-  fn apply(f: Int -> Int, x: Int) -> Int do
+  fn apply(f : Int -> Int, x : Int) : Int do
     f(x)
+  end
+
+  fn main() : Int do
+    apply(fn n -> n + 1, 41)
   end
 end
 |} in
   let a = analyse src in
   let a2 = An.run_tir_pass a in
-  (* If TIR pipeline ran successfully, check for indirect call insight *)
-  let has_indirect = List.exists (fun (pi : An.perf_insight) ->
-      match pi.pi_kind with
-      | An.TirIndirectCall _ -> true
-      | _ -> false
-    ) a2.An.perf_insights
-  in
-  let has_tir_data = List.length a2.An.tir_fn_insights > 0 in
-  if has_tir_data then
-    Alcotest.(check bool) "HOF has indirect-call insight" true has_indirect
-  else
-    (* TIR pipeline may not run in test env with limited stdlib — just check no crash *)
-    Alcotest.(check bool) "TIR pass completed" true true
+  Alcotest.(check bool) "the TIR pass ran (guards vacuity)" true
+    (a2.An.tir_fn_insights <> []);
+  Alcotest.(check bool) "a higher-order call yields an indirect-call insight" true
+    (List.exists (fun (pi : An.perf_insight) ->
+         match pi.An.pi_kind with
+         | An.TirIndirectCall _ -> true
+         | _ -> false)
+       a2.An.perf_insights)
 
 (** Test 5: tir_fn_insights field is populated correctly. *)
 let test_tir_fn_insights_field_populated () =
+  (* Old version: `-> Int` (unparseable) plus `List.length ... >= 0` and a
+     [for_all] over what was necessarily the empty list — three assertions that
+     could not fail. The source now allocates, so there is something to count,
+     and the counts themselves are checked. *)
   let src = {|
 mod Test do
-  fn factorial(n: Int, acc: Int) -> Int do
-    match n do
-      0 -> acc
-      k -> factorial(k - 1, acc * k)
-    end
+  fn pair_up(n : Int) : List(Int) do
+    Cons(n, Cons(n * 2, Nil))
+  end
+
+  fn main() : Int do
+    List.length(pair_up(3))
   end
 end
 |} in
   let a = analyse src in
   let a2 = An.run_tir_pass a in
-  (* tir_fn_insights is always a proper list *)
-  Alcotest.(check bool) "tir_fn_insights is a list" true
-    (List.length a2.An.tir_fn_insights >= 0);
-  (* All insights have non-empty function names *)
-  let all_named = List.for_all (fun (tfi : An.tir_fn_insight) ->
-      String.length tfi.An.tfi_fn_name > 0
-    ) a2.An.tir_fn_insights in
-  Alcotest.(check bool) "all insights have non-empty fn names" true all_named
+  Alcotest.(check bool) "insights were produced (guards vacuity)" true
+    (a2.An.tir_fn_insights <> []);
+  Alcotest.(check bool) "every insight names a function" true
+    (List.for_all (fun (tfi : An.tir_fn_insight) ->
+         String.length tfi.An.tfi_fn_name > 0) a2.An.tir_fn_insights);
+  Alcotest.(check bool) "an allocating function reports heap allocations" true
+    (List.exists (fun (tfi : An.tir_fn_insight) -> tfi.An.tfi_heap_allocs > 0)
+       a2.An.tir_fn_insights)
 
 (** Test 6: code_lens_items are consistent with tir_fn_insights. *)
 let test_code_lens_consistent_with_tir_insights () =
+  (* With the old unparseable source both lists were empty, so "0 <= 0" and a
+     [for_all] over nothing both held regardless of the code under test. *)
   let src = {|
 mod Test do
-  fn apply(f: Int -> Int, x: Int) -> Int do
+  fn apply(f : Int -> Int, x : Int) : Int do
     f(x)
+  end
+
+  fn main() : Int do
+    apply(fn n -> n + 1, 41)
   end
 end
 |} in
   let a = analyse src in
   let a2 = An.run_tir_pass a in
-  (* code_lens_items <= tir_fn_insights (only fns with interesting TIR nodes get a lens) *)
-  Alcotest.(check bool) "code lens count <= insight count" true
-    (List.length a2.An.code_lens_items <= List.length a2.An.tir_fn_insights);
-  (* All code lens items have non-empty titles *)
-  let all_titled = List.for_all (fun (cl : An.code_lens_item) ->
-      String.length cl.An.cl_title > 0
-    ) a2.An.code_lens_items in
-  Alcotest.(check bool) "all code lens items have titles" true all_titled
+  Alcotest.(check bool) "insights were produced (guards vacuity)" true
+    (a2.An.tir_fn_insights <> []);
+  (* Only the INFORMATIONAL lenses come from TIR insights. Actionable lenses
+     (Run / Debug, which carry a command) are produced by [analyse] from the
+     presence of a `main` or a test block and are unrelated to this bound — the
+     original assertion compared against all lenses and only held because both
+     counts were zero on source that never parsed. *)
+  let perf_lenses =
+    List.filter (fun (cl : An.code_lens_item) -> cl.An.cl_command = None)
+      a2.An.code_lens_items in
+  Alcotest.(check bool) "informational lens count <= insight count" true
+    (List.length perf_lenses <= List.length a2.An.tir_fn_insights);
+  Alcotest.(check bool) "every code lens item has a title" true
+    (List.for_all (fun (cl : An.code_lens_item) ->
+         String.length cl.An.cl_title > 0) a2.An.code_lens_items)
 
 (* ------------------------------------------------------------------ *)
 (* Actionable Run / Debug code lenses + executeCommand                  *)
@@ -3461,12 +3505,20 @@ end
 
 (** A file with no tests and no main yields no actionable lenses. *)
 let test_action_lens_absent_without_runnables () =
+  (* The absence assertion only means something if the file parsed: the old
+     source used `-> Int`, so "no runnable lenses" held because there was no
+     analysis at all, not because a library module lacks runnables. *)
   let src = {|
 mod Lib do
-  fn helper(x: Int) -> Int do x + 1 end
+  fn helper(x : Int) : Int do x + 1 end
 end
 |} in
   let a = analyse src in
+  Alcotest.(check bool) "source typechecks (guards vacuity)" false
+    (List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+         d.severity = Some Lsp.Types.DiagnosticSeverity.Error) a.An.diagnostics);
+  Alcotest.(check bool) "the module's function was actually indexed" true
+    (Hashtbl.mem a.An.def_map "helper");
   Alcotest.(check int) "no actionable lenses" 0 (List.length (action_lens_commands a))
 
 (** Action lenses survive the TIR pass (must not be dropped by perf lenses). *)

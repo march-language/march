@@ -176,6 +176,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The LSP's TIR pass is now idempotent — performance insights no longer
+  duplicate.** Re-running it on an analysis it had already processed appended
+  its perf insights to a list that already contained them, so a function could
+  report "stack-allocates 2 values" twice. The pass now returns immediately when
+  the analysis it is handed is already its own output.
+
 - **LSP semantic tokens: the `linear` and `affine` modifiers now follow the
   type system instead of use counts.** They were previously derived from how
   many times a name appeared — a binding mentioned exactly once was painted

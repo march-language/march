@@ -3727,6 +3727,16 @@ let run_tir_pass (a : t) : t =
     ) a.diagnostics
   in
   if has_errors then a
+  (* Idempotence. [analyse] always yields an analysis with no TIR insights, so a
+     non-empty [tir_fn_insights] means this value is already the OUTPUT of a
+     previous run. Without this guard a second run appends the pass's perf
+     insights to a list that already contains them, and the user sees each
+     insight twice. [tir_perf_insights] is a filter_map over [tir_fn_insights],
+     so the empty case has nothing to duplicate and needs no guard.
+
+     The old idempotence test tolerated this with a "<= n + 3" bound instead of
+     checking equality, which is why it went unnoticed. *)
+  else if a.tir_fn_insights <> [] then a
   else
     let cache_key = March_cas.Blake3.hash_string a.src in
     (* Preserve the actionable Run/Debug lenses already built in [analyse]
