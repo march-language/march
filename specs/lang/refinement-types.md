@@ -1667,6 +1667,14 @@ edges:
   code and its obligation is discharged against an unsatisfiable path. This is
   expected and safe-direction — the call can never execute with a violating
   value — not a gap in checking.
+- **A caller's own contract forwards through a call, including when it mentions
+  another parameter.** `fn pick(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)})`
+  calling `at(xs, i)` — where `at` declares the same contract — *proves*. Until
+  2026-08-03 it did not: the assumption side mapped every name that was not the
+  refinement's own subject to nothing, and a single such name discarded the whole
+  predicate, so the call was silently unchecked. A promise is retired when any
+  name it mentions is rebound between the parameter and the call, so a shadowed
+  name never lends its fact to a new binding.
 - **A local `let` does not carry a fact forward, for any type.** The pass
   propagates no local binding's value into a later goal, so `let u = 5` then
   `take_pos(u)` against `{Int | _ > 0}` is skipped, and the `List` analogue
