@@ -59,12 +59,13 @@ let enforceability_bwrap cap = (
             "a network namespace isolates rather than refuses; bind() still \
              succeeds but is unreachable"
       | "IO.FileRead" ->
-          (* Linux CAN scope reads, unlike macOS -- this is the gap Landlock
-             closes properly.  Reported Enforced only once path scoping is
-             wired; today the profile does not restrict reads. *)
-          Advisory
-            "read scoping is available on Linux (tmpfs/Landlock) but not yet \
-             wired into the profile"
+          (* Enforced via an allow-list mount namespace: only the loader's
+             paths and the binary are bound in, so anything else is absent
+             rather than merely forbidden.  Measured on Linux 6.12 --
+             /etc/hosts DENIED, an explicitly bound path OK, program runs.
+             macOS cannot do this because dyld maps system libraries before
+             user code exists. *)
+          Enforced
       | "IO.Process" -> Enforced
       | "IO.Clock" ->
           Advisory "clock_gettime is indistinguishable from the scheduler's own use"
@@ -153,19 +154,52 @@ let profile_for ~caps ~binary =
    the filesystem visible (the loader needs it), then each withheld class is
    removed:  --ro-bind makes the whole tree read-only, --unshare-net drops
    external reachability, --unshare-pid contains process spawning. *)
-let bwrap_args ~caps =
+(* Paths a dynamically-linked binary needs before any user code runs.  Bound
+   read-only into the allow-list namespace; everything not listed is simply
+   not present in the mount namespace, so a read of it fails with ENOENT
+   rather than being denied by a policy that could have holes. *)
+let loader_paths = [ "/usr"; "/lib"; "/lib64"; "/bin"; "/sbin"; "/etc/ld.so.cache" ]
+
+let bwrap_args ?(binary = "") ~caps () =
   let a = ref [] in
   let add x = a := x :: !a in
-  if holds_under caps "IO.FileWrite" then add "--dev-bind / /"
-  else begin
-    (* read-only root, with a writable /tmp so the runtime can still use
-       scratch space; without this many programs fail for reasons unrelated
-       to the capability being withheld. *)
-    add "--ro-bind / /";
-    add "--tmpfs /tmp";
-    add "--dev /dev";
-    add "--proc /proc"
-  end;
+  let reads = holds_under caps "IO.FileRead" in
+  let writes = holds_under caps "IO.FileWrite" in
+  let uses_tmpfs = ref false in
+  (match (reads, writes) with
+   | true, true -> add "--dev-bind / /"
+   | true, false ->
+     (* Whole filesystem visible but read-only; a writable /tmp keeps the
+        runtime's scratch space working, so a failure means the withheld
+        capability and not incidental breakage. *)
+     add "--ro-bind / /";
+     add "--tmpfs /tmp";
+     add "--dev /dev";
+     add "--proc /proc";
+     uses_tmpfs := true
+   | false, _ ->
+     (* Read NOT granted: build an ALLOW-LIST namespace containing only the
+        loader's paths and the binary itself.  Verified on Linux 6.12 —
+        /etc/hosts reads DENIED while an explicitly bound path still reads
+        OK.  This is the scoping macOS cannot do, because dyld must map
+        /usr/lib before any user code exists. *)
+     List.iter
+       (fun p -> add (Printf.sprintf "--ro-bind-try %s %s" p p))
+       loader_paths;
+     add "--dev /dev";
+     add "--proc /proc";
+     add "--tmpfs /tmp";
+     uses_tmpfs := true);
+  (* Bind the target AFTER any tmpfs.  A tmpfs mounted over /tmp masks
+     everything beneath it — including the binary itself when it lives
+     there — so binding earlier makes the program unlaunchable
+     ("execvp: No such file or directory").  Caught by testing the GRANTED
+     direction; the denied direction passes either way, which is exactly
+     why a sandbox needs both tests. *)
+  if binary <> "" && !uses_tmpfs then
+    add
+      (Printf.sprintf "--ro-bind-try %s %s" (Filename.quote binary)
+         (Filename.quote binary));
   if not (holds_under caps "IO.Network") then add "--unshare-net";
   if not (holds_under caps "IO.Process") then add "--unshare-pid";
   List.rev !a
@@ -193,7 +227,7 @@ let run ~caps ~binary ~args =
   | Bwrap ->
     let cmd =
       Printf.sprintf "bwrap %s %s %s"
-        (String.concat " " (bwrap_args ~caps))
+        (String.concat " " (bwrap_args ~binary ~caps ()))
         (Filename.quote binary) quoted_args
     in
     Ok (Sys.command cmd)

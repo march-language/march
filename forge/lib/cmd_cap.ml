@@ -514,6 +514,31 @@ let cap_run ~bin ~args ~allow_only () =
       Printf.eprintf
         "forge cap run: policy taken from the binary's own claim; pass \
          --allow-only for untrusted code\n%!";
+    (* An empty policy is the TIGHTEST possible sandbox, which fails safe but
+       fails confusingly: the program breaks and nothing says why.  Name the
+       reason, and distinguish "genuinely needs nothing" from "we could not
+       read what it needs". *)
+    if caps = [] then begin
+      let why =
+        match allow_only with
+        | Some _ -> "--allow-only was given an empty capability list"
+        | None -> (
+            match t.Cap_binary.build with
+            | Cap_binary.Symbols_removed ->
+                "the binary's symbols were stripped, so its capabilities \
+                 could not be read"
+            | Cap_binary.Unstripped ->
+                "the binary was linked without dead-strip, so its capability \
+                 list was withheld as unreliable"
+            | Cap_binary.Dead_stripped ->
+                "the binary genuinely declares no capabilities")
+      in
+      Printf.eprintf
+        "forge cap run: running with NO capabilities granted — %s.\n\
+         forge cap run: if the program misbehaves, this is why; pass \
+         --allow-only to grant explicitly.\n%!"
+        why
+    end;
     List.iter
       (fun c ->
          match Cap_sandbox.enforceability c with
