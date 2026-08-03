@@ -169,6 +169,12 @@ let run ~query ~type_sig ~doc_query ~callers ~limit ~as_json ~plain ~rebuild () 
       let name_q     = if String.length query    > 0 then Some query    else None in
       let type_q     = if String.length type_sig > 0 then Some type_sig else None in
       let doc_q      = if String.length doc_query > 0 then Some doc_query else None in
+      (match type_q with
+       | Some q ->
+         (match Search.parse_type_query q with
+          | Error msg -> Printf.eprintf "error: %s\n%!" msg; exit 1
+          | Ok _ -> ())
+       | None -> ());
       let results =
         if name_q = None && type_q = None && doc_q = None then
           (* No query — print a summary *)

@@ -376,6 +376,29 @@ let sample_index () : Search.index =
         ~return_type:(Some "String")
         ~file:"stdlib/int.march";
 
+      (* Structural-search fixture: a single-arg `String -> Int` entry,
+         deliberately the reverse of `to_string`'s `Int -> String`, so
+         order-sensitivity can be tested without ambiguity. *)
+      make_entry "to_int"
+        ~module_name:"String"
+        ~signature:"String.to_int(s: String) -> Int"
+        ~doc:(Some "Parse a string as an integer.")
+        ~params:[("s", "String")]
+        ~return_type:(Some "Int")
+        ~file:"stdlib/string.march";
+
+      (* Structural-search fixture: an `Int -> Int` entry, so a query of
+         `Int -> Int` has a genuine positive match to find (and the old
+         substring matcher would have also wrongly matched `to_string` /
+         `to_int` here, since both signatures contain the substring "Int"). *)
+      make_entry "negate"
+        ~module_name:"Int"
+        ~signature:"Int.negate(n: Int) -> Int"
+        ~doc:(Some "Negate an integer.")
+        ~params:[("n", "Int")]
+        ~return_type:(Some "Int")
+        ~file:"stdlib/int.march";
+
       make_entry "Option"
         ~kind:Search.Type_
         ~signature:"Option"
@@ -392,6 +415,35 @@ let sample_index () : Search.index =
         ~signature:"None"
         ~return_type:(Some "Option")
         ~module_name:"";
+
+      (* Return-only alpha-equivalence fixture: `Option.map`'s return type
+         variable letter is assigned relative to the WHOLE signature (`opt:
+         Option(a), f: a -> b`), so the return type is `Option(b)`, not
+         `Option(a)`. A `QReturnOnly` query is canonicalized alone, so its
+         first variable is always `a` — `--type="-> Option(a)"` must still
+         find this entry by re-canonicalizing the return type in isolation.
+         See [Search.canonicalize_return_type_alone]. *)
+      make_entry "map"
+        ~module_name:"Option"
+        ~signature:"Option.map(opt: Option(a), f: a -> b) -> Option(b)"
+        ~doc:(Some "Apply a function to the value inside an Option.")
+        ~params:[("opt", "Option(a)"); ("f", "a -> b")]
+        ~return_type:(Some "Option(b)");
+
+      (* QFull identity guard: same param shape (`xs: List(a)`), but two
+         different return types (`a` vs `b`) that must stay distinguishable
+         under full-signature matching, unlike return-only matching. *)
+      make_entry "same_head"
+        ~module_name:"Test"
+        ~signature:"Test.same_head(xs: List(a)) -> a"
+        ~params:[("xs", "List(a)")]
+        ~return_type:(Some "a");
+
+      make_entry "different_return"
+        ~module_name:"Test"
+        ~signature:"Test.different_return(xs: List(a)) -> b"
+        ~params:[("xs", "List(a)")]
+        ~return_type:(Some "b");
     ];
   }
 
@@ -439,22 +491,209 @@ let test_name_sorted_by_score () =
 (* Type signature search                                               *)
 (* ------------------------------------------------------------------ *)
 
-let test_type_search_return_type () =
+let test_type_search_return_only_mode () =
   let idx = sample_index () in
+  (* Leading `->` = return-type-only query, matches at any arity. *)
   let results = Search.search_type idx "-> Int" in
   let names = List.map (fun (e, _) -> e.Search.name) results in
   Alcotest.(check bool) "length (-> Int) found" true (List.mem "length" names)
 
-let test_type_search_param_type () =
+(** Was [test_type_search_param_type]: a bare `"String"` query used to match
+    [split] via substring matching against its printed signature. Under
+    structural matching a bare type with no `->` is a zero-argument query
+    (see [test_type_search_zero_arg_not_return_only]), so this is rewritten
+    as the full structural query that actually describes [split]'s
+    signature: two `String` params returning `List(String)`. *)
+let test_type_search_multi_arg_match () =
   let idx = sample_index () in
-  let results = Search.search_type idx "String" in
+  let results = Search.search_type idx "String -> String -> List(String)" in
   let names = List.map (fun (e, _) -> e.Search.name) results in
-  Alcotest.(check bool) "split (String) found" true (List.mem "split" names)
+  Alcotest.(check bool) "split (String, String) -> List(String) found" true
+    (List.mem "split" names)
 
 let test_type_search_empty_query () =
   let idx = sample_index () in
   let results = Search.search_type idx "" in
   Alcotest.(check int) "empty type query returns 0" 0 (List.length results)
+
+let test_type_search_order_sensitive () =
+  let idx = sample_index () in
+  (* `to_string` is `Int -> String`; `to_int` is the reverse, `String ->
+     Int`. Querying one order must not match the other. *)
+  let results = Search.search_type idx "String -> Int" in
+  let names = List.map (fun (e, _) -> e.Search.name) results in
+  Alcotest.(check bool) "to_string (Int -> String) not matched by reversed query"
+    false (List.mem "to_string" names);
+  Alcotest.(check bool) "to_int (String -> Int) matched" true
+    (List.mem "to_int" names)
+
+let test_type_search_arity_discriminates () =
+  let idx = sample_index () in
+  (* A 1-arg query must not match a 2-arg entry, even if the types appear. *)
+  let results = Search.search_type idx "String -> Int" in
+  List.iter (fun (e, _) ->
+      Alcotest.(check int) ("arity 1 for " ^ e.Search.name)
+        1 (List.length e.Search.params))
+    results
+
+let test_type_search_no_substring_bleed () =
+  let idx = sample_index () in
+  (* `Int` must not match `Int64` / `Integer` / `List(Int)`, and the
+     substring "Int" appearing in `Int.to_string`'s module prefix or
+     `to_int`'s param must not leak either. *)
+  let results = Search.search_type idx "Int -> Int" in
+  Alcotest.(check bool) "negate (Int -> Int) matched" true
+    (List.mem "negate" (List.map (fun (e, _) -> e.Search.name) results));
+  List.iter (fun (e, _) ->
+      Alcotest.(check bool) ("exact param type for " ^ e.Search.name)
+        true (List.for_all (fun (_, t) -> t = "Int") e.Search.params))
+    results
+
+let test_type_search_unparseable_is_error () =
+  match Search.parse_type_query "List( ->" with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "expected a parse error for a malformed type query"
+
+(** Finding 2 regression: an entry whose return type is canonicalized as
+    part of the FULL signature (so its first variable letter isn't `a`) must
+    still be found by a `QReturnOnly` query — the query and the stored
+    return type must be compared after each is independently re-canonicalized
+    in isolation, not as originally printed. *)
+let test_type_search_return_only_alpha_equivalent () =
+  let idx = sample_index () in
+  let results = Search.search_type idx "-> Option(a)" in
+  let names =
+    List.map (fun (e, _) -> e.Search.module_name ^ "." ^ e.Search.name) results
+  in
+  Alcotest.(check bool)
+    "Option.map (stored return type Option(b)) found via `-> Option(a)`"
+    true (List.mem "Option.map" names)
+
+(** Companion to the above: full-signature (`QFull`) matching must NOT gain
+    this alpha-equivalence — a variable's identity across params AND the
+    return type is meaningful there, so `List(a) -> a` must not match an
+    entry whose return type is `List(a) -> b`. This guards against loosening
+    `QFull` while fixing the `QReturnOnly` dead zone. *)
+let test_type_search_full_query_not_loosened () =
+  let idx = sample_index () in
+  let results = Search.search_type idx "List(a) -> a" in
+  let names =
+    List.map (fun (e, _) -> e.Search.module_name ^ "." ^ e.Search.name) results
+  in
+  Alcotest.(check bool) "Test.same_head (List(a) -> a) matched" true
+    (List.mem "Test.same_head" names);
+  Alcotest.(check bool)
+    "Test.different_return (List(a) -> b) NOT matched by `List(a) -> a`"
+    false (List.mem "Test.different_return" names)
+
+let test_type_search_zero_arg_not_return_only () =
+  (* A zero-argument query is QFull ([], _), NOT QReturnOnly — it must match
+     only zero-argument entries, unlike the `-> T` form. *)
+  match Search.parse_type_query "Int" with
+  | Ok (Search.QFull ([], _)) -> ()
+  | Ok (Search.QReturnOnly _) ->
+    Alcotest.fail "bare `Int` must not be treated as a return-only query"
+  | Ok _ -> Alcotest.fail "expected QFull ([], _) for a bare type"
+  | Error m -> Alcotest.fail ("unexpected parse error: " ^ m)
+
+(* ------------------------------------------------------------------ *)
+(* Type parsing (standalone `ty_eof` start symbol)                     *)
+(* ------------------------------------------------------------------ *)
+
+let parse_ty_str (s : string) : March_ast.Ast.ty =
+  let lexbuf = Lexing.from_string s in
+  March_parser.Parser.ty_eof
+    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+
+let test_parse_ty_eof_arrow () =
+  match parse_ty_str "List(a) -> Int" with
+  | March_ast.Ast.TyArrow (_, _) -> ()
+  | _ -> Alcotest.fail "expected TyArrow for `List(a) -> Int`"
+
+let test_pp_ast_ty_canonicalizes_vars () =
+  (* `xs` and `acc` must print as `a` and `b`, matching make_ty_printer. *)
+  let ty = parse_ty_str "List(xs) -> acc" in
+  Alcotest.(check string) "author var names normalized"
+    "List(a) -> b" (Search.pp_ast_ty ty)
+
+(* ------------------------------------------------------------------ *)
+(* AST-fallback signature building: shared renaming table              *)
+(* ------------------------------------------------------------------ *)
+
+(** Builds an index entirely through the AST-fallback path (an empty
+    [type_map] — [Search.build_index]'s own default — means
+    [resolve_fn_types] never finds a typechecker entry and falls straight
+    through to the AST-rendered params/return pair unchanged). This exercises
+    the real [collect_entries] call sites, not [pp_ast_ty] directly: a
+    single-call recursive printer would already get "List(a) -> b" right
+    (see [test_pp_ast_ty_canonicalizes_vars] above) even with no persistent
+    table at all, because one recursive descent naturally shares its own
+    local closure. What's only exercised by going through [build_index] is
+    whether *two separate calls* through the same closure — here,
+    [extract_fn_params]'s per-param renders and the later
+    [Option.map ast_pp fn.fn_ret_ty] — agree on the letter for a variable
+    that appears in both a parameter and the return type. *)
+let test_ast_fallback_signature_shares_var_table () =
+  let file = "fallback_share.march" in
+  let decls =
+    decls_of_source ~file "Test"
+      "mod Test do\n  fn const_(x : a, y : b) : b do y end\nend\n"
+  in
+  let idx = Search.build_index [decls] ~source_files:[file] () in
+  let entry =
+    match List.find_opt (fun (e : Search.entry) -> e.name = "const_") idx.entries with
+    | Some e -> e
+    | None -> Alcotest.fail "const_ entry not found in AST-fallback index"
+  in
+  Alcotest.(check (list (pair string string))) "params: x renamed a, y renamed b"
+    [("x", "a"); ("y", "b")] entry.params;
+  Alcotest.(check (option string))
+    "return type reuses y's letter (b), not a fresh table's a"
+    (Some "b") entry.return_type
+
+(* ------------------------------------------------------------------ *)
+(* Printer-format drift guard (Finding 4)                              *)
+(* ------------------------------------------------------------------ *)
+
+(** Finding 4: every other structural-matching test above runs against
+    [sample_index], a hand-built table of LITERAL strings — it never
+    exercises [make_ty_printer] (the typechecked path used for real fn
+    entries whose span IS in [type_map]; see [resolve_fn_types]), only
+    [make_ast_ty_printer] (the AST-fallback path, exercised by
+    [test_ast_fallback_signature_shares_var_table] above). A future
+    divergence between the two printers (record field ordering, how
+    [TyChan]/[TC.TChan] print, [TyNatOp]/nat-indexed types, …) would
+    silently break real structural matching against a typechecked index
+    while every hand-built-fixture test here stays green. This test closes
+    that hole: build an index WITH a real [type_map] (typechecked, going
+    through [resolve_fn_types] and [make_ty_printer], not the AST fallback),
+    then confirm a parsed [--type] query structurally matches the resulting
+    entry. *)
+let test_type_search_typechecked_path_structural_match () =
+  let file = "typechecked_search.march" in
+  let src =
+    "mod TCSearch do\n\
+    \  fn wrap_pair(x : a) do (1, x) end\n\
+     end\n"
+  in
+  let decls = decls_of_source ~file "TCSearch" src in
+  let (type_map, _refs) = Search.typecheck_decls decls in
+  let idx = Search.build_index [decls] ~source_files:[file] ~type_map () in
+  let entry =
+    match List.find_opt (fun (e : Search.entry) -> e.name = "wrap_pair") idx.entries with
+    | Some e -> e
+    | None -> Alcotest.fail "wrap_pair entry not found in typechecked index"
+  in
+  (* Sanity: this went through the typechecked path (make_ty_printer), not
+     the AST fallback — the return type should be a canonicalized tuple
+     built from the inferred type, e.g. `(Int, a)`. *)
+  Alcotest.(check (option string)) "typechecked return type"
+    (Some "(Int, a)") entry.Search.return_type;
+  let results = Search.search_type idx "a -> (Int, a)" in
+  let names = List.map (fun (e, _) -> e.Search.name) results in
+  Alcotest.(check bool)
+    "structural --type query matches typechecked-path entry" true
+    (List.mem "wrap_pair" names)
 
 (* ------------------------------------------------------------------ *)
 (* Doc search                                                          *)
@@ -485,8 +724,11 @@ let test_doc_search_no_doc_entries () =
 
 let test_combined_name_and_type () =
   let idx = sample_index () in
-  (* Name "split" AND type contains "String" *)
-  let results = Search.search_combined idx ~name:"split" ~type_sig:"String" () in
+  (* Name "split" AND type is exactly (String, String) -> List(String) *)
+  let results =
+    Search.search_combined idx ~name:"split"
+      ~type_sig:"String -> String -> List(String)" ()
+  in
   let names = List.map (fun (e, _) -> e.Search.name) results in
   Alcotest.(check bool) "combined: split with String type" true
     (List.mem "split" names)
@@ -712,9 +954,25 @@ let name_search_tests = [
 ]
 
 let type_search_tests = [
-  "return_type",   `Quick, test_type_search_return_type;
-  "param_type",    `Quick, test_type_search_param_type;
-  "empty_query",   `Quick, test_type_search_empty_query;
+  "return_only_mode",       `Quick, test_type_search_return_only_mode;
+  "multi_arg_match",        `Quick, test_type_search_multi_arg_match;
+  "empty_query",            `Quick, test_type_search_empty_query;
+  "order_sensitive",        `Quick, test_type_search_order_sensitive;
+  "arity_discriminates",    `Quick, test_type_search_arity_discriminates;
+  "no_substring_bleed",     `Quick, test_type_search_no_substring_bleed;
+  "unparseable_is_error",   `Quick, test_type_search_unparseable_is_error;
+  "zero_arg_not_return_only", `Quick, test_type_search_zero_arg_not_return_only;
+  "return_only_alpha_equivalent", `Quick, test_type_search_return_only_alpha_equivalent;
+  "full_query_not_loosened", `Quick, test_type_search_full_query_not_loosened;
+]
+
+let type_parsing_tests = [
+  "ty_eof arrow",                `Quick, test_parse_ty_eof_arrow;
+  "pp_ast_ty canonicalizes vars", `Quick, test_pp_ast_ty_canonicalizes_vars;
+  "AST-fallback signature shares var table across params/return",
+                                  `Quick, test_ast_fallback_signature_shares_var_table;
+  "typechecked-path structural match (printer-drift guard)",
+                                  `Quick, test_type_search_typechecked_path_structural_match;
 ]
 
 let doc_search_tests = [
@@ -785,6 +1043,7 @@ let () =
     "levenshtein",   levenshtein_tests;
     "name_search",   name_search_tests;
     "type_search",   type_search_tests;
+    "type_parsing",  type_parsing_tests;
     "doc_search",    doc_search_tests;
     "combined",      combined_search_tests;
     "json",          json_tests;

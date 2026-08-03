@@ -136,9 +136,10 @@ cd /Users/80197052/code/march && \
 forge search "function_name"    # search for a function
 forge search "ModuleName"       # search for a module
 forge search "type_name"        # search for a type
+forge search --callers NAME     # reverse-reference: find every resolved call/ctor/type-use of NAME
 ```
 
-Always use `forge search` before grepping or manually reading files when looking for modules, functions, or types in March code.
+Always use `forge search` before grepping or manually reading files when looking for modules, functions, or types in March code. Use `--callers` before grepping when checking whether a declaration is still used anywhere.
 
 ## Project layout
 

@@ -45,13 +45,25 @@ type index = {
 }
 
 (** The [index.version] a freshly-[build_index]'d index carries. Bumped
-    whenever the on-disk cache's shape changes in a way an old cache can't
-    satisfy (e.g. the [references] table added in this feature) — a cache
-    reader (see [forge/lib/cmd_search.ml]'s [load_or_build_index]) MUST
-    compare a loaded index's [version] against this constant and treat a
-    mismatch as a cache miss (rebuild), or a stale pre-existing cache from
-    before the bump silently keeps serving without the new data forever. *)
-let current_index_version = 2
+    whenever the on-disk cache's shape OR CONTENT SEMANTICS changes in a way
+    an old cache can't satisfy — a cache reader (see [forge/lib/cmd_search.ml]'s
+    [load_or_build_index]) MUST compare a loaded index's [version] against
+    this constant and treat a mismatch as a cache miss (rebuild), or a stale
+    pre-existing cache from before the bump silently keeps serving without
+    the new data forever.
+
+    Bumped to 3 for the structural [--type] rewrite: the JSON *schema* (the
+    [references] table added at version 2) didn't change again, but the
+    *content* of stored strings did — every AST-fallback entry (constructors,
+    plus any fn whose span misses [type_map]) now stores canonicalized
+    [a]/[b]/[c] type-variable names instead of author-written ones. A
+    version-2 cache built by a pre-rewrite binary still loads (same shape)
+    but its strings don't match structural queries, so `--type` silently
+    returns "no results found" (exit 0) forever until `--rebuild` is passed
+    by hand. Don't repeat the mistake of reasoning "schema is unchanged, no
+    bump needed" — a content-format change is just as cache-poisoning as a
+    schema change and must bump this constant too. *)
+let current_index_version = 3
 
 let ref_kind_to_string = function
   | `Call    -> "call"
@@ -97,29 +109,54 @@ let levenshtein s t =
 (* AST surface-type pretty printer                                     *)
 (* ------------------------------------------------------------------ *)
 
-let rec pp_ast_ty = function
-  | Ast.TyCon ({txt; _}, []) -> txt
-  | Ast.TyCon ({txt; _}, args) ->
-    txt ^ "(" ^ String.concat ", " (List.map pp_ast_ty args) ^ ")"
-  | Ast.TyVar {txt; _} -> txt
-  | Ast.TyArrow (a, b) ->
-    let a_str = match a with
-      | Ast.TyArrow _ -> "(" ^ pp_ast_ty a ^ ")"
-      | _ -> pp_ast_ty a
-    in
-    a_str ^ " -> " ^ pp_ast_ty b
-  | Ast.TyTuple ts ->
-    "(" ^ String.concat ", " (List.map pp_ast_ty ts) ^ ")"
-  | Ast.TyRecord fields ->
-    "{ " ^
-    String.concat ", "
-      (List.map (fun ({Ast.txt; _}, t) -> txt ^ ": " ^ pp_ast_ty t) fields)
-    ^ " }"
-  | Ast.TyLinear (_, t) -> pp_ast_ty t
-  | Ast.TyNat n -> string_of_int n
-  | Ast.TyNatOp _ -> "_"
-  | Ast.TyChan _ -> "Chan"
-  | Ast.TyRefine (base, _, _) -> pp_ast_ty base
+(** Create a printer that assigns clean variable names (a, b, c, …) in order
+    of first appearance among an AST type's surface `TyVar` names, shared
+    across multiple calls — so all parts of one signature (e.g. a function's
+    params and its return type, or a variant's args listed twice) use the
+    same name mapping. Mirrors [make_ty_printer] below, but keyed by the
+    author-written variable text rather than a unification-engine id. *)
+let make_ast_ty_printer () : Ast.ty -> string =
+  let tbl  : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  let next = ref 0 in
+  let varname txt =
+    match Hashtbl.find_opt tbl txt with
+    | Some n -> n
+    | None ->
+      let n = if !next < 26 then String.make 1 (Char.chr (97 + !next))
+              else "t" ^ string_of_int (!next - 25) in
+      incr next; Hashtbl.add tbl txt n; n
+  in
+  let rec go = function
+    | Ast.TyCon ({txt; _}, []) -> txt
+    | Ast.TyCon ({txt; _}, args) ->
+      txt ^ "(" ^ String.concat ", " (List.map go args) ^ ")"
+    | Ast.TyVar {txt; _} -> varname txt
+    | Ast.TyArrow (a, b) ->
+      let a_str = match a with
+        | Ast.TyArrow _ -> "(" ^ go a ^ ")"
+        | _ -> go a
+      in
+      a_str ^ " -> " ^ go b
+    | Ast.TyTuple ts ->
+      "(" ^ String.concat ", " (List.map go ts) ^ ")"
+    | Ast.TyRecord fields ->
+      "{ " ^
+      String.concat ", "
+        (List.map (fun ({Ast.txt; _}, t) -> txt ^ ": " ^ go t) fields)
+      ^ " }"
+    | Ast.TyLinear (_, t) -> go t
+    | Ast.TyNat n -> string_of_int n
+    | Ast.TyNatOp _ -> "_"
+    | Ast.TyChan _ -> "Chan"
+    | Ast.TyRefine (base, _, _) -> go base
+  in
+  go
+
+(** Standalone entry point: renders one type with a fresh (single-call)
+    name table. Call sites that print several parts of the SAME signature
+    must instead share one [make_ast_ty_printer ()] closure — see
+    [collect_entries] below. *)
+let pp_ast_ty (ty : Ast.ty) : string = make_ast_ty_printer () ty
 
 (* ------------------------------------------------------------------ *)
 (* Canonical type printer (clean a/b/c variable names)                *)
@@ -171,17 +208,20 @@ let pp_ty_canonical (ty : TC.ty) : string = make_ty_printer () ty
 (* Index building from AST declarations                                *)
 (* ------------------------------------------------------------------ *)
 
-let extract_fn_params (fn : Ast.fn_def) : (string * string) list =
+(** [pp] must be shared with whoever prints this function's return type
+    (see the [Ast.DFn] case in [collect_entries]), so a type variable that
+    appears in both a parameter and the return type gets the same letter. *)
+let extract_fn_params (pp : Ast.ty -> string) (fn : Ast.fn_def) : (string * string) list =
   match fn.fn_clauses with
   | [] -> []
   | clause :: _ ->
     List.map (function
       | Ast.FPNamed p ->
         (p.param_name.txt,
-         match p.param_ty with Some t -> pp_ast_ty t | None -> "_")
+         match p.param_ty with Some t -> pp t | None -> "_")
       | Ast.FPDefault (p, _) ->
         (p.param_name.txt,
-         match p.param_ty with Some t -> pp_ast_ty t | None -> "_")
+         match p.param_ty with Some t -> pp t | None -> "_")
       | Ast.FPPat (Ast.PatVar n) -> (n.txt, "_")
       | Ast.FPPat _ -> ("_", "_")
     ) clause.fc_params
@@ -239,8 +279,12 @@ let make_fn_signature ~module_name (fn : Ast.fn_def) (params : (string * string)
 let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
   match decl with
   | Ast.DFn (fn, span) ->
-    let ast_params = extract_fn_params fn in
-    let ast_ret = Option.map pp_ast_ty fn.fn_ret_ty in
+    (* One shared table so an AST-fallback variable name (e.g. the `a` in
+       `xs: List(a)`) matches the same letter if it recurs in the return
+       type — mirrors the TC-side sharing in [resolve_fn_types] below. *)
+    let ast_pp = make_ast_ty_printer () in
+    let ast_params = extract_fn_params ast_pp fn in
+    let ast_ret = Option.map ast_pp fn.fn_ret_ty in
     let (params, ret) = resolve_fn_types type_map fn ast_params ast_ret in
     let signature = make_fn_signature ~module_name fn params ret in
     let entry = {
@@ -274,9 +318,12 @@ let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
     let ctor_entries = match typedef with
       | Ast.TDVariant variants ->
         List.map (fun (v : Ast.variant) ->
+          (* Shared table: args_str and params both render v.var_args, and
+             must agree on the letter assigned to each variable. *)
+          let pp = make_ast_ty_printer () in
           let args_str =
             if v.var_args = [] then ""
-            else "(" ^ String.concat ", " (List.map pp_ast_ty v.var_args) ^ ")"
+            else "(" ^ String.concat ", " (List.map pp v.var_args) ^ ")"
           in
           { name        = v.var_name.txt;
             module_name;
@@ -285,7 +332,7 @@ let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
             doc         = None;
             file;
             line        = v.var_name.span.Ast.start_line;
-            params      = List.mapi (fun i t -> (string_of_int i, pp_ast_ty t)) v.var_args;
+            params      = List.mapi (fun i t -> (string_of_int i, pp t)) v.var_args;
             return_type = Some name.txt;
           }
         ) variants
@@ -510,30 +557,122 @@ let search_name (idx : index) (query : string) : (entry * float) list =
     |> List.sort (fun (_, s1) (_, s2) -> compare s2 s1)
   end
 
-(** Search by type signature.  Checks if query type components appear in
-    the indexed signature string (v1: component-based string matching). *)
+(** A parsed `--type` query.  A leading `->` means "match the return type at
+    any arity" and is kept as a distinct constructor rather than collapsed
+    into an empty argument list, because a genuine zero-argument query
+    ([QFull ([], _)]) must match ONLY zero-argument entries. *)
+type type_query =
+  | QFull of string list * string   (** canonical arg types, canonical return type *)
+  | QReturnOnly of string           (** `-> T` form: canonical return type, any arity *)
+
+(** Flatten a (right-associative) curried arrow type into its argument types
+    and final return type: [A -> B -> C] becomes [([A; B], C)]. *)
+let flatten_arrow (ty : Ast.ty) : Ast.ty list * Ast.ty =
+  let rec go acc = function
+    | Ast.TyArrow (a, b) -> go (a :: acc) b
+    | t -> (List.rev acc, t)
+  in
+  go [] ty
+
+let parse_ty_query_string (s : string) : Ast.ty =
+  let lexbuf = Lexing.from_string s in
+  March_parser.Parser.ty_eof
+    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+
+(** Parse a type query, canonicalizing every part through one shared
+    variable-renaming table so `a` denotes the same variable everywhere in the
+    query (mirrors the discipline in [make_ast_ty_printer] / [collect_entries]).
+
+    A query beginning with `->` is a return-type-only query, matched at any
+    arity. This is a distinct constructor rather than an empty argument list,
+    because a zero-argument query also has no arguments and must NOT match at
+    any arity. *)
+let parse_type_query (q : string) : (type_query, string) result =
+  let trimmed = String.trim q in
+  try
+    if String.length trimmed >= 2 && String.sub trimmed 0 2 = "->" then begin
+      let rest = String.trim (String.sub trimmed 2 (String.length trimmed - 2)) in
+      let ty = parse_ty_query_string rest in
+      let pp = make_ast_ty_printer () in
+      Ok (QReturnOnly (pp ty))
+    end else begin
+      let ty = parse_ty_query_string trimmed in
+      let (arg_tys, ret_ty) = flatten_arrow ty in
+      let pp = make_ast_ty_printer () in
+      let args = List.map pp arg_tys in
+      let ret = pp ret_ty in
+      Ok (QFull (args, ret))
+    end
+  with _ ->
+    Error (Printf.sprintf
+      "could not parse type query: %S \
+       (hint: query arguments are separated by `->`, not `,` — search results \
+       print params comma-separated, e.g. `List.map(xs: List(a), f: a -> b) -> \
+       List(b)`, but the equivalent --type query is \
+       `List(a) -> (a -> b) -> List(b)`, with every argument AND the return \
+       type chained by `->`; a leading `-> T` matches the return type alone \
+       at any arity)"
+      q)
+
+(** Re-canonicalize a stored return-type string IN ISOLATION: reparse it and
+    reprint it with a fresh variable-name table, so its variables are
+    renumbered from `a` in first-appearance order within just that type —
+    independent of whatever letters they held in the full signature they
+    were originally printed from.
+
+    This exists because [entry.return_type] is canonicalized alongside its
+    function's parameters (one shared [make_ty_printer]/[make_ast_ty_printer]
+    table per [resolve_fn_types]/[collect_entries] call — see those), so its
+    first variable is often NOT `a` (e.g. `Option.map : (a -> b), Option(a)
+    -> Option(b)` stores return type `Option(b)`). A [QReturnOnly] query,
+    canonicalized alone, always starts its first variable at `a`. Comparing
+    the two directly would make such entries permanently unmatchable by any
+    query spelling. Re-deriving an alpha-equivalent form of just the return
+    type closes that gap.
+
+    Returns [None] if the stored string fails to reparse (should not happen
+    for anything [search.ml] itself produced, but a corrupt/foreign cache
+    entry shouldn't crash search). *)
+let canonicalize_return_type_alone (s : string) : string option =
+  try
+    let ty = parse_ty_query_string s in
+    let pp = make_ast_ty_printer () in
+    Some (pp ty)
+  with _ -> None
+
+(** Search by type signature: structural matching against each entry's
+    [params]/[return_type], positional and arity-sensitive — not substring
+    matching against the printed signature. *)
 let search_type (idx : index) (type_query : string) : (entry * float) list =
   if String.length type_query = 0 then [] else
-  let ql = normalize type_query in
-  (* Split on arrows and commas for component matching *)
-  let parts =
-    String.split_on_char ' ' ql
-    |> List.concat_map (String.split_on_char ',')
-    |> List.map String.trim
-    |> List.filter (fun s -> s <> "" && s <> "->" && s <> "-")
-  in
-  if parts = [] then [] else
-  List.filter_map (fun entry ->
-    let sig_l = normalize entry.signature in
-    let matched = List.filter (fun p -> contains_substr sig_l p) parts in
-    let total = List.length parts in
-    let n_matched = List.length matched in
-    if n_matched = 0 then None
-    else
-      let score = float_of_int n_matched /. float_of_int total in
-      Some (entry, score)
-  ) idx.entries
-  |> List.sort (fun (_, s1) (_, s2) -> compare s2 s1)
+  match parse_type_query type_query with
+  | Error _ -> []
+  | Ok (QReturnOnly ret) ->
+    (* [ret] was canonicalized alone (see [parse_type_query]), so an entry's
+       return type must ALSO be re-canonicalized alone before comparing —
+       NOT compared as stored, which is canonicalized jointly with the
+       entry's params and so may carry different variable letters for an
+       alpha-equivalent type. This must stay scoped to [QReturnOnly]: full
+       [QFull] matching below intentionally keeps the joint (whole-signature)
+       canonicalization, because there a variable's identity across params
+       AND return type is meaningful (`List(a) -> a` must NOT match an entry
+       whose return type is `List(a) -> b`). *)
+    List.filter_map (fun entry ->
+      match entry.return_type with
+      | Some r ->
+        (match canonicalize_return_type_alone r with
+         | Some r' when r' = ret -> Some (entry, 1.0)
+         | _ -> None)
+      | None -> None
+    ) idx.entries
+  | Ok (QFull (args, ret)) ->
+    List.filter_map (fun entry ->
+      if List.length args = List.length entry.params
+         && List.for_all2 (fun a (_, t) -> a = t) args entry.params
+         && (match entry.return_type with Some r -> r = ret | None -> false)
+      then Some (entry, 1.0)
+      else None
+    ) idx.entries
 
 (** Search by keyword in doc strings. *)
 let search_docs (idx : index) (keywords : string) : (entry * float) list =

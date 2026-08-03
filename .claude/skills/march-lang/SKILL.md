@@ -396,10 +396,11 @@ forge install PATH_OR_URL   # install as system CLI tool
 forge search map                               # name search (fuzzy)
 forge search "" --type "String -> Int"         # type signature search
 forge search "" --doc "concatenate"            # doc keyword search
-forge search fold --type List --pretty         # combined, table output
+forge search fold --type "List(a) -> b -> (b -> a -> b) -> b"  # combined: name + exact type signature
 forge search "" --json > out.json              # JSON output
 forge search sort --rebuild                    # force index rebuild
 forge search map --limit 5
+forge search --callers List.map                # reverse reference: who calls/uses it
 
 # Benchmarks
 forge bench                      # compile and run benchmarks under bench/
@@ -431,18 +432,60 @@ Index cached at `.march/search-index.json`, built from stdlib.
 forge search filter             # finds "filter", "filter_map", etc.
 forge search flt                # fuzzy: finds "filter", "flat_map"
 
-# Type signature (all components must appear in signature)
-forge search "" --type "String -> Int"
-forge search "" --type "List(a), a -> Bool"
+# Type signature: structural match, not substring — exact arity, each
+# argument type matches positionally (order-sensitive), type variables are
+# canonicalized (so `a -> a` and `x -> x` are the same query). Use `-> T` to
+# match by return type alone, at any arity. A value starting with `-` (like
+# `-> T`) MUST use `--type=VALUE`, not a space — `--type "-> Int"` is parsed
+# as two separate options and fails with `unknown option '->'`.
+forge search "" --type "String -> Int"          # 1-arg fn: String -> Int
+forge search "" --type "List(a) -> a -> Bool"   # 2-arg fn: List(a), a -> Bool
+forge search "" --type="-> Int"                 # any arity, returns Int
+
+# CAUTION: search results print params comma-separated, e.g.
+# `List.map(xs: List(a), f: a -> b) -> List(b)` — but a --type query chains
+# EVERY argument and the return type with `->`, not `,`. Copy-pasting the
+# printed signature's comma-separated param list as a query hard-errors
+# (with a hint pointing at this) rather than silently matching nothing:
+# the query for the entry above is `List(a) -> (a -> b) -> List(b)`.
 
 # Doc keyword (all keywords must appear in doc string)
 forge search "" --doc "sort stable"
 
 # Combined
-forge search fold --type "List" --doc "accumulator"
+forge search fold --type "List(a) -> b -> (b -> a -> b) -> b" --doc "accumulator"
+
+# Reverse reference: who calls/uses this? (distinct mode — ignores the other filters)
+forge search --callers List.map       # every resolved call site
+forge search --callers Widget         # constructor uses and qualified type references too
 ```
 
 Search is forge-only — there is no `-search` flag on the `march` compiler.
+
+`--callers` resolves through the typechecker, so it distinguishes same-named
+declarations in different modules instead of matching text. Qualified type
+references inside interface method signatures and impl headers are not tracked
+(no enclosing function to attribute them to).
+
+`--type` limitations to know about:
+- **Record fields are order-sensitive.** A `{ ... }` record type in the query
+  must list fields in the same order as the printed signature — copy the
+  field order straight from a `forge search` result rather than guessing.
+- **`type` entries and `_`-typed params aren't reachable via `--type`.**
+  `type` declarations (variants, aliases) have no `return_type`, so no
+  `--type` query — including `-> T` — will ever match one; use name search
+  (`forge search Option`) instead. Likewise a param whose type couldn't be
+  resolved (printed as `_`) never structurally matches a concrete-type query
+  position.
+- **A `-> T` query matches independent of the entry's other variable
+  letters.** `--type="-> Option(a)"` finds every entry returning
+  `Option(_)` regardless of what letter that variable has in the entry's
+  full signature (e.g. it finds `Option.map`, whose full signature is
+  `Option(a), (a -> b) -> Option(b)` — the return type alone is
+  re-canonicalized before comparing). Full-signature queries (no leading
+  `->`) do NOT get this treatment: there, a variable's identity across
+  params and the return type is meaningful, so `List(a) -> a` will not
+  match an entry whose return type is `List(a) -> b`.
 
 ---
 
