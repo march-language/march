@@ -32,8 +32,8 @@
 - Modify: `bin/main.ml:3007-3025` (add `strip_flag` beside `so_flag`)
 - Modify: `bin/main.ml:3137-3160` (add section flags to `cflags`)
 - Modify: `bin/main.ml:3180` (thread `strip_flag` into the link command)
-- Modify: `bin/main.ml:1798-1804` (add strip mode to `cas_flags`)
-- Test: `test/test_cap_strip.ml` (new), registered in `test/run_compiler.ml`
+- Modify: `bin/main.ml:1798-1804` AND `bin/main.ml:2783-2789` (add strip mode to `cas_flags` — BOTH sites)
+- Test: `test/test_cap_strip.ml` (new), registered in `Test_compiler.compiler_suites` (`test/test_compiler.ml:10665`)
 
 **Interfaces:**
 - Consumes: `link_is_linux : bool` and `!compile_so : bool`, both already in scope at `bin/main.ml:3007`.
@@ -123,7 +123,9 @@ let tests = [
 ]
 ```
 
-Register it in `test/run_compiler.ml` by adding `"cap_strip", Test_cap_strip.tests;` to the suite list.
+Register it by appending `("cap_strip", Test_cap_strip.tests);` to
+`Test_compiler.compiler_suites` (`test/test_compiler.ml:10665`) —
+`test/run_compiler.ml` is a one-line driver over that list and does not change.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -178,9 +180,10 @@ Finally, thread `strip_flag` into the link command at line 3180 by adding one
 `%s` to the format string immediately before ` -o %s` and passing `strip_flag`
 in the matching argument position.
 
-- [ ] **Step 4: Register the flag in the CAS key**
+- [ ] **Step 4: Register the flag in the CAS key — at BOTH sites**
 
-In `bin/main.ml:1798`, extend `cas_flags`:
+`cas_flags` is constructed twice, at `bin/main.ml:1798` and `bin/main.ml:2783`,
+each feeding its own `Cas.compilation_hash`. Extend **both** identically:
 
 ```ocaml
               @ (if !compile_so then ["compile-so"] else [])
@@ -188,8 +191,10 @@ In `bin/main.ml:1798`, extend `cas_flags`:
                  then [] else ["capstrip"])
 ```
 
-Without this, a binary cached before this change is served unstripped and the
-audit silently reports every capability.
+Patching only one is a silent failure: binaries built through the other path
+keep pre-change cache keys, so a stale unstripped artifact is served and the
+audit reports every capability. Verify both took effect with
+`MARCH_DEBUG_CASFLAGS=1` (it prints `flags=[...]`; `capstrip` must appear).
 
 - [ ] **Step 5: Run the test to verify it passes**
 
@@ -216,7 +221,7 @@ Expected: ~75KB rather than ~270KB, identical output to before the change.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add bin/main.ml test/test_cap_strip.ml test/run_compiler.ml
+git add bin/main.ml test/test_cap_strip.ml test/test_compiler.ml
 git commit -m "build: dead-strip executables so unused capability code is absent"
 ```
 
@@ -326,7 +331,7 @@ git commit -m "test: verify dead-strip preserves actor, HTTP, and TLS behavior"
 **Files:**
 - Create: `lib/caps/cap_symbols.ml`, `lib/caps/cap_symbols.mli`
 - Modify: `lib/caps/dune` (no new deps; `march_typecheck` must not be depended on — see below)
-- Test: `test/test_cap_symbols.ml` (new), registered in `test/run_compiler.ml`
+- Test: `test/test_cap_symbols.ml` (new), registered in `Test_compiler.compiler_suites` (`test/test_compiler.ml:10665`)
 
 **Interfaces:**
 - Produces:
@@ -356,18 +361,28 @@ let test_known_mappings () =
     None
     (March_caps.Cap_symbols.cap_of_symbol "march_list_map")
 
-(* Freshness: every builtin the typechecker attributes a cap to must have a
-   runtime symbol here, or the audit silently under-reports that capability. *)
+(* Freshness: for every builtin the typechecker attributes a cap to, the C
+   symbol it lowers to must map to that same cap here.  Cap-level coverage is
+   NOT enough — a missing symbol under an otherwise-covered cap silently
+   under-reports that builtin.  Joined through the codegen builtin table;
+   lib/tir has no .mli files, so [March_tir.Llvm_builtins.builtins] is
+   accessible from tests. *)
 let test_no_drift_from_builtin_cap_table () =
   let missing =
     List.filter_map (fun (march_name, cap) ->
-      let mapped =
-        List.exists (fun (_, c) -> c = cap) March_caps.Cap_symbols.table in
-      if mapped then None else Some (march_name ^ " -> " ^ cap))
+      match List.find_opt
+              (fun (b : March_tir.Llvm_builtins.builtin) ->
+                b.March_tir.Llvm_builtins.march_name = march_name)
+              March_tir.Llvm_builtins.builtins with
+      | None | Some { March_tir.Llvm_builtins.c_name = None; _ } ->
+        None  (* no runtime symbol to audit *)
+      | Some { March_tir.Llvm_builtins.c_name = Some c; _ } ->
+        if March_caps.Cap_symbols.cap_of_symbol c = Some cap then None
+        else Some (Printf.sprintf "%s (%s) -> %s" march_name c cap))
       March_typecheck.Typecheck.builtin_cap_table
   in
   Alcotest.(check (list string))
-    "every capability in builtin_cap_table has a runtime symbol" [] missing
+    "every cap-bearing builtin's C symbol maps to its cap" [] missing
 
 let tests = [
   "known cap symbol mappings", `Quick, test_known_mappings;
@@ -452,8 +467,9 @@ let all_caps =
   List.sort_uniq String.compare (List.map snd table)
 ```
 
-The freshness test tells you when the table is complete: it lists every cap in
-`builtin_cap_table` with no runtime symbol. Work until that list is empty.
+The freshness test tells you when the table is complete: it lists every
+cap-bearing builtin whose C symbol is missing or mismapped. Work until that
+list is empty.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -466,7 +482,7 @@ Expected: PASS, both cases, with the drift list empty.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib/caps/cap_symbols.ml lib/caps/cap_symbols.mli lib/caps/dune test/test_cap_symbols.ml test/run_compiler.ml
+git add lib/caps/cap_symbols.ml lib/caps/cap_symbols.mli lib/caps/dune test/test_cap_symbols.ml test/test_compiler.ml
 git commit -m "caps: add capability to runtime-symbol table with drift test"
 ```
 
@@ -478,8 +494,11 @@ Markers are derived from the builtins actually referenced in the **emitted LLVM
 module**, not from the typechecker's claim, so they reflect codegen reality.
 
 **Files:**
+- Modify: `lib/tir/llvm_ctx.ml` (record called builtin c_names in the emit context)
+- Modify: `lib/tir/llvm_calls.ml` (record at the direct-call emission site)
+- Modify: `lib/tir/llvm_builtins.ml` (record in the builtin apply-fn/wrapper path)
 - Modify: `lib/tir/llvm_emit.ml` (emit markers in the module epilogue)
-- Test: `test/test_cap_markers.ml` (new), registered in `test/run_compiler.ml`
+- Test: `test/test_cap_markers.ml` (new), registered in `Test_compiler.compiler_suites` (`test/test_compiler.ml:10665`)
 
 **Interfaces:**
 - Consumes: `March_caps.Cap_symbols.cap_of_symbol` from Task 3.
@@ -496,10 +515,12 @@ Create `test/test_cap_markers.ml`:
 let emit_ir src_text =
   let src = Filename.temp_file "cap_marker" ".march" in
   let oc = open_out src in output_string oc src_text; close_out oc;
-  let ll = Filename.temp_file "cap_marker" ".ll" in
+  (* --emit-llvm ignores -o: it writes <input-basename>.ll next to the input
+     (bin/main.ml:2616, `let ll_file = basename ^ ".ll"`). *)
+  let ll = Filename.remove_extension src ^ ".ll" in
   let rc = Sys.command (Printf.sprintf
-    "./_build/default/bin/main.exe --emit-llvm -o %s %s > /dev/null 2>&1"
-    (Filename.quote ll) (Filename.quote src)) in
+    "./_build/default/bin/main.exe --emit-llvm %s > /dev/null 2>&1"
+    (Filename.quote src)) in
   if rc <> 0 then failwith "emit-llvm failed";
   let ic = open_in ll in
   let s = really_input_string ic (in_channel_length ic) in
@@ -547,9 +568,6 @@ let tests = [
 ]
 ```
 
-If the compiler's LLVM-dump flag is not `--emit-llvm`, find the correct one with
-`./_build/default/bin/main.exe --help` and use it. `MARCH_DUMP_TXT=<stage>` is
-the documented mid-pipeline dump mechanism if a flag does not exist.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -572,9 +590,9 @@ add:
    the markers describe emitted code rather than the typechecker's claim.
    Pinned in @llvm.used so DCE and dead-strip cannot drop them: a marker's
    absence must mean "capability unused", never "optimizer removed it". *)
-let emit_cap_markers buf ~(declared_c_symbols : string list) =
+let emit_cap_markers buf ~(called_c_symbols : string list) =
   let caps =
-    declared_c_symbols
+    called_c_symbols
     |> List.filter_map March_caps.Cap_symbols.cap_of_symbol
     |> List.sort_uniq String.compare
     |> March_caps.Cap_lattice.normalize
@@ -595,11 +613,25 @@ let emit_cap_markers buf ~(declared_c_symbols : string list) =
   end
 ```
 
-`declared_c_symbols` is the set of runtime functions this module emitted a
-`declare` for. `llvm_emit.ml` already tracks these to produce the `PDeclare`
-list seen at `lib/tir/llvm_builtins.ml:1181` — reuse that set rather than
-recomputing it. If a `@llvm.used` global is already emitted elsewhere in the
-module, merge into it instead of emitting a second one; LLVM rejects duplicates.
+**Where `called_c_symbols` comes from — the correctness-critical choice.**
+The declare preamble is NOT usable: `emit_preamble`
+(`lib/tir/llvm_toplevel.ml:101-110`) emits `declare`s for **every builtin
+unconditionally** — it is a fixed blob. Deriving markers from declares would
+emit every marker in every binary, the app-invariance trap a third time.
+(Unused declares produce no relocations, which is why dead-strip itself still
+works — but used and unused are indistinguishable at the declare level.)
+
+Record at call-emission time instead: add a
+`called_builtins : (string, unit) Hashtbl.t` to the emit context in
+`lib/tir/llvm_ctx.ml`, and record the `c_name` at each site that emits a direct
+call to a builtin's C symbol — the direct-call path in `lib/tir/llvm_calls.ml`
+and the builtin apply-fn/wrapper path in `lib/tir/llvm_builtins.ml` (the
+wrapper's generated body contains the same direct call, which is what keeps the
+closure-routed case covered). `emit_cap_markers` reads that table.
+
+No `@llvm.used` global exists in the current emitter (verified:
+`grep -rn "llvm.used" lib/tir/` is empty), so the marker block is the only one —
+no merging needed.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -620,11 +652,18 @@ Expected: `__march_cap_IO_FileRead` present. If it is missing, `@llvm.used` did
 not pin it through dead-strip — that is a real bug in Step 3, not a reason to
 disable stripping.
 
+Then verify the same on Linux (docker, as in the Task 1 flow): on ELF,
+`@llvm.used` survives `--gc-sections` only via the `SHF_GNU_RETAIN` section
+flag, which needs a reasonably recent clang/binutils. If the marker is GC'd
+there, place markers in an explicitly retained section rather than weakening
+the strip — a marker's absence must always mean "capability unused", never
+"linker removed it".
+
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lib/tir/llvm_emit.ml test/test_cap_markers.ml test/run_compiler.ml
-git commit -m "codegen: emit capability marker symbols from referenced runtime entries"
+git add lib/tir/llvm_emit.ml lib/tir/llvm_ctx.ml lib/tir/llvm_calls.ml lib/tir/llvm_builtins.ml test/test_cap_markers.ml test/test_compiler.ml
+git commit -m "codegen: emit capability marker symbols from called runtime entries"
 ```
 
 ---
@@ -714,20 +753,22 @@ let read_symbols path =
   let out = Filename.temp_file "capnm" ".txt" in
   let rc = Sys.command (Printf.sprintf "nm %s > %s 2>/dev/null"
                           (Filename.quote path) (Filename.quote out)) in
-  if rc <> 0 then (try Sys.remove out with _ -> ()); 
-  let acc = ref [] in
-  (try
-     let ic = open_in out in
-     (try while true do
-        let line = input_line ic in
-        match String.rindex_opt line ' ' with
-        | Some i -> acc := String.sub line (i+1) (String.length line - i - 1) :: !acc
-        | None -> ()
-      done with End_of_file -> ());
-     close_in ic
-   with Sys_error _ -> ());
-  (try Sys.remove out with _ -> ());
-  !acc
+  if rc <> 0 then begin
+    (try Sys.remove out with Sys_error _ -> ());
+    []                     (* nm failed: caller classifies via other channels *)
+  end else begin
+    let acc = ref [] in
+    let ic = open_in out in
+    (try while true do
+       let line = input_line ic in
+       match String.rindex_opt line ' ' with
+       | Some i -> acc := String.sub line (i+1) (String.length line - i - 1) :: !acc
+       | None -> ()
+     done with End_of_file -> ());
+    close_in ic;
+    (try Sys.remove out with Sys_error _ -> ());
+    !acc
+  end
 
 (* Locate every MARCHCAP\x01 blob.  Multiplicity is an error: a planted blob
    placed earlier in the file would otherwise shadow the real manifest. *)
@@ -881,7 +922,9 @@ git commit -m "forge: add cap audit for compiled binaries"
 - Test: `forge/test/test_cap_notarize.ml` (new)
 
 **Interfaces:**
-- Consumes: the source-level walk already in `Cmd_cap.query` (`forge/lib/cmd_cap.ml`).
+- Consumes: `March_typecheck.Typecheck.fn_own_capability_closures` via a package
+  typecheck. NOT the parse-only walk in `Cmd_cap.query` — that sees only
+  *declared* `needs`, which is insufficient (see Step 3).
 - Produces: `val cap_set_of_project : root:string -> (string list, string) result` in `cmd_publish.ml`, and a `caps` field on the published package record.
 
 - [ ] **Step 1: Write the failing test**
@@ -894,7 +937,21 @@ let test_cap_set_is_normalized () =
     Alcotest.(check (list string)) "normalized cap set"
       ["IO.FileRead"] caps
 
-let tests = [ "publish computes a normalized cap set", `Quick, test_cap_set_is_normalized ]
+(* The F1 gap: a body call to file_read with no `needs` is WARNING-only at
+   --check, but must still notarize.  If publish recorded only declared needs,
+   this package would publish as [] while its own honest binary reports
+   IO.FileRead — a false registry-MISMATCH in Task 8. *)
+let test_body_call_without_needs_is_included () =
+  match Cmd_publish.cap_set_of_project ~root:"test/fixtures/proj_body_call_only" with
+  | Error e -> Alcotest.fail e
+  | Ok caps ->
+    Alcotest.(check (list string)) "inferred caps, not just declared needs"
+      ["IO.FileRead"] caps
+
+let tests = [
+  "publish computes a normalized cap set", `Quick, test_cap_set_is_normalized;
+  "body-call-only caps are notarized", `Quick, test_body_call_without_needs_is_included;
+]
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -907,10 +964,21 @@ Expected: FAILS — `cap_set_of_project` does not exist.
 
 - [ ] **Step 3: Implement it**
 
-Reuse the existing parse-and-extract walk in `Cmd_cap.query`. Return
-`Cap_lattice.normalize`d, sorted caps. Attach to the publish payload beside the
-existing API-surface data (`forge/lib/cmd_publish.ml:51-53` shows where surface
-extraction happens).
+**Do not compute this from the parse-only walk in `Cmd_cap.query`.** That walk
+extracts *declared* `needs` only, but body-scanned caps are WARNING-only (the
+F1 gap the design cites in §2) — a module calling `file_read` with no `needs`
+would publish as `[]`, and its own honest binary would then report
+`IO.FileRead`, producing a false `registry-MISMATCH` in Task 8.
+
+Compute the *inferred* set instead: typecheck the package (the same
+entry-per-file check `forge build` performs — see
+`project_forge_build_per_file_entry` conventions in `forge/lib/cmd_check.ml`)
+and take the union of `Typecheck.fn_own_capability_closures` over the
+package's own functions (filter to qualified names whose module prefix belongs
+to the package, so linked stdlib functions are excluded — including them would
+recreate the app-invariant union). Return `Cap_lattice.normalize`d, sorted
+caps. Attach to the publish payload beside the existing API-surface data
+(`forge/lib/cmd_publish.ml:51-53` shows where surface extraction happens).
 
 - [ ] **Step 4: Run tests and commit**
 
@@ -1082,9 +1150,13 @@ let test_underclaiming_binary_is_killed () =
     true (match r with Ok 0 -> false | _ -> true)
 ```
 
-Build `underclaiming.bin` by compiling a file-reading program and editing its
-embedded manifest to remove `IO.FileRead` — this is exactly the tampering the
-design says must be self-defeating.
+Build `underclaiming.bin` by compiling a file-reading program and renaming its
+marker symbol so the claim under-reports —
+`llvm-objcopy --redefine-sym __march_cap_IO_FileRead=__march_cap_removed
+in.bin underclaiming.bin` (llvm-objcopy handles both Mach-O and ELF and ships
+with the clang toolchain). This is exactly the tampering the design says must
+be self-defeating: enforcement derives the profile from the (falsified) claim,
+and the program's real file read then violates it.
 
 - [ ] **Step 2: Run to verify failure, then implement**
 
@@ -1117,8 +1189,8 @@ build that fixture from marker symbols instead. File manifest emission as its
 own todo when Phase 2 lands.
 
 **Known risk carried into execution.** Task 4 assumes `own_cap_closures` is not
-needed for the marker path (markers come from emitted `declare`s, avoiding the
-typecheck-name vs post-mono-name join entirely). If manifest emission is added
+needed for the marker path (markers are recorded at call-emission time in
+codegen, avoiding the typecheck-name vs post-mono-name join entirely). If manifest emission is added
 later, that join is unverified and must be tested before it is trusted — mono
 and defun rename functions, and this codebase has been bitten by a suffix-map
 mismatch in `llvm_emit` before.
