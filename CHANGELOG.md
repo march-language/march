@@ -13,6 +13,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Consuming-call inlay hints: the editor now marks which arguments a call
+  takes ownership of (`⊗ consumed`).** Ownership transfer was previously
+  invisible at the place it happens — you had to read the callee's signature,
+  and often its body, to know whether passing a value ended its life. The hint
+  is read off the compiler's own borrow inference (`Borrow.infer_module`), the
+  same map Perceus consults when deciding which arguments need a reference-count
+  bump, so it reports the decision the compiler actually made rather than a
+  re-derivation of it. Two deliberate restrictions keep it a signal instead of
+  decoration: only RC-tracked parameters qualify (the borrow map initialises
+  non-borrow-eligible parameters to "not borrowed", so without this filter every
+  `Int` argument would read as consumed), and only plain variable arguments are
+  annotated (a temporary has no name to lose). The effect is that a borrowing
+  call and a consuming call on the same variable look different one line apart.
+  Also adds `march-lsp query inlay <file>`, which dumps the hints as JSON so
+  they can be inspected without an editor.
+
 - `forge refine --fixpoint` (with `--apply`): repeat until a round applies
   nothing. A contract only becomes visible to a caller once the callee carries
   it, so each round propagates exactly one call hop. Bounded at 10 rounds, and
@@ -176,6 +192,11 @@ git log is authoritative for exact commits.
   `lib/modules/stdlib_manifest.ml` and two tests now hold the invariant: it is
   exhaustive over `stdlib/`, and every entry has a file behind it. Deliberately
   lazy modules go in an explicit allowlist.
+- **The LSP's TIR pass is now idempotent — performance insights no longer
+  duplicate.** Re-running it on an analysis it had already processed appended
+  its perf insights to a list that already contained them, so a function could
+  report "stack-allocates 2 values" twice. The pass now returns immediately when
+  the analysis it is handed is already its own output.
 
 - **LSP semantic tokens: the `linear` and `affine` modifiers now follow the
   type system instead of use counts.** They were previously derived from how
