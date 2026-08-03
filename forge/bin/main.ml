@@ -1001,10 +1001,36 @@ let cap_audit_cmd =
            ~doc:"List the capabilities of a compiled March executable")
     Term.(const run $ bin $ json $ deny $ allow_only $ allow_foreign)
 
+let cap_run_cmd =
+  let bin =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"BINARY" ~doc:"Compiled March executable to run.")
+  in
+  let args =
+    Arg.(value & pos_right 0 string [] &
+         info [] ~docv:"ARGS" ~doc:"Arguments passed to the program.")
+  in
+  let allow_only =
+    Arg.(value & opt (some (list string)) None &
+         info ["allow-only"] ~docv:"CAPS"
+           ~doc:"Grant only these capabilities, overriding the binary's own \
+                 claim. Use this for untrusted code: a policy derived from the \
+                 binary defeats under-claiming only, since a hostile binary is \
+                 free to over-claim.")
+  in
+  let run bin args allow_only =
+    match Cmd_cap.cap_run ~bin ~args ~allow_only () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "run"
+           ~doc:"Run a compiled binary under an OS-enforced capability sandbox")
+    Term.(const run $ bin $ args $ allow_only)
+
 let cap_cmd =
   Cmd.group (Cmd.info "cap"
                ~doc:"Capability and typestate inspection")
-    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd]
+    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd; cap_run_cmd]
 
 (* --------------------------------------------------------- forge ffi -------- *)
 

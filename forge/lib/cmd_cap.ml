@@ -486,3 +486,42 @@ let audit ~bin ~json ~deny ~allow_only ~allow_foreign () =
      | vs ->
        List.iter (fun v -> Printf.eprintf "forge cap audit: %s\n%!" v) vs;
        Error (Printf.sprintf "%d gate violation(s)" (List.length vs)))
+
+(* ------------------------------------------------------------------ *)
+(* forge cap run — execute a binary under an externally imposed        *)
+(* capability sandbox (design §4.3, mechanism B).                      *)
+(* ------------------------------------------------------------------ *)
+
+(* Policy source.  For an UNTRUSTED binary the caller supplies --allow-only:
+   deriving the policy from the binary's own claim only defeats
+   under-claiming, since a hostile binary can over-claim freely. *)
+let cap_run ~bin ~args ~allow_only () =
+  match Cap_binary.read bin with
+  | Error e -> Error e
+  | Ok t ->
+    let caps = match allow_only with Some l -> l | None -> t.Cap_binary.caps in
+    let advisory =
+      List.filter
+        (fun c ->
+           match Cap_sandbox.enforceability c with
+           | Cap_sandbox.Advisory _ -> true
+           | Cap_sandbox.Enforced -> false)
+        caps
+    in
+    (* Report what is NOT being enforced before running, so a green run is
+       never mistaken for full containment (design §8). *)
+    if allow_only = None then
+      Printf.eprintf
+        "forge cap run: policy taken from the binary's own claim; pass \
+         --allow-only for untrusted code\n%!";
+    List.iter
+      (fun c ->
+         match Cap_sandbox.enforceability c with
+         | Cap_sandbox.Advisory why ->
+           Printf.eprintf "forge cap run: %s is ADVISORY — %s\n%!" c why
+         | Cap_sandbox.Enforced -> ())
+      advisory;
+    (match Cap_sandbox.run ~caps ~binary:bin ~args with
+     | Error e -> Error e
+     | Ok 0 -> Ok ()
+     | Ok rc -> Error (Printf.sprintf "process exited %d" rc))
