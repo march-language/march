@@ -11,12 +11,17 @@
 
    The two failures are structural, not tuning: the loader must read
    /usr/lib and the shared cache before any user code exists, and
-   sandbox-exec must exec the target.  Scoped allow-lists for those paths
-   were tried and still aborted.  Rather than ship a file-read denial with
-   holes in it -- which would read as enforcement while not enforcing --
-   IO.FileRead is reported Advisory on macOS.  Linux Landlock can scope
-   filesystem reads properly and is the path to fixing that; see
-   specs/todos for the follow-up.
+   sandbox-exec must exec the target.  Rather than ship a file-read denial
+   with holes in it -- which would read as enforcement while not enforcing
+   -- IO.FileRead is Advisory on this backend.  Linux scopes reads properly
+   via a mount-namespace allow-list; see [bwrap_args].
+
+   The profile itself is DENY-DEFAULT (see [profile_for]).  An earlier
+   attempt concluded deny-default was infeasible because the runtime
+   SIGABRTed; the real cause was a baseline missing mach*, sysctl-read and
+   ipc-posix-shm, not the approach.  With those present a March binary runs
+   clean under (deny default), so the profile is a true allow-list rather
+   than a list of denied classes.
 
    IO.Clock and IO.Spawn are advisory everywhere: their syscalls
    (clock_gettime, thread creation) are indistinguishable from the GC and
@@ -127,27 +132,43 @@ let holds_under caps klass =
        || March_caps.Cap_lattice.cap_subsumes c klass)
     caps
 
+(* Runtime baseline: the minimum a March process needs to reach main under
+   (deny default).  Characterized empirically -- an earlier attempt failed
+   because it lacked mach*, sysctl-read and ipc-posix-shm, not because
+   deny-default was infeasible.  file-read* is unconditional here: dyld maps
+   system libraries before user code exists, which is why IO.FileRead is
+   Advisory on this backend (Linux scopes reads properly; see bwrap_args).
+   Writes are limited to the standard streams so the process can report. *)
+let sbpl_baseline =
+  "(allow process-exec)\n\
+   (allow file-read* file-read-metadata)\n\
+   (allow file-write-data (literal \"/dev/null\") (literal \"/dev/stdout\") \
+   (literal \"/dev/stderr\") (literal \"/dev/tty\"))\n\
+   (allow sysctl-read)\n\
+   (allow mach*)\n\
+   (allow signal)\n\
+   (allow ipc-posix-shm)\n\
+   (allow iokit-open)\n"
+
 let profile_for ~caps ~binary =
   let b = Buffer.create 512 in
   Buffer.add_string b "(version 1)\n";
-  (* Allow-by-default, then deny each enforceable class the caps do not
-     grant.  A deny-default profile was measured to abort the runtime even
-     with a hand-built allow-list for system paths; an allow-list that does
-     not work is worth nothing, so this denies the capability classes
-     instead.  That is weaker than a true allow-list -- it constrains the
-     categories the capability lattice models, not novel resources -- and
-     cap_sandbox.mli says so rather than implying otherwise. *)
-  Buffer.add_string b "(allow default)\n";
-  (* The target must be exec'able and readable or it cannot start. *)
-  Buffer.add_string b
-    (Printf.sprintf "(allow process-exec (literal %S))\n" binary);
+  (* DENY-DEFAULT allow-list: anything the capability set does not grant, and
+     that the runtime baseline does not require, is refused -- including
+     resources the capability lattice never modelled (IPC, IOKit, novel
+     services).  This replaced an allow-default profile that could only deny
+     the classes it knew to name. *)
+  Buffer.add_string b "(deny default)\n";
+  Buffer.add_string b sbpl_baseline;
+  (* The target must be readable to be mapped; covered by the baseline's
+     file-read*, but stated explicitly so tightening reads later cannot
+     silently make the binary unlaunchable. *)
   Buffer.add_string b (Printf.sprintf "(allow file-read* (literal %S))\n" binary);
-  if not (holds_under caps "IO.FileWrite") then
-    Buffer.add_string b "(deny file-write*)\n";
-  if not (holds_under caps "IO.Network") then
-    Buffer.add_string b "(deny network*)\n";
-  if not (holds_under caps "IO.Process") then
-    Buffer.add_string b "(deny process-fork)\n";
+  if holds_under caps "IO.FileWrite" then
+    Buffer.add_string b "(allow file-write*)\n";
+  if holds_under caps "IO.Network" then Buffer.add_string b "(allow network*)\n";
+  if holds_under caps "IO.Process" then
+    Buffer.add_string b "(allow process-fork)\n";
   Buffer.contents b
 
 (* Linux: bubblewrap flags for the same capability set.  --dev-bind / / keeps

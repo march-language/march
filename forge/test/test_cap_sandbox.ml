@@ -20,41 +20,52 @@ let has_deny profile needle =
 let profile caps = Cap_sandbox.profile_for ~caps ~binary:"/tmp/whatever"
 
 let test_withheld_network_is_denied () =
-  Alcotest.(check bool) "no network cap => deny network*" true
-    (has_deny (profile [ "IO.Console" ]) "(deny network*)")
+  (* Deny-default: withholding means the ALLOW is absent, not that an
+     explicit deny is present. *)
+  let p = profile [ "IO.Console" ] in
+  Alcotest.(check bool) "profile is deny-default" true (has_deny p "(deny default)");
+  Alcotest.(check bool) "no network cap => no (allow network*)" false
+    (has_deny p "(allow network*)")
 
 let test_granted_child_keeps_parent_class () =
   (* IO.NetListen is a CHILD of IO.Network; holding it must keep network
      access. Regression: the subsumption ran held-over-parent and denied
      network to a program that had been granted IO.NetListen. *)
-  Alcotest.(check bool) "IO.NetListen granted => network NOT denied" false
-    (has_deny (profile [ "IO.NetListen" ]) "(deny network*)")
+  Alcotest.(check bool) "IO.NetListen granted => network allowed" true
+    (has_deny (profile [ "IO.NetListen" ]) "(allow network*)")
 
 let test_granted_parent_covers_child () =
-  Alcotest.(check bool) "IO.Network granted => network NOT denied" false
-    (has_deny (profile [ "IO.Network" ]) "(deny network*)");
-  Alcotest.(check bool) "IO (root) granted => network NOT denied" false
-    (has_deny (profile [ "IO" ]) "(deny network*)")
+  Alcotest.(check bool) "IO.Network granted => network allowed" true
+    (has_deny (profile [ "IO.Network" ]) "(allow network*)");
+  Alcotest.(check bool) "IO (root) granted => network allowed" true
+    (has_deny (profile [ "IO" ]) "(allow network*)")
 
 let test_file_write_and_process_gating () =
   let pure = profile [ "IO.Console" ] in
-  Alcotest.(check bool) "no write cap => deny file-write*" true
-    (has_deny pure "(deny file-write*)");
-  Alcotest.(check bool) "no process cap => deny process-fork" true
-    (has_deny pure "(deny process-fork)");
+  Alcotest.(check bool) "no write cap => no (allow file-write*)" false
+    (has_deny pure "(allow file-write*)");
+  Alcotest.(check bool) "no process cap => no (allow process-fork)" false
+    (has_deny pure "(allow process-fork)");
   let w = profile [ "IO.FileWrite" ] in
-  Alcotest.(check bool) "write granted => not denied" false
-    (has_deny w "(deny file-write*)")
+  Alcotest.(check bool) "write granted => allowed" true
+    (has_deny w "(allow file-write*)")
 
 let test_target_binary_always_launchable () =
   (* Denying exec or read of the target prevents the process from starting
      at all — measured as exit 71 / SIGABRT. The profile must always carve
      these out or enforcement degenerates into "nothing runs". *)
   let p = Cap_sandbox.profile_for ~caps:[] ~binary:"/tmp/target-bin" in
-  Alcotest.(check bool) "target is exec-allowed" true
-    (has_deny p "(allow process-exec (literal \"/tmp/target-bin\"))");
+  Alcotest.(check bool) "exec is permitted by the baseline" true
+    (has_deny p "(allow process-exec)");
   Alcotest.(check bool) "target is read-allowed" true
-    (has_deny p "(allow file-read* (literal \"/tmp/target-bin\"))")
+    (has_deny p "(allow file-read* (literal \"/tmp/target-bin\"))");
+  (* Without these the runtime aborts under deny-default -- the reason the
+     first deny-default attempt was wrongly judged infeasible. *)
+  List.iter
+    (fun needed ->
+      Alcotest.(check bool)
+        (Printf.sprintf "baseline includes %s" needed) true (has_deny p needed))
+    [ "(allow mach*)"; "(allow sysctl-read)"; "(allow ipc-posix-shm)" ]
 
 let test_unenforceable_caps_are_declared_advisory () =
   (* These must never be silently treated as enforced: denying them kills

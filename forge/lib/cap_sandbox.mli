@@ -23,9 +23,11 @@ val advisory_caps : string list
 (** Capabilities this platform cannot enforce, for reporting. *)
 
 val profile_for : caps:string list -> binary:string -> string
-(** [profile_for ~caps ~binary] builds an SBPL profile (macOS) granting only
-    [caps]. [binary] is allowed to be exec'd and read — denying either
-    prevents the process from starting at all. *)
+(** [profile_for ~caps ~binary] builds a DENY-DEFAULT SBPL profile (macOS)
+    granting only [caps] plus the runtime baseline. Anything neither granted
+    nor required to reach [main] is refused, including resources the
+    capability lattice never modelled (IPC, IOKit, mach services). [binary]
+    must stay readable or it cannot be mapped. *)
 
 val bwrap_args : ?binary:string -> caps:string list -> unit -> string list
 (** Bubblewrap flags (Linux) for the same capability set. *)
