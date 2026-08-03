@@ -28,6 +28,42 @@ git log is authoritative for exact commits.
   irrelevancies is indistinguishable from a broken one. Outcomes stay
   distinguishable rather than collapsing into silence: `no-callers`,
   `no-debt`, `no-candidate` and `already-refined` are separate answers.
+- **A missing capability now shows the call chain from `main` that forced it.**
+  A capability is a property of a whole path, not of the single call that
+  happens to need it — `needs` has to be threaded through every function in
+  between — but the diagnostic named only the far end:
+
+  ```
+  call to `random_bytes` requires `needs IO.Random` — add `needs IO.Random` to module `CapErr`
+  reached from `main`: main → issue → make_token
+  ```
+
+  The chain crosses module boundaries (a qualified `M.f` resolves to the simple
+  name its definition declares) and terminates on recursive call graphs. It is
+  omitted rather than guessed when there is nothing to say: a library with no
+  `main`, a call sitting in `main` itself, or a callee reached only through a
+  function value. Because the edges are syntactic, the chain is a witness rather
+  than a proof — two modules defining the same function name share a node, so an
+  unusual program can get a plausible sibling in the path.
+
+- **An unverified refinement contract now says so, once per module.** March
+  reports only definite failures — an obligation the solver cannot decide is
+  accepted in silence, which is the right default (a false positive on correct
+  code is the worse error) but leaves no way to tell "checked and fine" apart
+  from "gave up". A single hint per module now names the first such contract
+  and its reason, and points at `cap verified`, the existing opt-in that turns
+  every unverifiable obligation into an error:
+
+  ```
+  precondition `_ != 0` on `safe_div` was NOT verified here
+  (solver-undecided: the solver proved neither the predicate nor its negation).
+  note: … add `cap verified` to this module to make every unverifiable
+  obligation an error instead. `--refine-report` lists them all.
+  ```
+
+  Code the checker can discharge stays completely silent, a module with three
+  undecidable calls still gets one hint, and inside `cap verified` the existing
+  error is unchanged rather than joined by a hint.
 
 - **Consuming-call inlay hints: the editor now marks which arguments a call
   takes ownership of (`⊗ consumed`).** Ownership transfer was previously
@@ -137,6 +173,25 @@ git log is authoritative for exact commits.
   summaries.
 
 ### Changed
+
+- **Refinement violations now name the offending parameter and callee, and
+  underline that argument.** The message opened with a bare "argument does not
+  satisfy precondition `_ != 0`" — on a call with several arguments that does
+  not say which one, and since the predicate's binder is usually the anonymous
+  `_`, nothing else in the message identified it either. It now reads
+  ``argument `d` of `safe_div` ``, and a second labelled span underlines the
+  argument itself rather than the whole call. The solver's counterexample
+  (`e.g. n = -1`), which only appears when the failing model has a free
+  variable, is unchanged.
+
+- **Linearity errors now point at the earlier consumption site, not just the
+  reuse.** "The linear value `token` is used more than once here" told you the
+  value was already gone but not what took it, leaving the reader to find the
+  first use by hand — which on a long function is the entire search. The
+  diagnostic now carries a second labelled span: ``​`token` was already consumed
+  here``. Attribution is path-correct: match arms are mutually exclusive, so
+  consuming the same value once per arm stays legal, and a double-use inside one
+  arm is labelled against that arm rather than a sibling that never ran.
 
 - **`derive Json`'s generated `from_json` now returns
   `Result(T, Json.DecodeError)` instead of `Result(T, String)` — a

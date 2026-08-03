@@ -402,6 +402,12 @@ type lin_entry = {
   le_name : string;
   le_lin  : Ast.linearity;
   le_used : bool ref;
+  le_first_use : Ast.span option ref;
+  (** Span of the use that consumed this value, recorded when [le_used] is
+      first set. A double-use error is about a RELATIONSHIP between two sites,
+      and reporting only the second one leaves the reader to find the first by
+      hand — so the diagnostic points at both. Kept in step with [le_used]
+      everywhere that flag is saved and restored (see [iter_arms_linear]). *)
 }
 
 (** Constructor info — populated from [DType] declarations.
@@ -1490,7 +1496,7 @@ let bind_vars bindings env =
 
 (** Extend env with a new linear/affine variable. *)
 let bind_linear name lin ty env =
-  let le = { le_name = name; le_lin = lin; le_used = ref false } in
+  let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     fn_arities = StrMap.remove name env.fn_arities;
@@ -3455,7 +3461,7 @@ let bind_linear_field_sentinels varname ty env =
         match repr fty with
         | TLin (lin, _) when lin <> Ast.Unrestricted ->
           let key = varname ^ "#" ^ fname in
-          let le = { le_name = key; le_lin = lin; le_used = ref false } in
+          let le = { le_name = key; le_lin = lin; le_used = ref false; le_first_use = ref None } in
           { acc_env with lin = le :: acc_env.lin }
         | _ -> acc_env
       ) env flds
@@ -3506,20 +3512,37 @@ let record_use name span env =
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
   | Some le ->
+    (* A double-use is a relationship between two sites. Point at the earlier
+       one as well: without it the reader knows only that the value was already
+       gone, not what took it — which on a long function is the whole search. *)
+    let consumed_label () =
+      match !(le.le_first_use) with
+      | None -> []
+      | Some first ->
+        [{ Err.lbl_span = first;
+           Err.lbl_message =
+             Printf.sprintf "`%s` was already consumed here"
+               (lin_display_name name) }]
+    in
     (match le.le_lin with
      | Ast.Linear when !(le.le_used) ->
-       Err.error env.errors ~span
-         (Printf.sprintf
-            "The linear value `%s` is used more than once here.\n\
-             Linear values must be consumed exactly once — they cannot \
-             be copied or ignored." (lin_display_name name))
+       Err.report env.errors
+         { Err.severity = Err.Error; span;
+           message = Printf.sprintf
+             "The linear value `%s` is used more than once here.\n\
+              Linear values must be consumed exactly once — they cannot \
+              be copied or ignored." (lin_display_name name);
+           labels = consumed_label (); notes = []; code = None; fix = None }
      | Ast.Affine when !(le.le_used) ->
-       Err.error env.errors ~span
-         (Printf.sprintf
-            "The affine value `%s` is used more than once here.\n\
-             Affine values may be used at most once." (lin_display_name name))
+       Err.report env.errors
+         { Err.severity = Err.Error; span;
+           message = Printf.sprintf
+             "The affine value `%s` is used more than once here.\n\
+              Affine values may be used at most once." (lin_display_name name);
+           labels = consumed_label (); notes = []; code = None; fix = None }
      | (Ast.Linear | Ast.Affine) ->
-       le.le_used := true
+       le.le_used := true;
+       if !(le.le_first_use) = None then le.le_first_use := Some span
      | Ast.Unrestricted -> ())
 
 (** [bind_vars_with_linearity bindings env] is like [bind_vars] except it
@@ -6315,18 +6338,31 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     genuine double-use WITHIN a single arm. *)
 and iter_arms_linear env (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
   (* For each outer linear entry track (entry, pre-match flag, union accumulator). *)
+  (* [le_first_use] is saved and restored alongside [le_used]. If it were not,
+     the first arm to consume a value would leave its span behind, and a genuine
+     double-use in a LATER arm would point at a line in a sibling arm that never
+     ran on the same path — a confidently wrong "already consumed here". *)
   let snapshot =
-    List.map (fun le -> (le, !(le.le_used), ref !(le.le_used))) env.lin
+    List.map (fun le ->
+        (le, !(le.le_used), ref !(le.le_used),
+             !(le.le_first_use), ref !(le.le_first_use)))
+      env.lin
   in
   List.iter (fun br ->
       (* Reset each entry to its pre-match state so this arm sees a fresh path. *)
-      List.iter (fun (le, was, _acc) -> le.le_used := was) snapshot;
+      List.iter (fun (le, was, _acc, was_span, _acc_span) ->
+          le.le_used := was; le.le_first_use := was_span) snapshot;
       f br;
       (* Fold whatever this arm consumed into the union accumulator. *)
-      List.iter (fun (le, _was, acc) -> if !(le.le_used) then acc := true) snapshot
+      List.iter (fun (le, _was, acc, _was_span, acc_span) ->
+          if !(le.le_used) then begin
+            acc := true;
+            if !acc_span = None then acc_span := !(le.le_first_use)
+          end) snapshot
     ) branches;
   (* Final: consumed iff consumed before the match OR in some arm. *)
-  List.iter (fun (le, _was, acc) -> le.le_used := !acc) snapshot
+  List.iter (fun (le, _was, acc, _was_span, acc_span) ->
+      le.le_used := !acc; le.le_first_use := !acc_span) snapshot
 
 (** Infer the result type of a match expression. *)
 and infer_match env span scrut scrut_ty branches =

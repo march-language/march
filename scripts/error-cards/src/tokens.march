@@ -1,0 +1,15 @@
+mod CapErr do
+
+  fn make_token() : String do
+    Bytes.to_string(random_bytes(16))
+  end
+
+  fn issue() : String do
+    make_token()
+  end
+
+  fn main() do
+    println(issue())
+  end
+
+end
