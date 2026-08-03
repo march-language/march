@@ -6708,6 +6708,97 @@ end|}))
    [Obligation.summary], not the presence of a diagnostic — modeled on
    [use_adoption_suite] above, since a correctly-resolved call and a
    silently-skipped one are both quiet. *)
+(* ── A caller's own refinement must survive mentioning another name ────────
+
+   Filed as "`len` facts don't propagate", which measurement refuted: `len` is
+   incidental. Four shapes distinguish the real defect —
+
+     A  `{Int | _ < n}` forwarded to a callee with the same contract   was: skipped
+     B  `{List(Int) | len(_) > 0}` forwarded likewise                  was: PROVED
+     C  `{Int | _ < len(xs)}` forwarded likewise                       was: skipped
+     D  A's fact arriving as a PATH GUARD instead                      was: PROVED
+
+   B proves, so measure composition works. D proves, so the solver, the
+   cross-parameter goal reflection and the VC machinery all work. A and C differ
+   from D only in the CHANNEL the fact arrives through: `reflect_scalar`'s
+   assumption-side resolver mapped every non-binder name to None, so ONE foreign
+   name discarded the whole predicate and the VC carried nothing but its negated
+   goal.
+
+   Every case asserts the LEDGER, never silence — a skip and a proof are
+   indistinguishable from outside, which is the confusion the ledger exists to
+   end. B and D are kept as regression guards precisely because they already
+   passed: a fix that broke them would otherwise look like a win. *)
+let ledger_of src =
+  March_refinecheck.Obligation.reset ();
+  let err = has_refine_error_d src in
+  let proved, violated, skips = March_refinecheck.Obligation.summary () in
+  (err, proved, violated, List.fold_left (fun a (_, n) -> a + n) 0 skips)
+
+let check_ledger label ~proved ~skipped src =
+  let (err, p, v, s) = ledger_of src in
+  Alcotest.(check bool) (label ^ ": no error") false err;
+  Alcotest.(check int) (label ^ ": proved") proved p;
+  Alcotest.(check int) (label ^ ": violated") 0 v;
+  Alcotest.(check int) (label ^ ": skipped") skipped s
+
+let caller_promise_suite =
+  [ gated "A: a cross-parameter scalar contract composes" (fun () ->
+        check_ledger "A" ~proved:1 ~skipped:0 {|
+mod CPA do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn pick(n : Int, i : {Int | _ < n}) : Int do at(n, i) end
+end|});
+
+    gated "C: a cross-parameter MEASURE contract composes" (fun () ->
+        check_ledger "C" ~proved:1 ~skipped:0 {|
+mod CPC do
+  fn at(xs : List(Int), i : {Int | _ < len(xs)}) : Int do i end
+  fn pick(xs : List(Int), i : {Int | _ < len(xs)}) : Int do at(xs, i) end
+end|});
+
+    gated "B: a self-measure contract still composes (regression)" (fun () ->
+        check_ledger "B" ~proved:1 ~skipped:0 {|
+mod CPB do
+  fn need(ys : {List(Int) | len(_) > 0}) : Int do 1 end
+  fn fwd(ys : {List(Int) | len(_) > 0}) : Int do need(ys) end
+end|});
+
+    gated "D: the same fact via a path guard still composes (regression)" (fun () ->
+        check_ledger "D" ~proved:1 ~skipped:0 {|
+mod CPD do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn go(n : Int, i : Int) : Int do
+    if i < n do at(n, i) else 0 end
+  end
+end|});
+
+    (* REJECT WITNESS. A caller that promises NOTHING about `i` must still be
+       skipped. If this starts proving, the fix is laundering the goal rather
+       than carrying a fact — the failure mode that makes a contract look
+       enforced while checking nothing. *)
+    gated "REJECT: an unpromised caller is still not proved" (fun () ->
+        check_ledger "unpromised" ~proved:0 ~skipped:1 {|
+mod CPR do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn bad(n : Int, i : Int) : Int do at(n, i) end
+end|});
+
+    (* REJECT WITNESS. The name the promise mentions is REBOUND before the call,
+       so the outer fact says nothing about the value actually passed.
+       Attributing an outer fact to an inner binding is the cardinal false
+       positive this subsystem keeps re-introducing. *)
+    gated "REJECT: a shadowed name does not borrow the outer fact" (fun () ->
+        check_ledger "shadowed" ~proved:0 ~skipped:1 {|
+mod CPS do
+  fn at(n : Int, i : {Int | _ < n}) : Int do i end
+  fn bad(n : Int, i : {Int | _ < n}) : Int do
+    let n = 0
+    at(n, i)
+  end
+end|});
+  ]
+
 let resolve_precedence_suite =
   [ gated "a nested `use` beats an enclosing contract of the same name (the fix)"
       (fun () ->
@@ -6841,4 +6932,5 @@ let () =
       ("interface-signature-refinement", iface_refine_suite);
       ("sig-extern-refinement", sig_extern_refine_suite);
       ("use-impl-adoption", use_adoption_suite);
-      ("resolve-precedence", resolve_precedence_suite) ]
+      ("resolve-precedence", resolve_precedence_suite);
+      ("caller-promise", caller_promise_suite) ]

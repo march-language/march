@@ -1692,8 +1692,6 @@ let rec pat_binders (p : A.pattern) : string list =
    refined entry visible and the checker would attribute the outer value's
    predicate to the inner binder — a false positive.  Every binding construct
    must remove its binders' names before adding any refined ones. *)
-let scope_shadow (sc : scope) (names : string list) : scope =
-  if names = [] then sc else List.filter (fun (n, _) -> not (List.mem n names)) sc
 
 (* Does [e] mention any of [names]?  Deliberately syntactic and deliberately
    OVER-approximate: an occurrence anywhere in the subtree counts, including
@@ -1812,6 +1810,35 @@ let rec expr_mentions_free (m : string) (e : A.expr) : bool =
    already imposes on the refined-local scope.  Dropping a fact is always sound
    under the definite-failure stance: fewer assumptions means fewer definite
    contradictions, i.e. more silence. *)
+(* Retiring a scope entry has TWO triggers, not one.
+
+   The obvious one: the entry's own name is rebound, so the refinement describes
+   a value this binding no longer denotes.
+
+   The second only became load-bearing once a caller's promise could MENTION
+   another name (see [reflect_scalar]'s [foreign_var]).  Given
+
+     fn bad(n : Int, i : {Int | _ < n}) do
+       let n = 0
+       at(n, i)          -- `at` needs `i < n`
+     end
+
+   `i` is not rebound, so its entry survives — but its predicate's `n` refers to
+   the PARAMETER, while `n` at the call site is `0`.  Keeping the entry lets the
+   stale fact and the fresh goal collapse onto one `n` symbol and the call
+   "proves", which is unsound: `i < n_param` does not give `i < 0`.  Attributing
+   an outer fact to an inner binding is the cardinal error in this subsystem and
+   has shipped from three different directions; [expr_mentions] is deliberately
+   over-approximate, so this errs toward dropping a fact (silence) rather than
+   inventing one. *)
+let scope_shadow (sc : scope) (names : string list) : scope =
+  if names = [] then sc
+  else
+    List.filter
+      (fun (n, (_, q, _)) ->
+        (not (List.mem n names)) && not (expr_mentions names q))
+      sc
+
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
@@ -2569,10 +2596,31 @@ let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
    both the declaration emitted for a variable and the one for a propagated
    postcondition's constant.  Getting it wrong puts one symbol at a sort its
    uses disagree with, which z3 rejects. *)
+(* [foreign_var] / [foreign_measure]: how a name in a caller-scope refinement
+   that is NOT that refinement's own subject resolves.
+
+   `fn pick(n : Int, i : {Int | _ < n}) … at(n, i)` — the promise carried by `i`
+   mentions `n`, a sibling PARAMETER. Until these existed, the resolver below
+   mapped every non-subject name to [None], and [smt_of] fails on a sub-term, so
+   ONE foreign name discarded the WHOLE predicate: the VC for `at(n, i)` was its
+   negated goal and nothing else, satisfiable both ways, silently skipped. The
+   identical fact arriving as a path guard (`if i < n do at(n, i)`) proved,
+   because THAT channel has a full caller-namespace resolver — so the defect was
+   never in the solver or the goal, only in which facts reached it.
+
+   Defaulting both to [None] keeps every other caller byte-identical: only the
+   call-site builder, which owns the caller namespace (sorts, string/record
+   registries, the measure memo), passes them. *)
 let reflect_scalar
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
+    ?(foreign_var : (string -> (Smt.term * (string * Smt.sort)) option) option)
+    ?(foreign_measure : (string -> string -> Smt.term option) option)
     ?(sort : Smt.sort = Smt.SInt) (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
+  let foreign_var = Option.value foreign_var ~default:(fun _ -> None) in
+  let foreign_measure =
+    Option.value foreign_measure ~default:(fun _ _ -> None)
+  in
   (* Reflect an expression with no scope help — also the fallback for a call
      whose callee has no usable postcondition. *)
   let plain e =
@@ -2590,13 +2638,27 @@ let reflect_scalar
         the value at this one, and loading it would be ill-sorted, so it falls
         through to the unconstrained constant below. *)
      | Some (b, q, m) when scalar_sort_of_marker m = Some sort ->
-       let rv n = if n = b || n = "_" then Some xc else None in
+       (* All three spellings of the refined value denote it: the anonymous `_`,
+          the declared binder [b], and the variable's own name [x].  Matches
+          [load_scope_measure_facts]'s [is_self_spelling] — the two sides of the
+          same fact must accept the same spellings or they meet on different
+          symbols. *)
+       let extra = ref [] in
+       let rv n =
+         if n = b || n = "_" || n = x then Some xc
+         else
+           match foreign_var n with
+           | Some (t, d) ->
+             if not (List.mem d !extra) then extra := d :: !extra;
+             Some t
+           | None -> None
+       in
        let assumptions =
-         match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
+         match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure q with
          | Some qa -> [ qa ]
          | None -> []
        in
-       Some (xc, [ (x, sort) ], assumptions)
+       Some (xc, (x, sort) :: !extra, assumptions)
      | Some _ | None ->
        (* An ordinary variable: reflect it as a constant so a path-context
           guard about it can constrain it.  Without a guard it stays
@@ -3243,44 +3305,6 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
            put one symbol at two sorts, the same hazard [is_recvar] guards.
 
        `$self` cannot collide with a March identifier. *)
-    let self_dt_sym = "$self" in
-    let self_is_str = rp_is_str rp in
-    let resolve_var name =
-      (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
-         choice is driven by a DECLARED type (the refinement's own base type for
-         the binder, the callee's parameter type otherwise), never inferred from
-         the actual — so an unknown stays unknown instead of being guessed. *)
-      match mode with
-      (* The refined value is a record: it stands for the datatype term, not
-         for anything [reflect_scalar] could produce.  Records and strings are
-         disjoint sorts, so this cannot shadow the String path. *)
-      | `Record (_, t) when is_self name -> Some t
-      | _ ->
-      if is_self name && self_is_str then reflect_str "$self" self_actual
-      else if (not (is_self name)) && name_is_str name then
-        (match actual_of_name name with Some a -> reflect_str name a | None -> None)
-      else if is_self name then
-        absorb
-          (reflect_cached "$self" (fun () ->
-               reflect_scalar ~postcond ~sort:self_scalar sc self_actual))
-      else
-        match actual_of_name name with
-        | Some a ->
-          absorb
-            (reflect_cached name (fun () ->
-                 reflect_scalar ~postcond ~sort:(scalar_of_name name) sc a))
-        | None ->
-          (* a caller-scope variable from the path context *)
-          if Hashtbl.mem str_names name then Some (Smt.Const name)
-          (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
-             Declaring it `Int` here would put one symbol at two sorts; dropping
-             the sub-term instead just loses a fact (silence). *)
-          else if is_recvar name then None
-          else begin
-            decls := (name, caller_scalar_of name) :: !decls;
-            Some (Smt.Const name)
-          end
-    in
     (* The Int symbol standing for `m(x)` where [x] is a March NAME — the one
        channel through which a non-axiomatised measure over a variable is
        reflected, on the goal side and (via [load_scope_measure_facts] below) on
@@ -3306,6 +3330,73 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
         let r = Some c in
         Hashtbl.replace measure_var_cache nm r;
         r
+    in
+    (* ── Caller-namespace resolvers for a caller-scope refinement's OWN
+       predicate ─────────────────────────────────────────────────────────────
+       Passed to [reflect_scalar] so a promise mentioning a sibling parameter
+       survives instead of being discarded whole (see its header).  The name is
+       a CALLER variable and denotes ITSELF, exactly as [path_resolve_var]
+       treats a name in a path condition — the same discipline, and for the same
+       reason: routing it through the goal-side resolvers would silently
+       re-point it at a callee actual whenever the two happen to share an
+       identifier.
+
+       The two sort guards are not optional.  A `Str`-sorted or record-sorted
+       name re-declared here at `Int` puts one symbol at two sorts, which makes
+       z3 emit an error line — and a malformed VC on the shared `z3 -in` channel
+       desynchronises it and silently switches refinement checking off for the
+       rest of the compilation.  Returning [None] instead drops the sub-term and
+       with it the fact, which only loses a proof. *)
+    let foreign_var name =
+      if Hashtbl.mem str_names name then None
+      else if is_recvar name then None
+      else Some (Smt.Const name, (name, caller_scalar_of name))
+    in
+    (* Route measures through the SAME memo the goal side uses, so a promise
+       about `len(xs)` and a goal about `len(xs)` land on the one `len$xs`
+       symbol.  Two independently-declared constants would be two unrelated
+       integers and the fact would connect to nothing — a skip that looks
+       exactly like a proof from outside. *)
+    let foreign_measure m name = measure_of_var m name in
+    let self_dt_sym = "$self" in
+    let self_is_str = rp_is_str rp in
+    let resolve_var name =
+      (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
+         choice is driven by a DECLARED type (the refinement's own base type for
+         the binder, the callee's parameter type otherwise), never inferred from
+         the actual — so an unknown stays unknown instead of being guessed. *)
+      match mode with
+      (* The refined value is a record: it stands for the datatype term, not
+         for anything [reflect_scalar] could produce.  Records and strings are
+         disjoint sorts, so this cannot shadow the String path. *)
+      | `Record (_, t) when is_self name -> Some t
+      | _ ->
+      if is_self name && self_is_str then reflect_str "$self" self_actual
+      else if (not (is_self name)) && name_is_str name then
+        (match actual_of_name name with Some a -> reflect_str name a | None -> None)
+      else if is_self name then
+        absorb
+          (reflect_cached "$self" (fun () ->
+               reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                 ~sort:self_scalar sc self_actual))
+      else
+        match actual_of_name name with
+        | Some a ->
+          absorb
+            (reflect_cached name (fun () ->
+                 reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                   ~sort:(scalar_of_name name) sc a))
+        | None ->
+          (* a caller-scope variable from the path context *)
+          if Hashtbl.mem str_names name then Some (Smt.Const name)
+          (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
+             Declaring it `Int` here would put one symbol at two sorts; dropping
+             the sub-term instead just loses a fact (silence). *)
+          else if is_recvar name then None
+          else begin
+            decls := (name, caller_scalar_of name) :: !decls;
+            Some (Smt.Const name)
+          end
     in
     (* ── A caller-scope refined ADT parameter's own promise ──────────────────
        `fn outer(ys : {List(Int) | len(_) > 0}) … inner(ys)`: the goal for the

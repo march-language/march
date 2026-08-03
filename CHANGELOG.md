@@ -144,6 +144,27 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A function's own parameter refinement no longer vanishes when it mentions
+  another name.** `fn pick(n : Int, i : {Int | _ < n})` calling `at(n, i)` left
+  its precondition unproven: the assumption-side resolver mapped every name that
+  was not the refinement's own subject to nothing, and one such name discarded
+  the entire predicate, so the verification condition consisted of its negated
+  goal and nothing else. The identical fact arriving as a path guard
+  (`if i < n do at(n, i)`) proved, which is what localised the defect to the
+  channel rather than the solver. Cross-parameter and measure-bearing contracts —
+  `{Int | _ >= 0 && _ < len(xs)}`, the canonical bounds contract — now forward
+  through a call.
+
+  Making those promises live exposed a shadowing hole in the same change: a
+  promise mentioning a name that is later rebound (`let n = 0`) would attach the
+  stale fact to the new binding and unsoundly discharge the call. Scope entries
+  are now retired when their predicate mentions a rebound name, not only when
+  their own name is rebound.
+
+  Checked for the failure mode that matters: 0 refinement violations across all
+  112 stdlib modules and 0 on a 43-file external project, so no correct code
+  started failing.
+
 - **Six stdlib modules (`ConsistentHash`, `WorkDispatch`, `RingBuf`,
   `Compress`, `DistLink`, `DistSupervisor`) no longer silently return garbage
   values from compiled programs.** Any stdlib module not registered in the
