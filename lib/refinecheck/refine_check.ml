@@ -3054,12 +3054,19 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
            && (match r with Obligation.Alias_withdrawn _ -> false | _ -> true) ->
       unverified_hinted := true;
       Err.hint errctx ~span
+        (* Hard-wrapped near 78 columns. The renderer does not reflow, so a
+           single long line is left to the terminal to break wherever it
+           happens to run out of width — mid-token, and differently in every
+           window. *)
         (Printf.sprintf
-           "%s `%s` on `%s` was NOT verified here (%s: %s).\n\
-            note: March reports only definite failures, so an undecidable \
-            contract is accepted in silence — add `cap verified` to this module \
-            to make every unverifiable obligation an error instead. \
-            `--refine-report` lists them all."
+           "%s `%s` on `%s` was NOT verified here.\n\
+            reason: %s — %s\n\
+            note: March reports only definite failures, so a contract it \
+            cannot decide\n\
+            is accepted in silence. Add `cap verified` to this module to make \
+            every\n\
+            unverifiable obligation an error instead; `--refine-report` lists \
+            them all."
            obligation_noun (pred_str rp.pred) callee
            (Obligation.reason_name r) (Obligation.reason_detail r))
     | _ -> ()

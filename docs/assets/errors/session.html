@@ -1,0 +1,45 @@
+<meta charset="utf-8">
+<title>March diagnostics — Linearity</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:34px; background:#0b0f14;
+         font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .card { max-width:1120px; margin:0 auto; background:#11161d;
+           border:1px solid #1e2732; border-radius:12px; overflow:hidden;
+           box-shadow:0 18px 44px rgba(0,0,0,.45); }
+  .bar { display:flex; align-items:center; gap:9px; padding:11px 15px;
+          background:#151b23; border-bottom:1px solid #1e2732; }
+  .dot { width:11px; height:11px; border-radius:50%; }
+  .tag { margin-left:7px; font-size:12.5px; font-weight:650;
+          letter-spacing:.02em; color:#8b98a8; }
+  pre { margin:0; padding:20px 22px 24px;
+         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+         font-size:13px; line-height:1.62; color:#c8d3e0;
+         white-space:pre; overflow-x:auto; }
+  .cap { max-width:1120px; margin:16px auto 0; font-size:13px;
+          color:#7d8b9c; text-align:center; }
+  code { font-family: ui-monospace, Menlo, monospace; color:#9fb0c4; }
+</style>
+<div class="card">
+  <div class="bar">
+    <span class="dot" style="background:#ff5f57"></span>
+    <span class="dot" style="background:#febc2e"></span>
+    <span class="dot" style="background:#28c840"></span>
+    <span class="tag">Linearity</span>
+  </div>
+  <pre><span style="opacity:.62">--</span> <span style="font-weight:700;color:#ff6b6b">ERROR</span><span style="opacity:.62"> ----------------------------------</span><span style="color:#56b6c2"> session.march</span>
+
+<span style="font-weight:700">The linear value </span><span style="font-weight:700;color:#c678dd">`token`</span><span style="font-weight:700"> is used more than once here.
+Linear values must be consumed exactly once — they cannot be copied or ignored.</span>
+
+<span style="opacity:.62">10 | </span>    let b = consume(token)
+     <span style="color:#ff6b6b">                    ^^^^^</span>
+
+
+    <span style="opacity:.62">`token` was already consumed here</span>:
+
+<span style="opacity:.62">9 | </span>    let a = consume(token)
+    <span style="opacity:.62">                    ^^^^^</span></pre>
+</div>
+<p class="cap">A double-use names the earlier consumption site, not just the reuse.</p>
