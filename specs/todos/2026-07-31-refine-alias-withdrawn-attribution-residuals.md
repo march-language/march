@@ -4,10 +4,9 @@ The verdict is `Skipped` in every case below — only the *reason* string is at
 stake. Recorded together because they are the same family and all three trade
 against the rule that a **wrong** attribution is worse than a vague one.
 
-**1. One `let` deep, no deeper.** `let n = List.length(ys)` then `if n > 0` is
-attributed to the withdrawal (done 2026-07-31); a chain
-(`let a = List.length(ys)` then `let n = a`) still falls back to the general
-`solver-undecided` message even when the withdrawal really was the cause.
+**1. One `let` deep, no deeper.** **CLOSED 2026-08-03.** `let n = List.length(ys)` then `if n > 0` is
+attributed to the withdrawal (done 2026-07-31); chains
+(`let a = List.length(ys)` then `let n = a`) now also attribute correctly, following the laundering transitively.
 
 **2. "Applies the spelling" ≠ "would have discharged".** Condition 3 tests that
 the guard applies the withdrawn spelling to the argument, not that it would have

@@ -5152,6 +5152,15 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let lets = launder_shadow lets names in
                (match b.A.bind_pat, b.A.bind_expr with
                 | A.PatVar n, (A.EApp _ as rhs) -> (n.A.txt, rhs) :: lets
+                (* A `let n = a` where `a` is ITSELF a laundered name copies the
+                   underlying application forward under the new name, so the chain
+                   extends to any depth without extra lookup machinery at use time.
+                   `lets` is most-recent-first and already shadow-disciplined by
+                   [launder_shadow] above, so `List.assoc_opt` finds the live entry. *)
+                | A.PatVar n, A.EVar { A.txt = y; _ } ->
+                  (match List.assoc_opt y lets with
+                   | Some rhs -> (n.A.txt, rhs) :: lets
+                   | None -> lets)
                 | _ -> lets)
              | A.ELetFn (n, _, _, _, _) -> launder_shadow lets [ n.A.txt ]
              | _ -> lets

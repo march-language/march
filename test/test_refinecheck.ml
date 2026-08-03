@@ -5371,34 +5371,6 @@ end|}
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
           "stays general" true (contains msg "solver-undecided"));
-    gated "TWO-level laundering stays general"
-      (fun () ->
-        (* `let a = List.length(ys)` then `let n = a`: the walk is one level
-           deep on purpose — a chain is where "the guard is about this value"
-           stops being syntactically evident, and the fallback is the honest
-           general message, not a guess. *)
-        let msg =
-          refine_error_text_d
-            {|mod LA5 do
-  cap verified
-  mod Internal do
-    mod List do
-      fn length(xs : List(Int)) : Int do 99 end
-    end
-  end
-  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
-  fn go(ys : List(Int)) : Int do
-    let a = List.length(ys)
-    let n = a
-    if n > 0 do head(ys) else 0 end
-  end
-end|}
-        in
-        Alcotest.(check bool) "reported at all" true (msg <> "");
-        Alcotest.(check bool)
-          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
-        Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
     gated "a NEGATED laundered guard is not read as a guard that proved nothing"
       (fun () ->
         (* The laundered analogue of WC: in the else-branch the guard
@@ -5435,7 +5407,54 @@ end|}
   fn go(ys : List(Int)) : Int do
     if List.length(ys) > 0 do head(ys) else 0 end
   end
-end|}))
+end|}));
+    gated "a guard laundered through a TWO-let chain is attributed to the withdrawal"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod LA9 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let a = List.length(ys)
+    let n = a
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "a chain that rebinds to something ELSE stays general" (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod LA10 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let a = List.length(ys)
+    let n = 5
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool)
+          "still falls back to solver-undecided" true
+          (contains msg "solver-undecided"))
   ]
 
 (* ── Composing a LIST contract across a call boundary ───────────────────────
