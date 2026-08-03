@@ -1839,6 +1839,24 @@ let scope_shadow (sc : scope) (names : string list) : scope =
         (not (List.mem n names)) && not (expr_mentions names q))
       sc
 
+(* An arm whose pattern is a bare constructor with only irrefutable sub-patterns
+   and NO guard fails exactly when the scrutinee's TAG differs.  That is what
+   makes an earlier arm's failure informative to a later one.  `Cons(0, _)` and
+   `Nil when c` both fail for reasons other than the tag, so neither licenses
+   any conclusion — see [arm_excludes_tag]. *)
+let rec irrefutable_pat (p : A.pattern) : bool =
+  match p with
+  | A.PatWild _ | A.PatVar _ -> true
+  | A.PatAs (p, _, _) -> irrefutable_pat p
+  | _ -> false
+
+(* [Some ctor] when reaching a LATER arm implies the scrutinee is not [ctor]. *)
+let arm_excludes_tag (br : A.branch) : string option =
+  match br.A.branch_pat, br.A.branch_guard with
+  | A.PatCon (ctor, subs), None when List.for_all irrefutable_pat subs ->
+    Some ctor.A.txt
+  | _ -> None
+
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
@@ -3896,6 +3914,40 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
       else measure_of_var m name
     in
     let path_resolve_tester ctor arg =
+      (* A tag test on a LIST is a statement about its length, and saying it that
+         way is what connects a `match` arm to a `len` contract:
+
+           match xs do Nil -> Err(…) | _ -> Ok(mean(xs)) end
+
+         The `_` arm carries `not is_Nil(xs)` (pushed by the arm-order exclusion
+         in [visit]), and `mean`'s precondition is about `len(xs)`.  Routed
+         through the datatype encoding below those are two unrelated facts — a
+         tester over an opaque datatype constant, and an integer — so the arm
+         proved nothing and every safe-wrapper in the stdlib carried permanent
+         unprovable debt.  Translating the tester onto the SAME memoized `len$x`
+         symbol the goal uses closes the gap with no datatype declaration and no
+         quantified axiom:
+
+           is_Nil(xs)   <->  len(xs) = 0
+           is_Cons(xs)  <->  len(xs) > 0
+
+         Both are exact for lists, and `len >= 0` is already asserted by
+         [measure_of_var], so `not (len$xs = 0)` gives z3 `len$xs > 0` directly.
+
+         Gated on the constructor belonging to the BUILT-IN List sort: a user
+         ADT is free to have its own `Nil`, and a `len` claim about that would be
+         invented rather than derived. *)
+      let list_sort = adt_sort_name "List" in
+      match arg, sort_of_ctor ctor with
+      | A.EVar { A.txt = x; _ }, Some adt
+        when adt = list_sort && (ctor = "Nil" || ctor = "Cons") ->
+        (match measure_of_var "len" x with
+         | Some len_x ->
+           Some
+             (if ctor = "Nil" then Smt.Eq (len_x, Smt.IntLit 0)
+              else Smt.Gt (len_x, Smt.IntLit 0))
+         | None -> None)
+      | _ ->
       match sort_of_ctor ctor with
       | None -> None
       | Some adt ->
@@ -5062,8 +5114,9 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       body
   | A.EMatch (subj, branches, _) ->
     go subj;
-    List.iter
-      (fun (br : A.branch) ->
+    ignore
+    @@ List.fold_left
+      (fun (earlier : A.branch list) (br : A.branch) ->
         let binders = pat_binders br.A.branch_pat in
         (* A pattern binder shadows a same-named refined outer local. *)
         let sc = scope_shadow sc binders in
@@ -5152,8 +5205,40 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             (tester, false) :: p
           | _ -> p
         in
-        visit ~root errctx defs ctx p lets sc re cb br.A.branch_body)
-      branches
+        (* Arm-order exclusion.  Reaching this arm means every EARLIER arm
+           failed to match, so for each of those whose failure is decided purely
+           by the tag ([arm_excludes_tag]), the scrutinee is known NOT to carry
+           it.  This is what gives the `_` arm of
+
+             match xs do Nil -> Err(…) | _ -> Ok(mean(xs)) end
+
+           the fact `not is_Nil(xs)` — the shape every "safe wrapper" in a
+           standard library has, and previously a permanent source of unprovable
+           debt.  Same three guards as the positive narrowing above, plus: an
+           earlier arm with a guard, or with a refutable sub-pattern, licenses
+           nothing, because it can fail with the tag still matching. *)
+        let p =
+          match subj with
+          | A.EVar s when not (List.mem s.A.txt binders) ->
+            List.fold_left
+              (fun p (prev : A.branch) ->
+                match arm_excludes_tag prev with
+                | Some ctor when sort_of_ctor ctor <> None ->
+                  let sp = s.A.span in
+                  let tester =
+                    A.EApp
+                      ( A.EVar { A.txt = "is_" ^ ctor; A.span = sp }
+                      , [ A.EVar { A.txt = s.A.txt; A.span = sp } ]
+                      , sp )
+                  in
+                  (tester, true) :: p
+                | _ -> p)
+              p earlier
+          | _ -> p
+        in
+        visit ~root errctx defs ctx p lets sc re cb br.A.branch_body;
+        br :: earlier)
+      [] branches
   | A.EIf (c, t, e, _) ->
     go c;
     go_path ((c, false) :: path) t;
