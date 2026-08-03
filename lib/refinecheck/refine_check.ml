@@ -2773,41 +2773,32 @@ let expr_applies (name : string) (e : A.expr) : bool =
     e;
   !found
 
-(* Does [e] apply [name] TO THE VARIABLE [subject]?  Stricter than
-   [expr_applies] on purpose — see condition 3 of [alias_withdrawal_cause]: a
-   guard on some OTHER list says nothing about this call's argument, so
-   `List.length(zs) > 0` guarding `head(ys)` must not be read as a guard on
-   `ys`.  Compared by NAME rather than structurally, because the same variable
-   read at two source positions carries two different spans and would never
-   compare equal. *)
-let expr_applies_to (name : string) (subject : string) (e : A.expr) : bool =
-  let found = ref false in
-  iter_all
-    (fun e ->
-      match e with
-      | A.EApp (A.EVar n, args, _) when n.A.txt = name ->
-        if List.exists (function A.EVar v -> v.A.txt = subject | _ -> false) args then
-          found := true
-      | _ -> ())
-    e;
-  !found
+(* Does [e] apply [name] TO THE VARIABLE [subject], counting only a FREE
+   occurrence of [subject] — one not captured by an intervening binder of the
+   same name?  Stricter than [expr_applies] on purpose — see condition 3 of
+   [alias_withdrawal_cause]: a guard on some OTHER list says nothing about
+   this call's argument, so `List.length(zs) > 0` guarding `head(ys)` must
+   not be read as a guard on `ys`.  Compared by NAME rather than
+   structurally, because the same variable read at two source positions
+   carries two different spans and would never compare equal.
 
-(* [expr_applies_to], but only counting an occurrence of [subject] that is
-   FREE — not captured by an intervening binder of the same name.
-
-   Same hazard as [expr_mentions_free] above, one level up the stack:
-   [expr_applies_to] is a discard-only helper (built with [iter_all], which
-   has no shadowing awareness at all) and is safe only in a DISCARDING
-   position.  [guard_applies] uses it in an ACCEPTING one — "this guard
-   applies the withdrawn spelling to the subject" is evidence FOR an
-   attribution, so a false hit here is a wrong attribution, not merely a
-   vague one.  `if check(fn ys -> List.length(ys) > 0, zs) do head(ys) …`
-   must not read as "the guard applies List.length to ys": the guard's `ys`
-   is the lambda's own parameter, and the guard says nothing about the outer
-   `ys` that `head`'s argument names.  Mirror image of the laundered-path bug
-   fixed 2026-07-31 (probe PE) — same fix, direct path, one level of AST
+   The FREE restriction exists because [guard_applies] below uses this in an
+   ACCEPTING position: "this guard applies the withdrawn spelling to the
+   subject" is evidence FOR an attribution, so a shadow-blind, discard-only
+   walk (the shape [expr_mentions] above uses, built on [iter_all]) would be
+   a wrong attribution here, not merely a vague one.  `if check(fn ys ->
+   List.length(ys) > 0, zs) do head(ys) …` must not read as "the guard
+   applies List.length to ys": the guard's `ys` is the lambda's own
+   parameter, and the guard says nothing about the outer `ys` that `head`'s
+   argument names.  Mirror image of the laundered-path bug fixed 2026-07-31
+   (probe PE, see [expr_mentions_free] above) — same fix, one level of AST
    deeper because the thing that must stay free is the ARGUMENT reference,
-   not the applied function's own name. *)
+   not the applied function's own name.  Modeled on [expr_mentions_free]'s
+   traversal shape (sequential [EBlock] scoping, lambda/[let fn] parameter
+   capture, match-arm binder capture) rather than sharing code with it: the
+   two walk for different things (a free mention of a name vs. a free
+   argument to an application) and a shared abstraction would be a worse
+   trade than the duplication. *)
 let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : bool =
   let free = expr_applies_to_free name subject in
   let any = List.exists free in
@@ -2912,7 +2903,7 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
    to an application, and THAT application applies the withdrawn spelling to
    the subject — `let n = List.length(ys)` then `if n > 0` is the same author
    intent, stopped by the same withdrawal, so it earns the same sentence.
-   The laundered check runs [expr_applies_to] against the recorded RHS with
+   The laundered check runs [expr_applies_to_free] against the recorded RHS with
    the obligation's own subject, never against the let-bound name: `let n =
    List.length(zs)` guarding a call about `ys` fails it exactly as the direct
    `if List.length(zs) > 0` does.  [lets] is shadow-disciplined by [visit]
@@ -2935,11 +2926,11 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
   | Obligation.Solver_undecided, Some (A.EVar sn) ->
     let guard_applies (w : withdrawal) (cond : A.expr) : bool =
       (* FREE occurrence only, on both the direct condition and the laundered
-         RHS: this is an ACCEPTING position, so the discard-only
-         [expr_applies_to] is the wrong tool on either path — a lambda
-         parameter in the guard that merely collides with the subject's own
-         name must not read as evidence (review 2026-07-31, probe PE, and its
-         mirror image on the direct path). *)
+         RHS: this is an ACCEPTING position, so a shadow-blind, discard-only
+         walk would be the wrong tool on either path — a lambda parameter in
+         the guard that merely collides with the subject's own name must not
+         read as evidence (review 2026-07-31, probe PE, and its mirror image
+         on the direct path). *)
       expr_applies_to_free w.wd_spelling sn.A.txt cond
       || List.exists
            (fun (m, rhs) ->

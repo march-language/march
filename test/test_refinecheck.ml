@@ -5290,7 +5290,7 @@ end|}
     gated "a laundered guard on a DIFFERENT collection is not this guard"
       (fun () ->
         (* The laundered analogue of the WA control: the walk must consult
-           [expr_applies_to] with the ORIGINAL argument (`zs`), never the
+           [expr_applies_to_free] with the ORIGINAL argument (`zs`), never the
            let-bound name — `n` guards `zs`, and the obligation is about
            `ys`. *)
         let msg =

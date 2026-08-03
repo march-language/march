@@ -37,14 +37,27 @@ withdrawn spelling:
   stay free here is the *argument reference*, not the applied function's own
   name.
 - `guard_applies` (inside `alias_withdrawal_cause`) now calls
-  `expr_applies_to_free` instead of `expr_applies_to` on both call sites: the
-  direct condition and the laundered RHS. The laundered RHS was equally
-  exposed to the same shadowing hazard and is fixed by the same change.
-
-`expr_applies_to` itself is untouched and kept — it and `expr_applies` remain
-correct for their existing discarding-position uses (see the comment on
-`expr_mentions` vs `expr_mentions_free` for why the two flavors must not be
-collapsed into one).
+  `expr_applies_to_free` instead of the old `expr_applies_to` on both call
+  sites: the direct condition and the laundered RHS. The laundered RHS was
+  equally exposed to the same shadowing hazard and is fixed by the same
+  change.
+- **`expr_applies_to` was removed.** It had exactly two call sites, both
+  inside `guard_applies`, and both migrated to `expr_applies_to_free` above —
+  after the migration it had zero remaining callers anywhere in the tree
+  (confirmed: `grep -rn "expr_applies_to\b" --include="*.ml"` matches only
+  the definition and prose comments before this cleanup). `refine_check.ml`
+  has no `.mli`, so an unused top-level binding produces no compiler warning
+  and a green build says nothing about it either way — this was caught in
+  review, not by tooling. Removed rather than kept-for-later: a discard-only
+  helper sitting next to its FREE-occurrence twin, with a subtle and
+  easy-to-forget safety distinction between them (safe only in a discarding
+  position vs. required in an accepting one), is a trap for the next reader
+  if it has no reason to exist. All four prose comments that pointed at
+  `expr_applies_to` (three in `refine_check.ml`, one in
+  `test/test_refinecheck.ml`) were corrected to point at
+  `expr_applies_to_free` or rephrased to not name a removed function.
+  `expr_applies` (the unrelated 1-arg-name/no-subject function, still live at
+  its own call site in `alias_withdrawal_cause`) was not touched.
 
 ## Verification
 
