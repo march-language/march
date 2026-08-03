@@ -12,8 +12,15 @@ permalink: /docs/memory-model/
 March's headline promise is **functional code that runs in place**: you write
 pure transformations over immutable data, and the compiler turns them into
 mutation when it can prove no one will notice. There is no tracing garbage
-collector, no stop-the-world pause, and — in the common "transform and return"
-case — no allocation at all. This page explains the mechanism end to end.
+collector, no stop-the-world collection, and — in the common "transform and
+return" case — no allocation at all. This page explains the mechanism end to end.
+
+The claim to hold onto is **deterministic, not pauseless**. Nothing scans your
+heap and nothing stops your program at a time it picks. But freeing is real work
+that happens *inline*, and releasing a large structure costs time proportional
+to its size — see [drop cascades](#drop-cascades-freeing-is-work-you-scheduled)
+below. The difference from a tracing GC is not that the work disappears; it is
+that you choose when it happens, and it is the same every run.
 
 The two ingredients are **Perceus reference counting** (deterministic, compiled
 in) and **FBIP — Functional But In-Place** (the reuse optimization that rides on
@@ -45,12 +52,15 @@ happens at a known program point:
 | | Tracing GC (e.g. OCaml's minor/major) | Perceus RC |
 |---|---|---|
 | When memory is freed | Later, when a collection runs | At the value's last use, in line |
-| Pause | Stop-the-world (or concurrent barriers) | None — no scan ever happens |
+| Who chooses the moment | The collector | Your code's control flow |
+| Cost of a free | Amortized into collection cycles | Paid inline, proportional to what died |
+| Worst-case stall | A collection over live data you didn't choose | A drop cascade over a structure you did |
 | Write barriers | On every pointer store | None (immutable-by-default has no stores) |
-| Predictability | Depends on heap pressure | Compile-time, per-value |
+| Predictability | Depends on heap pressure | Compile-time, per-value, identical every run |
 
-No scan. No pause. No write barriers. Freeing is just a `dec` the compiler
-already wrote into the code.
+No scan, no write barriers, and no collector deciding when to interrupt you.
+Freeing is just a `dec` the compiler already wrote into the code — which is
+exactly why its cost lands where that `dec` is, and not somewhere convenient.
 
 ---
 
@@ -276,6 +286,79 @@ FBIP is one layer of a stratified memory model. The others reinforce it:
 The net effect: most values never touch the heap, the ones that do are usually
 reused rather than reallocated, and the residual frees are deterministic `dec`
 operations the compiler already wrote — not a collector you have to wait for.
+
+---
+
+## Drop cascades: freeing is work you scheduled
+
+Deterministic does not mean free. When the last reference to a structure dies,
+its children's references die with it, and *that work happens right there*.
+
+March frees an aggregate in one of two ways. Usually the structure is
+**destructured** — a `case` arm that owns its scrutinee releases the box and
+hands the children to the extracted bindings, so the cost is spread across the
+traversal you were doing anyway. But when a structure is released **without**
+being taken apart — you borrowed it, or ignored it, and the owner simply drops
+it — the compiler synthesizes a deep-drop function for its type
+(`lib/tir/drop.ml`) and calls that instead:
+
+```
+fn __drop$List(x : List(String)) : Unit =
+  case x of
+  | Nil()      -> dec_rc x
+  | Cons(h, t) -> dec_rc x ; __drop$String(h) ; __drop$List(t)
+```
+
+So dropping a 1M-element list walks 1M cells. The practical consequences:
+
+- **Cost is proportional to what actually dies**, not to heap size and not to
+  live data. A drop of a shared structure (RC > 1) is O(1) — only the last owner
+  pays the walk.
+- **It is not a stack overflow risk.** The recursive drop is in tail position,
+  so it is turned into a loop by `llvm_tco.ml`; long spines iterate rather than
+  recurse.
+- **The stall is schedulable.** Because the release point is a program point you
+  can see, you can move it: drop a large structure before a latency-critical
+  section rather than inside one, or hand it to a task whose deadline is loose.
+  That option is the actual advantage over a tracing GC — not the absence of
+  work, but the ability to place it.
+- **It shows up in tail latency if you ignore it.** A request handler that
+  builds and releases a large intermediate structure pays that walk inside the
+  request. This is the single most likely reason a p99 looks worse than a p50 in
+  otherwise allocation-light March code.
+
+---
+
+## Cycles: not collected, and not reachable from ordinary code
+
+**March has no cycle collector.** Perceus is reference counting, and reference
+counting cannot reclaim a reference cycle. If one ever formed, it would leak —
+silently and permanently, with no diagnostic.
+
+The reason this is not a practical hazard is that the language makes cycles hard
+to construct rather than cleaning them up afterwards:
+
+- **Immutable data cannot close a cycle.** A cycle needs a back-pointer written
+  into an already-constructed value. March values are built once and never
+  mutated, so ordinary data forms DAGs, not graphs.
+- **Linear values cannot participate in one.** A cycle requires at least two
+  references to the same value; `linear` means exactly one owner.
+- **Actors do not share pointers.** Inter-actor references are capabilities, not
+  raw pointers into another actor's heap, so cross-actor cycles have nothing to
+  be made of.
+
+Two honest caveats. First, this is a *design argument*, not a mechanized proof —
+it is not among the properties checked in Lean, and there is no runtime detector
+that would tell you if it were wrong. Second, the argument covers user-level
+data; the runtime does construct self-referential shapes internally (a
+self-recursive closure captures itself), and those are handled by
+compiler-inserted drops on specific paths rather than by reference counting
+alone. That machinery is exercised by the test suite, not by a general
+collector — so the residual risk lives in the compiler, not in your code.
+
+`specs/gc_design.md` sketches a deferred per-actor cycle collector for a future
+in which March exposes unrestricted mutable values. Nothing like it is
+implemented today, and nothing needs it today.
 
 ---
 

@@ -3970,29 +3970,71 @@ let decode_semantic_tokens (arr : int array) =
   List.init (Array.length arr / 5) (fun i -> (arr.(i*5 + 3), arr.(i*5 + 4)))
 
 let test_semantic_tokens_linear_modifier () =
-  (* `x` is bound and consumed exactly once → linear (bit 8). *)
+  (* A binding DECLARED linear carries the linear modifier (bit 8). *)
   let src = {|mod M do
   fn f() : Int do
-    let x = 42
+    linear let x = 42
     x
   end
 end|} in
   let a = analyse src in
   let toks = decode_semantic_tokens (March_lsp_lib.Server.semantic_tokens_data a) in
-  Alcotest.(check bool) "a consumed-once binding is marked linear" true
+  Alcotest.(check bool) "a `linear let` binding is marked linear" true
     (List.exists (fun (_, m) -> m land 8 <> 0) toks)
 
 let test_semantic_tokens_affine_modifier () =
-  (* `x` is bound but never used → affine / at most once (bit 16). *)
+  (* A binding DECLARED affine carries the affine modifier (bit 16). *)
   let src = {|mod M do
   fn f() : Int do
-    let x = 42
-    99
+    affine let x = 42
+    x
   end
 end|} in
   let a = analyse src in
   let toks = decode_semantic_tokens (March_lsp_lib.Server.semantic_tokens_data a) in
-  Alcotest.(check bool) "an unused binding is marked affine" true
+  Alcotest.(check bool) "an `affine let` binding is marked affine" true
+    (List.exists (fun (_, m) -> m land 16 <> 0) toks)
+
+let test_semantic_tokens_always_linear_type () =
+  (* A parameter whose type is declared `always_linear type` is linear with no
+     per-site annotation — the modifier must follow the type, not the syntax. *)
+  let src = {|mod M do
+  always_linear type Handle = Handle(Int)
+  fn use_it(h : Handle) : Int do
+    match h do
+      Handle(n) -> n
+    end
+  end
+end|} in
+  let a = analyse src in
+  let toks = decode_semantic_tokens (March_lsp_lib.Server.semantic_tokens_data a) in
+  Alcotest.(check bool) "an always_linear-typed param is marked linear" true
+    (List.exists (fun (_, m) -> m land 8 <> 0) toks)
+
+let test_semantic_tokens_plain_binding_not_linear () =
+  (* REGRESSION WITNESS. The modifier used to be derived from USE COUNTS, so an
+     ordinary binding mentioned exactly once was painted `linear` and one never
+     mentioned was painted `affine`. Neither is a linearity claim the compiler
+     makes, and asserting one in the editor misrepresents the guarantee the
+     reader is there to check. Both bindings below are unrestricted.
+
+     The token-count assertion is load-bearing: if the embedded source ever
+     stops parsing, the analysis silently yields NO tokens and the two
+     "not marked" checks would pass vacuously. *)
+  let src = {|mod M do
+  fn f() : Int do
+    let used_once = 42
+    let never_used = 7
+    used_once
+  end
+end|} in
+  let a = analyse src in
+  let toks = decode_semantic_tokens (March_lsp_lib.Server.semantic_tokens_data a) in
+  Alcotest.(check bool) "analysis produced tokens (guards against vacuous pass)"
+    true (List.length toks > 0);
+  Alcotest.(check bool) "a once-used plain binding is NOT marked linear" false
+    (List.exists (fun (_, m) -> m land 8 <> 0) toks);
+  Alcotest.(check bool) "an unused plain binding is NOT marked affine" false
     (List.exists (fun (_, m) -> m land 16 <> 0) toks)
 
 let test_semantic_tokens_use_site_ctor_fidelity () =
@@ -6169,8 +6211,10 @@ let () =
       "linked editing links ~H open+close tag pair", `Quick, test_tag_pair_linked_edit;
     ];
     "semantic tokens", [
-      "linear modifier on consumed-once binding", `Quick, test_semantic_tokens_linear_modifier;
-      "affine modifier on unused binding", `Quick, test_semantic_tokens_affine_modifier;
+      "linear modifier on `linear let` binding", `Quick, test_semantic_tokens_linear_modifier;
+      "affine modifier on `affine let` binding", `Quick, test_semantic_tokens_affine_modifier;
+      "linear modifier follows always_linear type", `Quick, test_semantic_tokens_always_linear_type;
+      "plain bindings carry no ownership modifier", `Quick, test_semantic_tokens_plain_binding_not_linear;
       "constructor use site fidelity", `Quick, test_semantic_tokens_use_site_ctor_fidelity;
     ];
     "fbip inlay hints", [

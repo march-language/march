@@ -7,8 +7,8 @@ description:
 maintainer: ["March Contributors"]
 authors: ["March Contributors"]
 license: "MIT"
-homepage: "https://github.com/march-lang/march"
-bug-reports: "https://github.com/march-lang/march/issues"
+homepage: "https://github.com/march-language/march"
+bug-reports: "https://github.com/march-language/march/issues"
 depends: [
   "ocaml" {>= "5.3.0"}
   "dune" {>= "3.7" & >= "3.0"}
@@ -34,4 +34,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/march-lang/march.git"
+dev-repo: "git+https://github.com/march-language/march.git"

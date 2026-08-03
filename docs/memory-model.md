@@ -12,9 +12,17 @@ pure transformations over immutable data — the style where you never mutate
 anything, you just build new values from old ones — and the compiler turns
 that into ordinary in-place mutation wherever it can prove no one will notice
 the difference. There is no tracing garbage collector, no stop-the-world
-pause, and — in the common "transform and return" case — no allocation at
+collection, and — in the common "transform and return" case — no allocation at
 all. This page explains the mechanism end to end, from first principles, so
 you don't need a compilers background to follow it.
+
+The claim to hold onto is **deterministic, not pauseless**. Nothing scans your
+heap and nothing stops your program at a moment it picks. But freeing is real
+work that happens *inline*, and releasing a large structure costs time
+proportional to its size — see
+[drop cascades](#drop-cascades-freeing-is-work-you-scheduled) below. The
+difference from a tracing GC is not that the work disappears; it is that you
+choose when it happens, and it is the same every run.
 
 The two ingredients are **[Perceus](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/)
 reference counting** (deterministic, compiled in — the technique comes from
@@ -53,12 +61,15 @@ happens at a known program point:
 | | Tracing GC (e.g. OCaml's minor/major) | Perceus RC |
 |---|---|---|
 | When memory is freed | Later, when a collection runs | At the value's last use, in line |
-| Pause | Stop-the-world (or concurrent barriers) | None — no scan ever happens |
+| Who chooses the moment | The collector | Your code's control flow |
+| Cost of a free | Amortized into collection cycles | Paid inline, proportional to what died |
+| Worst-case stall | A collection over live data you didn't choose | A drop cascade over a structure you did |
 | Write barriers | On every pointer store | None (immutable-by-default has no stores) |
-| Predictability | Depends on heap pressure | Compile-time, per-value |
+| Predictability | Depends on heap pressure | Compile-time, per-value, identical every run |
 
-No scan. No pause. No write barriers. Freeing is just a `dec` the compiler
-already wrote into the code.
+No scan, no write barriers, and no collector deciding when to interrupt you.
+Freeing is just a `dec` the compiler already wrote into the code — which is
+exactly why its cost lands where that `dec` is, and not somewhere convenient.
 
 ---
 
@@ -267,6 +278,76 @@ locking. The same idea scales to actor message passing — see the
 [parallelism](/docs/parallel-collections/) guide, and
 [linear types]({{ site.baseurl }}/docs/linear-types/) for the ownership-transfer
 ("zero-copy send") case where a `linear` value is *guaranteed* RC == 1.
+
+---
+
+## Drop cascades: freeing is work you scheduled
+
+Deterministic does not mean free. When the last reference to a structure dies,
+its children's references die with it, and *that work happens right there*.
+
+March frees an aggregate in one of two ways. Usually the structure is
+**destructured** — a `match` arm that owns the value it matched on releases the
+box and hands the children to the extracted bindings, so the cost is spread
+across a traversal you were doing anyway. But when a structure is released
+**without** being taken apart — you borrowed it, or ignored it, and the owner
+simply drops it at the end of its scope — the compiler synthesizes a deep-drop
+function for that type and calls it instead. Conceptually:
+
+```
+drop a list  =  free this cell, then drop its element, then drop the rest
+```
+
+So dropping a one-million-element list walks one million cells. What that means
+in practice:
+
+- **Cost is proportional to what actually dies** — not to heap size, and not to
+  how much data is still live. Dropping a *shared* structure (someone else still
+  holds it) is O(1); only the last owner pays the walk.
+- **It will not overflow the stack.** The recursive step is in tail position and
+  compiles to a loop, so long lists iterate rather than recurse.
+- **The stall is schedulable.** Because the release point is a program point you
+  can see, you can move it: release a large structure before a latency-critical
+  section instead of inside one, or hand it off to a task whose deadline is
+  loose. That is the real advantage over a tracing GC — not that the work
+  vanishes, but that you decide where it lands.
+- **Ignore it and it shows up in tail latency.** A request handler that builds
+  and releases a large intermediate structure pays that walk inside the request.
+  This is the most likely reason a p99 looks worse than a p50 in otherwise
+  allocation-light March code.
+
+---
+
+## Cycles: not collected, and not reachable from ordinary code
+
+**March has no cycle collector.** Reference counting cannot reclaim a reference
+cycle: each object in the loop is still referenced, so no count ever reaches
+zero. If a cycle ever formed, it would leak — silently, permanently, with no
+diagnostic.
+
+The reason this is not a practical hazard is that the language makes cycles hard
+to build in the first place, rather than cleaning them up afterwards:
+
+- **Immutable data cannot close a cycle.** Closing a loop requires writing a
+  back-pointer into a value that already exists. March values are built once and
+  never mutated, so ordinary data forms trees and DAGs, never cycles.
+- **Linear values cannot participate in one.** A cycle needs at least two
+  references to the same value; `linear` means exactly one owner.
+- **Actors do not share pointers.** One actor reaches another through a
+  capability, not a raw pointer into its heap, so a cross-actor cycle has nothing
+  to be made of.
+
+Two caveats worth stating plainly. This is a *design argument*, not a mechanized
+proof — it is not among the properties checked in Lean, and no runtime detector
+would tell you if it were wrong. And it covers the data you write: the runtime
+does build self-referential shapes internally (a self-recursive closure captures
+itself), which are handled by compiler-inserted drops on specific paths rather
+than by reference counting alone. The residual risk therefore sits in the
+compiler, not in your program.
+
+A deferred, per-actor cycle collector is sketched in the GC design notes for a
+future in which March exposes unrestricted mutable values. None of it is
+implemented today, and nothing in the language today needs it.
 
 ---
 
