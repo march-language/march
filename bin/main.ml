@@ -921,6 +921,7 @@ let setup_interpreter_ffi () =
       March_eval.Eval.ffi_shim_so := Some so_path
 
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
+let dump_caps      = ref false   (* --dump-caps: print inferred cap set as JSON, then exit *)
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let emit_core_ast_file = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
@@ -2181,6 +2182,59 @@ let compile filename =
      exit 0 so tooling (forge build / forge check) can treat a clean typecheck
      as a pass.  Warnings do not fail the exit code — consistent with eval and
      compile modes. *)
+  else if !dump_caps then begin
+    (* --dump-caps: the module's INFERRED capability set, for
+       `forge publish` notarization (specs/2026-08-03-forge-cap-audit-design.md
+       §4.3, mechanism D).
+
+       Inferred, not declared: body-scanned caps are WARNING-only (the F1 gap,
+       specs/todos/2026-07-07-p2-compiler-capabilities-effects-*.md), so a
+       module calling file_read with no `needs` type-checks clean while its
+       compiled binary genuinely reports IO.FileRead.  Notarizing the DECLARED
+       set would manufacture a false registry mismatch for exactly those
+       modules.
+
+       OWN closures, filtered to this file's own functions: fn_capability_
+       closures folds in transitively-imported module needs, which makes the
+       union app-invariant (the 2026-07-04 granularity revision) and would
+       notarize every package as "needs everything". *)
+    let own = March_typecheck.Typecheck.fn_own_capability_closures typecheck_env in
+    let user_fn_names =
+      let tbl = Hashtbl.create 64 in
+      let rec walk decls =
+        List.iter (fun (d : March_ast.Ast.decl) ->
+            match d with
+            | March_ast.Ast.DFn (fd, _) ->
+              Hashtbl.replace tbl fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
+            | March_ast.Ast.DMod (_, _, inner, _) -> walk inner
+            | _ -> ()) decls
+      in
+      walk desugared.March_ast.Ast.mod_decls;
+      tbl
+    in
+    let belongs_to_this_module qname =
+      (* fn_own_capability_closures keys are "Mod.fn" or bare "fn" (lower.ml
+         strips the top-level module prefix).  Accept a bare name that this
+         file declares, or any qualified name whose prefix is this module. *)
+      match String.index_opt qname '.' with
+      | None -> Hashtbl.mem user_fn_names qname
+      | Some i ->
+        let m = String.sub qname 0 i in
+        m = desugared.March_ast.Ast.mod_name.March_ast.Ast.txt
+        || Hashtbl.mem user_fn_names qname
+    in
+    let caps =
+      List.concat_map (fun (qname, cs) ->
+          if belongs_to_this_module qname then cs else [])
+        own
+      |> List.sort_uniq String.compare
+      |> March_caps.Cap_lattice.normalize
+      |> List.sort String.compare
+    in
+    Printf.printf "{\"caps\":[%s]}\n"
+      (String.concat "," (List.map (Printf.sprintf "%S") caps));
+    exit 0
+  end
   else if !do_check then begin
     (* Cache successful check result so the next identical-source invocation
        exits immediately without re-running the typecheck pipeline (the early
@@ -4032,6 +4086,7 @@ let () =
     ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--dump-caps",  Arg.Set dump_caps,   " Print the module's inferred IO-capability set as JSON, then exit");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--refine-report", Arg.Set refine_report,
