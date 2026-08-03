@@ -21,6 +21,25 @@ type call_site = {
   cs_args     : Ast.expr list;  (** Argument expressions *)
 }
 
+(** Per-parameter ownership at a callee, read off the compiler's own borrow
+    inference ([March_tir.Borrow.infer_module]) rather than guessed from syntax.
+
+    [cm_consumes] is positional: [true] means calling this function TAKES
+    OWNERSHIP of that argument — the caller's reference is transferred and the
+    value is gone after the call. [false] means the parameter is borrowed (read
+    without taking ownership) or is not a heap value at all, for which ownership
+    is meaningless.
+
+    Both conditions matter. The borrow map initialises non-borrow-eligible
+    parameters to "not borrowed", so an [Int] parameter is nominally owned;
+    reporting that as "consumed" would bury the real signal under noise on every
+    numeric argument. A parameter is recorded here as consuming only when it is
+    both un-borrowed AND RC-tracked. *)
+type consume_modes = {
+  cm_fn_name : string;      (** callee name, as it appears in TIR *)
+  cm_consumes : bool list;  (** positional: true = this call consumes the argument *)
+}
+
 (** A `use`/`import` declaration, simplified for auto-import bookkeeping. *)
 type import_sel =
   | ISAll                    (** use M.* / import M — all members bare *)
@@ -55,7 +74,10 @@ type match_site = {
 (** What kind of annotation site this is. *)
 type annotation_kind =
   | AnnLet       (** let x = e  →  let x: T = e *)
-  | AnnFnReturn  (** fn foo(x) do e end  →  fn foo(x) -> T do e end *)
+  | AnnFnReturn  (** fn foo(x) do e end  →  fn foo(x) : T do e end.
+                     Not `-> T`: that is a parse error in March, and this
+                     comment described the arrow form for a while after the
+                     emitter itself was corrected (see the `: ` edit below). *)
   | AnnFnParam   (** fn foo(x) do e end  →  fn foo(x: T) do e end *)
 
 (** A site where a type annotation can be inserted. *)
@@ -241,6 +263,9 @@ type t = {
   (** Sites eligible for De Morgan rewriting: !(a&&b), !(a||b), !a&&!b, !a||!b. *)
   perf_insights    : perf_insight list;
   (** AST-level performance insights: non-tail calls, actor send copies, large closures. *)
+  consume_modes    : consume_modes list;
+  (** Per-callee argument ownership from borrow inference — drives the
+      "consumed" inlay hint. Populated by the TIR pass; empty until it runs. *)
   tir_fn_insights  : tir_fn_insight list;
   (** TIR-pipeline function-level insights: stack promotions, FBIP reuse, indirect calls. *)
   code_lens_items  : code_lens_item list;
@@ -2800,6 +2825,7 @@ let analyse ~filename ~src : t =
       naming_violations = [];
       demorgan_sites    = [];
       perf_insights     = [];
+      consume_modes     = [];
       tir_fn_insights   = [];
       code_lens_items   = [];
       decls             = [];
@@ -3629,6 +3655,7 @@ let analyse ~filename ~src : t =
       naming_violations;
       demorgan_sites;
       perf_insights;
+      consume_modes    = [];
       tir_fn_insights  = [];
       code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
@@ -3692,7 +3719,8 @@ let rec tir_count_nodes (e : Tir.expr) : int * int * int * int =
    tir perf insights are stored alone and recombined with the input analysis's
    own perf_insights on replay. *)
 let tir_pass_cache :
-  (string, tir_fn_insight list * code_lens_item list * perf_insight list) Hashtbl.t
+  (string, tir_fn_insight list * code_lens_item list * perf_insight list
+           * consume_modes list) Hashtbl.t
   = Hashtbl.create 16
 
 let run_tir_pass (a : t) : t =
@@ -3702,6 +3730,16 @@ let run_tir_pass (a : t) : t =
     ) a.diagnostics
   in
   if has_errors then a
+  (* Idempotence. [analyse] always yields an analysis with no TIR insights, so a
+     non-empty [tir_fn_insights] means this value is already the OUTPUT of a
+     previous run. Without this guard a second run appends the pass's perf
+     insights to a list that already contains them, and the user sees each
+     insight twice. [tir_perf_insights] is a filter_map over [tir_fn_insights],
+     so the empty case has nothing to duplicate and needs no guard.
+
+     The old idempotence test tolerated this with a "<= n + 3" bound instead of
+     checking equality, which is why it went unnoticed. *)
+  else if a.tir_fn_insights <> [] then a
   else
     let cache_key = March_cas.Blake3.hash_string a.src in
     (* Preserve the actionable Run/Debug lenses already built in [analyse]
@@ -3711,8 +3749,9 @@ let run_tir_pass (a : t) : t =
       List.filter (fun cl -> cl.cl_command <> None) a.code_lens_items
     in
     match Hashtbl.find_opt tir_pass_cache cache_key with
-    | Some (tir_fn_insights, code_lens_items, tir_perf_insights) ->
+    | Some (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes) ->
       { a with tir_fn_insights;
+               consume_modes;
                code_lens_items = action_lenses @ code_lens_items;
                perf_insights = a.perf_insights @ tir_perf_insights }
     | None ->
@@ -3732,6 +3771,31 @@ let run_tir_pass (a : t) : t =
       let tir = March_tir.Mono.monomorphize tir in
       let tir = March_tir.Defun.defunctionalize tir in
       let tir = March_tir.Known_call.run ~changed:(ref false) tir in
+      (* Borrow inference BEFORE Perceus: this is the same map Perceus itself
+         consults to decide which arguments need an EIncRC at a call site, so
+         the hint reports the compiler's actual decision rather than a
+         re-derivation of it. Run on the pre-Perceus module for the same reason
+         Perceus does — the RC operations it inserts are the CONSEQUENCE of
+         these modes, not an input to them. *)
+      let borrow_map = March_tir.Borrow.infer_module tir in
+      let consume_modes =
+        List.filter_map (fun (fn : Tir.fn_def) ->
+            if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$' then None
+            else
+              let consumes =
+                List.mapi (fun i (p : Tir.var) ->
+                    (* Consuming = takes ownership AND there is ownership to
+                       take. Skipping non-RC parameters is what keeps this hint
+                       off every Int argument (see [consume_modes]). *)
+                    (not (March_tir.Borrow.is_borrowed borrow_map fn.Tir.fn_name i))
+                    && March_tir.Rc_types.needs_rc p.Tir.v_ty)
+                  fn.Tir.fn_params
+              in
+              if List.exists (fun c -> c) consumes
+              then Some { cm_fn_name = fn.Tir.fn_name; cm_consumes = consumes }
+              else None)
+          tir.Tir.tm_fns
+      in
       let tir = March_tir.Perceus.perceus tir in
       let tir = March_tir.Escape.escape_analysis tir in
       (* Collect per-function optimization counts *)
@@ -3829,9 +3893,10 @@ let run_tir_pass (a : t) : t =
           ) tir_fn_insights
       in
       Hashtbl.replace tir_pass_cache cache_key
-        (tir_fn_insights, code_lens_items, tir_perf_insights);
+        (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes);
       { a with
         tir_fn_insights;
+        consume_modes;
         code_lens_items = action_lenses @ code_lens_items;
         perf_insights = a.perf_insights @ tir_perf_insights;
       }
@@ -4635,7 +4700,32 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
         match pi.pi_kind with
         | ActorSendCopy _ -> annotate pi.pi_span "⧉ copied"
         | _ -> ()
-      ) a.perf_insights
+      ) a.perf_insights;
+    (* Consuming-call hints: mark arguments this call TAKES OWNERSHIP of, so
+       ownership transfer is visible where it happens instead of having to be
+       inferred from the callee's signature.
+
+       Restricted to arguments that are a plain variable. A temporary
+       (`f(g(x))`, `f([1,2])`) is consumed too, but nobody is surprised that a
+       value with no name does not survive the call — whereas `f(xs)` ending
+       the life of `xs` is exactly the thing worth seeing. Narrowing to named
+       bindings is what keeps this a signal rather than decoration on every
+       argument in the file. *)
+    List.iter (fun (cs : call_site) ->
+        match cs.cs_fn_name with
+        | None -> ()
+        | Some fname ->
+          (match List.find_opt (fun cm -> cm.cm_fn_name = fname) a.consume_modes with
+           | None -> ()
+           | Some cm ->
+             List.iteri (fun i (arg : Ast.expr) ->
+                 match arg with
+                 | Ast.EVar n when (match List.nth_opt cm.cm_consumes i with
+                                    | Some true -> true | _ -> false) ->
+                   annotate n.Ast.span "⊗ consumed"
+                 | _ -> ())
+               cs.cs_args)
+      ) a.call_sites
   end;
   (* Parameter-name hints at call sites: foo(width: a, height: b).
      Emitted at the START of each positional argument as a Parameter inlay. *)
