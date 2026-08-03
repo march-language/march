@@ -1,4 +1,4 @@
--- EXPECT-ERROR: refinement violation: argument does not satisfy precondition `_ > 0`
+-- EXPECT-ERROR: refinement violation: argument `n` of `bump` does not satisfy precondition `_ > 0`
 -- The REMEDY that Task 5's interface-signature warning recommends, proved to
 -- be enforced rather than merely accepted.
 --

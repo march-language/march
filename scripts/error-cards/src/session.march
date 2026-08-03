@@ -1,0 +1,14 @@
+mod LinErr do
+
+  fn consume(s : String) : Int do
+    String.byte_size(s)
+  end
+
+  fn main() do
+    linear let token = "secret"
+    let a = consume(token)
+    let b = consume(token)
+    println(int_to_string(a + b))
+  end
+
+end

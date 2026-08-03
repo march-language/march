@@ -1,0 +1,16 @@
+mod RefineErr do
+
+  fn safe_div(n : Int, d : {Int | _ != 0}) : Int do
+    n / d
+  end
+
+  fn compute(scale : Int) : Int do
+    let divisor = scale - 5
+    safe_div(100, divisor)
+  end
+
+  fn main() do
+    println(int_to_string(compute(5)))
+  end
+
+end
