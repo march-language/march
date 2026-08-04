@@ -585,6 +585,22 @@ Example output for a project with a typestate database handle:
 
 This gives you a top-level map of what your codebase touches and what resource lifecycles it manages — useful during code review, security audits, or onboarding a new contributor.
 
+`forge cap coverage` reports which of the capabilities your project holds are exercised by tests and which are not — a `Covered` / `Uncovered` list and an `N/M capabilities covered (X%)` summary — so a capability that no test ever drives is easy to spot.
+
+### Reading and enforcing a compiled binary
+
+The subcommands above read source. Two more work on a built artifact:
+
+```sh
+forge cap inspect ./build/myapp                          # what capabilities does this binary hold?
+forge cap inspect ./build/myapp --deny IO.Network         # fail if it holds IO.Network (repeatable)
+forge cap inspect ./build/myapp --allow-only IO.Console    # fail if it holds anything outside this set
+forge cap run ./build/myapp                               # run it under a sandbox forge installs
+forge cap run --allow-only IO.Console ./untrusted          # run untrusted code with a policy YOU choose
+```
+
+`forge cap inspect` cross-checks capability markers the compiler emitted, capability-bearing runtime symbols that survived dead-stripping, and an embedded manifest when present; `--deny`/`--allow-only` are **fail-closed** (they fail on a binary whose coverage is not full, and foreign code requires `--allow-foreign`). `forge cap run` is the enforcing counterpart — it launches the binary under an OS sandbox before the program gets control. Both are covered in depth on the [Capability Audit](capability-audit.md) page and under [OS-level enforcement]({{ site.baseurl }}/docs/capabilities/#os-level-enforcement--sandboxing-the-compiled-binary); a binary can also sandbox *itself* at startup when compiled with `march --compile --cap-sandbox`.
+
 ---
 
 ## Dependency Management

@@ -65,11 +65,48 @@ thread):
   (recursive), but shrinks the tax generally.
 - **Amortise via a counter** (Erlang-style reductions): decrement a
   thread-local, poll the shared flag only on zero. Trades a volatile global
-  load for a thread-local decrement — needs measuring, not obviously cheaper.
+  load for a thread-local decrement. **MEASURED 2026-08-04 — REJECTED, +65%.**
+  See the measured subsection below.
 - **Relax volatile to an atomic monotonic load**: LLVM may then merge some
   adjacent checks. Risky — the optimizer is also allowed to hoist monotonic
   loads out of loops in ways that could unbound the check interval. Would need
   a hard argument, not just a green test run.
+
+### MEASURED 2026-08-04: the throttle counter is +65%, not a win
+
+Built the amortise-via-counter idea and A/B'd it on the dedicated x86 box
+(Xeon 8581C, idle) against `origin/main`, both compiled with `march --compile
+--opt 2`, interleaved runs, output verified identical (102334155):
+
+```
+base     (single volatile flag load)   0.42–0.43 s
+throttle (poll 1-in-64 via TLS counter) 0.70–0.71 s   (+65%)
+```
+
+The scheme: a **non-volatile** `_Thread_local march_check_throttle`; the common
+path decrements it and the volatile flag is polled only when it hits 0 and is
+then reset. The intent was that a non-volatile TLS lets LLVM keep the counter in
+a register across the loop, making the common path a register decrement instead
+of a memory read.
+
+**Why it lost — register promotion never happens.** fib's loop body contains the
+recursive `fib(n-2)` call, and that call also decrements the same shared TLS
+counter. So LLVM must treat the counter as clobbered across the call and cannot
+keep it in a register: every check becomes a `%fs` **load *and* a store** —
+strictly more memory traffic than the single flag load it replaced. The throttle
+adds work without ever collecting the register-promotion payoff. The single
+volatile flag load (base) is already near-optimal for a memory-resident check.
+
+**The only remaining lever is in-register reduction counting** — thread the
+budget as an actual function argument/return (`fib(n, budget) -> (result,
+budget')`) so it lives in an SSA register that survives the call, à la BEAM. That
+is a calling-convention change touching every function signature and call site
+(or, scoped to self-recursive functions, fib's signature + self-calls + entry),
+with a real regression surface across the codegen suite and **no guaranteed win**
+(the two-register struct return adds per-call unpacking that may eat the saving).
+Decision (2026-08-04): **not pursued** — fib's 429 ms is accepted as the honest
+price of function-entry preemptibility. Leaf-function elision (first bullet
+above) remains the only cheap, safe cut, and it does not help fib.
 
 ## 2. binary-trees: `march_alloc` is `calloc`, against OCaml's bump allocator
 

@@ -478,7 +478,43 @@ end
 
 ## Runtime behaviour
 
-All `Cap(X)` values are **runtime-erased**. They compile to `null` in LLVM IR and to `VUnit` in the interpreter. No allocation, no indirection, no overhead. Enforcement is purely at compile time.
+All `Cap(X)` values are **runtime-erased**. They compile to `null` in LLVM IR and to `VUnit` in the interpreter. No allocation, no indirection, no overhead. Enforcement of the capability *types* is purely at compile time — but a compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup; see [OS-level enforcement](#os-level-enforcement--sandboxing-the-compiled-binary) below.
+
+---
+
+## OS-level enforcement — sandboxing the compiled binary
+
+Capability *types* are checked at compile time and then erased (above). That verifies your March code, but it says nothing about what the process may do once it is running: an `extern` C call, a `dlopen`, or a raw syscall is past the point the compiler can see. This is the [`IO.Foreign`](#ioforeign--calling-unverified-c) boundary, and the gap [`forge audit`]({{ site.baseurl }}/docs/capability-audit/#what-this-does-and-does-not-prove) is explicit about not closing. March can close it at the OS level, turning the declared capability set into an actual confinement.
+
+There are two mechanisms — one imposed on the process from outside, one built into it.
+
+### `forge cap run` — externally imposed (the stronger one)
+
+`forge cap run` launches a binary under a sandbox that *forge* installs before the program gets control:
+
+```
+$ forge cap run ./build/myapp                        # policy from the binary's own claim
+$ forge cap run --allow-only IO.Console ./untrusted   # policy YOU choose
+```
+
+For a binary you do **not** trust, pass `--allow-only`: deriving the policy from the binary's own claim only tells you what it admits to, which is worthless against code trying to hide. Where a capability cannot be enforced by the platform's available primitive, `forge cap run` reports it as **advisory** per capability rather than pretending to enforce it. This is the stronger of the two mechanisms, because the launcher — not the code being confined — chooses the policy.
+
+### `--cap-sandbox` — self-imposed (defense in depth)
+
+Compiling with `--cap-sandbox` embeds a **deny-default** profile, derived from *this program's own* declared capabilities, that the binary installs on itself at startup before any user code runs:
+
+```
+$ march --compile --cap-sandbox -o build/myapp app.march
+```
+
+- **macOS** — a Seatbelt (SBPL) profile via `sandbox_init()`. Deny-default, then each declared capability opens a specific hole: `IO.FileWrite` allows writes (narrowed to the path scopes you declared, otherwise blanket), `IO.Network` allows sockets, `IO.Process` allows fork. `IO.FileRead` is **advisory** here — dyld must map system libraries before any user code exists, so the baseline allows reads unconditionally and a scoped read rule would be decorative.
+- **Linux** — an unprivileged in-process **seccomp-bpf** filter (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). One syscall class is denied per *withheld* capability: no `IO.Network` blocks `socket`/`socketpair`, no `IO.Process` blocks `execve`/`execveat`, no `IO.FileWrite` blocks the write path — denied calls return `EPERM`. `IO.FileRead` is not enforced here either, because seccomp filters syscall *numbers*, not paths; path-scoped reads come from `forge cap run`'s mount namespace instead.
+
+Installation **fails closed**: if the sandbox cannot be installed, the program refuses to run rather than continue unconfined.
+
+`--cap-sandbox` is **opt-in defense-in-depth**, not a guarantee against a hostile *publisher* — whoever builds the binary chooses whether to compile it in, so a malicious author simply omits it. Its purpose is a binary *you* built and trust, deployed somewhere `forge` is not the launcher — under systemd, a supervisor, a container entrypoint — the exact case `forge cap run` cannot reach. When you control the launcher, prefer `forge cap run`.
+
+Because both mechanisms confine the **whole process**, they bound even the code the compiler cannot see — `extern` C, `dlopen`, raw syscalls. They are the enforcement counterpart to [`forge cap inspect`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary): `inspect` *reads* what a binary holds; these *enforce* what it may do.
 
 ---
 
