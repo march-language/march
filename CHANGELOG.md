@@ -263,6 +263,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march-lsp` implements the pull diagnostics it advertises.** It declared
+  `diagnosticProvider`, but `textDocument/diagnostic` reached no handler, so
+  every pull failed with `TODO: handle this request` — invisible because the
+  push path quietly carried the feature. Also lowers `workspaceDiagnostics` to
+  `false`: that is a separate promise (`workspace/diagnostic`, over every file
+  rather than the open ones) which is still unimplemented, and advertising it
+  would recreate the same bug one level down.
+
 - **`march-lsp` now exits when the client tells it to.** The server handled the
   `exit` notification and then went straight back to reading stdin, so it hung
   until the editor's timeout killed it — `Jsonrpc2.run`'s `?shutdown` predicate,

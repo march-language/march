@@ -221,6 +221,78 @@ let test_exit_terminates () =
     "the `exit` notification terminates the server without closing its pipes"
     true (run_exit_terminates ())
 
+(* ── textDocument/diagnostic (pull) ───────────────────────────────────────────
+   The server advertises `diagnosticProvider`, so a conforming client may pull
+   instead of relying on the push. Until this was implemented the request fell
+   through to linol's `on_request_unhandled`, whose default fails with
+   `TODO: handle this request` — every pull logged an error while push
+   diagnostics quietly carried the feature, which is why it went unnoticed.
+
+   Two cases, because "returns something" is not the property: a handler that
+   always answers EMPTY would satisfy the first on its own. *)
+let pull_diagnostics ~(text : string) ~(uri : string) : Yojson.Safe.t option =
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
+  ignore (Unix.alarm 25);
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null; "rootUri", `Null;
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "method", `String "textDocument/didOpen";
+    "params", `Assoc [ "textDocument", `Assoc [
+      "uri", `String uri; "languageId", `String "march";
+      "version", `Int 1; "text", `String text ] ] ]);
+  ignore (read_until ic ~max:30 (is_method "textDocument/publishDiagnostics"));
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 2;
+    "method", `String "textDocument/diagnostic";
+    "params", `Assoc [ "textDocument", `Assoc [ "uri", `String uri ] ] ]);
+  let reply = read_until ic ~max:30 (is_id 2) in
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 3;
+                    "method", `String "shutdown"; "params", `Null ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  ignore (Unix.alarm 0);
+  Option.map (fun j -> member "result" j) reply
+
+let report_items (r : Yojson.Safe.t option) : int option =
+  match r with
+  | Some (`Assoc _ as res) ->
+    (match member "items" res with
+     | `List l -> Some (List.length l)
+     | _ -> None)
+  | _ -> None
+
+let test_pull_diagnostics_reports_an_error () =
+  let n =
+    report_items
+      (pull_diagnostics ~uri:"file:///pull_bad.march"
+         ~text:"mod M do\n  fn f() : Int do true end\nend\n")
+  in
+  match n with
+  | None -> Alcotest.fail "textDocument/diagnostic returned no full report"
+  | Some k ->
+    Alcotest.(check bool) "the type error is in the pulled report" true (k > 0)
+
+(* The companion that makes the first one mean something: a clean buffer must
+   come back as an EMPTY full report — not an error, and not the other file's
+   items. *)
+let test_pull_diagnostics_clean_buffer_is_empty () =
+  let n =
+    report_items
+      (pull_diagnostics ~uri:"file:///pull_ok.march"
+         ~text:"mod M do\n  fn f() : Int do 1 end\nend\n")
+  in
+  match n with
+  | None -> Alcotest.fail "textDocument/diagnostic returned no full report"
+  | Some k -> Alcotest.(check int) "clean buffer reports no items" 0 k
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
@@ -228,4 +300,8 @@ let () =
         Alcotest.test_case "workspace/executeCommand is dispatched" `Quick
           test_execute_command_dispatches;
         Alcotest.test_case "exit notification terminates the server" `Quick
-          test_exit_terminates ] ]
+          test_exit_terminates;
+        Alcotest.test_case "textDocument/diagnostic reports an error" `Quick
+          test_pull_diagnostics_reports_an_error;
+        Alcotest.test_case "textDocument/diagnostic is empty when clean" `Quick
+          test_pull_diagnostics_clean_buffer_is_empty ] ]
