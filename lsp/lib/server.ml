@@ -262,7 +262,22 @@ let semantic_tokens_data (a : Analysis.t) : int array =
     Utf16.byte_col_to_lsp_char a.Analysis.doc ~line:line0 ~byte_col
   in
 
+  (* Only spans belonging to THIS document may be emitted.  [def_map] and
+     [use_map] cover the whole analysis, and the analysis has the prelude and
+     any imported modules injected — so iterating them unfiltered emitted a
+     token for every stdlib definition, at line numbers from another file
+     entirely.  Measured on a 15-line document: 6949 tokens reaching line 3512.
+
+     The client has no way to detect that; it either wastes the bandwidth or
+     paints ranges that do not exist.  The bug was invisible while the request
+     itself was unreachable, and surfaced the moment the dispatch was repaired —
+     the second-round failure that being unable to run a feature hides. *)
+  let in_this_document (sp : March_ast.Ast.span) =
+    sp.March_ast.Ast.file = a.Analysis.filename
+  in
+
   Hashtbl.iter (fun name sp ->
+      if in_this_document sp then
       let tok_type_idx, mods =
         if List.mem_assoc name a.Analysis.types then
           tok_type, mod_declaration lor mod_readonly
@@ -286,6 +301,7 @@ let semantic_tokens_data (a : Analysis.t) : int array =
     ) a.Analysis.def_map;
 
   Hashtbl.iter (fun sp name ->
+      if in_this_document sp then
       (* Tag the use site by what the name resolves to — type, constructor,
          or variable — instead of blindly calling every use a variable. *)
       let tok, mods =

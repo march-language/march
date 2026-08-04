@@ -315,6 +315,18 @@ git log is authoritative for exact commits.
   capability and fails if any returns an error; its absence is what let these
   die quietly.
 
+  Each revived capability was then verified semantically against a fixture with
+  known answers — `references` finds the declaration and both uses, `rename`
+  produces three edits, `callHierarchy` finds the caller, `signatureHelp` reports
+  `double(Int)` — rather than only checking that a reply arrived.
+
+- **Semantic tokens no longer describe the whole prelude.** The builder walked
+  the entire analysis, which has the prelude injected, so it emitted a token per
+  stdlib definition at line numbers from another file: 6949 tokens reaching line
+  3512 for a 15-line document. Now filtered to the open document (15 tokens).
+  Found only once the request became reachable — it had been wrong for exactly
+  as long as it had been dead.
+
 - **`march-lsp` implements the pull diagnostics it advertises.** It declared
   `diagnosticProvider`, but `textDocument/diagnostic` reached no handler, so
   every pull failed with `TODO: handle this request` — invisible because the

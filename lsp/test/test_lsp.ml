@@ -3184,6 +3184,37 @@ end
   Alcotest.(check bool) "no action when the return is already refined" true
     (post_action_at src "done_already" = None)
 
+(* Semantic tokens must describe THIS document and nothing else.
+
+   `def_map`/`use_map` cover the whole analysis, and the analysis has the
+   prelude injected — so iterating them unfiltered emitted a token for every
+   stdlib definition, at line numbers belonging to another file. Measured on a
+   15-line document before the fix: 6949 tokens, reaching line 3512. A client
+   cannot detect that; it either wastes the bandwidth or paints ranges that do
+   not exist.
+
+   Invisible while `textDocument/semanticTokens/full` was unreachable, and
+   immediate once the dispatch was repaired. *)
+let test_semantic_tokens_stay_inside_the_document () =
+  let src = {|
+mod STok do
+  fn double(n : Int) : Int do
+    n * 2
+  end
+end
+|} in
+  let a = analyse src in
+  let data = March_lsp_lib.Server.semantic_tokens_data a in
+  let n_lines = List.length (String.split_on_char '\n' src) in
+  let highest = ref 0 and cur = ref 0 in
+  Array.iteri
+    (fun i v -> if i mod 5 = 0 then begin cur := !cur + v; if !cur > !highest then highest := !cur end)
+    data;
+  Alcotest.(check bool) "some tokens are produced" true (Array.length data > 0);
+  Alcotest.(check bool)
+    (Printf.sprintf "highest token line %d is inside a %d-line document" !highest n_lines)
+    true (!highest < n_lines)
+
 let test_perf_parallelizable_code_action () =
   let src = {|
 mod Test do
@@ -6673,6 +6704,9 @@ let () =
       "List.fold_left never flagged",                 `Quick, test_perf_parallelizable_fold_not_flagged;
       "parallelizable hint in diagnostics",           `Quick, test_perf_parallelizable_hint_in_diagnostics;
       "convert-to-pmap code action",                  `Quick, test_perf_parallelizable_code_action;
+    ];
+    "semantic tokens document scope", [
+      "tokens stay inside the open document",          `Quick, test_semantic_tokens_stay_inside_the_document;
     ];
     "suggest-postcondition code action", [
       "offered on a declared return type",             `Quick, test_post_action_offered_on_declared_return;
