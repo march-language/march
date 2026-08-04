@@ -875,9 +875,10 @@ let print_refine_report ~filename ~user_files () =
       (fun (r, n) ->
         Printf.eprintf "  skipped (%s): %d\n" (March_refinecheck.Obligation.reason_name r) n)
       (List.sort compare skips);
-    Printf.eprintf "  by kind: %d precondition, %d postcondition\n"
+    Printf.eprintf "  by kind: %d precondition, %d postcondition, %d division\n"
       (count_kind March_refinecheck.Obligation.Precondition obligations)
       (count_kind March_refinecheck.Obligation.Postcondition obligations)
+      (count_kind March_refinecheck.Obligation.Division obligations)
   in
   let all_obligations = March_refinecheck.Obligation.all () in
   let user_obligations = List.filter (fun (o : March_refinecheck.Obligation.t) -> is_user_span o.span) all_obligations in

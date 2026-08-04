@@ -9491,6 +9491,96 @@ let test_precond_infer_no_debt_is_its_own_status () =
     | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
   end
 
+(* ── `cap no_panic` divisions are debt the suggester can discharge ────────
+   Division safety is a SEPARATE pass from [Refine_check], so its obligations
+   reached neither the ledger nor [walk_debt]'s probe. A `cap no_panic` module
+   whose only problem was `n / d` counted as ZERO debt: `--refine-suggest-all`
+   printed "no suggestions" for the one case where the compiler's own error
+   already names the annotation to add. *)
+let test_precond_infer_suggests_for_no_panic_division () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"div"
+        {|mod PD do
+            cap no_panic
+            fn div(n : Int, d : Int) : Int do n / d end
+          end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check string) "status" "solved" (PI.status_name r.PI.rs_status);
+      (* Weakest-first still applies: `_ != 0` is what a divisor needs, and
+         `_ > 0` would forbid negative divisors the function accepts. *)
+      Alcotest.(check (list (pair string string)))
+        "suggests d != 0" [ ("d", "_ != 0") ] (sugg_preds r)
+    | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+  end
+
+(* REJECT witness for the test above. A change that simply proposes `_ != 0`
+   for every divisor-shaped parameter passes it while being pure noise on real
+   code. These two divisions are already safe — one by an existing refinement,
+   one by a runtime guard — and must draw NO suggestion. *)
+let test_precond_infer_silent_on_already_safe_division () =
+  if not (z3_available ()) then ()
+  else begin
+    let refined =
+      suggest_in ~target:"div"
+        {|mod PDR do
+            cap no_panic
+            fn div(n : Int, d : {Int | _ != 0}) : Int do n / d end
+          end|}
+    in
+    (match refined with
+     | [ r ] ->
+       Alcotest.(check string) "already-refined divisor: status"
+         "no-debt" (PI.status_name r.PI.rs_status);
+       Alcotest.(check int) "already-refined divisor: no suggestions"
+         0 (List.length r.PI.rs_suggestions)
+     | _ -> Alcotest.failf "expected one result for the refined case");
+    let guarded =
+      suggest_in ~target:"guarded"
+        {|mod PDG do
+            cap no_panic
+            fn guarded(n : Int, d : Int) : Int do
+              if d != 0 do n / d else 0 end
+            end
+          end|}
+    in
+    match guarded with
+    | [ r ] ->
+      Alcotest.(check string) "guarded divisor: status"
+        "no-debt" (PI.status_name r.PI.rs_status);
+      Alcotest.(check int) "guarded divisor: no suggestions"
+        0 (List.length r.PI.rs_suggestions)
+    | _ -> Alcotest.failf "expected one result for the guarded case"
+  end
+
+(* Second REJECT witness: the call-site path must be untouched. The division
+   obligation and the precondition obligation are different kinds recorded by
+   different passes, and a single call must still count as exactly ONE
+   obligation — not two, which is what folding division into [Precondition]
+   would have produced. *)
+let test_precond_infer_call_site_path_unchanged_by_division_kind () =
+  if not (z3_available ()) then ()
+  else begin
+    let rs =
+      suggest_in ~target:"wrapper"
+        {|mod PDC do
+            fn safe_div(n : Int, d : {Int | _ != 0}) : Int do n / d end
+            fn wrapper(x : Int) : Int do safe_div(10, x) end
+          end|}
+    in
+    match rs with
+    | [ r ] ->
+      Alcotest.(check string) "status" "solved" (PI.status_name r.PI.rs_status);
+      Alcotest.(check (list (pair string string)))
+        "suggests x != 0" [ ("x", "_ != 0") ] (sugg_preds r);
+      Alcotest.(check int) "exactly one obligation, not double-counted"
+        1 r.PI.rs_debt_before
+    | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+  end
+
 (* A truncated search must not report itself as a complete one: with a budget
    too small to reach the working candidate, the answer is `budget-exhausted`,
    NOT `no-candidate`. Those are different facts about different things — the
@@ -11966,6 +12056,9 @@ let compiler_suites =
           Alcotest.test_case "positive-param callee → _ > 0"                `Quick test_precond_infer_positive_param;
           Alcotest.test_case "prefers the weakest candidate that works"     `Quick test_precond_infer_prefers_the_weakest;
           Alcotest.test_case "no debt is its own status, not silence"       `Quick test_precond_infer_no_debt_is_its_own_status;
+          Alcotest.test_case "suggests for a `cap no_panic` division"       `Quick test_precond_infer_suggests_for_no_panic_division;
+          Alcotest.test_case "silent on an already-safe division"           `Quick test_precond_infer_silent_on_already_safe_division;
+          Alcotest.test_case "division kind leaves the call-site path alone" `Quick test_precond_infer_call_site_path_unchanged_by_division_kind;
           Alcotest.test_case "budget exhaustion is not 'no candidate'"        `Quick test_precond_infer_budget_exhaustion_is_not_no_candidate;
           Alcotest.test_case "no contract over a handled empty case"          `Quick test_precond_infer_respects_a_handled_empty_case;
           Alcotest.test_case "still proposes over a panicking empty case"     `Quick test_precond_infer_still_proposes_over_a_panicking_case;

@@ -323,6 +323,20 @@ let walk_debt ~root ~defs (decls : A.decl list) : debt =
   let errctx = Err.create () in
   (try RC.visit_decls ~root errctx defs RC.rctx0 decls
    with _ -> ());
+  (* Division safety is a SEPARATE pass — [Refine_check.visit_decls] never
+     reaches it — so it has to be re-run here for its obligations to move
+     under a hypothesis.  Recording them in [Division_safety] without also
+     running it here would leave the count frozen at whatever the first walk
+     produced: every candidate would appear to discharge nothing, the search
+     would report [No_candidate], and the whole feature would still be dead
+     while looking wired up.
+     [context_decls] keeps `DOpts`, so the pruned tree still carries the
+     `cap no_panic` that makes these obligations exist at all. *)
+  (try
+     Division_safety.check_module ~root errctx
+       { A.mod_name = { A.txt = "<probe>"; A.span = A.dummy_span }
+       ; A.mod_decls = decls }
+   with _ -> ());
   count_debt ()
 
 (* ── Results ──────────────────────────────────────────────────────────────── *)

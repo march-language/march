@@ -50,8 +50,15 @@ type verdict = Proved | Violated | Trusted | Skipped of reason
    names the callee/annotation site.  [Postcondition]: a function's own
    return value checked against its declared return refinement — [callee]
    carries the FUNCTION's own name, since there is no separate callee to
-   name. *)
-type kind = Precondition | Postcondition
+   name.  [Division]: a `cap no_panic` divisor checked non-zero by
+   [Division_safety] — [callee] names the DIVISOR variable, since the
+   obligation belongs to a `/` rather than to any function.
+
+   [Division] is its own kind rather than a [Precondition] with a synthetic
+   callee because both `cap verified` escalation and `--refine-report` branch
+   on kind; folding it into [Precondition] would silently change what those
+   two do for every module that already contains a division. *)
+type kind = Precondition | Postcondition | Division
 
 type t =
   { span : March_ast.Ast.span

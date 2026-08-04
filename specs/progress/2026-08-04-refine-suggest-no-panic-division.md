@@ -1,8 +1,8 @@
 # `forge refine` is blind to the one obligation the compiler tells you how to fix
 
-`[P2]` - [ ] **A `cap no_panic` division produces no suggestion, even though the
-compiler's own error names the exact annotation.** `--refine-suggest-all` prints
-`no suggestions` for the case a user is most likely to hit first.
+**FIXED 2026-08-04.** `[P2]` **A `cap no_panic` division produced no suggestion, even
+though the compiler's own error names the exact annotation.** `--refine-suggest-all`
+printed `no suggestions` for the case a user is most likely to hit first.
 
 ## Repro
 
@@ -132,3 +132,66 @@ Clear **both** caches before any run that is meant to prove a refinement verdict
 `.march/cas/vc` content-addresses solver verdicts and `.march/cas/artifacts-v2` lets
 `--check` exit on an artifact hit *before* refinecheck runs. A stale either way makes this
 repro appear to pass or fail at random.
+
+
+---
+
+# Implementation (2026-08-04)
+
+Both changes the spec called for, and the second one is the one that matters:
+
+1. **`Obligation.kind` gains `Division`**, and `Division_safety.check_var_divisor` records
+   one obligation per variable divisor. The verdict is read off the error context
+   (`did this call report?`) rather than threaded back through the function's many exit
+   paths — under `cap no_panic` anything short of proof *is* an error, so there is no
+   `Skipped` middle ground to lose. `Err.report` suppresses exact duplicates, but two
+   divisions never share a span, so a real second obligation cannot be swallowed.
+
+2. **`Precond_infer.walk_debt` now runs `Division_safety.check_module`** on the pruned
+   tree, in addition to `Refine_check.visit_decls`. `context_decls` already keeps `DOpts`,
+   so the probe tree still carries the `cap no_panic` that makes the obligation exist.
+
+**The spec's warning was correct and is now demonstrated.** Reverting only step 2 — keeping
+the recording, dropping the probe re-run — puts the output straight back to
+`no suggestions` while every other test stays green. That mutation is what the new positive
+test catches, and nothing else catches it.
+
+## Result
+
+```
+$ march --refine-suggest-all probe.march
+safe_div (probe.march:4)
+    d : Int  ->  d : {Int | _ != 0}
+  discharges all 1 unproven obligation(s)
+```
+
+`forge refine --all --apply` rewrites the parameter, and the applied file passes `--check`
+with **exit 0**.
+
+`--refine-report`'s by-kind line gained a third counter.
+
+## Tests
+
+`test/test_compiler.ml`, group `precond_infer`:
+
+- `suggests for a cap no_panic division` — the positive case, asserting the weakest
+  candidate (`_ != 0`, not `_ > 0`).
+- `silent on an already-safe division` — **REJECT witness**, two shapes: a divisor already
+  refined, and one guarded by `if d != 0`. A change that proposes `_ != 0` for every
+  divisor-shaped parameter passes the positive test and fails this one.
+- `division kind leaves the call-site path alone` — second REJECT witness, and it asserts
+  `rs_debt_before = 1`. Folding `Division` into `Precondition` would have double-counted a
+  single call as two obligations; only this assertion sees that.
+
+Mutation-checked both ways: dropping the probe re-run fails only the positive test;
+recording `Violated` unconditionally fails the positive test *and* the already-safe
+witness.
+
+## What did NOT change, verified
+
+`Postcond_infer` has its **own** `walk_debt` which does not run `Division_safety`, so no
+division obligation enters postcondition probing and its counts are untouched. Confirmed on
+a module containing a postcondition candidate and a division together: both surfaces
+produce exactly the answer each did before.
+
+675 → 678 compiler tests, all passing.
