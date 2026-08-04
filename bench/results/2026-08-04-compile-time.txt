@@ -1,0 +1,8 @@
+# Compile-time benchmark — regenerate with: python3 bench/compile_time.py
+# idle GCP c4-standard-4, 2026-08-04
+
+program : bench/dataframe_bench.march (193 lines)
+cpu     : INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz
+clean       (cold CAS)         median   4772 ms   min   4765
+incremental (1 literal edited) median     53 ms   min     48
+speedup     91x

@@ -79,6 +79,23 @@ tool_version() {                   # tool_version LABEL PATH VERSION-ARGS…
 
 print_provenance() {
   MISSING=""
+  # Start the machine file fresh and stamp the run's provenance as its first
+  # record, so a committed .jsonl documents the machine it came from.
+  if [ -n "$MACHINE_OUT" ]; then
+    : > "$MACHINE_OUT"
+    local cpu cores
+    if [ -r /proc/cpuinfo ]; then
+      cpu="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+      cores="$(nproc 2>/dev/null || echo 0)"
+    else
+      cpu="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+      cores="$(sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+    fi
+    printf '{"meta":true,"date":"%s","host":"%s","cpu":"%s","cores":%s,"runs":%s,"load":"%s"}\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$(json_escape "$(uname -srm)")" \
+      "$(json_escape "$cpu")" "$cores" "$RUNS" \
+      "$(json_escape "$(uptime | sed 's/.*load average[s]*: *//')")" >> "$MACHINE_OUT"
+  fi
   bold "═══ Environment ═══"
   printf '  %-8s %s\n' "date" "$(date -u '+%Y-%m-%dT%H:%M:%SZ') (UTC)"
   printf '  %-8s %s\n' "host" "$(uname -srm)"
@@ -141,8 +158,23 @@ print_provenance() {
   fi
   printf '\n'
 }
-header(){ printf '\n'; bold "═══ $* ═══"; printf '  %-12s %8s %8s %8s\n' "Language" "Median" "Min" "Max"; printf '  %-12s %8s %8s %8s\n' "--------" "------" "---" "---"; }
-row()   { printf '  %-12s %7.1f ms %6.1f ms %6.1f ms\n' "$1" "$2" "$3" "$4"; }
+# ── Machine-readable output (JSONL) ──────────────────────────────────────────
+# When MACHINE_OUT names a file, every row() also appends one JSON object there,
+# tagged with the current benchmark (set by header()). This is the data a chart
+# is generated FROM — a committed run under bench/results/*.jsonl plus
+# bench/chart.py means a published chart is regenerable from data in the repo,
+# never transcribed from a terminal (the failure that lost two languages once).
+MACHINE_OUT="${MACHINE_OUT:-}"
+CUR_BENCH=""
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+emit_json() {  # emit_json language median min max
+  [ -n "$MACHINE_OUT" ] || return 0
+  printf '{"benchmark":"%s","language":"%s","median_ms":%s,"min_ms":%s,"max_ms":%s}\n' \
+    "$(json_escape "$CUR_BENCH")" "$(json_escape "$1")" "$2" "$3" "$4" >> "$MACHINE_OUT"
+}
+
+header(){ CUR_BENCH="${1%% —*}"; printf '\n'; bold "═══ $* ═══"; printf '  %-12s %8s %8s %8s\n' "Language" "Median" "Min" "Max"; printf '  %-12s %8s %8s %8s\n' "--------" "------" "---" "---"; }
+row()   { printf '  %-12s %7.1f ms %6.1f ms %6.1f ms\n' "$1" "$2" "$3" "$4"; emit_json "$1" "$2" "$3" "$4"; }
 skip()  { printf '  %-12s   (not available)\n' "$1"; }
 
 # ── timing: run a command $RUNS times, print "median min max" (ms) to stdout ─
