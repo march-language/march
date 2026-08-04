@@ -11048,6 +11048,9 @@ let test_or_pattern_binding_type_mismatch_rejected () =
 
 let compiler_suites =
   [
+      ("cap_strip", Test_cap_strip.tests);
+      ("cap_symbols", Test_cap_symbols.tests);
+      ("cap_markers", Test_cap_markers.tests);
       ( "match_diagnostics",
         [
           Alcotest.test_case "or-pattern binding accepted" `Quick

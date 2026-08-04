@@ -965,10 +965,72 @@ let cap_coverage_cmd =
            ~doc:"Report which declared capabilities have test coverage (static analysis)")
     Term.(const run $ dir)
 
+let cap_audit_cmd =
+  let bin =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"BINARY"
+           ~doc:"Compiled March executable to audit.")
+  in
+  let json =
+    Arg.(value & flag &
+         info ["json"] ~doc:"Machine-readable output (coverage is always included).")
+  in
+  let deny =
+    Arg.(value & opt_all string [] &
+         info ["deny"] ~docv:"CAP"
+           ~doc:"Fail if the binary holds CAP or anything it subsumes (repeatable).")
+  in
+  let allow_only =
+    Arg.(value & opt (some (list string)) None &
+         info ["allow-only"] ~docv:"CAPS"
+           ~doc:"Fail if the binary holds any capability outside this comma-separated set.")
+  in
+  let allow_foreign =
+    Arg.(value & flag &
+         info ["allow-foreign"]
+           ~doc:"Let the gate pass on a binary containing foreign (FFI) code. \
+                 Without this, --deny/--allow-only fail closed on any binary \
+                 whose coverage is not full.")
+  in
+  let run bin json deny allow_only allow_foreign =
+    match Cmd_cap.audit ~bin ~json ~deny ~allow_only ~allow_foreign () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "audit"
+           ~doc:"List the capabilities of a compiled March executable")
+    Term.(const run $ bin $ json $ deny $ allow_only $ allow_foreign)
+
+let cap_run_cmd =
+  let bin =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"BINARY" ~doc:"Compiled March executable to run.")
+  in
+  let args =
+    Arg.(value & pos_right 0 string [] &
+         info [] ~docv:"ARGS" ~doc:"Arguments passed to the program.")
+  in
+  let allow_only =
+    Arg.(value & opt (some (list string)) None &
+         info ["allow-only"] ~docv:"CAPS"
+           ~doc:"Grant only these capabilities, overriding the binary's own \
+                 claim. Use this for untrusted code: a policy derived from the \
+                 binary defeats under-claiming only, since a hostile binary is \
+                 free to over-claim.")
+  in
+  let run bin args allow_only =
+    match Cmd_cap.cap_run ~bin ~args ~allow_only () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "run"
+           ~doc:"Run a compiled binary under an OS-enforced capability sandbox")
+    Term.(const run $ bin $ args $ allow_only)
+
 let cap_cmd =
   Cmd.group (Cmd.info "cap"
                ~doc:"Capability and typestate inspection")
-    [cap_query_cmd; cap_coverage_cmd]
+    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd; cap_run_cmd]
 
 (* --------------------------------------------------------- forge ffi -------- *)
 
