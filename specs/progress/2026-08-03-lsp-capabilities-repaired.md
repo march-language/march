@@ -206,3 +206,64 @@ Both `semantic_tokens_data` and `document_symbols` folded whole-analysis maps in
 per-document response. Any other handler that iterates `def_map`/`use_map` deserves the
 same scrutiny — that is a cheap grep and worth doing before the next feature is built on
 one of them.
+
+
+---
+
+# The two follow-ups, closed (2026-08-03)
+
+## 1. Audit: are there other whole-analysis leaks?
+
+Rather than grep for the cause and hope the list was complete, every PER-DOCUMENT response
+was measured against a real file for the symptom — a line number outside the document.
+
+| Response | Count | Max line (doc: 654) |
+|---|---|---|
+| documentSymbol | 1 | 6 |
+| foldingRange | 1 | 651 |
+| codeLens | 0 | — |
+| inlayHint | 414 | 647 |
+| inlineValue | 0 | — |
+| diagnostic | 0 | — |
+| documentHighlight | 1 | 6 |
+| selectionRange | 1 | 6 |
+| linkedEditingRange | — | 6 |
+| semanticTokens | 17 | 405 |
+
+**No further leaks.** The two fixed (`semantic_tokens_data`, `document_symbols`) were the
+only ones.
+
+`textDocument/formatting` flags in the sweep at line 654, and is a FALSE POSITIVE: its edit
+range is `0:0 → 654:0`, a whole-document replacement whose end position is legitimately one
+past the last line.
+
+But measuring it turned up something else: the formatter collapses that 654-line file to
+**10 lines, one of them 19,509 characters**. `march fmt` does the same, so it is
+pre-existing and not caused by this work — but `textDocument/formatting` was dead until
+now, so the repair made it reachable from every editor for the first time. Filed as
+`specs/todos/2026-08-03-formatter-collapses-multiline-literals.md`; the bug is older than
+the repair, its blast radius is not.
+
+## 2. The no-project-root hang
+
+`project_root` falls back to the open document's directory when no `forge.toml` is above
+it. For a file at `/` that meant `Workspace.walk_dir` walking the entire filesystem —
+unbounded, so `references` and `workspace/symbol` never returned, which a client cannot
+distinguish from a server still thinking.
+
+Two defences, because either alone leaves a case open:
+
+- **The walk is bounded** (`max_walk_files = 5000`, `max_walk_depth = 16`). A cap makes any
+  root terminate, and partial results beat an unanswered request. Truncation warns on
+  stderr, since a silently partial index makes "symbol not found" indistinguishable from
+  "symbol not indexed".
+- **An implausible root is refused outright** — `/`, `$HOME`, or empty. Indexing an
+  arbitrary slice of someone's disk returns noise even when it terminates.
+
+Measured: a document at `/` went from never answering to **0.00s** for both requests
+(references still finds the in-document declaration; workspace/symbol correctly reports
+none, there being no workspace). A real project is unaffected: forgepm answers
+`workspace/symbol` in 0.42s with 113 symbols.
+
+Pinned by `a document with no project root does not hang` in `test_jsonrpc.ml`, whose
+assertion is its alarm — before the fix the test does not fail, it never finishes.

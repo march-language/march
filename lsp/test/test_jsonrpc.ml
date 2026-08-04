@@ -415,6 +415,62 @@ let test_every_advertised_capability_answers () =
       (String.concat "\n"
          (List.map (fun (m, e) -> Printf.sprintf "  %-40s %s" m e) failures))
 
+(* ── A document with no project root must not hang the server ────────────────
+   `project_root` falls back to the open document's directory when no
+   `forge.toml` is found above it. For a file at `/` that meant indexing the
+   whole filesystem, and `textDocument/references` / `workspace/symbol` never
+   returned — the client cannot distinguish that from a server still thinking.
+
+   Two defences now: the walk is bounded (`Workspace.max_walk_files`), and a
+   root that is plainly not a project (`/`, `$HOME`) is refused outright rather
+   than walked. This pins the observable consequence of both.
+
+   The alarm is the assertion: before the fix this test does not fail, it
+   never finishes. *)
+let run_no_project_root () =
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle
+       (fun _ -> failwith "a document with no project root hung the server"));
+  ignore (Unix.alarm 30);
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null; "rootUri", `Null;
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  (* Deliberately at the filesystem root: no forge.toml can be found above it. *)
+  let uri = "file:///no_project_root_probe.march" in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "method", `String "textDocument/didOpen";
+    "params", `Assoc [ "textDocument", `Assoc [
+      "uri", `String uri; "languageId", `String "march"; "version", `Int 1;
+      "text", `String "mod NP do\n  fn f(x : Int) : Int do\n    x\n  end\nend\n" ] ] ]);
+  ignore (read_until ic ~max:30 (is_method "textDocument/publishDiagnostics"));
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 2; "method", `String "textDocument/references";
+    "params", `Assoc [ "textDocument", `Assoc [ "uri", `String uri ];
+                       "position", `Assoc [ "line", `Int 1; "character", `Int 5 ];
+                       "context", `Assoc [ "includeDeclaration", `Bool true ] ] ]);
+  let refs = read_until ic ~max:30 (is_id 2) in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 3; "method", `String "workspace/symbol";
+    "params", `Assoc [ "query", `String "f" ] ]);
+  let syms = read_until ic ~max:30 (is_id 3) in
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 4;
+                    "method", `String "shutdown"; "params", `Null ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  ignore (Unix.alarm 0);
+  (refs <> None, syms <> None)
+
+let test_no_project_root_does_not_hang () =
+  let (refs_ok, syms_ok) = run_no_project_root () in
+  Alcotest.(check bool) "references answers without a project root" true refs_ok;
+  Alcotest.(check bool) "workspace/symbol answers without a project root" true syms_ok
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
@@ -428,4 +484,6 @@ let () =
         Alcotest.test_case "textDocument/diagnostic is empty when clean" `Quick
           test_pull_diagnostics_clean_buffer_is_empty;
         Alcotest.test_case "every advertised capability answers" `Quick
-          test_every_advertised_capability_answers ] ]
+          test_every_advertised_capability_answers;
+        Alcotest.test_case "a document with no project root does not hang" `Quick
+          test_no_project_root_does_not_hang ] ]

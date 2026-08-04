@@ -320,6 +320,14 @@ git log is authoritative for exact commits.
   produces three edits, `callHierarchy` finds the caller, `signatureHelp` reports
   `double(Int)` — rather than only checking that a reply arrived.
 
+- **A file with no project root no longer hangs the language server.** Opening
+  a `.march` file with no `forge.toml` above it made the workspace index walk
+  the entire filesystem, so find-references and workspace-symbol never returned
+  — indistinguishable, from the editor, from a server still thinking. The walk
+  is now bounded (and warns when it truncates, since a silently partial index
+  makes "not found" and "not indexed" look identical), and roots that are
+  plainly not projects are refused outright.
+
 - **Document symbols no longer describe the whole prelude.** The same leak as
   semantic tokens, in a different handler: `documentSymbol` folded the whole
   analysis, so a one-function file reported 6936 symbols carrying line numbers

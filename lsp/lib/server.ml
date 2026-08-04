@@ -123,10 +123,30 @@ let project_root () : string option =
           else None)
       doc_cache None
   in
+  (* A directory is only a WORKSPACE if it plausibly bounds a project.  With a
+     `forge.toml` above the document, that is settled.  Without one, the
+     document's own directory is a guess — and for a file opened at `/`, in a
+     home directory, or in a scratch dir, indexing it means walking a tree that
+     has nothing to do with the code being edited.
+
+     Refusing those is better than indexing them: workspace symbol search over
+     an arbitrary slice of someone's disk returns noise, and (before the walk
+     was bounded) never returned at all. The bound in [Workspace.walk_dir] is
+     the backstop; this is the part that avoids starting a walk nobody wanted. *)
+  let implausible_root dir =
+    let home = try Sys.getenv "HOME" with Not_found -> "" in
+    dir = "/" || dir = "" || (home <> "" && dir = home)
+  in
   match from_doc with
   | Some dir ->
-    (match Forge_config.find_forge_root dir with Some r -> Some r | None -> Some dir)
-  | None -> (try Some (Sys.getcwd ()) with _ -> None)
+    (match Forge_config.find_forge_root dir with
+     | Some r -> Some r
+     | None -> if implausible_root dir then None else Some dir)
+  | None ->
+    (try
+       let cwd = Sys.getcwd () in
+       if implausible_root cwd then None else Some cwd
+     with _ -> None)
 
 (* Built once per root and cached (invalidation on disk change is a follow-up). *)
 let workspace_index () : Workspace.ws_symbol list =
