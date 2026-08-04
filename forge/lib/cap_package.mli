@@ -48,9 +48,3 @@ val widens : change list -> bool
 (** Whether any capability was gained — the condition an upgrade gate should
     require acknowledgement for. Losing a capability is safe and never gates. *)
 
-val load_baseline : string -> (string * string list) list
-(** Reviewed capability set per dependency, from [<root>/.forge/cap-baseline].
-    Empty when no baseline has been recorded. *)
-
-val save_baseline : string -> (string * string list) list -> unit
-(** Record the current sets as reviewed. *)

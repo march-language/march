@@ -1032,33 +1032,10 @@ let cap_run_cmd =
            ~doc:"Run a compiled binary under an OS-enforced capability sandbox")
     Term.(const run $ bin $ args $ allow_only)
 
-let cap_deps_cmd =
-  let check =
-    Arg.(value & flag &
-         info ["check"]
-           ~doc:"Fail if any dependency needs MORE than the recorded baseline. \
-                 This is the check `cap audit` cannot make: the audit sees the \
-                 whole-program union, in which a dependency abusing a \
-                 capability the app already holds is invisible.")
-  in
-  let accept =
-    Arg.(value & flag &
-         info ["accept"]
-           ~doc:"Record the current per-dependency capability sets as reviewed.")
-  in
-  let run check accept =
-    match Cmd_cap.cap_deps ~check ~accept () with
-    | Ok () -> ()
-    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
-  in
-  Cmd.v (Cmd.info "deps"
-           ~doc:"Show each dependency's capabilities, and detect widening")
-    Term.(const run $ check $ accept)
-
 let cap_cmd =
   Cmd.group (Cmd.info "cap"
                ~doc:"Capability and typestate inspection")
-    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd; cap_run_cmd; cap_deps_cmd]
+    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd; cap_run_cmd]
 
 (* ------------------------------------------------------------- forge audit *)
 
@@ -1069,8 +1046,20 @@ let audit_cmd =
            ~doc:"Record the current capability set as the baseline \
                  (writes forge.caps.lock). Use this to accept a reviewed change.")
   in
-  let run r =
-    match Cmd_audit.run ~record_mode:r () with
+  let inferred =
+    Arg.(value & flag &
+         info ["inferred"]
+           ~doc:"Infer each dependency's capability set from its code instead \
+                 of reading its $(b,needs) declarations. Catches a capability \
+                 builtin called directly in a body with no matching \
+                 $(b,needs) — which the compiler only warns about — at the \
+                 cost of requiring each dependency to typecheck cleanly. \
+                 Neither mode covers capabilities reached through FFI; \
+                 $(b,forge cap audit <binary>) is the sound check for a \
+                 built artifact.")
+  in
+  let run r inferred =
+    match Cmd_audit.run ~record_mode:r ~inferred () with
     | Ok code -> exit code
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
@@ -1093,7 +1082,7 @@ let audit_cmd =
              `P "forge audit --record   # accept the current set, commit forge.caps.lock";
              `P "forge audit            # in CI: fail if a dependency gained authority";
            ])
-    Term.(const run $ record)
+    Term.(const run $ record $ inferred)
 
 (* --------------------------------------------------------- forge ffi -------- *)
 
