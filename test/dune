@@ -11,8 +11,8 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (modules test_compiler test_cap_strip test_cap_symbols test_cap_markers)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
  (name march_test_eval)
@@ -46,10 +46,16 @@
 ; ── Parallel test runners (dune executes these concurrently) ─────────────
 ; -e: show test-case error details inline (no digging through log files).
 ; Run binaries directly for agent-safe, RPC-free execution: see scripts/run-tests.sh.
+; cap_strip / cap_markers shell out to the real compiler and inspect the
+; linked binary, so main.exe AND the staged runtime tree must exist before
+; this runner starts.  Without these deps the tests resolved nothing and
+; returned 127 in CI while passing locally (where the repo root happened to
+; be the CWD).
 (test
  (name run_compiler)
  (modules run_compiler)
  (libraries march_test_compiler alcotest)
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (run %{test} -e)))
 
 (test
@@ -153,6 +159,7 @@
           ../runtime/march_extras.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+         
           ../runtime/march_remote_registry.c)
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
@@ -163,6 +170,7 @@
                ../runtime/march_extras.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
                ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+              
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -260,6 +268,7 @@
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
           ../runtime/march_monitor_registry.c ../runtime/march_monitor_registry.h
+         
           ../lib/cas/blake3_cflags.sexp ../lib/cas/blake3_libs.sexp
           (glob_files ../runtime/*.h))
  (action
@@ -347,6 +356,7 @@
           ../runtime/march_gc.c
           ../runtime/march_monitor_registry.c
           ../runtime/march_monitor_registry.h
+         
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -I../runtime -O2
@@ -360,6 +370,7 @@
                ../runtime/march_heap.c
                ../runtime/march_gc.c
                ../runtime/march_monitor_registry.c
+              
                -lpthread -lm)))
 
 (rule

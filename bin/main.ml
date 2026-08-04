@@ -787,6 +787,47 @@ let setup_interpreter_ffi () =
       March_eval.Eval.ffi_shim_so := Some so_path
 
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
+(* [own_caps_of_this_module env m] — the module's OWN inferred capability
+    set, filtered to functions this file declares.
+
+    Two traps this exists to avoid, both previously shipped:
+    - [fn_capability_closures] folds in transitively-imported module needs,
+      which makes the union app-invariant;
+    - even [fn_own_capability_closures] is keyed over EVERY function the
+      typechecker saw, including linked stdlib, so it must be filtered to this
+      file or a pure program reports "needs everything".
+
+    Shared by --dump-caps and --cap-sandbox so the notarized set and the
+    embedded sandbox profile cannot disagree. *)
+
+let own_caps_of_this_module typecheck_env (m : March_ast.Ast.module_) : string list =
+  let own = March_typecheck.Typecheck.fn_own_capability_closures typecheck_env in
+  let user_fn_names = Hashtbl.create 64 in
+  let rec walk decls =
+    List.iter (fun (d : March_ast.Ast.decl) ->
+        match d with
+        | March_ast.Ast.DFn (fd, _) ->
+          Hashtbl.replace user_fn_names fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
+        | March_ast.Ast.DMod (_, _, inner, _) -> walk inner
+        | _ -> ()) decls
+  in
+  walk m.March_ast.Ast.mod_decls;
+  let belongs qname =
+    (* Keys are "Mod.fn" or bare "fn" (lower.ml strips the top-level module
+       prefix from declarations in the entry file). *)
+    match String.index_opt qname '.' with
+    | None -> Hashtbl.mem user_fn_names qname
+    | Some i ->
+      String.sub qname 0 i = m.March_ast.Ast.mod_name.March_ast.Ast.txt
+      || Hashtbl.mem user_fn_names qname
+  in
+  List.concat_map (fun (qname, cs) -> if belongs qname then cs else []) own
+  |> List.sort_uniq String.compare
+  |> March_caps.Cap_lattice.normalize
+  |> List.sort String.compare
+
+let dump_caps      = ref false   (* --dump-caps: print inferred cap set as JSON, then exit *)
+let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let emit_core_ast_file = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
@@ -1738,6 +1779,16 @@ let compile filename =
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              (* capstrip: the dead-strip link mode (strip_flag/section_cflags
+                 below) changes the emitted binary's contents; a pre-strip
+                 cached artifact must never satisfy a post-strip build or the
+                 cap audit silently reports every capability. Mirrors the
+                 eligibility condition on strip_flag. *)
+              @ (if !compile_so || !hot_reload_prefix <> None
+                 then [] else ["capstrip"])
+              (* --cap-sandbox changes the emitted binary (a -D define), so a
+                 non-sandboxed cached artifact must never satisfy it. *)
+              @ (if !cap_sandbox then ["capsandbox"] else [])
               @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -2114,6 +2165,27 @@ let compile filename =
      exit 0 so tooling (forge build / forge check) can treat a clean typecheck
      as a pass.  Warnings do not fail the exit code — consistent with eval and
      compile modes. *)
+  else if !dump_caps then begin
+    (* --dump-caps: the module's INFERRED capability set, for
+       `forge publish` notarization (specs/2026-08-03-forge-cap-audit-design.md
+       §4.3, mechanism D).
+
+       Inferred, not declared: body-scanned caps are WARNING-only (the F1 gap,
+       specs/todos/2026-07-07-p2-compiler-capabilities-effects-*.md), so a
+       module calling file_read with no `needs` type-checks clean while its
+       compiled binary genuinely reports IO.FileRead.  Notarizing the DECLARED
+       set would manufacture a false registry mismatch for exactly those
+       modules.
+
+       OWN closures, filtered to this file's own functions: fn_capability_
+       closures folds in transitively-imported module needs, which makes the
+       union app-invariant (the 2026-07-04 granularity revision) and would
+       notarize every package as "needs everything". *)
+    let caps = own_caps_of_this_module typecheck_env desugared in
+    Printf.printf "{\"caps\":[%s]}\n"
+      (String.concat "," (List.map (Printf.sprintf "%S") caps));
+    exit 0
+  end
   else if !do_check then begin
     (* Cache successful check result so the next identical-source invocation
        exits immediately without re-running the typecheck pipeline (the early
@@ -2725,6 +2797,16 @@ let compile filename =
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              (* capstrip: the dead-strip link mode (strip_flag/section_cflags
+                 below) changes the emitted binary's contents; a pre-strip
+                 cached artifact must never satisfy a post-strip build or the
+                 cap audit silently reports every capability. Mirrors the
+                 eligibility condition on strip_flag. *)
+              @ (if !compile_so || !hot_reload_prefix <> None
+                 then [] else ["capstrip"])
+              (* --cap-sandbox changes the emitted binary (a -D define), so a
+                 non-sandboxed cached artifact must never satisfy it. *)
+              @ (if !cap_sandbox then ["capsandbox"] else [])
               @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
@@ -2965,6 +3047,81 @@ let compile filename =
               (* -ldl is needed on Linux for dlopen; macOS has it in libc. *)
               if !hot_reload_prefix <> None && not !compile_so
                  && link_is_linux then " -ldl" else "" in
+            let cap_sandbox_define =
+              (* --cap-sandbox: embed a DENY-DEFAULT SBPL profile derived from
+                 this module's own inferred capabilities, applied by
+                 march_sandbox_install() before any user code runs
+                 (the MARCH_CAP_PROFILE block in runtime/march_runtime.c).
+
+                 Defense in depth only: whoever builds the binary chooses
+                 whether to compile it in, so a hostile publisher omits it.
+                 Its value is a binary you built and trust, deployed where
+                 forge is not the launcher (systemd, a supervisor) --- the
+                 case `forge cap run` cannot reach.  Externally imposed
+                 enforcement stays the stronger mechanism.
+
+                 Baseline mirrors forge/lib/cap_sandbox.ml's sbpl_baseline;
+                 the two are kept in step by test/test_cap_sandbox_profile.ml. *)
+              if not !cap_sandbox then ""
+              else begin
+                (* Filter to THIS module's own functions.  Using the whole
+                   closure table unions in every linked stdlib function and
+                   yields the app-invariant "needs everything" set --- which
+                   would grant a pure program network and filesystem write
+                   access, i.e. a sandbox that sandboxes nothing.  Same
+                   filtering as --dump-caps. *)
+                let caps = own_caps_of_this_module typecheck_env desugared in
+                let holds klass =
+                  List.exists (fun c ->
+                      March_caps.Cap_lattice.cap_subsumes klass c
+                      || March_caps.Cap_lattice.cap_subsumes c klass) caps
+                in
+                let b = Buffer.create 512 in
+                Buffer.add_string b "(version 1)(deny default)";
+                Buffer.add_string b "(allow process-exec)";
+                Buffer.add_string b "(allow file-read* file-read-metadata)";
+                Buffer.add_string b
+                  "(allow file-write-data (literal \\\"/dev/null\\\") \
+                   (literal \\\"/dev/stdout\\\") (literal \\\"/dev/stderr\\\") \
+                   (literal \\\"/dev/tty\\\"))";
+                Buffer.add_string b "(allow sysctl-read)(allow mach*)(allow signal)";
+                Buffer.add_string b "(allow ipc-posix-shm)(allow iokit-open)";
+                if holds "IO.FileWrite" then Buffer.add_string b "(allow file-write*)";
+                if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
+                if holds "IO.Process"   then Buffer.add_string b "(allow process-fork)";
+                (* Filename.quote the ALREADY-quoted C literal so the shell
+                   hands clang a real string; without the inner quotes the
+                   macro expands as bare SBPL tokens and the runtime will not
+                   compile. *)
+                " -DMARCH_CAP_PROFILE="
+                ^ Filename.quote ("\"" ^ Buffer.contents b ^ "\"")
+              end in
+            let strip_flag =
+              (* Capability-by-absence (specs/2026-08-03-forge-cap-audit-design.md
+                 §4.1): drop runtime functions the program never references, so a
+                 binary physically cannot perform a capability it does not use —
+                 and `forge cap audit` can read capabilities from what remains.
+
+                 Executables only.  A hot-reload .so resolves __march_init and
+                 __migrate_<Actor> via dlsym (runtime/march_reload.c:318-351),
+                 which the linker cannot see, so stripping would break hot
+                 deploy; the --hot-reload server build likewise exports symbols
+                 (-Wl,--export-dynamic above) for the dlopen'd patch .so to
+                 resolve against. *)
+              if !compile_so || !hot_reload_prefix <> None then ""
+              else if link_is_linux then " -Wl,--gc-sections"
+              else " -Wl,-dead_strip" in
+            let section_cflags =
+              (* ELF --gc-sections only drops whole sections; without
+                 -ffunction-sections each object's .text is one section and
+                 individual functions survive (verified with gcc 11 and
+                 clang 18 — design §4.1).  Mach-O gets function granularity
+                 for free via .subsections_via_symbols.  Runtime_archive.ensure
+                 folds cflags into its cache key, so stale non-sectioned
+                 runtime objects are invalidated automatically. *)
+              if strip_flag <> "" && link_is_linux
+              then " -ffunction-sections -fdata-sections"
+              else "" in
             let signing_define =
               if !hot_reload_prefix <> None && not !compile_so && !signing_pubkey <> "" then
                 match b64_decode_pubkey !signing_pubkey with
@@ -3095,10 +3252,16 @@ let compile filename =
                    while the -D/-I inside the openssl/compress/blake3 flags
                    genuinely affect codegen and so must be in the key. *)
                 let cflags =
+                  (* cap_sandbox_define MUST be here, not only on the link
+                     line: these objects are precompiled and cached, so a
+                     define applied at link time never reaches
+                     the runtime and --cap-sandbox silently becomes a
+                     no-op.  Runtime_archive.ensure keys on cflags, so
+                     including it also invalidates objects built without it. *)
                   Printf.sprintf
-                    "%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s"
-                    opt_flag dbg_flag san_flag arch_cflags
-                    openssl_flags2 compress_flags2 blake3_flags2 in
+                    "%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s"
+                    opt_flag dbg_flag san_flag arch_cflags section_cflags
+                    openssl_flags2 compress_flags2 blake3_flags2 cap_sandbox_define in
                 match March_cas.Runtime_archive.ensure ~cc:cc_driver ~cflags ~sources:srcs with
                 | Ok objs ->
                   Some (String.concat "" (List.map (fun o -> " " ^ Filename.quote o) objs))
@@ -3117,8 +3280,8 @@ let compile filename =
               | None      -> runtime ^ extra_c_files
             in
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s %s%s%s%s%s %s -o %s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
@@ -3932,6 +4095,8 @@ let () =
     ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--dump-caps",  Arg.Set dump_caps,   " Print the module's inferred IO-capability set as JSON, then exit");
+    ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS only)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--refine-report", Arg.Set refine_report,

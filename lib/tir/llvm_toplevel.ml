@@ -584,6 +584,10 @@ let emit_module ~emit_expr
   (* type defs are threaded via ctx.type_defs (set below); reset the
      repr-consistency audit per module emission. *)
   Hashtbl.reset Llvm_ctx._repr_audit;
+  (* Capability markers: start each module emission with a clean slate so
+     symbols recorded by a previous emission in the same process (tests,
+     forge multi-entry checks) cannot leak into this module's markers. *)
+  Llvm_builtins.reset_called_syms ();
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
      into NAME_IDs for the dispatch table.
      Actor dispatch functions (e.g. Counter_dispatch) have no module prefix in
@@ -1177,6 +1181,53 @@ let emit_module ~emit_expr
   emit_atom_show_table ctx;
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
+
+  (* Capability markers (specs/2026-08-03-forge-cap-audit-design.md §4.3, C).
+     Derived from the C symbols the emitted code actually resolved through
+     [Llvm_builtins.mangle_extern] — NOT from the declare preamble, which
+     lists every builtin unconditionally and would mark every cap in every
+     binary.  Emitted after the extra_fns flush so closure wrappers
+     (fn-as-value, including builtins routed through closures) have finished
+     mangling.  Pinned via @llvm.used so DCE/-dead_strip cannot drop them: a
+     marker's absence must always mean "capability unused", never "optimizer
+     removed it". *)
+  (let caps =
+     Llvm_builtins.called_c_symbols ()
+     |> List.filter_map March_caps.Cap_symbols.cap_of_symbol
+     (* FFI is self-declaring: extern decls mean the module contains C code
+        the cap analysis cannot see.  The audit renders IO.Foreign as a
+        scope limitation, not a capability row (design §5.2) — but the
+        marker must exist in the binary or a stripped-manifest binary could
+        hide its foreign code entirely. *)
+     |> (fun l ->
+          if m.Tir.tm_externs = [] then l
+          else
+            "IO.Foreign"
+            :: (if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_blocking)
+                     m.Tir.tm_externs
+                then [ "IO.Foreign.Blocking" ] else [])
+            @ l)
+     |> List.sort_uniq String.compare
+   in
+   if caps <> [] then begin
+     let mangle_cap c = String.map (fun ch -> if ch = '.' then '_' else ch) c in
+     List.iter
+       (fun cap ->
+          Buffer.add_string out
+            (Printf.sprintf "@__march_cap_%s = constant i8 1\n"
+               (mangle_cap cap)))
+       caps;
+     let refs =
+       List.map
+         (fun cap -> Printf.sprintf "ptr @__march_cap_%s" (mangle_cap cap))
+         caps
+     in
+     Buffer.add_string out
+       (Printf.sprintf
+          "@llvm.used = appending global [%d x ptr] [%s], section \
+           \"llvm.metadata\"\n"
+          (List.length refs) (String.concat ", " refs))
+   end);
 
   Llvm_ctx.repr_audit_report ();
   Buffer.contents out
