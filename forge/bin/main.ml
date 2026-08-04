@@ -970,7 +970,7 @@ let cap_coverage_cmd =
            ~doc:"Report which declared capabilities have test coverage (static analysis)")
     Term.(const run $ dir)
 
-let cap_audit_cmd =
+let cap_inspect_cmd =
   let bin =
     Arg.(required & pos 0 (some string) None &
          info [] ~docv:"BINARY"
@@ -998,11 +998,11 @@ let cap_audit_cmd =
                  whose coverage is not full.")
   in
   let run bin json deny allow_only allow_foreign =
-    match Cmd_cap.audit ~bin ~json ~deny ~allow_only ~allow_foreign () with
+    match Cmd_cap.inspect ~bin ~json ~deny ~allow_only ~allow_foreign () with
     | Ok () -> ()
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
-  Cmd.v (Cmd.info "audit"
+  Cmd.v (Cmd.info "inspect"
            ~doc:"List the capabilities of a compiled March executable")
     Term.(const run $ bin $ json $ deny $ allow_only $ allow_foreign)
 
@@ -1035,7 +1035,7 @@ let cap_run_cmd =
 let cap_cmd =
   Cmd.group (Cmd.info "cap"
                ~doc:"Capability and typestate inspection")
-    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd; cap_run_cmd]
+    [cap_query_cmd; cap_coverage_cmd; cap_inspect_cmd; cap_run_cmd]
 
 (* ------------------------------------------------------------- forge audit *)
 
@@ -1055,7 +1055,7 @@ let audit_cmd =
                  $(b,needs) — which the compiler only warns about — at the \
                  cost of requiring each dependency to typecheck cleanly. \
                  Neither mode covers capabilities reached through FFI; \
-                 $(b,forge cap audit <binary>) is the sound check for a \
+                 $(b,forge cap inspect <binary>) is the sound check for a \
                  built artifact.")
   in
   let run r inferred =

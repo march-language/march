@@ -1781,7 +1781,7 @@ let compile filename =
               (* capstrip: the dead-strip link mode (strip_flag/section_cflags
                  below) changes the emitted binary's contents; a pre-strip
                  cached artifact must never satisfy a post-strip build or the
-                 cap audit silently reports every capability. Mirrors the
+                 cap inspect silently reports every capability. Mirrors the
                  eligibility condition on strip_flag. *)
               @ (if !compile_so || !hot_reload_prefix <> None
                  then [] else ["capstrip"])
@@ -2778,7 +2778,7 @@ let compile filename =
               (* capstrip: the dead-strip link mode (strip_flag/section_cflags
                  below) changes the emitted binary's contents; a pre-strip
                  cached artifact must never satisfy a post-strip build or the
-                 cap audit silently reports every capability. Mirrors the
+                 cap inspect silently reports every capability. Mirrors the
                  eligibility condition on strip_flag. *)
               @ (if !compile_so || !hot_reload_prefix <> None
                  then [] else ["capstrip"])
@@ -3090,7 +3090,7 @@ let compile filename =
               (* Capability-by-absence (specs/2026-08-03-forge-cap-audit-design.md
                  §4.1): drop runtime functions the program never references, so a
                  binary physically cannot perform a capability it does not use —
-                 and `forge cap audit` can read capabilities from what remains.
+                 and `forge cap inspect` can read capabilities from what remains.
 
                  Executables only.  A hot-reload .so resolves __march_init and
                  __migrate_<Actor> via dlsym (runtime/march_reload.c:318-351),

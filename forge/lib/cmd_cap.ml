@@ -329,7 +329,7 @@ let query ~dir () =
   end
 
 (* ------------------------------------------------------------------ *)
-(* forge cap audit <binary> — read capabilities from a compiled       *)
+(* forge cap inspect <binary> — read capabilities from a compiled       *)
 (* executable (specs/2026-08-03-forge-cap-audit-design.md §5).        *)
 (* ------------------------------------------------------------------ *)
 
@@ -485,7 +485,7 @@ let gate_violations ~deny ~allow_only ~allow_foreign (t : Cap_binary.t) =
        effective);
   List.rev !violations
 
-let audit ~bin ~json ~deny ~allow_only ~allow_foreign () =
+let inspect ~bin ~json ~deny ~allow_only ~allow_foreign () =
   match Cap_binary.read bin with
   | Error e -> Error e
   | Ok t ->
@@ -494,7 +494,7 @@ let audit ~bin ~json ~deny ~allow_only ~allow_foreign () =
     (match gate_violations ~deny ~allow_only ~allow_foreign t with
      | [] -> Ok ()
      | vs ->
-       List.iter (fun v -> Printf.eprintf "forge cap audit: %s\n%!" v) vs;
+       List.iter (fun v -> Printf.eprintf "forge cap inspect: %s\n%!" v) vs;
        Error (Printf.sprintf "%d gate violation(s)" (List.length vs)))
 
 (* ------------------------------------------------------------------ *)

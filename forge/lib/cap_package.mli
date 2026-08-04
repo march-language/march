@@ -1,7 +1,7 @@
 (** Per-package capability sets, and the diff between two versions of one.
 
     This is the piece the whole-binary audit structurally cannot provide.
-    [forge cap audit --deny] sees the UNION of a program's capabilities, so a
+    [forge cap inspect --deny] sees the UNION of a program's capabilities, so a
     dependency abusing a capability the application already holds is invisible
     to it — any web app holds [IO.Network] and [IO.FileRead], and a compromised
     dependency exfiltrating files adds no new capability to that union.

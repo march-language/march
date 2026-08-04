@@ -125,11 +125,11 @@ let scope_note ~inferred =
   if inferred then
     "note: inferred from each package's own code. Does not cover capabilities
     \      reached through a stdlib or dependency function, or through FFI.
-    \      `forge cap audit <binary>` is the sound check for a built artifact."
+    \      `forge cap inspect <binary>` is the sound check for a built artifact."
   else
     "note: read from `needs` declarations. Does not cover a capability builtin
     \      called directly in a body without a matching `needs` (a warning, not
-    \      an error), or anything reached through FFI. `forge cap audit <binary>`
+    \      an error), or anything reached through FFI. `forge cap inspect <binary>`
     \      is the sound check for a built artifact."
 
 (* ------------------------------------------------------------------ *)

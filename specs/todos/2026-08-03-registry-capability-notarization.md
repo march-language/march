@@ -39,7 +39,7 @@ notarization needs, in order:
   The implementation must reuse `forge build`'s real per-entry lib-path
   construction, and must **fail loudly when any file in the package cannot be
   analyzed** rather than unioning whatever happened to typecheck.
-- [ ] **`forge cap audit --notarized`**: compare the binary's caps against the
+- [ ] **`forge cap inspect --notarized`**: compare the binary's caps against the
   registry record using `Cap_lattice.cap_subsumes`, NOT string equality — a binary
   needing `IO.FileRead` is consistent with a record of `IO`, but not the reverse.
   Verdicts: `registry-match` / `registry-MISMATCH <caps>` / `not-published` /

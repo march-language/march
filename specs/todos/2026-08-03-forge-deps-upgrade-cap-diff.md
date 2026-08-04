@@ -23,7 +23,7 @@ sets locally.
   accepting a dep whose new version widens its cap set.
 
   **Why this is the highest-leverage supply-chain piece:** the binary-level gate
-  (`forge cap audit --deny`) only sees the whole-program union, so a malicious dep
+  (`forge cap inspect --deny`) only sees the whole-program union, so a malicious dep
   hiding inside an app that already holds the widened cap is invisible there. The
   upgrade-time diff sees the *per-package* delta — which is exactly the
   xz/event-stream shape (a previously-pure library growing an effect class) at the

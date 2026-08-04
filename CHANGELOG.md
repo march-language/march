@@ -11,6 +11,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **`forge cap audit` is now `forge cap inspect`.** Two commands named "audit"
+  answered different questions at different granularities — `forge audit` reads
+  dependency declarations from source, the other reads a built artifact — which
+  is the kind of collision people get wrong under pressure. `inspect` is the
+  right verb for reading facts off a thing that already exists, and matches the
+  `docker inspect` precedent. No alias: the command is days old and unreleased.
+
 ### Fixed
 
 - **A package's own constructor is no longer ambiguous against an unimported
@@ -45,7 +54,7 @@ git log is authoritative for exact commits.
   at all and a nonzero exit, rather than a partial one.
 - **`/docs/capability-audit/` — a capability-audit guide written for a security
   audience.** Covers `forge audit` (dependency declarations, diffed against a
-  baseline) and `forge cap audit` (what a compiled artifact holds), what each
+  baseline) and `forge cap inspect` (what a compiled artifact holds), what each
   proves, and a threat-model table of what neither covers. States plainly that
   an undeclared capability *builtin* is currently a compiler warning rather than
   an error, so a declared set is a floor for capability-passing code rather than
@@ -123,7 +132,7 @@ git log is authoritative for exact commits.
   scheduler's own). Advisory capabilities are printed before the run so a clean
   run is never mistaken for full containment.
 
-- **`forge cap audit <binary>`: list the capabilities of a compiled March
+- **`forge cap inspect <binary>`: list the capabilities of a compiled March
   executable.** Executables are now linked with dead-strip (72–79% smaller),
   so unused capability runtime code is physically absent, and codegen embeds
   `__march_cap_*` marker symbols for the capabilities the emitted code

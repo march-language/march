@@ -59,7 +59,7 @@ loud rather than silent — but nobody reads a dependency's build warnings.
    for refinements), or a `--deny-warnings`-style compiler flag, so a project
    can demand the stronger property without breaking everyone at once. This
    matches the precedent already set by `cap verified`.
-3. **Leave it, and rely on `forge cap audit`** for the binary-level check, since
+3. **Leave it, and rely on `forge cap inspect`** for the binary-level check, since
    that reads emitted markers rather than declarations and therefore catches an
    undeclared direct call regardless.
 

@@ -1,4 +1,4 @@
-(* forge cap audit gate logic (design §5.2, plan Task 6).
+(* forge cap inspect gate logic (design §5.2, plan Task 6).
 
    The gate must be fail-closed: anything less than full coverage fails
    unless explicitly allowed, and --allow-foreign covers exactly the
