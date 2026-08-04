@@ -1,4 +1,4 @@
--- EXPECT-ERROR: argument does not satisfy precondition `k != 0`
+-- EXPECT-ERROR: argument `k` of `run` does not satisfy precondition `k != 0`
 -- Refinement types, ASSUME-WITHOUT-CHECK (2026-07-29). This is the bug that
 -- the decl-walk widening (reject/t120) CREATED and this witness closes.
 --

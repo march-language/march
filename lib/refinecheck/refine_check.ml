@@ -2740,6 +2740,20 @@ let sort_of_ctor (ctor : string) : string option =
        module strict the moment one user module asked for verification. *)
 let strict_verified = ref false
 
+(* Whether this decl list has already been told that some contract in it went
+   unverified. Scoped and restored exactly like [strict_verified].
+
+   The default stance is "definite failure only" — an undecidable obligation
+   stays silent rather than risk a false positive on correct code. That is the
+   right default, but silence is indistinguishable from "checked and fine": a
+   reader who never learns the checker gave up believes a contract is enforced
+   when it is not, and `cap verified` (the opt-in that turns exactly this
+   silence into an error) is only discoverable if you already know to look for
+   it. One hint per decl list names the first such contract and points at the
+   escalation — enough to be findable, not so much that a module with many
+   undecidable predicates becomes a wall of text. *)
+let unverified_hinted = ref false
+
 (* Scoped exactly like [strict_verified], but to a single `fn` rather than a
    decl list: true while [visit_fn] is walking a function whose [fn_attrs]
    carry `@[trusted]`.  Consulted only by [check_call]'s [note] — see there for
@@ -2887,6 +2901,21 @@ type check_subject =
   | Argument
   | Bound_expr
 
+(* Span of an expression, for pointing a diagnostic at ONE argument instead of
+   the whole call. [refinecheck] does not depend on [march_typecheck], so this
+   mirrors its [span_of_expr] rather than importing it; only the forms that can
+   appear in argument position need to be precise, and anything unlisted falls
+   back to the caller-supplied call span (never a dummy, which would render as
+   a phantom location at line 0). *)
+let arg_span (fallback : A.span) : A.expr -> A.span = function
+  | A.ELit (_, sp) | A.EApp (_, _, sp) | A.ECon (_, _, sp)
+  | A.ETuple (_, sp) | A.ERecord (_, sp) | A.EField (_, _, sp)
+  | A.EIf (_, _, _, sp) | A.EPipe (_, _, sp) | A.EAnnot (_, _, sp)
+  | A.EBlock (_, sp) | A.EMatch (_, _, sp) | A.ELam (_, _, sp)
+  | A.EAtom (_, _, sp) -> sp
+  | A.EVar name -> name.A.span
+  | _ -> fallback
+
 let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
     ?(verdict_out : Obligation.verdict option ref option) ~(lets : launder)
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
@@ -3016,6 +3045,30 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
            "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
            obligation_noun (pred_str rp.pred) callee (Obligation.reason_name r)
            (Obligation.reason_detail r) remedy)
+    (* Outside `cap verified`, a skip stays non-fatal — but say once per module
+       that it happened, so "no diagnostic" cannot be read as "checked". A
+       withdrawn alias is excluded: it has its own dedicated explanation and is
+       not the checker running out of road. *)
+    | Obligation.Skipped r
+      when (not !strict_verified) && (not !unverified_hinted)
+           && (match r with Obligation.Alias_withdrawn _ -> false | _ -> true) ->
+      unverified_hinted := true;
+      Err.hint errctx ~span
+        (* Hard-wrapped near 78 columns. The renderer does not reflow, so a
+           single long line is left to the terminal to break wherever it
+           happens to run out of width — mid-token, and differently in every
+           window. *)
+        (Printf.sprintf
+           "%s `%s` on `%s` was NOT verified here.\n\
+            reason: %s — %s\n\
+            note: March reports only definite failures, so a contract it \
+            cannot decide\n\
+            is accepted in silence. Add `cap verified` to this module to make \
+            every\n\
+            unverifiable obligation an error instead; `--refine-report` lists \
+            them all."
+           obligation_noun (pred_str rp.pred) callee
+           (Obligation.reason_name r) (Obligation.reason_detail r))
     | _ -> ()
   in
   match List.nth_opt args rp.idx with
@@ -4081,20 +4134,50 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
           (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
            | Refine.Verified ->
              note Obligation.Violated;
-             Err.error errctx ~span
-               (Printf.sprintf "refinement violation: %s does not satisfy %s `%s`%s\n%s"
-                  subject_noun obligation_noun (pred_str rp.pred)
-                  (format_cx (model_of first))
-                  (match subject with
-                   | Argument ->
-                     Printf.sprintf
-                       "note: guard the call (e.g. `if %s do …`) or pass a value known to \
-                        satisfy it"
-                       (pred_str rp.pred)
-                   | Bound_expr ->
-                     "note: a refined annotation on a `let` is CHECKED against the \
-                      expression it annotates, not assumed — bind a value that satisfies \
-                      it, or weaken the annotation"))
+             (* Name the parameter and callee rather than saying "argument".
+                On a call with several arguments, "argument does not satisfy
+                `_ != 0`" leaves the reader to work out WHICH one, and the
+                predicate's binder is usually the anonymous `_`, so the message
+                alone does not identify it. *)
+             let param_label =
+               match subject, List.nth_opt sg.param_names rp.idx with
+               | Argument, Some pname when pname <> "" ->
+                 Printf.sprintf "argument `%s` of `%s`" pname callee
+               | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
+               | Bound_expr, _ -> subject_noun
+             in
+             (* Point at the offending argument itself. The call span covers the
+                whole expression, which on a multi-argument call underlines
+                everything and singles out nothing. *)
+             let labels =
+               match subject, List.nth_opt args rp.idx with
+               | Argument, Some a ->
+                 let sp = arg_span span a in
+                 if sp = span then []
+                 else
+                   [{ Err.lbl_span = sp;
+                      Err.lbl_message =
+                        Printf.sprintf "this argument must satisfy `%s`"
+                          (pred_str rp.pred) }]
+               | _ -> []
+             in
+             Err.report errctx
+               { Err.severity = Err.Error; span;
+                 message = Printf.sprintf
+                   "refinement violation: %s does not satisfy %s `%s`%s\n%s"
+                   param_label obligation_noun (pred_str rp.pred)
+                   (format_cx (model_of first))
+                   (match subject with
+                    | Argument ->
+                      Printf.sprintf
+                        "note: guard the call (e.g. `if %s do …`) or pass a value known to \
+                         satisfy it"
+                        (pred_str rp.pred)
+                    | Bound_expr ->
+                      "note: a refined annotation on a `let` is CHECKED against the \
+                       expression it annotates, not assumed — bind a value that satisfies \
+                       it, or weaken the annotation");
+                 labels; notes = []; code = None; fix = None }
            | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
 
 (* ── Postconditions: a function's return value must satisfy its return
@@ -5675,8 +5758,16 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
     List.exists
       (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
       decls;
-  Fun.protect ~finally:(fun () -> strict_verified := saved_strict) (fun () ->
-    List.iter (visit_decl ~root errctx defs ctx) decls)
+  (* Per-decl-list, for the same reason [strict_verified] is: a nested module is
+     its own unit of advice, and one hint there should not silence the parent's
+     (or vice versa). *)
+  let saved_hinted = !unverified_hinted in
+  unverified_hinted := false;
+  Fun.protect
+    ~finally:(fun () ->
+      strict_verified := saved_strict;
+      unverified_hinted := saved_hinted)
+    (fun () -> List.iter (visit_decl ~root errctx defs ctx) decls)
 
 (* One declaration.  Every constructor of [A.decl] is named — there is NO
    wildcard, deliberately: for years this walk descended only into [DFn] and
