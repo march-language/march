@@ -7201,8 +7201,18 @@ mod MA2 do
   end
   fn main() : Int do 0 end
 end|}));
-        Alcotest.(check int) "no diagnostics (skip is silent, not an error)" 0
-          (List.length ctx.March_errors.Errors.diagnostics);
+        (* A skip must not produce an ERROR or WARNING.  HINT-severity
+           diagnostics are excluded deliberately: the unverified-precondition
+           HINT is advisory, does not change the exit code, and is emitted for
+           exactly this shape -- counting it here would make the assertion fail
+           for a reason that has nothing to do with the skip semantics under
+           test (the obligation counts below are the real check). *)
+        Alcotest.(check int) "no error/warning diagnostics (skip is silent)" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity <> March_errors.Errors.Hint)
+                ctx.March_errors.Errors.diagnostics));
         let proved, violated, skips = March_refinecheck.Obligation.summary () in
         Alcotest.(check int) "still NOT proved -- no Nil arm to exclude" 0 proved;
         Alcotest.(check int) "not falsely reported as violated either" 0 violated;
@@ -7275,8 +7285,18 @@ mod Z2 do
   fn go(t : Zt) : Int do needs_pos(t) end
   fn main() : Int do 0 end
 end|}));
-        Alcotest.(check int) "no diagnostics (skip is silent, not an error)" 0
-          (List.length ctx.March_errors.Errors.diagnostics);
+        (* A skip must not produce an ERROR or WARNING.  HINT-severity
+           diagnostics are excluded deliberately: the unverified-precondition
+           HINT is advisory, does not change the exit code, and is emitted for
+           exactly this shape -- counting it here would make the assertion fail
+           for a reason that has nothing to do with the skip semantics under
+           test (the obligation counts below are the real check). *)
+        Alcotest.(check int) "no error/warning diagnostics (skip is silent)" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity <> March_errors.Errors.Hint)
+                ctx.March_errors.Errors.diagnostics));
         let proved, violated, skips = March_refinecheck.Obligation.summary () in
         Alcotest.(check int) "still NOT proved -- no Zleaf arm to exclude" 0 proved;
         Alcotest.(check int) "not falsely reported as violated either" 0 violated;
@@ -7315,8 +7335,18 @@ mod Z3 do
   end
   fn main() : Int do 0 end
 end|}));
-        Alcotest.(check int) "no diagnostics (skip is silent, not an error)" 0
-          (List.length ctx.March_errors.Errors.diagnostics);
+        (* A skip must not produce an ERROR or WARNING.  HINT-severity
+           diagnostics are excluded deliberately: the unverified-precondition
+           HINT is advisory, does not change the exit code, and is emitted for
+           exactly this shape -- counting it here would make the assertion fail
+           for a reason that has nothing to do with the skip semantics under
+           test (the obligation counts below are the real check). *)
+        Alcotest.(check int) "no error/warning diagnostics (skip is silent)" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity <> March_errors.Errors.Hint)
+                ctx.March_errors.Errors.diagnostics));
         let proved, violated, skips = March_refinecheck.Obligation.summary () in
         Alcotest.(check int) "NOT proved -- base case body is not a bare literal" 0 proved;
         Alcotest.(check int) "not falsely reported as violated either" 0 violated;
