@@ -5483,11 +5483,49 @@ end|}
         Alcotest.(check bool)
           "stays general (solver-undecided)" true
           (contains msg "solver-undecided"));
-    gated "a FREE occurrence under a non-colliding binder is a free MENTION, but entails nothing"
+    gated "a FREE occurrence under a non-colliding binder still attributes"
       (fun () ->
-        (* Originally pinned as "the attribution must still fire" — `q > n`
-           inside the lambda IS a genuine free use of the laundered length
-           (the free-occurrence walk correctly does not stop at the
+        (* Companion control to LA7 (the colliding-binder case, just above):
+           LA7's `fn n -> n > 0` collides on the laundering name and must NOT
+           attribute; this one's `fn q -> n > 0` is a genuine free use of the
+           laundered length under a NON-colliding binder, and — unlike the
+           `q > n` shape this fixture used before Task 5 — `n > 0` is exactly
+           the entailing comparison, so the pair still discriminates the
+           free-occurrence walk: a regression that stopped descent at ANY
+           binder (colliding or not) would make LA7 wrongly attribute or make
+           this one wrongly stay general, and either failure is caught here.
+           (The `q > n` shape this fixture used to have never entailed
+           anything regardless of shadowing — see the sibling fixture below,
+           "a FREE occurrence … entails nothing", which keeps that shape and
+           asserts the now-correct undecided outcome instead.) *)
+        let msg =
+          refine_error_text_d
+            {|mod LA8 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_over(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if any_over(zs, fn q -> n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "a FREE occurrence under a non-colliding binder entails nothing when it is not the goal"
+      (fun () ->
+        (* `q > n` inside the lambda IS a genuine free use of the laundered
+           length (the free-occurrence walk correctly does not stop at the
            non-colliding `q` binder), so before Task 5 this counted as
            evidence on its own.  It should not have: `q > n` says nothing
            about `n`'s sign — `q` is an arbitrary value from an opaque
@@ -5495,11 +5533,11 @@ end|}
            `len(ys) > 0` whether or not the alias was withdrawn.  Task 5's
            entailment conjunct correctly reclassifies this as undecided
            (kept general) rather than misattributing it — the free-occurrence
-           coverage itself is still exercised by this fixture, just no longer
-           conflated with "therefore it discharged". *)
+           coverage itself is exercised (and asserted) by the sibling fixture
+           above, so this one only needs to pin the entailment half. *)
         let msg =
           refine_error_text_d
-            {|mod LA8 do
+            {|mod LA8B do
   cap verified
   mod Internal do
     mod List do
@@ -5823,6 +5861,69 @@ end|}
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
           "still attributes to the withdrawal" true
+          (contains msg "alias-withdrawn"));
+    gated "LA16: a lambda param reusing a LAUNDERING NAME is not read as that launder"
+      (fun () ->
+        (* [exists_discharging]'s [is_subject] reads a second name channel —
+           [lets], keyed by the laundering name `n` — and that channel needs
+           its own shadow discipline, independent of the SUBJECT's (`ys`).
+           `fn n -> n > 0` inside `any_pos` binds its OWN `n`; that `n` must
+           not be read as `List.length(ys)` just because "n" is a laundering
+           key somewhere in the enclosing scope.  Before this fixed, the
+           `if n >= 0 && …` conjunct alone should already stay general
+           (`>= 0` cannot discharge `> 0`), so if this ever reports
+           `alias-withdrawn` at all, it is because the lambda's `n` was
+           wrongly read as the laundered length. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA16 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_pos(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if n >= 0 && any_pos(zs, fn n -> n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the shadowed launder is not read as evidence" false
+          (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "LA16 CONTROL: a non-colliding param leaves the launder readable"
+      (fun () ->
+        (* Same shape as LA16, but the lambda binds `q` instead of `n`, so
+           nothing shadows the laundering key — the discrimination must be
+           real, or LA16 would pass merely because this whole family of
+           guards is unreachable by [exists_discharging]. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA16B do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_pos(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if n >= 0 && any_pos(zs, fn q -> q > 0 && n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the unshadowed launder still attributes" true
           (contains msg "alias-withdrawn"))
   ]
 

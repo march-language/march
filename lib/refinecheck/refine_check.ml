@@ -3066,31 +3066,44 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
     (* Does some subterm of [e] compare the withdrawn measure applied to the
        FREE subject against a literal, in a way that ENTAILS `(op2, n2)`
        (already known to be [pred]'s own comparison)?  Mirrors
-       [expr_applies_to_free]'s shadow-respecting descent exactly — same
-       cases, same shadowing rules — because this is asking the same
-       question ("does the withdrawn spelling apply to the free subject
-       somewhere in here") plus one more thing: not just THAT it applies, but
-       WHAT the surrounding comparison says.  A guard buried inside an opaque
-       call (`check(fn q -> List.length(ys) > 0, zs)`) still has a genuine,
-       entailing comparison at that free position — nesting inside a call
-       this pass cannot otherwise reason about must not by itself defeat
-       entailment, or a case [guard_applies] already accepted (companion
-       control, "a FREE occurrence … still attributes") would regress.  A
-       lambda parameter that collides with the subject's name still closes
-       off descent into that lambda's body, exactly as [expr_applies_to_free]
+       [expr_applies_to_free]'s shadow-respecting descent — same cases, same
+       shadowing rules for the SUBJECT name (`sn`) — because this is asking
+       the same question ("does the withdrawn spelling apply to the free
+       subject somewhere in here") plus one more thing: not just THAT it
+       applies, but WHAT the surrounding comparison says.  A guard buried
+       inside an opaque call (`check(fn q -> List.length(ys) > 0, zs)`) still
+       has a genuine, entailing comparison at that free position — nesting
+       inside a call this pass cannot otherwise reason about must not by
+       itself defeat entailment, or a case [guard_applies] already accepted
+       ("a FREE occurrence … still attributes") would regress.  A lambda
+       parameter that collides with the SUBJECT's name still closes off
+       descent into that lambda's body, exactly as [expr_applies_to_free]
        already does — that is the discipline probe PE pinned, and this walk
-       must not reopen it. *)
-    let rec exists_discharging (w : withdrawal) (op2, n2) (e : A.expr) : bool =
-      let recur = exists_discharging w (op2, n2) in
-      let any = List.exists recur in
+       must not reopen it.
+
+       [is_subject] reads a SECOND name channel besides the subject —
+       [lets], the laundering table — and that channel needs its own
+       shadow discipline: `let n = List.length(ys); if n >= 0 && any_pos(zs,
+       fn n -> n > 0) do head(ys) …` must not read the LAMBDA's own `n` as
+       the laundered length just because the string "n" is a laundering key
+       somewhere in scope.  [shadowed] carries every name any binder passed
+       on the way down has rebound (lambda/`let`/`let fn`/`let?`/match-arm),
+       independent of whether that name happens to be the subject; a
+       laundering lookup that hits a shadowed name is retired exactly as a
+       path fact would be (see [path_shadow]) rather than trusted. *)
+    let rec exists_discharging (w : withdrawal) (op2, n2) ~(shadowed : string list)
+        (e : A.expr) : bool =
+      let recur ?(bind = []) e = exists_discharging w (op2, n2) ~shadowed:(bind @ shadowed) e in
+      let any ?(bind = []) es = List.exists (recur ~bind) es in
       let binds ps = List.mem sn.A.txt ps in
       let pbinds ps = List.exists (fun (p : A.param) -> p.A.param_name.A.txt = sn.A.txt) ps in
+      let param_names ps = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
       let is_subject e =
         match e with
         | A.EApp (A.EVar n, args, _) ->
           n.A.txt = w.wd_spelling
           && List.exists (function A.EVar v -> v.A.txt = sn.A.txt | _ -> false) args
-        | A.EVar { A.txt = m; _ } -> (
+        | A.EVar { A.txt = m; _ } when not (List.mem m shadowed) -> (
           match List.assoc_opt m lets with
           | Some (A.EApp (A.EVar n, args, _)) ->
             n.A.txt = w.wd_spelling
@@ -3113,32 +3126,45 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
       | A.EApp (f, args, _) -> recur f || any args
       | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
-      | A.ELam (ps, body, _) -> if pbinds ps then false else recur body
+      | A.ELam (ps, body, _) -> if pbinds ps then false else recur ~bind:(param_names ps) body
       | A.EBlock (es, _) ->
-        let rec go = function
+        (* Sequential, like [expr_applies_to_free]'s own [EBlock] case: a
+           `let` (or `let fn`/`let?`) rebinding the SUBJECT shadows the rest
+           of the block exactly as there (the [binds]/[sn.A.txt] checks
+           below, unchanged); a `let` rebinding a LAUNDERING key instead
+           retires that key from [is_subject]'s lookup for the rest of the
+           block, via [shadowed], without discarding the whole branch — the
+           subject itself may still be free elsewhere. *)
+        let rec go (shadowed : string list) = function
           | [] -> false
           | e :: rest ->
-            recur e
+            exists_discharging w (op2, n2) ~shadowed e
             ||
             (match e with
              | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
              | A.ELetFn (n, _, _, _, _) when n.A.txt = sn.A.txt -> false
              | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
-             | _ -> go rest)
+             | A.ELet (b, _) -> go (pat_binders b.A.bind_pat @ shadowed) rest
+             | A.ELetFn (n, _, _, _, _) -> go (n.A.txt :: shadowed) rest
+             | A.ELetQ (p, _, _, _) -> go (pat_binders p @ shadowed) rest
+             | _ -> go shadowed rest)
         in
-        go es
+        go shadowed es
       | A.ELet (b, _) -> recur b.A.bind_expr
       | A.ELetFn (n, ps, _, body, _) ->
-        if n.A.txt = sn.A.txt || pbinds ps then false else recur body
-      | A.ELetQ (p, e1, e2, _) -> recur e1 || (if binds (pat_binders p) then false else recur e2)
+        if n.A.txt = sn.A.txt || pbinds ps then false
+        else recur ~bind:(n.A.txt :: param_names ps) body
+      | A.ELetQ (p, e1, e2, _) ->
+        recur e1 || (if binds (pat_binders p) then false else recur ~bind:(pat_binders p) e2)
       | A.EMatch (subj, brs, _) ->
         recur subj
         || List.exists
              (fun (br : A.branch) ->
-               if binds (pat_binders br.A.branch_pat) then false
+               let bs = pat_binders br.A.branch_pat in
+               if binds bs then false
                else
-                 (match br.A.branch_guard with Some g -> recur g | None -> false)
-                 || recur br.A.branch_body)
+                 (match br.A.branch_guard with Some g -> recur ~bind:bs g | None -> false)
+                 || recur ~bind:bs br.A.branch_body)
              brs
       | A.ERecord (fs, _) -> List.exists (fun (_, v) -> recur v) fs
       | A.ERecordUpdate (r, fs, _) -> recur r || List.exists (fun (_, v) -> recur v) fs
@@ -3159,10 +3185,10 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       match atomic_cmp (is_measured_pred w) pred with
       | None -> false
       | Some (op2, n2) ->
-        exists_discharging w (op2, n2) cond
+        exists_discharging w (op2, n2) ~shadowed:[] cond
         || List.exists
              (fun (m, rhs) ->
-               expr_mentions_free m cond && exists_discharging w (op2, n2) rhs)
+               expr_mentions_free m cond && exists_discharging w (op2, n2) ~shadowed:[] rhs)
              lets
     in
     List.find_opt

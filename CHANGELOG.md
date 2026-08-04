@@ -165,7 +165,8 @@ git log is authoritative for exact commits.
   proves nothing about the goal `len(ys) > 0`: the call is skipped whether or
   not the alias was withdrawn. The attribution now requires the guard's own
   comparison to syntactically entail the obligation's predicate (an
-  interval-subset check over `==`/`!=`/`<`/`<=`/`>`/`>=`); where entailment
+  interval-subset check over `==`/`<`/`<=`/`>`/`>=`; `!=` is not a convex
+  interval, so it never entails anything by this check); where entailment
   can't be decided, the honest `solver-undecided` message is kept instead.
   The verdict is unaffected — still `Skipped` either way — only the reason
   string changes.
