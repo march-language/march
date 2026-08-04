@@ -393,10 +393,15 @@ class march_server =
            shells out.  The edit goes back through workspace/applyEdit so it
            lands in the user's BUFFER; writing the file underneath an editor
            with unsaved changes would lose their work. *)
-        if command = "march.suggestRefinement" then
+        if command = "march.suggestRefinement"
+           || command = "march.suggestPostcondition" then
           match args with
           | [ `String file; `String fn ] ->
-            let (payload, edit) = Refine_command.run ~file ~fn in
+            let (payload, edit) =
+              if command = "march.suggestPostcondition" then
+                Refine_command.run_post ~file ~fn
+              else Refine_command.run ~file ~fn
+            in
             (match edit with
              | None -> Lwt.return payload
              | Some we ->
@@ -404,7 +409,11 @@ class march_server =
                  (notify_back#send_request
                     (Lsp.Server_request.WorkspaceApplyEdit
                        (Lsp.Types.ApplyWorkspaceEditParams.create ~edit:we
-                          ~label:"Suggest a refinement type" ()))
+                          ~label:
+                            (if command = "march.suggestPostcondition" then
+                               "Suggest a postcondition"
+                             else "Suggest a refinement type")
+                          ()))
                     (fun _ -> Lwt.return ()))
                  (fun _ -> Lwt.return payload))
           | _ ->
@@ -413,7 +422,7 @@ class march_server =
                 [ ("status", `String "error");
                   ("kind", `String "suggestRefinement");
                   ("message",
-                   `String "march.suggestRefinement expects [file, function]") ])
+                   `String (command ^ " expects [file, function]")) ])
         else
         let result =
           match Analysis.resolve_lens_command ~command ~args with
@@ -522,7 +531,8 @@ class march_server =
           Some (Lsp.Types.ExecuteCommandOptions.create
                   ~commands:[ "march.runTest"; "march.debugTest";
                               "march.run";     "march.debug";
-                              "march.suggestRefinement" ] ());
+                              "march.suggestRefinement";
+                              "march.suggestPostcondition" ] ());
         (* Auto-close HTML tags inside ~H sigils when the user types '>'. *)
         ServerCapabilities.documentOnTypeFormattingProvider =
           Some (Lsp.Types.DocumentOnTypeFormattingOptions.create

@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge refine --postconditions`, `--apply`, and an editor action complete
+  the postcondition half.** The compiler surface shipped previously; this adds
+  the two surfaces people actually reach for. `--apply` rewrites the *return*
+  annotation via a new `Refine_edit.splice_return`, which is a genuinely
+  different scan from the parameter one — it must find the paren closing the
+  parameter list (depth-tracked, so `Map(String, Int)` does not end it early)
+  and stop at the `do` that opens the body. The editor gets a "Suggest a
+  postcondition for `f`" action alongside the existing precondition one,
+  sharing that same splice so the CLI and the editor produce identical bytes.
+
 - **`march --refine-suggest-post <fn>`: suggest a postcondition.** Where
   `--refine-suggest` proposes the parameter contract that discharges a
   function's own unproven obligations, this proposes the *return* contract that

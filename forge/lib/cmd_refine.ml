@@ -190,6 +190,120 @@ let apply_result (r : fn_result) : (string, string) result =
                  (List.length r.rs_suggestions) r.rs_file)
          end)
 
+(* ── Postconditions ───────────────────────────────────────────────────────────
+   A postcondition proposal is one annotation on the RETURN, not a list of
+   parameter annotations, and it is justified by the CALLERS' debt rather than
+   the function's own — so it carries its own record and its own splice rather
+   than being squeezed into [fn_result]. *)
+
+type post_result = {
+  po_fn : string;
+  po_file : string;
+  po_line : int;
+  po_status : string;
+  po_base : string;
+  po_pred : string;
+  po_annotation : string;
+  po_callers : int;
+  po_debt_before : int;
+  po_debt_after : int;
+}
+
+let parse_posts (json : string) : post_result list =
+  match Yojson.Safe.from_string json with
+  | exception _ -> []
+  | `Assoc top ->
+    let member k o = try List.assoc k o with Not_found -> `Null in
+    let str = function `String s -> s | _ -> "" in
+    let int = function `Int n -> n | _ -> 0 in
+    (match member "postconditions" top with
+     | `List rs ->
+       List.filter_map
+         (function
+           | `Assoc r ->
+             Some
+               { po_fn = str (member "fn" r); po_file = str (member "file" r);
+                 po_line = int (member "line" r); po_status = str (member "status" r);
+                 po_base = str (member "base" r); po_pred = str (member "predicate" r);
+                 po_annotation = str (member "annotation" r);
+                 po_callers = int (member "callers" r);
+                 po_debt_before = int (member "debt_before" r);
+                 po_debt_after = int (member "debt_after" r) }
+           | _ -> None)
+         rs
+     | _ -> [])
+  | _ -> []
+
+let ask_posts ~lib_path_env ~budget ~mode file : post_result list =
+  let cmd =
+    Printf.sprintf "%smarch --check --refine-suggest-json %s --refine-suggest-budget %d %s"
+      lib_path_env mode budget (Filename.quote file)
+  in
+  let (_rc, out) = run_capturing_stdout cmd in
+  if (try Sys.getenv "FORGE_REFINE_DEBUG" <> "" with Not_found -> false) then
+    Printf.eprintf "forge refine: %s\n-> %s\n%!" cmd out;
+  parse_posts out
+
+let apply_post (r : post_result) : (string, string) result =
+  if r.po_pred = "" then Error (Printf.sprintf "%s: nothing to apply" r.po_fn)
+  else
+    match (try Some (read_file r.po_file) with Sys_error m -> prerr_endline m; None) with
+    | None -> Error (Printf.sprintf "cannot read %s" r.po_file)
+    | Some src ->
+      let short_fn =
+        match String.rindex_opt r.po_fn '.' with
+        | Some i -> String.sub r.po_fn (i + 1) (String.length r.po_fn - i - 1)
+        | None -> r.po_fn
+      in
+      (match
+         March_refactor.Refine_edit.splice_return ~src ~line:r.po_line ~fn:short_fn
+           ~annotation:r.po_annotation
+       with
+       | None ->
+         Error
+           (Printf.sprintf
+              "%s: could not locate the return annotation in %s — apply it by hand"
+              r.po_fn r.po_file)
+       | Some src' ->
+         if not (parses src' r.po_file) then
+           Error
+             (Printf.sprintf
+                "%s: the edited source no longer parses, so nothing was written to %s"
+                r.po_fn r.po_file)
+         else begin
+           write_file r.po_file src';
+           Ok (Printf.sprintf "%s: applied a postcondition to %s" r.po_fn r.po_file)
+         end)
+
+let print_post ~root (r : post_result) =
+  let rel =
+    let n = String.length root in
+    if String.length r.po_file > n && String.sub r.po_file 0 n = root then
+      String.sub r.po_file (n + 1) (String.length r.po_file - n - 1)
+    else r.po_file
+  in
+  match r.po_status with
+  | "no-return-type" -> Printf.printf "%s: no declared return type to refine\n%!" r.po_fn
+  | "already-refined" -> Printf.printf "%s: its return is already refined\n%!" r.po_fn
+  | "no-callers" ->
+    Printf.printf
+      "%s: nothing calls it here, so no postcondition could discharge anything\n%!" r.po_fn
+  | "no-debt" ->
+    Printf.printf "%s: its callers have no unproven obligations\n%!" r.po_fn
+  | "no-candidate" ->
+    Printf.printf
+      "%s: %d unproven obligation(s) in %d caller(s), but no candidate postcondition is both provable and useful\n%!"
+      r.po_fn r.po_debt_before r.po_callers
+  | _ ->
+    Printf.printf "%s:%d  %s\n%!" rel r.po_line r.po_fn;
+    Printf.printf "    returns %s  ->  returns %s\n%!" r.po_base r.po_annotation;
+    if r.po_status = "solved" then
+      Printf.printf "  discharges all %d obligation(s) across %d caller(s)\n%!"
+        r.po_debt_before r.po_callers
+    else
+      Printf.printf "  discharges %d of %d across %d caller(s); %d still unproven\n%!"
+        (r.po_debt_before - r.po_debt_after) r.po_debt_before r.po_callers r.po_debt_after
+
 (* ── Rendering ────────────────────────────────────────────────────────────── *)
 
 let print_result ~root (r : fn_result) =
@@ -231,6 +345,48 @@ let default_budget = 200
 
 (* One discover-and-maybe-apply pass.  Returns how many functions were applied,
    so the fixpoint loop can tell "made progress" from "converged". *)
+(* The postcondition pass.  Deliberately a separate function rather than a flag
+   threaded through [run_once]: it asks a different question (what would help my
+   CALLERS) and reports different outcomes, and interleaving the two would make
+   both harder to read for no gain. *)
+let run_posts ~root ~lib_path_env ~files ~all ~apply ~budget ~target :
+    (int, string) result =
+  let mode =
+    if all then "--refine-suggest-post-all"
+    else Printf.sprintf "--refine-suggest-post %s" (Filename.quote target)
+  in
+  let rec sweep acc = function
+    | [] -> List.rev acc
+    | f :: tl ->
+      let rs =
+        List.filter (fun r -> r.po_status <> "not-found")
+          (ask_posts ~lib_path_env ~budget ~mode f)
+      in
+      if rs <> [] && not all then List.rev_append acc rs
+      else sweep (List.rev_append rs acc) tl
+  in
+  let results = sweep [] files in
+  if results = [] then
+    if all then Ok 0
+    else Error (Printf.sprintf "no user function named `%s` in this project" target)
+  else begin
+    List.iter (print_post ~root) results;
+    let applicable = List.filter (fun r -> r.po_pred <> "") results in
+    if not apply then Ok 0
+    else begin
+      let failures = ref [] in
+      List.iter
+        (fun r ->
+          match apply_post r with
+          | Ok msg -> Printf.printf "%s\n%!" msg
+          | Error msg -> failures := msg :: !failures)
+        applicable;
+      match !failures with
+      | [] -> Ok (List.length applicable)
+      | fs -> Error (String.concat "\n" (List.rev fs))
+    end
+  end
+
 let run_once ~root ~lib_path_env ~files ~all ~apply ~budget ~target ~quiet :
     (int, string) result =
   let mode =
@@ -284,7 +440,7 @@ let run_once ~root ~lib_path_env ~files ~all ~apply ~budget ~target ~quiet :
    exists.  So exhausting the cap is its own message. *)
 let max_rounds = 10
 
-let run ?(all = false) ?(apply = false) ?(fixpoint = false)
+let run ?(all = false) ?(apply = false) ?(fixpoint = false) ?(postconditions = false)
     ?(budget = default_budget) ~(target : string) () : (string, string) result =
   match P.load () with
   | Error msg -> Error msg
@@ -307,7 +463,9 @@ let run ?(all = false) ?(apply = false) ?(fixpoint = false)
     else begin
       let lib_path_env = Cmd_build.lib_path_env proj in
       let once ?(quiet = false) () =
-        run_once ~root ~lib_path_env ~files ~all ~apply ~budget ~target ~quiet
+        if postconditions then
+          run_posts ~root ~lib_path_env ~files ~all ~apply ~budget ~target
+        else run_once ~root ~lib_path_env ~files ~all ~apply ~budget ~target ~quiet
       in
       if not (fixpoint && apply) then
         match once () with

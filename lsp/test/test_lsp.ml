@@ -3135,6 +3135,55 @@ end
   Alcotest.(check bool) "no action when every param is refined" true
     (refine_action_at src "only" = None)
 
+(* The postcondition action is offered only where there is a declared return
+   type that is not already refined — a solver-free test, for the same reason
+   the precondition one is: the inference is far too expensive to run while
+   building the code-action list. *)
+let post_action_at src needle =
+  let a = analyse src in
+  let (line, col) = pos_of src needle in
+  An.code_actions_at a ~line ~character:col ()
+  |> List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+         match ca.Lsp.Types.CodeAction.command with
+         | Some c -> c.Lsp.Types.Command.command = "march.suggestPostcondition"
+         | None -> false)
+
+let test_post_action_offered_on_declared_return () =
+  let src = {|
+mod PA1 do
+  fn produce(x : Int) : Int do
+    x
+  end
+end
+|} in
+  match post_action_at src "produce" with
+  | None -> Alcotest.fail "expected a suggestPostcondition action"
+  | Some ca ->
+    Alcotest.(check bool) "carries no eager edit" true
+      (ca.Lsp.Types.CodeAction.edit = None)
+
+let test_post_action_absent_without_a_return_type () =
+  let src = {|
+mod PA2 do
+  fn noret(x : Int) do
+    x
+  end
+end
+|} in
+  Alcotest.(check bool) "no action without a declared return" true
+    (post_action_at src "noret" = None)
+
+let test_post_action_absent_when_return_already_refined () =
+  let src = {|
+mod PA3 do
+  fn done_already(x : Int) : {Int | _ > 0} do
+    1
+  end
+end
+|} in
+  Alcotest.(check bool) "no action when the return is already refined" true
+    (post_action_at src "done_already" = None)
+
 let test_perf_parallelizable_code_action () =
   let src = {|
 mod Test do
@@ -6624,6 +6673,11 @@ let () =
       "List.fold_left never flagged",                 `Quick, test_perf_parallelizable_fold_not_flagged;
       "parallelizable hint in diagnostics",           `Quick, test_perf_parallelizable_hint_in_diagnostics;
       "convert-to-pmap code action",                  `Quick, test_perf_parallelizable_code_action;
+    ];
+    "suggest-postcondition code action", [
+      "offered on a declared return type",             `Quick, test_post_action_offered_on_declared_return;
+      "absent without a return type",                  `Quick, test_post_action_absent_without_a_return_type;
+      "absent when the return is already refined",     `Quick, test_post_action_absent_when_return_already_refined;
     ];
     "suggest-refinement code action", [
       "offered on a function with an annotated param", `Quick, test_refine_action_offered_on_annotated_param;
