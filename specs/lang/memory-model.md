@@ -348,8 +348,9 @@ to construct rather than cleaning them up afterwards:
   be made of.
 
 Two honest caveats. First, this is a *design argument*, not a mechanized proof —
-it is not among the properties checked in Lean, and there is no runtime detector
-that would tell you if it were wrong. Second, the argument covers user-level
+nothing in March is mechanically verified today (a Lean 4 metatheory effort is
+planned, not started; see `specs/lean4-metatheory-plan.md`), and there is no
+runtime detector that would tell you if it were wrong. Second, the argument covers user-level
 data; the runtime does construct self-referential shapes internally (a
 self-recursive closure captures itself), and those are handled by
 compiler-inserted drops on specific paths rather than by reference counting
