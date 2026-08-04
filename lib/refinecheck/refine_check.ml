@@ -4775,79 +4775,32 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
       | Closed -> Some []
       | Relational ps -> Some ps
     in
-    match ps, c.A.fc_body with
-    | None, _ -> false
-    (* The recognised shape: one clause whose whole body matches on a parameter. *)
-    | Some ps, A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
-      let mparam = sv.A.txt in
-      let mparam_idx =
-        let rec ix i = function
-          | [] -> -1
-          | x :: r -> if x = mparam then i else ix (i + 1) r
-        in
-        ix 0 params
-      in
-      let mparam_ty =
-        List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
-        |> (fun o -> Option.bind o param_ty_of)
-        |> (fun o -> Option.bind o smt_sort_of_ty)
-      in
-      match mparam_ty with
-      | Some (Smt.SData madt) when madt <> "Elem" ->
-        (* Every sort this VC family mentions must already be declared by the
-           measure preamble; otherwise the VC would reference an undeclared sort
-           and z3 would answer with an `(error …)` line — the failure mode that
-           desynchronises the shared solver channel.  (`--no-measure-axioms`
-           empties the preamble, so this also disables Tier 2 under that flag.) *)
-        if not (Hashtbl.mem measure_preamble_sorts ret_adt
-                && Hashtbl.mem measure_preamble_sorts madt)
-        then false
-        else begin
-          (* Structurally smaller variables, computed over the WHOLE clause body
-             so a nested match contributes its components too. *)
-          let sset = structural_subvars mparam c.A.fc_body in
-          let rec check_branch (br : A.branch) : bool =
-            match br.A.branch_pat with
-            | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
-              let ctor = ct.A.txt in
-              let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
-              if List.length subpats <> List.length fsorts then false
-              else
-                (* Only flat PatVar / PatWild sub-patterns: a nested pattern
-                   would need an equation we do not build. *)
-                let names =
-                  List.mapi
-                    (fun i p ->
-                      match p with
-                      | A.PatVar n -> Some n.A.txt
-                      | A.PatWild _ -> Some (Printf.sprintf "$w%s%d" ctor i)
-                      | _ -> None)
-                    subpats
-                in
-                if List.exists Option.is_none names then false
-                else
-                  let names = List.map Option.get names in
-                  (* A binder that reuses a parameter's name would be conflated
-                     with it (both reflect to `Const name`). *)
-                  if List.exists (fun n -> List.mem n params) names then false
-                  else
-                    let binder_sorts = List.combine names fsorts in
-                    let base_path =
-                      match br.A.branch_guard with Some g -> [ (g, false) ] | None -> []
-                    in
-                    let ts = tails base_path br.A.branch_body in
-                    (* Fold, not for_all: no short-circuit, so the VC cache is
-                       warmed uniformly and the verdict is order-independent. *)
-                    ts <> []
-                    && List.fold_left
-                         (fun acc t ->
-                           check_tail ~ctor ~binder_sorts t && acc)
-                         true ts)
-            (* A catch-all arm binds no constructor, so there is no pattern
-               equation pinning the scrutinee — nothing to prove from. *)
-            | _ -> false
-          and check_tail ~ctor ~binder_sorts ((path, tail_e) : (A.expr * bool) list * A.expr)
-              : bool =
+    (* Every sort this VC family mentions must already be declared by the
+       measure preamble; otherwise the VC would reference an undeclared sort and
+       z3 would answer with an `(error …)` line — the failure mode that
+       desynchronises the shared solver channel.  (`--no-measure-axioms` empties
+       the preamble, so this also disables Tier 2 under that flag.) *)
+    match ps with
+    | None -> false
+    | Some _ when not (Hashtbl.mem measure_preamble_sorts ret_adt) -> false
+    | Some ps ->
+      (* ── The single VC builder, shared by every accepted body shape ────────
+         [mctx] is the INDUCTION context — the matched parameter, its ADT sort,
+         its index in the parameter list, and the structurally-smaller variables
+         computed over the whole clause body.  It is the only thing that
+         licenses an induction hypothesis, so a body with no top-level match
+         passes [None] and can therefore never assume one.  [pat] is the pattern
+         equation for the arm under check (its constructor and flat binders); it
+         is meaningful only alongside an [mctx], since the equation's left-hand
+         side IS the matched parameter.
+
+         There is deliberately ONE generator: a second, parallel VC builder for
+         the non-match shape could drift from this one, the hazard recorded at
+         [postcond_infer.ml:25]. *)
+      let check_tail
+          ~(mctx : (string * string * int * (string, unit) Hashtbl.t) option)
+          ~(pat : (string * (string * Smt.sort) list) option) ~(refute : bool)
+          ((path, tail_e) : (A.expr * bool) list * A.expr) : Obligation.verdict option =
             (* ── Per-VC state ───────────────────────────────────────────────
                [declare] is the well-sortedness guard: one symbol at two sorts
                makes z3 emit an `(error …)`, which desynchronises the shared
@@ -4869,10 +4822,16 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
               Smt.Const n
             in
             let ok = ref true in
-            if not (declare mparam (Smt.SData madt)) then ok := false;
-            List.iter
-              (fun (n, s) -> if not (declare n s) then ok := false)
-              binder_sorts;
+            (match mctx with
+             | Some (mparam, madt, _, _) ->
+               if not (declare mparam (Smt.SData madt)) then ok := false
+             | None -> ());
+            (match pat with
+             | Some (_, binder_sorts) ->
+               List.iter
+                 (fun (n, s) -> if not (declare n s) then ok := false)
+                 binder_sorts
+             | None -> ());
             List.iter
               (fun fp ->
                 match Option.bind (param_ty_of fp) smt_sort_of_ty with
@@ -4910,14 +4869,24 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
                  position is a variable in [structural_subvars].  Any other
                  recursive call still reflects (so the arm can be attempted) but
                  carries NO assumption — an unconstrained constant proves
-                 nothing, which is exactly the skip we want. *)
+                 nothing, which is exactly the skip we want.  With no [mctx]
+                 there is no matched parameter and hence nothing that could be
+                 structurally smaller, so no IH is ever available. *)
               | A.EApp (A.EVar { A.txt = f; _ }, args, _) when f = self && d = ret_adt ->
                 incr ctr;
                 let nm = Printf.sprintf "$t2rec%d" !ctr in
                 Hashtbl.replace decls nm (Smt.SData ret_adt);
                 let cst = Smt.Const nm in
-                (match List.nth_opt args mparam_idx with
-                 | Some (A.EVar v) when Hashtbl.mem sset v.A.txt ->
+                let ih_arg =
+                  match mctx with
+                  | None -> None
+                  | Some (_, _, mparam_idx, sset) -> (
+                    match List.nth_opt args mparam_idx with
+                    | Some (A.EVar v) when Hashtbl.mem sset v.A.txt -> Some v
+                    | _ -> None)
+                in
+                (match ih_arg with
+                 | Some _ ->
                    let env =
                      List.mapi (fun i n -> (n, List.nth_opt args i)) params
                      |> List.filter_map (function
@@ -4928,7 +4897,7 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
                      (match pred_term cst (subst_params env pred) with
                       | Some t -> assume := t :: !assume
                       | None -> ())
-                 | _ -> ());
+                 | None -> ());
                 Some cst
               | _ -> None
             and reflect_int (e : A.expr) : Smt.term option =
@@ -4958,16 +4927,24 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
               in
               smt_of ~resolve_var:rv ~resolve_measure:rm' ~resolve_measure_app:rma p
             in
-            (* The pattern equation.  Without it the arm knows nothing about the
-               scrutinee, and even the BASE case (`size(t) + 1` with `t = Leaf`)
-               is unprovable. *)
-            let pat_eq =
-              List.fold_right
-                (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
-                binder_sorts (Some [])
-              |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, Smt.App (ctor, ts)))
-            in
-            (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false);
+            (* The pattern equation.  Without it a match arm knows nothing about
+               the scrutinee, and even the BASE case (`size(t) + 1` with `t =
+               Leaf`) is unprovable.  A body with no match has no scrutinee to
+               constrain — the parameters stay universally quantified, which is
+               strictly WEAKER than any equation, so omitting it cannot make a
+               goal provable that would otherwise fail. *)
+            (match pat, mctx with
+             | None, _ -> ()
+             | Some (ctor, binder_sorts), Some (mparam, _, _, _) ->
+               let pat_eq =
+                 List.fold_right
+                   (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
+                   binder_sorts (Some [])
+                 |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, Smt.App (ctor, ts)))
+               in
+               (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false)
+             (* A pattern with no matched parameter is not a shape we build. *)
+             | Some _, None -> ok := false);
             (* Reflecting the tail is what mints the IH assumptions, so it must
                happen before the assumption list is read. *)
             let tail_term = reflect_dt ret_adt tail_e in
@@ -4978,25 +4955,134 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
                 | None -> ())
               path;
             match tail_term with
-            | None -> false
+            | None -> None
             | Some tt -> (
               match pred_term tt pred with
-              | None -> false
+              | None -> None
               | Some goal ->
-                if (not !ok) || !conflict then false
+                if (not !ok) || !conflict then None
                 else
                   let decls =
                     Hashtbl.fold (fun n s acc -> (n, s) :: acc) decls []
                     |> List.sort compare
                   in
                   let vc = { Smt.decls; assumptions = !assume; goal } in
-                  Refine.discharge ~root ~preamble:!measure_preamble vc = Refine.Verified)
+                  match Refine.discharge ~root ~preamble:!measure_preamble vc with
+                  | Refine.Verified -> Some Obligation.Proved
+                  | _ when not refute -> Some (Obligation.Skipped Obligation.Solver_undecided)
+                  (* DEFINITE failure only: "not proved" is not "violated".  The
+                     predicate is reported as violated only when its NEGATION is
+                     itself Verified — i.e. it can never hold. *)
+                  | _ ->
+                    if Refine.discharge ~root ~preamble:!measure_preamble
+                         { vc with Smt.goal = Smt.Not goal }
+                       = Refine.Verified
+                    then Some Obligation.Violated
+                    else Some (Obligation.Skipped Obligation.Solver_undecided))
+      in
+      let proved_tail ~mctx ~pat t =
+        check_tail ~mctx ~pat ~refute:false t = Some Obligation.Proved
+      in
+      (match c.A.fc_body with
+      (* ── Shape 1: a constructor-literal body ───────────────────────────────
+         The simplest possible case, and one that needs no induction at all:
+         there is no recursive call to hypothesise over, so the goal is just the
+         predicate with its binder replaced by the constructed term, discharged
+         under the measure's own recursion axioms.  This shape used to fall
+         through to `false` SILENTLY — Tier 2 is verdict-only — so a
+         deliberately wrong postcondition on it reported no obligation of any
+         kind.  Checked BEFORE the match shape so the path that already worked
+         is reached unchanged. *)
+      | A.ECon _ as body ->
+        (* Unlike the match shape, this one RECORDS its verdict in the
+           obligation ledger.  Tier 2 stays verdict-only in the sense that
+           matters — it emits no diagnostic either way — but "attempted" has to
+           be distinguishable from "never looked at", and the ledger is the only
+           channel that carries that.  (Extending the same accounting to the
+           match shape is a separate change: it would move counts under every
+           existing Tier 2 fixture, so it is deliberately not bundled here.) *)
+        let v =
+          match check_tail ~mctx:None ~pat:None ~refute:true ([], body) with
+          | Some v -> v
+          (* No VC could be built at all — reflection failed somewhere. *)
+          | None -> Obligation.Skipped Obligation.Unreflectable_predicate
+        in
+        Obligation.record
+          { Obligation.span = fd.A.fn_name.A.span
+          ; callee = self
+          ; predicate = pred_str pred
+          ; verdict = v
+          ; kind = Obligation.Postcondition };
+        v = Obligation.Proved
+      (* ── Shape 2: one clause whose whole body matches on a parameter ─────── *)
+      | A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
+        let mparam = sv.A.txt in
+        let mparam_idx =
+          let rec ix i = function
+            | [] -> -1
+            | x :: r -> if x = mparam then i else ix (i + 1) r
           in
-          branches <> []
-          && List.fold_left (fun acc br -> check_branch br && acc) true branches
-        end
-      | _ -> false)
-    | Some _, _ -> false)
+          ix 0 params
+        in
+        let mparam_ty =
+          List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
+          |> (fun o -> Option.bind o param_ty_of)
+          |> (fun o -> Option.bind o smt_sort_of_ty)
+        in
+        match mparam_ty with
+        | Some (Smt.SData madt) when madt <> "Elem" ->
+          if not (Hashtbl.mem measure_preamble_sorts madt) then false
+          else begin
+            (* Structurally smaller variables, computed over the WHOLE clause
+               body so a nested match contributes its components too. *)
+            let sset = structural_subvars mparam c.A.fc_body in
+            let mctx = Some (mparam, madt, mparam_idx, sset) in
+            let check_branch (br : A.branch) : bool =
+              match br.A.branch_pat with
+              | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
+                let ctor = ct.A.txt in
+                let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
+                if List.length subpats <> List.length fsorts then false
+                else
+                  (* Only flat PatVar / PatWild sub-patterns: a nested pattern
+                     would need an equation we do not build. *)
+                  let names =
+                    List.mapi
+                      (fun i p ->
+                        match p with
+                        | A.PatVar n -> Some n.A.txt
+                        | A.PatWild _ -> Some (Printf.sprintf "$w%s%d" ctor i)
+                        | _ -> None)
+                      subpats
+                  in
+                  if List.exists Option.is_none names then false
+                  else
+                    let names = List.map Option.get names in
+                    (* A binder that reuses a parameter's name would be
+                       conflated with it (both reflect to `Const name`). *)
+                    if List.exists (fun n -> List.mem n params) names then false
+                    else
+                      let binder_sorts = List.combine names fsorts in
+                      let base_path =
+                        match br.A.branch_guard with Some g -> [ (g, false) ] | None -> []
+                      in
+                      let ts = tails base_path br.A.branch_body in
+                      (* Fold, not for_all: no short-circuit, so the VC cache is
+                         warmed uniformly and the verdict is order-independent. *)
+                      ts <> []
+                      && List.fold_left
+                           (fun acc t ->
+                             proved_tail ~mctx ~pat:(Some (ctor, binder_sorts)) t && acc)
+                           true ts)
+              (* A catch-all arm binds no constructor, so there is no pattern
+                 equation pinning the scrutinee — nothing to prove from. *)
+              | _ -> false
+            in
+            branches <> []
+            && List.fold_left (fun acc br -> check_branch br && acc) true branches
+          end
+        | _ -> false)
+      | _ -> false))
   | _ -> false
 
 (* Check every return-position tail of every clause of [fd] against its declared

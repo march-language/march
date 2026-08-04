@@ -157,7 +157,18 @@ git log is authoritative for exact commits.
   array is never mutated out from under its alias. This is the same FBIP
   in-place-at-unique-ownership story March already applies to ADT reuse.
   Compiled-only (the interpreter uses a different NativeArray backend).
-
+- **A refined ADT return on a constructor-literal body is now actually
+  checked.** `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+  Node(t, x, Leaf) end` — the simplest possible case, needing no induction at
+  all — was never attempted: the postcondition prover recognised exactly one
+  body shape, a top-level `match` on a parameter, and everything else fell
+  through silently. A deliberately *wrong* postcondition on such a body
+  reported `0 proved, 0 violated, 0 skipped` in `--refine-report`: not
+  undecided, simply never looked at. Constructor-literal bodies are now
+  discharged against the measure's recursion equations, and — unlike the
+  `match` shape — record their verdict in the obligation ledger, so the report
+  can tell "attempted and proved" from "never attempted". A proved
+  postcondition also propagates to call sites, as with the `match` shape.
 - **`cap no_panic` no longer rejects a division guarded by a boolean
   condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a
   possible division by zero, as was every other guard containing `&&` or `||`

@@ -1126,10 +1126,15 @@ dependent typing. Know the edges:
   that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
   — is proven by supplying the induction hypothesis at each recursive call whose
   argument is a proper component of the matched parameter, then discharging each
-  `match` arm against the measure's recursion equations. Only a postcondition
-  actually *proved* propagates, so an unprovable one stays legal but tells
-  callers nothing. Still silent: mutual recursion, a recursive call inside a
-  lambda or behind a nested `match`, and any non-structural recursion.
+  `match` arm against the measure's recursion equations. A body that is a bare
+  **constructor application** — `fn push(t, x) : {Tree | size(_) == size(t) + 1}
+  do Node(t, x, Leaf) end` — is proven too, and needs no induction at all: there
+  is no recursive call to hypothesise over, only one unfolding of the measure's
+  recursion equation. That shape also records its verdict in the obligation
+  ledger, so `--refine-report` shows it as attempted rather than absent. Only a
+  postcondition actually *proved* propagates, so an unprovable one stays legal
+  but tells callers nothing. Still silent: mutual recursion, a recursive call
+  inside a lambda or behind a nested `match`, and any non-structural recursion.
 - **A measure over a built-in `List` with a non-scalar element does not
   axiomatise.** `List(Int)` is fine; `List(SomeAdt)` collapses the element to an
   opaque sort and the measure is never usable. A user-defined list type with the

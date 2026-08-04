@@ -1869,6 +1869,13 @@ edges:
   **What is proven:**
   - a single-clause, unguarded function whose whole body is a `match` on one
     parameter, with flat constructor-pattern arms;
+  - a single-clause, unguarded function whose whole body is a **constructor
+    application** — `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}
+    do Node(t, x, Leaf) end`. No induction is needed here (there is no recursive
+    call to hypothesise over), just one unfolding of the measure's recursion
+    equation. Unlike the `match` shape, this one also **records its verdict in
+    the obligation ledger**, so `--refine-report` distinguishes "attempted and
+    proved" from "never looked at"; it still emits no diagnostic either way;
   - a return refinement over a **variant ADT** (`{Tree | …}`, `{List(Int) | …}`)
     whose predicate mentions a **`@[measure]`**;
   - self-recursion into any recursive component (left or right, it is the

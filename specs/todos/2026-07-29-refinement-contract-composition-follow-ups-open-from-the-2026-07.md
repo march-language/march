@@ -183,12 +183,19 @@ prototyped here:**
    build for them — this is real, non-trivial new work, not a small filter
    tweak, and is exactly the risk the task-6 brief flagged and asked to be
    re-scoped rather than built under this task's budget.
-3. `check_post_induction` must handle a non-match, non-recursive
+3. ~~`check_post_induction` must handle a non-match, non-recursive
    constructor-literal clause body for a refined ADT return (trivial case:
    no induction, no recursive IH needed — but it is currently a completely
    separate, unhandled shape) — this is unrelated to composition/consumption
    and belongs to the "postcondition proof, definition side" half of this
-   backlog's first bullet, not the "composition" half.
+   backlog's first bullet, not the "composition" half.~~
+   **CLOSED 2026-08-04** — see `specs/progress/2026-08-04-post-nonmatch-body.md`.
+   The VC builder inside `check_post_induction` was hoisted out of the `EMatch`
+   arm and re-parameterised on an optional *induction context*, so the
+   constructor-literal shape reuses the one generator with no induction
+   hypothesis available to it. That shape also now records a `Postcondition`
+   obligation, so a wrong postcondition on it is countable instead of
+   `0 proved, 0 violated, 0 skipped`. Suite: `post-nonmatch-body`.
 
 No code was kept from this investigation (the prototype patch to
 `scope_add_binding` plus its regression tests were reverted cleanly after

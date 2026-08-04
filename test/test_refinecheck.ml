@@ -4412,6 +4412,67 @@ let divsafety_error_texts src =
 
 let has_divsafety_error src = divsafety_error_texts src <> []
 
+(* ── Postcondition proof for a NON-MATCH ADT body ──────────────────────────
+   [check_post_induction] recognised exactly one clause-body shape: a top-level
+   `EMatch` on a structural parameter.  A body that is a bare constructor
+   application — the simplest case, no induction needed, just one unfolding of
+   the measure's definition — fell through and returned false SILENTLY (Tier 2
+   is verdict-only).  A deliberately WRONG postcondition on such a body
+   therefore reported `0 proved, 0 violated, 0 skipped`: never attempted, not
+   merely undecided.
+
+   The REJECT control is what makes this suite worth anything.  An accept-only
+   witness cannot tell "the checker proved it" from "the checker still is not
+   looking", because both report no error. *)
+let post_nonmatch_body_suite =
+  let tree_src body post = Printf.sprintf {|
+mod PN do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | %s} do %s end
+  fn main() : Int do size(push(Leaf, 1)) end
+end|} post body
+  in
+  [ gated "a constructor-literal body has its postcondition ATTEMPTED" (fun () ->
+        (* Before: 0 postcondition obligations of any kind — never attempted. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src "Node(t, x, Leaf)" "size(_) == size(t) + 1" in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check bool) "at least one postcondition proved" true (proved >= 1))
+  ; gated "REJECT CONTROL: a FALSE postcondition on the same body is caught"
+      (fun () ->
+        (* `size(Node(t,x,Leaf))` is `size(t) + 1`, never `size(t) + 2`.
+           Without this control the accept case above passes just as well when
+           the checker is still not looking at the body at all. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src "Node(t, x, Leaf)" "size(_) == size(t) + 2" in
+        let _ = has_refine_error_d src in
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check bool) "the false postcondition is reported" true
+          (violated >= 1))
+  ; gated "the existing match-shaped body still verifies" (fun () ->
+        (* Regression guard: widening the accepted shapes must not disturb the
+           EMatch path that already worked. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src
+          "match t do Leaf -> Node(Leaf, x, Leaf) | Node(l, y, r) -> Node(Node(l, y, r), x, Leaf) end"
+          "size(_) == size(t) + 1"
+        in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated)
+  ]
+
 (* NOTE ON GATING: none of these cases reaches the solver, so they must NOT be
    [gated] on z3 — a [gated] hole test would silently SKIP on a z3-less machine,
    i.e. the test whose whole point is fail-closed behaviour when verification is
@@ -7598,6 +7659,7 @@ let () =
       ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
+      ("post-nonmatch-body", post_nonmatch_body_suite);
       ("divsafety-boolean-guard", divsafety_boolean_guard_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite);
