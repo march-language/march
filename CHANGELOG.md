@@ -11,6 +11,26 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`forge refine` now suggests the fix for a `cap no_panic` division.** The compiler's
+  own error already says *"annotate the divisor parameter with `{v : Int | v != 0}`"*,
+  but `--refine-suggest-all` printed `no suggestions` for exactly that case — the one a
+  user is most likely to hit first. Division safety is a separate pass from the
+  refinement checker, so its obligations reached neither the ledger the suggester counts
+  nor the probe it re-runs; both are now wired, and `--refine-report` gained a `division`
+  counter. Suggestions stay weakest-first (`_ != 0`, not `_ > 0`), and a division that is
+  already safe — refined, or guarded by `if d != 0` — still draws nothing.
+
+- **Fifteen protocol-level LSP correctness tests.** The 2026-08-03 capability repair
+  proved each feature *answers*; nothing proved any of them answers *correctly*, and the
+  existing per-feature tests exercise the analysis layer, which was never the broken
+  part. `references`, `documentHighlight`, `documentSymbol`, `workspace/symbol`,
+  `formatting`, `signatureHelp`, `prepareCallHierarchy`, `selectionRange`, `definition`,
+  `foldingRange` and `rename` now have assertions on exact positions, each with a reject
+  case where the correct answer is nothing. The `formatting` edit is asserted
+  byte-identical to `march fmt`, so the two cannot drift.
+
 ### Changed
 
 - **`forge cap audit` is now `forge cap inspect`.** Two commands named "audit"

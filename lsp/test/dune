@@ -32,5 +32,8 @@
 (test
  (name test_jsonrpc)
  (modules test_jsonrpc)
- (libraries unix yojson alcotest)
+ ; march_format/parser/lexer are here so the formatting test can assert the
+ ; LSP's edit is EXACTLY `march fmt` on the same bytes, rather than merely
+ ; non-empty — which keeps the two from drifting apart.
+ (libraries unix yojson alcotest march_format march_parser march_lexer)
  (deps %{exe:../bin/main.exe}))

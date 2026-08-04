@@ -1,6 +1,7 @@
 # Twenty LSP capabilities are tested for *reachability*, not for *correctness*
 
-`[P2]` - [ ] **The capability repair proved each feature answers; nothing proves any of
+**DONE 2026-08-04** for the fourteen capabilities below; see "Still owed" at the end.
+`[P2]` **The capability repair proved each feature answers; nothing proved any of
 them answers correctly.** Twelve features ran for the first time on 2026-08-03. Their
 outputs have still never been asserted at the protocol level, nor exercised against a real
 editor. Per-feature tests are owed.
@@ -111,3 +112,86 @@ passes the positive test for every capability in the table above.
   and the per-feature tests do not subsume it.
 - The per-document leak assertion (`max endLine < document lines`) runs for every
   per-document response, not only the two that leaked.
+
+
+---
+
+# Implementation (2026-08-04)
+
+Fifteen tests added to `lsp/test/test_jsonrpc.ml` under a new
+`per-feature correctness` group. One server session serves them all — spawning per test
+would multiply a multi-second startup across every feature for no extra coverage — with the
+results memoised behind a `Lazy.t` so each assertion still fails under its own name.
+
+The fixture's coordinates are the test:
+
+```
+0  mod M do
+1    fn helper(x : Int) : Int do     `helper` at chars 5..11
+2      x + 1
+3    end
+4                                    ← blank: every REJECT case queries here
+5    fn main() : Int do
+6      helper(2)                     the call at chars 4..10
+7    end
+8  end
+```
+
+| Capability | Positive assertion | REJECT case |
+|---|---|---|
+| `references` | exactly the decl `(1,5)-(1,11)` and the call `(6,4)-(6,10)` | blank line → `[]` |
+| `documentHighlight` | same two ranges | blank line → `[]` |
+| `documentSymbol` | exactly `helper`, `main` | — (leak test below) |
+| `workspace/symbol` | `helper` at its declaration | non-matching query → `[]` |
+| `formatting` | edit is **byte-identical to `march fmt`** | — |
+| `signatureHelp` | label `helper(Int)`, `activeParameter = 0` | — |
+| `prepareCallHierarchy` | `selectionRange` is the name; `range` spans lines 1–3 | — |
+| `selectionRange` | innermost is the callee; parent strictly wider | — |
+| `definition` | lands on the declaration | — |
+| `foldingRange` | one fold per body: `1–3`, `5–7` | — |
+| `rename` | both sites, each writing the new name | — |
+
+Every assertion pins a **position**, never a count.
+
+## Two decisions worth recording
+
+**`formatting` is asserted against `march fmt` itself**, not against a literal string. That
+required adding `march_format`/`march_parser`/`march_lexer` to the test's libraries, and it
+buys something a golden string would not: the LSP and the formatter can no longer drift,
+and a formatter regression fails here too.
+
+**The prelude-leak check is one test over ALL responses**, not a clause repeated per
+feature. The bug that hit `semanticTokens` and `documentSymbol` always presents the same
+way — a line number past the end of the document — so the test walks every response in the
+batch and fails on the first coordinate beyond the fixture. A new capability added to the
+batch is covered by it for free.
+
+## Non-vacuity
+
+Both mutations were run with `lsp/bin/main.exe` **rebuilt** — the suite resolves the server
+relative to the test executable, so rebuilding only the test binary silently exercises the
+previous server and any new test "passes".
+
+| Mutation | Fails |
+|---|---|
+| drop the `documentSymbol` in-file filter (re-introduce the prelude leak) | `documentSymbol lists exactly the two functions` **and** `no response describes a line past the document` |
+| `workspace/symbol` ignores the query and returns everything | `workspace/symbol finds the one match` **and** `workspace/symbol miss is empty` |
+
+The second is the case the REJECT witness exists for: a handler that ignores its query
+passes any positive assertion that only checks the wanted symbol is present.
+
+`every advertised capability answers` is untouched. It guards a different property — that a
+capability advertised in `config_*` has a reachable handler at all — and these tests do not
+subsume it.
+
+22 protocol tests (was 7); 348 `test_lsp`, 10 `test_incremental`, 5 `test_utf16`,
+7 `test_query_cli` all still pass.
+
+## Still owed
+
+- `textDocument/semanticTokens/full`, `codeLens`, `inlineValue`, `linkedEditingRange`,
+  `typeDefinition` and `onTypeFormatting` answer correctly-shaped but empty or `null`
+  results on this fixture, so there is nothing to pin without a fixture built specifically
+  for each. They remain covered only by the reachability sweep and the leak check.
+- Nothing here exercises a *multi-file* workspace, where cross-file references and
+  workspace symbol are most likely to be wrong.
