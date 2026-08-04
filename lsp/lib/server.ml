@@ -3,6 +3,7 @@
 module Lsp = Linol_lsp.Lsp
 module S   = Linol_lwt.Jsonrpc2
 module Pos = Position  (* our position utilities *)
+module Jsonrpc = Linol_jsonrpc.Jsonrpc
 
 (* ------------------------------------------------------------------ *)
 (* Document cache                                                      *)
@@ -122,10 +123,30 @@ let project_root () : string option =
           else None)
       doc_cache None
   in
+  (* A directory is only a WORKSPACE if it plausibly bounds a project.  With a
+     `forge.toml` above the document, that is settled.  Without one, the
+     document's own directory is a guess — and for a file opened at `/`, in a
+     home directory, or in a scratch dir, indexing it means walking a tree that
+     has nothing to do with the code being edited.
+
+     Refusing those is better than indexing them: workspace symbol search over
+     an arbitrary slice of someone's disk returns noise, and (before the walk
+     was bounded) never returned at all. The bound in [Workspace.walk_dir] is
+     the backstop; this is the part that avoids starting a walk nobody wanted. *)
+  let implausible_root dir =
+    let home = try Sys.getenv "HOME" with Not_found -> "" in
+    dir = "/" || dir = "" || (home <> "" && dir = home)
+  in
   match from_doc with
   | Some dir ->
-    (match Forge_config.find_forge_root dir with Some r -> Some r | None -> Some dir)
-  | None -> (try Some (Sys.getcwd ()) with _ -> None)
+    (match Forge_config.find_forge_root dir with
+     | Some r -> Some r
+     | None -> if implausible_root dir then None else Some dir)
+  | None ->
+    (try
+       let cwd = Sys.getcwd () in
+       if implausible_root cwd then None else Some cwd
+     with _ -> None)
 
 (* Built once per root and cached (invalidation on disk change is a follow-up). *)
 let workspace_index () : Workspace.ws_symbol list =
@@ -261,7 +282,22 @@ let semantic_tokens_data (a : Analysis.t) : int array =
     Utf16.byte_col_to_lsp_char a.Analysis.doc ~line:line0 ~byte_col
   in
 
+  (* Only spans belonging to THIS document may be emitted.  [def_map] and
+     [use_map] cover the whole analysis, and the analysis has the prelude and
+     any imported modules injected — so iterating them unfiltered emitted a
+     token for every stdlib definition, at line numbers from another file
+     entirely.  Measured on a 15-line document: 6949 tokens reaching line 3512.
+
+     The client has no way to detect that; it either wastes the bandwidth or
+     paints ranges that do not exist.  The bug was invisible while the request
+     itself was unreachable, and surfaced the moment the dispatch was repaired —
+     the second-round failure that being unable to run a feature hides. *)
+  let in_this_document (sp : March_ast.Ast.span) =
+    sp.March_ast.Ast.file = a.Analysis.filename
+  in
+
   Hashtbl.iter (fun name sp ->
+      if in_this_document sp then
       let tok_type_idx, mods =
         if List.mem_assoc name a.Analysis.types then
           tok_type, mod_declaration lor mod_readonly
@@ -285,6 +321,7 @@ let semantic_tokens_data (a : Analysis.t) : int array =
     ) a.Analysis.def_map;
 
   Hashtbl.iter (fun sp name ->
+      if in_this_document sp then
       (* Tag the use site by what the name resolves to — type, constructor,
          or variable — instead of blindly calling every use a variable. *)
       let tok, mods =
@@ -329,7 +366,7 @@ let semantic_tokens_data (a : Analysis.t) : int array =
 (* ------------------------------------------------------------------ *)
 
 class march_server =
-  object (_self)
+  object (self)
     inherit S.server as super
 
     (* Spawn using Lwt.async *)
@@ -491,7 +528,55 @@ class march_server =
           Linol_lwt.return
             (`RelatedFullDocumentDiagnosticReport
                (Lsp.Types.RelatedFullDocumentDiagnosticReport.create ~items ()))
-        | _ -> super#on_request_unhandled ~notify_back ~id req
+        | _ ->
+          (* ── The bridge that makes ~20 features reachable ─────────────────
+             linol routes a request here when it DECODED it but has no
+             dedicated `on_req_*` method for it — which is true of references,
+             rename, formatting, semantic tokens, folding, signature help, call
+             hierarchy, type definition, workspace symbol and a dozen more.
+             Every one of those had a handler written as a method-string branch
+             in [on_unknown_request], where a decoded request never arrives, so
+             every one of them answered `TODO: handle this request`. Measured,
+             not inferred: see
+             specs/todos/2026-08-03-lsp-most-advertised-capabilities-are-dead.md.
+
+             Rather than rewrite 20 handlers against 20 typed parameter records,
+             recover the wire form of the request and feed it to the dispatcher
+             that already implements them: [to_jsonrpc_request] gives back the
+             method and params, and [response_of_json] turns the JSON they
+             produce into the typed result this GADT arm owes. The handler
+             bodies are untouched — they were never the broken part.
+
+             A handler whose JSON does not match the protocol type now raises
+             here rather than being quietly mistyped. That is the right
+             direction: it converts a wrong shape into a visible failure, and
+             the capability sweep in test_jsonrpc.ml is what will show it. *)
+          let wire = Lsp.Client_request.to_jsonrpc_request req ~id:(`Int 0) in
+          let params =
+            Option.map
+              (fun (p : Jsonrpc.Structured.t) -> (p :> Yojson.Safe.t))
+              wire.Jsonrpc.Request.params
+          in
+          (* `Null is a LEGITIMATE result here, not a signal that the dispatcher
+             declined: `textDocument/typeDefinition` answers null when the
+             cursor is not on a type, and so do most option-returning requests.
+             An earlier version treated it as "unhandled" and fell through to
+             super, which reported the capability as dead when it was in fact
+             answering correctly. The dispatcher signals "no branch for this
+             method" by REJECTING (its final `Lwt.fail_with`), so that — and
+             only that — is what delegates to super. *)
+          Lwt.catch
+            (fun () ->
+              Lwt.bind
+                (self#dispatch_by_method ~notify_back wire.Jsonrpc.Request.method_ params)
+                (fun json -> Lwt.return (Lsp.Client_request.response_of_json req json)))
+            (fun _exn -> super#on_request_unhandled ~notify_back ~id req)
+
+    method on_unknown_request ~notify_back ~server_request:_ ~id:_ meth params =
+      (* [params] arrives here as the narrower `Structured.t option`; the
+         dispatcher works in plain JSON, which is a supertype of it. *)
+      self#dispatch_by_method ~notify_back meth
+        (Option.map (fun (p : Jsonrpc.Structured.t) -> (p :> Yojson.Safe.t)) params)
 
     method config_code_action_provider =
       `CodeActionOptions (Lsp.Types.CodeActionOptions.create
@@ -819,7 +904,13 @@ class march_server =
     (* Semantic tokens (full) — dispatched via on_unknown_request     *)
     (* -------------------------------------------------------------- *)
 
-    method on_unknown_request ~notify_back:_ ~server_request:_ ~id:_ meth params =
+    (* The string-keyed dispatcher.  Named separately from [on_unknown_request]
+       because it now has TWO callers: that method (for methods linol could not
+       decode) and [on_request_unhandled] (for methods it decoded but has no
+       dedicated handler for).  Splitting them is what makes the second reachable
+       at all — see the note on [on_request_unhandled] below. *)
+    method private dispatch_by_method ~notify_back:(_notify_back : _) meth params =
+      ignore _notify_back;
       (* ---- helpers ---- *)
       let get_td_uri () =
         match params with
@@ -1083,10 +1174,19 @@ class march_server =
         in
         let open Lsp.Types in
         let json_ranges = List.map (fun (sl, el, kind) ->
+            (* Use the standard kinds where one applies — editors treat
+               `imports` specially (e.g. "fold all imports"), which an
+               `Other "imports"` does not reliably reach. *)
+            let kind = match kind with
+              | "imports" -> FoldingRangeKind.Imports
+              | "region"  -> FoldingRangeKind.Region
+              | "comment" -> FoldingRangeKind.Comment
+              | other     -> FoldingRangeKind.Other other
+            in
             let fr = FoldingRange.create
               ~startLine:sl
               ~endLine:el
-              ~kind:(FoldingRangeKind.Other kind)
+              ~kind
               ()
             in
             FoldingRange.yojson_of_t fr

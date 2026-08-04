@@ -317,6 +317,81 @@ end|} in
   (* And a second pass over the padded output is still stable. *)
   Alcotest.(check string) "stable after re-format" once (fmt with_blanks)
 
+let test_import_run_is_tight () =
+  (* A run of imports reads as one list, not as N paragraphs, so the blank
+     lines between them are removed. *)
+  let src = {|mod Test do
+
+import A.B
+
+import C.D
+
+import E.F
+
+fn f() : Int do
+  1
+end
+
+end|} in
+  let out = fmt src in
+  if not (contains_substring out "  import A.B\n  import C.D\n  import E.F\n") then
+    Alcotest.fail (Printf.sprintf "imports were not tightened:\n%s" out);
+  check_parses "import run" src;
+  check_idempotent "import run" src
+
+let test_cap_run_is_tight () =
+  (* Same for capability declarations.  `cap no_panic` must also round-trip
+     under its real surface spelling — it was once re-emitted as `opts
+     no_panic`, which does not parse. *)
+  let src = {|mod Test do
+
+needs IO.Network
+
+needs IO.Clock
+
+cap no_panic
+
+cap pure
+
+fn f() : Int do
+  1
+end
+
+end|} in
+  let out = fmt src in
+  if not (contains_substring out "  needs IO.Network\n  needs IO.Clock\n  cap no_panic\n  cap pure\n") then
+    Alcotest.fail (Printf.sprintf "caps were not tightened:\n%s" out);
+  check_parses "cap run" src;
+  check_idempotent "cap run" src
+
+let test_unrelated_decls_keep_blank_line () =
+  (* REJECT witness for the two tests above: tightening must apply ONLY within
+     a run of the same kind.  A formatter that dropped every blank line would
+     pass both of them, and only this test tells the two apart.  Imports and
+     caps are different kinds, so even they stay separated. *)
+  let src = {|mod Test do
+
+needs IO.Clock
+
+import A.B
+
+fn f() : Int do
+  1
+end
+
+fn g() : Int do
+  2
+end
+
+end|} in
+  let out = fmt src in
+  List.iter (fun (what, s) ->
+    if not (contains_substring out s) then
+      Alcotest.fail (Printf.sprintf "%s lost its blank line:\n%s" what out))
+    [ "cap/import boundary", "  needs IO.Clock\n\n  import A.B";
+      "import/fn boundary",  "  import A.B\n\n  fn f";
+      "fn/fn boundary",      "  end\n\n  fn g" ]
+
 (* ------------------------------------------------------------------ *)
 (* Stdlib file roundtrip                                               *)
 (* ------------------------------------------------------------------ *)
@@ -393,6 +468,10 @@ let () =
       test_case "small float literal" `Quick test_small_float_literal;
       test_case "format fixpoint" `Quick test_format_fixpoint;
       test_case "trailing blank insensitive" `Quick test_trailing_blank_insensitive;
+      test_case "import run is tight" `Quick test_import_run_is_tight;
+      test_case "cap run is tight"    `Quick test_cap_run_is_tight;
+      test_case "unrelated decls keep blank line" `Quick
+        test_unrelated_decls_keep_blank_line;
     ];
     "stdlib", [
       test_case "list"    `Quick test_stdlib_list;

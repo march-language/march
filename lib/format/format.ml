@@ -4,7 +4,8 @@
     source text.  Rules (opinionated, gofmt-style):
       - 2-space indentation
       - 80-character soft line-width target
-      - One blank line between top-level declarations
+      - One blank line between top-level declarations, except that a run of
+        imports, or a run of capability declarations, stays tight
       - Match arms each on their own line
       - Inline form when expression fits within 80 columns
 
@@ -772,16 +773,33 @@ let get_span = function
   | DDeriving (_, _, s) | DSatisfy (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s)
   | DTransitions (_, _, s) | DOpts (_, s) -> s
 
+(** Declarations that read as a list rather than as separate paragraphs: a run
+    of imports or a run of capability declarations stays tight, with blank lines
+    only at the boundaries of the run.  Everything else keeps one blank line
+    between declarations. *)
+let compact_group = function
+  | DUse _ | DAlias _ -> Some `Imports
+  | DNeeds _ | DProofCap _ | DOpts _ -> Some `Caps
+  | _ -> None
+
+(** Two adjacent declarations belong to the same run only if both are compact
+    and of the same kind. *)
+let same_compact_run a b =
+  match compact_group a, compact_group b with
+  | Some x, Some y -> x = y
+  | _ -> false
+
 (** Emit a list of declarations separated by blank lines,
     flushing comments before each one. *)
 let rec emit_decls ctx decls =
-  let n = List.length decls in
-  List.iteri (fun i decl ->
+  let arr = Array.of_list decls in
+  let n = Array.length arr in
+  Array.iteri (fun i decl ->
     let span = get_span decl in
     flush_comments_before ctx span.start_line;
     emit_decl ctx decl;
-    if i < n - 1 then nl ctx
-  ) decls
+    if i < n - 1 && not (same_compact_run decl arr.(i + 1)) then nl ctx
+  ) arr
 
 and emit_decl ctx = function
   | DFn (fn, _) ->
@@ -977,7 +995,9 @@ and emit_decl ctx = function
     line ctx (Printf.sprintf "proof cap %s" name.txt)
 
   | DOpts (opts, _) ->
-    List.iter (fun opt -> line ctx (Printf.sprintf "opts %s" opt)) opts
+    (* The only surface spelling is `cap no_panic` and friends; there is no
+       `opts` keyword, so emitting one produced a file that no longer parsed. *)
+    List.iter (fun opt -> line ctx (Printf.sprintf "cap %s" opt)) opts
 
   | DProtocol (name, proto, _) ->
     line ctx (Printf.sprintf "protocol %s do" name.txt);

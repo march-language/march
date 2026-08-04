@@ -21,20 +21,126 @@ trap 'rm -rf "$TMP"' EXIT
 
 RUNS="${RUNS:-10}"
 
-# Paths
-DUNE=/Users/80197052/.opam/march/bin/dune
-OCAMLOPT=/Users/80197052/.opam/march/bin/ocamlopt
-OCAMLFIND=/Users/80197052/.opam/march/bin/ocamlfind
-MARCH=/Users/80197052/.opam/march/bin/march
-ELIXIR=$(command -v elixir 2>/dev/null || true)
-RUSTC=$(command -v rustc 2>/dev/null || true)
-PYTHON3=$(command -v python3 2>/dev/null || true)
+# ── Toolchain discovery ──────────────────────────────────────────────────────
+# PATH first, then the conventional opam switch. These used to be absolute paths
+# into one developer's switch, which made the published numbers unreproducible in
+# a specific and quiet way: a missing tool does not fail here, it drops that
+# language's ROW. Anyone else running the command the docs tell them to run got a
+# smaller comparison and no indication that it was smaller. Every resolved path
+# and every omission is now printed before any timing (see the toolchain banner).
+#
+# Override any of these from the environment if your tools live elsewhere:
+#   MARCH=/path/to/march bash bench/run_benchmarks.sh
+OPAM_BIN="${OPAM_SWITCH_BIN:-$HOME/.opam/march/bin}"
+
+find_tool() {                      # find_tool VAR_VALUE name…
+  local preset="$1"; shift
+  if [ -n "$preset" ]; then printf '%s' "$preset"; return; fi
+  local n
+  for n in "$@"; do
+    local p
+    p="$(command -v "$n" 2>/dev/null || true)"
+    [ -n "$p" ] && { printf '%s' "$p"; return; }
+    [ -x "$OPAM_BIN/$n" ] && { printf '%s' "$OPAM_BIN/$n"; return; }
+  done
+  printf ''
+}
+
+DUNE="$(find_tool "${DUNE:-}" dune)"
+OCAMLOPT="$(find_tool "${OCAMLOPT:-}" ocamlopt)"
+OCAMLFIND="$(find_tool "${OCAMLFIND:-}" ocamlfind)"
+MARCH="$(find_tool "${MARCH:-}" march)"
+ELIXIR="$(find_tool "${ELIXIR:-}" elixir)"
+RUSTC="$(find_tool "${RUSTC:-}" rustc)"
+PYTHON3="$(find_tool "${PYTHON3:-}" python3)"
 NUMPY_PY=""
 [ -x "$BENCH_DIR/.venv/bin/python" ] && NUMPY_PY="$BENCH_DIR/.venv/bin/python"
 
 # ── formatting helpers ────────────────────────────────────────────────────────
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
+
+# ── Provenance banner ────────────────────────────────────────────────────────
+# Printed BEFORE any timing, so a reader of pasted output can tell what actually
+# ran. A results table that silently omits a language is the failure mode this
+# exists to prevent: versions come from the tools themselves rather than from a
+# hand-maintained table that can drift from the run it claims to describe.
+first_line() { "$@" 2>&1 | head -1 | tr -d '\r'; }
+
+tool_version() {                   # tool_version LABEL PATH VERSION-ARGS…
+  local label="$1" path="$2"; shift 2
+  if [ -z "$path" ] || [ ! -x "$path" ]; then
+    printf '  %-8s \033[2m— not found, this row will be MISSING from the tables\033[0m\n' "$label"
+    MISSING="$MISSING $label"
+  else
+    printf '  %-8s %s\n' "$label" "$(first_line "$path" "$@")"
+  fi
+}
+
+print_provenance() {
+  MISSING=""
+  bold "═══ Environment ═══"
+  printf '  %-8s %s\n' "date" "$(date -u '+%Y-%m-%dT%H:%M:%SZ') (UTC)"
+  printf '  %-8s %s\n' "host" "$(uname -srm)"
+  # /proc first: Linux ships a `sysctl` too, so probing for the COMMAND rather
+  # than for the data source sent Linux down the macOS branch and printed
+  # "cpu unknown / cores unknown" on exactly the dedicated hosts worth
+  # recording. Probe for the file, which only one of the two platforms has.
+  if [ -r /proc/cpuinfo ]; then
+    printf '  %-8s %s\n' "cpu" "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//' || echo unknown)"
+    printf '  %-8s %s\n' "cores" "$(nproc 2>/dev/null || echo unknown)"
+  elif command -v sysctl >/dev/null 2>&1; then
+    printf '  %-8s %s\n' "cpu" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null || echo unknown)"
+    printf '  %-8s %s\n' "cores" "$(sysctl -n hw.ncpu 2>/dev/null || echo unknown)"
+  fi
+  # Load matters: these runs are short, and a busy machine inflates them. Print
+  # it rather than trusting whoever pastes the output to mention it.
+  printf '  %-8s %s\n' "load" "$(uptime | sed 's/.*load average[s]*: *//')"
+  printf '  %-8s %s\n' "runs" "$RUNS per benchmark (median/min/max reported)"
+
+  printf '\n'
+  bold "═══ Toolchain ═══"
+  # March is reported from the compiler that actually BUILDS the benchmarks —
+  # `dune exec` against this working tree — not from whatever `march` happens to
+  # be on PATH. Those differ routinely (an installed release vs. the tree you
+  # are testing), and reporting the wrong one is the same class of error as
+  # omitting a language silently.
+  if [ -n "$DUNE" ]; then
+    printf '  %-8s %s\n' "March" \
+      "$( (cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --version 2>/dev/null | head -1) || echo 'build failed' ) (dune exec, this working tree)"
+  else
+    printf '  %-8s \033[2m— dune not found; March rows will be MISSING\033[0m\n' "March"
+    MISSING="$MISSING March"
+  fi
+  tool_version "OCaml"  "$OCAMLOPT"  -version
+  tool_version "Rust"   "$RUSTC"     --version
+  # `elixir --version` leads with the Erlang/OTP banner; the Elixir line is
+  # further down. Report both, Elixir first.
+  if [ -n "$ELIXIR" ] && [ -x "$ELIXIR" ]; then
+    printf '  %-8s %s\n' "Elixir" \
+      "$("$ELIXIR" --version 2>&1 | grep -m1 '^Elixir' || echo unknown)"
+    printf '  %-8s %s\n' "" \
+      "$("$ELIXIR" --version 2>&1 | grep -m1 '^Erlang' || true)"
+  else
+    printf '  %-8s \033[2m— not found, this row will be MISSING from the tables\033[0m\n' "Elixir"
+    MISSING="$MISSING Elixir"
+  fi
+  tool_version "Python" "$PYTHON3"   --version
+  if [ -n "$NUMPY_PY" ]; then
+    printf '  %-8s %s\n' "NumPy" "$("$NUMPY_PY" -c 'import numpy; print("numpy " + numpy.__version__)' 2>/dev/null || echo 'venv present, numpy import failed')"
+  else
+    printf '  %-8s \033[2m— no bench/.venv, NumPy rows will be MISSING\033[0m\n' "NumPy"
+    MISSING="$MISSING NumPy"
+  fi
+
+  if [ -n "$MISSING" ]; then
+    printf '\n'
+    printf '\033[1;33m  WARNING\033[0m these languages are absent:%s\n' "$MISSING"
+    printf '          The tables below are NOT the full published comparison.\n'
+    printf '          Install them, or state the omission when quoting these numbers.\n'
+  fi
+  printf '\n'
+}
 header(){ printf '\n'; bold "═══ $* ═══"; printf '  %-12s %8s %8s %8s\n' "Language" "Median" "Min" "Max"; printf '  %-12s %8s %8s %8s\n' "--------" "------" "---" "---"; }
 row()   { printf '  %-12s %7.1f ms %6.1f ms %6.1f ms\n' "$1" "$2" "$3" "$4"; }
 skip()  { printf '  %-12s   (not available)\n' "$1"; }
@@ -123,6 +229,9 @@ show_interp_self_timed() {
     skip "$label"
   fi
 }
+
+# ── provenance ────────────────────────────────────────────────────────────────
+print_provenance
 
 # ── compile step ──────────────────────────────────────────────────────────────
 bold "Compiling..."

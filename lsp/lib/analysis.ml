@@ -1202,7 +1202,40 @@ let collect_fold_ranges (m : Ast.module_) : (int * int * string) list =
     let el = sp.Ast.end_line   - 1 in
     if el > sl then ranges := (sl, el, kind) :: !ranges
   in
-  let rec go_decls decls = List.iter go_decl decls
+  (* A run of imports, or a run of capability declarations, folds as one unit.
+     These are the two kinds that appear as long homogeneous blocks at the top
+     of a file, and they are exactly the runs `march fmt` keeps tight.
+     Returns the run kind and the declaration's own span. *)
+  let compact_group = function
+    | Ast.DUse (_, sp) | Ast.DAlias (_, sp) -> Some (`Imports, sp)
+    | Ast.DNeeds (_, sp) | Ast.DProofCap (_, sp) | Ast.DOpts (_, sp) ->
+      Some (`Caps, sp)
+    | _ -> None
+  in
+  (* Add one range per maximal run of same-kind declarations.  A lone import
+     has nothing to collapse, and `add` drops it anyway since a one-line run
+     has end_line = start_line. *)
+  let add_compact_runs decls =
+    let flush = function
+      | Some (k, first, last) ->
+        add { first with Ast.end_line = last.Ast.end_line }
+          (match k with `Imports -> "imports" | `Caps -> "region")
+      | None -> ()
+    in
+    let run =
+      List.fold_left (fun run decl ->
+          match compact_group decl, run with
+          (* Extending the current run: keep its start, move its end. *)
+          | Some (k, sp), Some (k', first, _) when k = k' -> Some (k, first, sp)
+          (* Anything else ends the run; a compact decl starts a new one. *)
+          | g, _ ->
+            flush run;
+            (match g with Some (k, sp) -> Some (k, sp, sp) | None -> None))
+        None decls
+    in
+    flush run
+  in
+  let rec go_decls decls = add_compact_runs decls; List.iter go_decl decls
   and go_decl decl =
     match decl with
     | Ast.DFn (fn, sp) ->
@@ -4844,7 +4877,18 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
 
 let document_symbols (a : t) =
   let open Lsp.Types in
+  (* textDocument/documentSymbol describes ONE document.  [def_map] spans the
+     whole analysis, and the analysis has the prelude injected — so folding it
+     unfiltered returned every stdlib definition as a symbol of whatever file
+     happened to be open: measured at 6936 symbols for a one-function file, at
+     line numbers belonging elsewhere.  The editor's outline and breadcrumbs
+     are built from this, so it was not a harmless overcount.
+
+     Identical in shape to the semantic-tokens leak fixed alongside it; both
+     were invisible until the requests carrying them became reachable. *)
   let syms = Hashtbl.fold (fun name sp acc ->
+      if sp.Ast.file <> a.filename then acc
+      else
       let range = Pos.span_to_lsp_range sp in
       let kind =
         if List.mem_assoc name a.types then SymbolKind.Class

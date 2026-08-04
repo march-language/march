@@ -1,0 +1,107 @@
+═══ Environment ═══
+  date     2026-08-04T13:54:57Z (UTC)
+  host     Linux 6.17.0-1021-gcp x86_64
+  cpu      INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz
+  cores    4
+  load     0.58, 0.89, 0.88
+  runs     10 per benchmark (median/min/max reported)
+
+═══ Toolchain ═══
+  March    march 0.2.0 (dune exec, this working tree)
+  OCaml    5.3.0
+  Rust     rustc 1.97.1 (8bab26f4f 2026-07-14)
+  Elixir   Elixir 1.14.0 (compiled with Erlang/OTP 24)
+           Erlang/OTP 25 [erts-13.2.2.5] [source] [64-bit] [smp:4:4] [ds:4:4:10] [async-threads:1] [jit:ns]
+  Python   Python 3.12.3
+  NumPy    numpy 2.5.1
+
+Compiling...
+  March... fib bt tt lo ss sm sm2 
+  OCaml... fib bt tt lo 
+  OCaml (simd)... ss sm sm2 
+  Rust... fib bt tt lo ss sm sm2 
+  Elixir... (script mode, BEAM JIT)
+  Python... (interpreted)
+  NumPy...  (bench/.venv)
+
+Running each benchmark 10 times. Reporting median / min / max wall-clock time.
+
+═══ fib(40) — naive recursive ═══
+  Language       Median      Min      Max
+  --------       ------      ---      ---
+  March          429.5 ms  425.8 ms  433.7 ms
+  OCaml          557.8 ms  553.3 ms  560.9 ms
+  Rust           268.6 ms  267.0 ms  270.0 ms
+  Elixir        1513.6 ms 1506.8 ms 1523.2 ms
+
+═══ binary-trees(15) — alloc/GC stress ═══
+  Language       Median      Min      Max
+  --------       ------      ---      ---
+  (Allocates and walks complete binary trees; stresses allocator and GC.)
+  March          526.3 ms  523.4 ms  530.3 ms
+  OCaml           26.5 ms   26.0 ms   27.4 ms
+  Rust           119.6 ms  118.8 ms  121.0 ms
+  Elixir         370.1 ms  362.5 ms  376.9 ms
+
+═══ tree-transform(depth=20, 100 passes) — Perceus FBIP showcase ═══
+  Language       Median      Min      Max
+  --------       ------      ---      ---
+  March rewrites leaf values in-place (RC=1, zero alloc after first pass).
+  OCaml/Rust allocate a fresh tree each pass.
+  Elixir is purely functional; allocates fresh nodes each pass on BEAM.
+  March         3017.6 ms 2884.2 ms 3079.8 ms
+  OCaml         6947.0 ms 6860.2 ms 6977.7 ms
+  Rust          4310.7 ms 4146.4 ms 4366.1 ms
+  Elixir        4837.6 ms 4549.5 ms 5260.5 ms
+
+═══ list-ops(1M) — map/filter/fold HOF pipeline ═══
+  Language       Median      Min      Max
+  --------       ------      ---      ---
+  range(1..1M) |> map(*2) |> filter(%3=0) |> sum.
+  Rust iterators fuse into a single loop (zero allocation).
+  March, OCaml, Elixir allocate intermediate lists.
+  March          148.8 ms  143.6 ms  155.0 ms
+  OCaml           49.7 ms   46.6 ms   51.3 ms
+  Rust             1.3 ms    1.2 ms    1.5 ms
+  Elixir         356.0 ms  351.5 ms  372.1 ms
+
+═══ simd-sum(5M) — Float array reduction ═══
+  Language       Median      Min      Max
+  --------       ------      ---      ---
+  sum(arr). March native_float_arr_sum auto-vectorizes at -O2 (see docs/simd-vectorization.md).
+  Self-timed: each program times only the operation itself (excludes data
+  generation / interpreter startup) and reports it via a TIME_MS line.
+  March            4.0 ms    3.9 ms    4.1 ms
+  OCaml            7.2 ms    6.2 ms    7.4 ms
+  Rust             5.1 ms    4.9 ms    5.4 ms
+  Elixir          79.2 ms   70.3 ms   80.7 ms
+  Python         233.2 ms  214.4 ms  255.3 ms
+  NumPy            2.8 ms    2.7 ms    3.1 ms
+
+═══ simd-map(5M) — elementwise (x * 2.0 + 1.0) ═══
+  Language       Median      Min      Max
+  --------       ------      ---      ---
+  March map_float, with a concrete-Float single-use callback, gets the boxing-free
+  inlined clone (Stage 4 Option B) and genuinely vectorizes. Self-timed (see above).
+  March           18.6 ms   18.2 ms   19.0 ms
+  OCaml            8.7 ms    8.6 ms    8.8 ms
+  Rust            17.4 ms   17.2 ms   18.2 ms
+  Elixir         460.6 ms  452.6 ms  470.0 ms
+  Python         163.1 ms  160.0 ms  163.8 ms
+  NumPy            9.2 ms    8.3 ms   10.2 ms
+
+═══ simd-map2(5M) — elementwise (a[i] + b[i]) ═══
+  Language       Median      Min      Max
+  --------       ------      ---      ---
+  March map2_float is correct but NOT YET vectorized/inlined (see docs/simd-vectorization.md
+  "Known limitations") — included deliberately so the numbers stay honest. Self-timed.
+  March           19.8 ms   19.5 ms   20.2 ms
+  OCaml           10.3 ms    9.7 ms   10.5 ms
+  Rust            17.0 ms   16.1 ms   18.7 ms
+  Elixir         255.6 ms  240.6 ms  291.4 ms
+  Python         197.1 ms  195.6 ms  198.2 ms
+  NumPy            8.9 ms    8.4 ms    9.6 ms
+
+Done.
+  Source files: bench/elixir/  bench/ocaml/  bench/rust/  bench/python/
+  March sources: bench/*.march  (compiled with --opt 2)
