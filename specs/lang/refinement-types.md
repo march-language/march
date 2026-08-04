@@ -709,6 +709,21 @@ is derived from that function's own panic message, so the contract is never
 stronger than the check the code already performs, and the `panic` remains as the
 runtime backstop for the arguments the checker skips.
 
+`List.nth` is the fourteenth, and the only one whose contract is
+**cross-parameter** rather than over the refined value itself (2026-08-04):
+
+```march
+fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do ... end
+```
+
+`List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are reported; an index the
+checker cannot bound — the overwhelmingly common case — stays **skipped and
+silent**, exactly as `head(ys)` does for an unknown list. That is not a
+concession, it is the point: a blast-radius sweep taken before the contract
+shipped (all 112 stdlib modules plus the `forgepm`, `bastion`, `conduit` and
+`depot` projects) produced **zero** new violations and only new skips. Witnesses
+`accept/t141`, `reject/t142`.
+
 An ordinary `List.length(ys) > 0` guard **does** discharge this obligation, so
 the contract bites on a list you validated at runtime and not only on literals:
 

@@ -129,8 +129,16 @@ mod List do
     end
   end
 
-  doc "Returns the nth element (0-indexed). Panics if out of bounds."
-  fn nth(xs : List(a), n : Int) : a do
+  doc """
+  Returns the nth element (0-indexed). Panics if out of bounds.
+
+  `n` carries the bounds contract `{Int | _ >= 0 && _ < len(xs)}`, so an index
+  the compiler can prove out of range is a compile error rather than a runtime
+  panic. An index it cannot bound is accepted in silence — March reports only
+  definite failures — and the `panic` below remains the runtime backstop.
+  Use `nth_opt` when the index is genuinely unknown.
+  """
+  fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do
     match xs do
     Nil        -> panic("List.nth: index out of bounds")
     Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end

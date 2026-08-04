@@ -8077,6 +8077,80 @@ end|}
           true (violated >= 1 || skipped >= 1))
   ]
 
+(* ── `List.nth` carries a bounds contract ──────────────────────────────────
+   `nth` panics on an out-of-range index and, unlike `head`/`last`/`unwrap`,
+   carried no contract at all — so a provably-out-of-range index compiled
+   silently.  The contract is cross-parameter (`n` bounded by a measure of
+   `xs`), a shape verified working before this task was planned.
+
+   The fixtures restate the stdlib `List.nth` signature inline because this
+   harness checks a single parsed string: unlike `bin/main.ml`, it does NOT
+   prepend the stdlib, so a bare `List.nth(…)` would resolve to nothing and
+   every case here would pass vacuously.  The restated signature is copied
+   verbatim from `stdlib/list.march` — Step 5's revert-the-signature mutation
+   is what keeps the two in step. *)
+let nth_fixture name body =
+  Printf.sprintf
+    "mod %s do\n\
+    \  mod List do\n\
+    \    fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do\n\
+    \      match xs do\n\
+    \      Nil        -> panic(\"List.nth: index out of bounds\")\n\
+    \      Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end\n\
+    \      end\n\
+    \    end\n\
+    \  end\n\
+     %s\n\
+     end\n"
+    name body
+
+let stdlib_nth_contract_suite =
+  [ gated "an in-range literal index proves" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthOk"
+            "  fn go() : Int do List.nth([1, 2, 3], 1) end\n\
+            \  fn main() : Int do go() end"
+        in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated)
+  ; gated "REJECT CONTROL: a provably out-of-range index is a violation"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthBad"
+            "  fn go() : Int do List.nth([1, 2, 3], 7) end\n\
+            \  fn main() : Int do go() end"
+        in
+        let _ = has_refine_error_d src in
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check bool) "reported" true (violated >= 1))
+  ; gated "a negative literal index is a violation" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthNeg"
+            "  fn go() : Int do List.nth([1, 2, 3], -1) end\n\
+            \  fn main() : Int do go() end"
+        in
+        let _ = has_refine_error_d src in
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check bool) "reported" true (violated >= 1))
+  ; gated "an unknown index is SILENT, not reported" (fun () ->
+        (* The definite-failure stance: an index the checker cannot bound is
+           accepted in silence.  This is the false-positive guard, and it is
+           the assertion that matters most in this suite. *)
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthUnknown"
+            "  fn go(xs : List(Int), i : Int) : Int do List.nth(xs, i) end\n\
+            \  fn main() : Int do go([1], 0) end"
+        in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -8136,4 +8210,5 @@ let () =
       ("arm-exclusion", arm_exclusion_suite);
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
       ("post-compose-closed", post_compose_closed_suite);
-      ("post-compose-relational", post_compose_relational_suite) ]
+      ("post-compose-relational", post_compose_relational_suite);
+      ("stdlib-nth-contract", stdlib_nth_contract_suite) ]

@@ -526,6 +526,19 @@ Each contract is taken from that function's own panic message, so it never
 demands more than the code already checked, and every `panic` stays in place to
 catch the cases the compiler skips.
 
+`List.nth` is the fourteenth, and the only one whose contract talks about a
+*different* parameter rather than the refined value itself:
+
+```march
+fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do ... end
+```
+
+So `List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are compile errors
+now. An index the compiler can't pin down — by far the common case — stays
+silent, just as `head(ys)` does for a list it can't see into. Before this
+shipped the whole standard library and four real projects (`forgepm`,
+`bastion`, `conduit`, `depot`) were swept for it: zero calls became errors.
+
 An ordinary `List.length(xs) > 0` guard **does** satisfy the requirement, so these
 contracts bite on a list you checked at runtime and not just on literals — see
 [the solver really does connect `List.length` to

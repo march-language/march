@@ -106,6 +106,18 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`List.nth` now carries a bounds contract:
+  `n : {Int | _ >= 0 && _ < len(xs)}`.** `nth` panics on an out-of-range index
+  and, unlike its siblings `head`/`last`/`unwrap`/`expect`, carried no contract
+  at all — so a *provably* out-of-range index compiled in silence. It is now a
+  compile error: `List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are
+  reported. This can turn previously-silent code into an error, which is why it
+  is listed here and not under Fixed. An index the checker cannot bound stays
+  skipped and silent, as March reports only definite failures; a blast-radius
+  sweep taken before the change (all 112 stdlib modules plus the `forgepm`,
+  `bastion`, `conduit` and `depot` projects) found **zero** new violations and
+  only new skips. `List.nth_opt` remains the unconditional alternative.
+
 - **`forge cap audit` is now `forge cap inspect`.** Two commands named "audit"
   answered different questions at different granularities — `forge audit` reads
   dependency declarations from source, the other reads a built artifact — which
