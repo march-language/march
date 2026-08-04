@@ -82,12 +82,16 @@ print_provenance() {
   bold "═══ Environment ═══"
   printf '  %-8s %s\n' "date" "$(date -u '+%Y-%m-%dT%H:%M:%SZ') (UTC)"
   printf '  %-8s %s\n' "host" "$(uname -srm)"
-  if command -v sysctl >/dev/null 2>&1; then
+  # /proc first: Linux ships a `sysctl` too, so probing for the COMMAND rather
+  # than for the data source sent Linux down the macOS branch and printed
+  # "cpu unknown / cores unknown" on exactly the dedicated hosts worth
+  # recording. Probe for the file, which only one of the two platforms has.
+  if [ -r /proc/cpuinfo ]; then
+    printf '  %-8s %s\n' "cpu" "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//' || echo unknown)"
+    printf '  %-8s %s\n' "cores" "$(nproc 2>/dev/null || echo unknown)"
+  elif command -v sysctl >/dev/null 2>&1; then
     printf '  %-8s %s\n' "cpu" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null || echo unknown)"
     printf '  %-8s %s\n' "cores" "$(sysctl -n hw.ncpu 2>/dev/null || echo unknown)"
-  elif [ -r /proc/cpuinfo ]; then
-    printf '  %-8s %s\n' "cpu" "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
-    printf '  %-8s %s\n' "cores" "$(nproc 2>/dev/null || echo unknown)"
   fi
   # Load matters: these runs are short, and a busy machine inflates them. Print
   # it rather than trusting whoever pastes the output to mention it.
