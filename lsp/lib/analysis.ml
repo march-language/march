@@ -3018,7 +3018,9 @@ let analyse ~filename ~src : t =
     let rec collect_proof_cap_uses (d : Ast.decl) =
       match d with
       | Ast.DNeeds (paths, _) ->
-        List.iter (fun path ->
+        (* Proof-cap references live in the capability path; the optional path
+           scope is a string literal and never names a proof cap. *)
+        List.iter (fun (path, _scope) ->
           List.iter (fun (n : Ast.name) ->
             if Hashtbl.mem proof_cap_defs n.txt then
               Hashtbl.replace use_map n.span n.txt
