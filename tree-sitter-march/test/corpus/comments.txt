@@ -11,10 +11,12 @@ end
 
 (source_file
   (module_def
-    name: (type_identifier)
+    name: (module_path
+      (type_identifier))
     (comment)
     (let_declaration
-      pattern: (variable_pattern (variable_pattern))
+      pattern: (variable_pattern
+        (variable_pattern))
       value: (integer))))
 
 ================================================================================
@@ -30,10 +32,12 @@ end
 
 (source_file
   (module_def
-    name: (type_identifier)
+    name: (module_path
+      (type_identifier))
     (block_comment)
     (let_declaration
-      pattern: (variable_pattern (variable_pattern))
+      pattern: (variable_pattern
+        (variable_pattern))
       value: (integer))))
 
 ================================================================================
@@ -49,8 +53,10 @@ end
 
 (source_file
   (module_def
-    name: (type_identifier)
+    name: (module_path
+      (type_identifier))
     (block_comment)
     (let_declaration
-      pattern: (variable_pattern (variable_pattern))
+      pattern: (variable_pattern
+        (variable_pattern))
       value: (integer))))

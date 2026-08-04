@@ -11,18 +11,32 @@ actor Counter do
 end
 end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier)
-  (actor_def
-    name: (type_identifier)
-    (actor_state
-      (record_type_field name: (identifier) type: (type_constructor (type_constructor))))
-    (actor_init (record_expression (record_field name: (identifier) value: (integer))))
-    (actor_handler
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (actor_def
       name: (type_identifier)
-      (block_body
-        (record_update
-          base: (identifier)
-          (record_field name: (identifier)
-            value: (additive_expression
-              left: (field_expression object: (identifier) field: (identifier))
-              right: (integer)))))))))
+      (actor_state
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      (actor_init
+        (record_expression
+          (record_field
+            name: (identifier)
+            value: (integer))))
+      (actor_handler
+        name: (type_identifier)
+        (block_body
+          (record_update
+            base: (identifier)
+            (record_field
+              name: (identifier)
+              value: (additive_expression
+                left: (field_expression
+                  object: (identifier)
+                  field: (identifier))
+                right: (integer)))))))))
