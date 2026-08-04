@@ -403,6 +403,22 @@ That compile-time-resolved picture is not the whole story, though — it describ
 - The **built-in type-directed interfaces** (`Show`, `Eq`, `Ord`, `Hash`) dispatch, in the **interpreter**, through a genuine **runtime hashtable** (`impl_tbl`, keyed `(interface, type_name)`) looked up by the argument's dynamic type at the call site — this is real runtime type-directed dispatch, not something resolved ahead of time.
 - **User-defined interfaces** used to get no dispatch table at all and overlapping impls were silently "last one wins" — that's no longer the case. **Impl coherence** (checked at declaration) now rejects a second `impl Speak(Dog)` for the same `(interface, type)` pair outright as a compile error ("Overlapping implementation ... A type may implement an interface at most once"), so it's a diagnostic, not silent shadowing. Separately, **FQN dispatch identity** (`specs/todos/`, "FQN dispatch identity" entries) lets two genuinely distinct types that happen to share a short name across different modules (e.g. an unrelated `Thing` declared in two library modules) each `impl` the same general interface and dispatch correctly by the value's runtime type, in *both* backends, when the collision is present — the interpreter qualifies its dispatch table by declaring module and the compiled backend generates a runtime ctor-tag dispatch function for the ambiguous call sites. One narrow, pre-existing gap remains in the **interpreter only**: calling an interface method unqualified from a module other than the one that declared the `impl` can fail to resolve (`unbound variable`) even when the identical call compiles and runs correctly — this reproduces even with no short-name collision at all, so it's a general interpreter scoping limitation, not specific to the collision-dispatch mechanism. See `core-march.md` §4.4.2/§4.4.3 for the full operational account.
 
+A related, separate limitation: **interface method names are not
+module-qualifiable at all**, in either backend. `Foo.speak(x)` never resolves
+— for a nested module or the entry module alike — even when `Foo` declares
+`interface Speak(a) do fn speak : a -> String end` and dispatches it via
+`impl Speak(...)`, because dispatch works through the method's bare name,
+not module-member lookup; the working spelling is always the unqualified
+`speak(x)`. Closing this needs interface methods to become qualifiable in
+general (a dispatch-side redesign), which was tried and **measured to
+regress working code** — see
+`specs/progress/2026-08-03-interface-method-names-qualifiability-disposition.md`
+for the measurement and why it was closed as won't-fix rather than attempted
+again. As a bounded consolation, the **interpreter** now recognizes this
+exact failure shape and appends a note to the `unbound variable: Foo.speak`
+error naming the interface and suggesting the bare spelling — a diagnostic
+improvement only, not a resolution change.
+
 So "no vtables or runtime type lookups" is accurate for the compiled backend's statically-resolved calls, but not as a claim about the language or the interpreter in general — treat this section's overhead claims as scoped to the compiled backend's common-case dispatch, not a universal guarantee:
 
 - Zero overhead compared to a direct call, for the compiled backend's statically-resolved case

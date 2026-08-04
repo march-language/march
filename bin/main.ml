@@ -3654,7 +3654,8 @@ let compile filename =
      | March_eval.Eval.Eval_error msg ->
        (* panic_/todo_/unreachable_ builtins already prefix their messages with
           "panic: " / "todo: " / "unreachable: " — print as-is. *)
-       Printf.eprintf "%s\n" msg;
+       let hint = March_eval.Eval.interface_method_hint desugared msg in
+       Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
        print_march_backtrace ();
        exit 1
      | March_eval.Eval.Match_failure msg ->

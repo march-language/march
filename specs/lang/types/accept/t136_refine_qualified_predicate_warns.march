@@ -1,29 +1,30 @@
 -- A QUALIFIED spelling inside a refinement predicate -- `List.length(_)`
--- rather than the bare `len(_)` -- parses, typechecks, and enforces NOTHING.
--- Refinement predicates are never run through the expression desugarer
--- (`Desugar.respan_ty` is the only place that touches `A.TyRefine`, and it
--- only respans), so `List.length` stays an `EField` chain rather than the
--- dotted `EVar` the measure alias keys on. The obligation this contract
--- looks like it generates is silently skipped.
+-- rather than the bare `len(_)` -- used to parse, typecheck, and enforce
+-- NOTHING (2026-07-30 through 2026-08-02): predicates were never run through
+-- the expression desugarer, so `List.length` stayed an `EField` chain rather
+-- than the dotted `EVar` the measure alias keys on, and the obligation this
+-- contract looked like it generated was silently skipped.
 --
--- Until Task 4 of the 2026-07-30 refinement backlog that was SILENT: the
--- contract read as working and did nothing. It now emits a WARNING naming
--- both the qualified spelling found and the bare spelling that works.
+-- As of 2026-08-03, `Desugar.desugar_ty` flattens a module-path call head
+-- found inside a `TyRefine` predicate the same way an ordinary call head is
+-- flattened -- a narrow slice, not the general expression desugarer -- so
+-- `List.length(_)` here means exactly what `len(_)` means. `inner([1])`
+-- below now genuinely satisfies the precondition (length 1 > 0) rather than
+-- merely compiling past a skipped obligation.
 --
--- This is an `accept/` witness on purpose, and its exit code is the point.
--- A warning does not change `--check`'s exit status, so this program must
--- stay exit 0: turning the qualified spelling into a hard ERROR is a
--- separate decision (it would break code that compiles today), and this
--- witness is the regression guard against making it one by accident. The
--- warning TEXT is pinned in `test/test_refinecheck.ml`'s `qualified-predicate`
--- suite instead -- `check_types.sh` asserts only exit 0 for `accept/`, and
--- pins substrings for `reject/` alone.
+-- This stays an `accept/` witness on purpose: the exit code was always the
+-- point, and it is unchanged (0) either way -- `--check` cannot distinguish
+-- "skipped" from "proved" from its exit status alone. What DID change is
+-- pinned in `test/test_refinecheck.ml`'s `qualified-predicate` suite: no
+-- warning fires for this program now (the alias is live), and a companion
+-- case proves the precondition is genuinely enforced (an empty-list call is
+-- rejected as a violation, not silently accepted).
 --
--- The bare spelling that DOES enforce is already witnessed by t115-t118,
--- t128 and t130; this program is the negative-space companion to those.
+-- The bare spelling that always enforced is already witnessed by t115-t118,
+-- t128 and t130.
 --
 -- See specs/lang/refinement-types.md, "A qualified spelling in a predicate
--- enforces nothing".
+-- now works (narrow desugar slice)".
 mod T136 do
 
   fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do

@@ -240,30 +240,41 @@ happens to be a byte length today, but the *name* suggests characters, and a
 connection made on a name that might later be corrected is a bug waiting to happen.
 Reach for `String.byte_size` in a guard; it says what it means.
 
-### A common mistake: `List.length` *inside* the predicate itself
+### A qualified spelling *inside* the predicate itself
 
 Everything above is about a **guard** — ordinary code, outside the `{...}`. Writing
-the qualified name **inside** the braces is a different, much easier mistake to
-make, and it looks completely reasonable:
+the qualified name **inside** the braces used to be a different, much easier mistake
+to make — it looked completely reasonable but silently did nothing:
 
 ```march
-fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end   -- enforces NOTHING
-fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end            -- enforces the contract
+fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
 ```
 
-A predicate is never desugared the way a function body is, so inside the braces
-`List.length` never becomes the dotted name the alias above is keyed on — it parses,
-typechecks, and silently discharges nothing, ever, for any caller. Since 2026-07-30
-this warns instead of compiling silently:
+As of 2026-08-03 both spellings above enforce the same contract. A refinement
+predicate is still not run through the general expression desugarer the way a
+function body is — no pipe desugaring, no multi-head-fn desugaring — but the one
+transformation that mattered here, flattening a module-path call head
+(`List.length(_)`) into the dotted form the `len` alias keys on, now runs over
+every `TyRefine` predicate (parameter, return, `let`-annotation — top-level
+and block-level alike — and record/variant field types alike). When the
+alias is live — no competing `List.length` in scope —
+the qualified spelling means exactly what `len` means, so `inner([])` above is
+rejected as a genuine precondition violation, the same as if you'd written `len(_)`.
 
-> `List.length` is a qualified call inside a refinement predicate. Predicates are not
-> desugared, so this is never reflected and the refinement enforces nothing. Use the
-> bare spelling `len` instead.
+If a unit has [withdrawn the alias](#listlength-is-an-alias-of-the-len-measure) by
+defining its own competing `List.length`, the qualified spelling still enforces
+nothing (correctly — the alias genuinely doesn't hold there), and the checker still
+warns, still recommending the bare `len(_)` spelling:
 
-The fix is always the bare measure name — `len(_)`, never `List.length(_)` — inside
-a predicate. The same applies to `String.byte_size`. This is a warning, not an error:
-the shape has always compiled, and turning it into a hard error would break code that
-happens to have this typo today.
+> `List.length` is a qualified call inside a refinement predicate. This spelling is
+> never reflected here, so the refinement enforces nothing. Use the bare spelling
+> `len` instead.
+
+The same applies to `String.byte_size`. Two shapes remain genuinely unhandled and
+still warn/stay silent as before: a record **field** call (`{Cfg | c.cb(1) > 0}`,
+never treated as a qualified call — see below) and a receiver that is itself a call
+(`f(x).g(y)`, not rendered as a path).
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
@@ -695,6 +706,42 @@ quiet rather than guessing — so these are all *silence*, never false alarms:
 As everywhere else, the definite-failure stance applies: an `Option` whose tag
 the checker can't determine is not an error.
 
+Later arms also learn what the earlier ones ruled out. Reaching an arm means
+every arm above it failed to match, so for each of those whose failure is
+decided purely by the tag, the scrutinee is known *not* to carry it:
+
+```march
+fn mean_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  Nil -> Err("empty")
+  _   -> Ok(mean(xs))   -- `mean` needs len > 0; the `_` arm has it
+  end
+end
+```
+
+For a **list**, a tag test is a statement about length — `is_Nil(xs)` means
+`len(xs) = 0` and `is_Cons(xs)` means `len(xs) > 0` — so the exclusion above
+discharges a `len`-bearing precondition directly. This is what makes the
+safe-wrapper idiom (match the empty case, return `Err`/`None`, do the real work
+in the other arm) check out. The same idea generalizes to a user `@[measure]`:
+a base-case arm whose body is a literal gets an axiom linking its constructor's
+tester directly to the measure's value, so the exclusion connects there too.
+
+An earlier arm licenses **nothing** if it carries a guard or a refutable
+sub-pattern, because either can fail with the tag still matching:
+`Cons(0, _)` does not match `Cons(1, [])`, which is nonetheless a `Cons`, and
+`Nil when flag` fails whenever `flag` is false. So
+
+```march
+match xs do
+Nil -> Err(…)
+Cons(_, Nil) -> Err("need at least 2")
+_ -> Ok(std_dev(xs))     -- knows only len > 0, NOT len > 1
+end
+```
+
+still abstains on a `len > 1` requirement, which is the honest answer.
+
 ---
 
 ## Seeing What Got Checked — `--refine-report`
@@ -865,6 +912,16 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
   > signature instead — a refinement on its return type is always checked,
   > and one on a parameter is enforced when the method name is unambiguous
   > (exactly one `impl` defines it and no top-level `fn` shares the name).
+
+  **Inside a `cap verified` module this is an error, not a warning** (decided
+  2026-08-03; see `specs/progress/2026-08-03-cap-verified-interface-signature-decision.md`).
+  `cap verified`'s escalation otherwise fires only on undischarged obligations
+  in the ledger, and an inert interface signature raises none — but the
+  capability's whole promise is "if it compiles, it is proved," and this is
+  exactly the shape of silent-no-op contract it exists to catch, the same
+  reasoning that already made the `sig`/`extern` case below a warning
+  everywhere. Outside `cap verified` the message above is unchanged and still
+  only a warning.
 
   The same silent-no-op shape exists for a `sig` ascription and an `extern`
   declaration, and both warn too since 2026-08-01: `sig Store do fn put :
