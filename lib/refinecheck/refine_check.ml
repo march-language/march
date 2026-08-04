@@ -4739,8 +4739,14 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
    happened.  This function occupies exactly that previously-inert case, so it
    cannot regress any existing verdict.  It is VERDICT-ONLY: it returns "proven"
    or "not proven" and never reports a diagnostic, so the definition side of a
-   Tier 2 function stays silent no matter what the solver says.  Its only
-   observable effect is enabling PROPAGATION via [gate_unverified_posts].
+   Tier 2 function stays silent no matter what the solver says.  Its observable
+   effects are enabling PROPAGATION via [gate_unverified_posts] and — for the
+   constructor-literal shape only — writing a [Postcondition] entry to the
+   obligation ledger, so `--refine-report` can tell "attempted and proved" from
+   "never looked at".  That write is gated on [~record], NOT on emission,
+   because [check_fn_post_verdict] runs twice per refined-return function and
+   the same postcondition must never be counted twice; this mirrors exactly
+   what [check_post]'s own [record] parameter is for.
 
    Everything outside a narrow, recognised shape returns false (= not proven =
    skipped): several clauses, a clause guard, a catch-all arm, a nested pattern,
@@ -4760,7 +4766,7 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
 let ctor_belongs (ctor : string) (adt : string) : bool =
   match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false
 
-let check_post_induction ~root (fd : A.fn_def) : bool =
+let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
   let self = fd.A.fn_name.A.txt in
   let dummy_span = fd.A.fn_name.A.span in
   let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
@@ -4998,21 +5004,28 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
            obligation ledger.  Tier 2 stays verdict-only in the sense that
            matters — it emits no diagnostic either way — but "attempted" has to
            be distinguishable from "never looked at", and the ledger is the only
-           channel that carries that.  (Extending the same accounting to the
-           match shape is a separate change: it would move counts under every
-           existing Tier 2 fixture, so it is deliberately not bundled here.) *)
+           channel that carries that.  Gated on [record] (which the caller
+           threads from [emit]) so the pre-pass run does not double-count.
+           (Extending the same accounting to the match shape is a separate
+           change: it would move counts under every existing Tier 2 fixture, so
+           it is deliberately not bundled here.) *)
         let v =
-          match check_tail ~mctx:None ~pat:None ~refute:true ([], body) with
+          (* The refutation query exists only to classify a LEDGER verdict, so
+             it is pointless on the non-recording pass — and skipping it there
+             cannot change the boolean result, since [Violated] and
+             [Skipped Solver_undecided] are both "not proven". *)
+          match check_tail ~mctx:None ~pat:None ~refute:record ([], body) with
           | Some v -> v
           (* No VC could be built at all — reflection failed somewhere. *)
           | None -> Obligation.Skipped Obligation.Unreflectable_predicate
         in
-        Obligation.record
-          { Obligation.span = fd.A.fn_name.A.span
-          ; callee = self
-          ; predicate = pred_str pred
-          ; verdict = v
-          ; kind = Obligation.Postcondition };
+        if record then
+          Obligation.record
+            { Obligation.span = fd.A.fn_name.A.span
+            ; callee = self
+            ; predicate = pred_str pred
+            ; verdict = v
+            ; kind = Obligation.Postcondition };
         v = Obligation.Proved
       (* ── Shape 2: one clause whose whole body matches on a parameter ─────── *)
       | A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
@@ -5092,10 +5105,13 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
 
    A return refinement [check_post] cannot handle at all (a variant-ADT return)
    falls through to [check_post_induction], the Tier 2 path.  That path never
-   emits, so this stays the single reporting site. *)
+   emits, so this stays the single reporting site.  [emit] IS threaded to it as
+   [~record], though: its constructor-literal shape writes an obligation, and
+   this function runs twice per refined-return function, so without the thread
+   every such postcondition would be counted twice in `--refine-report`. *)
 let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
   match return_refine_ext fd with
-  | None -> check_post_induction ~root fd
+  | None -> check_post_induction ~root ~record:emit fd
   | Some (binder, ret_pred, marker) ->
     (* [record_sort] must carry only a DECLARED sort name.  A scalar marker
        (`$Bool`) is not one: handing it here would send the return value down

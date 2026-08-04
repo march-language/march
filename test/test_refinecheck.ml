@@ -4442,24 +4442,56 @@ mod PN do
 end|} post body
   in
   [ gated "a constructor-literal body has its postcondition ATTEMPTED" (fun () ->
-        (* Before: 0 postcondition obligations of any kind — never attempted. *)
+        (* Before: 0 postcondition obligations of any kind — never attempted.
+
+           The counts are EXACT, not `>= 1`.  The fixture has exactly one
+           refined-return function, so it must leave exactly one ledger entry —
+           and `check_fn_post_verdict` runs TWICE per such function (once from
+           the [gate_unverified_posts] pre-pass with `~emit:false`, once from
+           the walk).  A `>= 1` assertion cannot see the resulting double-count,
+           and in fact did not: it shipped as `2 proved` and was caught in
+           review, not here. *)
         March_refinecheck.Obligation.reset ();
         let src = tree_src "Node(t, x, Leaf)" "size(_) == size(t) + 1" in
         Alcotest.(check bool) "no error" false (has_refine_error_d src);
         let proved, violated, _ = March_refinecheck.Obligation.summary () in
         Alcotest.(check int) "violated" 0 violated;
-        Alcotest.(check bool) "at least one postcondition proved" true (proved >= 1))
+        Alcotest.(check int) "exactly one postcondition proved, counted once"
+          1 proved)
   ; gated "REJECT CONTROL: a FALSE postcondition on the same body is caught"
       (fun () ->
         (* `size(Node(t,x,Leaf))` is `size(t) + 1`, never `size(t) + 2`.
            Without this control the accept case above passes just as well when
-           the checker is still not looking at the body at all. *)
+           the checker is still not looking at the body at all.  Exact counts
+           for the same double-count reason as above. *)
         March_refinecheck.Obligation.reset ();
         let src = tree_src "Node(t, x, Leaf)" "size(_) == size(t) + 2" in
         let _ = has_refine_error_d src in
-        let _, violated, _ = March_refinecheck.Obligation.summary () in
-        Alcotest.(check bool) "the false postcondition is reported" true
-          (violated >= 1))
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 0 proved;
+        Alcotest.(check int) "the false postcondition is reported exactly once"
+          1 violated)
+  ; gated "THIRD OUTCOME: an UNDECIDABLE postcondition stays silent" (fun () ->
+        (* Definite-failure-only, on the new path.  `Node(push(t, x), x, Leaf)`
+           has a self-recursive call, and the constructor-literal shape supplies
+           NO induction hypothesis (there is no matched parameter, so nothing
+           can be certified structurally smaller).  The call therefore reflects
+           to an unconstrained constant `c`, and the goal reduces to
+           `size(c) == size(t)` — neither provable nor refutable.
+
+           That must be a SKIP, not a violation.  This is the gap where a future
+           widening of the refutation would first go wrong: refuting a goal
+           merely because an opaque constant makes it unprovable would reject
+           correct code, which is this subsystem's cardinal sin.  Neither
+           counter may move. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src "Node(push(t, x), x, Leaf)" "size(_) == size(t) + 1" in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 0 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check bool) "recorded as a skip, so it is still countable" true
+          (List.exists (fun (_, n) -> n > 0) skips))
   ; gated "the existing match-shaped body still verifies" (fun () ->
         (* Regression guard: widening the accepted shapes must not disturb the
            EMatch path that already worked. *)
@@ -4469,8 +4501,16 @@ end|} post body
           "size(_) == size(t) + 1"
         in
         Alcotest.(check bool) "no error" false (has_refine_error_d src);
-        let _, violated, _ = March_refinecheck.Obligation.summary () in
-        Alcotest.(check int) "violated" 0 violated)
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        (* The EMatch path deliberately still records NOTHING in the ledger —
+           extending the accounting to it would move counts under every existing
+           Tier 2 fixture and is a separate change.  Pinned exactly so that if
+           someone does extend it, this test fails and forces the decision to be
+           made on purpose rather than as a side effect. *)
+        Alcotest.(check int) "the EMatch path records no obligation" 0 proved;
+        Alcotest.(check int) "…and no skip either" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
   ]
 
 (* NOTE ON GATING: none of these cases reaches the solver, so they must NOT be
