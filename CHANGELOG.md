@@ -218,6 +218,19 @@ git log is authoritative for exact commits.
   mechanized proof. Same corrections applied to the README and docs index
   summaries.
 
+### Added
+
+- **The LSP folds a run of imports, or a run of capability declarations, as a
+  single range.** A block of eight imports collapses to one line instead of
+  needing eight chevrons, matching the runs `march fmt` now keeps tight.
+  Import runs carry the standard LSP `imports` fold kind, so editor commands
+  like "fold all imports" reach them; capability runs use `region`. Runs are
+  *maximal and consecutive* — imports split by a function are two runs, and
+  neither one swallows the function between them. A lone import offers no
+  fold, since there is nothing to collapse. The server also now emits the
+  standard `region` and `comment` kinds where they apply, instead of tagging
+  every range `Other`.
+
 ### Changed
 
 - **`march fmt` keeps a run of imports, or a run of capability declarations,

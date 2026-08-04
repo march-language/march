@@ -5905,6 +5905,93 @@ end|} in
   Alcotest.(check bool) "single-line ~H still has fn fold range" true has_fn_fold
 
 (* ------------------------------------------------------------------ *)
+(* Import / capability run folding                                     *)
+(* ------------------------------------------------------------------ *)
+
+(** All fold ranges carrying [kind]. *)
+let folds_of_kind a kind =
+  List.filter (fun (_, _, k) -> k = kind) a.An.fold_ranges
+
+let test_import_run_folds () =
+  (* Lines (1-indexed):
+       1 mod M do
+       2   import A.B
+       3   import C.D
+       4   import E.F
+       5   fn f() ...
+     The run spans lines 2-4, so 0-indexed startLine=1, endLine=3. *)
+  let src = {|mod M do
+  import A.B
+  import C.D
+  import E.F
+  fn f() : Int do
+    1
+  end
+end|} in
+  let a = analyse src in
+  let ok = List.exists (fun (sl, el, _) -> sl = 1 && el = 3)
+      (folds_of_kind a "imports") in
+  Alcotest.(check bool) "the three-import run folds as one range" true ok
+
+let test_cap_run_folds () =
+  let src = {|mod M do
+  needs IO.Network
+  needs IO.Clock
+  cap no_panic
+  fn f() : Int do
+    1
+  end
+end|} in
+  let a = analyse src in
+  (* Capability runs use "region"; other constructs use it too, so this asks
+     for the exact span rather than merely for some region. *)
+  let ok = List.exists (fun (sl, el, _) -> sl = 1 && el = 3)
+      (folds_of_kind a "region") in
+  Alcotest.(check bool) "the three-cap run folds as one range" true ok
+
+let test_runs_do_not_span_other_decls () =
+  (* REJECT witness.  An implementation that folded from the first compact
+     declaration to the last one anywhere in the module — rather than per
+     maximal *consecutive* run — would pass both tests above while collapsing
+     the function between the two blocks.  Here the imports are split by a fn,
+     so the correct answer is two short runs and NEVER one range covering the
+     function. *)
+  let src = {|mod M do
+  import A.B
+  import C.D
+  fn f() : Int do
+    1
+  end
+  import E.F
+  import G.H
+end|} in
+  let a = analyse src in
+  let imports = folds_of_kind a "imports" in
+  (* Two separate runs: lines 2-3 and lines 7-8 (0-indexed 1-2 and 6-7). *)
+  Alcotest.(check bool) "first run folds 1-2" true
+    (List.exists (fun (sl, el, _) -> sl = 1 && el = 2) imports);
+  Alcotest.(check bool) "second run folds 6-7" true
+    (List.exists (fun (sl, el, _) -> sl = 6 && el = 7) imports);
+  (* And nothing swallows the function that separates them. *)
+  List.iter (fun (sl, el, _) ->
+      if sl <= 2 && el >= 5 then
+        Alcotest.failf "an import fold (%d-%d) spans the intervening fn" sl el)
+    imports
+
+let test_lone_import_does_not_fold () =
+  (* A single import has nothing to collapse; offering a fold on it puts a
+     useless chevron in the gutter. *)
+  let src = {|mod M do
+  import A.B
+  fn f() : Int do
+    1
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check int) "no import fold for a lone import" 0
+    (List.length (folds_of_kind a "imports"))
+
+(* ------------------------------------------------------------------ *)
 (* ~H auto-close on typing >                                           *)
 (* ------------------------------------------------------------------ *)
 
@@ -6818,6 +6905,10 @@ let () =
     ];
     "~H element folding ranges", [
       "multi-line ~H element produces fold range", `Quick, test_h_element_folding;
+      "import run folds as one range",   `Quick, test_import_run_folds;
+      "cap run folds as one range",      `Quick, test_cap_run_folds;
+      "runs do not span other decls",    `Quick, test_runs_do_not_span_other_decls;
+      "lone import does not fold",       `Quick, test_lone_import_does_not_fold;
       "single-line ~H does not crash",             `Quick, test_h_element_no_fold_for_single_line;
     ];
     "~H auto-close on typing >", [

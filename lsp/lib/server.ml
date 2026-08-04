@@ -1174,10 +1174,19 @@ class march_server =
         in
         let open Lsp.Types in
         let json_ranges = List.map (fun (sl, el, kind) ->
+            (* Use the standard kinds where one applies — editors treat
+               `imports` specially (e.g. "fold all imports"), which an
+               `Other "imports"` does not reliably reach. *)
+            let kind = match kind with
+              | "imports" -> FoldingRangeKind.Imports
+              | "region"  -> FoldingRangeKind.Region
+              | "comment" -> FoldingRangeKind.Comment
+              | other     -> FoldingRangeKind.Other other
+            in
             let fr = FoldingRange.create
               ~startLine:sl
               ~endLine:el
-              ~kind:(FoldingRangeKind.Other kind)
+              ~kind
               ()
             in
             FoldingRange.yojson_of_t fr
