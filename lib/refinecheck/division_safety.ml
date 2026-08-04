@@ -286,7 +286,35 @@ let division_suggestion =
    `if d == 0 do 0 else 10 / d end` was reported even though the guard alone
    makes the division unreachable with zero.  A negated comparison is handled by
    dualising the operator (`==` ↦ `!=`, `<` ↦ `>=`, …), which is exact for the
-   total orders involved. *)
+   total orders involved.
+
+   BOOLEAN CONNECTIVES count too.  Matching only an atomic comparison meant any
+   `&&`/`||` anywhere in the guard defeated this — including `if p > 0 && d > 0
+   do n / d`, the most idiomatic safe spelling there is, and including a
+   disjunction over the divisor itself.  The divisor then fell through to the
+   unrefined arm and `cap no_panic` reported a division the guard makes
+   unreachable: a FALSE POSITIVE, and a hard error rather than a hint.  (Found
+   by running this pass over forgepm, whose metrics module has exactly the
+   `if prev <= 0 || dt <= 0 do 0 else … / dt` shape.)
+
+   The polarity is the entire content of the rule, so state it explicitly.  A
+   path entry is a FACT — `cond` when not negated, `not cond` when negated —
+   and the question is whether that fact entails `var ≠ 0`:
+
+     - a CONJUNCTIVE fact is proved by EITHER side (one true conjunct is enough);
+     - a DISJUNCTIVE fact is proved only if BOTH sides prove it independently,
+       since either arm may be the one that holds.
+
+   De Morgan decides which is which: `A && B` is conjunctive un-negated and
+   disjunctive negated, `A || B` the reverse — i.e. conjunctive exactly when
+   `(op = "&&") <> negated`.  Both arms inherit the SAME negation flag
+   (`¬(A ∧ B) = ¬A ∨ ¬B`), so polarity threads through unchanged; only the
+   combinator flips.  Getting this backwards would be unsound rather than
+   merely incomplete, which is why each direction has a negative control in the
+   `divsafety-boolean-guard` suite.
+
+   Anything that is neither a connective nor a recognised comparison still
+   answers false — fail-closed, as before. *)
 let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
   (* `not (a op b)` ⟺ `a (dual op) b` *)
   let dual = function
@@ -311,31 +339,41 @@ let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
     | "<=" -> n <= -1
     | _ -> false
   in
-  List.exists
-    (fun (cond, negated) ->
-      match cond with
-      | A.EApp (A.EVar { A.txt = op0; _ }, [ a; b ], _) ->
-        let is_var e =
-          match e with A.EVar { A.txt = x; _ } -> x = var | _ -> false
-        in
-        let int_of e =
-          match e with A.ELit (A.LitInt n, _) -> Some n | _ -> None
-        in
-        (* Normalise to `var op n`, then dualise if we are on the else side. *)
-        let normalised =
-          match int_of b, int_of a with
-          | Some n, _ when is_var a -> Some (op0, n)
-          | _, Some n when is_var b -> Some (flip op0, n)
-          | _ -> None
-        in
-        (match normalised with
-         | None -> false
-         | Some (op, n) ->
-           (match (if negated then dual op else Some op) with
-            | None -> false
-            | Some op -> proves op n))
-      | _ -> false)
-    path
+  (* A single comparison, under the given polarity. *)
+  let atomic op0 a b negated =
+    let is_var e =
+      match e with A.EVar { A.txt = x; _ } -> x = var | _ -> false
+    in
+    let int_of e = match e with A.ELit (A.LitInt n, _) -> Some n | _ -> None in
+    (* Normalise to `var op n`, then dualise if we are on the else side. *)
+    let normalised =
+      match int_of b, int_of a with
+      | Some n, _ when is_var a -> Some (op0, n)
+      | _, Some n when is_var b -> Some (flip op0, n)
+      | _ -> None
+    in
+    match normalised with
+    | None -> false
+    | Some (op, n) ->
+      (match (if negated then dual op else Some op) with
+       | None -> false
+       | Some op -> proves op n)
+  in
+  (* Does the fact [cond] (negated when [negated]) entail `var ≠ 0`? *)
+  let rec entails (cond : A.expr) (negated : bool) : bool =
+    match cond with
+    | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> entails a (not negated)
+    | A.EApp (A.EVar { A.txt = ("&&" | "||") as op; _ }, [ a; b ], _) ->
+      if (op = "&&") <> negated then
+        (* conjunctive fact: one side suffices *)
+        entails a negated || entails b negated
+      else
+        (* disjunctive fact: every arm must prove it on its own *)
+        entails a negated && entails b negated
+    | A.EApp (A.EVar { A.txt = op0; _ }, [ a; b ], _) -> atomic op0 a b negated
+    | _ -> false
+  in
+  List.exists (fun (cond, negated) -> entails cond negated) path
 
 (* [c.shadowed] names have been rebound since the parameter scope, so a
    refinement declared on the parameter of that name says nothing about the
