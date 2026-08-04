@@ -280,8 +280,14 @@ let load_stdlib ?(for_js=false) () =
     let home = (try Sys.getenv "HOME" with Not_found -> ".") in
     let cache_dir = Filename.concat home ".cache/march" in
     let short_hash = String.sub source_hash 0 16 in
+    (* The compiler's own identity is part of the key.  This blob is a
+       Marshal of March_ast.Ast.decl list: if the AST type changes shape while
+       the stdlib SOURCE does not, a content-only key still hits, and
+       unmarshalling a stale blob into the new type is undefined behaviour —
+       observed as a SIGSEGV on every input, with no diagnostic. *)
+    let build_id = String.sub (Lazy.force March_cas.Cas.compiler_identity) 0 12 in
     let cache_path = Filename.concat cache_dir
-      ("stdlib_ast_" ^ short_hash ^ ".bin") in
+      ("stdlib_ast_" ^ build_id ^ "_" ^ short_hash ^ ".bin") in
     (* Cache hit: unmarshal parsed ASTs *)
     match (try
       if Sys.file_exists cache_path then begin
@@ -374,8 +380,13 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
   let js_suffix = if for_js then "_js" else "" in
+  (* Keyed on the compiler build too — this is a Marshal of the typecheck env
+     record, so a field added to it while stdlib source is unchanged would
+     otherwise be read back at the wrong shape.  See the note on the AST
+     cache above. *)
+  let build_id = String.sub (Lazy.force March_cas.Cas.compiler_identity) 0 12 in
   let cache_path = Filename.concat cache_dir
-    (Printf.sprintf "stdlib_tcenv_cli%s_%s.bin" js_suffix short_hash) in
+    (Printf.sprintf "stdlib_tcenv_cli%s_%s_%s.bin" js_suffix build_id short_hash) in
   let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
     Hashtbl.create 4096 in
   let load_from_cache () =

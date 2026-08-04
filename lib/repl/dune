@@ -14,4 +14,5 @@
    march_eval
    march_jit
    march_modules
+   march_cas
    march_resolver))
