@@ -100,3 +100,55 @@ Suggested order: add the missing `needs` to those 20 first (harmless on its own,
 and it makes stdlib self-describing for `forge audit`), then measure the
 corpora, then decide between promoting the check and gating it behind
 `cap strict`.
+
+## ATTEMPTED 2026-08-04: "add the 20 needs" is NOT harmless — reverted
+
+Added `needs <cap>` to all 20 modules and measured. The Check-1b warnings all
+cleared and, for a QUALIFIED call (`DateTime.now()` from an outside module), the
+capability did NOT cascade to the caller — so the "harmless" claim looked right.
+
+Then the conformance corpus failed: `accept/t37_use_all_stdlib_module.march` and
+`t38` broke with
+
+```
+module `Main` imports `List` which requires `Cap(IO.Spawn)`, but `IO.Spawn`
+is not declared in `needs`.
+```
+
+**`needs` cascades through `use`/`import`, and module-level granularity
+over-constrains.** `List` declares `needs IO.Spawn` only because of one niche
+function, `List.pmap` (parallel map). But a module-level `needs` applies to the
+whole module, so `use List.*` — even to reach `append`, `map`, `filter`, which
+spawn nothing — now forces the importer to declare `IO.Spawn`. That is wrong:
+using a data-structure module should not demand a concurrency capability.
+
+The 20 split into two kinds, and they need different handling:
+
+- **Whole-module-legitimate** (the module's purpose IS the capability): `task`,
+  `parallel` (IO.Spawn), `file`, `seq` (IO.FileSystem/FileRead), `socket`,
+  `tls`, `http_transport` (IO.NetConnect), `dns` (IO.Network), `process`, `env`
+  (IO.Process), `audio`, `canvas`, `dom` (IO.Foreign). Declaring the cap here is
+  arguably correct — a `use` of these modules SHOULD propagate the requirement.
+- **Over-constrained** (the cap comes from a niche function): `list` (IO.Spawn,
+  only `pmap`), and likely `datetime`/`uuid`/`random` (IO.Clock, only the
+  wall-clock functions, not the pure formatting/parsing ones), `config`
+  (IO.Mut/IO.Process, only the live-reload paths).
+
+So the real fix is not 20 one-line edits. It is one of:
+
+1. **Per-function / per-`needs`-scope capabilities** — declare the cap on the
+   function that uses it (`List.pmap`), not the module, so `use List.*` only
+   propagates IO.Spawn to code that actually calls `pmap`. This is the correct
+   model but a language/typechecker change.
+2. **Split the niche functions out** — move `List.pmap` to a `ListParallel`
+   module, `DateTime.now` to a `Clock` module, etc., so each module's declared
+   caps match what all its functions need. Mechanical but churny and changes the
+   public API surface.
+3. **Declare only the whole-module-legitimate set now** (the ~14 above), leave
+   the over-constrained ~6 warning until option 1 or 2 lands.
+
+This is a design decision for the plan owner, not a mechanical sweep — which is
+why the attempt was reverted rather than forced. The Check-1b promotion decision
+(the top of this file) depends on it: promoting Check 1b to an error is only
+viable once the over-constraint is resolved, or every `use List.*` in the
+ecosystem breaks.
