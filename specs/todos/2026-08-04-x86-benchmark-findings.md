@@ -56,6 +56,42 @@ at -O2. So fib's story is entirely the preemption check; there is no second
 codegen problem hiding behind it. The residual 13% vs Rust is call-shape/layout
 territory, not worth chasing.
 
+### ATTEMPTED AND REVERTED: sinking the check off leaf base-case arms
+
+A check-sinking implementation (defer the entry check for a non-leaf non-TCO
+function whose body is a tail `ECase`; emit it only in arms that call; skip leaf
+arms like `n < 2 -> n`) was written, verified for correctness (starvation: the
+tail-recursive `burn` emits byte-identical IR; full suites clean modulo two
+pre-existing env failures), and **reverted**, because it is an ~8% REGRESSION
+under the real compiler.
+
+The trap, worth remembering: two measurement methods disagreed on the SIGN.
+
+| fib(40) build method | base (entry check) | sink | verdict |
+|---|---|---|---|
+| hand `clang -O2 -msse4.2 fib.ll runtime/*.c` | 440 ms | 362 ms | sink +18% |
+| March `--compile` (production path) | 425 ms | 459 ms | sink **−8%** |
+
+Same IR difference, opposite result. The hand-clang proxy compiled `fib.ll` and
+the runtime `.c` in one invocation (a link/optimisation model the real path does
+not share) and happened to favour the sunk block layout; March's actual
+`--compile` favours the entry check. The +18% was an artefact of the measurement,
+not a property of the change.
+
+**Lesson: measure a codegen change with `march --compile`, never a hand-rolled
+clang line — the flags and link model differ enough to flip a result's sign.** A
+same-method, same-base-commit A/B (build both binaries via
+`./_build/default/bin/main.exe --compile`, time back-to-back) is the only
+trustworthy comparison. Beware also the global dune shared cache: reverting the
+source and rebuilding can silently re-serve the other binary — use
+`rm -rf _build` + `DUNE_CACHE=disabled` per side, and confirm each binary by
+where its check lands before timing.
+
+WHY the sink loses under `--compile` is unexplained; it needs an `-O2` asm diff of
+the two fib bodies as the real compiler emits them. Until that is understood, do
+not re-attempt sinking — the diagnosis (the check IS 80% of fib's gap) stands, the
+naive fix does not.
+
 Candidate mitigations, all gated on the starvation test (the per-call check IS
 the progress guarantee — a CPU-bound TCO loop once starved a sibling green
 thread):
