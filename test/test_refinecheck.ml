@@ -7825,6 +7825,95 @@ end|});
         Alcotest.(check int) "violated" 1 violated)
   ]
 
+(* ── Postcondition composition through an unannotated `let`: CLOSED case ───
+   `scope_add_binding`'s postcond arm seeds a refined-local scope entry only
+   for a scalar- or record-sorted postcondition; a plain multi-constructor ADT
+   fell into the catch-all and vanished.  The consumer
+   ([load_scope_measure_facts]) already existed and already reads exactly this
+   entry — only the producer was missing.
+
+   CLOSED means the postcondition mentions no parameter other than the refined
+   value itself (`size(_) > 0`).  The RELATIONAL case (`size(_) == size(t) + 1`)
+   needs Task 3 as well and is pinned there, NOT here — do not widen this
+   fixture to a relational predicate and expect it to pass. *)
+let post_compose_closed_suite =
+  let src = {|
+mod PC do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn grow(t : Tree) : {Tree | size(_) > 0} do
+    match t do
+      Leaf -> Node(Leaf, 1, Leaf)
+      Node(l, y, r) -> Node(Node(l, y, r), 1, Leaf)
+    end
+  end
+
+  fn needs_nonempty(x : {Tree | size(_) > 0}) : Int do 1 end
+
+  fn go(t : Tree) : Int do
+    let r = grow(t)
+    needs_nonempty(r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+  in
+  [ gated "a CLOSED measure postcondition composes through an unannotated let"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ; gated "REJECT CONTROL: rebinding `r` retires the carried fact" (fun () ->
+        (* If the fact survived a rebind, the entry is keyed wrongly and an
+           outer promise would be attributed to an inner binding — the
+           false-positive shape this subsystem has shipped three times. *)
+        let src' = {|
+mod PC2 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn grow(t : Tree) : {Tree | size(_) > 0} do
+    match t do
+      Leaf -> Node(Leaf, 1, Leaf)
+      Node(l, y, r) -> Node(Node(l, y, r), 1, Leaf)
+    end
+  end
+
+  fn needs_nonempty(x : {Tree | size(_) > 0}) : Int do 1 end
+
+  fn go(t : Tree) : Int do
+    let r = grow(t)
+    let r = Leaf
+    needs_nonempty(r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let proved, _, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool) "the rebound `r` does NOT inherit the promise" true
+          (skipped >= 1 || proved = 0))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -7882,4 +7971,5 @@ let () =
       ("resolve-precedence", resolve_precedence_suite);
       ("caller-promise", caller_promise_suite);
       ("arm-exclusion", arm_exclusion_suite);
-      ("measure-base-case-axiom", measure_base_case_axiom_suite) ]
+      ("measure-base-case-axiom", measure_base_case_axiom_suite);
+      ("post-compose-closed", post_compose_closed_suite) ]

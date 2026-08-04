@@ -2068,14 +2068,34 @@ let scope_add_binding
           skipped even though the direct `needLow(mk())` is now checked; the
           two spellings must agree.
 
-          Any OTHER ADT sort (a plain variant, a String) is still refused: a
-          variant fact is carried only by [reflect_dt], which reaches it
-          through the expression, not through [scope]. *)
+          A plain multi-constructor ADT (`Tree`, `List(a)`) may too, at the
+          MEASURE-ONLY marker ([meas_sort_prefix]): [load_scope_measure_facts]
+          already reads exactly this shape for a refined PARAMETER
+          ([scope_add_param]) and treats a `$Meas:`-marked entry as an
+          assumption over the same measure-application symbol its goal uses,
+          so seeding one here for an unannotated `let` makes the two spellings
+          agree the same way the record case above does.
+
+          [postcond] (via [return_refine_sorted]) reports a plain ADT return at
+          its bare registered sort (`"M_Tree"`, from [is_adt_base]/
+          [adt_sort_name]) — the same convention [refined_param_ty] uses for a
+          refined PARAMETER — not at the `$Meas:`-prefixed marker
+          [refined_scope_ty] gives a directly-annotated local.  A non-record
+          registered ADT sort is re-tagged with [meas_sort_prefix] here so the
+          entry lands on the one spelling every scope consumer
+          ([load_scope_measure_facts] and its constructor-tag analogue) already
+          reads.
+
+          A String postcondition is still refused: it is not carried by
+          [refined_scope_ty] at all in this position (only `str_sort` params
+          are), so there is nothing to widen here. *)
        (match postcond fname args with
         | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
           (n.A.txt, (binder, pred, m)) :: sc
         | Some (binder, pred, Some srt) when is_record_sort srt ->
           (n.A.txt, (binder, pred, Some srt)) :: sc
+        | Some (binder, pred, Some srt) when Hashtbl.mem adt_ctors srt ->
+          (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
      | _ -> sc)
   | _ -> sc

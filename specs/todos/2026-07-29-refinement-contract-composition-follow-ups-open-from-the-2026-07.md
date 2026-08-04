@@ -175,8 +175,18 @@ predicate remains broken (see above).
 **Net: closing the exact brief repro needs THREE independent things, only
 one of which (the scope_add_binding producer widening) was actually
 prototyped here:**
-1. `scope_add_binding` must seed a `$Meas:`-marked scope entry for a plain
-   ADT return from an unannotated `let` (prototyped, verified, reverted).
+1. ~~`scope_add_binding` must seed a `$Meas:`-marked scope entry for a plain
+   ADT return from an unannotated `let` (prototyped, verified, reverted).~~
+   **CLOSED 2026-08-04** — re-landed. `scope_add_binding`'s postcond arm now
+   also seeds an entry for a non-record registered ADT sort, re-tagged with
+   `meas_sort_prefix` so it lands on the spelling `load_scope_measure_facts`
+   already reads (the postcond side reports the return's sort at the bare
+   `adt_sort_name`, e.g. `"M_Tree"`, not at the `$Meas:`-prefixed marker
+   `refined_scope_ty` gives a directly-annotated local — the two conventions
+   differ and the fix reconciles them at the point of insertion). Covers only
+   the **Closed** case (`size(_) > 0`); item 2 below remains open and is what
+   the **Relational** case (`size(_) == size(t) + 1`) still needs. Suite:
+   `post-compose-closed`.
 2. `load_scope_measure_facts`'s resolver must be widened to resolve OTHER
    caller-scope names appearing in a Relational predicate (i.e. `t`, not
    just the entry's own self-spellings) to the SAME term the goal side would

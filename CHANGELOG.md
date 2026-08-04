@@ -183,6 +183,19 @@ git log is authoritative for exact commits.
   `match` shape — record their verdict in the obligation ledger, so the report
   can tell "attempted and proved" from "never attempted". A proved
   postcondition also propagates to call sites, as with the `match` shape.
+
+- **A CLOSED measure postcondition on a plain multi-constructor ADT now
+  composes through an unannotated `let`.** `fn grow(t : Tree) : {Tree |
+  size(_) > 0} do … end` followed by `let r = grow(t); needs_nonempty(r)`
+  used to skip the second call: `scope_add_binding` seeded a refined-local
+  scope entry for a scalar- or record-sorted postcondition only, so a plain
+  variant ADT (`Tree`, `List(a)`) fell into the catch-all and the fact
+  vanished, even though the identically-annotated spelling (`let r : {Tree |
+  size(_) > 0} = grow(t)`) already worked. Only the CLOSED case (the
+  postcondition mentions no parameter besides the refined value itself) is
+  covered; a relational postcondition (`size(_) == size(t) + 1`) still needs
+  further work.
+
 - **`cap no_panic` no longer rejects a division guarded by a boolean
   condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a
   possible division by zero, as was every other guard containing `&&` or `||`
