@@ -6915,6 +6915,29 @@ let code_actions_at (a : t) ~line ~character
           | _ -> [])
         decls
     in
+    (* A second action for the RETURN, offered only when there is a declared
+       return type to refine and it is not refined already — the same
+       solver-free test as above, for the same reason. *)
+    let returns_refinable (fd : Ast.fn_def) =
+      match fd.Ast.fn_ret_ty with
+      | Some (Ast.TyRefine _) | None -> false
+      | Some _ -> true
+    in
+    let rec collect_ret prefix (decls : Ast.decl list) =
+      List.concat_map
+        (function
+          | Ast.DFn (fd, _) ->
+            let sp = fd.Ast.fn_name.Ast.span in
+            if Pos.span_contains sp ~line ~character && returns_refinable fd then
+              [ (if prefix = "" then fd.Ast.fn_name.Ast.txt
+                 else prefix ^ "." ^ fd.Ast.fn_name.Ast.txt) ]
+            else []
+          | Ast.DMod (n, _, inner, _) ->
+            collect_ret
+              (if prefix = "" then n.Ast.txt else prefix ^ "." ^ n.Ast.txt) inner
+          | _ -> [])
+        decls
+    in
     List.map
       (fun qname ->
         CodeAction.create
@@ -6926,6 +6949,17 @@ let code_actions_at (a : t) ~line ~character
                ~arguments:[ `String a.filename; `String qname ] ())
           ())
       (collect "" a.decls)
+    @ List.map
+        (fun qname ->
+          CodeAction.create
+            ~title:(Printf.sprintf "Suggest a postcondition for `%s`" qname)
+            ~kind:CodeActionKind.RefactorRewrite
+            ~command:
+              (Command.create ~title:"Suggest a postcondition"
+                 ~command:"march.suggestPostcondition"
+                 ~arguments:[ `String a.filename; `String qname ] ())
+            ())
+        (collect_ret "" a.decls)
   in
   (* ---- Add-type-annotation actions (P1.7 enhanced) ---- *)
   (* Look up the smallest type_map entry containing a point. *)

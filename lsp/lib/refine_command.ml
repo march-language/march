@@ -39,11 +39,12 @@ let read_all path =
     Some (Bytes.to_string s)
   with Sys_error _ -> None
 
-let run_compiler ~file ~fn : string =
+let run_compiler ?(post = false) ~file ~fn () : string =
   let tmp = Filename.temp_file "march_lsp_refine" ".json" in
   let cmd =
     Printf.sprintf
-      "march --check --refine-suggest-json --refine-suggest %s %s >%s 2>/dev/null"
+      "march --check --refine-suggest-json %s %s %s >%s 2>/dev/null"
+      (if post then "--refine-suggest-post" else "--refine-suggest")
       (Filename.quote fn) (Filename.quote file) (Filename.quote tmp)
   in
   ignore (Sys.command cmd);
@@ -119,10 +120,11 @@ let edits_of ~(src : string) (p : parsed) : Types.TextEdit.t list option =
   in
   go [] p.ps_suggestions
 
-let msg status ?(edit : Types.WorkspaceEdit.t option) text =
+let msg ?(kind = "suggestRefinement") status
+    ?(edit : Types.WorkspaceEdit.t option) text =
   let base =
     [ ("status", `String status);
-      ("kind", `String "suggestRefinement");
+      ("kind", `String kind);
       ("message", `String text) ]
   in
   `Assoc
@@ -134,7 +136,7 @@ let msg status ?(edit : Types.WorkspaceEdit.t option) text =
     server should send through workspace/applyEdit (if there is one). *)
 let run ~(file : string) ~(fn : string) :
     Yojson.Safe.t * Types.WorkspaceEdit.t option =
-  match parse (run_compiler ~file ~fn) with
+  match parse (run_compiler ~file ~fn ()) with
   | [] ->
     ( msg "error"
         (Printf.sprintf
@@ -199,4 +201,119 @@ let run ~(file : string) ~(fn : string) :
                    p.ps_debt_before p.ps_debt_after
              in
              ( msg "ok" ~edit:we (Printf.sprintf "%s — %s" summary tail),
+               Some we ))))
+
+
+(* ── Postconditions ───────────────────────────────────────────────────────────
+   The `march.suggestPostcondition` command.  Same shape as above — the action
+   carries a command, the inference runs once on selection, the edit goes back
+   through workspace/applyEdit — but it rewrites the RETURN annotation, whose
+   range comes from [Refine_edit.byte_range_of_return].  Sharing that module
+   with `forge refine --apply` is what keeps the editor's edit and the CLI's
+   byte-identical. *)
+
+type parsed_post = {
+  pp_fn : string;
+  pp_file : string;
+  pp_line : int;
+  pp_status : string;
+  pp_annotation : string;
+  pp_callers : int;
+  pp_debt_before : int;
+  pp_debt_after : int;
+}
+
+let parse_post (json : string) : parsed_post list =
+  match Yojson.Safe.from_string json with
+  | exception _ -> []
+  | `Assoc top ->
+    let member k o = try List.assoc k o with Not_found -> `Null in
+    let str = function `String s -> s | _ -> "" in
+    let int = function `Int n -> n | _ -> 0 in
+    (match member "postconditions" top with
+     | `List rs ->
+       List.filter_map
+         (function
+           | `Assoc r ->
+             Some { pp_fn = str (member "fn" r); pp_file = str (member "file" r);
+                    pp_line = int (member "line" r); pp_status = str (member "status" r);
+                    pp_annotation = str (member "annotation" r);
+                    pp_callers = int (member "callers" r);
+                    pp_debt_before = int (member "debt_before" r);
+                    pp_debt_after = int (member "debt_after" r) }
+           | _ -> None)
+         rs
+     | _ -> [])
+  | _ -> []
+
+let run_post ~(file : string) ~(fn : string) :
+    Yojson.Safe.t * Types.WorkspaceEdit.t option =
+  match parse_post (run_compiler ~post:true ~file ~fn ()) with
+  | [] ->
+    ( msg ~kind:"suggestPostcondition" "error"
+        (Printf.sprintf
+           "Could not run the refinement checker for `%s`. Is `march` on PATH, \
+            and is z3 installed?" fn),
+      None )
+  | p :: _ ->
+    (match p.pp_status with
+     | "no-return-type" ->
+       (msg ~kind:"suggestPostcondition" "ok" (Printf.sprintf "`%s` declares no return type to refine." fn), None)
+     | "already-refined" ->
+       (msg ~kind:"suggestPostcondition" "ok" (Printf.sprintf "`%s`'s return is already refined." fn), None)
+     | "no-callers" ->
+       ( msg ~kind:"suggestPostcondition" "ok"
+           (Printf.sprintf
+              "Nothing calls `%s` here, so no postcondition could discharge anything."
+              fn),
+         None )
+     | "no-debt" ->
+       ( msg ~kind:"suggestPostcondition" "ok"
+           (Printf.sprintf "`%s`'s callers have no unproven obligations." fn), None )
+     | "no-candidate" ->
+       ( msg ~kind:"suggestPostcondition" "ok"
+           (Printf.sprintf
+              "`%s`'s callers have %d unproven obligation(s), but no candidate \
+               postcondition is both provable and useful."
+              fn p.pp_debt_before),
+         None )
+     | "not-found" ->
+       (msg ~kind:"suggestPostcondition" "error" (Printf.sprintf "No function named `%s` in %s." fn file), None)
+     | _ ->
+       (match read_all p.pp_file with
+        | None -> (msg ~kind:"suggestPostcondition" "error" (Printf.sprintf "Could not read %s." p.pp_file), None)
+        | Some src ->
+          (match
+             March_refactor.Refine_edit.byte_range_of_return ~src ~line:p.pp_line
+               ~fn:(short_name p.pp_fn)
+           with
+           | None ->
+             ( msg ~kind:"suggestPostcondition" "error"
+                 (Printf.sprintf
+                    "Found a postcondition for `%s`, but could not locate the \
+                     return annotation to rewrite — apply it by hand." fn),
+               None )
+           | Some (a, b) ->
+             let (sl, sc) = March_refactor.Refine_edit.position_of_offset src a in
+             let (el, ec) = March_refactor.Refine_edit.position_of_offset src b in
+             let range =
+               Types.Range.create
+                 ~start:(Types.Position.create ~line:sl ~character:sc)
+                 ~end_:(Types.Position.create ~line:el ~character:ec)
+             in
+             let edit =
+               Types.TextEdit.create ~range ~newText:(" " ^ p.pp_annotation ^ " ")
+             in
+             let uri = Types.DocumentUri.of_path p.pp_file in
+             let we = Types.WorkspaceEdit.create ~changes:[ (uri, [ edit ]) ] () in
+             let tail =
+               if p.pp_status = "solved" then
+                 Printf.sprintf "discharges all %d obligation(s) across %d caller(s)"
+                   p.pp_debt_before p.pp_callers
+               else
+                 Printf.sprintf "discharges %d of %d across %d caller(s)"
+                   (p.pp_debt_before - p.pp_debt_after) p.pp_debt_before p.pp_callers
+             in
+             ( msg ~kind:"suggestPostcondition" "ok" ~edit:we
+                 (Printf.sprintf "returns %s — %s" p.pp_annotation tail),
                Some we ))))
