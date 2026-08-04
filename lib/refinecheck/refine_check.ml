@@ -5507,42 +5507,60 @@ let qualified_measure_spelling (qname : string) : string option =
    once per unrecognized applied name.
 
    Must run AFTER [registered_measures] is populated (see [check_module]):
-   otherwise every user `@[measure]` looks unrecognized and warns spuriously. *)
+   otherwise every user `@[measure]` looks unrecognized and warns spuriously.
+
+   [warn_qualified_call] is the shared remedy-builder for an unresolved
+   dotted spelling [qname], reached whether it arrives as an un-flattened
+   `EField` chain or as a dotted `EVar` [Desugar.desugar_ty] already
+   flattened but that still failed [known_predicate_fn] (alias withdrawn, or
+   simply not a recognized qualified spelling). *)
+let warn_qualified_call (errctx : Err.ctx) ~(span : A.span) (qname : string) : unit =
+  let remedy =
+    match qualified_measure_spelling qname with
+    | Some bare -> Printf.sprintf " Use the bare spelling `%s` instead." bare
+    | None ->
+      " A predicate can only call the bare measure vocabulary — `len`, or an \
+       `@[measure]` function by its bare name."
+  in
+  Err.warning errctx ~span
+    (Printf.sprintf
+       "`%s` is a qualified call inside a refinement predicate. This spelling is \
+        never reflected here, so the refinement enforces nothing.%s"
+       qname remedy)
+
 let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
   let rec go (e : A.expr) =
     match e with
     | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
-      if not (known_predicate_fn f) then
-        Err.warning errctx ~span
-          (Printf.sprintf
-             "`%s` is not a measure or known predicate, so this refinement is not checked. \
-              Annotate the function `@[measure]`, or use a supported predicate."
-             f);
+      if not (known_predicate_fn f) then begin
+        if String.contains f '.' then
+          (* [Desugar.desugar_ty] (Task 8) now flattens a MODULE-PATH call head
+             (`List.length(_)`) in predicate position into this dotted `EVar`
+             the SAME way ordinary call heads are flattened — so a live alias
+             is already reflected by the time [known_predicate_fn] is
+             consulted, and this branch is reached ONLY when the alias is
+             unavailable (withdrawn by a competing binding, or simply not a
+             recognized qualified spelling at all).  Route it through the
+             SAME remedy as an unresolved qualified call so a withdrawn
+             `List.length` still points at `len`, instead of degrading to the
+             generic "not a measure" message below. *)
+          warn_qualified_call errctx ~span f
+        else
+          Err.warning errctx ~span
+            (Printf.sprintf
+               "`%s` is not a measure or known predicate, so this refinement is not checked. \
+                Annotate the function `@[measure]`, or use a supported predicate."
+               f)
+      end;
       List.iter go args
-    (* A QUALIFIED call in call position (`List.length(_)`) is never desugared
-       here — [Desugar.respan_ty] is the only place that touches `A.TyRefine`
-       and it never rewrites the predicate — so it stays an `EField` chain
-       rather than the dotted `EVar` [measure_alias] keys
-       on, and the obligation this predicate should generate is silently
-       skipped instead.  The contract parses and typechecks and looks like it
-       works; it enforces nothing.  Warn once, naming the qualified spelling
-       found and the bare spelling that IS recognized. *)
+    (* A qualified call in call position that ISN'T already flattened to a
+       dotted `EVar` by [Desugar.desugar_ty] — e.g. a receiver that is itself
+       a call (`f(x).g(y)`), which [Desugar.flatten_pred_quals] deliberately
+       does not rewrite (mirrors [Desugar.desugar_expr]'s own `EField` arm,
+       which only flattens a chain bottoming out at a bare module `ECon`). *)
     | A.EApp ((A.EField _ as fhd), args, span) ->
       (match qualified_name fhd with
-       | Some qname ->
-         let remedy =
-           match qualified_measure_spelling qname with
-           | Some bare -> Printf.sprintf " Use the bare spelling `%s` instead." bare
-           | None ->
-             " A predicate can only call the bare measure vocabulary — `len`, or an \
-              `@[measure]` function by its bare name."
-         in
-         Err.warning errctx ~span
-           (Printf.sprintf
-              "`%s` is a qualified call inside a refinement predicate. Predicates are \
-               not desugared, so this is never reflected and the refinement enforces \
-               nothing.%s"
-              qname remedy)
+       | Some qname -> warn_qualified_call errctx ~span qname
        | None -> ());
       go fhd;
       List.iter go args

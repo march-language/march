@@ -314,58 +314,86 @@ Use `assert` as the escape hatch for facts the checker can't derive on its own
 A guard may also read a **record field** (`if c.port >= 1 do serve(c)`) — see
 [Refining a record over its fields](#refining-a-record-over-its-fields).
 
-### A qualified spelling in a predicate enforces nothing
+### A qualified spelling in a predicate now works (narrow desugar slice)
 
 The alias above holds in a **guard** — ordinary code the desugarer rewrites.
-It does **not** hold inside a **predicate**, the `{T | … }` itself:
+Until 2026-08-03 it did **not** hold inside a **predicate**, the `{T | … }`
+itself:
 
 ```march
-fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do …   -- enforces NOTHING
-fn inner(xs : {List(Int) | len(_) > 0}) : Int do …           -- enforces the contract
+fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do …   -- used to enforce NOTHING
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do …           -- always enforced the contract
 ```
 
-Refinement predicates are never run through the expression desugarer —
-`Desugar.respan_ty` is the only place that touches `A.TyRefine`, and it only
-respans — so inside a predicate `List.length` stays a field-access chain
-rather than the dotted variable the alias keys on. The obligation the contract
-looks like it generates is simply skipped, and skipping is silent by default.
-The contract parses, typechecks, reads as working, and checks nothing.
+Refinement predicates were never run through the expression desugarer, so
+`List.length` stayed a field-access chain rather than the dotted variable the
+alias keys on, and the obligation the contract looked like it generated was
+simply skipped — silent by default. From 2026-07-30 this shape **warned**
+instead of compiling silently, naming the spelling found and the bare `len`
+that works; that warning was deliberately sized to fix the *silence*, not the
+capability gap (see `specs/progress/2026-07-30-refine-qualified-spelling-in-predicate-warns.md`).
 
-Since 2026-07-30 this **warns**, naming both the spelling found and the bare
-measure that works:
+As of 2026-08-03, `Desugar.desugar_ty` (`lib/desugar/desugar.ml`) closes the
+capability gap for the specific case that motivated the warning: a **narrow**
+slice that flattens a module-path call head (`List.length(_)`) found inside a
+`TyRefine` predicate into the dotted form the alias keys on — the *same*
+flattening `Desugar.desugar_expr`'s own `EField` arm already applies to an
+ordinary call head, and nothing else. No pipe desugaring, no multi-head-fn
+desugaring, no other expression-desugarer machinery runs over the predicate.
+It is wired into every site a surface `ty` can carry a `TyRefine`: fn
+param/return types, `let`-binding annotations, `EAnnot`, and record/variant
+field types.
+
+When the alias is live (no competing `List.length` in scope — the ordinary
+case), the qualified spelling now means exactly what `len` means: `inner([])`
+above is rejected as a genuine precondition violation, and the warning
+correctly stops firing (nothing left to warn about). When a unit has
+[withdrawn the alias](#listlength-is-an-alias-of-the-len-measure) by defining
+its own competing `List.length`, the qualified spelling still enforces
+nothing — correctly, since the alias genuinely does not hold there — and the
+warning still fires, still recommending `len`:
 
 ```
-`List.length` is a qualified call inside a refinement predicate. Predicates
-are not desugared, so this is never reflected and the refinement enforces
-nothing. Use the bare spelling `len` instead.
+`List.length` is a qualified call inside a refinement predicate. This
+spelling is never reflected here, so the refinement enforces nothing. Use the
+bare spelling `len` instead.
 ```
 
-It is a warning rather than an error on purpose: this shape compiles today, so
-promoting it would break working builds, and the defect being fixed is the
-*silence*, not the lack of capability — the bare spelling has always worked.
-Desugaring predicates properly, so the qualified spelling means what it reads
-as, is a genuine follow-up and a much larger change with its own regression
-surface. Witnessed by `accept/t136` (which pins that the program stays exit 0)
-and by `test_refinecheck.ml`'s `qualified-predicate` suite, which pins the
-warning text together with a false-positive control that the bare spelling
-stays quiet.
+(The withdrawn case is reached through a different `warn_predicate_expr` arm
+than the live case — the flattened spelling arrives as a plain dotted `EVar`
+either way, but only fails `known_predicate_fn` when the alias is down — and
+both arms share one `warn_qualified_call` remedy builder specifically so the
+message doesn't degrade to the generic "not a measure" wording in the
+withdrawn case.)
 
-The same reasoning covers the other qualified measures: write `len(_)`, not
-`String.byte_size(_)`, inside a predicate. The advice stays `len` even in a unit
-that has [withdrawn the alias](#listlength-is-an-alias-of-the-len-measure) by
-defining its own competing `List.length` — a withdrawn alias is a separate
-problem, and the bare measure is still what the predicate needs.
+The same applies to the other qualified measures: `String.byte_size` inside a
+predicate now means `len` under the same conditions.
 
-Two limits worth stating, since the warning is narrower than "any call that
-enforces nothing":
+Two limits remain, both deliberate and unaffected by this change — the narrow
+slice only ever touches an `EField` chain that bottoms out at a bare,
+zero-arg, uppercase module `ECon`, exactly mirroring what `Desugar.desugar_expr`
+itself flattens for an ordinary call head:
 
-- It fires on a **qualified module path** (`List.length`, `M.N.f`), the shape
-  desugar would have flattened. A record **field** call — `{Cfg | c.cb(1) > 0}`
-  — enforces nothing either, but it is not a qualified call and is not reported
-  as one; calling it that, and offering the field name as a "bare spelling",
-  would be a false explanation.
-- A receiver that is itself a call (`f(x).g(y)`) is not rendered as a path and
-  stays silent.
+- A record **field** call — `{Cfg | c.cb(1) > 0}` — still enforces nothing and
+  is still not reported as a qualified call; treating it as one would offer
+  the field name as a false "bare spelling."
+- A receiver that is itself a call (`f(x).g(y)`) is still not rendered as a
+  path and stays silent.
+
+Measurement behind this: a stdlib-wide `--refine-report` sweep (all 112
+modules, pre-fix binary vs. post-fix binary, file-copy revert — no
+`git stash`) came back **byte-identical**, because no stdlib predicate uses a
+qualified spelling. The instrument was confirmed non-vacuous on the motivating
+repro instead: pre-fix, `{List(Int) | List.length(_) > 0}` records
+`0 proved, 0 violated, 1 skipped`; post-fix, the same program against an
+empty-list call records `0 proved, 1 violated, 0 skipped` — the obligation
+went from silently skipped to genuinely checked. See
+`specs/progress/2026-08-03-refine-desugar-predicate-qualified-spelling.md`
+for the full writeup, including why the task's originally-scoped anchor site
+(`Desugar.respan_ty`'s `TyRefine` arm) turned out to be dead code for this
+path — it is reachable only through derive-expansion span uniquification, not
+through ordinary function-signature desugaring, which is why the fix lives in
+a new `Desugar.desugar_ty` instead.
 
 ### A refinement in an interface signature enforces nothing
 

@@ -426,6 +426,15 @@ git log is authoritative for exact commits.
   its perf insights to a list that already contained them, so a function could
   report "stack-allocates 2 values" twice. The pass now returns immediately when
   the analysis it is handed is already its own output.
+- **A qualified spelling inside a refinement predicate now enforces the
+  contract**, e.g. `{List(Int) | List.length(_) > 0}` means exactly what
+  `{List(Int) | len(_) > 0}` means (previously it parsed, typechecked, and
+  silently enforced nothing — a warning added 2026-07-30 fixed the silence but
+  not the capability gap). A narrow desugar slice now flattens a module-path
+  call head found inside a `{T | …}` predicate the same way an ordinary call
+  head is flattened, without running the full expression desugarer over the
+  predicate. See
+  `specs/progress/2026-08-03-refine-desugar-predicate-qualified-spelling.md`.
 
 - **LSP semantic tokens: the `linear` and `affine` modifiers now follow the
   type system instead of use counts.** They were previously derived from how

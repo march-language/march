@@ -240,30 +240,40 @@ happens to be a byte length today, but the *name* suggests characters, and a
 connection made on a name that might later be corrected is a bug waiting to happen.
 Reach for `String.byte_size` in a guard; it says what it means.
 
-### A common mistake: `List.length` *inside* the predicate itself
+### A qualified spelling *inside* the predicate itself
 
 Everything above is about a **guard** — ordinary code, outside the `{...}`. Writing
-the qualified name **inside** the braces is a different, much easier mistake to
-make, and it looks completely reasonable:
+the qualified name **inside** the braces used to be a different, much easier mistake
+to make — it looked completely reasonable but silently did nothing:
 
 ```march
-fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end   -- enforces NOTHING
-fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end            -- enforces the contract
+fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
 ```
 
-A predicate is never desugared the way a function body is, so inside the braces
-`List.length` never becomes the dotted name the alias above is keyed on — it parses,
-typechecks, and silently discharges nothing, ever, for any caller. Since 2026-07-30
-this warns instead of compiling silently:
+As of 2026-08-03 both spellings above enforce the same contract. A refinement
+predicate is still not run through the general expression desugarer the way a
+function body is — no pipe desugaring, no multi-head-fn desugaring — but the one
+transformation that mattered here, flattening a module-path call head
+(`List.length(_)`) into the dotted form the `len` alias keys on, now runs over
+every `TyRefine` predicate (parameter, return, `let`-annotation, and record/variant
+field types alike). When the alias is live — no competing `List.length` in scope —
+the qualified spelling means exactly what `len` means, so `inner([])` above is
+rejected as a genuine precondition violation, the same as if you'd written `len(_)`.
 
-> `List.length` is a qualified call inside a refinement predicate. Predicates are not
-> desugared, so this is never reflected and the refinement enforces nothing. Use the
-> bare spelling `len` instead.
+If a unit has [withdrawn the alias](#listlength-is-an-alias-of-the-len-measure) by
+defining its own competing `List.length`, the qualified spelling still enforces
+nothing (correctly — the alias genuinely doesn't hold there), and the checker still
+warns, still recommending the bare `len(_)` spelling:
 
-The fix is always the bare measure name — `len(_)`, never `List.length(_)` — inside
-a predicate. The same applies to `String.byte_size`. This is a warning, not an error:
-the shape has always compiled, and turning it into a hard error would break code that
-happens to have this typo today.
+> `List.length` is a qualified call inside a refinement predicate. This spelling is
+> never reflected here, so the refinement enforces nothing. Use the bare spelling
+> `len` instead.
+
+The same applies to `String.byte_size`. Two shapes remain genuinely unhandled and
+still warn/stay silent as before: a record **field** call (`{Cfg | c.cb(1) > 0}`,
+never treated as a qualified call — see below) and a receiver that is itself a call
+(`f(x).g(y)`, not rendered as a path).
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:

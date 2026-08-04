@@ -531,6 +531,82 @@ let desugar_expr_error ~(sp : span) ?hint msg : unit =
                 pos_cnum = sp.start_col } in
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
+(* ---- Predicate qualified-spelling flattening (Task 8 prototype) ────────
+
+   NARROW SLICE ONLY — this does NOT run refinement predicates through the
+   general expression desugarer.  It replicates *only* the dotted-path
+   flattening [desugar_expr]'s own [EField] arm already applies to ordinary
+   call heads (`List.length(_)` → the [EVar] `"List.length"` that
+   [Refine_check.qualified_name]/the measure-alias machinery keys on), and
+   nothing else: no pipe desugaring, no multi-head-fn desugaring, no
+   conn-scope tracking, no sigil expansion, no ELetFn/ELetQ handling.
+   Constructs that a predicate should never plausibly contain (ELam, ELetFn,
+   ELetQ, ESend, ESpawn, EPipe, ESigil, EAssert, EDbg) are left untouched by
+   the catch-all rather than risked through unrelated desugaring paths. *)
+let rec flatten_pred_quals (e : expr) : expr =
+  let go = flatten_pred_quals in
+  match e with
+  | EField (ex, name, sp) ->
+    let rec flatten_module_path = function
+      | ECon (mod_name, [], _) -> Some mod_name.txt
+      | EField (inner, field, _) ->
+        (match flatten_module_path inner with
+         | Some prefix -> Some (prefix ^ "." ^ field.txt)
+         | None -> None)
+      | _ -> None
+    in
+    (match flatten_module_path ex with
+     | Some prefix ->
+       let qualified_txt = prefix ^ "." ^ name.txt in
+       if String.length name.txt > 0 && Char.uppercase_ascii name.txt.[0] = name.txt.[0]
+       then ECon ({ txt = qualified_txt; span = sp }, [], sp)
+       else EVar { txt = qualified_txt; span = sp }
+     | None -> EField (go ex, name, sp))
+  | EApp (f, args, sp)      -> EApp (go f, List.map go args, sp)
+  | ECon (n, args, sp)      -> ECon (n, List.map go args, sp)
+  | ETuple (es, sp)         -> ETuple (List.map go es, sp)
+  | EAtom (a, args, sp)     -> EAtom (a, List.map go args, sp)
+  | EIf (c, t, f, sp)       -> EIf (go c, go t, go f, sp)
+  | ECond (arms, sp)        ->
+    ECond (List.map (fun (c, b) -> (go c, go b)) arms, sp)
+  | EAnnot (ex, ty, sp)     -> EAnnot (go ex, ty, sp)
+  | EMatch (s, brs, sp)     ->
+    EMatch (go s,
+            List.map (fun br ->
+                { br with branch_guard = Option.map go br.branch_guard
+                        ; branch_body  = go br.branch_body }) brs,
+            sp)
+  | EBlock (es, sp)         -> EBlock (List.map go es, sp)
+  | ELet (b, sp)            -> ELet ({ b with bind_expr = go b.bind_expr }, sp)
+  | ERecord (fs, sp)        ->
+    ERecord (List.map (fun (n, e) -> (n, go e)) fs, sp)
+  | ERecordUpdate (b, fs, sp) ->
+    ERecordUpdate (go b, List.map (fun (n, e) -> (n, go e)) fs, sp)
+  | ELit _ | EVar _ | EHole _ | EResultRef _ -> e
+  | ELam _ | ELetFn _ | ELetQ _ | ESend _ | ESpawn _ | EPipe _ | ESigil _
+  | EAssert _ | EDbg _ -> e
+
+(** Structural [ty] walk whose ONLY effect is calling [flatten_pred_quals] on
+    every [TyRefine] predicate it finds — mirrors [Desugar.respan_ty]'s shape
+    (same constructor set) but respans nothing and touches nothing outside
+    the predicate expression.  Wired into every site that carries a surface
+    [ty] on the normal (non-derive) desugaring path: fn param/return types,
+    `let`-binding annotations, `EAnnot`, and record/variant field types —
+    everywhere [Refine_check.warn_predicate_ty] itself recurses, since that
+    warning is the ground truth for "everywhere a predicate can live". *)
+let rec desugar_ty (t : ty) : ty =
+  match t with
+  | TyCon (n, args)    -> TyCon (n, List.map desugar_ty args)
+  | TyVar _            -> t
+  | TyArrow (a, b)     -> TyArrow (desugar_ty a, desugar_ty b)
+  | TyTuple ts         -> TyTuple (List.map desugar_ty ts)
+  | TyRecord fs        -> TyRecord (List.map (fun (n, t) -> (n, desugar_ty t)) fs)
+  | TyLinear (l, t)    -> TyLinear (l, desugar_ty t)
+  | TyNat _            -> t
+  | TyNatOp (op, a, b) -> TyNatOp (op, desugar_ty a, desugar_ty b)
+  | TyChan _           -> t
+  | TyRefine (t, n, e) -> TyRefine (desugar_ty t, n, flatten_pred_quals e)
+
 (** Desugar [EPipe (l, r, sp)] → [EApp (r, [l], sp)].
     Works recursively; all other nodes are walked to catch nested pipes. *)
 let rec desugar_expr (e : expr) : expr =
@@ -654,7 +730,8 @@ let rec desugar_expr (e : expr) : expr =
       EBlock (go [] es, sp))
 
   | ELet (b, sp) ->
-    ELet ({ b with bind_expr = desugar_expr b.bind_expr }, sp)
+    ELet ({ b with bind_expr = desugar_expr b.bind_expr
+                  ; bind_ty  = Option.map desugar_ty b.bind_ty }, sp)
 
   | EMatch (scrut, branches, sp) ->
     let branches' = List.map (fun br ->
@@ -703,7 +780,7 @@ let rec desugar_expr (e : expr) : expr =
     ECond (List.map (fun (cond_e, body) -> (desugar_expr cond_e, desugar_expr body)) arms, sp)
 
   | EAnnot (ex, ty, sp) ->
-    EAnnot (desugar_expr ex, ty, sp)
+    EAnnot (desugar_expr ex, desugar_ty ty, sp)
 
   | EAtom (a, args, sp) ->
     EAtom (a, List.map desugar_expr args, sp)
@@ -758,7 +835,24 @@ let rec desugar_expr (e : expr) : expr =
     - The body of the merged clause is [EMatch(scrutinee, branches)].
     - If there is only one clause AND it is trivial (all named params, no
       guard), skip the match and return as-is — no-op for simple functions. *)
+
+(** Apply [desugar_ty] to every param type and the return type of [def],
+    without touching bodies/guards/params otherwise — a pure pre-pass so the
+    branches below (which only ever rewrite bodies/guards) don't need their
+    own copy of this. *)
+let desugar_fn_def_tys (def : fn_def) : fn_def =
+  let desugar_fn_param = function
+    | FPNamed p        -> FPNamed { p with param_ty = Option.map desugar_ty p.param_ty }
+    | FPDefault (p, e) -> FPDefault ({ p with param_ty = Option.map desugar_ty p.param_ty }, e)
+    | FPPat _ as p     -> p
+  in
+  { def with
+    fn_ret_ty  = Option.map desugar_ty def.fn_ret_ty;
+    fn_clauses = List.map (fun c -> { c with fc_params = List.map desugar_fn_param c.fc_params })
+        def.fn_clauses }
+
 let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
+  let def = desugar_fn_def_tys def in
   let clauses = def.fn_clauses in
   match clauses with
   | [] -> def   (* degenerate — validation pass will catch this *)
@@ -859,9 +953,16 @@ let rec desugar_decl (d : decl) : decl =
   | DLet (vis, b, sp) ->
     DLet (vis, { b with bind_expr = desugar_expr b.bind_expr }, sp)
 
-  | DType _ ->
-    (* Type declarations have no expressions to desugar. *)
-    d
+  | DType (vis, name, tparams, td, sp) ->
+    (* Field/variant-arg types can themselves carry `TyRefine` predicates
+       (`type T = { x : {Int | x > 0} }`) — flatten qualified spellings
+       there the same way fn signatures are handled above. *)
+    let td' = match td with
+      | TDAlias t    -> TDAlias (desugar_ty t)
+      | TDVariant vs -> TDVariant (List.map (fun v -> { v with var_args = List.map desugar_ty v.var_args }) vs)
+      | TDRecord fs  -> TDRecord (List.map (fun f -> { f with fld_ty = desugar_ty f.fld_ty }) fs)
+    in
+    DType (vis, name, tparams, td', sp)
 
   | DActor (vis, name, actor, sp) ->
     let init'     = desugar_expr actor.actor_init in

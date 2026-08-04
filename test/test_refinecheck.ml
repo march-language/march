@@ -6314,29 +6314,34 @@ end|}))
    (not an error — the module still compiles) naming both the qualified
    spelling found and the bare spelling that would actually work. *)
 let qualified_pred_suite =
-  [ gated "a qualified spelling in a predicate warns" (fun () ->
-        (* PRE-FIX: silent. The contract parses, typechecks, and enforces
-           NOTHING, because predicates are never desugared so List.length
-           stays an EField chain rather than the dotted EVar the alias keys
-           on. Looks like it works; doesn't. *)
+  [ gated "a qualified spelling in a predicate is now enforced (Task 8 narrow slice)" (fun () ->
+        (* PRE-Task-8: silent. The contract parsed, typechecked, and enforced
+           NOTHING, because predicates were never desugared so List.length
+           stayed an EField chain rather than the dotted EVar the alias keys
+           on. Looks like it works; didn't.
+
+           [Desugar.desugar_ty] (see lib/desugar/desugar.ml) now flattens a
+           module-path call head found INSIDE a `TyRefine` predicate the same
+           way [Desugar.desugar_expr]'s own `EField` arm already flattens an
+           ordinary call head — without running the rest of the expression
+           desugarer over the predicate.  When the alias is live (no
+           competing `List.length` in scope, the case here), that is enough
+           for the qualified spelling to mean exactly what `len` means: no
+           warning fires, and a genuinely violating call is caught. *)
+        March_refinecheck.Obligation.reset ();
         let ctx = March_errors.Errors.create () in
         March_refinecheck.Refine_check.check_module ctx
           (March_desugar.Desugar.desugar_module (parse {|
 mod QP1 do
   fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
-  fn main() : Int do inner([1]) end
+  fn main() : Int do inner([]) end
 end|}));
         let msgs = ctx.March_errors.Errors.diagnostics in
-        (* Pin the SUGGESTION, not just the spelling. `contains m "len"` would
-           be vacuous here — "len" is a substring of "List.length", so that
-           conjunct is implied by the first and the test would stay green if
-           the remedy said `length`, or said nothing at all. Match the whole
-           remedy clause instead. *)
-        Alcotest.(check bool) "warns about the qualified spelling" true
+        Alcotest.(check bool) "no qualified-call warning (alias is live)" false
           (List.exists (fun (d : March_errors.Errors.diagnostic) ->
-             let m = d.March_errors.Errors.message in
-             contains m "List.length"
-             && contains m "Use the bare spelling `len` instead") msgs))
+             contains d.March_errors.Errors.message "qualified call") msgs);
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "the empty list genuinely violates `List.length(_) > 0`" 1 violated)
 
   ; gated "the bare spelling does NOT warn" (fun () ->
         (* The false-positive control: the supported spelling must stay quiet. *)
