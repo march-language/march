@@ -11,6 +11,15 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **`forge cap audit` is now `forge cap inspect`.** Two commands named "audit"
+  answered different questions at different granularities — `forge audit` reads
+  dependency declarations from source, the other reads a built artifact — which
+  is the kind of collision people get wrong under pressure. `inspect` is the
+  right verb for reading facts off a thing that already exists, and matches the
+  `docker inspect` precedent. No alias: the command is days old and unreleased.
+
 ### Fixed
 
 - **A package's own constructor is no longer ambiguous against an unimported
@@ -25,17 +34,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
-- **`forge cap deps`: per-dependency capabilities, and drift detection.** The
-  check `forge cap audit` structurally cannot make — the audit sees a
-  program's whole-binary union, in which a dependency abusing a capability the
-  application already holds is invisible (any web app holds `IO.Network` and
-  `IO.FileRead`, so a compromised dependency exfiltrating files adds nothing).
-  This reports each dependency's own capability set, and `--check` fails when
-  one needs MORE than the reviewed baseline recorded by `--accept` — catching a
-  previously-pure library growing an effect class at the moment it enters the
-  tree, before it is built. Uses lattice subsumption, so narrowing a capability
-  does not gate and broadening within a family does. A dependency that cannot
-  be analyzed is reported as such, never as capability-free.
+- **`forge audit --inferred`: infer each dependency's capability set from its
+  code rather than its `needs` declarations.** Catches a capability builtin
+  called directly in a body with no matching `needs` — which the compiler only
+  warns about — at the cost of requiring each dependency to typecheck cleanly.
+  Every capability report now states what it does NOT cover: source-level
+  audits miss capabilities reached through stdlib or dependency functions,
+  binary audits are a whole-program union that cannot attribute a capability to
+  a specific dependency. The two are complementary, and neither is a complete
+  account on its own.
 
 - **`march caps <files...>`: a package's inferred capability set as JSON.**
   Loads the whole package the way `march check` does, so sibling and
@@ -47,7 +54,7 @@ git log is authoritative for exact commits.
   at all and a nonzero exit, rather than a partial one.
 - **`/docs/capability-audit/` — a capability-audit guide written for a security
   audience.** Covers `forge audit` (dependency declarations, diffed against a
-  baseline) and `forge cap audit` (what a compiled artifact holds), what each
+  baseline) and `forge cap inspect` (what a compiled artifact holds), what each
   proves, and a threat-model table of what neither covers. States plainly that
   an undeclared capability *builtin* is currently a compiler warning rather than
   an error, so a declared set is a floor for capability-passing code rather than
@@ -125,7 +132,7 @@ git log is authoritative for exact commits.
   scheduler's own). Advisory capabilities are printed before the run so a clean
   run is never mistaken for full containment.
 
-- **`forge cap audit <binary>`: list the capabilities of a compiled March
+- **`forge cap inspect <binary>`: list the capabilities of a compiled March
   executable.** Executables are now linked with dead-strip (72–79% smaller),
   so unused capability runtime code is physically absent, and codegen embeds
   `__march_cap_*` marker symbols for the capabilities the emitted code
@@ -136,7 +143,7 @@ git log is authoritative for exact commits.
   analysis stops at the C boundary — and the gate fails closed on it unless
   `--allow-foreign` is passed; the same fail-closed rule applies to stripped
   or unstripped binaries (`--json` always includes a `coverage` field).
-  `march --dump-caps` prints a module's inferred capability set as JSON.
+  `march caps <files...>` prints a package's inferred capability set as JSON.
 - **`march --refine-suggest-post <fn>`: suggest a postcondition.** Where
   `--refine-suggest` proposes the parameter contract that discharges a
   function's own unproven obligations, this proposes the *return* contract that

@@ -98,6 +98,40 @@ let caps_of_dir (dir : string) : string list =
   |> List.concat_map needs_in_decls
   |> sorted_uniq
 
+(** The capability set a package's code INFERS, via `march caps`, rather than
+    the set it declares.
+
+    The two miss opposite things, which is why this is a mode rather than a
+    replacement (measured, see the coverage note in [scope_note]):
+    - declared misses a capability builtin called directly in a body with no
+      matching [needs] — that is a warning, not an error
+      (specs/todos/2026-08-03-undeclared-capability-is-only-a-warning.md);
+    - inferred misses a capability reached through a stdlib or dependency
+      FUNCTION rather than a builtin, because it reads each package's OWN
+      closures.
+
+    Inferred needs the package to typecheck cleanly, which declared does not,
+    so it returns [Error] where [caps_of_dir] would return a partial answer.
+    Callers must surface that rather than treating it as "asks for nothing". *)
+let inferred_caps_of_dir ~env_prefix (dir : string) : (string list, string) result =
+  match Cap_package.of_package ~root:dir ~env_prefix with
+  | Ok t -> Ok t.Cap_package.caps
+  | Error e -> Error e
+
+(** What this audit does NOT cover. Printed with every report: a bare
+    capability list reads as a complete account of what a dependency can do,
+    and neither extraction mode is that. *)
+let scope_note ~inferred =
+  if inferred then
+    "note: inferred from each package's own code. Does not cover capabilities
+    \      reached through a stdlib or dependency function, or through FFI.
+    \      `forge cap inspect <binary>` is the sound check for a built artifact."
+  else
+    "note: read from `needs` declarations. Does not cover a capability builtin
+    \      called directly in a body without a matching `needs` (a warning, not
+    \      an error), or anything reached through FFI. `forge cap inspect <binary>`
+    \      is the sound check for a built artifact."
+
 (* ------------------------------------------------------------------ *)
 (*  Dependency enumeration                                             *)
 (* ------------------------------------------------------------------ *)
@@ -121,8 +155,16 @@ type dep_caps = {
   dc_installed : bool;
 }
 
-let collect (proj : Project.project) : dep_caps list =
+let collect ?(inferred = false) (proj : Project.project) : dep_caps list =
   let root = proj.Project.root in
+  (* Each dependency is analyzed in ITS OWN scope. Using the application's
+     lib path pulls the app's sources onto MARCH_LIB_PATH, so the app's own
+     type errors abort every dependency's analysis. *)
+  let env_for dir =
+    match Project.load_from_dir dir with
+    | Ok dp -> Cmd_build.lib_path_env dp
+    | Error _ -> ""
+  in
   let tbl : (string, dep_caps) Hashtbl.t = Hashtbl.create 32 in
   let rec visit ~base ~name ~dep =
     if not (Hashtbl.mem tbl name) then begin
@@ -130,7 +172,17 @@ let collect (proj : Project.project) : dep_caps list =
       let installed = Sys.file_exists dir && Sys.is_directory dir in
       Hashtbl.replace tbl name
         { dc_name = name;
-          dc_caps = (if installed then caps_of_dir dir else []);
+          dc_caps =
+            (if not installed then []
+             else if inferred then
+               (match inferred_caps_of_dir ~env_prefix:(env_for dir) dir with
+                | Ok caps -> caps
+                | Error e ->
+                  (* Loud, and NOT an empty set: "could not analyze" and
+                     "asks for nothing" must never look the same. *)
+                  Printf.eprintf "forge audit: %s: %s\n%!" name e;
+                  caps_of_dir dir)
+             else caps_of_dir dir);
           dc_installed = installed };
       match Project.load_from_dir dir with
       | Ok p -> List.iter (fun (cn, cd) -> visit ~base:dir ~name:cn ~dep:cd) p.Project.deps
@@ -263,8 +315,8 @@ let string_of_change = function
 (* ------------------------------------------------------------------ *)
 
 (** Print the capability set of every dependency. *)
-let show (proj : Project.project) : unit =
-  let deps = collect proj in
+let show ?(inferred = false) (proj : Project.project) : unit =
+  let deps = collect ~inferred proj in
   if deps = [] then print_endline "no dependencies"
   else
     List.iter
@@ -273,10 +325,12 @@ let show (proj : Project.project) : unit =
           Printf.printf "  %s — not installed (run `forge deps`)\n" d.dc_name
         else if d.dc_caps = [] then Printf.printf "  %s — no capabilities\n" d.dc_name
         else Printf.printf "  %s — %s\n" d.dc_name (String.concat ", " d.dc_caps))
-      deps
+      deps;
+  print_endline "";
+  print_endline (scope_note ~inferred)
 
-let record (proj : Project.project) : (unit, string) result =
-  let deps = collect proj in
+let record ?(inferred = false) (proj : Project.project) : (unit, string) result =
+  let deps = collect ~inferred proj in
   let missing = List.filter (fun d -> not d.dc_installed) deps in
   if missing <> [] then
     Error
@@ -299,9 +353,9 @@ let record (proj : Project.project) : (unit, string) result =
 
 (** Compare against the recorded baseline. Returns the exit code: 0 when the
     audit passes, 1 when a dependency gained authority. *)
-let check_proj (proj : Project.project) : int =
+let check_proj ?(inferred = false) (proj : Project.project) : int =
   let path = baseline_path proj.Project.root in
-  let current = collect proj in
+  let current = collect ~inferred proj in
   if not (Sys.file_exists path) then begin
     print_endline "no capability baseline recorded.";
     print_endline "";
@@ -343,10 +397,10 @@ let check_proj (proj : Project.project) : int =
 
 (** CLI entry. [record] rewrites the baseline; otherwise compare against it.
     Returns the process exit code so the caller can gate CI on it. *)
-let run ?(record_mode = false) () : (int, string) result =
+let run ?(record_mode = false) ?(inferred = false) () : (int, string) result =
   match Project.load () with
   | Error e -> Error e
   | Ok proj ->
     if record_mode then
-      match record proj with Ok () -> Ok 0 | Error m -> Error m
-    else Ok (check_proj proj)
+      match record ~inferred proj with Ok () -> Ok 0 | Error m -> Error m
+    else Ok (check_proj ~inferred proj)

@@ -2,7 +2,7 @@
 
    This is the check the whole-binary audit structurally cannot make: a
    dependency abusing a capability the application already holds adds nothing
-   to the program-wide union and passes `forge cap audit --deny` cleanly. The
+   to the program-wide union and passes `forge cap inspect --deny` cleanly. The
    per-package delta catches it, at the moment the dependency enters the tree.
 
    The subsumption direction is the part that has gone wrong before (twice, in

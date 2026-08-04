@@ -1,7 +1,8 @@
-# `forge cap deps` follow-ups
+# Dependency capability audit — follow-ups
 
-Shipped 2026-08-04 alongside `march caps` (package-level capability
-computation). Design context: `specs/2026-08-03-forge-cap-audit-design.md` §4.3.
+Shipped 2026-08-04. `forge audit --inferred` was folded into `forge audit --inferred`
+(#167 owns the dependency audit; the inferred extraction is the mode that
+closes its declared-set gap). `march caps` is the underlying extractor. Design context: `specs/2026-08-03-forge-cap-audit-design.md` §4.3.
 
 - [ ] **Require a toolchain `march` that supports `caps`.** `Cmd_build.lib_path_env`
   prepends `~/.march/versions/<v>/bin` to `PATH`, so an installed compiler that
@@ -29,7 +30,7 @@ computation). Design context: `specs/2026-08-03-forge-cap-audit-design.md` §4.3
   rather than needing a fully clean tree on day one.
 
 - [ ] **Wire into `forge add` / `forge outdated`.** Today the check is
-  explicit (`forge cap deps --check`). The moment that matters most is when a
+  explicit (`forge audit`). The moment that matters most is when a
   dependency is added or upgraded — surface the delta there, and require
   acknowledgement before writing the lockfile. That is the xz/event-stream
   moment. Needs the speed item first, or every `forge add` pays minutes.

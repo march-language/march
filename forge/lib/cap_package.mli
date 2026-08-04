@@ -1,7 +1,7 @@
 (** Per-package capability sets, and the diff between two versions of one.
 
     This is the piece the whole-binary audit structurally cannot provide.
-    [forge cap audit --deny] sees the UNION of a program's capabilities, so a
+    [forge cap inspect --deny] sees the UNION of a program's capabilities, so a
     dependency abusing a capability the application already holds is invisible
     to it — any web app holds [IO.Network] and [IO.FileRead], and a compromised
     dependency exfiltrating files adds no new capability to that union.
@@ -48,9 +48,3 @@ val widens : change list -> bool
 (** Whether any capability was gained — the condition an upgrade gate should
     require acknowledgement for. Losing a capability is safe and never gates. *)
 
-val load_baseline : string -> (string * string list) list
-(** Reviewed capability set per dependency, from [<root>/.forge/cap-baseline].
-    Empty when no baseline has been recorded. *)
-
-val save_baseline : string -> (string * string list) list -> unit
-(** Record the current sets as reviewed. *)
