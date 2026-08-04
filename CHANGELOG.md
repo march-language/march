@@ -220,6 +220,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`march fmt` keeps a run of imports, or a run of capability declarations,
+  tight.** Every top-level declaration used to be separated by a blank line,
+  which turned a block of eight imports into eight paragraphs. A run of
+  `import`/`alias`, or a run of `needs`/`cap`/`proof cap`, is now emitted with
+  no blank lines inside it; the blank line at the boundary of the run, and
+  between everything else, is unchanged. Imports and capabilities count as
+  different runs, so the two blocks stay separated from each other.
+
 - **Refinement violations now name the offending parameter and callee, and
   underline that argument.** The message opened with a bare "argument does not
   satisfy precondition `_ != 0`" — on a call with several arguments that does
@@ -298,6 +306,23 @@ git log is authoritative for exact commits.
   your handlers block.
 
 ### Fixed
+
+- **Syntax highlighting broke on any file using a dotted module name.** The
+  tree-sitter grammar accepted only a single-segment `mod Name do`, so
+  `mod Mgrep.Search.Stream do` failed at line 1 and every construct after it
+  was highlighted as an error. Six constructs the compiler has long accepted
+  were missing from the grammar entirely: dotted module names, `import` /
+  `alias` / `needs` / `cap` declarations, `pfn` and `ptype`, refinement types
+  (`{ Int | _ > 0 }`, including the binder form), qualified type paths
+  (`A.B.Mode`), and qualified calls (`A.B.C.go(x)`). Across a 199-file corpus
+  of stdlib and real projects, files containing a parse error drop from 188 to
+  150 with no file regressing. The remaining gaps are tracked in
+  `specs/todos/2026-08-04-tree-sitter-grammar-drift.md`.
+
+- **`march fmt` re-emitted `cap no_panic` as `opts no_panic`.** There is no
+  `opts` keyword in March, so formatting any file with a capability
+  declaration produced a file that no longer parsed — and `fmt` was therefore
+  not idempotent on it.
 
 - **~20 advertised LSP capabilities were dead code; all now answer.** References,
   rename, formatting, semantic tokens, folding ranges, signature help, call
