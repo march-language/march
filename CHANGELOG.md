@@ -33,6 +33,43 @@ git log is authoritative for exact commits.
   *under*-reports, which for a capability record certifies a package as
   needing less than it does. A package that does not typecheck yields no set
   at all and a nonzero exit, rather than a partial one.
+- **`/docs/capability-audit/` — a capability-audit guide written for a security
+  audience.** Covers `forge audit` (dependency declarations, diffed against a
+  baseline) and `forge cap audit` (what a compiled artifact holds), what each
+  proves, and a threat-model table of what neither covers. States plainly that
+  an undeclared capability *builtin* is currently a compiler warning rather than
+  an error, so a declared set is a floor for capability-passing code rather than
+  a ceiling on all behaviour.
+
+- **`forge audit` — capability diffing on dependency update.** Every March
+  package declares the capabilities it needs and the compiler enforces those
+  declarations, so the authority a dependency holds is readable from its source
+  rather than guessed at. `forge audit` extracts the capability set of every
+  transitive dependency and compares it against a recorded baseline:
+
+  ```
+  $ forge audit
+    ! liba — now ALSO needs: IO.FileWrite, IO.NetConnect
+
+  1 dependency is asking for capabilities it did not have.
+  Review the change, then accept it with `forge audit --record`.
+  ```
+
+  Exits non-zero on that, so CI can gate a dependency update on it. A dependency
+  that *stops* asking for a capability is reported but does not fail the audit —
+  narrowing is the direction you want, and failing on it would train people to
+  ignore the gate.
+
+  The baseline lives in `forge.caps.lock` rather than in `forge.lock`, because
+  `forge deps` rewrites the lockfile wholesale from resolution output and would
+  silently erase a capability set recorded there — leaving a gate that compares
+  nothing and reports success.
+
+  Scope, stated plainly: this reports what a package's source *declares*. It is
+  exactly as trustworthy as the compiler's enforcement of `needs`, which is
+  strong for March code and says nothing about what an `extern` block's foreign
+  code actually does — a package that grows an `extern` shows up as
+  `IO.Foreign`.
 
 - **`forge refine --postconditions`, `--apply`, and an editor action complete
   the postcondition half.** The compiler surface shipped previously; this adds
