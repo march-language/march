@@ -338,8 +338,9 @@ to build in the first place, rather than cleaning them up afterwards:
   to be made of.
 
 Two caveats worth stating plainly. This is a *design argument*, not a mechanized
-proof — it is not among the properties checked in Lean, and no runtime detector
-would tell you if it were wrong. And it covers the data you write: the runtime
+proof — nothing in March is mechanically verified today (a Lean 4 metatheory
+effort is planned, not started), and no runtime detector would tell you if the
+argument were wrong. And it covers the data you write: the runtime
 does build self-referential shapes internally (a self-recursive closure captures
 itself), which are handled by compiler-inserted drops on specific paths rather
 than by reference counting alone. The residual risk therefore sits in the

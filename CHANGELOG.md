@@ -23,6 +23,42 @@ git log is authoritative for exact commits.
   postcondition for `f`" action alongside the existing precondition one,
   sharing that same splice so the CLI and the editor produce identical bytes.
 
+- **`march --cap-sandbox`: opt-in self-imposed capability sandbox.** Embeds a
+  deny-default profile derived from the module's own inferred capabilities and
+  applies it before any user code runs, so a binary deployed where forge is not
+  the launcher (systemd, a container supervisor) still drops the privileges it
+  never needed. Defense in depth rather than a new guarantee — whoever builds
+  the binary chooses whether to compile it in, and the profile grants exactly
+  what the program does, so it constrains escalation beyond the program's
+  intended behaviour, not the behaviour itself. Off by default; default builds
+  are unchanged. macOS only; on other platforms it refuses rather than
+  installing a filter weaker than it claims.
+
+- **`forge cap run [--allow-only CAPS] BINARY`: run a compiled binary under an
+  OS-enforced capability sandbox.** The policy is imposed from outside, so
+  nothing in the binary is trusted — `--allow-only` lets you supply the policy
+  for untrusted code, since a policy derived from the binary's own claim only
+  defeats under-claiming. macOS uses `sandbox-exec` (SBPL), Linux uses
+  bubblewrap. Which capabilities are genuinely enforceable was measured, not
+  assumed: network, file-write and process-spawn are enforced, while
+  `IO.FileRead`, `IO.Clock`, `IO.Spawn` and `IO.Random` are reported as
+  **advisory** (denying them aborts the runtime — the loader must read system
+  libraries, and clock/thread syscalls are indistinguishable from the GC and
+  scheduler's own). Advisory capabilities are printed before the run so a clean
+  run is never mistaken for full containment.
+
+- **`forge cap audit <binary>`: list the capabilities of a compiled March
+  executable.** Executables are now linked with dead-strip (72–79% smaller),
+  so unused capability runtime code is physically absent, and codegen embeds
+  `__march_cap_*` marker symbols for the capabilities the emitted code
+  actually references. The audit reads both channels, renders witnesses
+  (which runtime entries back each cap), and gates CI with `--deny CAP` /
+  `--allow-only CAPS` through the capability lattice (denying `IO` catches
+  `IO.FileRead`). Foreign code (FFI) is reported as a scope limitation —
+  analysis stops at the C boundary — and the gate fails closed on it unless
+  `--allow-foreign` is passed; the same fail-closed rule applies to stripped
+  or unstripped binaries (`--json` always includes a `coverage` field).
+  `march --dump-caps` prints a module's inferred capability set as JSON.
 - **`march --refine-suggest-post <fn>`: suggest a postcondition.** Where
   `--refine-suggest` proposes the parameter contract that discharges a
   function's own unproven obligations, this proposes the *return* contract that

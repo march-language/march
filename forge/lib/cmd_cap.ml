@@ -327,3 +327,226 @@ let query ~dir () =
       Printf.printf "no capability declarations found under %s\n%!" root;
     Ok ()
   end
+
+(* ------------------------------------------------------------------ *)
+(* forge cap audit <binary> — read capabilities from a compiled       *)
+(* executable (specs/2026-08-03-forge-cap-audit-design.md §5).        *)
+(* ------------------------------------------------------------------ *)
+
+let foreign_caps = ["IO.Foreign"; "IO.Foreign.Blocking"]
+
+let is_foreign c = List.mem c foreign_caps
+
+(* Witness column: which runtime symbols back a cap (from the symbol
+   channel), so the report is actionable rather than a bare list. *)
+let witnesses_for (t : Cap_binary.t) cap =
+  List.filter
+    (fun s ->
+       match March_caps.Cap_symbols.cap_of_symbol s with
+       | Some c -> c = cap
+       | None -> false)
+    t.Cap_binary.rt_symbols
+
+let build_str = function
+  | Cap_binary.Dead_stripped -> "dead-stripped"
+  | Cap_binary.Unstripped -> "UNSTRIPPED"
+  | Cap_binary.Symbols_removed -> "symbols-removed"
+
+(* coverage: "full" only when every channel we rely on is intact and no
+   foreign code is present.  Anything else names its limitation — the gate
+   fails closed on all of them (design §5.2, §8). *)
+let coverage_of (t : Cap_binary.t) =
+  match t.Cap_binary.build with
+  | Cap_binary.Unstripped -> `Limited "unstripped build"
+  | Cap_binary.Symbols_removed -> `Limited "symbols removed"
+  | Cap_binary.Dead_stripped ->
+    if List.exists is_foreign t.Cap_binary.caps then `Partial "foreign code"
+    else if t.Cap_binary.markers = [] then
+      (* Symbols alone never certify.  Raw symbol presence cannot separate
+         "stripped, genuinely uses this" from "linked whole by a compiler
+         that predates markers" — measured on a real artifact carrying 79 of
+         82 cap symbols while reporting coverage:full.  Only markers, emitted
+         from the symbols codegen resolved and pinned through dead-strip,
+         support a full-coverage claim. *)
+      `Limited "no capability markers (pre-marker compiler, or not a March binary)"
+    else `Full
+
+let coverage_str = function
+  | `Full -> "full"
+  | `Partial r -> Printf.sprintf "partial (%s)" r
+  | `Limited r -> Printf.sprintf "limited (%s)" r
+
+let render_report ~bin (t : Cap_binary.t) =
+  let buf = Buffer.create 512 in
+  let non_foreign = List.filter (fun c -> not (is_foreign c)) t.Cap_binary.caps in
+  Buffer.add_string buf (Printf.sprintf "Capabilities — %s\n" bin);
+  (match t.Cap_binary.build with
+   | Cap_binary.Unstripped ->
+     Buffer.add_string buf
+       "  (not listed: this binary was linked without dead-strip, so every\n\
+       \   runtime capability symbol is present regardless of use.  Rebuild\n\
+       \   with a current compiler for a meaningful capability list.)\n"
+   | Cap_binary.Symbols_removed ->
+     Buffer.add_string buf
+       "  (not listed: symbol names were stripped from this binary; the\n\
+       \   marker and symbol channels are unavailable.)\n"
+   | Cap_binary.Dead_stripped ->
+     if non_foreign = [] then
+       Buffer.add_string buf "  (none — no capability-bearing runtime entries present)\n"
+     else
+       List.iter
+         (fun cap ->
+            let w = witnesses_for t cap in
+            let w_str = match w with
+              | [] -> "" | l -> "  [" ^ String.concat ", " l ^ "]" in
+            Buffer.add_string buf (Printf.sprintf "  %-22s%s\n" cap w_str))
+         non_foreign);
+  if List.exists is_foreign t.Cap_binary.caps then begin
+    let blocking = List.mem "IO.Foreign.Blocking" t.Cap_binary.caps in
+    Buffer.add_string buf
+      (Printf.sprintf
+         "\nForeign code (IO.Foreign%s) — extern C declarations present\n\
+         \  Capability analysis stops at the FFI boundary. The caps above\n\
+         \  describe March code only; what the linked C code does is outside\n\
+         \  the compiler's knowledge and is not covered by this report.\n"
+         (if blocking then ", includes blocking externs" else ""));
+  end;
+  Buffer.add_string buf
+    (Printf.sprintf "\nbuild: %s    coverage: %s\n"
+       (build_str t.Cap_binary.build)
+       (coverage_str (coverage_of t)));
+  Buffer.contents buf
+
+let render_json ~bin (t : Cap_binary.t) =
+  let strs l = `List (List.map (fun s -> `String s) l) in
+  Yojson.Safe.pretty_to_string
+    (`Assoc [
+        ("binary", `String bin);
+        ("caps", strs t.Cap_binary.caps);
+        ("markers", strs t.Cap_binary.markers);
+        ("rt_symbols", strs t.Cap_binary.rt_symbols);
+        ("build", `String (build_str t.Cap_binary.build));
+        ("coverage", `String (coverage_str (coverage_of t)));
+        ("manifest",
+         match t.Cap_binary.manifest with
+         | None -> `Null
+         | Some j ->
+           (try Yojson.Safe.from_string j with _ -> `String j));
+      ])
+
+(* Gate evaluation.  Fail-closed: any coverage other than `Full fails unless
+   the specific limitation was explicitly allowed (--allow-foreign covers
+   exactly the foreign-code case, nothing else). *)
+let gate_violations ~deny ~allow_only ~allow_foreign (t : Cap_binary.t) =
+  let subsumes = March_caps.Cap_lattice.cap_subsumes in
+  let violations = ref [] in
+  (match coverage_of t with
+   | `Full -> ()
+   | `Partial _ when allow_foreign -> ()
+   | (`Partial _ | `Limited _) as c ->
+     violations :=
+       Printf.sprintf
+         "coverage is %s — gate requires full coverage%s"
+         (coverage_str c)
+         (match c with
+          | `Partial _ -> " (pass --allow-foreign to accept FFI)"
+          | _ -> "")
+       :: !violations);
+  let effective = List.filter (fun c -> not (is_foreign c)) t.Cap_binary.caps in
+  List.iter
+    (fun d ->
+       List.iter
+         (fun c ->
+            if subsumes d c then
+              violations :=
+                Printf.sprintf "denied capability: %s (via --deny %s)" c d
+                :: !violations)
+         effective)
+    deny;
+  (match allow_only with
+   | None -> ()
+   | Some allowed ->
+     List.iter
+       (fun c ->
+          if not (List.exists (fun a -> subsumes a c) allowed) then
+            violations :=
+              Printf.sprintf "capability not in --allow-only set: %s" c
+              :: !violations)
+       effective);
+  List.rev !violations
+
+let audit ~bin ~json ~deny ~allow_only ~allow_foreign () =
+  match Cap_binary.read bin with
+  | Error e -> Error e
+  | Ok t ->
+    if json then print_string (render_json ~bin t)
+    else print_string (render_report ~bin t);
+    (match gate_violations ~deny ~allow_only ~allow_foreign t with
+     | [] -> Ok ()
+     | vs ->
+       List.iter (fun v -> Printf.eprintf "forge cap audit: %s\n%!" v) vs;
+       Error (Printf.sprintf "%d gate violation(s)" (List.length vs)))
+
+(* ------------------------------------------------------------------ *)
+(* forge cap run — execute a binary under an externally imposed        *)
+(* capability sandbox (design §4.3, mechanism B).                      *)
+(* ------------------------------------------------------------------ *)
+
+(* Policy source.  For an UNTRUSTED binary the caller supplies --allow-only:
+   deriving the policy from the binary's own claim only defeats
+   under-claiming, since a hostile binary can over-claim freely. *)
+let cap_run ~bin ~args ~allow_only () =
+  match Cap_binary.read bin with
+  | Error e -> Error e
+  | Ok t ->
+    let caps = match allow_only with Some l -> l | None -> t.Cap_binary.caps in
+    let advisory =
+      List.filter
+        (fun c ->
+           match Cap_sandbox.enforceability c with
+           | Cap_sandbox.Advisory _ -> true
+           | Cap_sandbox.Enforced -> false)
+        caps
+    in
+    (* Report what is NOT being enforced before running, so a green run is
+       never mistaken for full containment (design §8). *)
+    if allow_only = None then
+      Printf.eprintf
+        "forge cap run: policy taken from the binary's own claim; pass \
+         --allow-only for untrusted code\n%!";
+    (* An empty policy is the TIGHTEST possible sandbox, which fails safe but
+       fails confusingly: the program breaks and nothing says why.  Name the
+       reason, and distinguish "genuinely needs nothing" from "we could not
+       read what it needs". *)
+    if caps = [] then begin
+      let why =
+        match allow_only with
+        | Some _ -> "--allow-only was given an empty capability list"
+        | None -> (
+            match t.Cap_binary.build with
+            | Cap_binary.Symbols_removed ->
+                "the binary's symbols were stripped, so its capabilities \
+                 could not be read"
+            | Cap_binary.Unstripped ->
+                "the binary was linked without dead-strip, so its capability \
+                 list was withheld as unreliable"
+            | Cap_binary.Dead_stripped ->
+                "the binary genuinely declares no capabilities")
+      in
+      Printf.eprintf
+        "forge cap run: running with NO capabilities granted — %s.\n\
+         forge cap run: if the program misbehaves, this is why; pass \
+         --allow-only to grant explicitly.\n%!"
+        why
+    end;
+    List.iter
+      (fun c ->
+         match Cap_sandbox.enforceability c with
+         | Cap_sandbox.Advisory why ->
+           Printf.eprintf "forge cap run: %s is ADVISORY — %s\n%!" c why
+         | Cap_sandbox.Enforced -> ())
+      advisory;
+    (match Cap_sandbox.run ~caps ~binary:bin ~args with
+     | Error e -> Error e
+     | Ok 0 -> Ok ()
+     | Ok rc -> Error (Printf.sprintf "process exited %d" rc))

@@ -1458,7 +1458,25 @@ let mangle_extern_tbl : (string, string) Hashtbl.t =
     builtins;
   tbl
 
+(* Capability-marker support (specs/2026-08-03-forge-cap-audit-design.md
+   §4.3, mechanism C): record every C symbol resolved for emission, so
+   emit_module can emit @__march_cap_* markers for exactly the capabilities
+   the emitted code references.  A module-level accumulator with an explicit
+   reset — rather than a Llvm_ctx field — because [mangle_extern]'s
+   [string -> string] signature is frozen by its jit/repl_jit callers.
+   [Llvm_toplevel.emit_module] resets it at the start of each emission, so
+   multi-module processes (tests, forge) cannot leak symbols across modules.
+
+   The declare PREAMBLE must never feed this table: [emit_preamble] declares
+   every builtin unconditionally, so recording there would mark every cap in
+   every binary (the app-invariance trap — design §3).  [declare_text]
+   resolves via [b.c_name] directly and never calls [mangle_extern]. *)
+let called_syms : (string, unit) Hashtbl.t = Hashtbl.create 64
+let reset_called_syms () = Hashtbl.reset called_syms
+let called_c_symbols () =
+  Hashtbl.fold (fun k () acc -> k :: acc) called_syms []
+
 let mangle_extern (name : string) : string =
   match Hashtbl.find_opt mangle_extern_tbl name with
-  | Some c -> c
-  | None -> name
+  | Some c -> Hashtbl.replace called_syms c (); c
+  | None -> Hashtbl.replace called_syms name (); name

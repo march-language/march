@@ -1,0 +1,33 @@
+(** Read capabilities from a compiled March binary.
+
+    Three channels, cross-checked (specs/2026-08-03-forge-cap-audit-design.md
+    §4.2-§4.4):
+    - [markers]: [__march_cap_*] globals emitted by codegen from the C symbols
+      the module actually referenced — precise, March-level.
+    - [rt_symbols]: capability-bearing runtime entry points present in the
+      symbol table ([March_caps.Cap_symbols.table]) — meaningful because
+      dead-strip removes unused ones.
+    - [manifest]: raw JSON of an embedded [MARCHCAP\x01] blob, when present.
+
+    The reader never assumes stripping happened: a binary carrying every cap
+    symbol was almost certainly linked without dead-strip and is classified
+    [Unstripped] — reporting its full symbol set as "capabilities" would be
+    the app-invariance failure (design §3). *)
+
+type build_kind =
+  | Dead_stripped      (** normal capstrip executable *)
+  | Unstripped         (** every cap symbol present — strip did not apply *)
+  | Symbols_removed    (** names stripped; symbol/marker channels unavailable *)
+
+type t = {
+  caps : string list;        (** normalized; markers preferred, symbols as fallback *)
+  markers : string list;     (** cap paths recovered from [__march_cap_*] globals *)
+  rt_symbols : string list;  (** cap-bearing runtime symbols present *)
+  build : build_kind;
+  manifest : string option;  (** raw JSON; [None] when absent *)
+}
+
+val read : string -> (t, string) result
+(** [read path] inspects the binary at [path].  Errors on unreadable files and
+    on a binary carrying MULTIPLE manifest blobs (a planted second blob must
+    never shadow the real one — design §6). *)

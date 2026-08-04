@@ -1660,7 +1660,57 @@ static void main_fn_green_thread(void *arg) {
 /* Spawn the March main() function as a green thread so it runs inside the
  * scheduler and can use actor_call / task_await without blocking the OS thread.
  * Call this before march_run_scheduler(); the scheduler loop picks it up. */
+
+/* ── Self-imposed capability sandbox (opt-in via `march --cap-sandbox`) ──
+ *
+ * Lives HERE rather than in its own translation unit on purpose: march_spawn_main
+ * calls it unconditionally, and every harness that links the runtime keeps its
+ * own source list (bin/main.ml, test/dune x4, test/test_helpers.ml, the REPL's
+ * JIT .so builder). A separate file has to be added to all of them or the link
+ * breaks — which it did, taking out `march repl` and 33 tests.
+ *
+ * The compiler embeds MARCH_CAP_PROFILE, an SBPL profile derived from the
+ * module's own capabilities. Defense in depth, not a new guarantee: whoever
+ * builds the binary chooses whether to compile it in, and the profile grants
+ * exactly what the program does, so it constrains escalation beyond the
+ * program's behaviour rather than the behaviour itself. Externally imposed
+ * enforcement (`forge cap run --allow-only`) is the stronger mechanism. */
+#ifdef MARCH_CAP_PROFILE
+#if defined(__APPLE__)
+extern int sandbox_init(const char *profile, uint64_t flags, char **errorbuf);
+extern void sandbox_free_error(char *errorbuf);
+void march_sandbox_install(void) {
+    char *err = NULL;
+    if (sandbox_init(MARCH_CAP_PROFILE, 0, &err) != 0) {
+        /* Fail CLOSED: a sandbox that silently fails to install is worse than
+         * none, because the operator believes the process is contained. */
+        fprintf(stderr,
+                "march: capability sandbox failed to install (%s); refusing to "
+                "run uncontained\n", err ? err : "unknown error");
+        if (err) sandbox_free_error(err);
+        exit(70);
+    }
+}
+#else
+void march_sandbox_install(void) {
+    /* Linux self-sandboxing needs an in-process seccomp-bpf filter; the
+     * mount-namespace allow-list forge uses externally is unavailable to a
+     * process sandboxing itself post-exec. Refuse rather than install a filter
+     * that enforces less than the profile claims. */
+    fprintf(stderr,
+            "march: --cap-sandbox is not implemented on this platform; use "
+            "`forge cap run --allow-only ...` for external enforcement\n");
+    exit(70);
+}
+#endif
+#else
+void march_sandbox_install(void) { /* not built with --cap-sandbox */ }
+#endif
+
 void march_spawn_main(void (*fn)(void)) {
+    /* Drop privileges before the scheduler starts and before any user code
+     * runs.  No-op unless built with --cap-sandbox. */
+    march_sandbox_install();
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
             &g_sched_initialized, &expected, 1,
