@@ -320,6 +320,12 @@ git log is authoritative for exact commits.
   produces three edits, `callHierarchy` finds the caller, `signatureHelp` reports
   `double(Int)` — rather than only checking that a reply arrived.
 
+- **Document symbols no longer describe the whole prelude.** The same leak as
+  semantic tokens, in a different handler: `documentSymbol` folded the whole
+  analysis, so a one-function file reported 6936 symbols carrying line numbers
+  from other files — and the editor's outline and breadcrumbs are built from
+  that response. Found by running the server against a real 603-file project.
+
 - **Semantic tokens no longer describe the whole prelude.** The builder walked
   the entire analysis, which has the prelude injected, so it emitted a token per
   stdlib definition at line numbers from another file: 6949 tokens reaching line

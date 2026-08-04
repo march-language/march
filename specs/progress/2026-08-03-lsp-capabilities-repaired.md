@@ -163,3 +163,46 @@ It does not verify each capability returns the RIGHT answer — only that each i
 Twelve features have now run for the first time; their outputs have never been exercised
 against a real editor. Expect a second round of bugs behind this one, and treat per-feature
 tests as still owed.
+
+
+---
+
+# Verified against a real project (forgepm, 603 files / ~70k lines)
+
+The 15-line fixture proves correctness on a toy; it cannot show whether the handlers
+survive a real workspace. Driven against `~/code/forgepm`:
+
+- **initialize 0.34s, didOpen→diagnostics 3.58s**, every request under 0.4s, no hangs,
+  clean exit. The workspace index (603 files) is not a problem when a `forge.toml` root
+  exists — the pathological case remains a file with no project root above it.
+- **20/20 requests answered without error.**
+
+## What looked wrong and was not
+
+`foldingRange: 1`, `semanticTokens: 17` and `references: 1` on a 654-line file read as
+under-reporting. They are correct: `lib/forgepm/migrations.march` is 654 lines of SQL
+string literals inside a single `fn all()`. Worth recording because the instinct to "fix"
+those numbers would have broken working code.
+
+## What was actually wrong
+
+`textDocument/documentSymbol` returned **6936 symbols for that one-function file** — the
+same prelude leak as semantic tokens, in a different handler. `Analysis.document_symbols`
+folded `def_map` with no file filter. The editor's outline and breadcrumbs are built from
+this response.
+
+Fixed by the same one-line scope test: **6936 → 1**. Checked in the other direction too,
+since over-filtering would empty the outline instead: on `web/pages.march` (799 lines, 107
+`fn` declarations) it returns 141 symbols with real local names, 131 folding regions, and
+1214 semantic tokens whose highest line is 795 — all inside the document.
+
+Pinned by `document symbol scope` in `test_lsp.ml`, asserting BOTH that the file's own
+functions are present and that the prelude's thousands are not; confirmed non-vacuous by
+removing the filter.
+
+## Two leaks of one shape
+
+Both `semantic_tokens_data` and `document_symbols` folded whole-analysis maps into a
+per-document response. Any other handler that iterates `def_map`/`use_map` deserves the
+same scrutiny — that is a cheap grep and worth doing before the next feature is built on
+one of them.

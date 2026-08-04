@@ -4842,7 +4842,18 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
 
 let document_symbols (a : t) =
   let open Lsp.Types in
+  (* textDocument/documentSymbol describes ONE document.  [def_map] spans the
+     whole analysis, and the analysis has the prelude injected — so folding it
+     unfiltered returned every stdlib definition as a symbol of whatever file
+     happened to be open: measured at 6936 symbols for a one-function file, at
+     line numbers belonging elsewhere.  The editor's outline and breadcrumbs
+     are built from this, so it was not a harmless overcount.
+
+     Identical in shape to the semantic-tokens leak fixed alongside it; both
+     were invisible until the requests carrying them became reachable. *)
   let syms = Hashtbl.fold (fun name sp acc ->
+      if sp.Ast.file <> a.filename then acc
+      else
       let range = Pos.span_to_lsp_range sp in
       let kind =
         if List.mem_assoc name a.types then SymbolKind.Class

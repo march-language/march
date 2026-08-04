@@ -3215,6 +3215,40 @@ end
     (Printf.sprintf "highest token line %d is inside a %d-line document" !highest n_lines)
     true (!highest < n_lines)
 
+(* textDocument/documentSymbol describes ONE document. `def_map` spans the whole
+   analysis, prelude included, so folding it unfiltered returned every stdlib
+   definition as a symbol of whatever file was open — measured against a real
+   project (forgepm): 6936 symbols for a ONE-function file, carrying line
+   numbers from elsewhere. The editor builds its outline and breadcrumbs from
+   this, so it was not a harmless overcount.
+
+   The paired risk is over-filtering, which would empty the outline instead.
+   Hence both assertions: the file's own symbols are present, and nothing else
+   is. *)
+let test_document_symbols_scoped_to_the_file () =
+  let src = {|
+mod DocSym do
+  fn alpha(n : Int) : Int do
+    n
+  end
+  fn beta(n : Int) : Int do
+    alpha(n)
+  end
+end
+|} in
+  let a = analyse src in
+  match An.document_symbols a with
+  | `DocumentSymbol syms ->
+    let names = List.map (fun (s : Lsp.Types.DocumentSymbol.t) -> s.name) syms in
+    Alcotest.(check bool) "the file's own functions are present" true
+      (List.mem "alpha" names && List.mem "beta" names);
+    (* A handful of local binders may legitimately appear; the prelude's
+       thousands may not. *)
+    Alcotest.(check bool)
+      (Printf.sprintf "no prelude leak (got %d symbols)" (List.length names))
+      true (List.length names < 20)
+  | _ -> Alcotest.fail "expected a DocumentSymbol response"
+
 let test_perf_parallelizable_code_action () =
   let src = {|
 mod Test do
@@ -6704,6 +6738,9 @@ let () =
       "List.fold_left never flagged",                 `Quick, test_perf_parallelizable_fold_not_flagged;
       "parallelizable hint in diagnostics",           `Quick, test_perf_parallelizable_hint_in_diagnostics;
       "convert-to-pmap code action",                  `Quick, test_perf_parallelizable_code_action;
+    ];
+    "document symbol scope", [
+      "symbols are scoped to the open file",           `Quick, test_document_symbols_scoped_to_the_file;
     ];
     "semantic tokens document scope", [
       "tokens stay inside the open document",          `Quick, test_semantic_tokens_stay_inside_the_document;
