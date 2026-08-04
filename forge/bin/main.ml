@@ -17,7 +17,7 @@ let known_builtin_names =
     "refine"; "interactive"; "i"; "clean"; "deps"; "add"; "publish"; "retire";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
-    "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
+    "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
     "completions"; "deploy"; "hot-reload" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
@@ -970,6 +970,41 @@ let cap_cmd =
                ~doc:"Capability and typestate inspection")
     [cap_query_cmd; cap_coverage_cmd]
 
+(* ------------------------------------------------------------- forge audit *)
+
+let audit_cmd =
+  let record =
+    Arg.(value & flag &
+         info ["record"]
+           ~doc:"Record the current capability set as the baseline \
+                 (writes forge.caps.lock). Use this to accept a reviewed change.")
+  in
+  let run r =
+    match Cmd_audit.run ~record_mode:r () with
+    | Ok code -> exit code
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "audit"
+           ~doc:"Diff dependency capabilities against the recorded baseline"
+           ~man:[
+             `S Manpage.s_description;
+             `P "Every March package declares the capabilities it needs, and the \
+                 compiler enforces those declarations — so the authority a \
+                 dependency holds is readable from its source rather than \
+                 guessed at.";
+             `P "$(b,forge audit) extracts the capability set of every transitive \
+                 dependency and compares it against the baseline in \
+                 $(b,forge.caps.lock). It exits non-zero when a dependency asks \
+                 for a capability it did not previously hold, so CI can gate a \
+                 dependency update on it.";
+             `P "A dependency that stops asking for a capability is reported but \
+                 does not fail the audit.";
+             `S "TYPICAL USE";
+             `P "forge audit --record   # accept the current set, commit forge.caps.lock";
+             `P "forge audit            # in CI: fail if a dependency gained authority";
+           ])
+    Term.(const run $ record)
+
 (* --------------------------------------------------------- forge ffi -------- *)
 
 let ffi_gen_c_cmd =
@@ -1212,7 +1247,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
