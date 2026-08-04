@@ -413,20 +413,57 @@ let render_report ~bin (t : Cap_binary.t) =
          \  the compiler's knowledge and is not covered by this report.\n"
          (if blocking then ", includes blocking externs" else ""));
   end;
+  (* Per-module attribution: which module's code actually performs the IO.
+     Only meaningful when the capability list itself is meaningful, so it is
+     suppressed for the build kinds whose caps are withheld above. *)
+  if t.Cap_binary.build = Cap_binary.Dead_stripped
+     && t.Cap_binary.attribution <> [] then begin
+    Buffer.add_string buf "\nAttributed to\n";
+    List.iter
+      (fun cap ->
+         let owners =
+           List.filter_map
+             (fun (c, o) -> if c = cap then Some o else None)
+             t.Cap_binary.attribution
+           |> List.sort_uniq String.compare
+         in
+         if owners <> [] then
+           Buffer.add_string buf
+             (Printf.sprintf "  %-22s%s\n" cap (String.concat ", " owners)))
+      non_foreign;
+    (* A capability with no owner row is unattributed, NOT unused — an
+       indirect call through a closure has no statically known callee.
+       Saying so is the difference between a gap and a clean bill. *)
+    let unattributed =
+      List.filter
+        (fun c ->
+           not (List.exists (fun (c', _) -> c' = c) t.Cap_binary.attribution))
+        non_foreign
+    in
+    if unattributed <> [] then
+      Buffer.add_string buf
+        (Printf.sprintf
+           "  (unattributed: %s — reached only through indirect calls, whose\n\
+           \   callee is not statically known)\n"
+           (String.concat ", " unattributed))
+  end;
   Buffer.add_string buf
     (Printf.sprintf "\nbuild: %s    coverage: %s\n"
        (build_str t.Cap_binary.build)
        (coverage_str (coverage_of t)));
   (* Say what this does and does not cover.  This is the SOUND check — it is
      read after codegen, so it sees capabilities reached through stdlib and
-     dependency code that a source-level audit misses — but it answers about
-     the whole program, so it cannot show which dependency is responsible.
-     `forge audit` answers that, less soundly. Neither subsumes the other. *)
+     dependency code that a source-level audit misses.  Since attribution
+     landed it can also name the module responsible, but only the module that
+     directly calls the builtin: a dependency reaching IO through a stdlib
+     wrapper is attributed to that wrapper.  `forge audit` answers the
+     per-package question from source, less soundly. Neither subsumes the
+     other. *)
   Buffer.add_string buf
     "\nnote: read from the built artifact, so this covers capabilities reached\n\
-    \      through stdlib and dependency code as well as your own. It is a\n\
-    \      whole-program union: it cannot attribute a capability to a specific\n\
-    \      dependency — `forge audit` does that from source.\n";
+    \      through stdlib and dependency code as well as your own. Attribution\n\
+    \      names the module that directly calls the capability — code reaching\n\
+    \      it through a stdlib wrapper is attributed to the wrapper.\n";
   Buffer.contents buf
 
 let render_json ~bin (t : Cap_binary.t) =
@@ -436,6 +473,10 @@ let render_json ~bin (t : Cap_binary.t) =
         ("binary", `String bin);
         ("caps", strs t.Cap_binary.caps);
         ("markers", strs t.Cap_binary.markers);
+        ("attribution",
+         `List (List.map (fun (c, o) ->
+             `Assoc [ ("cap", `String c); ("module", `String o) ])
+             t.Cap_binary.attribution));
         ("rt_symbols", strs t.Cap_binary.rt_symbols);
         ("build", `String (build_str t.Cap_binary.build));
         ("coverage", `String (coverage_str (coverage_of t)));

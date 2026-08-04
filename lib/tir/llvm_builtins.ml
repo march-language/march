@@ -1480,3 +1480,15 @@ let mangle_extern (name : string) : string =
   match Hashtbl.find_opt mangle_extern_tbl name with
   | Some c -> Hashtbl.replace called_syms c (); c
   | None -> Hashtbl.replace called_syms name (); name
+
+(** [mangle_extern] without the [called_syms] side effect: same March-name →
+    C-symbol resolution, including the identity fallthrough.
+
+    Analyses that ask "what symbol WOULD this name resolve to?" must use this
+    rather than [mangle_extern].  Recording a symbol that emission never
+    actually referenced would mark a capability in a binary that does not use
+    it — the app-invariance trap the marker scheme exists to avoid. *)
+let c_symbol_of_march_name (name : string) : string =
+  match Hashtbl.find_opt mangle_extern_tbl name with
+  | Some c -> c
+  | None -> name

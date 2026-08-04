@@ -580,6 +580,7 @@ let emit_module ~emit_expr
     ?(remote_impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(emit_main=true)
+    ?(cap_attrib=([] : (string * string) list))
     (m : Tir.tir_module) : string =
   (* type defs are threaded via ctx.type_defs (set below); reset the
      repr-consistency audit per module emission. *)
@@ -1209,18 +1210,58 @@ let emit_module ~emit_expr
             @ l)
      |> List.sort_uniq String.compare
    in
+   let mangle_cap c = String.map (fun ch -> if ch = '.' then '_' else ch) c in
+   (* Per-module attribution (see cap_attrib.mli).  Computed pre-inline by the
+      driver and handed in, because by the time we are here the inliner has
+      already dissolved the module boundaries this needs.
+
+      Filtered against [caps]: attribution is computed on the pre-opt TIR, so
+      a call site that cprop/fold later proves dead would otherwise be
+      reported as a capability the final binary does not have.  Intersecting
+      guarantees the owner rows are a subset of the flat markers.
+
+      A flat cap with no owner row is UNATTRIBUTED, not absent — indirect
+      calls through closures have no statically known callee.  Consumers
+      compute that difference themselves rather than reading a sentinel. *)
+   let attrib =
+     cap_attrib
+     |> List.filter (fun (cap, owner) ->
+            owner <> "" && List.mem cap caps)
+     |> List.sort_uniq compare
+   in
    if caps <> [] then begin
-     let mangle_cap c = String.map (fun ch -> if ch = '.' then '_' else ch) c in
      List.iter
        (fun cap ->
           Buffer.add_string out
             (Printf.sprintf "@__march_cap_%s = constant i8 1\n"
                (mangle_cap cap)))
        caps;
+     (* Distinct prefix, NOT a longer @__march_cap_ name: the forge reader
+        matches that prefix and takes the whole remainder as the cap path, so
+        @__march_cap_IO_FileRead__BigLib would decode as a bogus capability
+        named "IO_FileRead__BigLib".  "__march_capfrom_" shares no prefix with
+        "__march_cap_" (they differ at the 12th character).  Cap paths never
+        contain "__", so splitting the remainder on the FIRST "__" recovers
+        (cap, owner) unambiguously.
+
+        The OWNER is emitted verbatim — LLVM global names permit dots, and
+        mangling them would be irreversible: a module named My_Mod and a
+        nested module My.Mod would collide on one encoding. *)
+     List.iter
+       (fun (cap, owner) ->
+          Buffer.add_string out
+            (Printf.sprintf "@__march_capfrom_%s__%s = constant i8 1\n"
+               (mangle_cap cap) owner))
+       attrib;
      let refs =
        List.map
          (fun cap -> Printf.sprintf "ptr @__march_cap_%s" (mangle_cap cap))
          caps
+       @ List.map
+           (fun (cap, owner) ->
+              Printf.sprintf "ptr @__march_capfrom_%s__%s" (mangle_cap cap)
+                owner)
+           attrib
      in
      Buffer.add_string out
        (Printf.sprintf
