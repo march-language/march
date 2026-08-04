@@ -134,3 +134,36 @@ binary, and the diff against the pre-change baseline was **111 lines**
 `zz_pc_sink` does not satisfy precondition `_ > 0``. The instrument detects a
 change; the byte-identical real comparison is therefore meaningful. `list.march`
 was restored from a saved copy afterwards (`git diff --stat stdlib/` empty).
+
+## Follow-up (same day, `343d2d1d`) — counted exactly once
+
+Review caught that the new `Obligation.record` fired on **both** passes:
+`check_fn_post_verdict` runs once from the `gate_unverified_posts` pre-pass with
+`~emit:false` and once from the walk, and the Tier 2 fallback did not thread
+`emit` the way Tier 1 threads it as `~record:emit`. One function with one
+postcondition reported `2 proved` (falsified variant: `2 violated`).
+
+`check_post_induction` now takes `?(record = true)`, the ledger write is gated on
+it, and the caller passes `~record:emit`. The refutation query became
+`~refute:record` too — it only ever classified a ledger verdict, so it is waste
+on the non-recording pass, and omitting it there cannot change the boolean
+result. The new tests moved from `>= 1` to **exact** counts, which is what pins
+the invariant; a third case was added for the UNDECIDABLE outcome
+(`Node(push(t, x), x, Leaf)` — no IH is available, so the goal reduces to
+`size(c) == size(t)` over an opaque constant) asserting `proved = 0` *and*
+`violated = 0`. The match-shape guard now pins that the `EMatch` path records
+nothing at all.
+
+Also corrected the Tier 2 header comment, which still claimed propagation was
+its "only observable effect".
+
+`test_refinecheck`: 459 tests, 0 skips. The `EMatch` path's counts were verified
+unmoved both in-suite and end-to-end against a pre-change binary.
+
+**Measurement note.** The end-to-end comparison first appeared to show a huge
+regression (pre: `0 proved`, post: `17 proved`). It was the exe-relative stdlib
+resolution: the pre-change binary was being run from `/tmp`, where there is no
+`../stdlib`, so it silently checked with **no stdlib in scope**. Moved to
+`_build/default/bin/` it reproduced the post numbers exactly. The Step 6 stdlib
+sweep was re-run with both binaries correctly located and is still byte-identical
+(4296 lines each).
