@@ -3,8 +3,11 @@
 **Date:** 2026-08-04
 **Status:** landed
 **Artifacts:** `bench/steady_state_ring.march`, `bench/gen_steady_state.py`,
-`bench/run_steady_state.sh`, `bench/results/2026-08-04-steady-state-arm64-laptop.jsonl`
-(+ `.txt` summary, `*.rss` traces).
+`bench/run_steady_state.sh`,
+`bench/results/2026-08-04-steady-state-x86_64-xeon8581c.jsonl` (**authoritative**,
+idle box) and `bench/results/2026-08-04-steady-state-arm64-laptop.jsonl`
+(load-contaminated laptop, kept for contrast) — each with a `.txt` summary and
+`*.rss` traces.
 
 ## What this substantiates
 
@@ -153,15 +156,54 @@ max ~20 ms), consistent with the load caveat.
   saturation, but the extreme tail reaches milliseconds under heavy
   oversubscription, and we report that rather than hide it.
 
+## Result (idle x86 — AUTHORITATIVE tail figures)
+
+Re-run on a **genuinely idle** GCP c4 box — **Intel Xeon Platinum 8581C @ 2.30 GHz,
+x86_64, 4 cores, Linux 6.17** — to give the tail an uncontaminated number
+(`bench/results/2026-08-04-steady-state-x86_64-xeon8581c.jsonl`; same config: 2M
+ops, WORK=512, siblings 0 4 8 16; p-values are power-of-two-bucket upper bounds,
+"p ≤ X"; min/max exact). **Measured load average at run time: 0.52 / 0.15 / 0.05
+on 4 cores** — idle, the whole point of the re-run. These p99.9/max replace the
+laptop's load-contaminated ones as authoritative:
+
+| siblings (÷4 sched) | p50 | p90 | p99 | p99.9 | max | RSS (flat) |
+|---|---|---|---|---|---|---|
+| 0 (none)        | 4.1 µs | 4.1 µs | 8.2 µs | 16.4 µs | 513 µs  | ~5.0 MB |
+| 4 (=schedulers) | 4.1 µs | 4.1 µs | 4.1 µs | 32.8 µs | 4.93 ms | ~5.0 MB |
+| 8 (2×)          | 4.1 µs | 4.1 µs | 4.1 µs | 4.19 ms | 9.65 ms | ~5.0 MB |
+| 16 (4×)         | 4.1 µs | 4.1 µs | 4.1 µs | 8.39 ms | 17.7 ms | ~5.0 MB |
+
+**How the idle tail compares to the laptop (the reason for the re-run):**
+
+- **p50/p90/p99 are flat and tighter.** On the idle box p99 stays **≤ 8.2 µs at
+  every** contention level (and is 4.1 µs for ≥ 4 siblings) — vs the laptop's
+  load-inflated p99 reaching 16.4 µs. The common-case claim (2) is if anything
+  cleaner here.
+- **At 0 / 4 siblings the extreme tail is far TIGHTER**, exactly as expected once
+  the external load is gone: p99.9 16.4 µs / 32.8 µs (laptop 65.5 µs / 262 µs)
+  and max 513 µs / 4.93 ms (laptop 3.37 ms / 8.06 ms).
+- **At 8 / 16 siblings the idle p99.9 is *larger* than the laptop's** (4.19 ms /
+  8.39 ms vs 2.10 ms / 4.19 ms) — **not** contamination but a core-count
+  difference: this box has **4 physical cores**, so 8 / 16 siblings oversubscribe
+  the CPU 2× / 4×, whereas the 14-core laptop still had spare cores for the same
+  sibling count. It is genuine CPU starvation on 4 cores, and the growth is still
+  **bounded** (16 µs → 33 µs → 4.2 ms → 8.4 ms), not unbounded — no starvation of
+  the common case at any point.
+- **Flat RSS is confirmed dead-flat.** The resident set is a *constant* ~5.0 MB
+  (5012 KB) start-to-finish of the 31 s / 16-sibling run — the sampler recorded
+  no variation at all. Absolute RSS is ~5 MB here vs ~2–3 MB on the M3 laptop (a
+  page-size / allocator-arena difference); the property that matters — flatness
+  across ops and contention, no ramp — holds identically.
+
 ## Limitations
 
-- **Laptop noise inflates the extreme tail.** These numbers were taken on a
-  laptop with other processes (and, during development, concurrent build/bench
-  load — reported load average was elevated). The `max` column in particular
-  (6–20 ms) includes OS-level scheduling of *other* processes, not just March.
-  An idle x86 box run would tighten p99.9/max; the runner is parameterised and
-  machine-agnostic precisely so someone can regenerate publication numbers
-  there. **The committed numbers are laptop/arm64 numbers.**
+- **Laptop noise inflated the laptop run's extreme tail.** The arm64 laptop
+  numbers were taken with concurrent build/bench load (reported load ~16–19 on 14
+  cores); their `max`/p99.9 columns include OS-level scheduling of *other*
+  processes. This is now **resolved**: the authoritative tail figures are the
+  **idle x86 Xeon 8581C run** above (measured load 0.52/0.15/0.05), which the
+  runner regenerated on the shared GCP box. The laptop table is retained only for
+  contrast; do not cite its p99.9/max as March's tail.
 - **Power-of-two histogram resolution.** Percentiles are bucket upper bounds
   (factor-2). Fine for the p50-vs-tail story; not for sub-2× latency claims.
 - **`unix_time` is `CLOCK_REALTIME`,** so a rare NTP step could produce a
@@ -178,4 +220,5 @@ max ~20 ms), consistent with the load caveat.
   in the compiled backend (todo filed 2026-08-04).
 - Optional: a compiled `RingBuf` backend (C runtime symbols + `llvm_builtins`),
   which would let the hand-off structure be a genuine in-place ring.
-- Optional: an idle-x86-box run and a loopback-socket variant.
+- Done: idle-x86-box run (Xeon 8581C, authoritative tail figures above).
+- Optional: a loopback-socket variant (kept below the ~30k/s ceiling).
