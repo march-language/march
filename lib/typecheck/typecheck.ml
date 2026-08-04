@@ -8513,6 +8513,18 @@ let fn_capability_closures (env : env) : (string * string list) list =
     handler-level [needs] to every function in the module, including a pure
     migrate_state, which would falsely fail such a check. Order is
     unspecified (backed by a hashtable). *)
+(* [declared_cap_scopes env] — every [needs] declaration's capability paired
+    with its optional path scope, as written in source.
+
+    Used by [--cap-sandbox] to emit a SCOPED sandbox profile: an unscoped
+    grant becomes a blanket allow, a scoped one becomes a subpath allow.
+    Declarations rather than inferred use, because the scope is a policy the
+    author states — inference can tell you a module reads files, not which
+    directory it is permitted to read. *)
+
+let declared_cap_scopes (env : env) : (string * string option) list =
+  List.sort_uniq compare env.mod_need_scopes
+
 let fn_own_capability_closures (env : env) : (string * string list) list =
   (* Sort by key for the same determinism reason as [fn_capability_closures]. *)
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []

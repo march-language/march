@@ -3060,6 +3060,8 @@ let compile filename =
                    access, i.e. a sandbox that sandboxes nothing.  Same
                    filtering as `march caps`. *)
                 let caps = own_caps_of_this_module typecheck_env desugared in
+                let declared_scopes =
+                  March_typecheck.Typecheck.declared_cap_scopes typecheck_env in
                 let holds klass =
                   List.exists (fun c ->
                       March_caps.Cap_lattice.cap_subsumes klass c
@@ -3075,7 +3077,50 @@ let compile filename =
                    (literal \\\"/dev/tty\\\"))";
                 Buffer.add_string b "(allow sysctl-read)(allow mach*)(allow signal)";
                 Buffer.add_string b "(allow ipc-posix-shm)(allow iokit-open)";
-                if holds "IO.FileWrite" then Buffer.add_string b "(allow file-write*)";
+                (* Scoped filesystem grants.
+                   WRITE only, and that asymmetry is measured, not assumed:
+
+                   - file-write is not granted by the baseline, so narrowing it
+                     to a subpath genuinely enforces.  Verified both ways: an
+                     in-scope write succeeds, an out-of-scope one is refused.
+                   - file-read IS granted by the baseline, unconditionally,
+                     because dyld must map system libraries before any user
+                     code exists.  A scoped read allow would therefore be
+                     DECORATIVE — it adds nothing to a blanket grant already
+                     present.  Narrowing the baseline was tried and aborts the
+                     runtime (SIGABRT) even with /usr/lib, /System, /usr/share
+                     and /dev/urandom explicitly allowed.  So IO.FileRead stays
+                     advisory here rather than shipping a rule that looks like
+                     enforcement and is not.  Linux scopes reads properly via
+                     the mount-namespace allow-list in forge/lib/cap_sandbox.ml.
+
+                   CAVEAT for scope authors: the kernel matches subpaths AFTER
+                   resolving symlinks, and normalization here is lexical (the
+                   build machine's filesystem is not the deployment machine's).
+                   A scope of "/tmp/x" on macOS therefore matches nothing,
+                   because /tmp is a symlink to /private/tmp.  Give the
+                   resolved path. *)
+                let write_scopes =
+                  List.filter_map (fun (cap, sc) ->
+                      if March_caps.Cap_lattice.cap_subsumes "IO.FileWrite" cap
+                         || March_caps.Cap_lattice.cap_subsumes cap "IO.FileWrite"
+                      then Some sc else None)
+                    declared_scopes
+                in
+                if holds "IO.FileWrite" then begin
+                  (* An unscoped grant among them means any path: narrowing
+                     would be a lie if one declaration is unrestricted. *)
+                  if write_scopes = [] || List.exists (fun sc -> sc = None) write_scopes
+                  then Buffer.add_string b "(allow file-write*)"
+                  else
+                    List.iter (function
+                        | None -> ()
+                        | Some path ->
+                          Buffer.add_string b
+                            (Printf.sprintf "(allow file-write* (subpath \\\"%s\\\"))"
+                               (March_caps.Cap_scope.normalize path)))
+                      write_scopes
+                end;
                 if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
                 if holds "IO.Process"   then Buffer.add_string b "(allow process-fork)";
                 (* Per-capability DENY flags, consumed by the Linux
