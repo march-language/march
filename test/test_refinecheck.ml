@@ -107,6 +107,16 @@ let has_refine_warning src =
       d.March_errors.Errors.severity = March_errors.Errors.Warning)
     ctx.March_errors.Errors.diagnostics
 
+(* Hints emitted by the refinement pass, as (message) list. *)
+let refine_hints src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Hint
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
 (* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
    it must NOT do is report those cases as PASSING.  [gated] used to print a
    "[skip]" line and then return unit, which alcotest scores as `[OK]`: on a
@@ -158,7 +168,63 @@ let suite =
     gated "refined-local propagation passes" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
-             (decl "  fn fwd(m : {Int | _ >= 0}) : Int do take_n(m) end"))) ]
+             (decl "  fn fwd(m : {Int | _ >= 0}) : Int do take_n(m) end")));
+
+    (* The message used to open with a bare "argument", which on a call with
+       several arguments does not say which one — and the predicate's binder is
+       usually the anonymous `_`, so nothing else in the message identified it
+       either. It now names the parameter and the callee. *)
+    gated "violation names the offending parameter and callee" (fun () ->
+        let text =
+          refine_error_text_d (decl "  fn main() : Int do nonzero(0) end") in
+        Alcotest.(check bool) "names the parameter" true
+          (contains text "argument `d`");
+        Alcotest.(check bool) "names the callee" true
+          (contains text "of `nonzero`");
+        Alcotest.(check bool) "still quotes the predicate" true
+          (contains text "_ != 0"));
+
+    (* A definite violation whose model has a free variable should still carry
+       the solver's counterexample — the parameter naming must not displace it. *)
+    gated "violation keeps the solver counterexample" (fun () ->
+        let text =
+          refine_error_text_d
+            (decl "  fn f(k : {Int | _ < 0}) : Int do take_n(k) end") in
+        Alcotest.(check bool) "reports a violation" true
+          (contains text "refinement violation");
+        Alcotest.(check bool) "includes a counterexample" true
+          (contains text "e.g. k = "));
+
+    (* An undecidable obligation stays non-fatal, but silence is
+       indistinguishable from "checked and fine". One hint per module says so
+       and names the escalation. *)
+    gated "an unverified contract is announced once" (fun () ->
+        let hints =
+          refine_hints (decl "  fn f(k : Int) : Int do take_n(k) end") in
+        Alcotest.(check bool) "a hint is emitted" true
+          (List.exists (fun h -> contains h "was NOT verified here") hints);
+        Alcotest.(check bool) "it points at `cap verified`" true
+          (List.exists (fun h -> contains h "cap verified") hints));
+
+    (* Advice repeated per call site would be worse than silence. *)
+    gated "the unverified hint is emitted at most once per module" (fun () ->
+        let hints =
+          refine_hints
+            (decl
+               "  fn f(k : Int) : Int do take_n(k) end\n\
+               \  fn g(k : Int) : Int do take_n(k) end\n\
+               \  fn h(k : Int) : Int do take_n(k) end") in
+        Alcotest.(check int) "exactly one unverified hint" 1
+          (List.length
+             (List.filter (fun h -> contains h "was NOT verified here") hints)));
+
+    (* The hint is about the checker giving up. Code it can discharge must stay
+       completely silent, or every clean project grows advisory noise. *)
+    gated "a fully proved module emits no unverified hint" (fun () ->
+        let hints = refine_hints (decl "  fn main() : Int do take_n(5) end") in
+        Alcotest.(check int) "no unverified hints on proved code" 0
+          (List.length
+             (List.filter (fun h -> contains h "was NOT verified here") hints))) ]
 
 (* A2: the `len` measure + cross-argument bounds.  `at` indexes a list with a
    bounds-refined index; we check calls against list literals (statically sized). *)

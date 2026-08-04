@@ -1453,6 +1453,102 @@ let test_linear_pattern_match_double_use () =
   end|} in
   Alcotest.(check bool) "linear pattern binding used twice: error" true (has_errors ctx)
 
+(* A double-use is a relationship between two sites, so the diagnostic carries a
+   label pointing at the earlier one. These tests read the label rather than
+   just [has_errors]: the error already existed, what is new is that it says
+   where the value went. *)
+let linear_double_use_labels src =
+  let ctx = typecheck src in
+  List.concat_map (fun (d : March_errors.Errors.diagnostic) ->
+      List.map (fun (l : March_errors.Errors.label) ->
+          (l.March_errors.Errors.lbl_message, l.March_errors.Errors.lbl_span))
+        d.March_errors.Errors.labels)
+    ctx.March_errors.Errors.diagnostics
+
+let test_linear_double_use_points_at_first_use () =
+  let src = {|mod Test do
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main() do
+      linear let token = "secret"
+      let a = consume(token)
+      let b = consume(token)
+      println(int_to_string(a + b))
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "double use of a linear value is an error" true
+    (has_errors ctx);
+  let labels = linear_double_use_labels src in
+  Alcotest.(check bool) "the error labels the earlier consumption site" true
+    (List.exists (fun (msg, _) ->
+         msg = "`token` was already consumed here") labels);
+  (* The label must point at the FIRST call (line 8), not repeat the second
+     (line 9) — pointing at the reuse twice would look right and help nobody. *)
+  Alcotest.(check bool) "the label points at the first use, not the second" true
+    (List.exists (fun (msg, (sp : March_ast.Ast.span)) ->
+         msg = "`token` was already consumed here" && sp.March_ast.Ast.start_line = 8)
+       labels)
+
+(* REGRESSION GUARD for the match-arm snapshot. Arms are mutually exclusive, so
+   consuming the same outer linear value once per arm is legal, and
+   [iter_arms_linear] saves/restores the use flag to allow it. [le_first_use]
+   has to be saved and restored in step: if it is not, the first arm leaves its
+   span behind and a later genuine double-use points into an arm that never ran
+   on the same path. *)
+let test_linear_match_arms_each_consume_once_ok () =
+  let ctx = typecheck {|mod Test do
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main() do
+      linear let token = "secret"
+      let flag = true
+      let r = match flag do
+        true -> consume(token)
+        false -> consume(token)
+      end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "one consumption per arm is accepted" false (has_errors ctx)
+
+let test_linear_double_use_within_arm_labels_same_arm () =
+  (* The arrangement that actually catches a missing save/restore: an EARLIER
+     arm consumes the value legally (line 10), and a LATER arm double-uses it
+     (line 11). If [le_first_use] survived across arms, the label would point at
+     line 10 — a line that never executes on the same path as the error. It must
+     point at line 11. *)
+  let src = {|mod Test do
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main() do
+      linear let token = "secret"
+      let flag = true
+      let r = match flag do
+        true -> consume(token)
+        false -> consume(token) + consume(token)
+      end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "double use inside one arm is an error" true
+    (has_errors (typecheck src));
+  let labels = linear_double_use_labels src in
+  Alcotest.(check bool) "the label is present" true
+    (List.exists (fun (msg, _) -> msg = "`token` was already consumed here") labels);
+  Alcotest.(check bool)
+    "the label points inside the offending arm, not the sibling arm" true
+    (List.for_all (fun ((msg : string), (sp : March_ast.Ast.span)) ->
+         msg <> "`token` was already consumed here"
+         || sp.March_ast.Ast.start_line = 11)
+       labels)
+
 let test_linear_closure_capture_error () =
   (* Capturing a linear value in a closure should error. *)
   let ctx = typecheck {|mod Test do
@@ -8531,6 +8627,99 @@ let check_cap_infer src =
   March_refinecheck.Cap_infer.check_module errors m;
   errors
 
+(* A capability is a property of the whole path from the entry point, not of the
+   one call that needs it: `needs` has to be threaded through every function in
+   between. The hint now shows that path. These tests pin both that it appears
+   and that it is OMITTED rather than guessed when there is nothing to show. *)
+let cap_hint_messages src =
+  let ctx = check_cap_infer src in
+  List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Hint
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
+let test_cap_chain_from_main () =
+  let hints = cap_hint_messages {|mod CapChain do
+    fn make_token() : String do
+      Bytes.to_string(random_bytes(16))
+    end
+    fn issue() : String do
+      make_token()
+    end
+    fn main() do
+      println(issue())
+    end
+  end|} in
+  Alcotest.(check bool) "a capability hint is emitted" true
+    (List.exists (fun h -> contains "IO.Random" h) hints);
+  Alcotest.(check bool) "the hint shows the path from main" true
+    (List.exists (fun h -> contains "main \xe2\x86\x92 issue \xe2\x86\x92 make_token" h) hints)
+
+(* The chain has to survive a module boundary — a qualified call `M.f` is one
+   EVar carrying the prefix, while graph nodes are keyed by the simple name a
+   definition declares. Unnormalised, the path breaks exactly at the boundary,
+   which is the case most worth explaining. *)
+let test_cap_chain_crosses_module_boundary () =
+  let hints = cap_hint_messages {|mod CapOuter do
+    mod Crypto do
+      fn token() : String do
+        Bytes.to_string(random_bytes(16))
+      end
+    end
+    fn issue() : String do
+      Crypto.token()
+    end
+    fn main() do
+      println(issue())
+    end
+  end|} in
+  Alcotest.(check bool) "the chain crosses into the nested module" true
+    (List.exists (fun h -> contains "main \xe2\x86\x92 issue \xe2\x86\x92 token" h) hints)
+
+let test_cap_chain_absent_without_main () =
+  (* A library has no entry point, so there is no chain to report — the hint
+     must still fire, just without inventing a path. *)
+  let hints = cap_hint_messages {|mod CapLib do
+    fn helper() : String do
+      Bytes.to_string(random_bytes(8))
+    end
+  end|} in
+  Alcotest.(check bool) "the capability is still reported" true
+    (List.exists (fun h -> contains "IO.Random" h) hints);
+  Alcotest.(check bool) "no chain is invented without an entry point" false
+    (List.exists (fun h -> contains "reached from" h) hints)
+
+let test_cap_chain_absent_when_call_is_in_main () =
+  (* Path of length one says nothing the span does not already say. *)
+  let hints = cap_hint_messages {|mod CapMain do
+    fn main() do
+      println(Bytes.to_string(random_bytes(8)))
+    end
+  end|} in
+  Alcotest.(check bool) "the capability is still reported" true
+    (List.exists (fun h -> contains "IO.Random" h) hints);
+  Alcotest.(check bool) "no trivial one-node chain" false
+    (List.exists (fun h -> contains "reached from" h) hints)
+
+let test_cap_chain_terminates_on_recursion =
+  (* A cycle in the call graph must not hang the BFS. Alcotest has no timeout,
+     so an infinite loop here would wedge the suite rather than fail it — which
+     is precisely why the visited set is worth a test. *)
+  fun () ->
+    let hints = cap_hint_messages {|mod CapRec do
+      fn loop_it(n : Int) : String do
+        if n <= 0 do
+          Bytes.to_string(random_bytes(4))
+        else
+          loop_it(n - 1)
+        end
+      end
+      fn start() : String do loop_it(3) end
+      fn main() do println(start()) end
+    end|} in
+    Alcotest.(check bool) "recursive call graph still yields a chain" true
+      (List.exists (fun h -> contains "main \xe2\x86\x92 start \xe2\x86\x92 loop_it" h) hints)
+
 let test_cap_infer_random_missing () =
   (* random_bytes without needs IO.Random → hint from cap_infer *)
   let ctx = check_cap_infer {|mod M do
@@ -9989,6 +10178,191 @@ let assert_stdlib_file_typechecks_cleanly name =
     (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
     false (has_errors errors)
 
+(* ── The stdlib load manifest must be exhaustive ─────────────────────────────
+
+   A file under stdlib/ that is missing from `stdlib_file_list` is reachable
+   only via [Module_registry.ensure_loaded], which extracts export SHAPES
+   without running the body through inference in its caller's context.  A
+   generic `Option`/`Result` it exports then reaches monomorphization with an
+   unresolved tvar, falls back to a boxed representation, and is read by a
+   concrete caller expecting the niche encoding: a WRONG VALUE, no diagnostic,
+   compiled only, different garbage on every run.
+
+   That class has been point-fixed three times by hand-adding the newly-noticed
+   files (deque, cluster_load, then six more on 2026-08-01).  Each of those was
+   restoring this invariant without stating it.  The list is exhaustive as of
+   2026-08-03, so this test locks in a good state rather than codifying a mess.
+
+   Reads the directory at test time on purpose — a hardcoded count is the thing
+   that goes stale.  See
+   specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md *)
+let stdlib_dir_for_test () =
+  let candidates = [ "stdlib"; "../../../stdlib"; "../../stdlib" ] in
+  match List.find_opt Sys.file_exists candidates with
+  | Some d -> d
+  | None ->
+    Alcotest.failf "cannot find the stdlib directory (searched: %s)"
+      (String.concat ", " candidates)
+
+let test_stdlib_manifest_is_exhaustive () =
+  let dir = stdlib_dir_for_test () in
+  let on_disk =
+    Sys.readdir dir |> Array.to_list
+    |> List.filter (fun f -> Filename.check_suffix f ".march")
+    |> List.sort String.compare
+  in
+  Alcotest.(check bool) "found stdlib modules on disk" true (List.length on_disk > 50);
+  let known = March_modules.Stdlib_manifest.all_known in
+  let missing = List.filter (fun f -> not (List.mem f known)) on_disk in
+  if missing <> [] then
+    Alcotest.failf
+      "These stdlib modules are in no load list: %s\n\n\
+       A module absent from `stdlib_file_list` (bin/main.ml, defined in\n\
+       lib/modules/stdlib_manifest.ml) is loaded for its export SHAPES only — its\n\
+       body never goes through type inference in its caller's context. If it\n\
+       exports a generic Option/Result and a caller uses it at a concrete\n\
+       niche-eligible type, the call silently produces a WRONG VALUE: no\n\
+       diagnostic, compiled builds only, different garbage on every run.\n\n\
+       Add each file to `stdlib_file_list`. Only add it to\n\
+       `lazily_loaded_allowlist` if it must stay lazy AND you have understood\n\
+       that consequence."
+      (String.concat ", " missing)
+
+(* The other direction: a name in the manifest with no file behind it is a typo
+   or a deletion nobody finished, and it would silently load nothing. *)
+let test_stdlib_manifest_has_no_phantom_entries () =
+  let dir = stdlib_dir_for_test () in
+  let phantom =
+    List.filter
+      (fun f -> not (Sys.file_exists (Filename.concat dir f)))
+      March_modules.Stdlib_manifest.all_known
+  in
+  Alcotest.(check (list string))
+    "every manifest entry has a file behind it" [] phantom
+
+(* ── postcond_infer: propose a RETURN refinement that helps the CALLERS ──────
+
+   Unlike a precondition, a postcondition discharges nothing in its own
+   function — it discharges obligations in the callers. So two independent
+   questions must both be answered, and the REJECT witnesses below are the half
+   that constrains the feature:
+
+     TRUE?    `check_fn_post_verdict` — the real checker's own oracle, not a
+              second prover that could disagree with it.
+     USEFUL?  the ledger delta over the callers. A true-but-useless
+              postcondition is noise, and a sweep full of true irrelevancies
+              looks exactly like a working one. *)
+
+module PO = March_refinecheck.Postcond_infer
+
+let suggest_post_in src ~target =
+  let m = Test_helpers.parse_and_desugar src in
+  let errctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module errctx m;
+  PO.suggest ~root:(Sys.getcwd ()) ~is_user:(fun _ -> true) ~target m
+
+let one_post rs =
+  match rs with
+  | [ r ] -> r
+  | _ -> Alcotest.failf "expected exactly one result, got %d" (List.length rs)
+
+let test_postcond_proposes_what_the_caller_needs () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"produce"
+           {|mod POA do
+               fn need_pos(n : {Int | _ > 0}) : Int do n end
+               fn produce(x : {Int | _ > 0}) : Int do x end
+               fn consume(x : {Int | _ > 0}) : Int do need_pos(produce(x)) end
+             end|})
+    in
+    Alcotest.(check string) "status" "solved" (PO.status_name r.PO.rs_status);
+    Alcotest.(check string) "predicate" "_ > 0" r.PO.rs_pred;
+    Alcotest.(check int) "one caller" 1 r.PO.rs_callers;
+    Alcotest.(check int) "caller debt cleared" 0 r.PO.rs_debt_after
+  end
+
+(* REJECT WITNESS (usefulness). The postcondition is provable, and no caller
+   needs it. Proposing it would be noise indistinguishable from working. *)
+let test_postcond_declines_a_true_but_useless_candidate () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"helper"
+           {|mod POB do
+               fn helper(x : {Int | _ > 0}) : Int do x end
+               fn user(x : {Int | _ > 0}) : Int do helper(x) + 1 end
+             end|})
+    in
+    Alcotest.(check string) "no proposal" "" r.PO.rs_pred;
+    Alcotest.(check string) "and says why" "no-debt" (PO.status_name r.PO.rs_status)
+  end
+
+(* REJECT WITNESS. The caller genuinely has debt, but the callee returns 0, so
+   no postcondition that would discharge it is true. Reporting one here would
+   produce an annotation `gate_unverified_posts` strips — i.e. one that silently
+   does nothing.
+
+   HONEST NOTE ON WHAT THIS DOES *NOT* PIN. Neutering `post_holds` to `true`
+   does not flip this case, nor any other case I could construct: the candidate
+   turns the postcondition obligation VIOLATED, and the admissibility rule
+   already refuses a candidate that raises the violated count. `post_holds` is
+   therefore defense-in-depth mirroring `gate_unverified_posts`, not a uniquely
+   load-bearing check — it is kept because it is the semantically correct gate
+   and costs one solver call, but do not read this test as evidence that it
+   fires. If you remove it, this suite will stay green; verify the drift
+   property some other way before concluding it is dead. *)
+let test_postcond_declines_when_nothing_true_helps () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"maybe"
+           {|mod POC do
+               fn need_pos(n : {Int | _ > 0}) : Int do n end
+               fn maybe(x : Int) : Int do 0 end
+               fn consume(x : Int) : Int do need_pos(maybe(x)) end
+             end|})
+    in
+    Alcotest.(check string) "no proposal" "" r.PO.rs_pred;
+    Alcotest.(check string) "status" "no-candidate" (PO.status_name r.PO.rs_status);
+    Alcotest.(check int) "the debt is real and still there" 1 r.PO.rs_debt_before
+  end
+
+(* A function nothing calls cannot have a useful postcondition, and saying
+   "no-callers" rather than "no-candidate" is the difference between "there is
+   nothing to help" and "I could not find help". *)
+let test_postcond_reports_no_callers_distinctly () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"lonely"
+           {|mod POD do
+               fn lonely(x : {Int | _ > 0}) : Int do x end
+             end|})
+    in
+    Alcotest.(check string) "status" "no-callers" (PO.status_name r.PO.rs_status)
+  end
+
+let test_postcond_leaves_a_declared_return_alone () =
+  if not (z3_available ()) then ()
+  else begin
+    let r =
+      one_post
+        (suggest_post_in ~target:"produce"
+           {|mod POE do
+               fn need_pos(n : {Int | _ > 0}) : Int do n end
+               fn produce(x : {Int | _ > 0}) : {Int | _ > 0} do x end
+               fn consume(x : {Int | _ > 0}) : Int do need_pos(produce(x)) end
+             end|})
+    in
+    Alcotest.(check string) "status" "already-refined" (PO.status_name r.PO.rs_status)
+  end
+
 let test_stdlib_prelude_fold_left_curried () =
   assert_stdlib_file_typechecks_cleanly "prelude.march"
 
@@ -10995,6 +11369,9 @@ let compiler_suites =
           (* Fix 2: Linear type enforcement *)
           Alcotest.test_case "linear pattern match ok"       `Quick test_linear_pattern_match_ok;
           Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;
+          Alcotest.test_case "double use labels first use"   `Quick test_linear_double_use_points_at_first_use;
+          Alcotest.test_case "match arms each consume once"  `Quick test_linear_match_arms_each_consume_once_ok;
+          Alcotest.test_case "double use in arm stays in arm" `Quick test_linear_double_use_within_arm_labels_same_arm;
           Alcotest.test_case "linear closure capture"        `Quick test_linear_closure_capture_error;
           Alcotest.test_case "linear field let binding"       `Quick test_linear_field_let_binding;
           (* H6: Linear field direct field-access tracking *)
@@ -11395,6 +11772,11 @@ let compiler_suites =
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
         ] );
       ( "cap_infer", [
+          Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;
+          Alcotest.test_case "cap chain crosses module boundary"            `Quick test_cap_chain_crosses_module_boundary;
+          Alcotest.test_case "cap chain omitted without main"               `Quick test_cap_chain_absent_without_main;
+          Alcotest.test_case "cap chain omitted when call is in main"       `Quick test_cap_chain_absent_when_call_is_in_main;
+          Alcotest.test_case "cap chain terminates on recursion"            `Quick test_cap_chain_terminates_on_recursion;
           Alcotest.test_case "random_bytes missing needs: hint emitted"     `Quick test_cap_infer_random_missing;
           Alcotest.test_case "random_bytes with needs IO.Random: no hint"   `Quick test_cap_infer_random_declared;
           Alcotest.test_case "file_write missing needs: hint emitted"       `Quick test_cap_infer_filewrite_missing;
@@ -11459,6 +11841,17 @@ let compiler_suites =
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "postcond_infer", [
+          Alcotest.test_case "proposes what the caller needs"                `Quick test_postcond_proposes_what_the_caller_needs;
+          Alcotest.test_case "REJECT: true but useless is not proposed"      `Quick test_postcond_declines_a_true_but_useless_candidate;
+          Alcotest.test_case "REJECT: nothing true helps -> no candidate"    `Quick test_postcond_declines_when_nothing_true_helps;
+          Alcotest.test_case "no callers is its own outcome"                 `Quick test_postcond_reports_no_callers_distinctly;
+          Alcotest.test_case "a declared return is left alone"               `Quick test_postcond_leaves_a_declared_return_alone;
+        ] );
+      ( "stdlib-manifest", [
+          Alcotest.test_case "the load manifest is exhaustive over stdlib/"  `Quick test_stdlib_manifest_is_exhaustive;
+          Alcotest.test_case "the load manifest has no phantom entries"      `Quick test_stdlib_manifest_has_no_phantom_entries;
         ] );
       ( "precond_infer", [
           Alcotest.test_case "candidate text and AST agree"                 `Quick test_precond_infer_candidate_text_matches_ast;

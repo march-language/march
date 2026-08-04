@@ -198,6 +198,122 @@ let rec iter_cap_calls (f : string -> A.span -> unit) (e : A.expr) : unit =
   | A.ESigil (_, inner, _) -> go inner
   | A.EVar _ | A.ELit _ | A.EHole _ | A.EResultRef _ -> ()
 
+(* ── Call graph, for "how did we get here from `main`" ───────────────────── *)
+
+(** Direct callees of an expression: the names in `f(...)` position. Indirect
+    calls (a function value in a variable, an interface method) are not edges we
+    can resolve syntactically, so they are skipped — the chain is a witness, not
+    a proof, and a missing edge costs at most the chain, never a wrong one. *)
+let direct_callees (e : A.expr) : string list =
+  let acc = ref [] in
+  (* A qualified call `M.f` is one [EVar] whose text carries the module prefix,
+     while graph nodes are keyed by the simple name a definition declares. Left
+     unnormalised the edge never matches, and the chain breaks precisely at a
+     module boundary — the case most worth explaining, since threading `needs`
+     across modules is the part people get wrong. Normalising can conflate two
+     modules' same-named functions; that is the acknowledged cost of a
+     syntactic witness (see [build_call_graph]). *)
+  let simple_name (s : string) =
+    match String.rindex_opt s '.' with
+    | None -> s
+    | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+  in
+  let rec go (e : A.expr) =
+    (match e with
+     | A.EApp (A.EVar fn, _, _) -> acc := simple_name fn.A.txt :: !acc
+     | _ -> ());
+    match e with
+    | A.EApp (callee, args, _) -> go callee; List.iter go args
+    | A.ECon (_, args, _) | A.ETuple (args, _) | A.EAtom (_, args, _) ->
+      List.iter go args
+    | A.ERecord (fields, _) -> List.iter (fun (_, e) -> go e) fields
+    | A.ERecordUpdate (r, fields, _) -> go r; List.iter (fun (_, e) -> go e) fields
+    | A.EBlock (es, _) -> List.iter go es
+    | A.ELet (b, _) -> go b.A.bind_expr
+    | A.ELetQ (_, e1, e2, _) -> go e1; go e2
+    | A.ELetFn (_, _, _, body, _) -> go body
+    | A.EMatch (scrut, arms, _) ->
+      go scrut; List.iter (fun (br : A.branch) -> go br.A.branch_body) arms
+    | A.EIf (c, t, f, _) -> go c; go t; go f
+    | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
+    | A.ELam (_, body, _) -> go body
+    | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go a; go b
+    | A.EField (e, _, _) | A.EAnnot (e, _, _) | A.ESpawn (e, _)
+    | A.ESigil (_, e, _) | A.EAssert (e, _) -> go e
+    | A.EDbg (e_opt, _) -> Option.iter go e_opt
+    | A.EVar _ | A.ELit _ | A.EHole _ | A.EResultRef _ -> ()
+  in
+  go e;
+  List.rev !acc
+
+(** Flat call graph over every function in the compilation unit, keyed by SIMPLE
+    name — the same key [iter_cap_calls] reports and the same one a qualified
+    call `M.f` resolves to at its definition. Two modules that both define `f`
+    therefore share a node; the cost of that collision is a chain that may name
+    the wrong sibling, never a chain where none exists, which is why this is
+    reported as "reached from" rather than as a proof. *)
+let build_call_graph (decls : A.decl list) : (string, string list) Hashtbl.t =
+  let g : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  let add name callees =
+    let prev = try Hashtbl.find g name with Not_found -> [] in
+    Hashtbl.replace g name (prev @ callees)
+  in
+  let rec walk ds =
+    List.iter
+      (function
+        | A.DFn (fd, _) ->
+          List.iter
+            (fun (c : A.fn_clause) ->
+              add fd.A.fn_name.A.txt (direct_callees c.A.fc_body))
+            fd.A.fn_clauses
+        | A.DLet (_, b, _) -> add "" (direct_callees b.A.bind_expr)
+        | A.DMod (_, _, inner, _) -> walk inner
+        | _ -> ())
+      ds
+  in
+  walk decls;
+  g
+
+(** Shortest call path [entry → … → target], or None when the target is not
+    reachable from the entry (a library with no `main`, or a function only
+    reached indirectly). Breadth-first, so the reported chain is the shortest
+    one; the visited set makes recursion terminate. *)
+let call_path (g : (string, string list) Hashtbl.t) ~(entry : string)
+    ~(target : string) : string list option =
+  if entry = target then Some [ entry ]
+  else begin
+    let visited : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+    let result = ref None in
+    let rec bfs (frontier : (string * string list) list) =
+      match frontier with
+      | [] -> ()
+      | _ when !result <> None -> ()
+      | _ ->
+        let next =
+          List.concat_map
+            (fun (node, path) ->
+              if !result <> None then []
+              else
+                let callees = try Hashtbl.find g node with Not_found -> [] in
+                List.filter_map
+                  (fun c ->
+                    if Hashtbl.mem visited c then None
+                    else begin
+                      Hashtbl.replace visited c ();
+                      let path' = path @ [ c ] in
+                      if c = target then (result := Some path'; None)
+                      else Some (c, path')
+                    end)
+                  callees)
+            frontier
+        in
+        bfs next
+    in
+    Hashtbl.replace visited entry ();
+    bfs [ (entry, [ entry ]) ];
+    !result
+  end
+
 (* ── Per-module check ────────────────────────────────────────────────────── *)
 
 (** Walk [decls] belonging to module [mod_name], emitting a hint for every
@@ -205,10 +321,26 @@ let rec iter_cap_calls (f : string -> A.span -> unit) (e : A.expr) : unit =
     per missing capability per module (deduplication suppresses repeated hints
     for the same cap when multiple call sites are present).
     Recurses into [DMod] children with their own [DNeeds] scope. *)
-let rec check_decls (mod_name : string) (errctx : Err.ctx) (decls : A.decl list) : unit =
+let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
+    (mod_name : string) (errctx : Err.ctx) (decls : A.decl list) : unit =
   let needs = declared_needs decls in
   let hinted : (string, unit) Hashtbl.t = Hashtbl.create 4 in
-  let emit_if_missing call_name call_span =
+  (* The chain that forced this capability. A capability is a property of the
+     whole path, not of the one call that happens to need it: the reader has to
+     thread `needs` through every function between `main` and here, and until
+     now the diagnostic named only the far end. Omitted rather than guessed when
+     there is no `main` (a library) or no syntactic path (the call is reached
+     only through a function value). *)
+  let chain_note (enclosing : string) : string =
+    match graph with
+    | None -> ""
+    | Some g ->
+      (match call_path g ~entry:"main" ~target:enclosing with
+       | None | Some [ _ ] -> ""
+       | Some path ->
+         Printf.sprintf "\nreached from `main`: %s" (String.concat " → " path))
+  in
+  let emit_if_missing enclosing call_name call_span =
     match cap_of_call call_name with
     | None -> ()
     | Some cap ->
@@ -218,8 +350,8 @@ let rec check_decls (mod_name : string) (errctx : Err.ctx) (decls : A.decl list)
         Hashtbl.replace hinted cap ();
         Err.hint errctx ~span:call_span
           (Printf.sprintf
-             "call to `%s` requires `needs %s` — add `needs %s` to module `%s`"
-             call_name cap cap mod_name)
+             "call to `%s` requires `needs %s` — add `needs %s` to module `%s`%s"
+             call_name cap cap mod_name (chain_note enclosing))
       end
   in
   List.iter
@@ -227,14 +359,18 @@ let rec check_decls (mod_name : string) (errctx : Err.ctx) (decls : A.decl list)
       | A.DFn (fd, _) ->
         List.iter
           (fun (clause : A.fn_clause) ->
-            iter_cap_calls emit_if_missing clause.A.fc_body)
+            iter_cap_calls (emit_if_missing fd.A.fn_name.A.txt) clause.A.fc_body)
           fd.A.fn_clauses
       | A.DLet (_vis, b, _) ->
-        iter_cap_calls emit_if_missing b.A.bind_expr
+        iter_cap_calls (emit_if_missing "") b.A.bind_expr
       | A.DMod (inner_name, _, inner_decls, _) ->
-        check_decls inner_name.A.txt errctx inner_decls
+        check_decls ?graph inner_name.A.txt errctx inner_decls
       | _ -> ())
     decls
 
 let check_module (errctx : Err.ctx) (m : A.module_) : unit =
-  check_decls m.A.mod_name.A.txt errctx m.A.mod_decls
+  (* Built once over the whole unit, then shared by every nested module's walk:
+     a chain from `main` routinely crosses module boundaries, so a per-module
+     graph would report "no path" for exactly the cases worth explaining. *)
+  let graph = build_call_graph m.A.mod_decls in
+  check_decls ~graph m.A.mod_name.A.txt errctx m.A.mod_decls

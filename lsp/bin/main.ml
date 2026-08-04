@@ -9,7 +9,17 @@ let run_server () =
   let conn =
     Linol_lwt.Jsonrpc2.create_stdio ~env:() server
   in
-  let task = Linol_lwt.Jsonrpc2.run conn in
+  (* `Jsonrpc2.run`'s `?shutdown` predicate is what ends the loop. Its default is
+     `fun _ -> false`, so WITHOUT this the server handles the `exit`
+     notification, returns to `read_msg`, and blocks on stdin forever — the
+     client has said goodbye and is waiting for the process to go away, and
+     instead the editor has to time out and kill it. linol's own documentation
+     names this exact predicate. *)
+  let task =
+    Linol_lwt.Jsonrpc2.run
+      ~shutdown:(fun () -> server#get_status = `ReceivedExit)
+      conn
+  in
   match Linol_lwt.run task with
   | () -> ()
   | exception exn ->

@@ -50,6 +50,57 @@ git log is authoritative for exact commits.
   `--allow-foreign` is passed; the same fail-closed rule applies to stripped
   or unstripped binaries (`--json` always includes a `coverage` field).
   `march --dump-caps` prints a module's inferred capability set as JSON.
+- **`march --refine-suggest-post <fn>`: suggest a postcondition.** Where
+  `--refine-suggest` proposes the parameter contract that discharges a
+  function's own unproven obligations, this proposes the *return* contract that
+  lets its **callers** discharge theirs — the other direction of the same
+  propagation. Verified end to end: applying the suggestion takes the worked
+  example from 1 proved / 1 skipped to 3 proved / 0 skipped.
+
+  A postcondition discharges nothing in its own function, so two independent
+  questions are both answered before anything is proposed: is the candidate
+  *true* (asked of the checker's own postcondition oracle, not a second prover),
+  and is it *useful* (does any caller's obligation actually become provable). A
+  true-but-useless postcondition is not proposed — a sweep full of true
+  irrelevancies is indistinguishable from a broken one. Outcomes stay
+  distinguishable rather than collapsing into silence: `no-callers`,
+  `no-debt`, `no-candidate` and `already-refined` are separate answers.
+- **A missing capability now shows the call chain from `main` that forced it.**
+  A capability is a property of a whole path, not of the single call that
+  happens to need it — `needs` has to be threaded through every function in
+  between — but the diagnostic named only the far end:
+
+  ```
+  call to `random_bytes` requires `needs IO.Random` — add `needs IO.Random` to module `CapErr`
+  reached from `main`: main → issue → make_token
+  ```
+
+  The chain crosses module boundaries (a qualified `M.f` resolves to the simple
+  name its definition declares) and terminates on recursive call graphs. It is
+  omitted rather than guessed when there is nothing to say: a library with no
+  `main`, a call sitting in `main` itself, or a callee reached only through a
+  function value. Because the edges are syntactic, the chain is a witness rather
+  than a proof — two modules defining the same function name share a node, so an
+  unusual program can get a plausible sibling in the path.
+
+- **An unverified refinement contract now says so, once per module.** March
+  reports only definite failures — an obligation the solver cannot decide is
+  accepted in silence, which is the right default (a false positive on correct
+  code is the worse error) but leaves no way to tell "checked and fine" apart
+  from "gave up". A single hint per module now names the first such contract
+  and its reason, and points at `cap verified`, the existing opt-in that turns
+  every unverifiable obligation into an error:
+
+  ```
+  precondition `_ != 0` on `safe_div` was NOT verified here
+  (solver-undecided: the solver proved neither the predicate nor its negation).
+  note: … add `cap verified` to this module to make every unverifiable
+  obligation an error instead. `--refine-report` lists them all.
+  ```
+
+  Code the checker can discharge stays completely silent, a module with three
+  undecidable calls still gets one hint, and inside `cap verified` the existing
+  error is unchanged rather than joined by a hint.
 
 - **Consuming-call inlay hints: the editor now marks which arguments a call
   takes ownership of (`⊗ consumed`).** Ownership transfer was previously
@@ -160,6 +211,25 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Refinement violations now name the offending parameter and callee, and
+  underline that argument.** The message opened with a bare "argument does not
+  satisfy precondition `_ != 0`" — on a call with several arguments that does
+  not say which one, and since the predicate's binder is usually the anonymous
+  `_`, nothing else in the message identified it either. It now reads
+  ``argument `d` of `safe_div` ``, and a second labelled span underlines the
+  argument itself rather than the whole call. The solver's counterexample
+  (`e.g. n = -1`), which only appears when the failing model has a free
+  variable, is unchanged.
+
+- **Linearity errors now point at the earlier consumption site, not just the
+  reuse.** "The linear value `token` is used more than once here" told you the
+  value was already gone but not what took it, leaving the reader to find the
+  first use by hand — which on a long function is the entire search. The
+  diagnostic now carries a second labelled span: ``​`token` was already consumed
+  here``. Attribution is path-correct: match arms are mutually exclusive, so
+  consuming the same value once per arm stays legal, and a double-use inside one
+  arm is labelled against that arm rather than a sibling that never ran.
+
 - **`derive Json`'s generated `from_json` now returns
   `Result(T, Json.DecodeError)` instead of `Result(T, String)` — a
   breaking change for any caller matching on the old bare-`String` error.**
@@ -220,6 +290,23 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march-lsp` now exits when the client tells it to.** The server handled the
+  `exit` notification and then went straight back to reading stdin, so it hung
+  until the editor's timeout killed it — `Jsonrpc2.run`'s `?shutdown` predicate,
+  which is what actually ends the loop, was never passed. Every existing
+  protocol test ended by closing the pipes, which stops the server via EOF
+  whether or not `exit` is honoured, so none of them could see it.
+
+- **The stdlib load manifest is now guarded against going stale.** A file under
+  `stdlib/` missing from `stdlib_file_list` is loaded for export shapes only —
+  its body never goes through inference in its caller's context — so a generic
+  `Option`/`Result` it exports silently produces a **wrong value** at a concrete
+  niche-eligible call site: no diagnostic, compiled builds only, different
+  garbage each run. That class had been point-fixed three times by hand-adding
+  whichever files someone happened to notice. The manifest moved to
+  `lib/modules/stdlib_manifest.ml` and two tests now hold the invariant: it is
+  exhaustive over `stdlib/`, and every entry has a file behind it. Deliberately
+  lazy modules go in an explicit allowlist.
 - **The LSP's TIR pass is now idempotent — performance insights no longer
   duplicate.** Re-running it on an analysis it had already processed appended
   its perf insights to a list that already contained them, so a function could

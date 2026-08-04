@@ -1,4 +1,4 @@
--- EXPECT-ERROR: refinement violation: argument does not satisfy precondition
+-- EXPECT-ERROR: refinement violation: argument `n` of `take_n` does not satisfy precondition
 -- Refinement types (widening slice 12, §2.14). A DIRECT call to a function
 -- whose parameter carries {T | pred} has its argument checked against pred
 -- by the separate post-typecheck lib/refinecheck pass (NOT by typecheck.ml,
