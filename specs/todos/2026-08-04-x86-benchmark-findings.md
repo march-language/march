@@ -78,44 +78,68 @@ Note the shape of the result: March *wins* tree-transform (FBIP reuses nodes in
 place, so it barely allocates) and *loses* binary-trees (pure allocation). Those
 two results are the same fact seen from both sides.
 
-## 3. simd-map does not vectorize on x86_64
+## 3. simd-map: vectorizes fine; the ISA baseline costs ~13%, and the 2× gap to OCaml is still unexplained
 
-`docs/simd-benchmarks.md` says `map_float` "gets the boxing-free inlined clone
-(Stage 4 Option B) and genuinely vectorizes". On x86 it does not.
+**A first pass at this was wrong twice, and the corrections are the useful part.**
 
-The benchmark computes `x * 2.0 + 1.0`. Instruction census of the compiled
-binary:
+*Wrong claim 1: "the map loop is scalar."* An instruction census showed one
+scalar `mulsd` and zero `mulpd`, which looked conclusive. It is not: the
+benchmark computes `x * 2.0 + 1.0`, and LLVM strength-reduces `x * 2.0` into
+`x + x`. The vectorized loop therefore contains packed **adds** and no multiply
+at all. Counting instructions cannot answer "did this vectorize"; ask the
+vectorizer:
 
 ```
-simd_map:   9 addsd   7 addpd   1 mulsd     <- the multiply is SCALAR, no mulpd
-simd_sum:   3 addsd   3 addpd                <- sum does get packed adds
+$ clang -O2 -msse4.2 -Rpass=loop-vectorize -c simd_map.ll
+remark: vectorized loop (vectorization width: 2, interleaved count: 2)
 ```
 
-One scalar `mulsd` and **zero packed multiplies**: the map loop is scalar. The
-`addpd`s are reduction paths elsewhere. simd-sum, by contrast, does vectorize —
-and it shows in the numbers (March 4.0 ms beats Rust 5.1 and OCaml 7.2), while
-map loses to OCaml 18.6 vs 8.7.
+It vectorizes. `-Rpass-missed=loop-vectorize` reports nothing precisely because
+nothing was missed. (The generic `native_float_arr_map` in the runtime — which
+calls a closure per element and genuinely cannot vectorize — is not used here:
+the binary contains zero calls to it and zero `clo_call_dbl_dbl`. The Stage 4
+inlined clone does fire on x86.)
 
-Two candidate causes, neither confirmed:
+*Wrong claim 2: "so the `-msse4.2` baseline is the bottleneck."* The baseline is
+real — `bin/main.ml:3154` pins x86 to SSE4.2, and the width follows:
 
-- **ISA baseline.** March compiles x86 with `-msse4.2` (`bin/main.ml:3154`),
-  so 128-bit SSE at best — no AVX2/AVX-512 on a machine that has both. This
-  caps the win but does not explain a *scalar* multiply.
-- **Aliasing.** The map writes a destination array while reading a source. With
-  no `noalias`/`restrict` on the emitted pointers, LLVM cannot prove they do not
-  overlap and will refuse to vectorize. `-fno-strict-aliasing` is also passed to
-  the runtime compile, which removes the other analysis that could have helped.
+| flags | width × interleave | doubles/iteration |
+|---|---|---|
+| `-msse4.2` (shipped) | 2 × 2 | 4 |
+| `-march=native` (AVX-512 present) | 4 × 4 | 16 |
 
-The docs claim is presumably true on arm64 (where the published numbers were
-taken) and platform-specific. Until that is resolved, the SIMD page should say
-which platform the vectorization claim holds on.
+But 4× the vector width is not 4× the speed. Linking the same IR both ways
+against the real runtime and timing the self-reported operation, 7 runs each:
+
+```
+sse     18.76 18.88 20.78 20.87 21.11 22.94 23.05   median 20.87 ms
+native  17.40 17.81 17.94 18.12 19.33 19.76 19.88   median 18.12 ms
+```
+
+**~13%.** The loop is not vector-width-bound. Something else dominates —
+plausibly the result-array allocation, the `memcpy`-per-element in/out pattern,
+or memory bandwidth at 5M doubles (40 MB touched, far past L3).
+
+So the honest state of simd-map:
+
+- The docs' "genuinely vectorizes" claim is **correct on x86**, contrary to the
+  first draft of this file. No documentation change needed.
+- Raising the ISA baseline is worth ~13% here and is cheap to offer (a
+  `--target-cpu`/`-march` passthrough), but it is not the answer to the OCaml
+  gap.
+- **March 18.6 ms vs OCaml 8.7 ms remains unexplained** and is the actual open
+  question. Profile before theorising further; the two wrong turns above both
+  came from reasoning about the artifact instead of measuring it.
 
 ---
 
 ## Suggested order
 
-1. Confirm the aliasing hypothesis for simd-map (`-Rpass-missed=loop-vectorize`
-   on the emitted IR will say why the loop was rejected). Cheapest, and it is a
-   documentation-correctness issue right now.
-2. Decide on the allocator direction for binary-trees — the largest single gap.
-3. Investigate amortising the preemption check, gated on the starvation test.
+1. **The allocator (finding 2)** — the largest single gap, 20×, and the one with
+   a design already written down (`specs/gc_design.md`'s per-actor bump arenas).
+2. **Profile simd-map** to find what the remaining 2× vs OCaml actually is.
+   Allocation and the per-element `memcpy` are the first suspects; measure
+   rather than reason, per the two wrong turns recorded above.
+3. **Amortise the preemption check (finding 1)**, gated on the starvation test.
+4. Optionally expose a `--target-cpu` passthrough — worth ~13% on simd-map here,
+   but it is a knob, not a fix.
