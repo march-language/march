@@ -9920,6 +9920,64 @@ let test_native_array_map_reused_capturing_closure_compiled () =
         "[8, 9, 10]\n107" run_out
     done
 
+(* ── Blocking-FFI worker pool ────────────────────────────────────── *)
+
+(* Blocking externs used to get a fresh pthread_create + join PER CALL, which
+   made a program doing one blocking call per work item pay a thread
+   create/join per item (measured on a 3,600-item run: 14,408 clone3 calls,
+   ~0.79s of pure thread churn — enough to make the parallel path several
+   times slower than the serial one).  Calls now go to a pool of reusable
+   worker threads.
+
+   The pool must stay ELASTIC — see the comment in runtime/march_ffi.c: blocking
+   calls can depend on each other, so a submission that finds no PARKED worker
+   must spawn one rather than wait for a busy worker to free up.  This test
+   therefore checks reuse, not a thread cap: many sequential calls from a single
+   green thread must be served by far fewer threads than there are calls. *)
+let test_blocking_ffi_pool_reuses_threads_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_blkpool"
+    "mod BlkPool do\n\
+    \  needs IO\n\
+    \  extern \"march\" : Cap(IO.Foreign) do\n\
+    \    blocking fn nap(us : Int) : Int = \"march_test_blocking_nap\"\n\
+    \    fn spawned() : Int = \"march_blocking_threads_spawned\"\n\
+    \    fn calls() : Int = \"march_blocking_calls\"\n\
+    \  end\n\
+    \  pfn spin(n : Int) : Int do\n\
+    \    if n <= 0 do 0 else do let _ = nap(0)\n\
+    \      spin(n - 1) end end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let _ = spin(400)\n\
+    \    println(int_to_string(calls()) ++ \" \" ++ int_to_string(spawned()))\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "blkpoolbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    (match String.split_on_char ' ' (String.trim out) with
+     | [calls_s; spawned_s] ->
+       let calls = int_of_string (String.trim calls_s) in
+       let spawned = int_of_string (String.trim spawned_s) in
+       Alcotest.(check bool)
+         (Printf.sprintf "all 400 blocking calls ran (saw %d)" calls)
+         true (calls >= 400);
+       (* One-thread-per-call would make these equal.  A serial caller can only
+          ever need one worker at a time, so reuse should keep this tiny; the
+          bound is deliberately loose (idle-retirement or a stray respawn may
+          add a few) while still failing hard on per-call thread creation. *)
+       Alcotest.(check bool)
+         (Printf.sprintf
+            "pool reuses threads: %d spawned for %d calls (per-call would be %d)"
+            spawned calls calls)
+         true (spawned <= 20)
+     | _ ->
+       Alcotest.failf "unexpected output from blocking-pool probe: %S" out)
+
 (* Signal.watch — a FOURTH family, and the most severe: unlike __try_call
    (one call) or the array builtins (N calls but the whole map finishes and
    releases in one process step), a watcher closure is held for the
@@ -13126,6 +13184,8 @@ let codegen_suites =
           test_blocking_extern_uses_blocking_dispatch;
         Alcotest.test_case "never emitted as a direct call" `Quick
           test_blocking_extern_never_called_directly;
+        Alcotest.test_case "pool reuses worker threads across calls" `Quick
+          test_blocking_ffi_pool_reuses_threads_compiled;
       ]);
       ("known_call", [
         Alcotest.test_case "direct"          `Quick test_known_call_direct;
