@@ -123,3 +123,14 @@ suspicious.
 
 `specs/lang/refinement-types.md` ("What is proven") and `docs/refinement-types.md`
 (Limitations) both updated — the two copies are independently maintained.
+
+## Positive control result
+
+`stdlib/list.march` had two private functions appended
+(`pfn zz_pc_sink(x : {Int | _ > 0})` and `pfn zz_positive_control() do
+zz_pc_sink(0) end`), the same 112-file sweep was re-run with the post-change
+binary, and the diff against the pre-change baseline was **111 lines**
+(non-empty), carrying the expected `refinement violation: argument `x` of
+`zz_pc_sink` does not satisfy precondition `_ > 0``. The instrument detects a
+change; the byte-identical real comparison is therefore meaningful. `list.march`
+was restored from a saved copy afterwards (`git diff --stat stdlib/` empty).
