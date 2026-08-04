@@ -10363,6 +10363,41 @@ let test_postcond_leaves_a_declared_return_alone () =
     Alcotest.(check string) "status" "already-refined" (PO.status_name r.PO.rs_status)
   end
 
+(* ── refine_edit: the RETURN-position splice ────────────────────────────────
+   A different scan from the parameter one, not a variation: it must find the
+   paren CLOSING the parameter list (depth-tracked, so `Map(String, Int)` does
+   not end it early) and stop at the `do` that opens the body. *)
+let src_ret = "mod R do\n  fn f(m : Map(String, Int), n : Int) : Int do\n    n\n  end\nend\n"
+
+let test_refine_edit_return_range_covers_only_the_type () =
+  match March_refactor.Refine_edit.byte_range_of_return ~src:src_ret ~line:2 ~fn:"f" with
+  | None -> Alcotest.fail "expected a return range"
+  | Some (a, b) ->
+    Alcotest.(check string) "range text" " Int " (String.sub src_ret a (b - a))
+
+let test_refine_edit_return_splices_past_nested_parens () =
+  match
+    March_refactor.Refine_edit.splice_return ~src:src_ret ~line:2 ~fn:"f"
+      ~annotation:"{Int | _ > 0}"
+  with
+  | None -> Alcotest.fail "expected a splice"
+  | Some out ->
+    let has needle =
+      let re = Str.regexp_string needle in
+      try ignore (Str.search_forward re out 0); true with Not_found -> false
+    in
+    Alcotest.(check bool) "return annotated" true (has ") : {Int | _ > 0} do");
+    Alcotest.(check bool) "parameters untouched" true
+      (has "m : Map(String, Int), n : Int")
+
+(* A function with no declared return type has nothing to annotate. Returning
+   None here is the difference between "nothing to do" and a splice that would
+   insert an annotation where the grammar has no slot for one. *)
+let test_refine_edit_return_declines_when_absent () =
+  let src = "mod R2 do\n  fn g(n : Int) do\n    n\n  end\nend\n" in
+  Alcotest.(check bool) "no range without a return type" true
+    (March_refactor.Refine_edit.byte_range_of_return ~src ~line:2 ~fn:"g" = None)
+
 let test_stdlib_prelude_fold_left_curried () =
   assert_stdlib_file_typechecks_cleanly "prelude.march"
 
@@ -11841,6 +11876,11 @@ let compiler_suites =
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "refine_edit_return", [
+          Alcotest.test_case "range covers exactly the return annotation"     `Quick test_refine_edit_return_range_covers_only_the_type;
+          Alcotest.test_case "splices past a nested paren in a param type"    `Quick test_refine_edit_return_splices_past_nested_parens;
+          Alcotest.test_case "declines when there is no return type"          `Quick test_refine_edit_return_declines_when_absent;
         ] );
       ( "postcond_infer", [
           Alcotest.test_case "proposes what the caller needs"                `Quick test_postcond_proposes_what_the_caller_needs;

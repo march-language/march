@@ -1,7 +1,7 @@
-# march-lsp advertises pull diagnostics it does not implement
+# march-lsp now implements the pull diagnostics it advertises
 
-**Filed:** 2026-08-03 — found by running the server under Zed while verifying the
-suggest-refinement code action.
+**Filed & fixed:** 2026-08-03 — found by running the server under Zed while verifying
+the suggest-refinement code action.
 
 ## Symptom
 
@@ -135,3 +135,45 @@ editor. Walk every `ServerCapabilities.*` field the `config_*` methods set in
 `lsp/lib/server.ml` and pair each with the handler that answers it. Anything advertised
 with no handler gets implemented or unadvertised. The audit is cheaper than the next
 discovery.
+
+
+---
+
+# As implemented (2026-08-03)
+
+`on_request_unhandled` is overridden in `lsp/lib/server.ml` and answers
+`TextDocumentDiagnostic` with a `RelatedFullDocumentDiagnosticReport`, delegating
+everything else to `super`. The class now inherits `S.server as super` so that delegation
+is possible.
+
+**Simpler than the spec expected in one place.** The spec worried about two conversions
+drifting apart; there are none. `Analysis.t.diagnostics` is already
+`Lsp.Types.Diagnostic.t list`, so pull and push serve the identical values by
+construction.
+
+**`workspaceDiagnostics` was lowered to `false`.** It is a separate claim — it promises
+`workspace/diagnostic`, a request over every file rather than the open ones — and this
+change answers only the per-document request. Leaving it `true` would have recreated the
+same bug one level down. `Workspace.index_project` is the raw material whenever someone
+implements it.
+
+## Verification
+
+Two protocol-level cases in `lsp/test/test_jsonrpc.ml`, which spawns the real binary:
+
+- a buffer with a type error returns a report whose `items` are non-empty;
+- a CLEAN buffer returns an empty full report — not an error, and not the other
+  document's items. Without this second case, a handler that always answered empty would
+  satisfy the first.
+
+Non-vacuity confirmed by mutation (`when false` on the arm): both fail. Both binaries were
+rebuilt for that check — testing only the test binary runs the previous server and
+"passes", which is the mistake that cost a cycle when guarding the executeCommand fix.
+
+342 analysis + 5 jsonrpc + 10 + 7 LSP tests pass.
+
+## The audit this was a symptom of — still open
+
+Three bugs of this shape in one week (`executeCommand` dispatched nowhere, `exit` never
+honoured, this). Every advertised `ServerCapabilities.*` field still deserves pairing with
+the handler that answers it. Not done here.

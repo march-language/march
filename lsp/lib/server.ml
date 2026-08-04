@@ -330,7 +330,7 @@ let semantic_tokens_data (a : Analysis.t) : int array =
 
 class march_server =
   object (_self)
-    inherit S.server
+    inherit S.server as super
 
     (* Spawn using Lwt.async *)
     method spawn_query_handler f = Linol_lwt.spawn f
@@ -393,10 +393,15 @@ class march_server =
            shells out.  The edit goes back through workspace/applyEdit so it
            lands in the user's BUFFER; writing the file underneath an editor
            with unsaved changes would lose their work. *)
-        if command = "march.suggestRefinement" then
+        if command = "march.suggestRefinement"
+           || command = "march.suggestPostcondition" then
           match args with
           | [ `String file; `String fn ] ->
-            let (payload, edit) = Refine_command.run ~file ~fn in
+            let (payload, edit) =
+              if command = "march.suggestPostcondition" then
+                Refine_command.run_post ~file ~fn
+              else Refine_command.run ~file ~fn
+            in
             (match edit with
              | None -> Lwt.return payload
              | Some we ->
@@ -404,7 +409,11 @@ class march_server =
                  (notify_back#send_request
                     (Lsp.Server_request.WorkspaceApplyEdit
                        (Lsp.Types.ApplyWorkspaceEditParams.create ~edit:we
-                          ~label:"Suggest a refinement type" ()))
+                          ~label:
+                            (if command = "march.suggestPostcondition" then
+                               "Suggest a postcondition"
+                             else "Suggest a refinement type")
+                          ()))
                     (fun _ -> Lwt.return ()))
                  (fun _ -> Lwt.return payload))
           | _ ->
@@ -413,7 +422,7 @@ class march_server =
                 [ ("status", `String "error");
                   ("kind", `String "suggestRefinement");
                   ("message",
-                   `String "march.suggestRefinement expects [file, function]") ])
+                   `String (command ^ " expects [file, function]")) ])
         else
         let result =
           match Analysis.resolve_lens_command ~command ~args with
@@ -447,6 +456,42 @@ class march_server =
             ]
         in
         Lwt.return result
+
+    (* ── textDocument/diagnostic (pull diagnostics) ──────────────────────────
+       `TextDocumentDiagnostic` is a KNOWN client request that linol has no
+       dedicated method for, so it arrives here — NOT at [on_unknown_request],
+       which only ever sees requests linol could not decode. Putting a known
+       request there is exactly what made every `workspace/executeCommand` dead
+       code (see specs/progress/2026-08-03-lsp-execute-command-was-never-dispatched.md).
+
+       The server advertises `diagnosticProvider`, so until this existed every
+       pull fell through to linol's default and failed with "TODO: handle this
+       request" — an advertised capability nothing answered, while the PUSH path
+       quietly carried the feature and hid it.
+
+       [Analysis.t] already stores `Lsp.Types.Diagnostic.t list`, so pull and
+       push serve the identical values by construction; there is no second
+       conversion that could drift. A cache miss analyses on the spot rather
+       than answering empty: a client may pull before it opens a document, and
+       an empty report is indistinguishable from a clean file. *)
+    method! on_request_unhandled : type r.
+        notify_back:_ -> id:_ -> r Lsp.Client_request.t -> r Linol_lwt.t =
+      fun ~notify_back ~id req ->
+        match req with
+        | Lsp.Client_request.TextDocumentDiagnostic params ->
+          let uri = params.Lsp.Types.DocumentDiagnosticParams.textDocument.uri in
+          let items =
+            match get_analysis uri with
+            | Some a -> a.Analysis.diagnostics
+            | None ->
+              (match Hashtbl.find_opt doc_cache (Lsp.Types.DocumentUri.to_string uri) with
+               | Some a -> a.Analysis.diagnostics
+               | None -> [])
+          in
+          Linol_lwt.return
+            (`RelatedFullDocumentDiagnosticReport
+               (Lsp.Types.RelatedFullDocumentDiagnosticReport.create ~items ()))
+        | _ -> super#on_request_unhandled ~notify_back ~id req
 
     method config_code_action_provider =
       `CodeActionOptions (Lsp.Types.CodeActionOptions.create
@@ -510,10 +555,17 @@ class march_server =
           Some (`Bool true);
         ServerCapabilities.callHierarchyProvider =
           Some (`Bool true);
+        (* `workspaceDiagnostics` is a SEPARATE claim from the per-document
+           pull: it promises `workspace/diagnostic`, a request over every file
+           rather than the open ones, which this server does not answer.
+           Advertising it while implementing only `textDocument/diagnostic`
+           would recreate one level down the exact bug just fixed — a capability
+           dispatched where nothing listens. Lowered until someone implements
+           it; `Workspace.index_project` is the raw material if they do. *)
         ServerCapabilities.diagnosticProvider =
           Some (`DiagnosticOptions
                   (Lsp.Types.DiagnosticOptions.create
-                     ~interFileDependencies:true ~workspaceDiagnostics:true ()));
+                     ~interFileDependencies:true ~workspaceDiagnostics:false ()));
         ServerCapabilities.codeLensProvider =
           Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ());
         (* Advertise the runnable code-lens commands so generic clients know
@@ -522,7 +574,8 @@ class march_server =
           Some (Lsp.Types.ExecuteCommandOptions.create
                   ~commands:[ "march.runTest"; "march.debugTest";
                               "march.run";     "march.debug";
-                              "march.suggestRefinement" ] ());
+                              "march.suggestRefinement";
+                              "march.suggestPostcondition" ] ());
         (* Auto-close HTML tags inside ~H sigils when the user types '>'. *)
         ServerCapabilities.documentOnTypeFormattingProvider =
           Some (Lsp.Types.DocumentOnTypeFormattingOptions.create

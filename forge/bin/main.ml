@@ -327,12 +327,17 @@ let refine_cmd =
            ~doc:"With --apply, repeat until a round applies nothing. A contract only \
                  becomes visible to a caller once the callee carries it, so each round \
                  propagates one call hop.") in
-  let run t a ap fx b =
+  let postconditions =
+    Arg.(value & flag & info ["postconditions"]
+           ~doc:"Propose RETURN refinements instead: the contract that lets a \
+                 function's CALLERS discharge their obligations. Preconditions \
+                 propagate up the call graph; postconditions propagate down.") in
+  let run t a ap fx po b =
     if t = "" && not a then begin
       Printf.eprintf "error: forge refine needs a function name, or --all\n%!";
       exit 1
     end;
-    handle_msg (Cmd_refine.run ~all:a ~apply:ap ~fixpoint:fx ~budget:b ~target:t ())
+    handle_msg (Cmd_refine.run ~all:a ~apply:ap ~fixpoint:fx ~postconditions:po ~budget:b ~target:t ())
   in
   Cmd.v
     (Cmd.info "refine"
@@ -343,7 +348,7 @@ let refine_cmd =
                   A suggestion is only made when the checker itself proves the \
                   obligations under it, so `march check` after --apply agrees \
                   with what was printed." ])
-    Term.(const run $ target $ all $ apply $ fixpoint $ budget)
+    Term.(const run $ target $ all $ apply $ fixpoint $ postconditions $ budget)
 
 (* -------------------------------------------------------------- forge refactor *)
 

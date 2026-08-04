@@ -99,6 +99,99 @@ let splice ~(src : string) ~(line : int) ~(fn : string) ~(param : string)
       (String.sub src 0 a ^ " " ^ annotation
        ^ String.sub src b (String.length src - b))
 
+(** [byte_range_of_return ~src ~line ~fn] locates [fn]'s RETURN type annotation,
+    searching from 1-based [line].  Returns the half-open byte range of the
+    annotation text — everything after the `:` that follows the parameter list,
+    up to but excluding the `do` that opens the body.
+
+    Separate from [byte_range_of_param] because it is a different scan, not a
+    variation of one: the parameter version splits a comma-separated list inside
+    brackets, while this must first find the paren that CLOSES the parameter
+    list (tracking depth, so `Map(String, Int)` does not end it early) and then
+    stop at a `do` keyword rather than a separator.
+
+    [None] when the function declares no return type (`fn f(x) do …`), which is
+    not a failure — there is simply nothing to annotate. *)
+let byte_range_of_return ~(src : string) ~(line : int) ~(fn : string) :
+    (int * int) option =
+  let n = String.length src in
+  let rec line_start i cur =
+    if cur >= line || i >= n then i
+    else line_start (i + 1) (if src.[i] = '\n' then cur + 1 else cur)
+  in
+  let start = line_start 0 1 in
+  let flen = String.length fn in
+  let rec find_fn i =
+    if i + flen > n then None
+    else if
+      String.sub src i flen = fn
+      && (i = 0 || not (is_word src.[i - 1]))
+      && (i + flen >= n || not (is_word src.[i + flen]))
+    then Some i
+    else find_fn (i + 1)
+  in
+  match find_fn start with
+  | None -> None
+  | Some fn_ofs ->
+    let rec find_lparen i =
+      if i >= n then None
+      else
+        match src.[i] with
+        | '(' -> Some i
+        | ' ' | '\t' -> find_lparen (i + 1)
+        | _ -> None
+    in
+    (match find_lparen (fn_ofs + flen) with
+     | None -> None
+     | Some lp ->
+       (* Closing paren of the PARAMETER LIST, tracking depth so a parenthesised
+          parameter type does not terminate the scan early. *)
+       let rec close i depth =
+         if i >= n then None
+         else
+           match src.[i] with
+           | '(' | '[' | '{' -> close (i + 1) (depth + 1)
+           | ')' when depth = 1 -> Some i
+           | ')' | ']' | '}' -> close (i + 1) (depth - 1)
+           | _ -> close (i + 1) depth
+       in
+       (match close (lp + 1) 1 with
+        | None -> None
+        | Some rp ->
+          (* `: <ty> do`.  Anything else between the parameter list and the body
+             (including no annotation at all) yields None rather than a guess. *)
+          let rec skip_ws i = if i < n && (src.[i] = ' ' || src.[i] = '\t') then skip_ws (i + 1) else i in
+          let i = skip_ws (rp + 1) in
+          if i >= n || src.[i] <> ':' then None
+          else
+            let ty_start = i + 1 in
+            let rec find_do j depth =
+              if j + 2 > n then None
+              else
+                match src.[j] with
+                | '(' | '[' | '{' -> find_do (j + 1) (depth + 1)
+                | ')' | ']' | '}' -> find_do (j + 1) (depth - 1)
+                | 'd' when depth = 0
+                           && j + 2 <= n && String.sub src j 2 = "do"
+                           && (j = 0 || not (is_word src.[j - 1]))
+                           && (j + 2 >= n || not (is_word src.[j + 2])) -> Some j
+                | '\n' -> None   (* the body opener must be on the signature line *)
+                | _ -> find_do (j + 1) depth
+            in
+            (match find_do ty_start 0 with
+             | None -> None
+             | Some do_ofs -> Some (ty_start, do_ofs))))
+
+(** Replace [fn]'s return annotation with [annotation]. *)
+let splice_return ~(src : string) ~(line : int) ~(fn : string)
+    ~(annotation : string) : string option =
+  match byte_range_of_return ~src ~line ~fn with
+  | None -> None
+  | Some (a, b) ->
+    Some
+      (String.sub src 0 a ^ " " ^ annotation ^ " "
+       ^ String.sub src b (String.length src - b))
+
 (** 0-based (line, column) of a byte offset — what an LSP [Position] needs. *)
 let position_of_offset (src : string) (ofs : int) : int * int =
   let line = ref 0 and col = ref 0 in

@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge refine --postconditions`, `--apply`, and an editor action complete
+  the postcondition half.** The compiler surface shipped previously; this adds
+  the two surfaces people actually reach for. `--apply` rewrites the *return*
+  annotation via a new `Refine_edit.splice_return`, which is a genuinely
+  different scan from the parameter one — it must find the paren closing the
+  parameter list (depth-tracked, so `Map(String, Int)` does not end it early)
+  and stop at the `do` that opens the body. The editor gets a "Suggest a
+  postcondition for `f`" action alongside the existing precondition one,
+  sharing that same splice so the CLI and the editor produce identical bytes.
+
 - **`march --cap-sandbox`: opt-in self-imposed capability sandbox.** Embeds a
   deny-default profile derived from the module's own inferred capabilities and
   applies it before any user code runs, so a binary deployed where forge is not
@@ -288,6 +298,14 @@ git log is authoritative for exact commits.
   your handlers block.
 
 ### Fixed
+
+- **`march-lsp` implements the pull diagnostics it advertises.** It declared
+  `diagnosticProvider`, but `textDocument/diagnostic` reached no handler, so
+  every pull failed with `TODO: handle this request` — invisible because the
+  push path quietly carried the feature. Also lowers `workspaceDiagnostics` to
+  `false`: that is a separate promise (`workspace/diagnostic`, over every file
+  rather than the open ones) which is still unimplemented, and advertising it
+  would recreate the same bug one level down.
 
 - **`march-lsp` now exits when the client tells it to.** The server handled the
   `exit` notification and then went straight back to reading stdin, so it hung
