@@ -637,6 +637,13 @@ type env = {
       then "Lib", then "Lib.Sub", etc., mirroring [prebind_mod_members]'s
       [prefix ^ "." ^ mname.txt] recursion. The entry module's own name is
       NOT included (TIR unwraps the entry module), so this starts empty. *)
+  enclosing_package : string;
+  (** Top-level module name of the file being checked, set ONCE and never
+      overwritten as nested modules are entered.  [current_module] is only the
+      bare name inside a nested `mod Sub`, and [cap_qual_prefix] is "" at the
+      entry module, so neither answers "which package does this code belong
+      to" — which bare-constructor ambiguity needs, so that a package's own
+      constructor is not reported ambiguous against an unimported stdlib type. *)
   no_panic_mod : bool;
   (** True when the module currently being checked has `cap no_panic`.
       Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
@@ -780,6 +787,7 @@ let make_env errors type_map = {
   current_module = "";
   cur_fn_public = false;
   cap_qual_prefix = "";
+  enclosing_package = "";
   no_panic_mod = false;
   no_panic_modules = [];
   nonexhaustive_match_spans = ref [];
@@ -1776,6 +1784,38 @@ let builtin_cap_table : (string * string) list = [
     E.g., cap_subsumes "IO" "IO.FileRead" = true.
     See [March_caps.Cap_lattice.cap_subsumes]. *)
 let cap_subsumes = March_caps.Cap_lattice.cap_subsumes
+
+(** [same_package_namespace a b] — do two module paths belong to the same
+    top-level namespace?  ["Conduit.RateLimiter"] and ["Conduit"] do; neither
+    shares one with ["Compress.Gzip"].
+
+    Used to decide whether a bare constructor reference is genuinely ambiguous.
+    Exact current-module equality is too strict: a package that declares a type
+    in `mod Pkg` and matches on its constructors from `mod Pkg.Sub` owns both
+    sides, but the two module paths differ, so an unrelated stdlib type sharing
+    the constructor name made the package's own code ambiguous against a type
+    it never imported.  Measured on conduit, whose `RateLimiterBackend.Custom`
+    collided with `Compress.Gzip.Level.Custom`. *)
+(* Every module path that could carry the current code's package namespace.
+   All three are consulted rather than the first non-empty, because which one
+   holds it depends on how the code was reached:
+     - a dotted top-level `mod Pkg.Sub` puts the whole path in current_module;
+     - a nested `mod Sub` leaves only the bare name there, and the package name
+       is in enclosing_package;
+     - the multi-file check path wraps everything in a synthetic "LibCheck"
+       module, which makes enclosing_package useless but leaves current_module
+       correct.
+   Consulting only one of them misses whichever shape it does not cover. *)
+let local_module_paths env =
+  List.filter (fun s -> s <> "")
+    [ env.current_module; env.cap_qual_prefix; env.enclosing_package ]
+
+let same_package_namespace (a : string) (b : string) : bool =
+  let root p = match String.index_opt p '.' with
+    | None -> p
+    | Some i -> String.sub p 0 i
+  in
+  a <> "" && b <> "" && root a = root b
 
 (** [cap_path_of_names names] joins AST name list to dot-string. *)
 let cap_path_of_names names =
@@ -3767,7 +3807,12 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
          let candidates = all_ctor_candidates_named name.txt env in
          let distinct_modules = List.sort_uniq compare (List.map snd candidates) in
          let local_owns_one =
-           List.exists (fun (_, m) -> m = env.current_module) candidates in
+           List.exists
+             (fun (_, m) ->
+                m = env.current_module
+                || List.exists (same_package_namespace m)
+                     (local_module_paths env))
+             candidates in
          if List.length distinct_modules > 1 && not local_owns_one then begin
            let lines = List.map (fun (t, m) ->
                Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
@@ -5630,7 +5675,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let candidates = all_ctor_candidates_named name.txt env in
            let distinct_modules = List.sort_uniq compare (List.map snd candidates) in
            let local_owns_one =
-             List.exists (fun (_, m) -> m = env.current_module) candidates in
+             List.exists
+               (fun (_, m) ->
+                  m = env.current_module
+                  || List.exists (same_package_namespace m)
+                       (local_module_paths env))
+               candidates in
            if List.length distinct_modules > 1 && not local_owns_one then begin
              let lines = List.map (fun (t, m) ->
                  Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
@@ -11364,7 +11414,12 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     prebind_mod_members m.Ast.mod_name.txt pre_env top_level
   in
   (* Pass 2: full checking *)
-  let pre_env = { pre_env with current_module = m.Ast.mod_name.txt } in
+  let pre_env =
+    { pre_env with
+      current_module = m.Ast.mod_name.txt;
+      enclosing_package =
+        (if pre_env.enclosing_package = "" then m.Ast.mod_name.txt
+         else pre_env.enclosing_package) } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Part 1: the cap_narrow proof-cap forge is closed by the [unify] hook
      ([cap_producer_ivars]), which fires at the exact moment a cap_narrow-derived

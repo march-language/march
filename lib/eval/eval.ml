@@ -993,6 +993,85 @@ let debug_ctx : debug_ctx option ref = ref None
 exception Match_failure of string
 exception Eval_error of string
 
+(** Bounded consolation diagnostic for task 7 of the 2026-08-03
+    refinement-followups-seven plan (see
+    specs/progress/2026-08-0*-interface-method-names-qualifiability-disposition.md).
+
+    Interface method names are not module-qualifiable: `Foo.greet(1)` never
+    resolves, even when `Foo` declares `interface Greeter do fn greet : ... end`
+    and greet is dispatched via `impl`, because dispatch works through the
+    unqualified name, not module-member lookup — see [lookup]'s
+    `strip_lookup` fallback below, whose terminal case raises exactly
+    `Eval_error ("unbound variable: " ^ name)` for this shape. Making that
+    resolve is a dispatch-side redesign (see the todo this task closed for
+    why the naive fix — teaching [Desugar.collect_direct_names] about method
+    names — was measured to regress working code and silently re-vacuate the
+    accept/t126 and accept/t127 corpus witnesses). This function does NOT
+    change resolution: it only recognizes the exact failure shape after the
+    fact and appends a note suggesting the working spelling. Called from
+    [bin/main.ml]'s [Eval_error] handler, which has no other access to the
+    desugared module tree once evaluation has already unwound.
+
+    [module_ast] is the desugared top-level module. On a dotted unbound-name
+    failure `"unbound variable: Mod.method"`, this walks every module
+    (top-level and nested [DMod]) whose own name matches the last path
+    segment before [method] and checks whether it declares an interface with
+    a method by that name. If so, returns a note; otherwise [None] — including
+    for a genuinely unbound name, which must fall through unchanged. *)
+let interface_method_hint (module_ast : module_) (msg : string) : string option =
+  let prefix = "unbound variable: " in
+  let plen = String.length prefix in
+  if String.length msg <= plen || String.sub msg 0 plen <> prefix then None
+  else
+    let name = String.sub msg plen (String.length msg - plen) in
+    match String.rindex_opt name '.' with
+    | None -> None
+    | Some i ->
+      let mod_path = String.sub name 0 i in
+      let member = String.sub name (i + 1) (String.length name - i - 1) in
+      (* Last path segment, matching [lookup]'s own [strip_lookup] fallback
+         which progressively strips leading module components. *)
+      let last_segment =
+        match String.rindex_opt mod_path '.' with
+        | None -> mod_path
+        | Some j -> String.sub mod_path (j + 1) (String.length mod_path - j - 1)
+      in
+      let find_in_decls decls =
+        List.find_map
+          (function
+            | DInterface (idef, _) ->
+              if List.exists
+                   (fun (m : method_decl) -> m.md_name.txt = member)
+                   idef.iface_methods
+              then Some idef.iface_name.txt
+              else None
+            | _ -> None)
+          decls
+      in
+      let rec search this_name decls =
+        let here =
+          if this_name = last_segment || this_name = mod_path then
+            match find_in_decls decls with
+            | Some iface_name -> Some (this_name, iface_name)
+            | None -> None
+          else None
+        in
+        match here with
+        | Some _ -> here
+        | None ->
+          List.find_map
+            (function
+              | DMod (nested_name, _, inner, _) -> search nested_name.txt inner
+              | _ -> None)
+            decls
+      in
+      (match search module_ast.mod_name.txt module_ast.mod_decls with
+       | None -> None
+       | Some (found_mod, iface_name) ->
+         Some (Printf.sprintf
+                 "\nnote: `%s` is a method of interface `%s` declared in module `%s` — interface methods aren't module-qualifiable (dispatch resolves the bare name, not the qualified one). Call it as `%s(...)` instead of `%s(...)`."
+                 member iface_name found_mod member name))
+
 (** Raised when an [assert] expression fails during test execution.
     Carries a human-readable failure message. *)
 exception Assert_failure of string

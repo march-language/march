@@ -1,11 +1,13 @@
 /* runtime/march_ffi.c — implementation of the March FFI ABI (march_ffi.h). */
 #include "march_ffi.h"
 #include "march_runtime.h"  /* march_incrc / march_decrc */
+#include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <time.h>
 
 /* From the scheduler: cooperatively yield the green thread (no-op outside a
  * scheduler context).  Declared here to avoid pulling the whole scheduler API. */
@@ -254,36 +256,177 @@ static double blk_call_d(void *fn, const int64_t *a, int n) {
         default:return ((double(*)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2],a[3],a[4],a[5]);
     }
 }
-typedef struct {
+typedef struct march_blk_call {
     void *fn; const int64_t *args; int n; int is_double;
     int64_t ri; double rd; _Atomic int done;
+    struct march_blk_call *next;   /* intrusive submission-queue link */
 } march_blk_call;
-static void *march_blk_thread(void *p) {
-    march_blk_call *b = (march_blk_call *)p;
+static void march_blk_execute(march_blk_call *b) {
     if (b->is_double) b->rd = blk_call_d(b->fn, b->args, b->n);
     else              b->ri = blk_call_i(b->fn, b->args, b->n);
     atomic_store_explicit(&b->done, 1, memory_order_release);
+}
+
+/* ── Blocking-FFI worker pool ────────────────────────────────────────────────
+ * Blocking externs used to get a fresh pthread_create + pthread_join PER CALL.
+ * That is correct but very expensive: a program that makes one blocking call
+ * per work item pays a thread create/join for every item (measured: 14,408
+ * clone3 calls, ~0.79s of pure thread churn, for a 3,600-item run — enough to
+ * make the parallel path several times SLOWER than the serial one).
+ *
+ * So calls are handed to a pool of reusable worker threads instead.
+ *
+ * The pool is ELASTIC, and that is a correctness requirement, not a tuning
+ * choice: blocking calls may DEPEND ON EACH OTHER.  A worker-pool program can
+ * legitimately have N green threads parked inside a blocking `take_job` that
+ * only returns once a *different* green thread's blocking `submit` runs.  With
+ * a fixed-size pool those take_jobs would occupy every worker and the submit
+ * could never be serviced — reintroducing exactly the deadlock this mechanism
+ * exists to avoid.  Therefore: if no worker is idle at submission time, we
+ * always spawn another one.  The pool only ever *reuses* threads that are
+ * provably free, and idle workers retire after MARCH_BLK_IDLE_SECONDS so a
+ * burst does not leave threads parked for the life of the process. */
+#define MARCH_BLK_IDLE_SECONDS 10
+
+static pthread_mutex_t g_blk_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_blk_cv = PTHREAD_COND_INITIALIZER;
+static march_blk_call *g_blk_head = NULL;   /* FIFO of pending calls */
+static march_blk_call *g_blk_tail = NULL;
+/* Demand vs. supply, both guarded by g_blk_mu.  A new worker is spawned iff
+ * g_blk_queued > g_blk_waiting, i.e. iff some queued call has no parked worker
+ * earmarked for it.  Counting *parked workers* rather than "is anyone idle"
+ * is what makes concurrent submissions safe: two submissions racing against a
+ * single parked worker both observe queued=2 > waiting=1, so exactly one of
+ * them spawns the extra thread the second call needs.  (An "is a worker idle?"
+ * test lets both conclude the same lone worker will serve them; the unserved
+ * call then hangs forever if the served one is waiting on it.) */
+static int g_blk_queued  = 0;               /* calls enqueued, not yet claimed */
+static int g_blk_waiting = 0;               /* workers parked on g_blk_cv */
+/* Diagnostics: total worker threads ever spawned, and calls ever submitted.
+ * Exposed for tests — the pool's whole purpose is threads_spawned << calls. */
+static _Atomic int64_t g_blk_threads_spawned = 0;
+static _Atomic int64_t g_blk_calls = 0;
+
+/* Unlink [b] from the pending queue.  Returns 1 if it was still queued (so the
+ * caller now owns it and must run it), 0 if a worker already claimed it.
+ * Caller holds g_blk_mu. */
+static int march_blk_unlink_locked(march_blk_call *b) {
+    march_blk_call **link = &g_blk_head;
+    march_blk_call *prev = NULL;
+    while (*link) {
+        if (*link == b) {
+            *link = b->next;
+            if (g_blk_tail == b) g_blk_tail = prev;
+            b->next = NULL;
+            return 1;
+        }
+        prev = *link;
+        link = &(*link)->next;
+    }
+    return 0;
+}
+
+static void *march_blk_worker(void *unused) {
+    (void)unused;
+    pthread_mutex_lock(&g_blk_mu);
+    for (;;) {
+        if (g_blk_head) {
+            march_blk_call *b = g_blk_head;
+            g_blk_head = b->next;
+            if (!g_blk_head) g_blk_tail = NULL;
+            b->next = NULL;
+            --g_blk_queued;
+            pthread_mutex_unlock(&g_blk_mu);
+            march_blk_execute(b);
+            pthread_mutex_lock(&g_blk_mu);
+            continue;
+        }
+        struct timespec deadline;
+        if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) break;
+        deadline.tv_sec += MARCH_BLK_IDLE_SECONDS;
+        ++g_blk_waiting;
+        int rc = pthread_cond_timedwait(&g_blk_cv, &g_blk_mu, &deadline);
+        --g_blk_waiting;
+        /* Idle long enough with nothing pending — retire, so a burst does not
+         * leave threads parked for the life of the process. */
+        if (!g_blk_head && rc == ETIMEDOUT) break;
+    }
+    pthread_mutex_unlock(&g_blk_mu);
     return NULL;
 }
+
 static void march_run_blocking(march_blk_call *b) {
-    pthread_t t;
-    if (pthread_create(&t, NULL, march_blk_thread, b) != 0) {
-        /* Can't offload — run inline (still correct, just stalls this worker). */
-        march_blk_thread(b);
-        return;
+    int need_worker;
+    b->next = NULL;
+    atomic_fetch_add_explicit(&g_blk_calls, 1, memory_order_relaxed);
+
+    pthread_mutex_lock(&g_blk_mu);
+    if (g_blk_tail) g_blk_tail->next = b; else g_blk_head = b;
+    g_blk_tail = b;
+    ++g_blk_queued;
+    /* More queued calls than parked workers ⇒ spawn one.  See the elasticity
+     * note above: reusing a BUSY worker is not an option, because the call it
+     * is running may be waiting on the call we are submitting right now. */
+    need_worker = (g_blk_queued > g_blk_waiting);
+    pthread_cond_signal(&g_blk_cv);
+    pthread_mutex_unlock(&g_blk_mu);
+
+    if (need_worker) {
+        pthread_t t;
+        pthread_attr_t attr;
+        int spawned = 0;
+        if (pthread_attr_init(&attr) == 0) {
+            (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+            spawned = (pthread_create(&t, &attr, march_blk_worker, NULL) == 0);
+            (void)pthread_attr_destroy(&attr);
+        }
+        if (spawned) {
+            atomic_fetch_add_explicit(&g_blk_threads_spawned, 1,
+                                      memory_order_relaxed);
+        } else {
+            /* Cannot offload.  Reclaim our own call and run it inline — still
+             * correct, it just stalls this scheduler thread (the pre-pool
+             * fallback behaved the same way).  If a worker already claimed it,
+             * leave it alone and fall through to the wait loop. */
+            int mine;
+            pthread_mutex_lock(&g_blk_mu);
+            mine = march_blk_unlink_locked(b);
+            if (mine) --g_blk_queued;
+            pthread_mutex_unlock(&g_blk_mu);
+            if (mine) { march_blk_execute(b); return; }
+        }
     }
-    /* Cooperatively yield while the C call runs on the OS thread. */
+
+    /* Cooperatively yield while the C call runs on a pool thread. */
     while (!atomic_load_explicit(&b->done, memory_order_acquire))
         march_sched_yield();
-    pthread_join(t, NULL);
+}
+
+/* Test/diagnostic hooks: the pool is working when spawned << calls. */
+int64_t march_blocking_threads_spawned(void) {
+    return atomic_load_explicit(&g_blk_threads_spawned, memory_order_relaxed);
+}
+int64_t march_blocking_calls(void) {
+    return atomic_load_explicit(&g_blk_calls, memory_order_relaxed);
+}
+/* Test hook: a trivial body to declare `blocking` and drive the pool from a
+ * March test program.  [us] microseconds of sleep (0 = return immediately). */
+int64_t march_test_blocking_nap(int64_t us) {
+    if (us > 0) {
+        struct timespec ts;
+        ts.tv_sec  = (time_t)(us / 1000000);
+        ts.tv_nsec = (long)(us % 1000000) * 1000L;
+        (void)nanosleep(&ts, NULL);
+    }
+    return us;
 }
 int64_t march_run_blocking_i(void *fn, const int64_t *args, int n) {
-    march_blk_call b = { fn, args, n, 0, 0, 0.0, 0 };
+    march_blk_call b = { fn, args, n, 0, 0, 0.0, 0, NULL };
     march_run_blocking(&b);
     return b.ri;
 }
 double march_run_blocking_d(void *fn, const int64_t *args, int n) {
-    march_blk_call b = { fn, args, n, 1, 0, 0.0, 0 };
+    march_blk_call b = { fn, args, n, 1, 0, 0.0, 0, NULL };
     march_run_blocking(&b);
     return b.rd;
 }

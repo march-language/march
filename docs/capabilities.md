@@ -292,6 +292,7 @@ A module with `cap no_panic` must not contain any expression that can panic at r
 2. **Division safety** — proves every integer divisor is non-zero via the Z3 SMT solver. Both literal divisors (`a / 0` → immediate error) and variable divisors are handled:
    - Variable with an Int refinement `{v | pred}`: Z3 discharges `pred ⊢ v ≠ 0`; fast syntactic short-circuit for common patterns (`v > 0`, `v >= 1`, `v != 0`, `v < 0`).
    - Let-bound variable: Z3 discharges `var = rhs ⊢ var ≠ 0` with param assumptions injected.
+   - **Enclosing `if` guards count**, on either branch: `if d != 0 do n / d else 0 end` needs no refinement at all, and neither does the `else` side of `if d == 0 do 0 else n / d end`. Guards are read through `&&`, `||` and `not`, so `if p > 0 && d > 0 do n / d` and `if p <= 0 || d <= 0 do 0 else n / d end` both discharge. A conjunctive fact is discharged by either side; a disjunctive one only when *both* sides prove the divisor non-zero on their own — `if p > 0 || d > 0 do n / d` is still an error, since `d` may be the arm that does not hold.
    - No refinement or unsupported expression: conservative error.
 3. **Non-exhaustive `match` ban** — inside a `cap no_panic` module, a `match` that doesn't cover every constructor is an ERROR, not just the ordinary non-blocking exhaustiveness warning every other module gets: an uncaught pattern is a runtime panic ("no matching clause"), and `cap no_panic` exists precisely to rule that class of failure out.
 

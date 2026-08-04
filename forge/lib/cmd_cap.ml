@@ -329,7 +329,7 @@ let query ~dir () =
   end
 
 (* ------------------------------------------------------------------ *)
-(* forge cap audit <binary> — read capabilities from a compiled       *)
+(* forge cap inspect <binary> — read capabilities from a compiled       *)
 (* executable (specs/2026-08-03-forge-cap-audit-design.md §5).        *)
 (* ------------------------------------------------------------------ *)
 
@@ -415,6 +415,16 @@ let render_report ~bin (t : Cap_binary.t) =
     (Printf.sprintf "\nbuild: %s    coverage: %s\n"
        (build_str t.Cap_binary.build)
        (coverage_str (coverage_of t)));
+  (* Say what this does and does not cover.  This is the SOUND check — it is
+     read after codegen, so it sees capabilities reached through stdlib and
+     dependency code that a source-level audit misses — but it answers about
+     the whole program, so it cannot show which dependency is responsible.
+     `forge audit` answers that, less soundly. Neither subsumes the other. *)
+  Buffer.add_string buf
+    "\nnote: read from the built artifact, so this covers capabilities reached\n\
+    \      through stdlib and dependency code as well as your own. It is a\n\
+    \      whole-program union: it cannot attribute a capability to a specific\n\
+    \      dependency — `forge audit` does that from source.\n";
   Buffer.contents buf
 
 let render_json ~bin (t : Cap_binary.t) =
@@ -475,7 +485,7 @@ let gate_violations ~deny ~allow_only ~allow_foreign (t : Cap_binary.t) =
        effective);
   List.rev !violations
 
-let audit ~bin ~json ~deny ~allow_only ~allow_foreign () =
+let inspect ~bin ~json ~deny ~allow_only ~allow_foreign () =
   match Cap_binary.read bin with
   | Error e -> Error e
   | Ok t ->
@@ -484,7 +494,7 @@ let audit ~bin ~json ~deny ~allow_only ~allow_foreign () =
     (match gate_violations ~deny ~allow_only ~allow_foreign t with
      | [] -> Ok ()
      | vs ->
-       List.iter (fun v -> Printf.eprintf "forge cap audit: %s\n%!" v) vs;
+       List.iter (fun v -> Printf.eprintf "forge cap inspect: %s\n%!" v) vs;
        Error (Printf.sprintf "%d gate violation(s)" (List.length vs)))
 
 (* ------------------------------------------------------------------ *)

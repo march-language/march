@@ -2548,41 +2548,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end;
     if Hashtbl.mem ctx.raises_externs resolved_name then
       emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs
-    else if Hashtbl.mem ctx.blocking_externs resolved_name then begin
-      (* Blocking dispatch: marshal args into a stack i64 array and run the C
-         call on an OS thread via march_run_blocking_*, while the green thread
-         cooperatively yields.  Int/ptr args only (GP-register trampoline). *)
-      let n   = List.length arg_pairs in
-      let cap = if n = 0 then 1 else n in
-      let arr = fresh ctx "blkargs" in
-      emit ctx (Printf.sprintf "%s = alloca [%d x i64]" arr cap);
-      List.iteri (fun i (ty, v) ->
-        let iv = match ty with
-          | "i64" -> v
-          | "ptr" -> let t = fresh ctx "blki" in
-                     emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" t v); t
-          | other ->
-            failwith (Printf.sprintf
-              "blocking extern `%s`: argument type %s is not supported \
-               (Int/Bool/pointer args only)" resolved_name other)
-        in
-        let slot = fresh ctx "blkslot" in
-        emit ctx (Printf.sprintf
-          "%s = getelementptr [%d x i64], ptr %s, i64 0, i64 %d" slot cap arr i);
-        emit ctx (Printf.sprintf "store i64 %s, ptr %s" iv slot)
-      ) arg_pairs;
-      let helper, hret =
-        if ret_ty = "double" then "march_run_blocking_d", "double"
-        else "march_run_blocking_i", "i64" in
-      let r = fresh ctx "blkr" in
-      emit ctx (Printf.sprintf "%s = call %s @%s(ptr @%s, ptr %s, i32 %d)"
-                  r hret helper fname arr n);
-      (match ret_ty with
-       | "void" -> ("i64", "0")
-       | "ptr"  -> let p = fresh ctx "blkp" in
-                   emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r); ("ptr", p)
-       | _      -> (ret_ty, r))
-    end
+    else if Hashtbl.mem ctx.blocking_externs resolved_name then
+      Llvm_calls.emit_blocking_call ctx ~fname ~ret_ty ~arg_pairs ~resolved_name
     else if (match ctx.hr_config with
              | None -> false
              | Some cfg ->
@@ -2700,6 +2667,36 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty rn with
       | Some t -> t | None -> fn_ret_tir f.Tir.v_ty in
     emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs
+
+  (* ── ECallPtr to a `blocking` extern: OS-thread dispatch ─────────────── *)
+  (* Exactly the same situation as the `raises` arm above: defun may emit
+     extern calls as ECallPtr, so `blocking` externs must be caught here —
+     before the generic global-call arms — or they fall through to a plain
+     direct call and lose their blocking dispatch entirely.
+
+     That is not merely a missed optimization.  The C call then runs INLINE on
+     the green thread's stack, blocking the whole scheduler OS thread; once
+     every scheduler thread is parked inside one, runnable green threads can
+     never be dispatched and the program deadlocks. *)
+  | Tir.ECallPtr (Tir.AVar f, args)
+    when (not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)))
+      && (let rn =
+            if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
+            else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+              | Some q -> q | None -> f.Tir.v_name in
+          Hashtbl.mem ctx.blocking_externs rn) ->
+    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
+    let rn =
+      if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
+      else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+        | Some q -> q | None -> f.Tir.v_name in
+    let fname = match Hashtbl.find_opt ctx.extern_map rn with
+      | Some c_name -> c_name | None -> mangle_extern rn in
+    let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty rn with
+      | Some t -> t | None -> fn_ret_tir f.Tir.v_ty in
+    let ret_ty = llvm_ret_ty ret_tir in
+    Llvm_calls.emit_blocking_call ctx ~fname ~ret_ty ~arg_pairs
+      ~resolved_name:rn
 
   (* ── ECallPtr where callee is an unqualified cross-module user function ── *)
   (* lower.ml may emit function references without their module prefix (e.g.

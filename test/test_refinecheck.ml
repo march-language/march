@@ -4586,6 +4586,130 @@ end|}))
    retired, so the divisor reaches the unrefined branch and errors), and the
    whole point is fail-closed behaviour — gating would disable these exactly
    where verification is unavailable. *)
+(* ── Division-safety: BOOLEAN path guards ──────────────────────────────────
+   [path_proves_nonzero] matched a single atomic comparison and nothing else,
+   so ANY `&&`/`||` in a guard — on either side of the `if`, and even a
+   disjunction over the divisor itself — defeated it.  The divisor then fell
+   through to the unrefined arm and `cap no_panic` reported a division that the
+   guard makes unreachable.  That is a FALSE POSITIVE on the most idiomatic
+   spelling there is (`if p > 0 && d > 0 do n / d`), and under `cap no_panic` it
+   is a hard error, not a hint — which is why this was worth fixing over the
+   completeness backlog.
+
+   Found by pointing the checker at forgepm (a real ~9k-line app), whose
+   `metrics.march` has exactly the `if prev <= 0 || dt <= 0 do 0 else … / dt`
+   shape.
+
+   The polarity is the whole content of the fix, so both directions of BOTH
+   connectives are pinned, each with a negative control in [..._unsound] below:
+   a fact `A && B` proves the goal if EITHER conjunct does, but a fact `A || B`
+   proves it only if BOTH arms do.  Negating swaps which is which (De Morgan).
+
+   NOT gated: decided syntactically, with no VC built at all. *)
+let divsafety_boolean_guard_suite =
+  let ok name src = Alcotest.(check bool) name false (has_divsafety_error src) in
+  let errors name src = Alcotest.(check bool) name true (has_divsafety_error src) in
+  [ Alcotest.test_case "conjunctive guard, THEN side: one conjunct proves it"
+      `Quick (fun () ->
+        ok "no error" {|
+mod B1 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p > 0 && d > 0 do 100 / d else 0 end
+  end
+end
+|})
+  ; Alcotest.test_case "disjunctive guard, ELSE side: De Morgan gives a conjunction"
+      `Quick (fun () ->
+        (* not (p <= 0 || d <= 0)  ==  p > 0 && d > 0  ==>  d != 0.
+           This is the forgepm metrics.march shape. *)
+        ok "no error" {|
+mod B2 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p <= 0 || d <= 0 do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "disjunction over the divisor ITSELF, else side" `Quick
+      (fun () ->
+        (* not (d <= 0 || d > 1000)  ==>  d > 0.  Both arms mention `d`, so this
+           fails differently from B2 if the recursion drops one arm. *)
+        ok "no error" {|
+mod B3 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d <= 0 || d > 1000 do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "conjunctive guard over a `let`-bound divisor" `Quick
+      (fun () ->
+        ok "no error" {|
+mod B4 do
+  cap no_panic
+  fn f(total : Int, prev : Int, p : Int) : Int do
+    let dt = total - prev
+    if p <= 0 || dt <= 0 do 0 else 100 / dt end
+  end
+end
+|})
+  ; Alcotest.test_case "`not` around a proving comparison flips polarity" `Quick
+      (fun () ->
+        ok "no error" {|
+mod B5 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if not(d != 0) do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "nested connectives still reduce" `Quick (fun () ->
+        ok "no error" {|
+mod B6 do
+  cap no_panic
+  fn f(p : Int, q : Int, d : Int) : Int do
+    if p > 0 && (q > 0 && d != 0) do 100 / d else 0 end
+  end
+end
+|})
+  ; (* ── negative controls: the unsound direction must still error ──────── *)
+    Alcotest.test_case "DISJUNCTIVE fact whose other arm proves nothing errors"
+      `Quick (fun () ->
+        (* Fact is `p > 0 || d > 0` — d may well be 0 (take p = 1, d = 0).
+           If the `||` arm used OR instead of AND, this would pass. *)
+        errors "error" {|
+mod B7 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p > 0 || d > 0 do 100 / d else 0 end
+  end
+end
+|})
+  ; Alcotest.test_case
+      "negated CONJUNCTION whose other arm proves nothing errors" `Quick
+      (fun () ->
+        (* Fact is `not (p > 0 && d > 0)` == `p <= 0 || d <= 0` — d may be 0. *)
+        errors "error" {|
+mod B8 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p > 0 && d > 0 do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "a conjunction proving nothing about the divisor errors"
+      `Quick (fun () ->
+        errors "error" {|
+mod B9 do
+  cap no_panic
+  fn f(p : Int, q : Int, d : Int) : Int do
+    if p > 0 && q > 0 do 100 / d else 0 end
+  end
+end
+|})
+  ]
+
 let divsafety_shadowing_suite =
   let errors name src = Alcotest.(check bool) name true (has_divsafety_error src) in
   [ Alcotest.test_case "a `let` rebinding the guarded name retires the guard (else side)"
@@ -5290,7 +5414,7 @@ end|}
     gated "a laundered guard on a DIFFERENT collection is not this guard"
       (fun () ->
         (* The laundered analogue of the WA control: the walk must consult
-           [expr_applies_to] with the ORIGINAL argument (`zs`), never the
+           [expr_applies_to_free] with the ORIGINAL argument (`zs`), never the
            let-bound name — `n` guards `zs`, and the obligation is about
            `ys`. *)
         let msg =
@@ -5371,34 +5495,6 @@ end|}
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
           "stays general" true (contains msg "solver-undecided"));
-    gated "TWO-level laundering stays general"
-      (fun () ->
-        (* `let a = List.length(ys)` then `let n = a`: the walk is one level
-           deep on purpose — a chain is where "the guard is about this value"
-           stops being syntactically evident, and the fallback is the honest
-           general message, not a guess. *)
-        let msg =
-          refine_error_text_d
-            {|mod LA5 do
-  cap verified
-  mod Internal do
-    mod List do
-      fn length(xs : List(Int)) : Int do 99 end
-    end
-  end
-  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
-  fn go(ys : List(Int)) : Int do
-    let a = List.length(ys)
-    let n = a
-    if n > 0 do head(ys) else 0 end
-  end
-end|}
-        in
-        Alcotest.(check bool) "reported at all" true (msg <> "");
-        Alcotest.(check bool)
-          "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
-        Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
     gated "a NEGATED laundered guard is not read as a guard that proved nothing"
       (fun () ->
         (* The laundered analogue of WC: in the else-branch the guard
@@ -5435,7 +5531,134 @@ end|}
   fn go(ys : List(Int)) : Int do
     if List.length(ys) > 0 do head(ys) else 0 end
   end
-end|}))
+end|}));
+    gated "a guard laundered through a TWO-let chain is attributed to the withdrawal"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod LA9 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let a = List.length(ys)
+    let n = a
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "a chain that rebinds to something ELSE stays general" (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod LA10 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    let a = List.length(ys)
+    let n = 5
+    if n > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool)
+          "still falls back to solver-undecided" true
+          (contains msg "solver-undecided"));
+    gated "a guard's lambda param colliding with the subject name is not evidence"
+      (fun () ->
+        (* Mirror-image of probe PE (2026-07-31), on the DIRECT path instead of
+           the laundered one. The guard's `ys` here is the lambda's own
+           parameter — it never applies List.length to the OUTER ys that
+           `head`'s argument names. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA11 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn check(f : (List(Int)) -> Bool, zs : List(Int)) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    if check(fn ys -> List.length(ys) > 0, zs) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "a FREE occurrence of the subject under a non-colliding binder still attributes"
+      (fun () ->
+        (* Companion control: a genuine free use of the withdrawn spelling
+           applied to the real subject, merely sitting inside an unrelated
+           lambda, must still attribute -- the fix must not over-retire. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA12 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn check(f : (List(Int)) -> Bool, zs : List(Int)) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    if check(fn q -> List.length(ys) > 0, zs) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided"));
+    gated "a guard's lambda param colliding with the subject name is not evidence, laundered through a `let`"
+      (fun () ->
+        (* Same shape as LA11 (a lambda param that merely collides with the
+           subject name must not be read as evidence), but the guard is
+           laundered through exactly one `let` first, so the collision lives
+           in the recorded RHS ([lets]) that [alias_withdrawal_cause]'s
+           laundered branch re-checks, rather than in the direct condition
+           itself.  Pins the RHS-path half of the same fix LA11 pins on the
+           direct path -- until now that half rested on code-reading symmetry
+           with no fixture of its own. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA13 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn check(f : (List(Int)) -> Bool, zs : List(Int)) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let ok = check(fn ys -> List.length(ys) > 0, zs)
+    if ok do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"))
   ]
 
 (* ── Composing a LIST contract across a call boundary ───────────────────────
@@ -6245,29 +6468,34 @@ end|}))
    (not an error — the module still compiles) naming both the qualified
    spelling found and the bare spelling that would actually work. *)
 let qualified_pred_suite =
-  [ gated "a qualified spelling in a predicate warns" (fun () ->
-        (* PRE-FIX: silent. The contract parses, typechecks, and enforces
-           NOTHING, because predicates are never desugared so List.length
-           stays an EField chain rather than the dotted EVar the alias keys
-           on. Looks like it works; doesn't. *)
+  [ gated "a qualified spelling in a predicate is now enforced (Task 8 narrow slice)" (fun () ->
+        (* PRE-Task-8: silent. The contract parsed, typechecked, and enforced
+           NOTHING, because predicates were never desugared so List.length
+           stayed an EField chain rather than the dotted EVar the alias keys
+           on. Looks like it works; didn't.
+
+           [Desugar.desugar_ty] (see lib/desugar/desugar.ml) now flattens a
+           module-path call head found INSIDE a `TyRefine` predicate the same
+           way [Desugar.desugar_expr]'s own `EField` arm already flattens an
+           ordinary call head — without running the rest of the expression
+           desugarer over the predicate.  When the alias is live (no
+           competing `List.length` in scope, the case here), that is enough
+           for the qualified spelling to mean exactly what `len` means: no
+           warning fires, and a genuinely violating call is caught. *)
+        March_refinecheck.Obligation.reset ();
         let ctx = March_errors.Errors.create () in
         March_refinecheck.Refine_check.check_module ctx
           (March_desugar.Desugar.desugar_module (parse {|
 mod QP1 do
   fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
-  fn main() : Int do inner([1]) end
+  fn main() : Int do inner([]) end
 end|}));
         let msgs = ctx.March_errors.Errors.diagnostics in
-        (* Pin the SUGGESTION, not just the spelling. `contains m "len"` would
-           be vacuous here — "len" is a substring of "List.length", so that
-           conjunct is implied by the first and the test would stay green if
-           the remedy said `length`, or said nothing at all. Match the whole
-           remedy clause instead. *)
-        Alcotest.(check bool) "warns about the qualified spelling" true
+        Alcotest.(check bool) "no qualified-call warning (alias is live)" false
           (List.exists (fun (d : March_errors.Errors.diagnostic) ->
-             let m = d.March_errors.Errors.message in
-             contains m "List.length"
-             && contains m "Use the bare spelling `len` instead") msgs))
+             contains d.March_errors.Errors.message "qualified call") msgs);
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "the empty list genuinely violates `List.length(_) > 0`" 1 violated)
 
   ; gated "the bare spelling does NOT warn" (fun () ->
         (* The false-positive control: the supported spelling must stay quiet. *)
@@ -6451,6 +6679,94 @@ mod IR2 do
 end|}));
         Alcotest.(check int) "no diagnostics" 0
           (List.length (ctx.March_errors.Errors.diagnostics)))
+
+  ; gated "cap verified escalates an inert interface-signature refinement to an error"
+      (fun () ->
+        (* Decision recorded in
+           specs/progress/2026-08-03-cap-verified-interface-signature-decision.md:
+           under `cap verified` this is an ERROR, not a warning -- matching
+           `check_call`/`check_post`'s own escalation.  [refine_error_text_d]
+           filters strictly to [Error] severity (see its doc comment above), so
+           asserting through it is NOT vacuous here the way it would be against
+           today's plain-warning behaviour -- confirmed by the companion test
+           below, which pins that the SAME fixture without `cap verified`
+           produces no error, only a warning. *)
+        let msg =
+          refine_error_text_d
+            {|mod T do
+  cap verified
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int
+  end
+  fn main() : Int do 0 end
+end|}
+        in
+        Alcotest.(check bool) "reported as an error" true (contains msg "enforces nothing"))
+
+  ; gated "without cap verified the same fixture is only a warning, not an error"
+      (fun () ->
+        (* Companion/control for the test above: proves [refine_error_text_d]
+           genuinely distinguishes the two cases here rather than always
+           finding SOME error text for unrelated reasons. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR5 do
+  interface Runner(a) do
+    fn run : a -> {Int | _ > 0} -> Int
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "no ERROR-severity diagnostic" true
+          (not
+             (List.exists
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity = March_errors.Errors.Error)
+                msgs));
+        Alcotest.(check bool) "still a WARNING" true
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               d.March_errors.Errors.severity = March_errors.Errors.Warning
+               && contains d.March_errors.Errors.message "enforces nothing")
+             msgs))
+
+  ; gated "cap verified does NOT leak strictness into a nested mod lacking its own"
+      (fun () ->
+        (* Pins non-inheritance: [strict_verified] (and the [~strict] flag
+           threaded through [warn_predicate_decls]) is scoped to the decl
+           list that declares `cap verified`, exactly like every other
+           `cap verified` obligation in this file -- a nested `mod` re-derives
+           its own strictness rather than inheriting the enclosing module's.
+           This is load-bearing for the whole codebase, not just this test:
+           the standard library arrives as sibling `DMod` decls, so a leak
+           here would make the entire stdlib strict the moment any one
+           top-level module opted into `cap verified`. *)
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod IR6 do
+  cap verified
+  mod Inner do
+    interface Runner(a) do
+      fn run : a -> {Int | _ > 0} -> Int
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        let msgs = ctx.March_errors.Errors.diagnostics in
+        Alcotest.(check bool) "no ERROR-severity diagnostic (no strictness leak)" true
+          (not
+             (List.exists
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity = March_errors.Errors.Error)
+                msgs));
+        Alcotest.(check bool) "still a WARNING" true
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               d.March_errors.Errors.severity = March_errors.Errors.Warning
+               && contains d.March_errors.Errors.message "enforces nothing")
+             msgs))
   ]
 
 (* ── `sig` / `extern` signature refinements ────────────────────────────────
@@ -6950,6 +7266,216 @@ mod AE5 do
     end
   end
 end|});
+
+    (* Count-based pin of the exact `stats.march` repro (Float list, Result
+       wrapper), using Obligation.reset/summary directly rather than
+       check_ledger, so the obligation ledger's shape is asserted precisely:
+       ONE precondition, PROVED, nothing skipped. The `_` arm's own
+       arm-order-exclusion fact (`not is_Nil(xs)`, already landed — see
+       [arm_exclusion_suite] above) reaches `path_resolve_tester`'s
+       is_Nil/is_Cons <-> len(x) translation.
+
+       CORRECTION (final-review pass): this test does NOT reach the
+       base-case-linking axiom [build_measure_preamble] adds via
+       [measure_base_cases] (the "MA1" name notwithstanding). `len` over the
+       built-in `List` routes entirely through `path_resolve_tester`'s own
+       hardcoded `is_Nil(xs) <-> len(xs) = 0` translation, never through the
+       general axiom — deleting [measure_base_cases]'s emitter entirely still
+       leaves this test (and the whole suite) green. See the
+       "measure-base-case-axiom" suite below for tests that actually pin the
+       axiom itself, using a user `@[measure]` with no `path_resolve_tester`
+       special-casing to fall back on. *)
+    gated "excluding Nil in a match gives the other arm len(xs) > 0" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod MA1 do
+  fn mean(xs : {List(Float) | len(_) > 0}) : Float do 0.0 end
+  fn mean_safe(xs : List(Float)) : Result(Float, String) do
+    match xs do
+    Nil -> Err("empty")
+    _   -> Ok(mean(xs))
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "the mean(xs) call is proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
+
+    (* REJECT CONTROL. No `Nil` arm exists to exclude anything, so `mean`'s
+       precondition must stay unproven. This is the discriminating test: it is
+       what tells a genuine fact-propagation fix apart from one that
+       accidentally proves the precondition unconditionally (laundering the
+       goal rather than deriving it from the exclusion). *)
+    gated "with no Nil arm, the obligation is still unproven" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod MA2 do
+  fn mean(xs : {List(Float) | len(_) > 0}) : Float do 0.0 end
+  fn always_call(xs : List(Float)) : Result(Float, String) do
+    Ok(mean(xs))
+  end
+  fn main() : Int do 0 end
+end|}));
+        (* A skip must not produce an ERROR or WARNING.  HINT-severity
+           diagnostics are excluded deliberately: the unverified-precondition
+           HINT is advisory, does not change the exit code, and is emitted for
+           exactly this shape -- counting it here would make the assertion fail
+           for a reason that has nothing to do with the skip semantics under
+           test (the obligation counts below are the real check). *)
+        Alcotest.(check int) "no error/warning diagnostics (skip is silent)" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity <> March_errors.Errors.Hint)
+                ctx.March_errors.Errors.diagnostics));
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "still NOT proved -- no Nil arm to exclude" 0 proved;
+        Alcotest.(check int) "not falsely reported as violated either" 0 violated;
+        Alcotest.(check int) "the obligation is skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
+  ]
+
+(* ── Pinning [measure_base_cases]/[build_measure_preamble]'s base-case-linking
+   axiom directly ────────────────────────────────────────────────────────────
+   The MA1/MA2 tests above exercise `len` over the built-in `List`, which
+   never reaches this axiom -- `path_resolve_tester`'s own hardcoded
+   `is_Nil(xs) <-> len(xs) = 0` translation gets there first (see the
+   corrected MA1 comment). Deleting [measure_base_cases]'s emitter entirely
+   leaves MA1/MA2 (and the whole 437/437 suite at the time this was found)
+   green, so it needs its own witness: a user `@[measure]` over a user ADT,
+   which has no built-in special case to fall back on. *)
+let measure_base_case_axiom_suite =
+  [ gated "a user measure's nullary-arm exclusion reaches the base-case axiom"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod Z do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+  fn go(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      _ -> needs_pos(t)
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "the needs_pos(t) call is proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
+  ; gated "REJECT CONTROL: with no Zleaf arm to exclude, the obligation is skipped"
+      (fun () ->
+        (* Drop the `Zleaf` arm entirely: there is nothing left in the match
+           to narrow `t`, so the base-case axiom has no exclusion fact to
+           fire against and the call stays unproven. Tells a genuine
+           fact-propagation proof apart from one that proves unconditionally. *)
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod Z2 do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+  fn go(t : Zt) : Int do needs_pos(t) end
+  fn main() : Int do 0 end
+end|}));
+        (* A skip must not produce an ERROR or WARNING.  HINT-severity
+           diagnostics are excluded deliberately: the unverified-precondition
+           HINT is advisory, does not change the exit code, and is emitted for
+           exactly this shape -- counting it here would make the assertion fail
+           for a reason that has nothing to do with the skip semantics under
+           test (the obligation counts below are the real check). *)
+        Alcotest.(check int) "no error/warning diagnostics (skip is silent)" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity <> March_errors.Errors.Hint)
+                ctx.March_errors.Errors.diagnostics));
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "still NOT proved -- no Zleaf arm to exclude" 0 proved;
+        Alcotest.(check int) "not falsely reported as violated either" 0 violated;
+        Alcotest.(check int) "the obligation is skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
+  ; gated "LOAD-BEARING: a semantically-identical non-ELit base case body loses the axiom"
+      (fun () ->
+        (* [measure_base_cases]'s collection loop only records a base case
+           whose body is a bare [A.ELit] -- `0 * n` is semantically identical
+           to `0` for any Int `n`, but it is an [A.EApp] (or similar), not a
+           literal, so the emitter does not record it and the base-case axiom
+           is never generated for this constructor. This is the decisive pin:
+           it fails (proved becomes 1, skipped becomes 0) if the emitter is
+           deleted outright, or if its literal-detection is loosened to see
+           through arithmetic. *)
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod Z3 do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(n) -> 0 * n
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+  fn go(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      _ -> needs_pos(t)
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        (* A skip must not produce an ERROR or WARNING.  HINT-severity
+           diagnostics are excluded deliberately: the unverified-precondition
+           HINT is advisory, does not change the exit code, and is emitted for
+           exactly this shape -- counting it here would make the assertion fail
+           for a reason that has nothing to do with the skip semantics under
+           test (the obligation counts below are the real check). *)
+        Alcotest.(check int) "no error/warning diagnostics (skip is silent)" 0
+          (List.length
+             (List.filter
+                (fun (d : March_errors.Errors.diagnostic) ->
+                  d.March_errors.Errors.severity <> March_errors.Errors.Hint)
+                ctx.March_errors.Errors.diagnostics));
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "NOT proved -- base case body is not a bare literal" 0 proved;
+        Alcotest.(check int) "not falsely reported as violated either" 0 violated;
+        Alcotest.(check int) "the obligation is skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
   ]
 
 let resolve_precedence_suite =
@@ -7072,6 +7598,7 @@ let () =
       ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
+      ("divsafety-boolean-guard", divsafety_boolean_guard_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite);
       ("compose", compose_suite);
@@ -7087,4 +7614,5 @@ let () =
       ("use-impl-adoption", use_adoption_suite);
       ("resolve-precedence", resolve_precedence_suite);
       ("caller-promise", caller_promise_suite);
-      ("arm-exclusion", arm_exclusion_suite) ]
+      ("arm-exclusion", arm_exclusion_suite);
+      ("measure-base-case-axiom", measure_base_case_axiom_suite) ]

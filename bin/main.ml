@@ -797,7 +797,7 @@ let do_check       = ref false   (* --check: typecheck only, no codegen or eval 
       typechecker saw, including linked stdlib, so it must be filtered to this
       file or a pure program reports "needs everything".
 
-    Shared by --dump-caps and --cap-sandbox so the notarized set and the
+    Shared by `march caps` and --cap-sandbox so the reported set and the
     embedded sandbox profile cannot disagree. *)
 
 let own_caps_of_this_module typecheck_env (m : March_ast.Ast.module_) : string list =
@@ -826,7 +826,6 @@ let own_caps_of_this_module typecheck_env (m : March_ast.Ast.module_) : string l
   |> March_caps.Cap_lattice.normalize
   |> List.sort String.compare
 
-let dump_caps      = ref false   (* --dump-caps: print inferred cap set as JSON, then exit *)
 let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let emit_core_ast_file = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
@@ -1782,7 +1781,7 @@ let compile filename =
               (* capstrip: the dead-strip link mode (strip_flag/section_cflags
                  below) changes the emitted binary's contents; a pre-strip
                  cached artifact must never satisfy a post-strip build or the
-                 cap audit silently reports every capability. Mirrors the
+                 cap inspect silently reports every capability. Mirrors the
                  eligibility condition on strip_flag. *)
               @ (if !compile_so || !hot_reload_prefix <> None
                  then [] else ["capstrip"])
@@ -2165,27 +2164,6 @@ let compile filename =
      exit 0 so tooling (forge build / forge check) can treat a clean typecheck
      as a pass.  Warnings do not fail the exit code — consistent with eval and
      compile modes. *)
-  else if !dump_caps then begin
-    (* --dump-caps: the module's INFERRED capability set, for
-       `forge publish` notarization (specs/2026-08-03-forge-cap-audit-design.md
-       §4.3, mechanism D).
-
-       Inferred, not declared: body-scanned caps are WARNING-only (the F1 gap,
-       specs/todos/2026-07-07-p2-compiler-capabilities-effects-*.md), so a
-       module calling file_read with no `needs` type-checks clean while its
-       compiled binary genuinely reports IO.FileRead.  Notarizing the DECLARED
-       set would manufacture a false registry mismatch for exactly those
-       modules.
-
-       OWN closures, filtered to this file's own functions: fn_capability_
-       closures folds in transitively-imported module needs, which makes the
-       union app-invariant (the 2026-07-04 granularity revision) and would
-       notarize every package as "needs everything". *)
-    let caps = own_caps_of_this_module typecheck_env desugared in
-    Printf.printf "{\"caps\":[%s]}\n"
-      (String.concat "," (List.map (Printf.sprintf "%S") caps));
-    exit 0
-  end
   else if !do_check then begin
     (* Cache successful check result so the next identical-source invocation
        exits immediately without re-running the typecheck pipeline (the early
@@ -2800,7 +2778,7 @@ let compile filename =
               (* capstrip: the dead-strip link mode (strip_flag/section_cflags
                  below) changes the emitted binary's contents; a pre-strip
                  cached artifact must never satisfy a post-strip build or the
-                 cap audit silently reports every capability. Mirrors the
+                 cap inspect silently reports every capability. Mirrors the
                  eligibility condition on strip_flag. *)
               @ (if !compile_so || !hot_reload_prefix <> None
                  then [] else ["capstrip"])
@@ -3069,7 +3047,7 @@ let compile filename =
                    yields the app-invariant "needs everything" set --- which
                    would grant a pure program network and filesystem write
                    access, i.e. a sandbox that sandboxes nothing.  Same
-                   filtering as --dump-caps. *)
+                   filtering as `march caps`. *)
                 let caps = own_caps_of_this_module typecheck_env desugared in
                 let holds klass =
                   List.exists (fun c ->
@@ -3089,18 +3067,30 @@ let compile filename =
                 if holds "IO.FileWrite" then Buffer.add_string b "(allow file-write*)";
                 if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
                 if holds "IO.Process"   then Buffer.add_string b "(allow process-fork)";
+                (* Per-capability DENY flags, consumed by the Linux
+                   seccomp-bpf builder in runtime/march_runtime.c.  Emitted on
+                   both platforms so the two backends are driven by one
+                   decision rather than two copies of it. *)
+                let deny name held =
+                  if held then "" else " -DMARCH_CAP_DENY_" ^ name in
+                let deny_flags =
+                  deny "NET"   (holds "IO.Network")
+                  ^ deny "EXEC"  (holds "IO.Process")
+                  ^ deny "WRITE" (holds "IO.FileWrite")
+                in
                 (* Filename.quote the ALREADY-quoted C literal so the shell
                    hands clang a real string; without the inner quotes the
                    macro expands as bare SBPL tokens and the runtime will not
                    compile. *)
                 " -DMARCH_CAP_PROFILE="
                 ^ Filename.quote ("\"" ^ Buffer.contents b ^ "\"")
+                ^ deny_flags
               end in
             let strip_flag =
               (* Capability-by-absence (specs/2026-08-03-forge-cap-audit-design.md
                  §4.1): drop runtime functions the program never references, so a
                  binary physically cannot perform a capability it does not use —
-                 and `forge cap audit` can read capabilities from what remains.
+                 and `forge cap inspect` can read capabilities from what remains.
 
                  Executables only.  A hot-reload .so resolves __march_init and
                  __migrate_<Actor> via dlsym (runtime/march_reload.c:318-351),
@@ -3642,7 +3632,8 @@ let compile filename =
      | March_eval.Eval.Eval_error msg ->
        (* panic_/todo_/unreachable_ builtins already prefix their messages with
           "panic: " / "todo: " / "unreachable: " — print as-is. *)
-       Printf.eprintf "%s\n" msg;
+       let hint = March_eval.Eval.interface_method_hint desugared msg in
+       Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
        print_march_backtrace ();
        exit 1
      | March_eval.Eval.Match_failure msg ->
@@ -3666,7 +3657,26 @@ let compile filename =
     Parses each file, collects all their declarations, and type-checks the
     combined module.  Exits 0 on success, 1 if any errors are found.
     Used by [forge build] for library projects. *)
-let run_check_cmd files =
+(* [run_check_cmd ~emit_caps files] — `march check`, and with [emit_caps] also
+   `march caps`: the PACKAGE's inferred capability set as JSON.
+
+   Package-level, not per-file, because per-file analysis does not work: most
+   files in a real package reference sibling modules and fail standalone
+   (measured: conduit 9/43, depot 14/32, forgepm 15/60), and a union over
+   whatever happened to typecheck UNDER-reports — the dangerous direction for
+   a capability record, since it certifies a package as needing less than it
+   does.  This path loads the whole package exactly as `march check` does, so
+   sibling and dependency imports resolve.
+
+   Errors are fatal even in caps mode: a package that does not typecheck has
+   no knowable capability set, and reporting a partial one would be the same
+   under-report by another route. *)
+let caps_env : March_typecheck.Typecheck.env option ref = ref None
+(* file path -> module names that file declares.  Used to keep the reported
+   capability set to the package's OWN modules. *)
+let file_modules : (string, string list) Hashtbl.t = Hashtbl.create 32
+
+let run_check_cmd ?(emit_caps = false) files =
   if files = [] then begin
     Printf.eprintf "march check: no files specified\n"; exit 1
   end;
@@ -3699,6 +3709,21 @@ let run_check_cmd files =
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
+    (* Record which modules this file declares, top-level and nested, so caps
+       mode can filter to the package's own code. *)
+    (let names = ref [ desugared.March_ast.Ast.mod_name.March_ast.Ast.txt ] in
+     let rec walk prefix decls =
+       List.iter (fun (d : March_ast.Ast.decl) ->
+           match d with
+           | March_ast.Ast.DMod (n, _, inner, _) ->
+             let q = if prefix = "" then n.March_ast.Ast.txt
+                     else prefix ^ "." ^ n.March_ast.Ast.txt in
+             names := q :: n.March_ast.Ast.txt :: !names;
+             walk q inner
+           | _ -> ()) decls
+     in
+     walk "" desugared.March_ast.Ast.mod_decls;
+     Hashtbl.replace file_modules filename !names);
     let (_resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     import_user_files := user_files @ !import_user_files;
     (* [extra_decls] (this file's auto-discovered/imported modules) must stay
@@ -3773,15 +3798,23 @@ let run_check_cmd files =
         March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
         March_ast.Ast.mod_decls = all_decls;
       } in
-      let (errs, _tm, _env) =
+      let (errs, _tm, env) =
         March_typecheck.Typecheck.check_module_core ~seed_env user_only in
+      caps_env := Some env;
       errs
     end else begin
       let combined = {
         March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
         March_ast.Ast.mod_decls = stdlib_decls @ all_decls;
       } in
-      let (errs, _type_map) = March_typecheck.Typecheck.check_module combined in
+      (* check_module_full rather than check_module: it additionally returns
+         the typecheck env, which caps mode needs.  This branch runs whenever a
+         package shadows a stdlib module name — bastion does — so without it
+         `march caps` failed on exactly those packages with "capability
+         closures unavailable". *)
+      let (errs, _type_map, env) =
+        March_typecheck.Typecheck.check_module_full combined in
+      caps_env := Some env;
       errs
     end
   in
@@ -3808,8 +3841,49 @@ let run_check_cmd files =
   in
   List.iter (print_diag "warning") user_warnings;
   List.iter (print_diag "error") user_errors;
-  if user_errors <> [] then exit 1
-  else exit 0
+  if user_errors <> [] then begin
+    if emit_caps then
+      Printf.eprintf
+        "march caps: %d error(s) — a package that does not typecheck has no \
+         knowable capability set; refusing to report a partial one\n"
+        (List.length user_errors);
+    exit 1
+  end;
+  if emit_caps then begin
+    match !caps_env with
+    | None ->
+      Printf.eprintf
+        "march caps: capability closures unavailable (no-shadowing mode is \
+         required to expose the typecheck env)\n";
+      exit 1
+    | Some env ->
+      (* Keep only functions belonging to the modules the LISTED files declare.
+         Imported deps and stdlib are excluded: including them re-creates the
+         app-invariant "needs everything" union. *)
+      let own_mods = Hashtbl.create 16 in
+      List.iter (fun f ->
+          match Hashtbl.find_opt file_modules f with
+          | Some names -> List.iter (fun n -> Hashtbl.replace own_mods n ()) names
+          | None -> ())
+        files;
+      let belongs qname =
+        match String.index_opt qname '.' with
+        | None -> Hashtbl.mem own_mods qname
+        | Some i -> Hashtbl.mem own_mods (String.sub qname 0 i)
+      in
+      let caps =
+        List.concat_map
+          (fun (qname, cs) -> if belongs qname then cs else [])
+          (March_typecheck.Typecheck.fn_own_capability_closures env)
+        |> List.sort_uniq String.compare
+        |> March_caps.Cap_lattice.normalize
+        |> List.sort String.compare
+      in
+      Printf.printf "{\"caps\":[%s]}\n"
+        (String.concat "," (List.map (Printf.sprintf "%S") caps));
+      exit 0
+  end;
+  exit 0
 
 (* ── Phase 10: GC trace analyser ────────────────────────────────────── *)
 (*
@@ -3956,6 +4030,12 @@ let () =
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_check_cmd rest
   end;
+  (* `march caps <files...>` — the package's inferred capability set as JSON.
+     Same loading path as `check` so sibling/dependency imports resolve. *)
+  if Array.length argv >= 2 && argv.(1) = "caps" then begin
+    let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    run_check_cmd ~emit_caps:true rest
+  end;
   if Array.length argv >= 2 && argv.(1) = "test" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_test_cmd rest
@@ -4095,8 +4175,7 @@ let () =
     ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
-    ("--dump-caps",  Arg.Set dump_caps,   " Print the module's inferred IO-capability set as JSON, then exit");
-    ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS only)");
+    ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--refine-report", Arg.Set refine_report,

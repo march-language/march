@@ -12,12 +12,13 @@ are what is left, all narrow.
   contained. The exfiltration path (outbound connect) IS enforced today. Low
   priority.
 
-- [ ] **`--cap-sandbox` on Linux refuses.** Self-sandboxing there needs an
-  in-process seccomp-bpf filter; the mount-namespace allow-list forge uses
-  externally is unavailable to a process sandboxing itself post-exec. It
-  currently exits with a pointer to `forge cap run` rather than installing a
-  filter weaker than the profile claims. Build only if there is demand for
-  deployed Linux binaries that self-contain without a supervisor.
+- [ ] **`IO.FileRead` under the Linux self-sandbox needs Landlock.** seccomp
+  filters syscall numbers and scalar args, never pointer contents, so it cannot
+  tell WHICH path an `openat` targets — read scoping is therefore not enforced
+  by `--cap-sandbox` on Linux (write is, via the O_* flag bits, which are
+  scalar). Landlock closes this; `forge cap run` already scopes reads
+  externally via a mount-namespace allow-list. Until then `IO.FileRead` is
+  advisory for the self-imposed variant on BOTH platforms.
 
 - [ ] **Two SBPL baselines can drift.** `forge/lib/cap_sandbox.ml`'s
   `sbpl_baseline` and `bin/main.ml`'s `cap_sandbox_define` construct the same

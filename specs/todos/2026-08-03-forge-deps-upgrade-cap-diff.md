@@ -1,3 +1,12 @@
+**STATUS 2026-08-04: shipped as `forge audit` (#167), with `--inferred` (#169+)** — see
+`specs/todos/2026-08-04-cap-deps-followups.md` for what remains (toolchain
+version check, speed, wiring into `forge add`/`outdated`). Implemented against
+a local reviewed baseline rather than the registry, which turned out not to be
+required: dependencies arrive as source, so forge computes their capability
+sets locally.
+
+---
+
 # forge: capability diff at dependency-upgrade time
 
 - [ ] Once registry notarization lands (cap-audit plan Tasks 7-8: `forge publish`
@@ -14,7 +23,7 @@
   accepting a dep whose new version widens its cap set.
 
   **Why this is the highest-leverage supply-chain piece:** the binary-level gate
-  (`forge cap audit --deny`) only sees the whole-program union, so a malicious dep
+  (`forge cap inspect --deny`) only sees the whole-program union, so a malicious dep
   hiding inside an app that already holds the widened cap is invisible there. The
   upgrade-time diff sees the *per-package* delta — which is exactly the
   xz/event-stream shape (a previously-pure library growing an effect class) at the

@@ -1,4 +1,4 @@
-# `forge cap audit` — capability audit of a compiled March executable
+# `forge cap inspect` — capability audit of a compiled March executable
 
 **Date:** 2026-08-03
 **Status:** design (v2 — supersedes the v1 in this file's git history)
@@ -148,7 +148,7 @@ Strippable and forgeable by a modified compiler — this is attribution, not the
 trust root.
 
 **D — registry notarization (default for registry packages).** `forge publish`
-records the source-derived cap set against the artifact hash. `forge cap audit`
+records the source-derived cap set against the artifact hash. `forge cap inspect`
 compares a binary's caps to the registry's record. Sound wherever source exists,
 which covers how most third-party March code actually arrives — as dependencies.
 
@@ -168,7 +168,7 @@ symbol is present was almost certainly not stripped and is reported as
 
 ---
 
-## 5. `forge cap audit <binary>`
+## 5. `forge cap inspect <binary>`
 
 Third subcommand in `forge/lib/cmd_cap.ml`.
 
