@@ -21,8 +21,9 @@ git log is authoritative for exact commits.
   the binary chooses whether to compile it in, and the profile grants exactly
   what the program does, so it constrains escalation beyond the program's
   intended behaviour, not the behaviour itself. Off by default; default builds
-  are unchanged. macOS only; on other platforms it refuses rather than
-  installing a filter weaker than it claims.
+  are unchanged. macOS only: on Linux the compiler **rejects the flag** rather than
+  emitting a binary that would refuse to start, and points at
+  `forge cap run` instead.
 
 - **`forge cap run [--allow-only CAPS] BINARY`: run a compiled binary under an
   OS-enforced capability sandbox.** The policy is imposed from outside, so
