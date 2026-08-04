@@ -88,21 +88,61 @@ individually — the minor GC copies survivors and resets the pointer. On a
 workload that is nothing but millions of short-lived nodes, that is a structural
 difference, and 526 ms vs 26.5 ms (**20×**) is what it buys.
 
-Two directions:
+### Decomposed by ablation (5 runs each, arg 15, idle box)
 
-- **Stop zeroing.** The header is overwritten immediately, and constructor
-  fields are written by the emitted code, so most of the zeroing is dead work.
-  **Careful:** at least one caller depends on it —
-  `march_task_spawn_with_cancel_thunk` notes "march_alloc zeroed the object and
-  the trampoline records task[2] itself". Any switch to `malloc` needs an audit
-  of who relies on zero-init, not a blanket replacement.
-- **Bump-allocate.** `specs/gc_design.md` already describes per-actor arenas
-  with bump allocation ("Linear/affine: bump pointer in actor arena"). This
-  benchmark is the argument for implementing that layer.
+| Variant | median | vs baseline |
+|---|---|---|
+| `calloc` + `free` (shipped) | 530 ms | — |
+| `malloc` + `free` (drop zeroing) | 474 ms | −11% |
+| bump-arena + no-free (leak) | 356 ms | −33% |
+| bump + no-free + no-preempt | 352 ms | −34% |
+| `calloc` + no-free (leak) | 571 ms | **+8% (worse)** |
+| OCaml | 26.5 ms | — |
 
-Note the shape of the result: March *wins* tree-transform (FBIP reuses nodes in
-place, so it barely allocates) and *loses* binary-trees (pure allocation). Those
-two results are the same fact seen from both sides.
+Reading these:
+
+- **Zeroing is ~11%** (530→474), a cheap and real win. Correctness verified
+  byte-identical with `malloc`. **But not a blanket change:**
+  `march_task_spawn_with_cancel_thunk` documents relying on `march_alloc`'s
+  zero-init, so this needs a per-caller audit, not a `sed`.
+- **Per-op allocator cost is the bulk.** bump-allocation reaches 356 ms — but
+  that variant *never frees*, so it is a loose upper bound (what you would get
+  if both alloc and free were nearly free), not a shippable design.
+- **The preemption check is negligible here** (356→352), unlike fib: binary-trees
+  does real work per call, so one cycle per call disappears into it.
+- **Never-freeing under `calloc` is *slower*** (571 ms): the working set grows
+  past cache. This is the tell for the real gap — see below.
+
+### The residual is the memory model, and it is the flip side of the FBIP win
+
+Even the leak-and-bump upper bound (356 ms) is **13× OCaml**. Allocation
+*strategy* does not close the gap; the *model* does. OCaml's generational GC
+recycles a small minor heap that stays L1/L2-resident and traces only live
+objects. March's RC frees each node eagerly and precisely at last use.
+
+I tried to measure a recycling bump arena (reset the pointer when a small region
+fills, approximating a minor heap) and it **aborted with RC underflow**. That is
+not a failed experiment — it is the constraint stated in hardware: you cannot
+reset a region out from under reference counting, because RC tracks liveness
+*per object*, not per region. A resettable arena needs a separate proof that the
+whole region is dead, which is exactly the tracing OCaml does and RC does not.
+
+So binary-trees is the **adversarial case for RC** (a flood of short-lived nodes
+with no reuse opportunity), and tree-transform — which March *wins* 2.3× — is the
+friendly case: FBIP proves uniqueness and rewrites in place, allocating almost
+nothing. **They are the same design decision seen from both sides.** A page that
+shows binary-trees must show tree-transform beside it or it is quoting half a
+sentence.
+
+### Actionable, in order of confidence
+
+1. **Drop the zeroing** where a caller audit clears it (~11%, low risk).
+2. **A bump/free-list allocator** for the RC fast path would cut per-op cost;
+   `specs/gc_design.md`'s per-actor arena is the vehicle. Upper bound here ~33%.
+   It closes *part* of the gap, not the model-level part.
+3. **The model-level 13× is not a bug to fix** — it is RC's cost on its worst
+   workload, and the honest framing is the tree-transform pairing, not a promise
+   to catch OCaml at binary-trees.
 
 ## 3. simd-map: vectorizes fine; the ISA baseline costs ~13%, and the 2× gap to OCaml is still unexplained
 
