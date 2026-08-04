@@ -1,0 +1,35 @@
+{"meta":true,"date":"2026-08-04T18:16:39Z","host":"Linux 6.17.0-1021-gcp x86_64","cpu":"INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz","cores":4,"runs":10,"load":"0.14, 0.54, 0.38"}
+{"benchmark":"fib(40)","language":"March","median_ms":425.3,"min_ms":421.5,"max_ms":433.0}
+{"benchmark":"fib(40)","language":"OCaml","median_ms":554.7,"min_ms":546.0,"max_ms":560.2}
+{"benchmark":"fib(40)","language":"Rust","median_ms":266.4,"min_ms":263.9,"max_ms":267.8}
+{"benchmark":"fib(40)","language":"Elixir","median_ms":1507.3,"min_ms":1503.5,"max_ms":1511.6}
+{"benchmark":"binary-trees(15)","language":"March","median_ms":527.5,"min_ms":523.2,"max_ms":530.8}
+{"benchmark":"binary-trees(15)","language":"OCaml","median_ms":26.2,"min_ms":25.5,"max_ms":26.6}
+{"benchmark":"binary-trees(15)","language":"Rust","median_ms":120.1,"min_ms":117.3,"max_ms":122.8}
+{"benchmark":"binary-trees(15)","language":"Elixir","median_ms":366.6,"min_ms":359.1,"max_ms":368.8}
+{"benchmark":"tree-transform(depth=20, 100 passes)","language":"March","median_ms":2744.9,"min_ms":2607.7,"max_ms":3073.9}
+{"benchmark":"tree-transform(depth=20, 100 passes)","language":"OCaml","median_ms":6960.2,"min_ms":6899.8,"max_ms":7043.4}
+{"benchmark":"tree-transform(depth=20, 100 passes)","language":"Rust","median_ms":4326.2,"min_ms":4250.7,"max_ms":4380.0}
+{"benchmark":"tree-transform(depth=20, 100 passes)","language":"Elixir","median_ms":5151.5,"min_ms":4545.4,"max_ms":5268.2}
+{"benchmark":"list-ops(1M)","language":"March","median_ms":147.0,"min_ms":144.0,"max_ms":153.5}
+{"benchmark":"list-ops(1M)","language":"OCaml","median_ms":46.5,"min_ms":44.8,"max_ms":50.0}
+{"benchmark":"list-ops(1M)","language":"Rust","median_ms":1.3,"min_ms":1.2,"max_ms":1.5}
+{"benchmark":"list-ops(1M)","language":"Elixir","median_ms":354.0,"min_ms":348.9,"max_ms":358.7}
+{"benchmark":"simd-sum(5M)","language":"March","median_ms":4.039,"min_ms":3.984,"max_ms":4.107}
+{"benchmark":"simd-sum(5M)","language":"OCaml","median_ms":6.571,"min_ms":6.061,"max_ms":6.689}
+{"benchmark":"simd-sum(5M)","language":"Rust","median_ms":5.247,"min_ms":4.857,"max_ms":5.659}
+{"benchmark":"simd-sum(5M)","language":"Elixir","median_ms":74.003,"min_ms":69.353,"max_ms":84.121}
+{"benchmark":"simd-sum(5M)","language":"Python","median_ms":222.153,"min_ms":210.716,"max_ms":255.771}
+{"benchmark":"simd-sum(5M)","language":"NumPy","median_ms":2.859,"min_ms":2.789,"max_ms":3.095}
+{"benchmark":"simd-map(5M)","language":"March","median_ms":18.485,"min_ms":18.282,"max_ms":19.198}
+{"benchmark":"simd-map(5M)","language":"OCaml","median_ms":8.835,"min_ms":8.721,"max_ms":8.925}
+{"benchmark":"simd-map(5M)","language":"Rust","median_ms":17.440,"min_ms":17.234,"max_ms":17.700}
+{"benchmark":"simd-map(5M)","language":"Elixir","median_ms":460.258,"min_ms":442.906,"max_ms":481.226}
+{"benchmark":"simd-map(5M)","language":"Python","median_ms":161.556,"min_ms":158.265,"max_ms":164.893}
+{"benchmark":"simd-map(5M)","language":"NumPy","median_ms":10.478,"min_ms":9.715,"max_ms":11.075}
+{"benchmark":"simd-map2(5M)","language":"March","median_ms":19.696,"min_ms":19.380,"max_ms":19.918}
+{"benchmark":"simd-map2(5M)","language":"OCaml","median_ms":10.806,"min_ms":10.662,"max_ms":11.331}
+{"benchmark":"simd-map2(5M)","language":"Rust","median_ms":19.221,"min_ms":18.671,"max_ms":19.498}
+{"benchmark":"simd-map2(5M)","language":"Elixir","median_ms":250.293,"min_ms":240.326,"max_ms":267.515}
+{"benchmark":"simd-map2(5M)","language":"Python","median_ms":194.763,"min_ms":192.777,"max_ms":211.492}
+{"benchmark":"simd-map2(5M)","language":"NumPy","median_ms":9.478,"min_ms":8.794,"max_ms":10.049}

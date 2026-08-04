@@ -142,12 +142,20 @@ let eval_decls_only env decls =
   ) env decls
 
 (** Try to load a cached typecheck env.  Returns Some tc_env on hit. *)
+(* The compiler's own identity, part of every marshalled cache key below.
+   These blobs are Marshals of the typecheck env record; keying on stdlib
+   SOURCE alone means a field added to that record still hits the cache, and
+   unmarshalling a stale blob at the wrong shape is undefined behaviour —
+   observed as a SIGSEGV on every input, with no diagnostic to point at it. *)
+let cache_build_id () =
+  String.sub (Lazy.force March_cas.Cas.compiler_identity) 0 12
+
 let load_cached_tc_env ~content_hash ~type_map =
   let home = (try Sys.getenv "HOME" with Not_found -> ".") in
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
   let cache_path = Filename.concat cache_dir
-    ("stdlib_tcenv_" ^ short_hash ^ ".bin") in
+    ("stdlib_tcenv_" ^ cache_build_id () ^ "_" ^ short_hash ^ ".bin") in
   try
     if Sys.file_exists cache_path then begin
       let ic = open_in_bin cache_path in
@@ -170,7 +178,7 @@ let save_cached_tc_env ~content_hash tc_env =
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
   let cache_path = Filename.concat cache_dir
-    ("stdlib_tcenv_" ^ short_hash ^ ".bin") in
+    ("stdlib_tcenv_" ^ cache_build_id () ^ "_" ^ short_hash ^ ".bin") in
   (try
     (try Unix.mkdir cache_dir 0o755
      with Unix.Unix_error (Unix.EEXIST, _, _) -> ());

@@ -157,9 +157,13 @@ type decl =
   | DExtern of extern_def * span                   (** FFI extern block *)
   | DUse of use_decl * span                        (** Import: use Mod.* or use Mod.{f} *)
   | DAlias of alias_decl * span                    (** alias Long.Name, as: Short *)
-  | DNeeds of name list list * span
+  | DNeeds of (name list * string option) list * span
   (** Capability manifest: [needs IO.Network, IO.Clock]
-      Each [name list] is one capability path, e.g. [["IO";"Network"]; ["IO";"Clock"]] *)
+      Each entry is one capability path, e.g. [["IO";"Network"]], paired with an
+      optional PATH SCOPE from [needs IO.FileRead("/etc/myapp")].
+      [None] means unscoped — any path — which is what every capability
+      declared without a scope means, so existing source keeps its meaning.
+      Only filesystem capabilities accept a scope; see [March_caps.Cap_scope]. *)
   | DProofCap of name * span
   (** Proof capability declaration: [proof cap Migrated]
       Registers an unforgeable capability that can only be minted inside the declaring module. *)

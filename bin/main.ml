@@ -280,8 +280,14 @@ let load_stdlib ?(for_js=false) () =
     let home = (try Sys.getenv "HOME" with Not_found -> ".") in
     let cache_dir = Filename.concat home ".cache/march" in
     let short_hash = String.sub source_hash 0 16 in
+    (* The compiler's own identity is part of the key.  This blob is a
+       Marshal of March_ast.Ast.decl list: if the AST type changes shape while
+       the stdlib SOURCE does not, a content-only key still hits, and
+       unmarshalling a stale blob into the new type is undefined behaviour —
+       observed as a SIGSEGV on every input, with no diagnostic. *)
+    let build_id = String.sub (Lazy.force March_cas.Cas.compiler_identity) 0 12 in
     let cache_path = Filename.concat cache_dir
-      ("stdlib_ast_" ^ short_hash ^ ".bin") in
+      ("stdlib_ast_" ^ build_id ^ "_" ^ short_hash ^ ".bin") in
     (* Cache hit: unmarshal parsed ASTs *)
     match (try
       if Sys.file_exists cache_path then begin
@@ -374,8 +380,13 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
   let js_suffix = if for_js then "_js" else "" in
+  (* Keyed on the compiler build too — this is a Marshal of the typecheck env
+     record, so a field added to it while stdlib source is unchanged would
+     otherwise be read back at the wrong shape.  See the note on the AST
+     cache above. *)
+  let build_id = String.sub (Lazy.force March_cas.Cas.compiler_identity) 0 12 in
   let cache_path = Filename.concat cache_dir
-    (Printf.sprintf "stdlib_tcenv_cli%s_%s.bin" js_suffix short_hash) in
+    (Printf.sprintf "stdlib_tcenv_cli%s_%s_%s.bin" js_suffix build_id short_hash) in
   let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
     Hashtbl.create 4096 in
   let load_from_cache () =
@@ -3050,6 +3061,8 @@ let compile filename =
                    access, i.e. a sandbox that sandboxes nothing.  Same
                    filtering as `march caps`. *)
                 let caps = own_caps_of_this_module typecheck_env desugared in
+                let declared_scopes =
+                  March_typecheck.Typecheck.declared_cap_scopes typecheck_env in
                 let holds klass =
                   List.exists (fun c ->
                       March_caps.Cap_lattice.cap_subsumes klass c
@@ -3065,7 +3078,50 @@ let compile filename =
                    (literal \\\"/dev/tty\\\"))";
                 Buffer.add_string b "(allow sysctl-read)(allow mach*)(allow signal)";
                 Buffer.add_string b "(allow ipc-posix-shm)(allow iokit-open)";
-                if holds "IO.FileWrite" then Buffer.add_string b "(allow file-write*)";
+                (* Scoped filesystem grants.
+                   WRITE only, and that asymmetry is measured, not assumed:
+
+                   - file-write is not granted by the baseline, so narrowing it
+                     to a subpath genuinely enforces.  Verified both ways: an
+                     in-scope write succeeds, an out-of-scope one is refused.
+                   - file-read IS granted by the baseline, unconditionally,
+                     because dyld must map system libraries before any user
+                     code exists.  A scoped read allow would therefore be
+                     DECORATIVE — it adds nothing to a blanket grant already
+                     present.  Narrowing the baseline was tried and aborts the
+                     runtime (SIGABRT) even with /usr/lib, /System, /usr/share
+                     and /dev/urandom explicitly allowed.  So IO.FileRead stays
+                     advisory here rather than shipping a rule that looks like
+                     enforcement and is not.  Linux scopes reads properly via
+                     the mount-namespace allow-list in forge/lib/cap_sandbox.ml.
+
+                   CAVEAT for scope authors: the kernel matches subpaths AFTER
+                   resolving symlinks, and normalization here is lexical (the
+                   build machine's filesystem is not the deployment machine's).
+                   A scope of "/tmp/x" on macOS therefore matches nothing,
+                   because /tmp is a symlink to /private/tmp.  Give the
+                   resolved path. *)
+                let write_scopes =
+                  List.filter_map (fun (cap, sc) ->
+                      if March_caps.Cap_lattice.cap_subsumes "IO.FileWrite" cap
+                         || March_caps.Cap_lattice.cap_subsumes cap "IO.FileWrite"
+                      then Some sc else None)
+                    declared_scopes
+                in
+                if holds "IO.FileWrite" then begin
+                  (* An unscoped grant among them means any path: narrowing
+                     would be a lie if one declaration is unrestricted. *)
+                  if write_scopes = [] || List.exists (fun sc -> sc = None) write_scopes
+                  then Buffer.add_string b "(allow file-write*)"
+                  else
+                    List.iter (function
+                        | None -> ()
+                        | Some path ->
+                          Buffer.add_string b
+                            (Printf.sprintf "(allow file-write* (subpath \\\"%s\\\"))"
+                               (March_caps.Cap_scope.normalize path)))
+                      write_scopes
+                end;
                 if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
                 if holds "IO.Process"   then Buffer.add_string b "(allow process-fork)";
                 (* Per-capability DENY flags, consumed by the Linux
