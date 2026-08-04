@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`/docs/capability-audit/` — a capability-audit guide written for a security
+  audience.** Covers `forge audit` (dependency declarations, diffed against a
+  baseline) and `forge cap audit` (what a compiled artifact holds), what each
+  proves, and a threat-model table of what neither covers. States plainly that
+  an undeclared capability *builtin* is currently a compiler warning rather than
+  an error, so a declared set is a floor for capability-passing code rather than
+  a ceiling on all behaviour.
+
 - **`forge audit` — capability diffing on dependency update.** Every March
   package declares the capabilities it needs and the compiler enforces those
   declarations, so the authority a dependency holds is readable from its source
