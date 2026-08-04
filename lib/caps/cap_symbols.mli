@@ -5,7 +5,7 @@
     to the capability path the typechecker attributes to it
     ([builtin_cap_table] in [lib/typecheck/typecheck.ml]).
 
-    Consumed by [forge cap audit] to read a binary's capabilities from its
+    Consumed by [forge cap inspect] to read a binary's capabilities from its
     symbol table, and by the marker-emission pass. Kept in sync with
     [builtin_cap_table] by a freshness test in [test/test_cap_symbols.ml] —
     this module cannot depend on the typechecker without creating a

@@ -40,10 +40,10 @@ Two commands use that.
 | Command | Asks | Needs a build? | Attributes to a dependency? |
 |---|---|---|---|
 | `forge audit` | Did my dependencies' **declared** capabilities change? | No | **Yes** |
-| `forge cap audit <binary>` | What does this **compiled artifact** actually hold? | Yes | No |
+| `forge cap inspect <binary>` | What does this **compiled artifact** actually hold? | Yes | No |
 
 They answer different questions and neither replaces the other. This page is
-about the first; see [`forge cap audit`](#auditing-a-compiled-binary) below for
+about the first; see [`forge cap inspect`](#auditing-a-compiled-binary) below for
 the second.
 
 ---
@@ -154,7 +154,7 @@ into a settled one.
 - **That the shipped artifact matches this source.** `forge audit` reads the
   dependency sources resolved into your project. If you want a statement about a
   binary — including one built elsewhere — that is
-  [`forge cap audit`](#auditing-a-compiled-binary), which reads what the
+  [`forge cap inspect`](#auditing-a-compiled-binary), which reads what the
   compiler actually emitted rather than what the source claims.
 - **Anything about non-March dependencies.** A package that vendors a shared
   library is described by its March declarations only.
@@ -171,7 +171,7 @@ into a settled one.
 | Effects through `extern` C, `dlopen`, or raw syscalls | **No** — reported as `IO.Foreign`, which bounds nothing |
 | A dependency that misuses a capability it legitimately holds | **No** — out of scope for any capability system |
 
-For the row that is only partly covered, `forge cap audit` on the built binary
+For the row that is only partly covered, `forge cap inspect` on the built binary
 is the stronger check: it reads capability markers the compiler emitted and
 capability-bearing runtime symbols that survived dead-stripping, so a direct
 builtin call shows up there whether or not it was declared.
@@ -182,12 +182,12 @@ builtin call shows up there whether or not it was declared.
 
 `forge audit` reads source declarations. To ask what a *built artifact* holds —
 including the effect of dead-stripping, and evidence that does not depend on
-trusting the source tree — use `forge cap audit`:
+trusting the source tree — use `forge cap inspect`:
 
 ```
-$ forge cap audit ./build/myapp
-$ forge cap audit ./build/myapp --deny IO.Network
-$ forge cap audit ./build/myapp --allow-only IO.Console,IO.FileRead
+$ forge cap inspect ./build/myapp
+$ forge cap inspect ./build/myapp --deny IO.Network
+$ forge cap inspect ./build/myapp --allow-only IO.Console,IO.FileRead
 ```
 
 It cross-checks capability markers the compiler emitted, capability-bearing
@@ -196,7 +196,7 @@ gate is fail-closed: `--deny` and `--allow-only` fail on a binary whose coverage
 is not full, and foreign code requires an explicit `--allow-foreign`.
 
 Use both. `forge audit` tells you which dependency changed and does so before
-anything is built; `forge cap audit` tells you what the artifact you are about
+anything is built; `forge cap inspect` tells you what the artifact you are about
 to ship actually carries.
 
 ---

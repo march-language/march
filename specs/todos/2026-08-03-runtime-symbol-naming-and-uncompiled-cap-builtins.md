@@ -1,6 +1,6 @@
 # Runtime symbol naming inconsistency + cap-table builtins with no compiled lowering
 
-Found 2026-08-03 while building the cap→symbol table for `forge cap audit`
+Found 2026-08-03 while building the cap→symbol table for `forge cap inspect`
 (`lib/caps/cap_symbols.ml`; full accounting enforced by `test/test_cap_symbols.ml`).
 
 - [ ] **`dns_resolve`'s C function is unprefixed** (`runtime/march_runtime.c:3679` —

@@ -11,11 +11,50 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **`forge cap audit` is now `forge cap inspect`.** Two commands named "audit"
+  answered different questions at different granularities — `forge audit` reads
+  dependency declarations from source, the other reads a built artifact — which
+  is the kind of collision people get wrong under pressure. `inspect` is the
+  right verb for reading facts off a thing that already exists, and matches the
+  `docker inspect` precedent. No alias: the command is days old and unreleased.
+
+### Fixed
+
+- **A package's own constructor is no longer ambiguous against an unimported
+  stdlib type.** Declaring `type Backend = StorageBacked | Custom(Int)` in
+  `mod Pkg` and matching on `Custom` from `mod Pkg.Sub` failed with
+  "ambiguous between multiple modules" whenever any stdlib type shared the
+  constructor name — conduit's `RateLimiterBackend.Custom` against
+  `Compress.Gzip.Level.Custom`, which made the whole package fail to
+  typecheck. Locality now covers the package namespace rather than requiring
+  an exact current-module match. Genuinely ambiguous references, where the
+  current package owns none of the candidates, still error.
+
 ### Added
 
+- **`forge audit --inferred`: infer each dependency's capability set from its
+  code rather than its `needs` declarations.** Catches a capability builtin
+  called directly in a body with no matching `needs` — which the compiler only
+  warns about — at the cost of requiring each dependency to typecheck cleanly.
+  Every capability report now states what it does NOT cover: source-level
+  audits miss capabilities reached through stdlib or dependency functions,
+  binary audits are a whole-program union that cannot attribute a capability to
+  a specific dependency. The two are complementary, and neither is a complete
+  account on its own.
+
+- **`march caps <files...>`: a package's inferred capability set as JSON.**
+  Loads the whole package the way `march check` does, so sibling and
+  dependency imports resolve. Package-level rather than per-file because
+  per-file does not work — most files in a real package reference siblings and
+  fail standalone, and a union over whatever happened to typecheck
+  *under*-reports, which for a capability record certifies a package as
+  needing less than it does. A package that does not typecheck yields no set
+  at all and a nonzero exit, rather than a partial one.
 - **`/docs/capability-audit/` — a capability-audit guide written for a security
   audience.** Covers `forge audit` (dependency declarations, diffed against a
-  baseline) and `forge cap audit` (what a compiled artifact holds), what each
+  baseline) and `forge cap inspect` (what a compiled artifact holds), what each
   proves, and a threat-model table of what neither covers. States plainly that
   an undeclared capability *builtin* is currently a compiler warning rather than
   an error, so a declared set is a floor for capability-passing code rather than
@@ -93,7 +132,7 @@ git log is authoritative for exact commits.
   scheduler's own). Advisory capabilities are printed before the run so a clean
   run is never mistaken for full containment.
 
-- **`forge cap audit <binary>`: list the capabilities of a compiled March
+- **`forge cap inspect <binary>`: list the capabilities of a compiled March
   executable.** Executables are now linked with dead-strip (72–79% smaller),
   so unused capability runtime code is physically absent, and codegen embeds
   `__march_cap_*` marker symbols for the capabilities the emitted code
@@ -104,7 +143,7 @@ git log is authoritative for exact commits.
   analysis stops at the C boundary — and the gate fails closed on it unless
   `--allow-foreign` is passed; the same fail-closed rule applies to stripped
   or unstripped binaries (`--json` always includes a `coverage` field).
-  `march --dump-caps` prints a module's inferred capability set as JSON.
+  `march caps <files...>` prints a package's inferred capability set as JSON.
 - **`march --refine-suggest-post <fn>`: suggest a postcondition.** Where
   `--refine-suggest` proposes the parameter contract that discharges a
   function's own unproven obligations, this proposes the *return* contract that
@@ -172,6 +211,14 @@ git log is authoritative for exact commits.
   call and a consuming call on the same variable look different one line apart.
   Also adds `march-lsp query inlay <file>`, which dumps the hints as JSON so
   they can be inspected without an editor.
+- **The interpreter now suggests the working spelling when a call qualifies
+  an interface method by its declaring module**, e.g. `Foo.speak(x)` when
+  `Foo` declares `interface Speak(a) do fn speak : a -> String end`.
+  Interface method names remain not module-qualifiable (a dispatch-side
+  limitation, not a resolution bug — see
+  `specs/progress/2026-08-03-interface-method-names-qualifiability-disposition.md`),
+  but the `unbound variable: Foo.speak` error now names the interface and
+  its declaring module and suggests the unqualified `speak(x)` call.
 
 - `forge refine --fixpoint` (with `--apply`): repeat until a round applies
   nothing. A contract only becomes visible to a caller once the callee carries
@@ -284,6 +331,17 @@ git log is authoritative for exact commits.
   here``. Attribution is path-correct: match arms are mutually exclusive, so
   consuming the same value once per arm stays legal, and a double-use inside one
   arm is labelled against that arm rather than a sibling that never ran.
+- **`cap verified` now rejects an inert `interface`-signature refinement as an
+  error instead of only warning.** A refinement written on an `interface`
+  method's own signature (e.g. `fn run : a -> {Int | _ > 0} -> Int`) has
+  always been inert — the refinement checker never reads a method
+  declaration's type, so no call site is obliged and no body may assume it —
+  and has warned about it since 2026-07-30. Under `cap verified`, whose whole
+  promise is "if it compiles, it is proved," that silent-no-op shape is now a
+  compile error instead, matching how the capability already escalates every
+  other undischarged obligation. Outside `cap verified` the behavior is
+  unchanged (still a warning). See
+  `specs/progress/2026-08-03-cap-verified-interface-signature-decision.md`.
 
 - **`derive Json`'s generated `from_json` now returns
   `Result(T, Json.DecodeError)` instead of `Result(T, String)` — a
@@ -375,6 +433,26 @@ git log is authoritative for exact commits.
   its perf insights to a list that already contained them, so a function could
   report "stack-allocates 2 values" twice. The pass now returns immediately when
   the analysis it is handed is already its own output.
+- **A top-level `let`'s refined annotation is now checked, not silently
+  ignored.** `let zs : {List(Int) | len(_) > 0} = []` at module scope
+  previously produced zero obligations — the desugarer never normalized a
+  qualified spelling in the annotation (`Desugar.desugar_ty` ran over a
+  block-level `let`'s type but not a top-level one), and separately the
+  checker's own top-level-`let` walk never invoked the annotation-vs-bound-expr
+  check that a block-level `let` already gets. Both are fixed: the identical
+  annotation on a `let` inside a function body and on a top-level `let` now
+  behave the same way, including catching a genuine violation like the one
+  above (`[]` does not satisfy `len(_) > 0`).
+
+- **A qualified spelling inside a refinement predicate now enforces the
+  contract**, e.g. `{List(Int) | List.length(_) > 0}` means exactly what
+  `{List(Int) | len(_) > 0}` means (previously it parsed, typechecked, and
+  silently enforced nothing — a warning added 2026-07-30 fixed the silence but
+  not the capability gap). A narrow desugar slice now flattens a module-path
+  call head found inside a `{T | …}` predicate the same way an ordinary call
+  head is flattened, without running the full expression desugarer over the
+  predicate. See
+  `specs/progress/2026-08-03-refine-desugar-predicate-qualified-spelling.md`.
 
 - **LSP semantic tokens: the `linear` and `affine` modifiers now follow the
   type system instead of use counts.** They were previously derived from how
@@ -402,6 +480,17 @@ git log is authoritative for exact commits.
   sub-pattern, since either can fail with the tag still matching. `stats.march`
   goes from 0 to 4 proved; the one function that still abstains is the one
   needing `len > 1`, which these facts genuinely do not give.
+
+- **A match arm's excluded-constructor fact now reaches a user `@[measure]`,
+  not only the built-in `len`.** The `len`/`List` case above is discharged by
+  a hardcoded `is_Nil(xs) <-> len(xs) = 0` translation, which does not exist
+  for a measure the author defines. `build_measure_preamble` now also emits a
+  base-case linking axiom for any axiomatized measure whose base-case arm body
+  is a literal — `(_ is Nil) x => size(x) = 0` — so the same exclusion fact
+  connects for those too. A full stdlib `--refine-report` sweep is
+  byte-identical before/after (no current stdlib measure has this shape), so
+  this closes the general case ahead of the next measure that hits it rather
+  than fixing an observed regression.
 
 - **`Logger.random_hex` no longer drops the contract it forwards into.** A
   private wrapper passed its argument straight to `Crypto.random_hex`, whose
