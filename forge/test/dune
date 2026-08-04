@@ -1,8 +1,8 @@
 (tests
  (names test_forge test_resolver test_solver test_cas_package test_patch
-        test_api_surface test_properties test_regression test_cap_binary test_cap_audit test_cap_sandbox)
+        test_api_surface test_properties test_regression test_cap_binary test_cap_audit test_cap_sandbox test_cap_package)
  (modules test_forge test_resolver test_solver test_cas_package test_patch
-          test_api_surface test_properties test_regression test_cap_binary test_cap_audit test_cap_sandbox)
+          test_api_surface test_properties test_regression test_cap_binary test_cap_audit test_cap_sandbox test_cap_package)
  (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas))
 
 ; QUARANTINED from `runtest` (2026-07-24): test_build_check.ml's "forge check"/

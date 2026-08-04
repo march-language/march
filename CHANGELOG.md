@@ -13,6 +13,18 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge cap deps`: per-dependency capabilities, and drift detection.** The
+  check `forge cap audit` structurally cannot make — the audit sees a
+  program's whole-binary union, in which a dependency abusing a capability the
+  application already holds is invisible (any web app holds `IO.Network` and
+  `IO.FileRead`, so a compromised dependency exfiltrating files adds nothing).
+  This reports each dependency's own capability set, and `--check` fails when
+  one needs MORE than the reviewed baseline recorded by `--accept` — catching a
+  previously-pure library growing an effect class at the moment it enters the
+  tree, before it is built. Uses lattice subsumption, so narrowing a capability
+  does not gate and broadening within a family does. A dependency that cannot
+  be analyzed is reported as such, never as capability-free.
+
 - **`march caps <files...>`: a package's inferred capability set as JSON.**
   Loads the whole package the way `march check` does, so sibling and
   dependency imports resolve. Package-level rather than per-file because
