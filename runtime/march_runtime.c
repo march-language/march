@@ -1691,12 +1691,169 @@ void march_sandbox_install(void) {
         exit(70);
     }
 }
+#elif defined(__linux__)
+
+/* Linux: an in-process seccomp-bpf filter, installed unprivileged via
+ * PR_SET_NO_NEW_PRIVS.  Denied syscalls return EPERM rather than killing the
+ * process, matching the macOS behaviour where a withheld capability surfaces
+ * as a March `Err` the program can handle instead of a crash.
+ *
+ * The compiler passes one -D per WITHHELD capability class (MARCH_CAP_DENY_*),
+ * derived from the same own-capability set as the macOS profile.
+ *
+ * What is enforced here, and what is not:
+ *   IO.Network    -> socket/socketpair denied            ENFORCED
+ *   IO.Process    -> execve/execveat denied              ENFORCED
+ *                    (NOT clone/fork: the scheduler needs threads)
+ *   IO.FileWrite  -> openat with write flags, plus the
+ *                    unambiguous mutators, denied        ENFORCED
+ *   IO.FileRead   -> NOT enforced: seccomp filters syscall numbers and
+ *                    scalar args, never pointer contents, so it cannot tell
+ *                    which PATH is being opened.  Path scoping needs
+ *                    Landlock; until then read stays advisory here, exactly
+ *                    as it is on macOS (where dyld forces it).  Do not claim
+ *                    otherwise.
+ */
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+
+#if defined(__x86_64__)
+#define MARCH_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define MARCH_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#else
+#define MARCH_AUDIT_ARCH 0
+#endif
+
+/* seccomp_data: nr@0, arch@4, ip@8, args[6]@16 (8 bytes each, LE). */
+#define SD_NR   offsetof(struct seccomp_data, nr)
+#define SD_ARCH offsetof(struct seccomp_data, arch)
+#define SD_ARG2 (offsetof(struct seccomp_data, args) + 2 * 8)
+
+/* O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND — any of these makes an open a
+ * write.  Spelled numerically: the values are identical on x86_64 and
+ * aarch64, and pulling in fcntl.h here would fight the runtime's own
+ * _GNU_SOURCE ordering. */
+#define MARCH_O_WRITE_MASK (01 | 02 | 0100 | 01000 | 02000)
+
+#define MAX_FILTER 96
+
+void march_sandbox_install(void) {
+    struct sock_filter f[MAX_FILTER];
+    size_t n = 0;
+
+    /* Refuse to run on a foreign arch rather than installing a filter whose
+     * syscall numbers mean something else. */
+    if (MARCH_AUDIT_ARCH == 0) {
+        fprintf(stderr,
+                "march: --cap-sandbox: unsupported architecture; refusing to "
+                "run uncontained\n");
+        exit(70);
+    }
+
+    /* arch guard: a mismatch (e.g. a 32-bit compat call) is denied, not
+     * allowed — allowing it would let a caller re-enter through the other
+     * syscall table. */
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, SD_ARCH);
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                          MARCH_AUDIT_ARCH, 1, 0);
+    f[n++] = (struct sock_filter)BPF_STMT(
+        BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, SD_NR);
+
+/* Two instructions per denied syscall: "if nr == X fall through to the
+ * ERRNO return, else skip it". Fixed offsets, so no second pass. */
+#define DENY_NR(nr_)                                                          \
+    do {                                                                      \
+        f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,       \
+                                              (nr_), 0, 1);                    \
+        f[n++] = (struct sock_filter)BPF_STMT(                                 \
+            BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));  \
+    } while (0)
+
+#ifdef MARCH_CAP_DENY_NET
+    DENY_NR(__NR_socket);
+    DENY_NR(__NR_socketpair);
+#endif
+
+#ifdef MARCH_CAP_DENY_EXEC
+    DENY_NR(__NR_execve);
+#ifdef __NR_execveat
+    DENY_NR(__NR_execveat);
+#endif
+#endif
+
+#ifdef MARCH_CAP_DENY_WRITE
+    /* Unambiguous mutators.  Legacy numbers exist only on some arches
+     * (aarch64 has no open/unlink/rename/mkdir/rmdir/chmod), hence the
+     * per-syscall guards. */
+#ifdef __NR_unlink
+    DENY_NR(__NR_unlink);
+#endif
+    DENY_NR(__NR_unlinkat);
+#ifdef __NR_rename
+    DENY_NR(__NR_rename);
+#endif
+#ifdef __NR_renameat
+    DENY_NR(__NR_renameat);
+#endif
+    DENY_NR(__NR_renameat2);
+#ifdef __NR_mkdir
+    DENY_NR(__NR_mkdir);
+#endif
+    DENY_NR(__NR_mkdirat);
+#ifdef __NR_rmdir
+    DENY_NR(__NR_rmdir);
+#endif
+#ifdef __NR_truncate
+    DENY_NR(__NR_truncate);
+#endif
+    DENY_NR(__NR_ftruncate);
+#ifdef __NR_chmod
+    DENY_NR(__NR_chmod);
+#endif
+    DENY_NR(__NR_fchmodat);
+#endif /* MARCH_CAP_DENY_WRITE */
+
+#undef DENY_NR
+
+#ifdef MARCH_CAP_DENY_WRITE
+    /* openat is both the read and the write path, so it is filtered on its
+     * flags argument rather than its number.  Placed LAST so the accumulator
+     * can be clobbered without reloading nr for later checks. */
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                          __NR_openat, 0, 3);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, SD_ARG2);
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K,
+                                          MARCH_O_WRITE_MASK, 0, 1);
+    f[n++] = (struct sock_filter)BPF_STMT(
+        BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+#endif
+
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+
+    struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        /* Fail CLOSED.  Installation genuinely can fail — seccomp is
+         * unavailable under qemu user emulation, and a restrictive outer
+         * profile can reject the prctl — and running uncontained after the
+         * operator asked for containment is the worst outcome. */
+        fprintf(stderr,
+                "march: capability sandbox failed to install (%s); refusing to "
+                "run uncontained\n",
+                strerror(errno));
+        exit(70);
+    }
+}
+
 #else
 void march_sandbox_install(void) {
-    /* Linux self-sandboxing needs an in-process seccomp-bpf filter; the
-     * mount-namespace allow-list forge uses externally is unavailable to a
-     * process sandboxing itself post-exec. Refuse rather than install a filter
-     * that enforces less than the profile claims. */
     fprintf(stderr,
             "march: --cap-sandbox is not implemented on this platform; use "
             "`forge cap run --allow-only ...` for external enforcement\n");
