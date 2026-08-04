@@ -128,11 +128,19 @@ march_value march_resource_new(int32_t type_id, void *native_ptr);
 void       *march_resource_get(march_value v, int32_t type_id);
 
 /* ── Blocking dispatch ───────────────────────────────────────────────────────
- * Run a `blocking` extern (`fn` with `args` of int64/ptr) on a dedicated OS
- * thread while the calling green thread cooperatively yields.  Two return
- * shapes (int64 / double).  Emitted by codegen for `blocking` extern calls. */
+ * Run a `blocking` extern (`fn` with `args` of int64/ptr) on a pool OS thread
+ * while the calling green thread cooperatively yields.  Two return shapes
+ * (int64 / double).  Emitted by codegen for `blocking` extern calls. */
 int64_t march_run_blocking_i(void *fn, const int64_t *args, int n);
 double  march_run_blocking_d(void *fn, const int64_t *args, int n);
+
+/* Blocking-pool diagnostics (tests): worker threads ever spawned, and blocking
+ * calls ever submitted.  The pool reuses threads, so spawned should stay far
+ * below calls; one-thread-per-call would make them equal. */
+int64_t march_blocking_threads_spawned(void);
+int64_t march_blocking_calls(void);
+/* Test hook: trivial body, declared `blocking` by tests to drive the pool. */
+int64_t march_test_blocking_nap(int64_t us);
 
 /* ── Native → March upcalls ───────────────────────────────────────────────────
  * Invoke a March closure value (received as an extern parameter of a function
