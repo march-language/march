@@ -11,8 +11,40 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A package's own constructor is no longer ambiguous against an unimported
+  stdlib type.** Declaring `type Backend = StorageBacked | Custom(Int)` in
+  `mod Pkg` and matching on `Custom` from `mod Pkg.Sub` failed with
+  "ambiguous between multiple modules" whenever any stdlib type shared the
+  constructor name — conduit's `RateLimiterBackend.Custom` against
+  `Compress.Gzip.Level.Custom`, which made the whole package fail to
+  typecheck. Locality now covers the package namespace rather than requiring
+  an exact current-module match. Genuinely ambiguous references, where the
+  current package owns none of the candidates, still error.
+
 ### Added
 
+- **`forge cap deps`: per-dependency capabilities, and drift detection.** The
+  check `forge cap audit` structurally cannot make — the audit sees a
+  program's whole-binary union, in which a dependency abusing a capability the
+  application already holds is invisible (any web app holds `IO.Network` and
+  `IO.FileRead`, so a compromised dependency exfiltrating files adds nothing).
+  This reports each dependency's own capability set, and `--check` fails when
+  one needs MORE than the reviewed baseline recorded by `--accept` — catching a
+  previously-pure library growing an effect class at the moment it enters the
+  tree, before it is built. Uses lattice subsumption, so narrowing a capability
+  does not gate and broadening within a family does. A dependency that cannot
+  be analyzed is reported as such, never as capability-free.
+
+- **`march caps <files...>`: a package's inferred capability set as JSON.**
+  Loads the whole package the way `march check` does, so sibling and
+  dependency imports resolve. Package-level rather than per-file because
+  per-file does not work — most files in a real package reference siblings and
+  fail standalone, and a union over whatever happened to typecheck
+  *under*-reports, which for a capability record certifies a package as
+  needing less than it does. A package that does not typecheck yields no set
+  at all and a nonzero exit, rather than a partial one.
 - **`/docs/capability-audit/` — a capability-audit guide written for a security
   audience.** Covers `forge audit` (dependency declarations, diffed against a
   baseline) and `forge cap audit` (what a compiled artifact holds), what each

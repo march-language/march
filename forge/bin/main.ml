@@ -1032,10 +1032,33 @@ let cap_run_cmd =
            ~doc:"Run a compiled binary under an OS-enforced capability sandbox")
     Term.(const run $ bin $ args $ allow_only)
 
+let cap_deps_cmd =
+  let check =
+    Arg.(value & flag &
+         info ["check"]
+           ~doc:"Fail if any dependency needs MORE than the recorded baseline. \
+                 This is the check `cap audit` cannot make: the audit sees the \
+                 whole-program union, in which a dependency abusing a \
+                 capability the app already holds is invisible.")
+  in
+  let accept =
+    Arg.(value & flag &
+         info ["accept"]
+           ~doc:"Record the current per-dependency capability sets as reviewed.")
+  in
+  let run check accept =
+    match Cmd_cap.cap_deps ~check ~accept () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "deps"
+           ~doc:"Show each dependency's capabilities, and detect widening")
+    Term.(const run $ check $ accept)
+
 let cap_cmd =
   Cmd.group (Cmd.info "cap"
                ~doc:"Capability and typestate inspection")
-    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd; cap_run_cmd]
+    [cap_query_cmd; cap_coverage_cmd; cap_audit_cmd; cap_run_cmd; cap_deps_cmd]
 
 (* ------------------------------------------------------------- forge audit *)
 

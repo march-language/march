@@ -550,3 +550,151 @@ let cap_run ~bin ~args ~allow_only () =
      | Error e -> Error e
      | Ok 0 -> Ok ()
      | Ok rc -> Error (Printf.sprintf "process exited %d" rc))
+
+(* ------------------------------------------------------------------ *)
+(* forge cap deps — per-dependency capability sets and drift           *)
+(* ------------------------------------------------------------------ *)
+
+(* The check `forge cap audit` structurally cannot make.  The audit sees a
+   program's whole-binary UNION, so a dependency abusing a capability the
+   application already holds is invisible: any web app holds IO.Network and
+   IO.FileRead, and a compromised dep exfiltrating files adds nothing to that
+   union.  The per-dependency delta sees it, at the moment the dep enters the
+   tree rather than after it runs — the xz / event-stream shape. *)
+
+let cap_deps ~check ~accept () =
+  match Project.load () with
+  | Error m -> Error m
+  | Ok proj ->
+    let root = proj.Project.root in
+    (* Each dependency is analyzed in ITS OWN scope, never the application's.
+       Passing the app's lib_path_env pulls the APP's sources onto
+       MARCH_LIB_PATH too, so the app's own type errors abort the dependency's
+       analysis and every dep reports NOT ANALYZABLE — measured on forgepm: 48
+       errors, most of them in forgepm itself rather than in any dep. *)
+    let env_for_dep dep_root =
+      match Project.load_from_dir dep_root with
+      | Ok dep_proj -> Cmd_build.lib_path_env dep_proj
+      | Error _ ->
+        (* No forge.toml (e.g. a vendored tree): fall back to just its own
+           lib dirs rather than the application's. *)
+        let libs = Cmd_build.collect_lib_dirs (Filename.concat dep_root "lib") in
+        Printf.sprintf "MARCH_LIB_PATH=%s "
+          (Filename.quote (String.concat ":" libs))
+    in
+    let visited = Hashtbl.create 16 in
+    let deps =
+      Cmd_build.collect_transitive_deps visited
+        (root, proj.Project.deps @ proj.Project.dev_deps)
+    in
+    (* One entry per distinct dependency root. *)
+    let dep_roots =
+      List.filter_map
+        (fun (r, name, dep) ->
+          match Cmd_build.dep_to_lib_paths ~root:r (name, dep) with
+          | [] -> None
+          | lp :: _ ->
+            (* lib path is <dep_root>/lib[/...]; walk back to the package root *)
+            let rec up p n = if n = 0 then p else up (Filename.dirname p) (n - 1) in
+            Some (name, up lp 1))
+        deps
+      |> List.sort_uniq compare
+    in
+    if dep_roots = [] then begin
+      Printf.printf "no dependencies to audit\n%!";
+      Ok ()
+    end
+    else begin
+      let results =
+        List.map
+          (fun (name, dep_root) ->
+            (name,
+             Cap_package.of_package ~root:dep_root
+               ~env_prefix:(env_for_dep dep_root)))
+          dep_roots
+      in
+      let failures =
+        List.filter_map
+          (function name, Error e -> Some (name, e) | _ -> None)
+          results
+      in
+      let ok =
+        List.filter_map
+          (function
+            | name, Ok (t : Cap_package.t) -> Some (name, t.Cap_package.caps)
+            | _ -> None)
+          results
+      in
+      List.iter
+        (fun (name, caps) ->
+          Printf.printf "%-24s %s\n" name
+            (if caps = [] then "(no capabilities)" else String.concat ", " caps))
+        ok;
+      (* An unanalyzable dependency is reported, never silently treated as
+         capability-free — that would read as "this dep is pure". *)
+      List.iter
+        (fun (name, e) ->
+          Printf.eprintf "forge cap deps: %s: NOT ANALYZABLE — %s\n%!" name e)
+        failures;
+      if accept then begin
+        if failures <> [] then
+          Error
+            (Printf.sprintf
+               "refusing to record a baseline while %d dependency/ies cannot \
+                be analyzed"
+               (List.length failures))
+        else begin
+          Cap_package.save_baseline root ok;
+          Printf.printf "\nrecorded %d dependency capability set(s)\n%!"
+            (List.length ok);
+          Ok ()
+        end
+      end
+      else if check then begin
+        let baseline = Cap_package.load_baseline root in
+        if baseline = [] then
+          Error
+            "no capability baseline recorded — run `forge cap deps --accept` \
+             after reviewing the sets above"
+        else begin
+          let widened = ref [] in
+          List.iter
+            (fun (name, caps) ->
+              let old_caps =
+                match List.assoc_opt name baseline with
+                | Some c -> c
+                | None -> [] (* a NEW dependency: everything it needs is new *)
+              in
+              let ch = Cap_package.diff ~old_caps ~new_caps:caps in
+              if Cap_package.widens ch then begin
+                widened := name :: !widened;
+                match
+                  Cap_package.format_change ~name ~old_version:"reviewed"
+                    ~new_version:"current" ch
+                with
+                | Some s -> Printf.eprintf "\n%s%!" s
+                | None -> ()
+              end)
+            ok;
+          if failures <> [] then
+            Error
+              (Printf.sprintf "%d dependency/ies could not be analyzed"
+                 (List.length failures))
+          else if !widened <> [] then
+            Error
+              (Printf.sprintf
+                 "%d dependency/ies widened their capabilities — review, then \
+                  `forge cap deps --accept`"
+                 (List.length !widened))
+          else begin
+            Printf.printf "\nno capability widening against the recorded baseline\n%!";
+            Ok ()
+          end
+        end
+      end
+      else if failures <> [] then
+        Error
+          (Printf.sprintf "%d dependency/ies could not be analyzed"
+             (List.length failures))
+      else Ok ()
+    end
