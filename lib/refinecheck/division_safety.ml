@@ -380,7 +380,34 @@ let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
    value being divided by.  Retiring them here is what stops
    `if d != 0 do (let d = 0; 10 / d)` — and its `fn d -> …` and `Some(d) -> …`
    siblings — from reading the outer fact. *)
-let check_var_divisor ~root errctx span var_name all_params (c : dctx) =
+(* [check_var_divisor], wrapped so every variable divisor leaves a trace in the
+   obligation ledger.
+
+   Why it matters: `Precond_infer` measures a function's debt by counting that
+   ledger, and division safety is a SEPARATE pass from [Refine_check].  With
+   nothing recorded here, a `cap no_panic` module whose only problem is
+   `n / d` counted as zero debt, so `--refine-suggest-all` had nothing to
+   shrink and printed "no suggestions" — for the one case where the compiler's
+   own error already names the fix.
+
+   The verdict is read off the error context rather than threaded back through
+   [check_var_divisor]'s many exit paths: under `cap no_panic` anything short
+   of proof IS an error (there is no [Skipped] middle ground the way there is
+   for a precondition), so "did this call report?" is exactly the verdict.
+   Note [Err.report] suppresses an exact duplicate, but two divisions never
+   share a span, so a genuine second obligation can never be swallowed. *)
+let rec check_var_divisor ~root errctx span var_name all_params (c : dctx) =
+  let before = List.length errctx.Err.diagnostics in
+  check_var_divisor_inner ~root errctx span var_name all_params c;
+  let verdict =
+    if List.length errctx.Err.diagnostics = before then Obligation.Proved
+    else Obligation.Violated
+  in
+  Obligation.record
+    { Obligation.span; callee = var_name; predicate = "_ != 0"; verdict
+    ; kind = Obligation.Division }
+
+and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
   let params =
     List.filter (fun (n, _, _) -> not (List.mem n c.shadowed)) all_params
   in

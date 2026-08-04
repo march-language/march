@@ -471,6 +471,329 @@ let test_no_project_root_does_not_hang () =
   Alcotest.(check bool) "references answers without a project root" true refs_ok;
   Alcotest.(check bool) "workspace/symbol answers without a project root" true syms_ok
 
+(* ── Per-feature CORRECTNESS ──────────────────────────────────────────────
+   [test_every_advertised_capability_answers] above proves each capability is
+   REACHABLE. It deliberately asserts nothing about content, so a handler that
+   answered `[]` to everything would pass it.
+
+   These tests close that gap. They matter more than they look: the many
+   per-feature tests in `test_lsp.ml` exercise `Analysis.*`, and that layer was
+   never the broken part — dispatch was. Every one of those tests stayed green
+   through the entire period in which these features returned
+   `TODO: handle this request` to editors, which is exactly why `dune runtest`
+   never noticed.
+
+   Each assertion pins a POSITION, not just a count. A response with the right
+   shape and the wrong coordinates is the failure mode that reaches a user, and
+   a non-emptiness check cannot see it. Each feature also gets a REJECT case —
+   a query whose correct answer is "nothing" — because a handler returning
+   every symbol in the file passes every positive test here.
+
+   One server session serves them all: spawning per test would multiply a
+   multi-second startup by the number of features for no extra coverage. *)
+
+let fixture_dir = Filename.concat (Filename.get_temp_dir_name ()) "march_lsp_perfeature"
+let fixture_path = Filename.concat fixture_dir "fixture.march"
+
+(* Line/character coordinates are asserted literally below, so the layout is
+   part of the test. 0-indexed:
+     0  mod M do
+     1    fn helper(x : Int) : Int do     `helper` at chars 5..11
+     2      x + 1
+     3    end
+     4
+     5    fn main() : Int do              `main` at chars 5..9
+     6      helper(2)                     the call at chars 4..10
+     7    end
+     8  end                                                              *)
+let fixture_text =
+  "mod M do\n\
+  \  fn helper(x : Int) : Int do\n\
+  \    x + 1\n\
+  \  end\n\
+   \n\
+  \  fn main() : Int do\n\
+  \    helper(2)\n\
+  \  end\n\
+   end\n"
+
+let fixture_uri () = "file://" ^ fixture_path
+
+let decl_pos = `Assoc [ "line", `Int 1; "character", `Int 6 ]
+let call_pos = `Assoc [ "line", `Int 6; "character", `Int 5 ]
+(* Line 4 is blank — every position-based query here must answer "nothing". *)
+let blank_pos = `Assoc [ "line", `Int 4; "character", `Int 0 ]
+
+let per_feature_requests uri =
+  let td = `Assoc [ "uri", `String uri ] in
+  let ctx = `Assoc [ "includeDeclaration", `Bool true ] in
+  [ "references", "textDocument/references",
+    `Assoc [ "textDocument", td; "position", decl_pos; "context", ctx ];
+    "references-blank", "textDocument/references",
+    `Assoc [ "textDocument", td; "position", blank_pos; "context", ctx ];
+    "highlight", "textDocument/documentHighlight",
+    `Assoc [ "textDocument", td; "position", decl_pos ];
+    "highlight-blank", "textDocument/documentHighlight",
+    `Assoc [ "textDocument", td; "position", blank_pos ];
+    "symbols", "textDocument/documentSymbol", `Assoc [ "textDocument", td ];
+    "wsymbol", "workspace/symbol", `Assoc [ "query", `String "helper" ];
+    "wsymbol-miss", "workspace/symbol", `Assoc [ "query", `String "zzzznomatch" ];
+    "formatting", "textDocument/formatting",
+    `Assoc [ "textDocument", td;
+             "options", `Assoc [ "tabSize", `Int 2; "insertSpaces", `Bool true ] ];
+    "sighelp", "textDocument/signatureHelp",
+    `Assoc [ "textDocument", td;
+             "position", `Assoc [ "line", `Int 6; "character", `Int 11 ] ];
+    "callhier", "textDocument/prepareCallHierarchy",
+    `Assoc [ "textDocument", td; "position", decl_pos ];
+    "selrange", "textDocument/selectionRange",
+    `Assoc [ "textDocument", td; "positions", `List [ call_pos ] ];
+    "definition", "textDocument/definition",
+    `Assoc [ "textDocument", td; "position", call_pos ];
+    "folding", "textDocument/foldingRange", `Assoc [ "textDocument", td ];
+    "rename", "textDocument/rename",
+    `Assoc [ "textDocument", td; "position", decl_pos; "newName", `String "renamed" ] ]
+
+let run_per_feature_session () : (string * Yojson.Safe.t) list =
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
+  ignore (Unix.alarm 120);
+  (* The file must exist on disk: `workspace/symbol` answers from the workspace
+     index, which reads the directory rather than the open-document set. *)
+  (try Unix.mkdir fixture_dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let ch = open_out fixture_path in
+  output_string ch fixture_text;
+  close_out ch;
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  let uri = fixture_uri () in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null;
+                       "rootUri", `String ("file://" ^ fixture_dir);
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "method", `String "textDocument/didOpen";
+    "params", `Assoc [ "textDocument", `Assoc [
+      "uri", `String uri; "languageId", `String "march";
+      "version", `Int 1; "text", `String fixture_text ] ] ]);
+  ignore (read_until ic ~max:30 (is_method "textDocument/publishDiagnostics"));
+  let out =
+    List.mapi
+      (fun i (label, meth, params) ->
+        let id = 500 + i in
+        send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int id;
+                          "method", `String meth; "params", params ]);
+        match read_until ic ~max:60 (is_id id) with
+        | None -> (label, `Null)
+        | Some j ->
+          (* An error here is the reachability failure the sweep guards; surface
+             it as `Null so the per-feature assertion fails with its own name. *)
+          (match member "error" j with
+           | `Null -> (label, member "result" j)
+           | _ -> (label, `Null)))
+      (per_feature_requests uri)
+  in
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 999;
+                    "method", `String "shutdown"; "params", `Null ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  ignore (Unix.alarm 0);
+  out
+
+let per_feature : (string * Yojson.Safe.t) list Lazy.t =
+  lazy (run_per_feature_session ())
+
+let answer label =
+  try List.assoc label (Lazy.force per_feature) with Not_found -> `Null
+
+let items j = match j with `List l -> l | _ -> []
+
+(* (startLine, startChar, endLine, endChar) of a `range` member. *)
+let range_of j =
+  let r = member "range" j in
+  let pt k f =
+    match member f (member k r) with `Int n -> n | _ -> -1
+  in
+  (pt "start" "line", pt "start" "character", pt "end" "line", pt "end" "character")
+
+let check_ranges label expected actual =
+  Alcotest.(check (list (list int))) label
+    (List.map (fun (a, b, c, d) -> [ a; b; c; d ]) expected)
+    (List.map (fun (a, b, c, d) -> [ a; b; c; d ])
+       (List.sort compare (List.map range_of actual)))
+
+(* The two ranges every reference-shaped answer must name: the declaration of
+   `helper`, and its one call site. *)
+let helper_decl_range = (1, 5, 1, 11)
+let helper_call_range = (6, 4, 6, 10)
+
+let test_references_names_both_sites () =
+  check_ranges "references: declaration and call, and nothing else"
+    [ helper_decl_range; helper_call_range ] (items (answer "references"))
+
+let test_references_on_a_blank_line_is_empty () =
+  Alcotest.(check int) "references on a blank line finds nothing"
+    0 (List.length (items (answer "references-blank")))
+
+let test_document_highlight_names_both_sites () =
+  check_ranges "documentHighlight: declaration and call"
+    [ helper_decl_range; helper_call_range ] (items (answer "highlight"))
+
+let test_document_highlight_on_a_blank_line_is_empty () =
+  Alcotest.(check int) "documentHighlight on a blank line finds nothing"
+    0 (List.length (items (answer "highlight-blank")))
+
+let test_document_symbol_lists_exactly_the_two_functions () =
+  let names =
+    List.sort compare
+      (List.filter_map
+         (fun j -> match member "name" j with `String s -> Some s | _ -> None)
+         (items (answer "symbols")))
+  in
+  (* Exactly two: a prelude leak — the bug this response had before — shows up
+     here as dozens of stdlib names rather than as a wrong coordinate. *)
+  Alcotest.(check (list string)) "document symbols" [ "helper"; "main" ] names
+
+let test_workspace_symbol_finds_the_one_match () =
+  let locs =
+    List.map (fun j -> member "location" j) (items (answer "wsymbol"))
+  in
+  check_ranges "workspace/symbol locates `helper` at its declaration"
+    [ helper_decl_range ] locs
+
+let test_workspace_symbol_miss_is_empty () =
+  (* Without this, a handler that ignores the query and returns every symbol in
+     the workspace passes the test above. *)
+  Alcotest.(check int) "a query matching nothing returns nothing"
+    0 (List.length (items (answer "wsymbol-miss")))
+
+let test_formatting_edit_equals_march_fmt () =
+  match items (answer "formatting") with
+  | [ edit ] ->
+    let got = match member "newText" edit with `String s -> s | _ -> "" in
+    (* Tie the LSP to the formatter the rest of the suite already covers, so
+       the two can never drift and a formatter regression surfaces here too. *)
+    let expected =
+      let lexbuf = Lexing.from_string fixture_text in
+      let m =
+        March_parser.Parser.module_
+          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      in
+      March_format.Format.format_module ~src:fixture_text m
+    in
+    Alcotest.(check string) "formatting edit is exactly `march fmt`" expected got
+  | l -> Alcotest.failf "expected exactly one formatting edit, got %d" (List.length l)
+
+let test_signature_help_names_the_callee_and_parameter () =
+  let r = answer "sighelp" in
+  let sigs = items (member "signatures" r) in
+  (match sigs with
+   | s :: _ ->
+     Alcotest.(check string) "signature label"
+       "helper(Int)"
+       (match member "label" s with `String x -> x | _ -> "")
+   | [] -> Alcotest.fail "signatureHelp returned no signatures");
+  Alcotest.(check int) "active parameter is the first"
+    0 (match member "activeParameter" r with `Int n -> n | _ -> -1)
+
+let test_call_hierarchy_prepares_the_enclosing_function () =
+  match items (answer "callhier") with
+  | [ item ] ->
+    Alcotest.(check string) "prepared item names the function"
+      "helper" (match member "name" item with `String s -> s | _ -> "");
+    (* `range` spans the whole declaration; `selectionRange` pinpoints the name.
+       Asserting both is what distinguishes a correct item from one that reuses
+       a single span for each — which reads fine in a client until you use it. *)
+    Alcotest.(check (list int)) "selectionRange is the name"
+      [ 1; 5; 1; 11 ]
+      (let (a, b, c, d) =
+         let r = member "selectionRange" item in
+         let pt k f = match member f (member k r) with `Int n -> n | _ -> -1 in
+         (pt "start" "line", pt "start" "character",
+          pt "end" "line", pt "end" "character")
+       in
+       [ a; b; c; d ]);
+    let (sl, _, el, _) = range_of item in
+    Alcotest.(check bool) "range covers the whole declaration" true
+      (sl = 1 && el = 3)
+  | l -> Alcotest.failf "expected one call-hierarchy item, got %d" (List.length l)
+
+let test_selection_range_widens_from_the_call () =
+  match items (answer "selrange") with
+  | [ sr ] ->
+    Alcotest.(check (list int)) "innermost range is the callee name"
+      [ 6; 4; 6; 10 ]
+      (let (a, b, c, d) = range_of sr in [ a; b; c; d ]);
+    (* A selection range that does not widen is useless: the whole feature is
+       the parent chain. *)
+    let (pa, pb, pc, pd) = range_of (member "parent" sr) in
+    Alcotest.(check bool) "parent strictly contains it" true
+      (pa = 6 && pb = 4 && pc = 6 && pd > 10)
+  | l -> Alcotest.failf "expected one selection range, got %d" (List.length l)
+
+let test_definition_jumps_to_the_declaration () =
+  check_ranges "definition of the call lands on the declaration"
+    [ helper_decl_range ] (items (answer "definition"))
+
+let test_folding_covers_both_function_bodies () =
+  let spans =
+    List.sort compare
+      (List.map
+         (fun j ->
+           [ (match member "startLine" j with `Int n -> n | _ -> -1);
+             (match member "endLine" j with `Int n -> n | _ -> -1) ])
+         (items (answer "folding")))
+  in
+  Alcotest.(check (list (list int))) "one fold per function body"
+    [ [ 1; 3 ]; [ 5; 7 ] ] spans
+
+let test_rename_edits_every_site_and_only_those () =
+  let edits =
+    match member "changes" (answer "rename") with
+    | `Assoc [ (_uri, es) ] -> items es
+    | _ -> []
+  in
+  check_ranges "rename touches the declaration and the call"
+    [ helper_decl_range; helper_call_range ] edits;
+  List.iter
+    (fun e ->
+      Alcotest.(check string) "every edit writes the new name"
+        "renamed" (match member "newText" e with `String s -> s | _ -> ""))
+    edits
+
+(* The leak that hit `semanticTokens` and `documentSymbol`: a per-document
+   response describing the whole prelude-injected analysis rather than the open
+   file. It shows up as a line number past the end of the document, so check
+   that DIRECTLY, across every response at once, rather than per feature. *)
+let test_no_response_describes_a_line_past_the_document () =
+  let doc_lines = List.length (String.split_on_char '\n' fixture_text) in
+  let rec max_line j =
+    match j with
+    | `Assoc l ->
+      List.fold_left
+        (fun acc (k, v) ->
+          match (k, v) with
+          | (("line" | "startLine" | "endLine"), `Int n) -> max acc n
+          | _ -> max acc (max_line v))
+        (-1) l
+    | `List l -> List.fold_left (fun acc v -> max acc (max_line v)) (-1) l
+    | _ -> -1
+  in
+  List.iter
+    (fun (label, j) ->
+      let m = max_line j in
+      if m >= doc_lines then
+        Alcotest.failf
+          "%s describes line %d, past the end of a %d-line document — the \
+           response is built from the whole analysis (prelude included) rather \
+           than the open file"
+          label m doc_lines)
+    (Lazy.force per_feature)
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
@@ -486,4 +809,35 @@ let () =
         Alcotest.test_case "every advertised capability answers" `Quick
           test_every_advertised_capability_answers;
         Alcotest.test_case "a document with no project root does not hang" `Quick
-          test_no_project_root_does_not_hang ] ]
+          test_no_project_root_does_not_hang ];
+      "per-feature correctness",
+      [ Alcotest.test_case "references names both sites" `Quick
+          test_references_names_both_sites;
+        Alcotest.test_case "references on a blank line is empty" `Quick
+          test_references_on_a_blank_line_is_empty;
+        Alcotest.test_case "documentHighlight names both sites" `Quick
+          test_document_highlight_names_both_sites;
+        Alcotest.test_case "documentHighlight on a blank line is empty" `Quick
+          test_document_highlight_on_a_blank_line_is_empty;
+        Alcotest.test_case "documentSymbol lists exactly the two functions" `Quick
+          test_document_symbol_lists_exactly_the_two_functions;
+        Alcotest.test_case "workspace/symbol finds the one match" `Quick
+          test_workspace_symbol_finds_the_one_match;
+        Alcotest.test_case "workspace/symbol miss is empty" `Quick
+          test_workspace_symbol_miss_is_empty;
+        Alcotest.test_case "formatting edit equals march fmt" `Quick
+          test_formatting_edit_equals_march_fmt;
+        Alcotest.test_case "signatureHelp names callee and parameter" `Quick
+          test_signature_help_names_the_callee_and_parameter;
+        Alcotest.test_case "prepareCallHierarchy prepares the function" `Quick
+          test_call_hierarchy_prepares_the_enclosing_function;
+        Alcotest.test_case "selectionRange widens from the call" `Quick
+          test_selection_range_widens_from_the_call;
+        Alcotest.test_case "definition jumps to the declaration" `Quick
+          test_definition_jumps_to_the_declaration;
+        Alcotest.test_case "foldingRange covers both function bodies" `Quick
+          test_folding_covers_both_function_bodies;
+        Alcotest.test_case "rename edits every site and only those" `Quick
+          test_rename_edits_every_site_and_only_those;
+        Alcotest.test_case "no response describes a line past the document" `Quick
+          test_no_response_describes_a_line_past_the_document ] ]
