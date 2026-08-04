@@ -13,6 +13,24 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge cap inspect` now says WHICH module uses each capability.** The
+  report gained an "Attributed to" section: `IO.FileRead   Conduit.Store`
+  instead of only "this binary reads files". This is what makes it possible to
+  ask whether a capability came from your code or from a dependency — the
+  whole-program union could never distinguish them.
+
+  Attribution is computed before inlining, which is the only point where it is
+  correct: by codegen time a small dependency function has been folded into
+  its caller, so attributing there credits the dependency's IO to the
+  application — a false clean bill for the dependency. A capability reached
+  through a stdlib wrapper is attributed to the module that called the
+  wrapper, not to the wrapper, so `File.read` does not become the answer for
+  every dependency in the program.
+
+  A capability reached only through an indirect (closure) call has no
+  statically known callee and is reported as *unattributed* rather than
+  silently omitted. Also available as `attribution` in `--json` output.
+
 - **Path-scoped capabilities: `needs IO.FileRead("/etc/myapp")`.** A module
   can narrow a filesystem capability to a directory subtree instead of
   declaring all-or-nothing access. A literal path outside the declared scope

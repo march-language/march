@@ -9,10 +9,10 @@ open March_forge
 (* A current-compiler binary carries markers for the caps it holds; [markers]
    defaults to [caps] so fixtures model that.  Pass ~markers:[] explicitly to
    model a pre-marker or non-March binary. *)
-let mk ?(caps = []) ?markers ?(rt_symbols = [])
+let mk ?(caps = []) ?markers ?(rt_symbols = []) ?(attribution = [])
     ?(build = Cap_binary.Dead_stripped) () =
   let markers = match markers with Some m -> m | None -> caps in
-  { Cap_binary.caps; markers; rt_symbols; build; manifest = None }
+  { Cap_binary.caps; markers; attribution; rt_symbols; build; manifest = None }
 
 let test_deny_uses_lattice_subsumption () =
   let t = mk ~caps:[ "IO.FileRead" ] () in

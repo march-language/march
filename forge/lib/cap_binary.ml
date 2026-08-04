@@ -6,6 +6,7 @@ type build_kind = Dead_stripped | Unstripped | Symbols_removed
 type t = {
   caps : string list;
   markers : string list;
+  attribution : (string * string) list;
   rt_symbols : string list;
   build : build_kind;
   manifest : string option;
@@ -81,6 +82,48 @@ let markers_of_symbols syms =
     syms
   |> List.sort_uniq String.compare
 
+(* ── attribution channel ────────────────────────────────────────────── *)
+
+(* Per-module attribution markers, [__march_capfrom_<CAP>__<OWNER>].  The
+   prefix deliberately shares no prefix with [marker_prefix] (they diverge at
+   the 12th character), so [markers_of_symbols] above cannot mistake one of
+   these for a flat marker and decode "IO_FileRead__BigLib" as a capability.
+
+   Capability paths never contain "__", so the FIRST "__" in the remainder is
+   the separator even when the owner module itself contains one. *)
+let attrib_prefix = "__march_capfrom_"
+
+let split_on_double_underscore s =
+  let n = String.length s in
+  let rec go i =
+    if i + 1 >= n then None
+    else if s.[i] = '_' && s.[i + 1] = '_' then
+      Some (String.sub s 0 i, String.sub s (i + 2) (n - i - 2))
+    else go (i + 1)
+  in
+  go 0
+
+let attribution_of_symbols syms =
+  List.filter_map
+    (fun sym ->
+      let sym = strip_underscore sym in
+      if not (has_prefix attrib_prefix sym) then None
+      else
+        let rest =
+          String.sub sym
+            (String.length attrib_prefix)
+            (String.length sym - String.length attrib_prefix)
+        in
+        match split_on_double_underscore rest with
+        (* The owner is emitted verbatim (dots and all — LLVM global names
+           permit them), so it needs no unmangling.  Mangling it would be
+           irreversible: a module named My_Mod and a nested module My.Mod
+           would share one encoding. *)
+        | Some (cap, owner) when owner <> "" -> Some (unmangle_cap cap, owner)
+        | _ -> None)
+    syms
+  |> List.sort_uniq compare
+
 (* ── manifest channel ───────────────────────────────────────────────── *)
 
 let manifest_magic = "MARCHCAP\x01"
@@ -139,6 +182,7 @@ let read path : (t, string) result =
             in
             let syms = read_symbols path in
             let markers = markers_of_symbols syms in
+            let attribution = attribution_of_symbols syms in
             let rt_symbols =
               List.filter_map
                 (fun s ->
@@ -192,9 +236,9 @@ let read path : (t, string) result =
                 (* Reporting the full symbol set as "capabilities" would be
                    the app-invariance failure; report the build kind and no
                    cap list. Markers, if present, are still trustworthy. *)
-                Ok { caps = markers; markers; rt_symbols; build; manifest }
+                Ok { caps = markers; markers; attribution; rt_symbols; build; manifest }
             | Symbols_removed ->
-                Ok { caps = []; markers; rt_symbols; build; manifest }
+                Ok { caps = []; markers; attribution; rt_symbols; build; manifest }
             | Dead_stripped ->
                 let caps =
                   if markers <> [] then markers
@@ -203,4 +247,4 @@ let read path : (t, string) result =
                       rt_symbols
                     |> List.sort_uniq String.compare
                 in
-                Ok { caps; markers; rt_symbols; build; manifest }))
+                Ok { caps; markers; attribution; rt_symbols; build; manifest }))

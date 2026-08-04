@@ -117,3 +117,145 @@ let tests =
     Alcotest.test_case "no marker for unused capability" `Slow
       test_marker_absent_for_unused_cap;
   ]
+
+(* ── Per-module attribution (lib/tir/cap_attrib.ml) ──────────────────────
+   The flat marker says the binary reads files; @__march_capfrom_ says WHOSE
+   code does the reading.  Each case below is a route by which attribution
+   was measured to go wrong, or would go wrong under the obvious
+   implementation. *)
+
+let attrib_inlined_src =
+  {|
+mod AttribApp do
+  mod Dep do
+    needs IO.FileRead
+    fn slurp(p : String) : String do
+      match file_read(p) do
+        Ok(s)  -> s
+        Err(_) -> ""
+      end
+    end
+  end
+  fn main() : () do
+    println(Dep.slurp("/etc/hosts"))
+  end
+end
+|}
+
+let test_attributed_to_dep_not_app_despite_inlining () =
+  (* The load-bearing case.  [Dep.slurp] is small enough that the inliner
+     folds it into main and no trace of [Dep] survives to the emitted IR —
+     measured.  Attributing at codegen time would therefore credit the
+     dependency's file read to the application: a clean bill for the
+     dependency and a false one for the app, which is the wrong direction for
+     every decision this feature exists to support.  Attribution is taken
+     pre-inline precisely so this says Dep. *)
+  let ir = emit_ir attrib_inlined_src in
+  Alcotest.(check bool) "IO.FileRead attributed to Dep" true
+    (contains ir "@__march_capfrom_IO_FileRead__Dep");
+  Alcotest.(check bool) "IO.FileRead NOT attributed to the app" false
+    (contains ir "@__march_capfrom_IO_FileRead__AttribApp")
+
+let attrib_stdlib_wrapper_src =
+  {|
+mod WrapApp do
+  mod Dep do
+    needs IO.FileRead
+    fn slurp(p : String) : String do
+      match File.read(p) do
+        Ok(s)  -> s
+        Err(_) -> ""
+      end
+    end
+  end
+  fn main() : () do
+    println(Dep.slurp("/etc/hosts"))
+  end
+end
+|}
+
+let test_stdlib_wrapper_is_seen_through () =
+  (* Before the transparent-module walk this reported [File] — and since most
+     dependencies reach IO through a stdlib wrapper, every capability in a
+     real program landed on a handful of stdlib modules.  A report that names
+     the same owner regardless of which dependency is responsible answers
+     nobody's question, so stdlib is walked through to the caller. *)
+  let ir = emit_ir attrib_stdlib_wrapper_src in
+  Alcotest.(check bool) "attributed to the calling module" true
+    (contains ir "@__march_capfrom_IO_FileRead__Dep");
+  Alcotest.(check bool) "NOT attributed to the stdlib wrapper" false
+    (contains ir "@__march_capfrom_IO_FileRead__File")
+
+let attrib_unused_feature_src =
+  {|
+mod PartialApp do
+  mod Dep do
+    needs IO.FileRead
+    fn add(a : Int, b : Int) : Int do
+      a + b
+    end
+    fn slurp(p : String) : String do
+      match file_read(p) do
+        Ok(s)  -> s
+        Err(_) -> ""
+      end
+    end
+  end
+  fn main() : () do
+    println(Int.to_string(Dep.add(2, 3)))
+  end
+end
+|}
+
+let test_unused_feature_contributes_nothing () =
+  (* Using one function of a module must not import the capabilities of the
+     functions you did not call — neither the flat marker nor an owner row.
+     Attribution runs after reachability pruning so that stays true. *)
+  let ir = emit_ir attrib_unused_feature_src in
+  Alcotest.(check bool) "no IO.FileRead marker at all" false
+    (contains ir "@__march_cap_IO_FileRead");
+  Alcotest.(check bool) "no IO.FileRead owner row either" false
+    (contains ir "@__march_capfrom_IO_FileRead")
+
+let test_attribution_prefix_cannot_be_read_as_a_flat_marker () =
+  (* forge's Cap_binary matches the "__march_cap_" prefix and takes the whole
+     remainder as the capability path.  An attribution marker spelled
+     @__march_cap_IO_FileRead__Dep would decode as a bogus capability named
+     "IO_FileRead__Dep", so the two prefixes must diverge before that point. *)
+  let ir = emit_ir attrib_inlined_src in
+  Alcotest.(check bool) "attribution markers do not start with __march_cap_"
+    false
+    (contains ir "@__march_cap_IO_FileRead__")
+
+let tests =
+  tests
+  @ [
+      Alcotest.test_case "attributed to the dep despite inlining" `Slow
+        test_attributed_to_dep_not_app_despite_inlining;
+      Alcotest.test_case "stdlib wrapper is seen through" `Slow
+        test_stdlib_wrapper_is_seen_through;
+      Alcotest.test_case "unused feature contributes no owner row" `Slow
+        test_unused_feature_contributes_nothing;
+      Alcotest.test_case "attribution prefix is not a flat-marker prefix" `Slow
+        test_attribution_prefix_cannot_be_read_as_a_flat_marker;
+    ]
+
+let test_indirect_call_is_unattributed_not_absent () =
+  (* [direct_pass_src] invokes file_read through a closure, so no statically
+     known callee exists and attribution genuinely cannot see it.  The FLAT
+     marker still must — the two channels complement each other, and a
+     capability that is real but unattributed must never look like an absent
+     one.  Measured: `forge cap inspect` renders this as an explicit
+     "unattributed" line rather than an empty owner set. *)
+  let ir = emit_ir direct_pass_src in
+  Alcotest.(check bool) "flat marker still reports the capability" true
+    (contains ir "@__march_cap_IO_FileRead");
+  Alcotest.(check bool) "but no owner row is invented" false
+    (contains ir "@__march_capfrom_IO_FileRead")
+
+let tests =
+  tests
+  @ [
+      Alcotest.test_case "indirect call is unattributed, not absent" `Slow
+        test_indirect_call_is_unattributed_not_absent;
+    ]

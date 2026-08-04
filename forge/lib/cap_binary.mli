@@ -22,6 +22,20 @@ type build_kind =
 type t = {
   caps : string list;        (** normalized; markers preferred, symbols as fallback *)
   markers : string list;     (** cap paths recovered from [__march_cap_*] globals *)
+  attribution : (string * string) list;
+      (** [(cap_path, owner_module)] from [__march_capfrom_*] globals: which
+          module's code performs the IO, so a capability can be traced to the
+          dependency that introduced it rather than only to the program.
+
+          Computed by the compiler BEFORE inlining ([March_tir.Cap_attrib]) —
+          by emission time a small dependency function has been folded into
+          its caller and would be credited to the application instead.
+
+          A cap in [markers] with no row here is UNATTRIBUTED, not
+          unattributable-to-anyone: indirect calls through closures have no
+          statically known callee. Report that difference; do not present an
+          empty owner set as "nothing uses it". Binaries built by a
+          pre-attribution compiler have this empty entirely. *)
   rt_symbols : string list;  (** cap-bearing runtime symbols present *)
   build : build_kind;
   manifest : string option;  (** raw JSON; [None] when absent *)

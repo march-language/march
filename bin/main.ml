@@ -356,6 +356,37 @@ let stdlib_span_files (decls : March_ast.Ast.decl list) : string list =
   go decls;
   Hashtbl.fold (fun f () acc -> f :: acc) seen []
 
+(** The module names a batch of stdlib declarations defines.
+
+    Feeds [Cap_attrib.attribute]'s [~transparent] set, so a capability reached
+    through a stdlib wrapper is attributed to the dependency that called the
+    wrapper rather than to the wrapper. Derived from the declarations actually
+    loaded — like [stdlib_span_files] — rather than from a hand-maintained
+    name list, which is exactly the thing that drifts (see the correction
+    history on [Resolver.stdlib_module_names]).
+
+    [DMod] is the only declaration form that introduces a module name, so the
+    catch-all below cannot hide one; nested modules are reached through
+    [DMod]'s own inner list. Note prelude.march is deliberately unwrapped into
+    global scope by [load_stdlib_file], so its members are bare-named and
+    invisible here — a capability used only by a prelude function is
+    attributed to the entry module. *)
+let stdlib_module_names (decls : March_ast.Ast.decl list) : string list =
+  let seen = Hashtbl.create 64 in
+  let rec go prefix ds =
+    List.iter
+      (function
+        | March_ast.Ast.DMod (name, _, inner, _) ->
+          let name = name.March_ast.Ast.txt in
+          let q = if prefix = "" then name else prefix ^ "." ^ name in
+          Hashtbl.replace seen q ();
+          go q inner
+        | _ -> ())
+      ds
+  in
+  go "" decls;
+  Hashtbl.fold (fun n () acc -> n :: acc) seen []
+
 (** Typecheck [stdlib_decls] once and cache the resulting environment, so a
     combined check/compile can seed pass 1 from it (via
     [Typecheck.check_module_core]'s [?seed_env]) instead of re-typechecking
@@ -2516,6 +2547,20 @@ let compile filename =
     (* Save pre-opt TIR so we can hash __rpc_stub base functions that the
        inliner may eliminate before the CAS hash step below. *)
     let pre_opt_tir = tir in
+    (* Per-module capability attribution MUST be taken here, before the
+       inliner runs: it folds a dependency's small function into its caller
+       and the module boundary is gone by emission time, so attributing then
+       would credit the dependency's IO to the application.  Pruned first so
+       a dependency feature nothing calls contributes no owner row — that is
+       what makes "use one function of a library" cost only that function's
+       capabilities.  Both passes are pure, so this observes the pipeline
+       without perturbing it. *)
+    let cap_attrib =
+      let stdlib_mods = stdlib_module_names stdlib_decls in
+      March_tir.Cap_attrib.attribute
+        ~transparent:(fun m -> List.mem m stdlib_mods)
+        (March_tir.Dce.prune_unreachable pre_opt_tir)
+    in
     let tir =
       if !opt_enabled then
         March_tir.Opt.run
@@ -2813,7 +2858,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -3574,7 +3619,7 @@ let compile filename =
             end
           ) pre_fns
         in
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
