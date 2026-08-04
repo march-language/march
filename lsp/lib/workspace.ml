@@ -183,18 +183,63 @@ let skip_dir name =
   | "_build" | "_build_wt" | ".git" | ".claude" | "node_modules" | "_opam" -> true
   | _ -> false
 
-let rec walk_dir acc dir =
-  match Sys.readdir dir with
-  | exception _ -> acc
-  | entries ->
-    Array.fold_left (fun acc name ->
-        if skip_dir name then acc
-        else
-          let path = Filename.concat dir name in
-          if (try Sys.is_directory path with _ -> false) then walk_dir acc path
-          else if Filename.check_suffix name ".march" then path :: acc
-          else acc)
-      acc entries
+(* Bounds on the workspace walk.
+
+   [project_root] falls back to the open DOCUMENT'S DIRECTORY when no
+   `forge.toml` is found above it, and to the process cwd when there is no
+   document — so a file opened at `/`, in a home directory, or anywhere else
+   large makes this walk the whole tree. Unbounded, that is not slow but
+   effectively infinite: `textDocument/references` and `workspace/symbol` never
+   return, and the client cannot tell a hang from a server that is thinking.
+   Observed while auditing the LSP against a real project.
+
+   A cap turns that into partial results, which is the right failure: symbol
+   search that misses a distant file is useful, and a request that never answers
+   is not. The depth bound catches deep trees, the file bound catches wide ones,
+   and either one alone leaves the other case open. *)
+let max_walk_files = 5000
+let max_walk_depth = 16
+
+(* Reported once per walk that truncates. A silently partial index would make
+   "symbol not found" indistinguishable from "symbol not indexed" — the same
+   ambiguity the obligation ledger exists to prevent in the checker. stderr is
+   where an LSP server's diagnostics go; there is no protocol channel for
+   "your workspace is bigger than I will read". *)
+let warn_truncated ~root ~count =
+  Printf.eprintf
+    "march-lsp: workspace index stopped at %d files under %s (limit %d). \
+     Symbol search and find-references will be incomplete. Open the project \
+     root (the directory containing forge.toml) to index it properly.\n%!"
+    count root max_walk_files
+
+let walk_dir acc root =
+  let count = ref (List.length acc) in
+  let truncated = ref false in
+  let rec go acc dir depth =
+    if !count >= max_walk_files || depth > max_walk_depth then begin
+      if !count >= max_walk_files then truncated := true;
+      acc
+    end
+    else
+      match Sys.readdir dir with
+      | exception _ -> acc
+      | entries ->
+        Array.fold_left (fun acc name ->
+            if !count >= max_walk_files then begin truncated := true; acc end
+            else if skip_dir name then acc
+            else
+              let path = Filename.concat dir name in
+              if (try Sys.is_directory path with _ -> false) then
+                go acc path (depth + 1)
+              else if Filename.check_suffix name ".march" then begin
+                incr count; path :: acc
+              end
+              else acc)
+          acc entries
+  in
+  let result = go acc root 0 in
+  if !truncated then warn_truncated ~root ~count:!count;
+  result
 
 let read_file path =
   try

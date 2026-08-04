@@ -23,11 +23,14 @@ module.exports = grammar({
     [$.type_application, $.variant],
     // bare_constructor vs constructor_expression (resolved by lookahead on '(')
     [$.bare_constructor, $.constructor_expression],
+    // `import A.B` vs `import A.{c, d}` — the choice needs the token after '.'
+    [$.module_path],
   ],
 
   reserved: {
     keyword: $ => [
       'fn', 'let', 'do', 'end', 'type', 'mod', 'pub',
+      'pfn', 'ptype', 'import', 'alias', 'needs',
       'true', 'false',
       'when', 'linear', 'affine',
       'match',
@@ -46,7 +49,7 @@ module.exports = grammar({
     ),
 
     module_def: $ => seq(
-      'mod', field('name', $.type_identifier),
+      'mod', field('name', $.module_path),
       'do', repeat($._declaration), 'end',
     ),
 
@@ -62,6 +65,10 @@ module.exports = grammar({
       $.extern_def,
       $.protocol_def,
       $.use_declaration,
+      $.import_declaration,
+      $.alias_declaration,
+      $.needs_declaration,
+      $.capability_declaration,
       $.test_decl,
       $.describe_decl,
       $.setup_decl,
@@ -86,7 +93,8 @@ module.exports = grammar({
     ),
 
     function_def: $ => seq(
-      optional('pub'), 'fn',
+      // `pfn` is the private form; it never combines with `pub`.
+      choice(seq(optional('pub'), 'fn'), 'pfn'),
       field('name', $.identifier),
       '(', optional(commaSep($.fn_param)), ')',
       optional(seq(':', field('return_type', $._type))),
@@ -173,15 +181,32 @@ module.exports = grammar({
 
     _type_atom: $ => choice(
       $.type_application,
+      $.qualified_type,
       $.type_constructor,
       $.type_variable,
       $.linear_type,
       $.tuple_type,
+      $.refinement_type,
+    ),
+
+    // { Int | _ > 0 }, { List(a) | len(_) > 0 }, { v : Int | v != 0 }
+    refinement_type: $ => seq(
+      '{',
+      optional(seq(field('binder', $.identifier), ':')),
+      field('base', $._type),
+      '|',
+      field('predicate', $._expr),
+      '}',
     ),
 
     type_application: $ => seq(
-      field('name', $.type_identifier),
+      field('name', choice($.type_identifier, $.qualified_type)),
       '(', commaSep1($._type), ')',
+    ),
+
+    // A type named through its module: `Mgrep.Search.MatcherMode.Mode`.
+    qualified_type: $ => seq(
+      $.type_identifier, repeat1(seq('.', $.type_identifier)),
     ),
 
     // alias() — NOT new regex — to avoid duplicate-terminal conflicts
@@ -198,7 +223,7 @@ module.exports = grammar({
     ),
 
     type_def: $ => seq(
-      'type',
+      choice('type', 'ptype'),
       field('name', $.type_identifier),
       optional($.type_params),
       '=',
@@ -305,6 +330,42 @@ module.exports = grammar({
       '*',
     )),
 
+    // Elixir-style: import A, import A.B, import A.B.{C, d},
+    // import A, only: [f, g], import A, except: [f, g]
+    import_declaration: $ => seq(
+      'import',
+      field('path', $.module_path),
+      optional(choice(
+        seq('.', '{', commaSep1(choice($.identifier, $.type_identifier)), '}'),
+        seq(',', choice('only', 'except'), ':',
+            '[', commaSep($.identifier), ']'),
+      )),
+    ),
+
+    // alias Long.Name  |  alias Long.Name as Short  |  alias Long.Name, as: Short
+    alias_declaration: $ => seq(
+      'alias',
+      field('path', $.module_path),
+      optional(choice(
+        seq('as', field('name', $.type_identifier)),
+        seq(',', 'as', ':', field('name', $.type_identifier)),
+      )),
+    ),
+
+    // needs IO.Network, IO.Clock
+    needs_declaration: $ => seq('needs', commaSep1($.module_path)),
+
+    // `cap no_panic` and friends lex as a single keyword in the compiler, so
+    // the space between the two words is not free-form whitespace here either.
+    capability_declaration: $ => choice(
+      seq('proof', 'cap', field('name', $.type_identifier)),
+      seq('cap', field('name', choice(
+        'no_panic', 'pure', 'no_extern', 'deterministic', 'no_alloc', 'verified',
+      ))),
+    ),
+
+    module_path: $ => seq($.type_identifier, repeat(seq('.', $.type_identifier))),
+
     // Test declarations
     test_decl: $ => seq(
       'test', field('name', $.string),
@@ -357,6 +418,7 @@ module.exports = grammar({
       $.sigil_expression,
       $.atom,
       $.typed_hole,
+      $.refinement_placeholder,
       $.integer,
       $.float,
       $.string,
@@ -404,7 +466,10 @@ module.exports = grammar({
     // Bare constructor (nullary) used as expression, e.g. Nil, None, True
     bare_constructor: $ => field('name', $.type_identifier),
     field_expression: $ => prec.left(9, seq(
-      field('object', $._expr), '.', field('field', $.identifier),
+      // The field may be a type_identifier so that a qualified path such as
+      // `Mgrep.Search.Matcher.contains_case` parses as nested field accesses.
+      field('object', $._expr), '.',
+      field('field', choice($.identifier, $.type_identifier)),
     )),
 
     lambda_expression: $ => seq(
@@ -486,6 +551,10 @@ module.exports = grammar({
     atom_literal: _ => seq(':', /[a-z][a-zA-Z0-9_']*/),
 
     typed_hole: $ => seq('?', optional($.identifier)),
+
+    // The refined value inside a refinement predicate: `{ Int | _ > 0 }`.
+    // Only meaningful there; elsewhere `_` is a wildcard_pattern.
+    refinement_placeholder: _ => '_',
 
     // Atom expression: :ok or :error(msg)
     atom: $ => seq(

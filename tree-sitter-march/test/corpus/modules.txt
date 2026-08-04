@@ -6,22 +6,184 @@ mod MyMod do
   fn f() : Int do 1 end
 end
 --------------------------------------------------------------------------------
+
 (source_file
   (module_def
-    name: (type_identifier)
-    (type_def name: (type_identifier)
-      (variant name: (type_identifier))
-      (variant name: (type_identifier)))
-    (function_def name: (identifier)
-      return_type: (type_constructor (type_constructor))
-      body: (block_body (integer)))))
+    name: (module_path
+      (type_identifier))
+    (type_def
+      name: (type_identifier)
+      (variant
+        name: (type_identifier))
+      (variant
+        name: (type_identifier)))
+    (function_def
+      name: (identifier)
+      return_type: (type_constructor
+        (type_constructor))
+      body: (block_body
+        (integer)))))
 
 ================================================================================
 Source file bare declarations (no mod wrapper)
 ================================================================================
 fn f() : Int do 1 end
 --------------------------------------------------------------------------------
+
 (source_file
-  (function_def name: (identifier)
-    return_type: (type_constructor (type_constructor))
-    body: (block_body (integer))))
+  (function_def
+    name: (identifier)
+    return_type: (type_constructor
+      (type_constructor))
+    body: (block_body
+      (integer))))
+
+================================================================================
+Dotted module name
+================================================================================
+mod A.B.C do
+fn f() : Int do 1 end
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier)
+      (type_identifier)
+      (type_identifier))
+    (function_def
+      (identifier)
+      (type_constructor
+        (type_constructor))
+      (block_body
+        (integer)))))
+
+================================================================================
+Import declarations
+================================================================================
+mod M do
+import A
+import A.B.C
+import A.B.{c, D}
+import A, only: [f, g]
+import A, except: [h]
+alias A.B.C
+alias A.B as Short
+alias A.B, as: Other
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (import_declaration
+      (module_path
+        (type_identifier)))
+    (import_declaration
+      (module_path
+        (type_identifier)
+        (type_identifier)
+        (type_identifier)))
+    (import_declaration
+      (module_path
+        (type_identifier)
+        (type_identifier))
+      (identifier)
+      (type_identifier))
+    (import_declaration
+      (module_path
+        (type_identifier))
+      (identifier)
+      (identifier))
+    (import_declaration
+      (module_path
+        (type_identifier))
+      (identifier))
+    (alias_declaration
+      (module_path
+        (type_identifier)
+        (type_identifier)
+        (type_identifier)))
+    (alias_declaration
+      (module_path
+        (type_identifier)
+        (type_identifier))
+      (type_identifier))
+    (alias_declaration
+      (module_path
+        (type_identifier)
+        (type_identifier))
+      (type_identifier))))
+
+================================================================================
+Capability declarations
+================================================================================
+mod M do
+needs IO.Network, IO.Clock
+needs IO.Foreign
+cap no_panic
+cap pure
+cap no_extern
+cap deterministic
+cap no_alloc
+cap verified
+proof cap Sorted
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (needs_declaration
+      (module_path
+        (type_identifier)
+        (type_identifier))
+      (module_path
+        (type_identifier)
+        (type_identifier)))
+    (needs_declaration
+      (module_path
+        (type_identifier)
+        (type_identifier)))
+    (capability_declaration)
+    (capability_declaration)
+    (capability_declaration)
+    (capability_declaration)
+    (capability_declaration)
+    (capability_declaration)
+    (capability_declaration
+      (type_identifier))))
+
+================================================================================
+Private declarations (pfn / ptype)
+================================================================================
+mod M do
+ptype T = T(Int)
+pfn f(x : Int) : Int do x end
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (type_def
+      (type_identifier)
+      (variant
+        (type_identifier)
+        (type_constructor
+          (type_constructor))))
+    (function_def
+      (identifier)
+      (fn_param
+        (named_param
+          (identifier)
+          (type_constructor
+            (type_constructor))))
+      (type_constructor
+        (type_constructor))
+      (block_body
+        (identifier)))))

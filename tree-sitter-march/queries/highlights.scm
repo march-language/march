@@ -1,14 +1,26 @@
 ; Keywords — control flow
-["fn" "let" "do" "end" "if" "else" "match" "when"] @keyword
+["fn" "pfn" "let" "do" "end" "if" "else" "match" "when"] @keyword
 
 ; Keywords — declarations
-["type" "mod" "actor" "protocol" "interface" "impl" "sig" "extern"] @keyword
+["type" "ptype" "mod" "actor" "protocol" "interface" "impl" "sig" "extern"] @keyword
 
 ; Keywords — modifiers
 ["pub" "linear" "affine"] @keyword
 
 ; Keywords — actor / concurrency
 ["send" "spawn" "loop" "for" "use"] @keyword
+
+; Keywords — imports and capabilities
+["import" "alias" "needs" "as" "only" "except"] @keyword
+(capability_declaration) @keyword
+
+; Refinement types — the predicate's `_` stands for the refined value
+(refinement_placeholder) @variable.builtin
+
+; Module paths
+(module_path (type_identifier) @module)
+(qualified_type (type_identifier) @module)
+(qualified_type (type_identifier) @type .)
 
 ; Doc annotations
 (doc_annotation "doc" @keyword.documentation)
@@ -59,7 +71,7 @@
 (constructor_pattern name: (type_identifier) @constructor)
 
 ; Module names
-(module_def name: (type_identifier) @namespace)
+(module_def name: (module_path (type_identifier) @namespace))
 
 ; Actor / interface / impl / sig / protocol names
 (actor_def name: (type_identifier) @type)

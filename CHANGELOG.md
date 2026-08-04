@@ -321,7 +321,28 @@ git log is authoritative for exact commits.
   mechanized proof. Same corrections applied to the README and docs index
   summaries.
 
+### Added
+
+- **The LSP folds a run of imports, or a run of capability declarations, as a
+  single range.** A block of eight imports collapses to one line instead of
+  needing eight chevrons, matching the runs `march fmt` now keeps tight.
+  Import runs carry the standard LSP `imports` fold kind, so editor commands
+  like "fold all imports" reach them; capability runs use `region`. Runs are
+  *maximal and consecutive* — imports split by a function are two runs, and
+  neither one swallows the function between them. A lone import offers no
+  fold, since there is nothing to collapse. The server also now emits the
+  standard `region` and `comment` kinds where they apply, instead of tagging
+  every range `Other`.
+
 ### Changed
+
+- **`march fmt` keeps a run of imports, or a run of capability declarations,
+  tight.** Every top-level declaration used to be separated by a blank line,
+  which turned a block of eight imports into eight paragraphs. A run of
+  `import`/`alias`, or a run of `needs`/`cap`/`proof cap`, is now emitted with
+  no blank lines inside it; the blank line at the boundary of the run, and
+  between everything else, is unchanged. Imports and capabilities count as
+  different runs, so the two blocks stay separated from each other.
 
 - **Refinement violations now name the offending parameter and callee, and
   underline that argument.** The message opened with a bare "argument does not
@@ -412,6 +433,65 @@ git log is authoritative for exact commits.
   your handlers block.
 
 ### Fixed
+
+- **Syntax highlighting broke on any file using a dotted module name.** The
+  tree-sitter grammar accepted only a single-segment `mod Name do`, so
+  `mod Mgrep.Search.Stream do` failed at line 1 and every construct after it
+  was highlighted as an error. Six constructs the compiler has long accepted
+  were missing from the grammar entirely: dotted module names, `import` /
+  `alias` / `needs` / `cap` declarations, `pfn` and `ptype`, refinement types
+  (`{ Int | _ > 0 }`, including the binder form), qualified type paths
+  (`A.B.Mode`), and qualified calls (`A.B.C.go(x)`). Across a 199-file corpus
+  of stdlib and real projects, files containing a parse error drop from 188 to
+  150 with no file regressing. The remaining gaps are tracked in
+  `specs/todos/2026-08-04-tree-sitter-grammar-drift.md`.
+
+- **`march fmt` re-emitted `cap no_panic` as `opts no_panic`.** There is no
+  `opts` keyword in March, so formatting any file with a capability
+  declaration produced a file that no longer parsed — and `fmt` was therefore
+  not idempotent on it.
+
+- **~20 advertised LSP capabilities were dead code; all now answer.** References,
+  rename, formatting, semantic tokens, folding ranges, signature help, call
+  hierarchy, type definition, workspace symbol, document highlight, selection
+  range, code lens and inline values each had a handler written as a
+  method-string branch in `on_unknown_request` — where a request the library
+  successfully *decoded* never arrives. Every one of them returned
+  `TODO: handle this request` to the editor. The handler bodies were correct
+  throughout; only the wiring was wrong, which is why reading the file showed a
+  complete-looking implementation of every feature.
+
+  Repaired by one generic bridge that recovers a decoded request's wire form,
+  routes it to the existing dispatcher, and types the result back — rather than
+  rewriting twenty handlers. A new protocol-level test drives every advertised
+  capability and fails if any returns an error; its absence is what let these
+  die quietly.
+
+  Each revived capability was then verified semantically against a fixture with
+  known answers — `references` finds the declaration and both uses, `rename`
+  produces three edits, `callHierarchy` finds the caller, `signatureHelp` reports
+  `double(Int)` — rather than only checking that a reply arrived.
+
+- **A file with no project root no longer hangs the language server.** Opening
+  a `.march` file with no `forge.toml` above it made the workspace index walk
+  the entire filesystem, so find-references and workspace-symbol never returned
+  — indistinguishable, from the editor, from a server still thinking. The walk
+  is now bounded (and warns when it truncates, since a silently partial index
+  makes "not found" and "not indexed" look identical), and roots that are
+  plainly not projects are refused outright.
+
+- **Document symbols no longer describe the whole prelude.** The same leak as
+  semantic tokens, in a different handler: `documentSymbol` folded the whole
+  analysis, so a one-function file reported 6936 symbols carrying line numbers
+  from other files — and the editor's outline and breadcrumbs are built from
+  that response. Found by running the server against a real 603-file project.
+
+- **Semantic tokens no longer describe the whole prelude.** The builder walked
+  the entire analysis, which has the prelude injected, so it emitted a token per
+  stdlib definition at line numbers from another file: 6949 tokens reaching line
+  3512 for a 15-line document. Now filtered to the open document (15 tokens).
+  Found only once the request became reachable — it had been wrong for exactly
+  as long as it had been dead.
 
 - **`march-lsp` implements the pull diagnostics it advertises.** It declared
   `diagnosticProvider`, but `textDocument/diagnostic` reached no handler, so
