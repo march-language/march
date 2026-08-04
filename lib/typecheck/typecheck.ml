@@ -553,6 +553,13 @@ type env = {
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
   mod_needs  : string list;
   (** Capabilities declared via [needs] in the current module scope, as dot-joined paths *)
+  mod_need_scopes : (string * string option) list;
+  (** Those same declarations paired with their optional PATH SCOPE, from
+      [needs IO.FileRead("/etc/app")].  Parallel to [mod_needs], which keeps
+      the bare paths every existing consumer reads, so nothing that treats a
+      capability as a plain string is disturbed.  [None] means unscoped.
+      A capability declared twice contributes one entry per scope, so
+      [needs IO.FileRead("/a"), IO.FileRead("/b")] permits both subtrees. *)
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
@@ -775,7 +782,7 @@ let make_env errors type_map = {
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
-  mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
+  mod_needs = []; mod_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   import_idx = make_import_index ();
   local_fns = StrMap.empty;
@@ -7864,6 +7871,69 @@ let is_migrate_fn_name (fn_name : string) : bool =
     [mod_prefix]). [mod_name] itself continues to be used for all
     diagnostics/messages and the [proof_caps] self-declaration check below,
     unchanged. *)
+(* ── Path-scoped capability checking ──────────────────────────────────
+
+   Which builtins take a FILESYSTEM PATH, and at which argument.  Verified
+   against the signature table: the read/write builtins take the path at
+   argument 0, [file_rename] and [file_copy] take two paths, and
+   [file_read_line] / [file_read_chunk] / [csv_next_row] take an INT HANDLE
+   rather than a path — those need no check, because a handle cannot be
+   obtained except through an opening builtin, which is checked.  That is what
+   makes this sound without dataflow analysis. *)
+let path_arg_builtins : (string * int list) list = [
+  ("file_read", [0]); ("file_open", [0]); ("file_exists", [0]);
+  ("file_stat", [0]); ("dir_list", [0]); ("dir_exists", [0]);
+  ("file_write", [0]); ("file_append", [0]); ("file_delete", [0]);
+  ("dir_mkdir", [0]); ("dir_mkdir_p", [0]); ("dir_rmdir", [0]);
+  ("dir_rm_rf", [0]);
+  (* Both arguments are paths. *)
+  ("file_rename", [0; 1]); ("file_copy", [0; 1]);
+]
+
+(* Literal path arguments at capability-builtin call sites.
+   Deliberately only LITERALS: a computed path is left to runtime enforcement
+   rather than guessed at.  Reporting only definite violations matches the
+   refinement checker's existing stance, and keeps this out of Z3's string
+   theory, which refine_check.ml explicitly stays clear of. *)
+let rec literal_path_uses (acc : (string * string * Ast.span) list)
+    (e : Ast.expr) : (string * string * Ast.span) list =
+  let acc =
+    match e with
+    | Ast.EApp (Ast.EVar fn, args, _) ->
+      (match List.assoc_opt fn.Ast.txt path_arg_builtins with
+       | None -> acc
+       | Some idxs ->
+         List.fold_left (fun a i ->
+             match List.nth_opt args i with
+             | Some (Ast.ELit (Ast.LitString path, sp)) ->
+               (fn.Ast.txt, path, sp) :: a
+             | _ -> a)
+           acc idxs)
+    | _ -> acc
+  in
+  match e with
+  | Ast.EApp (f, args, _) ->
+    List.fold_left literal_path_uses (literal_path_uses acc f) args
+  | Ast.ELet (b, _) -> literal_path_uses acc b.Ast.bind_expr
+  | Ast.EBlock (es, _) -> List.fold_left literal_path_uses acc es
+  | Ast.EMatch (sc, brs, _) ->
+    let acc = literal_path_uses acc sc in
+    List.fold_left (fun a br -> literal_path_uses a br.Ast.branch_body) acc brs
+  | Ast.EIf (c, t, f, _) ->
+    literal_path_uses (literal_path_uses (literal_path_uses acc c) t) f
+  | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) ->
+    literal_path_uses (literal_path_uses acc x) y
+  | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+    List.fold_left literal_path_uses acc es
+  | Ast.ERecord (fs, _) ->
+    List.fold_left (fun a (_, e) -> literal_path_uses a e) acc fs
+  | Ast.ERecordUpdate (e, fs, _) ->
+    List.fold_left (fun a (_, e) -> literal_path_uses a e) (literal_path_uses acc e) fs
+  | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
+  | Ast.ESpawn (e, _) | Ast.EAssert (e, _) -> literal_path_uses acc e
+  | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> literal_path_uses acc b
+  | _ -> acc
+
 let check_module_needs (env : env) (mod_name : Ast.name)
     ~(cap_qname_prefix : string) (decls : Ast.decl list) =
   (* [cap_qname_prefix] carries no trailing dot (e.g. "", "Lib", "Lib.Sub").
@@ -7876,7 +7946,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     else cap_qname_prefix ^ "." ^ leaf_name
   in
   let declared_needs = List.concat_map (function
-    | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
+    | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []
   ) decls in
   (* Per-function inferred IO-capability closure (Phase5C-A.2): attributes the
@@ -7968,6 +8038,63 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   ) decls in
   (* Body-scan: collect builtin calls that imply a cap need.
      Deduplicated to one warning per cap (first call-site span). *)
+  (* ── Path-scope violations ──────────────────────────────────────────
+     A literal path outside every scope declared for its capability is a
+     DEFINITE violation and an error.  Three conditions keep this quiet
+     otherwise, each deliberate:
+       - no declaration for the capability at all -> silent; the existing
+         needs checks already cover an undeclared capability, and reporting
+         it twice would be noise;
+       - at least one UNSCOPED declaration -> silent; unscoped means any path,
+         so nothing is out of scope;
+       - a computed path -> not collected at all, so nothing to say. *)
+  List.iter (fun (d : Ast.decl) ->
+      let bodies = match d with
+        | Ast.DFn (def, _) -> List.map (fun c -> c.Ast.fc_body) def.fn_clauses
+        | Ast.DLet (_, b, _) -> [ b.Ast.bind_expr ]
+        | _ -> []
+      in
+      List.iter (fun body ->
+          List.iter (fun (builtin, path, sp) ->
+              match List.assoc_opt builtin builtin_cap_table with
+              | None -> ()
+              | Some cap ->
+                (* Scopes declared for this capability, or for anything that
+                   subsumes it: needs IO.FileSystem("/srv") also scopes
+                   IO.FileRead. *)
+                let relevant =
+                  List.filter (fun (declared, _) -> cap_subsumes declared cap)
+                    env.mod_need_scopes
+                in
+                if relevant <> [] then begin
+                  let unscoped = List.exists (fun (_, sc) -> sc = None) relevant in
+                  let permitted =
+                    List.exists (fun (_, sc) -> match sc with
+                        | None -> true
+                        | Some scope -> March_caps.Cap_scope.within ~scope path)
+                      relevant
+                  in
+                  if (not unscoped) && not permitted then begin
+                    let scopes =
+                      List.filter_map (fun (_, sc) -> sc) relevant
+                      |> List.sort_uniq String.compare
+                    in
+                    Err.error env.errors ~span:sp
+                      (Printf.sprintf
+                         "`%s` is scoped to %s, but this reads `%s`, which is \
+                          outside it.\n\
+                          hint: widen the scope in `needs`, or use a path \
+                          within it."
+                         cap
+                         (String.concat " and "
+                            (List.map (fun s -> "`" ^ s ^ "`") scopes))
+                         path)
+                  end
+                end)
+            (literal_path_uses [] body))
+        bodies)
+    decls;
+
   let body_cap_uses : (string * Ast.span) list =
     let all = List.concat_map (function
       | Ast.DFn (def, _) ->
@@ -8099,7 +8226,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let rec find_span = function
         | [] -> mod_name.span
         | Ast.DNeeds (caps, s) :: _
-          when List.exists (fun names -> cap_path_of_names names = need) caps -> s
+          when List.exists (fun (names, _) -> cap_path_of_names names = need) caps -> s
         | _ :: rest -> find_span rest
       in
       find_span decls
@@ -8386,6 +8513,18 @@ let fn_capability_closures (env : env) : (string * string list) list =
     handler-level [needs] to every function in the module, including a pure
     migrate_state, which would falsely fail such a check. Order is
     unspecified (backed by a hashtable). *)
+(* [declared_cap_scopes env] — every [needs] declaration's capability paired
+    with its optional path scope, as written in source.
+
+    Used by [--cap-sandbox] to emit a SCOPED sandbox profile: an unscoped
+    grant becomes a blanket allow, a scoped one becomes a subpath allow.
+    Declarations rather than inferred use, because the scope is a policy the
+    author states — inference can tell you a module reads files, not which
+    directory it is permitted to read. *)
+
+let declared_cap_scopes (env : env) : (string * string option) list =
+  List.sort_uniq compare env.mod_need_scopes
+
 let fn_own_capability_closures (env : env) : (string * string list) list =
   (* Sort by key for the same determinism reason as [fn_capability_closures]. *)
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []
@@ -9368,7 +9507,7 @@ let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list
            mod_name edef.Ast.ext_lib_name no_extern_suggestion)
     | Ast.DNeeds (caps, sp) ->
       (* Check if any capability path starts with "IO" and contains "Foreign" *)
-      let has_foreign = List.exists (fun path ->
+      let has_foreign = List.exists (fun (path, _scope) ->
         match path with
         | first :: rest ->
           first.Ast.txt = "IO" &&
@@ -9836,7 +9975,7 @@ let rec check_decl env (d : Ast.decl) : env =
       ) new_ctors StrMap.empty in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
-        | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
+        | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
         | _ -> []) decls in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
@@ -10403,10 +10542,12 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DNeeds (caps, _sp) ->
     (* Record declared capability paths in env for DMod validation.
        Each path is a list of names e.g. ["IO"; "Network"] → "IO.Network" *)
-    let paths = List.map (fun names ->
-        String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
+    let scoped = List.map (fun (names, scope) ->
+        (String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names), scope)
       ) caps in
-    { env with mod_needs = paths @ env.mod_needs }
+    let paths = List.map fst scoped in
+    { env with mod_needs = paths @ env.mod_needs;
+               mod_need_scopes = scoped @ env.mod_need_scopes }
 
   | Ast.DProofCap (name, _sp) ->
     (* Register proof cap: full qualified path → declaring module name.

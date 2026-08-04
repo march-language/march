@@ -981,8 +981,14 @@ and emit_decl ctx = function
     line ctx (Printf.sprintf "alias %s, as: %s" path a.alias_name.txt)
 
   | DNeeds (caps, _) ->
+    (* The scope must round-trip: dropping it here would make `forge format`
+       silently widen a capability. *)
     let cs = List.map
-      (fun cap -> String.concat "." (List.map (fun n -> n.txt) cap)) caps in
+      (fun (cap, scope) ->
+         let path = String.concat "." (List.map (fun n -> n.txt) cap) in
+         match scope with
+         | None -> path
+         | Some sc -> Printf.sprintf "%s(%S)" path sc) caps in
     line ctx (Printf.sprintf "needs %s" (String.concat ", " cs))
 
   | DProofCap (name, _) ->

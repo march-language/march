@@ -11,6 +11,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Path-scoped capabilities: `needs IO.FileRead("/etc/myapp")`.** A module
+  can narrow a filesystem capability to a directory subtree instead of
+  declaring all-or-nothing access. A literal path outside the declared scope
+  is a compile error; computed paths are left to runtime enforcement rather
+  than guessed at. `--cap-sandbox` narrows the embedded sandbox profile to the
+  declared scope for **writes** — reads are not narrowed on macOS, because the
+  profile must already grant `file-read` unconditionally for the dynamic
+  loader, so a scoped read rule would be decorative. Unscoped declarations are
+  unchanged in meaning, so existing code keeps working. Note that scope
+  matching happens after the kernel resolves symlinks: on macOS a scope of
+  `/tmp/x` matches nothing, since `/tmp` is a symlink to `/private/tmp`.
+
 ### Changed
 
 - **`forge cap audit` is now `forge cap inspect`.** Two commands named "audit"

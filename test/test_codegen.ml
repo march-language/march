@@ -8676,7 +8676,7 @@ let test_cap_parse_needs_dotted () =
   let cap_paths = List.filter_map (fun d ->
     match d with
     | March_ast.Ast.DNeeds (caps, _) ->
-      Some (List.map (fun names ->
+      Some (List.map (fun (names, _scope) ->
         String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) names)
       ) caps)
     | _ -> None

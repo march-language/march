@@ -700,8 +700,14 @@ let rec decl_to_json (d : decl) : string =
   | DNeeds (paths, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "DNeeds");
-      ("paths", Dump.json_list (List.map (fun path ->
+      (* Scope emitted alongside the path so a dumped AST is not a widened
+         version of the source. *)
+      ("paths", Dump.json_list (List.map (fun (path, _scope) ->
            Dump.json_list (List.map name_to_json path)) paths));
+      ("scopes", Dump.json_list (List.map (fun (_p, scope) ->
+           match scope with
+           | None -> Dump.json_string ""
+           | Some sc -> Dump.json_string sc) paths));
       ("span", span_to_json span);
     ]
   | DProofCap (n, span) ->

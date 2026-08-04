@@ -144,7 +144,7 @@ let cap_path_of_names names =
 let declared_needs (decls : A.decl list) : string list =
   List.concat_map
     (function
-      | A.DNeeds (caps, _) -> List.map cap_path_of_names caps
+      | A.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
       | _ -> [])
     decls
 

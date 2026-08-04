@@ -44,7 +44,7 @@ let rec extract_decls decls acc =
 
 and extract_one acc = function
   | Ast.DNeeds (paths, _) ->
-    let strs = List.map (List.map (fun n -> n.Ast.txt)) paths in
+    let strs = List.map (fun (p, _) -> List.map (fun n -> n.Ast.txt) p) paths in
     { acc with needs = acc.needs @ strs }
   | Ast.DAlwaysLinearType (_, name, _, _, _) ->
     { acc with always_linear = acc.always_linear @ [name.Ast.txt] }
@@ -189,7 +189,9 @@ let build_coverage_data files =
               else prefix ^ "." ^ name.Ast.txt in
       walk_decls ~prefix:p ~file inner
     | Ast.DNeeds (paths, _) ->
-      let caps = List.map (fun path ->
+      (* Coverage keys on the bare capability, not the scope: a test that
+         exercises IO.FileRead covers it however it is scoped. *)
+      let caps = List.map (fun (path, _scope) ->
           String.concat "." (List.map (fun (n : Ast.name) -> n.txt) path)
         ) paths in
       let existing = match Hashtbl.find_opt file_caps file with
