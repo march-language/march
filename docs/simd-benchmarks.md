@@ -32,6 +32,17 @@ directly from a single invocation of `bench/run_benchmarks.sh`, unedited.
 Where March loses or is only mid-pack, that's shown too (`map` loses to Rust
 here; `map2` did too, along with everything else, before the fix below).
 
+**Reproducing this.** `bench/run_benchmarks.sh` now prints its own provenance
+before it times anything — date, host, CPU, core count, load average, and the
+version of every compiler it resolved, including March's taken from the
+`dune exec` compiler that actually builds the benchmarks rather than from
+whatever `march` sits on `PATH`. If a comparison language is missing it says so
+loudly and names the rows that will be absent, because the old failure mode was
+quiet: a missing tool dropped that language's row and produced a smaller table
+with no indication it was smaller. The tables below and the profile beneath them
+were transcribed from such a run; the run prints them so you never have to take
+this page's word for it.
+
 ## Machine profile
 
 | | |

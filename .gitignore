@@ -77,6 +77,11 @@ __pycache__/
 !/bench/c/
 !/bench/cpp/
 !/bench/tfb/
+# Raw benchmark output, committed on purpose: published numbers should be
+# traceable to the run that produced them, and a chart should be generated from
+# data in the repo rather than transcribed from a terminal by hand. Each file
+# carries its own provenance header (host, CPU, load, toolchain versions).
+!/bench/results/
 # ...but not the server binary bench/tfb/run.sh compiles into that directory,
 # nor Python bytecode from python_http.py. The `!/bench/tfb/` un-ignore above
 # would otherwise offer both up as committable.
