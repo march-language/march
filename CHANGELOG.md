@@ -426,6 +426,17 @@ git log is authoritative for exact commits.
   its perf insights to a list that already contained them, so a function could
   report "stack-allocates 2 values" twice. The pass now returns immediately when
   the analysis it is handed is already its own output.
+- **A top-level `let`'s refined annotation is now checked, not silently
+  ignored.** `let zs : {List(Int) | len(_) > 0} = []` at module scope
+  previously produced zero obligations — the desugarer never normalized a
+  qualified spelling in the annotation (`Desugar.desugar_ty` ran over a
+  block-level `let`'s type but not a top-level one), and separately the
+  checker's own top-level-`let` walk never invoked the annotation-vs-bound-expr
+  check that a block-level `let` already gets. Both are fixed: the identical
+  annotation on a `let` inside a function body and on a top-level `let` now
+  behave the same way, including catching a genuine violation like the one
+  above (`[]` does not satisfy `len(_) > 0`).
+
 - **A qualified spelling inside a refinement predicate now enforces the
   contract**, e.g. `{List(Int) | List.length(_) > 0}` means exactly what
   `{List(Int) | len(_) > 0}` means (previously it parsed, typechecked, and

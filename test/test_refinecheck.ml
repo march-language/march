@@ -5504,6 +5504,36 @@ end|}
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
           "does not blame the solver" false
+          (contains msg "solver-undecided"));
+    gated "a guard's lambda param colliding with the subject name is not evidence, laundered through a `let`"
+      (fun () ->
+        (* Same shape as LA11 (a lambda param that merely collides with the
+           subject name must not be read as evidence), but the guard is
+           laundered through exactly one `let` first, so the collision lives
+           in the recorded RHS ([lets]) that [alias_withdrawal_cause]'s
+           laundered branch re-checks, rather than in the direct condition
+           itself.  Pins the RHS-path half of the same fix LA11 pins on the
+           direct path -- until now that half rested on code-reading symmetry
+           with no fixture of its own. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA13 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn check(f : (List(Int)) -> Bool, zs : List(Int)) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let ok = check(fn ys -> List.length(ys) > 0, zs)
+    if ok do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
           (contains msg "solver-undecided"))
   ]
 
@@ -7119,8 +7149,18 @@ end|});
        ONE precondition, PROVED, nothing skipped. The `_` arm's own
        arm-order-exclusion fact (`not is_Nil(xs)`, already landed — see
        [arm_exclusion_suite] above) reaches `path_resolve_tester`'s
-       is_Nil/is_Cons <-> len(x) translation, which reaches the base-case
-       linking axiom this task added in [build_measure_preamble]. *)
+       is_Nil/is_Cons <-> len(x) translation.
+
+       CORRECTION (final-review pass): this test does NOT reach the
+       base-case-linking axiom [build_measure_preamble] adds via
+       [measure_base_cases] (the "MA1" name notwithstanding). `len` over the
+       built-in `List` routes entirely through `path_resolve_tester`'s own
+       hardcoded `is_Nil(xs) <-> len(xs) = 0` translation, never through the
+       general axiom — deleting [measure_base_cases]'s emitter entirely still
+       leaves this test (and the whole suite) green. See the
+       "measure-base-case-axiom" suite below for tests that actually pin the
+       axiom itself, using a user `@[measure]` with no `path_resolve_tester`
+       special-casing to fall back on. *)
     gated "excluding Nil in a match gives the other arm len(xs) > 0" (fun () ->
         March_refinecheck.Obligation.reset ();
         let ctx = March_errors.Errors.create () in
@@ -7168,6 +7208,120 @@ end|}));
         Alcotest.(check int) "not falsely reported as violated either" 0 violated;
         Alcotest.(check int) "the obligation is skipped" 1
           (List.fold_left (fun a (_, n) -> a + n) 0 skips));
+  ]
+
+(* ── Pinning [measure_base_cases]/[build_measure_preamble]'s base-case-linking
+   axiom directly ────────────────────────────────────────────────────────────
+   The MA1/MA2 tests above exercise `len` over the built-in `List`, which
+   never reaches this axiom -- `path_resolve_tester`'s own hardcoded
+   `is_Nil(xs) <-> len(xs) = 0` translation gets there first (see the
+   corrected MA1 comment). Deleting [measure_base_cases]'s emitter entirely
+   leaves MA1/MA2 (and the whole 437/437 suite at the time this was found)
+   green, so it needs its own witness: a user `@[measure]` over a user ADT,
+   which has no built-in special case to fall back on. *)
+let measure_base_case_axiom_suite =
+  [ gated "a user measure's nullary-arm exclusion reaches the base-case axiom"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod Z do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+  fn go(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      _ -> needs_pos(t)
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics" 0
+          (List.length ctx.March_errors.Errors.diagnostics);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "the needs_pos(t) call is proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
+  ; gated "REJECT CONTROL: with no Zleaf arm to exclude, the obligation is skipped"
+      (fun () ->
+        (* Drop the `Zleaf` arm entirely: there is nothing left in the match
+           to narrow `t`, so the base-case axiom has no exclusion fact to
+           fire against and the call stays unproven. Tells a genuine
+           fact-propagation proof apart from one that proves unconditionally. *)
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod Z2 do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+  fn go(t : Zt) : Int do needs_pos(t) end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics (skip is silent, not an error)" 0
+          (List.length ctx.March_errors.Errors.diagnostics);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "still NOT proved -- no Zleaf arm to exclude" 0 proved;
+        Alcotest.(check int) "not falsely reported as violated either" 0 violated;
+        Alcotest.(check int) "the obligation is skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
+  ; gated "LOAD-BEARING: a semantically-identical non-ELit base case body loses the axiom"
+      (fun () ->
+        (* [measure_base_cases]'s collection loop only records a base case
+           whose body is a bare [A.ELit] -- `0 * n` is semantically identical
+           to `0` for any Int `n`, but it is an [A.EApp] (or similar), not a
+           literal, so the emitter does not record it and the base-case axiom
+           is never generated for this constructor. This is the decisive pin:
+           it fails (proved becomes 1, skipped becomes 0) if the emitter is
+           deleted outright, or if its literal-detection is loosened to see
+           through arithmetic. *)
+        March_refinecheck.Obligation.reset ();
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse {|
+mod Z3 do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(n) -> 0 * n
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+  fn go(t : Zt) : Int do
+    match t do
+      Zleaf(_) -> 0
+      _ -> needs_pos(t)
+    end
+  end
+  fn main() : Int do 0 end
+end|}));
+        Alcotest.(check int) "no diagnostics (skip is silent, not an error)" 0
+          (List.length ctx.March_errors.Errors.diagnostics);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "NOT proved -- base case body is not a bare literal" 0 proved;
+        Alcotest.(check int) "not falsely reported as violated either" 0 violated;
+        Alcotest.(check int) "the obligation is skipped" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
   ]
 
 let resolve_precedence_suite =
@@ -7305,4 +7459,5 @@ let () =
       ("use-impl-adoption", use_adoption_suite);
       ("resolve-precedence", resolve_precedence_suite);
       ("caller-promise", caller_promise_suite);
-      ("arm-exclusion", arm_exclusion_suite) ]
+      ("arm-exclusion", arm_exclusion_suite);
+      ("measure-base-case-axiom", measure_base_case_axiom_suite) ]

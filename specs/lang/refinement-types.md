@@ -341,8 +341,9 @@ flattening `Desugar.desugar_expr`'s own `EField` arm already applies to an
 ordinary call head, and nothing else. No pipe desugaring, no multi-head-fn
 desugaring, no other expression-desugarer machinery runs over the predicate.
 It is wired into every site a surface `ty` can carry a `TyRefine`: fn
-param/return types, `let`-binding annotations, `EAnnot`, and record/variant
-field types.
+param/return types, `let`-binding annotations (a top-level `let` and a
+block-level `let` alike — the `DLet` decl arm and the `ELet` expr arm both
+call it), `EAnnot`, and record/variant field types.
 
 When the alias is live (no competing `List.length` in scope — the ordinary
 case), the qualified spelling now means exactly what `len` means: `inner([])`

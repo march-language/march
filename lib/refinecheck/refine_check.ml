@@ -1017,10 +1017,14 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
        that has no `path_resolve_tester`-style hardcoding, the ordinary
        recursion-equation axiom cannot pick that up: its trigger pattern is the
        CONSTRUCTED term `(name (Ctor v1 v2 …))`, which never E-matches against
-       a tester over a free variable.  (A NULLARY base case is already a ground
-       fact via [arm_axiom]'s `vars = []` branch and needs no axiom of its own;
-       this one is for a base case whose constructor takes fields but whose
-       body is still a plain literal, e.g. `Cons(_, _) -> 0`.)
+       a tester over a free variable.  (A NULLARY base case is ALSO a ground
+       fact via [arm_axiom]'s `vars = []` branch, so strictly it needs no
+       axiom of its own here either — but the collection loop above does not
+       filter on arity, so a nullary constructor with a literal body, e.g.
+       `Nil -> 0`, gets one anyway.  That is redundant, not wrong: the two
+       axioms agree, so the solver just has one extra fact to skip.  The case
+       this axiom actually exists for is a base case whose constructor takes
+       fields but whose body is still a plain literal, e.g. `Cons(_, _) -> 0`.)
 
        Confirmed empirically to be the whole fix needed for the `len`/`List`
        shape — no change to the arm-order-exclusion narrowing itself was
@@ -5962,7 +5966,17 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     List.iter
       (fun (m : A.method_decl) -> Option.iter visit_expr m.A.md_default)
       idf.A.iface_methods
-  | A.DLet (_, b, _) -> visit_expr b.A.bind_expr
+  | A.DLet (_, b, _) ->
+    (* A top-level `let`'s own annotation must be CHECKED against its bound
+       expression exactly as a block-level `let`'s is -- see
+       [check_let_annotation] and its call site inside the [A.EBlock] case
+       above.  There is no enclosing block to thread scope/path/lets/recenv
+       through here, so all four start empty, matching [visit_expr]'s own
+       convention just above; a top-level `let` also has no following
+       sibling statements in THIS sense of "block", so there is nothing to
+       admit the proved fact into afterward. *)
+    ignore (check_let_annotation ~root errctx defs ctx [] [] [] [] b);
+    visit_expr b.A.bind_expr
   | A.DActor (_, _, ad, _) ->
     visit_expr ad.A.actor_init;
     List.iter

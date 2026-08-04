@@ -256,8 +256,9 @@ predicate is still not run through the general expression desugarer the way a
 function body is — no pipe desugaring, no multi-head-fn desugaring — but the one
 transformation that mattered here, flattening a module-path call head
 (`List.length(_)`) into the dotted form the `len` alias keys on, now runs over
-every `TyRefine` predicate (parameter, return, `let`-annotation, and record/variant
-field types alike). When the alias is live — no competing `List.length` in scope —
+every `TyRefine` predicate (parameter, return, `let`-annotation — top-level
+and block-level alike — and record/variant field types alike). When the
+alias is live — no competing `List.length` in scope —
 the qualified spelling means exactly what `len` means, so `inner([])` above is
 rejected as a genuine precondition violation, the same as if you'd written `len(_)`.
 

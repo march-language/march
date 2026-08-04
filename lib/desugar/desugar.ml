@@ -591,9 +591,14 @@ let rec flatten_pred_quals (e : expr) : expr =
     (same constructor set) but respans nothing and touches nothing outside
     the predicate expression.  Wired into every site that carries a surface
     [ty] on the normal (non-derive) desugaring path: fn param/return types,
-    `let`-binding annotations, `EAnnot`, and record/variant field types —
-    everywhere [Refine_check.warn_predicate_ty] itself recurses, since that
-    warning is the ground truth for "everywhere a predicate can live". *)
+    `let`-binding annotations (both a block-level [ELet] and a top-level
+    [DLet] — see [desugar_decl]'s `DLet` arm), `EAnnot`, and record/variant
+    field types.  This is a SUPERSET of everywhere [Refine_check.warn_predicate_ty]
+    itself recurses, not an exact match: it also walks a [DType]'s own
+    field/variant types, which [Refine_check.warn_predicate_decls] deliberately
+    does not (a refinement in a type DEFINITION is checked where the type is
+    used, not at the definition site) — covering more than the warning needs
+    is harmless, so the extra site stays. *)
 let rec desugar_ty (t : ty) : ty =
   match t with
   | TyCon (n, args)    -> TyCon (n, List.map desugar_ty args)
@@ -951,7 +956,8 @@ let rec desugar_decl (d : decl) : decl =
     DFn (desugar_fn_def def sp, sp)
 
   | DLet (vis, b, sp) ->
-    DLet (vis, { b with bind_expr = desugar_expr b.bind_expr }, sp)
+    DLet (vis, { b with bind_expr = desugar_expr b.bind_expr
+                       ; bind_ty  = Option.map desugar_ty b.bind_ty }, sp)
 
   | DType (vis, name, tparams, td, sp) ->
     (* Field/variant-arg types can themselves carry `TyRefine` predicates
