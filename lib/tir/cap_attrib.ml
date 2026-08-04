@@ -13,22 +13,38 @@ let cap_of_call (name : string) : string option =
   March_caps.Cap_symbols.cap_of_symbol
     (Llvm_builtins.c_symbol_of_march_name name)
 
+(* A builtin can also appear as a VALUE rather than a call — [apply1(file_read,
+   p)] passes it as an atom, and only later does defun synthesize the apply
+   wrapper that calls it.  Measured: without this, such a program emitted an
+   IO.FileRead marker with NO owner row, so the module that handed out the
+   capability escaped attribution entirely.  Charging it to the module that
+   passes the value is right: that module is the one granting the authority. *)
+let atom_cap (a : Tir.atom) : string option =
+  match a with
+  | Tir.AVar v -> cap_of_call v.Tir.v_name
+  | Tir.ADefRef _ | Tir.ALit _ -> None
+
+let add_atoms caps atoms =
+  List.fold_left
+    (fun acc a -> match atom_cap a with Some c -> SSet.add c acc | None -> acc)
+    caps atoms
+
 (* One walk collecting both halves: the capabilities this body reaches
    directly, and the functions it calls (for the reverse call graph). *)
 let rec walk (caps, callees) (e : Tir.expr) =
   match e with
-  | Tir.EApp (v, _) ->
+  | Tir.EApp (v, args) ->
     let n = v.Tir.v_name in
     let caps =
       match cap_of_call n with Some c -> SSet.add c caps | None -> caps
     in
-    (caps, SSet.add n callees)
+    (add_atoms caps args, SSet.add n callees)
   | Tir.ELet (_, rhs, body) -> walk (walk (caps, callees) rhs) body
   | Tir.ESeq (a, b) -> walk (walk (caps, callees) a) b
-  | Tir.ECase (_, branches, default) ->
+  | Tir.ECase (scrut, branches, default) ->
     let acc =
       List.fold_left (fun a (br : Tir.branch) -> walk a br.Tir.br_body)
-        (caps, callees) branches
+        (add_atoms caps [ scrut ], callees) branches
     in
     (match default with Some d -> walk acc d | None -> acc)
   (* A lambda lifted into an inner fn_def is still the enclosing module's
@@ -39,13 +55,26 @@ let rec walk (caps, callees) (e : Tir.expr) =
         (caps, callees) fns
     in
     walk acc body
-  (* ECallPtr is an indirect call with no statically known callee — see the
-     .mli on why it yields no row rather than a guess. *)
-  | Tir.ECallPtr _
-  | Tir.EAtom _ | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
-  | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EReuse _
-  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ ->
-    (caps, callees)
+  (* ECallPtr's CALLEE is not statically known — that is the residual gap the
+     .mli documents — but its atoms are still scanned, so a builtin handed to
+     it as an argument is attributed. *)
+  | Tir.ECallPtr (f, args) -> (add_atoms caps (f :: args), callees)
+  | Tir.EAtom a -> (add_atoms caps [ a ], callees)
+  | Tir.ETuple atoms -> (add_atoms caps atoms, callees)
+  | Tir.ERecord fields -> (add_atoms caps (List.map snd fields), callees)
+  | Tir.EField (a, _) -> (add_atoms caps [ a ], callees)
+  | Tir.EUpdate (a, fields) ->
+    (add_atoms caps (a :: List.map snd fields), callees)
+  | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
+    (add_atoms caps atoms, callees)
+  | Tir.EReuse (a, _, atoms) -> (add_atoms caps (a :: atoms), callees)
+  (* RC ops and EFree only ever carry an already-bound local, never a
+     top-level function name, but scanning them costs nothing and keeps this
+     match exhaustive-by-construction rather than by a catch-all — the shape
+     that has repeatedly hidden a missed case in this codebase's cap walks. *)
+  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
+  | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a ->
+    (add_atoms caps [ a ], callees)
 
 let attribute ?(transparent = fun _ -> false) (m : Tir.tir_module) :
     (string * string) list =

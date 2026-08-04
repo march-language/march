@@ -869,6 +869,7 @@ let own_caps_of_this_module typecheck_env (m : March_ast.Ast.module_) : string l
   |> List.sort String.compare
 
 let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
+let cap_strict     = ref false   (* --cap-strict: `needs` is a hard ceiling, checked against attributed use *)
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let emit_core_ast_file = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
@@ -1831,6 +1832,7 @@ let compile filename =
               (* --cap-sandbox changes the emitted binary (a -D define), so a
                  non-sandboxed cached artifact must never satisfy it. *)
               @ (if !cap_sandbox then ["capsandbox"] else [])
+              @ (if !cap_strict then ["capstrict"] else [])
               @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -2562,6 +2564,51 @@ let compile filename =
         ~transparent:(fun m -> List.mem m stdlib_mods)
         (March_tir.Dce.prune_unreachable pre_opt_tir)
     in
+    (* --cap-strict: `needs` as a hard ceiling.  Deliberately checked here,
+       against attributed use, rather than by a fifth source-level AST walk.
+       The four existing walks in Typecheck do NOT cover the same routes —
+       measured, a stdlib-mediated `File.write` produced no diagnostic at all,
+       because Check 4 walks `DUse` declarations and stdlib modules are
+       ambiently available without one.  Emitted code collapses all routes
+       into one rule and cannot be evaded by re-routing through a helper.
+
+       Runs BEFORE the CAS artifact lookup below, so a warm cache cannot
+       skip it; "capstrict" is also in cas_flags so a strict build never
+       reuses an artifact produced without the check. *)
+    if !cap_strict then begin
+      let flat_caps =
+        List.sort_uniq compare (List.map fst cap_attrib)
+        @ own_caps_of_this_module typecheck_env desugared
+        |> List.sort_uniq compare
+      in
+      (* The entry module is unwrapped by desugar (~is_entry:true), so it has
+         no DMod and never lands in [module_caps]; its `needs` accumulate in
+         [mod_needs] instead. Attribution names it by [tm_name], so bind the
+         two together or every entry-module capability reads as undeclared —
+         which is what the first run of this check did to a module that had
+         correctly declared its need. *)
+      let module_caps =
+        (pre_opt_tir.March_tir.Tir.tm_name,
+         typecheck_env.March_typecheck.Typecheck.mod_needs)
+        :: typecheck_env.March_typecheck.Typecheck.module_caps
+      in
+      let violations =
+        March_caps.Cap_ceiling.check ~module_caps ~attribution:cap_attrib
+          ~caps:flat_caps
+      in
+      if violations <> [] then begin
+        List.iter
+          (fun v ->
+             Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
+               (March_caps.Cap_ceiling.describe v))
+          violations;
+        Printf.eprintf
+          "--cap-strict: %d capability ceiling violation(s). Every module's \
+           emitted code must stay within its own `needs`.\n%!"
+          (List.length violations);
+        exit 1
+      end
+    end;
     let tir =
       if !opt_enabled then
         March_tir.Opt.run
@@ -2842,6 +2889,7 @@ let compile filename =
               (* --cap-sandbox changes the emitted binary (a -D define), so a
                  non-sandboxed cached artifact must never satisfy it. *)
               @ (if !cap_sandbox then ["capsandbox"] else [])
+              @ (if !cap_strict then ["capstrict"] else [])
               @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
@@ -4277,6 +4325,7 @@ let () =
     ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling: fail the build if any module's emitted code uses a capability it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");

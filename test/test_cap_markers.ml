@@ -240,22 +240,22 @@ let tests =
         test_attribution_prefix_cannot_be_read_as_a_flat_marker;
     ]
 
-let test_indirect_call_is_unattributed_not_absent () =
-  (* [direct_pass_src] invokes file_read through a closure, so no statically
-     known callee exists and attribution genuinely cannot see it.  The FLAT
-     marker still must — the two channels complement each other, and a
-     capability that is real but unattributed must never look like an absent
-     one.  Measured: `forge cap inspect` renders this as an explicit
-     "unattributed" line rather than an empty owner set. *)
+let test_builtin_passed_as_a_value_is_attributed () =
+  (* [direct_pass_src] hands file_read to apply1 as a VALUE; defun only later
+     synthesizes the wrapper that calls it, so an EApp-only walk saw nothing
+     and the capability was emitted with no owner at all — the module handing
+     out the authority escaped attribution entirely.  Measured before the
+     atom scan was added.  Charging it to the module that passes the value is
+     the right answer: that module is the one granting the capability. *)
   let ir = emit_ir direct_pass_src in
-  Alcotest.(check bool) "flat marker still reports the capability" true
+  Alcotest.(check bool) "flat marker reports the capability" true
     (contains ir "@__march_cap_IO_FileRead");
-  Alcotest.(check bool) "but no owner row is invented" false
-    (contains ir "@__march_capfrom_IO_FileRead")
+  Alcotest.(check bool) "and it now has an owner" true
+    (contains ir "@__march_capfrom_IO_FileRead__")
 
 let tests =
   tests
   @ [
-      Alcotest.test_case "indirect call is unattributed, not absent" `Slow
-        test_indirect_call_is_unattributed_not_absent;
+      Alcotest.test_case "builtin passed as a value is attributed" `Slow
+        test_builtin_passed_as_a_value_is_attributed;
     ]
