@@ -56,6 +56,18 @@ git log is authoritative for exact commits.
   an exact current-module match. Genuinely ambiguous references, where the
   current package owns none of the candidates, still error.
 
+### Documentation
+
+- **OS-level capability enforcement is now documented.** The capabilities guide
+  gains an "OS-level enforcement" section covering `forge cap run` (an
+  externally imposed sandbox) and `--cap-sandbox` (a deny-default profile a
+  binary installs on itself at startup — macOS Seatbelt / Linux seccomp-bpf,
+  fail-closed), with the honest defense-in-depth framing and the per-platform
+  advisory caveats. The capability-audit and tooling pages cross-link to it and
+  distinguish *reading* a binary's authority (`forge cap inspect`) from
+  *enforcing* it, and the `forge cap` tooling reference now lists the
+  `coverage`, `inspect`, and `run` subcommands alongside `query`.
+
 ### Added
 
 - **`forge audit --inferred`: infer each dependency's capability set from its

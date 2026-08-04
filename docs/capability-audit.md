@@ -199,12 +199,26 @@ Use both. `forge audit` tells you which dependency changed and does so before
 anything is built; `forge cap inspect` tells you what the artifact you are about
 to ship actually carries.
 
+### Reading is not enforcing
+
+Both commands on this page *read* — they report authority, they do not restrain
+it. The rows above marked "bounds nothing" (`IO.Foreign`, raw syscalls, an
+undeclared builtin call) are a limit of *reading a declaration or a symbol
+table*, not a limit of what March can enforce. To turn the declared set into an
+actual OS-level confinement — one that bounds even `extern` C and raw syscalls
+because it confines the whole process — see [OS-level
+enforcement]({{ site.baseurl }}/docs/capabilities/#os-level-enforcement--sandboxing-the-compiled-binary):
+`forge cap run` (a sandbox forge installs around the binary) and `--cap-sandbox`
+(a deny-default profile the binary installs on itself at startup).
+
 ---
 
 ## See also
 
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/) — the language feature
-  these tools report on
+  these tools report on, including
+  [OS-level enforcement]({{ site.baseurl }}/docs/capabilities/#os-level-enforcement--sandboxing-the-compiled-binary)
+  (`forge cap run`, `--cap-sandbox`) that turns a declared set into a real sandbox
 - [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/) —
   how capabilities sit alongside the other safety axes
 - [FFI]({{ site.baseurl }}/docs/ffi/) — the `extern` boundary, and why analysis
