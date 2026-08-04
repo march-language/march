@@ -31,8 +31,16 @@ git log is authoritative for exact commits.
   the binary chooses whether to compile it in, and the profile grants exactly
   what the program does, so it constrains escalation beyond the program's
   intended behaviour, not the behaviour itself. Off by default; default builds
-  are unchanged. macOS only; on other platforms it refuses rather than
-  installing a filter weaker than it claims.
+  are unchanged. Implemented on both major platforms: macOS via a
+  deny-default Seatbelt profile, Linux via an in-process seccomp-bpf filter
+  installed unprivileged through `PR_SET_NO_NEW_PRIVS` — which matters
+  because Linux is where servers actually run. Denied syscalls return
+  `EPERM`, so a withheld capability surfaces as a March `Err` rather than a
+  crash. `IO.Network`, `IO.Process` and `IO.FileWrite` are enforced;
+  `IO.FileRead` is not, because seccomp filters syscall numbers and scalar
+  arguments, never pointer contents, so it cannot tell which path is being
+  opened (path scoping needs Landlock). Installation failure is fatal —
+  running uncontained after being asked to contain is worse than not trying.
 
 - **`forge cap run [--allow-only CAPS] BINARY`: run a compiled binary under an
   OS-enforced capability sandbox.** The policy is imposed from outside, so

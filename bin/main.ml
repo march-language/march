@@ -3089,12 +3089,24 @@ let compile filename =
                 if holds "IO.FileWrite" then Buffer.add_string b "(allow file-write*)";
                 if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
                 if holds "IO.Process"   then Buffer.add_string b "(allow process-fork)";
+                (* Per-capability DENY flags, consumed by the Linux
+                   seccomp-bpf builder in runtime/march_runtime.c.  Emitted on
+                   both platforms so the two backends are driven by one
+                   decision rather than two copies of it. *)
+                let deny name held =
+                  if held then "" else " -DMARCH_CAP_DENY_" ^ name in
+                let deny_flags =
+                  deny "NET"   (holds "IO.Network")
+                  ^ deny "EXEC"  (holds "IO.Process")
+                  ^ deny "WRITE" (holds "IO.FileWrite")
+                in
                 (* Filename.quote the ALREADY-quoted C literal so the shell
                    hands clang a real string; without the inner quotes the
                    macro expands as bare SBPL tokens and the runtime will not
                    compile. *)
                 " -DMARCH_CAP_PROFILE="
                 ^ Filename.quote ("\"" ^ Buffer.contents b ^ "\"")
+                ^ deny_flags
               end in
             let strip_flag =
               (* Capability-by-absence (specs/2026-08-03-forge-cap-audit-design.md
@@ -4096,7 +4108,7 @@ let () =
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--dump-caps",  Arg.Set dump_caps,   " Print the module's inferred IO-capability set as JSON, then exit");
-    ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS only)");
+    ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--refine-report", Arg.Set refine_report,
