@@ -4817,6 +4817,59 @@ let test_single_use_exact_extern_precedes_qualified_alias () =
       Alcotest.failf "exact extern call was rewritten as qualified helper: %s"
         (March_tir.Tir.show_expr actual)
 
+(* ── `blocking` extern dispatch ──────────────────────────────────── *)
+
+(* A `blocking` extern must ALWAYS be dispatched through march_run_blocking_*,
+   on whichever emission path the call happens to reach.  [Defun] rewrites some
+   extern calls into [ECallPtr], and that arm used to fall through to a plain
+   direct call, silently dropping the `blocking` treatment.
+
+   The consequence is a hang, not a slowdown: the C call then runs inline on the
+   green thread's stack and blocks its whole scheduler OS thread.  Once every
+   scheduler thread is parked inside such a call, no runnable green thread can
+   be dispatched — including the ones whose work would let the blocked callees
+   return — and the program deadlocks.  Observed as an intermittent whole-
+   program hang in a worker-pool program whose workers block on a native queue. *)
+let blocking_extern_src = {|mod Test do
+  needs IO
+
+  extern "repro" : Cap(IO.Foreign) do
+    blocking fn blocking_work(micros : Int) : Int = "repro_blocking_work"
+  end
+
+  pfn worker(remaining : Int) : Int do
+    if remaining <= 0 do
+      0
+    else
+      do
+        let _ = blocking_work(10)
+        worker(remaining - 1)
+      end
+    end
+  end
+
+  fn main() : Unit do
+    let w = task_spawn(fn _ -> worker(2))
+    let _ = task_await(w)
+    ()
+  end
+end|}
+
+let test_blocking_extern_uses_blocking_dispatch () =
+  let ir = emit_tco_opt_ir blocking_extern_src in
+  Alcotest.(check bool)
+    "blocking extern is dispatched via march_run_blocking_i"
+    true (ir_contains ir "@march_run_blocking_i(ptr @repro_blocking_work")
+
+let test_blocking_extern_never_called_directly () =
+  let ir = emit_tco_opt_ir blocking_extern_src in
+  (* The only permitted mention of the symbol as a *called* function is the
+     `declare`; every call site must go through the blocking helper.  A direct
+     `call ... @repro_blocking_work(` is exactly the defect this guards. *)
+  Alcotest.(check bool)
+    "blocking extern is never called directly (would block the scheduler thread)"
+    false (ir_contains ir "call i64 @repro_blocking_work(")
+
 (* ── Known-call optimization ─────────────────────────────────────── *)
 
 (** Helper: build an EAlloc for a Defun-style closure struct.
@@ -13067,6 +13120,12 @@ let codegen_suites =
           test_single_use_bare_alias_participates_in_scc;
         Alcotest.test_case "exact extern precedes qualified bare alias" `Quick
           test_single_use_exact_extern_precedes_qualified_alias;
+      ]);
+      ("blocking_extern", [
+        Alcotest.test_case "dispatched via march_run_blocking_i" `Quick
+          test_blocking_extern_uses_blocking_dispatch;
+        Alcotest.test_case "never emitted as a direct call" `Quick
+          test_blocking_extern_never_called_directly;
       ]);
       ("known_call", [
         Alcotest.test_case "direct"          `Quick test_known_call_direct;

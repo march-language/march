@@ -18,6 +18,56 @@ let ok_payload_ty : Tir.ty -> Tir.ty = function
   | Tir.TCon ("Result", [t_ok; _]) -> t_ok
   | t -> t
 
+(** Emit the call-site dispatch for a `blocking` extern.
+
+    Marshals the args into a stack i64 array and runs the C call on a dedicated
+    OS thread via [march_run_blocking_*], while the calling green thread
+    cooperatively yields.  Int/ptr args only (GP-register trampoline).
+
+    Shared by BOTH call-emission paths.  It must be, and the [ECallPtr] caller
+    is not optional: [defun] rewrites extern calls into [ECallPtr] depending on
+    how the call is written, so a `blocking` extern reached that way would
+    otherwise compile to a plain direct call and run INLINE on the green
+    thread's stack.  That silently blocks the whole scheduler OS thread, and
+    once every scheduler thread is parked inside such a call the runtime
+    deadlocks: runnable green threads (including the ones that would release
+    the blocked callees) can never be dispatched.  The `raises` externs already
+    have a matching dedicated [ECallPtr] arm for exactly the same reason. *)
+let emit_blocking_call ctx ~fname ~ret_ty ~arg_pairs ~resolved_name
+    : string * string =
+  let n   = List.length arg_pairs in
+  let cap = if n = 0 then 1 else n in
+  let arr = Llvm_ctx.fresh ctx "blkargs" in
+  Llvm_ctx.emit ctx (Printf.sprintf "%s = alloca [%d x i64]" arr cap);
+  List.iteri (fun i (ty, v) ->
+    let iv = match ty with
+      | "i64" -> v
+      | "ptr" -> let t = Llvm_ctx.fresh ctx "blki" in
+                 Llvm_ctx.emit ctx
+                   (Printf.sprintf "%s = ptrtoint ptr %s to i64" t v); t
+      | other ->
+        failwith (Printf.sprintf
+          "blocking extern `%s`: argument type %s is not supported \
+           (Int/Bool/pointer args only)" resolved_name other)
+    in
+    let slot = Llvm_ctx.fresh ctx "blkslot" in
+    Llvm_ctx.emit ctx (Printf.sprintf
+      "%s = getelementptr [%d x i64], ptr %s, i64 0, i64 %d" slot cap arr i);
+    Llvm_ctx.emit ctx (Printf.sprintf "store i64 %s, ptr %s" iv slot)
+  ) arg_pairs;
+  let helper, hret =
+    if ret_ty = "double" then "march_run_blocking_d", "double"
+    else "march_run_blocking_i", "i64" in
+  let r = Llvm_ctx.fresh ctx "blkr" in
+  Llvm_ctx.emit ctx (Printf.sprintf "%s = call %s @%s(ptr @%s, ptr %s, i32 %d)"
+              r hret helper fname arr n);
+  (match ret_ty with
+   | "void" -> ("i64", "0")
+   | "ptr"  -> let p = Llvm_ctx.fresh ctx "blkp" in
+               Llvm_ctx.emit ctx
+                 (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r); ("ptr", p)
+   | _      -> (ret_ty, r))
+
 (** Emit the call-site wrapper for a `raises` extern (env-routed error protocol).
     The C binding [fname] takes a hidden march_env* first param and returns the
     bare Ok payload (T of Result(T,E) = [ret_tir]); to fail it calls
