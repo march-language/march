@@ -1,0 +1,5 @@
+{"meta":true,"date":"2026-08-04T20:22:34Z","host":"Darwin 25.5.0 arm64","cpu":"Apple M3 Max","cores":14,"ops":2000000,"work":512,"sibwork":28,"load":"16.68 16.83 18.31"}
+{"scenario":"steady_state_ring","siblings":0,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":4096,"p999_ns":65536,"min_ns":1907,"max_ns":3365039,"rss_kb_min":1536,"rss_kb_max":2672,"wall_s":6.84}
+{"scenario":"steady_state_ring","siblings":4,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":8192,"p999_ns":262144,"min_ns":1907,"max_ns":8062124,"rss_kb_min":608,"rss_kb_max":2736,"wall_s":8.99}
+{"scenario":"steady_state_ring","siblings":8,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":8192,"p999_ns":2097152,"min_ns":1907,"max_ns":21659135,"rss_kb_min":1648,"rss_kb_max":2848,"wall_s":15.09}
+{"scenario":"steady_state_ring","siblings":16,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":16384,"p999_ns":4194304,"min_ns":1907,"max_ns":17901182,"rss_kb_min":1808,"rss_kb_max":2992,"wall_s":28.36}
