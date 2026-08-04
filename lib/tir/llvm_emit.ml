@@ -2476,12 +2476,22 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              the pre-regression, correct behavior exactly. *)
           (match Llvm_builtins.builtin_param_llvm_tys resolved_name with
            | Some param_llvm_tys when List.length param_llvm_tys = List.length arg_pairs ->
-             List.map2 (fun param_ty (ty, v) ->
+             List.mapi (fun i (param_ty, (ty, v)) ->
                if ty = "ptr" && (param_ty = "i64" || param_ty = "double") then
                  let v' = coerce ctx ty v param_ty in
                  param_ty ^ " " ^ v'
+               (* Reverse direction — a raw scalar (i64/double) flowing into a
+                  declared "ptr" param — is skipped in general (opaque handles),
+                  but ENABLED for slots whose March type is a generic TVar: the
+                  erased uniform slot needs the BOXED scalar (Int tagged, Float
+                  boxed), else an inlined raw literal is stored at the wrong
+                  representation. See builtin_boxed_generic_params_tbl. *)
+               else if param_ty = "ptr" && (ty = "i64" || ty = "double")
+                       && Llvm_builtins.builtin_param_is_boxed_generic resolved_name i then
+                 let v' = coerce ctx ty v "ptr" in
+                 "ptr " ^ v'
                else ty ^ " " ^ v
-             ) param_llvm_tys arg_pairs
+             ) (List.combine param_llvm_tys arg_pairs)
            | _ -> arg_strs)
     in
     let args_str = String.concat ", " arg_strs in

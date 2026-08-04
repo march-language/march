@@ -109,6 +109,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`RingBuf` gained a compiled backend.** The `ring_buf_*` builtins existed
+  only in the interpreter, so any program using `RingBuf` failed to link under
+  `march --compile` (`Undefined symbols: _ring_buf_make …`). RingBuf now has a
+  full native backend — a resource-cell-backed circular buffer whose destructor
+  releases live elements on drop — matching the interpreter's semantics for
+  `make`/`push`/`pop`/`get`/`peek_*`/`size`/`cap`/`clear`/`to_list`, including
+  wraparound eviction and element reference counting for heap-typed elements.
+
 - **`cap no_panic` no longer rejects a division guarded by a boolean
   condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a
   possible division by zero, as was every other guard containing `&&` or `||`

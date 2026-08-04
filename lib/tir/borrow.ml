@@ -128,6 +128,23 @@ let extern_borrow_table : (string * bool list) list = [
   ("record_has_key",   [true; true]);
   ("record_put",       [true; true; true]);
   ("record_from_list", [true]);
+  (* ── RingBuf builtins ───────────────────────────────────────────────────
+     The buffer [rb] is borrowed by every op: RingBuf mutates in place through
+     the pointer and returns Unit/Option/List, never consuming the buffer, so
+     the caller retains ownership and drops it when it goes dead.  push's second
+     param [x] is NOT borrowed — it is transferred (owned) into the ring, which
+     stores it without an incref and releases it on overwrite/pop/clear/drop.
+     get's Int index is not a heap value. *)
+  ("ring_buf_make",        [false]);
+  ("ring_buf_push",        [true; false]);
+  ("ring_buf_pop",         [true]);
+  ("ring_buf_get",         [true; false]);
+  ("ring_buf_peek_oldest", [true]);
+  ("ring_buf_peek_newest", [true]);
+  ("ring_buf_size",        [true]);
+  ("ring_buf_cap",         [true]);
+  ("ring_buf_clear",       [true]);
+  ("ring_buf_to_list",     [true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);

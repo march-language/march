@@ -1,0 +1,57 @@
+-- Compiled RingBuf backend regression (runtime/march_runtime.c ring_buf_*).
+-- Exercises make -> push past capacity (wraparound) -> pop -> get -> peek ->
+-- size -> cap -> clear -> to_list, with both Int (immediate) and String (heap,
+-- RC-managed) elements. Expected output equals the interpreter's.
+
+mod Main do
+  fn show_opt_int(o : Option(Int)) : String do
+    match o do
+      Some(v) -> "Some(" ++ int_to_string(v) ++ ")"
+      None -> "None"
+    end
+  end
+
+  fn show_opt_str(o : Option(String)) : String do
+    match o do
+      Some(v) -> "Some(" ++ v ++ ")"
+      None -> "None"
+    end
+  end
+
+  fn ints() : Unit do
+    let rb = RingBuf.make(3)
+    println("cap=" ++ int_to_string(RingBuf.cap(rb)))
+    println("empty=" ++ show(RingBuf.is_empty(rb)))
+    RingBuf.push(rb, 10)
+    RingBuf.push(rb, 20)
+    RingBuf.push(rb, 30)
+    println("full=" ++ show(RingBuf.is_full(rb)))
+    -- odd value 7 exercises the erased-i64 tag round-trip
+    RingBuf.push(rb, 7)
+    println("to_list=[" ++ String.join(List.map(RingBuf.to_list(rb), fn x -> int_to_string(x)), ",") ++ "]")
+    println("oldest=" ++ show_opt_int(RingBuf.peek_oldest(rb)))
+    println("newest=" ++ show_opt_int(RingBuf.peek_newest(rb)))
+    println("get0=" ++ show_opt_int(RingBuf.get(rb, 0)))
+    println("get2=" ++ show_opt_int(RingBuf.get(rb, 2)))
+    println("get9=" ++ show_opt_int(RingBuf.get(rb, 9)))
+    println("pop=" ++ show_opt_int(RingBuf.pop(rb)))
+    println("size=" ++ int_to_string(RingBuf.size(rb)))
+    RingBuf.clear(rb)
+    println("cleared=" ++ int_to_string(RingBuf.size(rb)))
+  end
+
+  fn strs() : Unit do
+    let rb = RingBuf.make(2)
+    RingBuf.push(rb, "a")
+    RingBuf.push(rb, "b")
+    RingBuf.push(rb, "c" ++ "!")
+    println("str to_list=" ++ String.join(RingBuf.to_list(rb), ","))
+    println("str pop=" ++ show_opt_str(RingBuf.pop(rb)))
+    println("str newest=" ++ show_opt_str(RingBuf.peek_newest(rb)))
+  end
+
+  fn main() : Unit do
+    ints()
+    strs()
+  end
+end
