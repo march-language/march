@@ -10583,6 +10583,73 @@ let test_tuple_pattern_let_is_a_module_member () =
     "a tuple-pattern top-level let still binds self-qualifiable members"
     3 (vint (call_fn env "run" []))
 
+(* ── interface-method qualifiability: bounded consolation diagnostic ─────── *)
+(* Task 7 of the 2026-08-03 refinement-followups-seven plan. An interface
+   method name is not module-qualifiable — `Foo.speak(x)` never resolves even
+   when `Foo` declares `interface Speak(a) do fn speak : a -> String end` and
+   dispatches it via `impl Speak(Dog)`, because dispatch works through the
+   bare name, not module-member lookup (see
+   specs/todos/2026-07-31-interface-method-names-not-module-qualifiable.md,
+   disposed of by this task). Fixing resolution itself is out of scope (see
+   the todo's landmine section); this only asserts that the eval-time failure
+   carries a helpful note pointing at the working spelling, and that a
+   genuinely unbound dotted name is NOT given a spurious note. *)
+
+let src_interface_method_shadow = {|mod Probe do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  type Dog = Dog(String)
+
+  impl Speak(Dog) do
+    fn speak(self) do
+      match self do
+        Dog(name) -> name
+      end
+    end
+  end
+
+  fn main() do
+    Probe.speak(Dog("Rex"))
+  end
+end|}
+
+let test_interface_method_qualified_call_gets_hint () =
+  let m = Test_helpers.parse_and_desugar src_interface_method_shadow in
+  let msg =
+    try
+      let env = March_eval.Eval.eval_module_env m in
+      ignore (call_fn env "main" []);
+      Alcotest.fail "expected Probe.speak(...) to raise Eval_error"
+    with March_eval.Eval.Eval_error msg -> msg
+  in
+  Alcotest.(check string) "base message unchanged"
+    "unbound variable: Probe.speak" msg;
+  match March_eval.Eval.interface_method_hint m msg with
+  | None -> Alcotest.fail "expected a hint for a qualified interface-method call"
+  | Some hint ->
+    let contains sub s =
+      let sl = String.length sub and l = String.length s in
+      let rec go i = i + sl <= l && (String.sub s i sl = sub || go (i + 1)) in
+      go 0
+    in
+    Alcotest.(check bool) "hint names the interface" true (contains "interface `Speak`" hint);
+    Alcotest.(check bool) "hint names the declaring module" true (contains "module `Probe`" hint);
+    Alcotest.(check bool) "hint suggests the bare spelling" true (contains "speak(...)" hint)
+
+(* CONTROL — a genuinely unbound dotted name (no interface, no such method)
+   must NOT get a hint; [interface_method_hint] must stay silent. *)
+let test_genuinely_unbound_dotted_name_gets_no_hint () =
+  let m = Test_helpers.parse_and_desugar {|mod Probe do
+    fn main() do
+      0
+    end
+  end|} in
+  let msg = "unbound variable: Probe.totally_unbound" in
+  Alcotest.(check bool) "no hint for a name that matches no interface method"
+    true (March_eval.Eval.interface_method_hint m msg = None)
+
 (* A match in CHECKING position (function with a declared return type) must
    still get redundant-arm warnings.  check_expr's EMatch arm called only
    check_exhaustiveness, never check_redundant_arms, so every match inside an
@@ -11954,6 +12021,10 @@ let compiler_suites =
           Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;
           Alcotest.test_case "record-pattern top-level let is a module member"   `Quick test_record_pattern_let_is_a_module_member;
           Alcotest.test_case "tuple-pattern top-level let is a module member"    `Quick test_tuple_pattern_let_is_a_module_member;
+        ] );
+      ( "interface_method_qualifiability", [
+          Alcotest.test_case "Mod.method for an interface method gets a hint"     `Quick test_interface_method_qualified_call_gets_hint;
+          Alcotest.test_case "genuinely unbound dotted name gets no hint"         `Quick test_genuinely_unbound_dotted_name_gets_no_hint;
         ] );
       ( "tail_call_enforcement", [
           Alcotest.test_case "local `fn` helper shadowing a top-level fn: no error"  `Quick test_tce_local_helper_shadow_no_false_recursion;

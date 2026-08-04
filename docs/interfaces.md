@@ -381,6 +381,19 @@ That compile-time-resolved picture is not the whole story, though — it describ
 - The **built-in type-directed interfaces** (`Show`, `Eq`, `Ord`, `Hash`) dispatch, in the **interpreter**, through a genuine runtime lookup keyed by the argument's dynamic type at the call site — this is real runtime type-directed dispatch, not something resolved ahead of time.
 - **User-defined interfaces** get a real dispatch table too. **Impl coherence** (checked at declaration) rejects a second `impl Speak(Dog)` for the same `(interface, type)` pair as a compile error ("Overlapping implementation ... A type may implement an interface at most once"), so conflicts are a diagnostic, not silent shadowing. Two genuinely distinct types that happen to share a short name across different modules (e.g. an unrelated `Thing` declared in two library modules) can each `impl` the same interface and dispatch correctly by the value's runtime type, on both backends. One narrower gap remains in the **interpreter only**: calling an interface method unqualified from a module other than the one that declared the `impl` can occasionally fail to resolve even when the identical call compiles and runs correctly — a general interpreter scoping limitation, not specific to same-name types.
 
+A related, separate limitation: **interface method names are not
+module-qualifiable at all**, in either backend. `Foo.speak(x)` never resolves
+— even when `Foo` declares `interface Speak(a) do fn speak : a -> String end`
+and dispatches it via `impl Speak(...)` — because dispatch works through the
+method's bare name, not module-member lookup; the working spelling is always
+the unqualified `speak(x)`. This is a known, closed-as-won't-fix limitation
+(making it work needs a dispatch-side redesign, and the naive fix was
+measured to regress working code — see
+`specs/progress/2026-08-03-interface-method-names-qualifiability-disposition.md`).
+As a bounded consolation, the **interpreter** recognizes this exact failure
+shape and appends a note to the `unbound variable: Foo.speak` error naming
+the interface and suggesting the bare spelling.
+
 So "no vtables or runtime type lookups" is accurate for the compiled backend's statically-resolved calls, but not as a claim about the language or the interpreter in general — treat this section's overhead claims as scoped to the compiled backend's common-case dispatch, not a universal guarantee:
 
 - Zero overhead compared to a direct call, for the compiled backend's statically-resolved case

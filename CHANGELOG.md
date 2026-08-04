@@ -204,6 +204,14 @@ git log is authoritative for exact commits.
   call and a consuming call on the same variable look different one line apart.
   Also adds `march-lsp query inlay <file>`, which dumps the hints as JSON so
   they can be inspected without an editor.
+- **The interpreter now suggests the working spelling when a call qualifies
+  an interface method by its declaring module**, e.g. `Foo.speak(x)` when
+  `Foo` declares `interface Speak(a) do fn speak : a -> String end`.
+  Interface method names remain not module-qualifiable (a dispatch-side
+  limitation, not a resolution bug — see
+  `specs/progress/2026-08-03-interface-method-names-qualifiability-disposition.md`),
+  but the `unbound variable: Foo.speak` error now names the interface and
+  its declaring module and suggests the unqualified `speak(x)` call.
 
 - `forge refine --fixpoint` (with `--apply`): repeat until a round applies
   nothing. A contract only becomes visible to a caller once the callee carries
