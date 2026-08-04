@@ -1,3 +1,7 @@
+**CLOSED 2026-08-03 — WON'T FIX, on a count.** The position does not occur. Evidence and
+reasoning at the end of this file; the original analysis is kept because the
+`with_no_caller` fix it describes is live and must not be undone.
+
 `[P3]` **`forge search --callers` never records qualified type references that appear
 only in an interface method signature or an impl/when-constraint header.**
 
@@ -118,3 +122,46 @@ than leaving it open indefinitely.
 - A second REJECT witness: a qualified type inside a plain function body still attributes
   to that function, not to an enclosing interface/impl owner left set by a missing restore.
   `with_owner` must be `Fun.protect`-scoped exactly as `with_no_caller` is.
+
+
+---
+
+# Closed 2026-08-03: won't fix
+
+The implementation spec added earlier said to count the affected positions before spending
+a day on this, and to close the file explicitly if the count was small rather than leave it
+open forever. The count:
+
+| Corpus | Interface decls | Impl headers | With a qualified `Mod.Type` |
+|---|---|---|---|
+| `stdlib/` (112 modules) | 0 real (6 mentions, all in comments) | 20 | **0** |
+| whole repo `.march` (incl. 27 in the conformance corpora) | 36 | — | **0** |
+| conduit (43 files, external) | — | — | **0** |
+
+Every impl header in the repo names a bare type — `Eq(BigInt)`, `Show(Decimal)` — and no
+interface method signature anywhere mentions a qualified type. The gap describes a position
+that no March code in existence occupies.
+
+## Why closing is the right call, not just the cheap one
+
+The current behaviour is silent **under**-reporting: a legitimate reference is absent from
+the results. That is the safe direction. A reverse-lookup that misses a hit sends someone
+to grep; the *confidently wrong* caller this position produced before the `with_no_caller`
+fix sent them to the wrong file believing the tool. Under-reporting a position that occurs
+zero times costs nothing measurable.
+
+Closing it also avoids a real cost: fixing it requires widening `ref_record.caller` from
+`string` to a variant and touching every consumer, to record references that do not exist.
+
+## If this is reopened
+
+Two things must survive, and they are the reason this file is kept rather than deleted:
+
+- `test_typeref_interface_sig_no_stale_caller` (`test/test_search.ml`) pins that these
+  positions do NOT attribute to whatever function happened to be checked before them. That
+  is the actual bug that was fixed here, and it is a different bug from the one closed.
+- Any `with_owner` replacement must be `Fun.protect`-scoped exactly as `with_no_caller` is,
+  or a leaked owner reattributes ordinary function-body references.
+
+Reopen if interface/impl-header references start appearing in real code — the count above
+is the thing to re-run, and it is a one-line grep.
