@@ -10,8 +10,14 @@
 #include <time.h>
 
 /* From the scheduler: cooperatively yield the green thread (no-op outside a
- * scheduler context).  Declared here to avoid pulling the whole scheduler API. */
+ * scheduler context), plus the park/wake pair used by the blocking-FFI pool to
+ * sleep a caller instead of spinning.  Declared here to avoid pulling the whole
+ * scheduler API. */
+struct march_proc;
 void march_sched_yield(void);
+struct march_proc *march_sched_current(void);
+void march_sched_wake(struct march_proc *target);
+void march_sched_park_self(void);
 
 int32_t march_ffi_abi_version(void) { return MARCH_FFI_ABI_VERSION; }
 
@@ -260,6 +266,11 @@ typedef struct march_blk_call {
     void *fn; const int64_t *args; int n; int is_double;
     int64_t ri; double rd; _Atomic int done;
     struct march_blk_call *next;   /* intrusive submission-queue link */
+    /* Green thread to wake on completion (NULL when the caller is not running
+     * on a scheduler, e.g. a foreign/evloop thread).  Written ONCE, before the
+     * call is enqueued, and never mutated afterwards — see the lifetime note
+     * in march_blk_worker for why the worker must read it early. */
+    struct march_proc *waiter;
 } march_blk_call;
 static void march_blk_execute(march_blk_call *b) {
     if (b->is_double) b->rd = blk_call_d(b->fn, b->args, b->n);
@@ -287,6 +298,12 @@ static void march_blk_execute(march_blk_call *b) {
  * provably free, and idle workers retire after MARCH_BLK_IDLE_SECONDS so a
  * burst does not leave threads parked for the life of the process. */
 #define MARCH_BLK_IDLE_SECONDS 10
+
+/* Cooperative yields a green thread performs before parking on a blocking call.
+ * Tuned on a 14,400-call workload; see the wait loop in march_run_blocking. */
+#ifndef MARCH_BLK_SPIN_YIELDS
+#  define MARCH_BLK_SPIN_YIELDS 32
+#endif
 
 static pthread_mutex_t g_blk_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_blk_cv = PTHREAD_COND_INITIALIZER;
@@ -337,7 +354,17 @@ static void *march_blk_worker(void *unused) {
             b->next = NULL;
             --g_blk_queued;
             pthread_mutex_unlock(&g_blk_mu);
+            /* LIFETIME: [b] lives on the CALLER's stack, and the caller is free
+             * to return the instant it observes `done`.  So the waiter must be
+             * read BEFORE running the call — after march_blk_execute stores
+             * `done`, [b] may already be a dead stack frame.  The proc pointer
+             * itself stays valid (procs are leak-don't-free). */
+            struct march_proc *waiter = b->waiter;
             march_blk_execute(b);
+            /* Wake the parked caller.  If it has not parked yet, the
+             * scheduler's wake-permit cancels its next park instead, so the
+             * wake cannot be lost in that window. */
+            if (waiter) march_sched_wake(waiter);
             pthread_mutex_lock(&g_blk_mu);
             continue;
         }
@@ -358,6 +385,9 @@ static void *march_blk_worker(void *unused) {
 static void march_run_blocking(march_blk_call *b) {
     int need_worker;
     b->next = NULL;
+    /* Published before the call is enqueued so the worker is guaranteed to see
+     * it (it reads the field at dequeue time).  NULL off-scheduler. */
+    b->waiter = march_sched_current();
     atomic_fetch_add_explicit(&g_blk_calls, 1, memory_order_relaxed);
 
     pthread_mutex_lock(&g_blk_mu);
@@ -397,9 +427,43 @@ static void march_run_blocking(march_blk_call *b) {
         }
     }
 
-    /* Cooperatively yield while the C call runs on a pool thread. */
-    while (!atomic_load_explicit(&b->done, memory_order_acquire))
-        march_sched_yield();
+    /* Wait for the pool thread to finish.
+     *
+     * A green thread PARKS rather than spin-yielding.  Spinning kept the caller
+     * permanently runnable, so the scheduler re-dispatched it (a full
+     * swapcontext) over and over for the whole duration of the C call: measured
+     * on a 3,600-file search doing 14,400 blocking calls, that spin accounted
+     * for ~0.59s of user CPU and ~28k context switches — several times the cost
+     * of the work itself.  Parking removes the caller from dispatch entirely
+     * until the worker wakes it (same reasoning as task_wait_done in
+     * march_runtime.c).  Re-check `done` after each park: a park may return
+     * early on a leftover permit, and the contract says never to assume the
+     * condition changed.
+     *
+     * Off-scheduler callers (foreign/evloop threads) have no proc to park, so
+     * they keep the original yield/spin behaviour. */
+    if (b->waiter) {
+        /* Bounded spin first, then park.  Parking alone is NOT enough: when
+         * every green thread is parked, sched_loop drops into its 1ms idle
+         * nanosleep, so a wake can wait up to a full millisecond to be
+         * dispatched.  For calls that return almost immediately (a queue op
+         * that happens to be ready) that latency dominates — measured on the
+         * 14,400-call search, park-always turned 0.60s of wall time into 3.18s
+         * at 17% CPU even though it did cut user CPU from 0.74s to 0.28s.
+         *
+         * Spinning first lets those fast calls finish without ever parking,
+         * while genuinely-blocking calls fall through to the park and stop
+         * burning a core.  The bound is what keeps the spin from costing what
+         * the old spin-forever loop did. */
+        int spins = MARCH_BLK_SPIN_YIELDS;
+        while (!atomic_load_explicit(&b->done, memory_order_acquire)) {
+            if (spins > 0) { --spins; march_sched_yield(); }
+            else march_sched_park_self();
+        }
+    } else {
+        while (!atomic_load_explicit(&b->done, memory_order_acquire))
+            march_sched_yield();
+    }
 }
 
 /* Test/diagnostic hooks: the pool is working when spawned << calls. */
@@ -421,12 +485,12 @@ int64_t march_test_blocking_nap(int64_t us) {
     return us;
 }
 int64_t march_run_blocking_i(void *fn, const int64_t *args, int n) {
-    march_blk_call b = { fn, args, n, 0, 0, 0.0, 0, NULL };
+    march_blk_call b = { fn, args, n, 0, 0, 0.0, 0, NULL, NULL };
     march_run_blocking(&b);
     return b.ri;
 }
 double march_run_blocking_d(void *fn, const int64_t *args, int n) {
-    march_blk_call b = { fn, args, n, 1, 0, 0.0, 0, NULL };
+    march_blk_call b = { fn, args, n, 1, 0, 0.0, 0, NULL, NULL };
     march_run_blocking(&b);
     return b.rd;
 }
