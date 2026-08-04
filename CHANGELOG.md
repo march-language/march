@@ -11,6 +11,18 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A package's own constructor is no longer ambiguous against an unimported
+  stdlib type.** Declaring `type Backend = StorageBacked | Custom(Int)` in
+  `mod Pkg` and matching on `Custom` from `mod Pkg.Sub` failed with
+  "ambiguous between multiple modules" whenever any stdlib type shared the
+  constructor name — conduit's `RateLimiterBackend.Custom` against
+  `Compress.Gzip.Level.Custom`, which made the whole package fail to
+  typecheck. Locality now covers the package namespace rather than requiring
+  an exact current-module match. Genuinely ambiguous references, where the
+  current package owns none of the candidates, still error.
+
 ### Added
 
 - **`forge cap deps`: per-dependency capabilities, and drift detection.** The

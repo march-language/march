@@ -3828,7 +3828,14 @@ let run_check_cmd ?(emit_caps = false) files =
         March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
         March_ast.Ast.mod_decls = stdlib_decls @ all_decls;
       } in
-      let (errs, _type_map) = March_typecheck.Typecheck.check_module combined in
+      (* check_module_full rather than check_module: it additionally returns
+         the typecheck env, which caps mode needs.  This branch runs whenever a
+         package shadows a stdlib module name — bastion does — so without it
+         `march caps` failed on exactly those packages with "capability
+         closures unavailable". *)
+      let (errs, _type_map, env) =
+        March_typecheck.Typecheck.check_module_full combined in
+      caps_env := Some env;
       errs
     end
   in

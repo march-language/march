@@ -124,3 +124,129 @@ let tests =
     Alcotest.test_case "unanalyzable package fails loudly" `Slow
       test_unanalyzable_package_fails_loudly;
   ]
+
+(* ── bare-constructor ambiguity within a package ───────────────────────
+   A package's own constructor must not be reported ambiguous against an
+   unimported stdlib type that happens to share the name.  Measured on
+   conduit, whose `RateLimiterBackend.Custom` collided with
+   `Compress.Gzip.Level.Custom` and made the whole package unanalyzable.
+
+   Both module shapes are covered because they carry the package namespace in
+   different places: a dotted top-level `mod Pkg.Sub` puts it in
+   current_module, a nested `mod Sub` in enclosing_package, and the multi-file
+   check path wraps everything in a synthetic module that clobbers the
+   latter. *)
+
+let check_files dir paths =
+  let err = Filename.temp_file "ambig" ".txt" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "MARCH_LIB_PATH=%s %s check %s > %s 2>&1"
+         (Filename.quote dir) (Filename.quote compiler_exe)
+         (String.concat " " (List.map Filename.quote paths))
+         (Filename.quote err))
+  in
+  let ic = open_in err in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  Sys.remove err;
+  (rc, s)
+
+let parent_src =
+  {|
+mod AmbigPkg do
+  type Backend = StorageBacked | Custom(Int)
+end
+|}
+
+let child_src =
+  {|
+mod AmbigPkg.Sub do
+  fn pick(b : Backend) : Int do
+    match b do
+      StorageBacked -> 1
+      Custom(n)     -> n
+    end
+  end
+end
+|}
+
+let nested_src =
+  {|
+mod AmbigNest do
+  type Backend2 = Plain | Custom(Int)
+
+  mod Inner do
+    fn pick(b : Backend2) : Int do
+      match b do
+        Plain     -> 1
+        Custom(n) -> n
+      end
+    end
+  end
+end
+|}
+
+let test_own_constructor_is_not_ambiguous_dotted () =
+  with_pkg
+    [ ("ambig_parent.march", parent_src); ("ambig_child.march", child_src) ]
+    (fun dir paths ->
+      let rc, out = check_files dir paths in
+      if rc <> 0 then
+        Alcotest.failf
+          "a package's own constructor was reported ambiguous:\n%s" out)
+
+let test_own_constructor_is_not_ambiguous_nested () =
+  with_pkg
+    [ ("ambig_nested.march", nested_src) ]
+    (fun dir paths ->
+      let rc, out = check_files dir paths in
+      if rc <> 0 then
+        Alcotest.failf
+          "a nested module's own constructor was reported ambiguous:\n%s" out)
+
+let a_src = {|
+mod AmbigA do
+  type TA = Custom(Int)
+end
+|}
+
+let b_src = {|
+mod AmbigB do
+  type TB = Custom(Int)
+end
+|}
+
+let c_src =
+  {|
+mod AmbigC do
+  fn pick(n : Int) : Int do
+    match Custom(n) do
+      Custom(x) -> x
+    end
+  end
+end
+|}
+
+let test_genuine_cross_package_ambiguity_still_errors () =
+  (* The check must not be disabled wholesale: a constructor owned by two
+     OTHER packages, with the current one owning neither, is still ambiguous. *)
+  with_pkg
+    [ ("ambig_a.march", a_src); ("ambig_b.march", b_src); ("ambig_c.march", c_src) ]
+    (fun dir paths ->
+      let rc, out = check_files dir paths in
+      Alcotest.(check bool) "genuinely ambiguous constructor still errors" true
+        (rc <> 0);
+      Alcotest.(check bool) "and says it is ambiguous" true
+        (contains out "ambiguous"))
+
+let tests =
+  tests
+  @ [
+      Alcotest.test_case "own constructor not ambiguous (dotted module)" `Slow
+        test_own_constructor_is_not_ambiguous_dotted;
+      Alcotest.test_case "own constructor not ambiguous (nested module)" `Slow
+        test_own_constructor_is_not_ambiguous_nested;
+      Alcotest.test_case "genuine cross-package ambiguity still errors" `Slow
+        test_genuine_cross_package_ambiguity_still_errors;
+    ]
