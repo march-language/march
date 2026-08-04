@@ -22,6 +22,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`cap no_panic` no longer rejects a division guarded by a boolean
+  condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a
+  possible division by zero, as was every other guard containing `&&` or `||`
+  — including `if d <= 0 || d > 1000 do 0 else n / d end`, a disjunction over
+  the divisor itself. Only a single, atomic comparison was understood, so the
+  most idiomatic safe spelling was rejected. Guards are now read through `&&`,
+  `||` and `not`: a conjunctive fact is discharged by either side, a
+  disjunctive one only when both sides prove the divisor non-zero
+  independently. Guards that genuinely fail to rule out zero still error.
+
 - **A package's own constructor is no longer ambiguous against an unimported
   stdlib type.** Declaring `type Backend = StorageBacked | Custom(Int)` in
   `mod Pkg` and matching on `Custom` from `mod Pkg.Sub` failed with

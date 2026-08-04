@@ -4586,6 +4586,130 @@ end|}))
    retired, so the divisor reaches the unrefined branch and errors), and the
    whole point is fail-closed behaviour — gating would disable these exactly
    where verification is unavailable. *)
+(* ── Division-safety: BOOLEAN path guards ──────────────────────────────────
+   [path_proves_nonzero] matched a single atomic comparison and nothing else,
+   so ANY `&&`/`||` in a guard — on either side of the `if`, and even a
+   disjunction over the divisor itself — defeated it.  The divisor then fell
+   through to the unrefined arm and `cap no_panic` reported a division that the
+   guard makes unreachable.  That is a FALSE POSITIVE on the most idiomatic
+   spelling there is (`if p > 0 && d > 0 do n / d`), and under `cap no_panic` it
+   is a hard error, not a hint — which is why this was worth fixing over the
+   completeness backlog.
+
+   Found by pointing the checker at forgepm (a real ~9k-line app), whose
+   `metrics.march` has exactly the `if prev <= 0 || dt <= 0 do 0 else … / dt`
+   shape.
+
+   The polarity is the whole content of the fix, so both directions of BOTH
+   connectives are pinned, each with a negative control in [..._unsound] below:
+   a fact `A && B` proves the goal if EITHER conjunct does, but a fact `A || B`
+   proves it only if BOTH arms do.  Negating swaps which is which (De Morgan).
+
+   NOT gated: decided syntactically, with no VC built at all. *)
+let divsafety_boolean_guard_suite =
+  let ok name src = Alcotest.(check bool) name false (has_divsafety_error src) in
+  let errors name src = Alcotest.(check bool) name true (has_divsafety_error src) in
+  [ Alcotest.test_case "conjunctive guard, THEN side: one conjunct proves it"
+      `Quick (fun () ->
+        ok "no error" {|
+mod B1 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p > 0 && d > 0 do 100 / d else 0 end
+  end
+end
+|})
+  ; Alcotest.test_case "disjunctive guard, ELSE side: De Morgan gives a conjunction"
+      `Quick (fun () ->
+        (* not (p <= 0 || d <= 0)  ==  p > 0 && d > 0  ==>  d != 0.
+           This is the forgepm metrics.march shape. *)
+        ok "no error" {|
+mod B2 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p <= 0 || d <= 0 do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "disjunction over the divisor ITSELF, else side" `Quick
+      (fun () ->
+        (* not (d <= 0 || d > 1000)  ==>  d > 0.  Both arms mention `d`, so this
+           fails differently from B2 if the recursion drops one arm. *)
+        ok "no error" {|
+mod B3 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d <= 0 || d > 1000 do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "conjunctive guard over a `let`-bound divisor" `Quick
+      (fun () ->
+        ok "no error" {|
+mod B4 do
+  cap no_panic
+  fn f(total : Int, prev : Int, p : Int) : Int do
+    let dt = total - prev
+    if p <= 0 || dt <= 0 do 0 else 100 / dt end
+  end
+end
+|})
+  ; Alcotest.test_case "`not` around a proving comparison flips polarity" `Quick
+      (fun () ->
+        ok "no error" {|
+mod B5 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if not(d != 0) do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "nested connectives still reduce" `Quick (fun () ->
+        ok "no error" {|
+mod B6 do
+  cap no_panic
+  fn f(p : Int, q : Int, d : Int) : Int do
+    if p > 0 && (q > 0 && d != 0) do 100 / d else 0 end
+  end
+end
+|})
+  ; (* ── negative controls: the unsound direction must still error ──────── *)
+    Alcotest.test_case "DISJUNCTIVE fact whose other arm proves nothing errors"
+      `Quick (fun () ->
+        (* Fact is `p > 0 || d > 0` — d may well be 0 (take p = 1, d = 0).
+           If the `||` arm used OR instead of AND, this would pass. *)
+        errors "error" {|
+mod B7 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p > 0 || d > 0 do 100 / d else 0 end
+  end
+end
+|})
+  ; Alcotest.test_case
+      "negated CONJUNCTION whose other arm proves nothing errors" `Quick
+      (fun () ->
+        (* Fact is `not (p > 0 && d > 0)` == `p <= 0 || d <= 0` — d may be 0. *)
+        errors "error" {|
+mod B8 do
+  cap no_panic
+  fn f(p : Int, d : Int) : Int do
+    if p > 0 && d > 0 do 0 else 100 / d end
+  end
+end
+|})
+  ; Alcotest.test_case "a conjunction proving nothing about the divisor errors"
+      `Quick (fun () ->
+        errors "error" {|
+mod B9 do
+  cap no_panic
+  fn f(p : Int, q : Int, d : Int) : Int do
+    if p > 0 && q > 0 do 100 / d else 0 end
+  end
+end
+|})
+  ]
+
 let divsafety_shadowing_suite =
   let errors name src = Alcotest.(check bool) name true (has_divsafety_error src) in
   [ Alcotest.test_case "a `let` rebinding the guarded name retires the guard (else side)"
@@ -7474,6 +7598,7 @@ let () =
       ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
+      ("divsafety-boolean-guard", divsafety_boolean_guard_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite);
       ("compose", compose_suite);
