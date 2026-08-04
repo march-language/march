@@ -1,10 +1,52 @@
 # `forge refine` should suggest postconditions, not just preconditions
 
-`[P2]` - [ ] **`lib/refinecheck/return_infer.ml` infers return refinements and nothing
-calls it.** Wire that capability into `forge refine`, which already has every surface it
-needs.
+`[P2]` - [x] **Shipped.** Verified 2026-08-04, after this todo was written: the feature
+described below now exists, built to the architecture this todo prescribed.
 
-## Why this exists
+- `lib/refinecheck/postcond_infer.ml` exists and uses `RC.check_fn_post_verdict ~emit:false`
+  (`postcond_infer.ml:183`) as the truth oracle — the same real-checker postcondition oracle
+  `gate_unverified_posts` uses. It explicitly does **not** use `Return_infer`'s parallel Z3
+  probing; `postcond_infer.ml:25` says so in as many words, honoring the "no parallel prover"
+  constraint this todo called out.
+- It is wired into the compiler at `bin/main.ml:996` (`print_refine_postconditions`) behind
+  `--refine-suggest-post` / `--refine-suggest-post-all`.
+- `forge refine --postconditions` is a documented flag (`forge/lib/cmd_refine.ml:443`).
+- **Smoke test** (this todo's own worked example), run against a freshly built compiler with
+  caches cleared:
+
+  ```march
+  mod P do
+    fn need_pos(n : {Int | _ > 0}) : Int do n end
+    fn produce(x : {Int | _ > 0}) : Int do x end
+    fn go(x : {Int | _ > 0}) : Int do need_pos(produce(x)) end
+    fn main() do println(int_to_string(go(3))) end
+  end
+  ```
+
+  `march --check --refine-suggest-post-all p.march` emits, for `produce`:
+
+  ```
+  produce (p.march:3)
+      returns Int  ->  returns {Int | _ > 0}
+    discharges all 1 obligation(s) across 1 caller(s)
+  ```
+
+  — exactly the composition case this todo's "payoff" section predicted.
+
+- **`--fixpoint` composition (this todo's open question):** `forge/lib/cmd_refine.ml:443-503`
+  shows `Cmd_refine.run`'s `once ()` closure (line 465-469) dispatches on the `postconditions`
+  flag to call `run_posts` instead of `run_once` *inside* the fixpoint `loop` (line 486-503).
+  Because the fixpoint loop calls `once ()` every round regardless of which mode it dispatches
+  to, `--fixpoint --postconditions` now repeats postcondition inference round over round the
+  same way it already repeated precondition inference — the todo's claim that "`--fixpoint`
+  today walks only the first direction" no longer holds; both directions now fixpoint. (A
+  live end-to-end `forge refine --postconditions --fixpoint --apply` run against a scratch
+  project was inconclusive in this environment only because `forge` shells out to the `march`
+  on `PATH`/`MARCH_HOME` rather than this worktree's freshly built binary — a known toolchain-
+  resolution trap, not a gap in this feature. The code-level composition finding above does
+  not depend on that run.)
+
+## Why this existed
 
 `return_infer.ml` was written 2026-06 and has never been called by the product. Its own
 header says it is "used by the IDE and documentation generator"; neither ever used it. It
