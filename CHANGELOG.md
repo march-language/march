@@ -13,6 +13,29 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--cap-strict`: `needs` as a hard ceiling.** Opt-in build gate — every
+  module's emitted code must stay within that module's own `needs`
+  declarations, or the build fails naming the module.
+
+  This closes a gap that was wider than the known one. `needs` was documented
+  as a floor that capability-passing code could not go under, with direct
+  builtin calls a warning rather than an error. Measured, a *stdlib-mediated*
+  call (`File.write(…)`) produced **no diagnostic at all** — not even the
+  warning — because the import check walks `use` declarations and stdlib
+  modules are ambiently available without one. That is the most common route
+  in real code.
+
+  The check runs against emitted code rather than as another source-level
+  walk, so every route — direct builtin, stdlib wrapper, builtin passed as a
+  value — collapses into one rule that re-routing through a helper cannot
+  evade. It applies per-module, so **a dependency that declares
+  `needs IO.Console` and reads `/etc/passwd` fails the build**, without that
+  dependency having opted in to anything.
+
+  A capability that cannot be attributed to any module fails the check rather
+  than passing it. `IO.Foreign` is excluded (extern blocks are already an
+  error when undeclared), and FFI remains outside what any of this can see.
+
 - **`forge cap inspect` now says WHICH module uses each capability.** The
   report gained an "Attributed to" section: `IO.FileRead   Conduit.Store`
   instead of only "this binary reads files". This is what makes it possible to

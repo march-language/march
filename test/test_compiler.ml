@@ -11155,6 +11155,7 @@ let compiler_suites =
       ("cap_markers", Test_cap_markers.tests);
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
+      ("cap_ceiling", Test_cap_ceiling.tests);
       ( "match_diagnostics",
         [
           Alcotest.test_case "or-pattern binding accepted" `Quick
