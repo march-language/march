@@ -2090,13 +2090,47 @@ let scope_add_binding
           [refined_scope_ty] cannot carry one — it has a `str_sort` arm.  The
           gap is one step earlier: [return_refine_sorted] has no String arm at
           all, so [postcond] never REPORTS a String return in the first place
-          and there is nothing here to admit. *)
+          and there is nothing here to admit.
+
+          ── The SELF-REBINDING guard on the ADT arm ────────────────────────
+          [scope_shadow] above retires PRE-EXISTING entries whose predicate
+          mentions one of this binding's binders.  The entry created HERE needs
+          the identical test applied to itself, and for the identical reason:
+
+            let t = push2(t, u)   -- push2 : {Tree | size(_) > size(t) + size(u)}
+            needs_smaller(w, t)   -- wants size(t) < size(w), for arbitrary w
+
+          [postcond_of] substitutes the call's ACTUALS, so `t` in the stored
+          predicate denotes the value BEFORE this binding.  But the entry is
+          filed under the name `t`, and [load_scope_measure_facts] accepts the
+          entry's own name as a spelling of the promised value ([is_self_spelling]
+          — correct for a refined PARAMETER, where the two really are the same
+          value, and wrong here).  The two collide onto one symbol and the
+          assumption becomes `size(t) > size(t) + size(u)`, i.e. `0 > size(u)` —
+          a CONTRADICTION under the `size >= 0` axiom, which discharges any goal
+          whatsoever.  A vacuously valid VC is a false proof, the one outcome
+          this subsystem exists to prevent.
+
+          Refusing to file such an entry is the whole fix: the predicate is
+          simply not usable at this name.  Note this hazard predates the
+          relational widening only in the sense that it was ACCIDENTALLY
+          masked — before it, `size(u)` was untranslatable and [smt_of] dropped
+          the predicate whole.
+
+          Deliberately on THIS arm only.  The scalar and record arms above have
+          the same shape and the same latent hole (reachable on the parent
+          commit through [reflect_scalar]'s `foreign_var` channel, which never
+          went through [load_scope_measure_facts] at all), but they are older,
+          broader, and out of scope here — recorded with repros in
+          `specs/todos/2026-08-04-postcond-let-self-rebinding-holes.md`. *)
        (match postcond fname args with
         | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
           (n.A.txt, (binder, pred, m)) :: sc
         | Some (binder, pred, Some srt) when is_record_sort srt ->
           (n.A.txt, (binder, pred, Some srt)) :: sc
-        | Some (binder, pred, Some srt) when Hashtbl.mem adt_ctors srt ->
+        | Some (binder, pred, Some srt)
+          when Hashtbl.mem adt_ctors srt
+               && not (expr_mentions (pat_binders b.A.bind_pat) pred) ->
           (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
      | _ -> sc)
@@ -3921,10 +3955,14 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
 
              Fail-closed: the sort guards (a `Str` name, a record name, a name
              already pinned to a non-Int scalar sort) drop the sub-term — and
-             with it the whole fact — rather than declare one symbol at two
-             sorts, which would make
-             z3 emit an error line and desynchronise the shared `z3 -in`
-             channel.  Losing a fact only loses a proof. *)
+             with it the whole fact — for a name this VC already knows at some
+             other sort.  They are a cheap FIRST filter, not the invariant: what
+             actually guarantees a one-symbol-two-sorts VC never reaches z3 (a
+             single error line there desynchronises the shared `z3 -in` channel
+             and silently switches refinement checking off for the rest of the
+             compilation) is the [sort_conflict decls] gate further down, which
+             sees the finished declaration list.  Losing a fact only loses a
+             proof. *)
           let rm m' n =
             if not (is_self_spelling n) then
               if Hashtbl.mem str_names n || is_recvar n

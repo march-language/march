@@ -8030,6 +8030,51 @@ end|}
         Alcotest.(check int) "no violation invented" 0 violated;
         Alcotest.(check bool) "the stale `size(t)` fact does NOT survive" true
           (skipped >= 1))
+  ; gated "REJECT CONTROL: a `let` REBINDING a name its own promise mentions"
+      (fun () ->
+        (* The dangerous shape, and the one the two controls above miss.
+           `push2`'s promise mentions `t`; the `let` binds its result to `t`
+           as well.  [postcond_of] substituted the ACTUAL, so the predicate's
+           `t` is the value BEFORE the binding — but the entry is filed under
+           `t`, and the fact loader reads the entry's own name as a spelling
+           of the promised value.  The two collide onto one symbol and the
+           assumption becomes `size(t) > size(t) + size(u)`, i.e. `0 >
+           size(u)`: a CONTRADICTION, which discharges anything at all.  Here
+           it would "prove" that an arbitrary `w` is bigger than the tree
+           `push2` just grew — a false proof, not merely an over-approximation.
+           Base behaviour (273b4ef2) is `1 proved, 1 skipped`. *)
+        let src' = {|
+mod PR4 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push2(t : Tree, u : Tree) : {Tree | size(_) > size(t) + size(u)} do
+    Node(t, 1, u)
+  end
+
+  fn needs_smaller(before : Tree, after : {Tree | size(_) < size(before)}) : Int do 0 end
+
+  fn go(t : Tree, u : Tree, w : Tree) : Int do
+    let t = push2(t, u)
+    needs_smaller(w, t)
+  end
+  fn main() : Int do go(Leaf, Leaf, Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool)
+          "an IMPOSSIBLE goal is never proved from a self-rebinding promise"
+          true (violated >= 1 || skipped >= 1))
   ]
 
 let () =
