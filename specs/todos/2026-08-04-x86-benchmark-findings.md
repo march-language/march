@@ -34,16 +34,42 @@ entry:
 it across calls, or delete it. fib(40) is ~300M calls, so this is ~300M
 un-elidable loads plus a predictable branch that neither Rust nor OCaml pays.
 
-This is the price of green threads being preemptible — a compiled March function
-must be interruptible, and the reduction check is how. It is not obviously
-wrong, but it is the reason a pure-call-overhead benchmark reads the way it
-does, and it should be stated rather than left as a mystery.
+**Measured, not just theorized.** Neutralizing the check in the emitted IR
+(replace the volatile load with a constant 0, keeping the SSA name — LLVM folds
+the branch away at -O2) and building both variants against the identical
+runtime, 7 runs each, outputs verified byte-identical:
 
-Worth investigating: whether the check can be elided for **leaf-ish** frames or
-amortised (checked every N calls via a counter rather than every call). Any such
-change interacts with the starvation guarantee — see the scheduler notes about a
-CPU-bound TCO loop starving a sibling green thread — so it needs the starvation
-test as its gate.
+```
+base   (check present)  median 441.4 ms   min 439.3   max 442.3
+nopre  (check removed)  median 303.3 ms   min 303.2   max 304.1
+```
+
+The check costs **138 ms — 31% of fib's runtime, and 80% of the gap to Rust**
+(441 − 269 = 172 ms gap; 303 − 269 = 34 ms remains). Per call that is
+~0.46 ns ≈ one cycle at 2.3 GHz; fib is simply 300M calls of almost nothing, so
+one cycle per call is 31%.
+
+The stripped binary's hot path is 22 instructions and otherwise optimal: LLVM
+loop-converts the second recursive call, and **no tag/untag arithmetic survives**
+— the erased-i64 tagging visible in the raw IR is fully folded intraprocedurally
+at -O2. So fib's story is entirely the preemption check; there is no second
+codegen problem hiding behind it. The residual 13% vs Rust is call-shape/layout
+territory, not worth chasing.
+
+Candidate mitigations, all gated on the starvation test (the per-call check IS
+the progress guarantee — a CPU-bound TCO loop once starved a sibling green
+thread):
+
+- **Skip the check in leaf functions** (no calls, no loops): bounded work
+  between checks is preserved by the caller's own check. Does not help fib
+  (recursive), but shrinks the tax generally.
+- **Amortise via a counter** (Erlang-style reductions): decrement a
+  thread-local, poll the shared flag only on zero. Trades a volatile global
+  load for a thread-local decrement — needs measuring, not obviously cheaper.
+- **Relax volatile to an atomic monotonic load**: LLVM may then merge some
+  adjacent checks. Risky — the optimizer is also allowed to hoist monotonic
+  loads out of loops in ways that could unbound the check interval. Would need
+  a hard argument, not just a green test run.
 
 ## 2. binary-trees: `march_alloc` is `calloc`, against OCaml's bump allocator
 
@@ -137,9 +163,11 @@ So the honest state of simd-map:
 
 1. **The allocator (finding 2)** — the largest single gap, 20×, and the one with
    a design already written down (`specs/gc_design.md`'s per-actor bump arenas).
-2. **Profile simd-map** to find what the remaining 2× vs OCaml actually is.
+2. **The preemption check (finding 1)** — now quantified at 31% of fib and 80%
+   of its gap to Rust, with the leaf-function elision as the safest first cut.
+   Gated on the starvation test.
+3. **Profile simd-map** to find what the remaining 2× vs OCaml actually is.
    Allocation and the per-element `memcpy` are the first suspects; measure
    rather than reason, per the two wrong turns recorded above.
-3. **Amortise the preemption check (finding 1)**, gated on the starvation test.
 4. Optionally expose a `--target-cpu` passthrough — worth ~13% on simd-map here,
    but it is a knob, not a fix.
