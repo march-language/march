@@ -31,6 +31,20 @@ git log is authoritative for exact commits.
   statically known callee and is reported as *unattributed* rather than
   silently omitted. Also available as `attribution` in `--json` output.
 
+- **Steady-state runtime demo (`bench/steady_state_ring.march` +
+  `bench/run_steady_state.sh`).** An in-process, sustained request loop that
+  measures March's two headline runtime claims together: **flat RSS under load**
+  (RC reclaims per-op transients, so resident memory stays ~2–3 MB across
+  millions of ops — no GC heap grows) and **bounded tail latency** (the
+  preemptive green-thread scheduler holds p50/p90/p99 near-constant at single-µs
+  even while CPU-bound siblings oversubscribe every scheduler thread; the extreme
+  p99.9 tail grows bounded, not unbounded, with contention). The hot request
+  kernel is placed under `cap no_alloc` so zero steady-state allocation is
+  compiler-enforced. Runner emits a latency histogram (p50/p90/p99/p99.9/max),
+  an external RSS-over-time trace, and machine-readable JSONL; committed laptop
+  (arm64) results under `bench/results/`. See
+  `specs/2026-08-04-steady-state-tail-latency-demo.md`.
+
 - **Path-scoped capabilities: `needs IO.FileRead("/etc/myapp")`.** A module
   can narrow a filesystem capability to a directory subtree instead of
   declaring all-or-nothing access. A literal path outside the declared scope
