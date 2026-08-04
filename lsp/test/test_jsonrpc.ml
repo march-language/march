@@ -293,6 +293,128 @@ let test_pull_diagnostics_clean_buffer_is_empty () =
   | None -> Alcotest.fail "textDocument/diagnostic returned no full report"
   | Some k -> Alcotest.(check int) "clean buffer reports no items" 0 k
 
+(* ── The class guard ──────────────────────────────────────────────────────────
+   Every capability the server ADVERTISES must answer without a protocol error.
+
+   This is the test whose absence let ~20 features die quietly. Each individual
+   feature's logic lives in `Analysis.*` and is unit-tested there, where it
+   works; what was broken was only the wiring, and nothing exercised that. A
+   per-feature test would have caught each one, but this catches the CLASS: add
+   a capability to `config_*` without a reachable handler and this fails.
+
+   It asserts "answered without error", deliberately not "answered usefully" —
+   a null or empty result is legitimate for many of these on a small buffer, and
+   asserting content here would make the guard brittle in exchange for coverage
+   the per-feature tests already provide. The failure it exists to catch is
+   `Failure("TODO: handle this request")`, which is a protocol ERROR. *)
+let advertised_requests uri =
+  let pos = `Assoc [ "line", `Int 1; "character", `Int 5 ] in
+  let td = `Assoc [ "uri", `String uri ] in
+  let range =
+    `Assoc [ "start", `Assoc [ "line", `Int 0; "character", `Int 0 ];
+             "end",   `Assoc [ "line", `Int 6; "character", `Int 0 ] ]
+  in
+  [ "textDocument/references",
+    `Assoc [ "textDocument", td; "position", pos;
+             "context", `Assoc [ "includeDeclaration", `Bool true ] ];
+    "textDocument/formatting",
+    `Assoc [ "textDocument", td;
+             "options", `Assoc [ "tabSize", `Int 2; "insertSpaces", `Bool true ] ];
+    "textDocument/documentHighlight", `Assoc [ "textDocument", td; "position", pos ];
+    "textDocument/foldingRange", `Assoc [ "textDocument", td ];
+    "textDocument/semanticTokens/full", `Assoc [ "textDocument", td ];
+    "textDocument/signatureHelp", `Assoc [ "textDocument", td; "position", pos ];
+    "textDocument/typeDefinition", `Assoc [ "textDocument", td; "position", pos ];
+    "textDocument/implementation", `Assoc [ "textDocument", td; "position", pos ];
+    "textDocument/selectionRange",
+    `Assoc [ "textDocument", td; "positions", `List [ pos ] ];
+    "textDocument/prepareCallHierarchy", `Assoc [ "textDocument", td; "position", pos ];
+    "textDocument/linkedEditingRange", `Assoc [ "textDocument", td; "position", pos ];
+    "textDocument/inlineValue",
+    `Assoc [ "textDocument", td; "range", range;
+             "context", `Assoc [ "frameId", `Int 0; "stoppedLocation", range ] ];
+    "textDocument/codeLens", `Assoc [ "textDocument", td ];
+    "workspace/symbol", `Assoc [ "query", `String "helper" ];
+    (* Answered already; kept so a regression in the working set fails here too. *)
+    "textDocument/hover", `Assoc [ "textDocument", td; "position", pos ];
+    "textDocument/documentSymbol", `Assoc [ "textDocument", td ];
+    "textDocument/diagnostic", `Assoc [ "textDocument", td ];
+  ]
+
+let run_capability_sweep () : (string * string) list =
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
+  ignore (Unix.alarm 90);
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null; "rootUri", `Null;
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  (* A URI at the FILESYSTEM ROOT makes `project_root` fall back to "/" and the
+     workspace index then walks the whole disk — `references` and
+     `workspace/symbol` never return. That is a real (pre-existing) sharp edge
+     worth knowing about, but it is not what this test is measuring, so use a
+     path under a temporary directory the way a real client would. *)
+  let dir = Filename.get_temp_dir_name () in
+  let uri = "file://" ^ Filename.concat dir "cap_sweep.march" in
+  let text =
+    "mod M do\n  fn helper(x : Int) : Int do\n    x + 1\n  end\n\
+     \  fn main() : Int do\n    helper(2)\n  end\nend\n"
+  in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "method", `String "textDocument/didOpen";
+    "params", `Assoc [ "textDocument", `Assoc [
+      "uri", `String uri; "languageId", `String "march";
+      "version", `Int 1; "text", `String text ] ] ]);
+  ignore (read_until ic ~max:30 (is_method "textDocument/publishDiagnostics"));
+  let failures = ref [] in
+  List.iteri
+    (fun i (meth, params) ->
+      let id = 100 + i in
+      send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int id;
+                        "method", `String meth; "params", params ]);
+      match read_until ic ~max:60 (is_id id) with
+      | None -> failures := (meth, "no reply") :: !failures
+      | Some j ->
+        (match member "error" j with
+         | `Null -> ()
+         | e ->
+           (* First line only: linol embeds a full Lwt backtrace in the message,
+              and twenty of those buries the list this test exists to show. *)
+           let m =
+             match member "message" e with
+             | `String s ->
+               (match String.index_opt s '\n' with
+                | Some i -> String.sub s 0 i
+                | None -> s)
+             | _ -> Yojson.Safe.to_string e
+           in
+           failures := (meth, m) :: !failures))
+    (advertised_requests uri);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 999;
+                    "method", `String "shutdown"; "params", `Null ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  ignore (Unix.alarm 0);
+  List.rev !failures
+
+let test_every_advertised_capability_answers () =
+  let failures = run_capability_sweep () in
+  if failures <> [] then
+    Alcotest.failf
+      "%d advertised capabilit(ies) do not answer:\n%s\n\n\
+       An advertised capability with no reachable handler is a promise the \
+       server cannot keep. Either wire it up, or stop advertising it in \
+       `config_*` — leaving it advertised is the failure this test exists to \
+       prevent."
+      (List.length failures)
+      (String.concat "\n"
+         (List.map (fun (m, e) -> Printf.sprintf "  %-40s %s" m e) failures))
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
@@ -304,4 +426,6 @@ let () =
         Alcotest.test_case "textDocument/diagnostic reports an error" `Quick
           test_pull_diagnostics_reports_an_error;
         Alcotest.test_case "textDocument/diagnostic is empty when clean" `Quick
-          test_pull_diagnostics_clean_buffer_is_empty ] ]
+          test_pull_diagnostics_clean_buffer_is_empty;
+        Alcotest.test_case "every advertised capability answers" `Quick
+          test_every_advertised_capability_answers ] ]

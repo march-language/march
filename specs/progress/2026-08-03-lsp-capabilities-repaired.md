@@ -1,6 +1,6 @@
-# ~20 advertised LSP capabilities are dead code — every one dispatched where nothing listens
+# ~20 advertised LSP capabilities were dead code — repaired by one bridge
 
-`[P1]` - [ ] **Most of `march-lsp`'s advertised features never run.** References, rename,
+**FIXED 2026-08-03.** `[P1]` **Most of `march-lsp`'s advertised features never ran.** References, rename,
 formatting, semantic tokens, folding, signature help, call hierarchy, type definition,
 workspace symbol, document highlight, selection range, code lens and inline values all
 return an error to the client. Measured, not inferred — see the table.
@@ -98,3 +98,68 @@ request; do not guess, since guessing wrong reproduces the bug silently.
 This is not a small change, and the temptation is to repair the easy half. Repairing some
 and leaving the rest advertised keeps the same lie in place for whatever is skipped —
 either wire a capability up or stop advertising it, per request.
+
+
+---
+
+# The repair (2026-08-03)
+
+## One bridge, not twenty rewrites
+
+The handler bodies were never broken — only their wiring — so rewriting them against twenty
+typed parameter records would have risked twenty new bugs to fix zero real ones. Instead
+`on_request_unhandled` gained a single generic arm:
+
+```
+to_jsonrpc_request req   ->  recover the wire method + params
+dispatch_by_method       ->  the EXISTING string-keyed handlers, untouched
+response_of_json req     ->  turn their JSON into the typed result the GADT owes
+```
+
+`on_unknown_request`'s body became a private `dispatch_by_method` with `on_unknown_request`
+as a thin forwarder, so genuinely-undecodable methods still reach it. It is private
+because a new public method widens the object type and breaks the coercion to
+`Linol_lwt.Jsonrpc2.server` in `lsp/bin/main.ml`.
+
+**13 failing capabilities → 0**, in one change.
+
+## Two mistakes worth recording, both mine, both caught by measurement
+
+**Treating `` `Null `` as "not handled".** The first version fell through to `super`
+whenever the dispatcher returned null — but null is a *legitimate* result for
+`typeDefinition`, `workspace/symbol` and most option-returning requests. The capability
+sweep reported `typeDefinition` as still dead when it was answering correctly. The
+dispatcher signals "no branch" by REJECTING (`Lwt.fail_with`), so that alone now delegates
+to super.
+
+**A test URI at the filesystem root.** The sweep first appeared to hang everything. Cause:
+`project_root` falls back to the open document's directory, and `file:///cap_sweep.march`
+makes that `/` — so the workspace index walked the entire disk. `references` and
+`workspace/symbol` never returned. The repair was fine; the test was pathological.
+
+That second one is a **real sharp edge left in place**: a client that opens a file in a very
+large directory with no `forge.toml` above it will hang those two requests. Worth its own
+todo, not fixed here.
+
+## Verification
+
+`test_every_advertised_capability_answers` in `lsp/test/test_jsonrpc.ml` drives every
+advertised capability over stdio and asserts none returns a protocol error. It asserts
+"answered", deliberately not "answered usefully" — a null result is legitimate for many
+of these, and demanding content would trade brittleness for coverage the per-feature unit
+tests already give. What it catches is exactly the failure that hid for months:
+`Failure("TODO: handle this request")`.
+
+Independently confirmed with an out-of-band probe script: references, formatting,
+documentHighlight, foldingRange, semanticTokens, signatureHelp, prepareCallHierarchy and
+selectionRange all return real payloads; typeDefinition and workspace/symbol return
+legitimate empties for the probe's cursor position.
+
+365 LSP tests pass (342 analysis + 6 jsonrpc + 10 + 7).
+
+## What this does not do
+
+It does not verify each capability returns the RIGHT answer — only that each is reachable.
+Twelve features have now run for the first time; their outputs have never been exercised
+against a real editor. Expect a second round of bugs behind this one, and treat per-feature
+tests as still owed.

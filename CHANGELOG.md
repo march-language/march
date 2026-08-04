@@ -299,6 +299,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **~20 advertised LSP capabilities were dead code; all now answer.** References,
+  rename, formatting, semantic tokens, folding ranges, signature help, call
+  hierarchy, type definition, workspace symbol, document highlight, selection
+  range, code lens and inline values each had a handler written as a
+  method-string branch in `on_unknown_request` — where a request the library
+  successfully *decoded* never arrives. Every one of them returned
+  `TODO: handle this request` to the editor. The handler bodies were correct
+  throughout; only the wiring was wrong, which is why reading the file showed a
+  complete-looking implementation of every feature.
+
+  Repaired by one generic bridge that recovers a decoded request's wire form,
+  routes it to the existing dispatcher, and types the result back — rather than
+  rewriting twenty handlers. A new protocol-level test drives every advertised
+  capability and fails if any returns an error; its absence is what let these
+  die quietly.
+
 - **`march-lsp` implements the pull diagnostics it advertises.** It declared
   `diagnosticProvider`, but `textDocument/diagnostic` reached no handler, so
   every pull failed with `TODO: handle this request` — invisible because the
