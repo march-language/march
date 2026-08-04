@@ -1,4 +1,4 @@
-# Refinement contract composition follow-ups (OPEN, from the 2026-07-29 call-boundary composition work)
+# Refinement contract composition follow-ups (CLOSED 2026-08-04, from the 2026-07-29 call-boundary composition work)
 
 
 - **A caller-established runtime GUARD is a different mechanism** from a
@@ -187,12 +187,27 @@ prototyped here:**
    the **Closed** case (`size(_) > 0`); item 2 below remains open and is what
    the **Relational** case (`size(_) == size(t) + 1`) still needs. Suite:
    `post-compose-closed`.
-2. `load_scope_measure_facts`'s resolver must be widened to resolve OTHER
+2. ~~`load_scope_measure_facts`'s resolver must be widened to resolve OTHER
    caller-scope names appearing in a Relational predicate (i.e. `t`, not
    just the entry's own self-spellings) to the SAME term the goal side would
-   build for them — this is real, non-trivial new work, not a small filter
-   tweak, and is exactly the risk the task-6 brief flagged and asked to be
-   re-scoped rather than built under this task's budget.
+   build for them.~~
+   **CLOSED 2026-08-04** — `rm`'s `if not (is_self_spelling n) then None`
+   early return is replaced by a caller-namespace resolution path. The
+   carried predicate is ALREADY in the caller's namespace (`postcond_of`
+   substitutes the actuals simultaneously or abandons propagation), so a
+   non-self name denotes itself; it is emitted as the term the GOAL side
+   builds for that same name — `(m n)` with `n` declared at the measure's
+   ADT sort for an axiomatised `@[measure]` (what `reflect_dt`'s `EVar` arm
+   produces), and the memoized `m$n` from `measure_of_var` otherwise. Never a
+   fresh constant: the reject-control test (a demand for a SMALLER tree,
+   which `push` never provides) is what distinguishes a working contract from
+   one that checks nothing. Two `str_names`/`is_recvar`/scalar-sort guards
+   keep it fail-closed. Shadowing needed no new code: `scope_shadow` already
+   retires an entry both when its own name is rebound AND when its predicate
+   MENTIONS a rebound name (`expr_mentions`), which is exactly the trigger
+   this widening makes load-bearing — pinned by a third test. Suite:
+   `post-compose-relational`. The brief repro now reports
+   `2 proved, 0 violated, 0 skipped`.
 3. ~~`check_post_induction` must handle a non-match, non-recursive
    constructor-literal clause body for a refined ADT return (trivial case:
    no induction, no recursive IH needed — but it is currently a completely

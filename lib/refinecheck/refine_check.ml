@@ -2086,9 +2086,11 @@ let scope_add_binding
           ([load_scope_measure_facts] and its constructor-tag analogue) already
           reads.
 
-          A String postcondition is still refused: it is not carried by
-          [refined_scope_ty] at all in this position (only `str_sort` params
-          are), so there is nothing to widen here. *)
+          A String postcondition is still refused, but not because
+          [refined_scope_ty] cannot carry one — it has a `str_sort` arm.  The
+          gap is one step earlier: [return_refine_sorted] has no String arm at
+          all, so [postcond] never REPORTS a String return in the first place
+          and there is nothing here to admit. *)
        (match postcond fname args with
         | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
           (n.A.txt, (binder, pred, m)) :: sc
@@ -3848,8 +3850,10 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
                whole VC above; a second, disconnected flag would leave the
                assumption in the VC with nothing to interpret it).
          - [resolve_var] is `None` throughout: the binder denotes a LIST, not a
-           scalar, so any predicate that mentions it outside a measure (or that
-           mentions any other variable) is dropped entirely.  No approximation.
+           scalar, so any predicate that mentions a variable OUTSIDE a measure
+           is dropped entirely.  No approximation.  A measure over some other
+           name IS translated — see [rm]'s non-self branch below — but only to
+           the term the goal side builds for that same name.
 
        Sound direction: this only ADDS a hypothesis that the caller's own
        signature already promises about this very value, over the same symbol.
@@ -3858,7 +3862,10 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
 
        Shadowing is handled upstream and not here: [scope_shadow] retires the
        name from [sc] at every binding construct, so after `let ys = tail(ys)`
-       the lookup simply finds nothing and no fact is loaded. *)
+       the lookup simply finds nothing and no fact is loaded.  Its SECOND
+       trigger covers the relational case: an entry whose predicate MENTIONS a
+       rebound name is retired too, so `let r = push(t, 5)` followed by a rebind
+       of `t` drops `r`'s promise rather than re-reading `t` at its new value. *)
     let scope_facts_loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
     let load_scope_measure_facts (x : string) : unit =
       if not (Hashtbl.mem scope_facts_loaded x) then begin
@@ -3871,8 +3878,65 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
              above; the goal side's [is_self]/[actual_of_name] pair already
              accepts the same three. *)
           let is_self_spelling n = n = b || n = "_" || n = x in
+          (* ── A RELATIONAL carried predicate's OTHER names ───────────────────
+             `fn push(t, x) : {Tree | size(_) == size(t) + 1}` stored against
+             `let r = push(t, 5)` arrives here as `size(_) == size(t) + 1`,
+             ALREADY in the caller's namespace ([postcond_of] substituted the
+             actuals simultaneously, or abandoned propagation entirely).  So a
+             non-self name denotes ITSELF, a caller-scope value — the same
+             discipline [foreign_var]/[foreign_measure] apply to a refined
+             parameter's own promise, and for the same reason: routing it
+             through the GOAL-side resolvers would silently re-point it at a
+             callee actual whenever a caller variable and a callee parameter
+             happen to share a spelling.
+
+             Refusing it outright (as this did until 2026-08-04) drops the
+             sub-term, and [smt_of] then drops the WHOLE predicate: no
+             assumption, VC satisfiable both ways, call silently skipped.  That
+             is what made the motivating repro `needs_bigger(t, r)` report
+             `1 proved, 1 skipped` with no diagnostic.
+
+             What is emitted must be the term the GOAL side builds for the same
+             name, or the fact connects to nothing and the skip merely looks
+             like a proof:
+               · axiomatised `@[measure]`: `(m n)` with `n` declared at the
+                 measure's ADT sort — exactly what [reflect_dt]'s `EVar` arm
+                 produces for this actual (goal side, [resolve_measure]), and
+                 what its caller-scope fallback produces when the name is not a
+                 callee parameter at all;
+               · everything else: the memoized `m$n` from [measure_of_var],
+                 which is literally the same call the goal side makes.
+             A FRESH constant here would be the `{List(a) | len(_) > 0}` bug
+             again — trivially satisfiable, hence a contract that enforces
+             nothing while appearing to work.  The REJECT CONTROL test (a
+             demand for a SMALLER tree, which `push` never provides) is what
+             distinguishes the two.
+
+             Shadowing needs nothing here: [scope_shadow] retires an entry both
+             when its own name is rebound AND when its predicate MENTIONS a
+             rebound name ([expr_mentions]), so a `t` rebound between the `let`
+             and the call removes the whole entry rather than re-pointing this
+             `Const t` at the new binding.  That second trigger already exists
+             precisely because a promise may mention another name.
+
+             Fail-closed: the sort guards (a `Str` name, a record name, a name
+             already pinned to a non-Int scalar sort) drop the sub-term — and
+             with it the whole fact — rather than declare one symbol at two
+             sorts, which would make
+             z3 emit an error line and desynchronise the shared `z3 -in`
+             channel.  Losing a fact only loses a proof. *)
           let rm m' n =
-            if not (is_self_spelling n) then None
+            if not (is_self_spelling n) then
+              if Hashtbl.mem str_names n || is_recvar n
+                 || caller_scalar_of n <> Smt.SInt
+              then None
+              else if is_axiom_measure m' then begin
+                let adt = Hashtbl.find axiom_measures m' in
+                uses_axiom := true;
+                decls := (n, Smt.SData adt) :: !decls;
+                Some (Smt.App (m', [ Smt.Const n ]))
+              end
+              else measure_of_var m' n
             else if is_axiom_measure m' then begin
               (* Gate the quantified-axiom preamble on the SHARED per-VC ref, so
                  `(m x)` here and `(m x)` in the goal are interpreted by the same

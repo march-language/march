@@ -193,8 +193,21 @@ git log is authoritative for exact commits.
   vanished, even though the identically-annotated spelling (`let r : {Tree |
   size(_) > 0} = grow(t)`) already worked. Only the CLOSED case (the
   postcondition mentions no parameter besides the refined value itself) is
-  covered; a relational postcondition (`size(_) == size(t) + 1`) still needs
-  further work.
+  covered; see the next entry for the relational case.
+
+- **A RELATIONAL measure postcondition now composes through an unannotated
+  `let` too.** `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}`
+  followed by `let r = push(t, 5); needs_bigger(t, r)` used to skip the second
+  call. The carried promise mentions the caller's *other* variable `t`, and
+  the fact loader accepted only names denoting the promised value itself — so
+  `size(t)` failed to translate and, by the usual "untranslatable predicate
+  stays unasserted" rule, the whole promise was dropped in silence. A
+  caller-scope name under a measure now resolves to the same SMT term the goal
+  side builds for it (never a fresh constant, which would make such a contract
+  trivially satisfiable and enforce nothing). A name whose value has been
+  rebound between the `let` and the call still retires the whole fact rather
+  than being re-read at its new value, and a name that cannot be resolved
+  still drops the promise silently.
 
 - **`cap no_panic` no longer rejects a division guarded by a boolean
   condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a

@@ -7914,6 +7914,124 @@ end|}
           (skipped >= 1 || proved = 0))
   ]
 
+(* ── Postcondition composition: the RELATIONAL case ────────────────────────
+   The motivating repro from the 2026-07-29 todo.  Needs Task 1 (so `push`'s
+   own postcondition is proven at its definition), Task 2 (so the `let` seeds a
+   measure-marked scope entry) AND this task (so the entry's relational
+   predicate can be translated).  Any one alone leaves it skipped. *)
+let post_compose_relational_suite =
+  let src = {|
+mod PR do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    Node(t, x, Leaf)
+  end
+
+  fn needs_bigger(before : Tree, after : {Tree | size(_) > size(before)}) : Int do 0 end
+
+  fn go(t : Tree) : Int do
+    let r = push(t, 5)
+    needs_bigger(t, r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+  in
+  [ gated "a RELATIONAL measure postcondition composes through a let" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ; gated "REJECT CONTROL: a caller-scope name must not resolve to a FRESH const"
+      (fun () ->
+        (* If `size(t)` resolved to a fresh unconstrained constant rather than
+           the goal side's own term for `t`, the predicate would be trivially
+           satisfiable and this FALSE goal would "prove" too.  `push` makes the
+           tree bigger, never smaller, so a demand for SMALLER must not pass. *)
+        let src' = {|
+mod PR2 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    Node(t, x, Leaf)
+  end
+
+  fn needs_smaller(before : Tree, after : {Tree | size(_) < size(before)}) : Int do 0 end
+
+  fn go(t : Tree) : Int do
+    let r = push(t, 5)
+    needs_smaller(t, r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool) "a FALSE relational goal is never proved" true
+          (violated >= 1 || skipped >= 1))
+  ; gated "REJECT CONTROL: rebinding the MENTIONED name retires the fact"
+      (fun () ->
+        (* `r`'s promise mentions `t`.  Rebinding `t` between the `let` and the
+           call makes the carried `size(t)` name a value that no longer exists;
+           translating it against the NEW `t` would attribute an outer fact to
+           an inner binding — the false positive this subsystem has shipped
+           three times.  The entry must be RETIRED, i.e. the call must go back
+           to being silently skipped. *)
+        let src' = {|
+mod PR3 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    Node(t, x, Leaf)
+  end
+
+  fn needs_bigger(before : Tree, after : {Tree | size(_) > size(before)}) : Int do 0 end
+
+  fn go(t : Tree) : Int do
+    let r = push(t, 5)
+    let t = Leaf
+    needs_bigger(t, r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check int) "no violation invented" 0 violated;
+        Alcotest.(check bool) "the stale `size(t)` fact does NOT survive" true
+          (skipped >= 1))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -7972,4 +8090,5 @@ let () =
       ("caller-promise", caller_promise_suite);
       ("arm-exclusion", arm_exclusion_suite);
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
-      ("post-compose-closed", post_compose_closed_suite) ]
+      ("post-compose-closed", post_compose_closed_suite);
+      ("post-compose-relational", post_compose_relational_suite) ]
