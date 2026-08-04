@@ -3678,7 +3678,26 @@ let compile filename =
     Parses each file, collects all their declarations, and type-checks the
     combined module.  Exits 0 on success, 1 if any errors are found.
     Used by [forge build] for library projects. *)
-let run_check_cmd files =
+(* [run_check_cmd ~emit_caps files] — `march check`, and with [emit_caps] also
+   `march caps`: the PACKAGE's inferred capability set as JSON.
+
+   Package-level, not per-file, because per-file analysis does not work: most
+   files in a real package reference sibling modules and fail standalone
+   (measured: conduit 9/43, depot 14/32, forgepm 15/60), and a union over
+   whatever happened to typecheck UNDER-reports — the dangerous direction for
+   a capability record, since it certifies a package as needing less than it
+   does.  This path loads the whole package exactly as `march check` does, so
+   sibling and dependency imports resolve.
+
+   Errors are fatal even in caps mode: a package that does not typecheck has
+   no knowable capability set, and reporting a partial one would be the same
+   under-report by another route. *)
+let caps_env : March_typecheck.Typecheck.env option ref = ref None
+(* file path -> module names that file declares.  Used to keep the reported
+   capability set to the package's OWN modules. *)
+let file_modules : (string, string list) Hashtbl.t = Hashtbl.create 32
+
+let run_check_cmd ?(emit_caps = false) files =
   if files = [] then begin
     Printf.eprintf "march check: no files specified\n"; exit 1
   end;
@@ -3711,6 +3730,21 @@ let run_check_cmd files =
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
+    (* Record which modules this file declares, top-level and nested, so caps
+       mode can filter to the package's own code. *)
+    (let names = ref [ desugared.March_ast.Ast.mod_name.March_ast.Ast.txt ] in
+     let rec walk prefix decls =
+       List.iter (fun (d : March_ast.Ast.decl) ->
+           match d with
+           | March_ast.Ast.DMod (n, _, inner, _) ->
+             let q = if prefix = "" then n.March_ast.Ast.txt
+                     else prefix ^ "." ^ n.March_ast.Ast.txt in
+             names := q :: n.March_ast.Ast.txt :: !names;
+             walk q inner
+           | _ -> ()) decls
+     in
+     walk "" desugared.March_ast.Ast.mod_decls;
+     Hashtbl.replace file_modules filename !names);
     let (_resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     import_user_files := user_files @ !import_user_files;
     (* [extra_decls] (this file's auto-discovered/imported modules) must stay
@@ -3785,8 +3819,9 @@ let run_check_cmd files =
         March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
         March_ast.Ast.mod_decls = all_decls;
       } in
-      let (errs, _tm, _env) =
+      let (errs, _tm, env) =
         March_typecheck.Typecheck.check_module_core ~seed_env user_only in
+      caps_env := Some env;
       errs
     end else begin
       let combined = {
@@ -3820,8 +3855,49 @@ let run_check_cmd files =
   in
   List.iter (print_diag "warning") user_warnings;
   List.iter (print_diag "error") user_errors;
-  if user_errors <> [] then exit 1
-  else exit 0
+  if user_errors <> [] then begin
+    if emit_caps then
+      Printf.eprintf
+        "march caps: %d error(s) — a package that does not typecheck has no \
+         knowable capability set; refusing to report a partial one\n"
+        (List.length user_errors);
+    exit 1
+  end;
+  if emit_caps then begin
+    match !caps_env with
+    | None ->
+      Printf.eprintf
+        "march caps: capability closures unavailable (no-shadowing mode is \
+         required to expose the typecheck env)\n";
+      exit 1
+    | Some env ->
+      (* Keep only functions belonging to the modules the LISTED files declare.
+         Imported deps and stdlib are excluded: including them re-creates the
+         app-invariant "needs everything" union. *)
+      let own_mods = Hashtbl.create 16 in
+      List.iter (fun f ->
+          match Hashtbl.find_opt file_modules f with
+          | Some names -> List.iter (fun n -> Hashtbl.replace own_mods n ()) names
+          | None -> ())
+        files;
+      let belongs qname =
+        match String.index_opt qname '.' with
+        | None -> Hashtbl.mem own_mods qname
+        | Some i -> Hashtbl.mem own_mods (String.sub qname 0 i)
+      in
+      let caps =
+        List.concat_map
+          (fun (qname, cs) -> if belongs qname then cs else [])
+          (March_typecheck.Typecheck.fn_own_capability_closures env)
+        |> List.sort_uniq String.compare
+        |> March_caps.Cap_lattice.normalize
+        |> List.sort String.compare
+      in
+      Printf.printf "{\"caps\":[%s]}\n"
+        (String.concat "," (List.map (Printf.sprintf "%S") caps));
+      exit 0
+  end;
+  exit 0
 
 (* ── Phase 10: GC trace analyser ────────────────────────────────────── *)
 (*
@@ -3967,6 +4043,12 @@ let () =
   if Array.length argv >= 2 && argv.(1) = "check" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_check_cmd rest
+  end;
+  (* `march caps <files...>` — the package's inferred capability set as JSON.
+     Same loading path as `check` so sibling/dependency imports resolve. *)
+  if Array.length argv >= 2 && argv.(1) = "caps" then begin
+    let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    run_check_cmd ~emit_caps:true rest
   end;
   if Array.length argv >= 2 && argv.(1) = "test" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in

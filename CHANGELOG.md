@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`march caps <files...>`: a package's inferred capability set as JSON.**
+  Loads the whole package the way `march check` does, so sibling and
+  dependency imports resolve. Package-level rather than per-file because
+  per-file does not work — most files in a real package reference siblings and
+  fail standalone, and a union over whatever happened to typecheck
+  *under*-reports, which for a capability record certifies a package as
+  needing less than it does. A package that does not typecheck yields no set
+  at all and a nonzero exit, rather than a partial one.
+
 - **`forge refine --postconditions`, `--apply`, and an editor action complete
   the postcondition half.** The compiler surface shipped previously; this adds
   the two surfaces people actually reach for. `--apply` rewrites the *return*
