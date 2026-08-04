@@ -43,8 +43,13 @@ let rec needs_in_decls (decls : A.decl list) : string list =
   List.concat_map
     (function
       | A.DNeeds (paths, _) ->
+        (* Render the scope into the reported string: a dependency narrowed to
+           IO.FileRead("/etc/app") must not audit identically to one that reads
+           anywhere, and the baseline diff compares these strings. *)
         List.map
-          (fun path -> String.concat "." (List.map (fun (n : A.name) -> n.A.txt) path))
+          (fun (path, scope) ->
+             let p = String.concat "." (List.map (fun (n : A.name) -> n.A.txt) path) in
+             match scope with None -> p | Some sc -> Printf.sprintf "%s(%s)" p sc)
           paths
       | A.DMod (_, _, inner, _) -> needs_in_decls inner
       | _ -> [])

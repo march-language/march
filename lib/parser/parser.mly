@@ -774,10 +774,18 @@ upper_dot_path:
   | name = upper_name; DOT; rest = upper_dot_path { name :: rest }
 
 (** Capability manifest: needs IO.Network, IO.Clock
-    Each path is a dot-separated sequence of uppercase names stored as a name list. *)
+    Each path is a dot-separated sequence of uppercase names stored as a name
+    list, optionally followed by a PATH SCOPE:  needs IO.FileRead("/etc/app").
+    A scope narrows the capability to that directory subtree; its absence means
+    any path.  Only filesystem capabilities accept one — the typechecker
+    rejects a scope elsewhere rather than ignoring it. *)
 needs_decl:
-  | NEEDS; caps = separated_nonempty_list(COMMA, cap_path)
+  | NEEDS; caps = separated_nonempty_list(COMMA, scoped_cap_path)
     { DNeeds (caps, mk_span ($loc)) }
+
+scoped_cap_path:
+  | p = cap_path { (p, None) }
+  | p = cap_path; LPAREN; s = STRING; RPAREN { (p, Some s) }
 
 cap_path:
   | id = upper_name { [id] }

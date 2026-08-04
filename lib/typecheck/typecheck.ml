@@ -553,6 +553,13 @@ type env = {
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
   mod_needs  : string list;
   (** Capabilities declared via [needs] in the current module scope, as dot-joined paths *)
+  mod_need_scopes : (string * string option) list;
+  (** Those same declarations paired with their optional PATH SCOPE, from
+      [needs IO.FileRead("/etc/app")].  Parallel to [mod_needs], which keeps
+      the bare paths every existing consumer reads, so nothing that treats a
+      capability as a plain string is disturbed.  [None] means unscoped.
+      A capability declared twice contributes one entry per scope, so
+      [needs IO.FileRead("/a"), IO.FileRead("/b")] permits both subtrees. *)
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
@@ -775,7 +782,7 @@ let make_env errors type_map = {
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
-  mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
+  mod_needs = []; mod_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   import_idx = make_import_index ();
   local_fns = StrMap.empty;
@@ -7876,7 +7883,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     else cap_qname_prefix ^ "." ^ leaf_name
   in
   let declared_needs = List.concat_map (function
-    | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
+    | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []
   ) decls in
   (* Per-function inferred IO-capability closure (Phase5C-A.2): attributes the
@@ -8099,7 +8106,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let rec find_span = function
         | [] -> mod_name.span
         | Ast.DNeeds (caps, s) :: _
-          when List.exists (fun names -> cap_path_of_names names = need) caps -> s
+          when List.exists (fun (names, _) -> cap_path_of_names names = need) caps -> s
         | _ :: rest -> find_span rest
       in
       find_span decls
@@ -9368,7 +9375,7 @@ let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list
            mod_name edef.Ast.ext_lib_name no_extern_suggestion)
     | Ast.DNeeds (caps, sp) ->
       (* Check if any capability path starts with "IO" and contains "Foreign" *)
-      let has_foreign = List.exists (fun path ->
+      let has_foreign = List.exists (fun (path, _scope) ->
         match path with
         | first :: rest ->
           first.Ast.txt = "IO" &&
@@ -9836,7 +9843,7 @@ let rec check_decl env (d : Ast.decl) : env =
       ) new_ctors StrMap.empty in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
-        | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
+        | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
         | _ -> []) decls in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
@@ -10403,10 +10410,12 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DNeeds (caps, _sp) ->
     (* Record declared capability paths in env for DMod validation.
        Each path is a list of names e.g. ["IO"; "Network"] → "IO.Network" *)
-    let paths = List.map (fun names ->
-        String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
+    let scoped = List.map (fun (names, scope) ->
+        (String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names), scope)
       ) caps in
-    { env with mod_needs = paths @ env.mod_needs }
+    let paths = List.map fst scoped in
+    { env with mod_needs = paths @ env.mod_needs;
+               mod_need_scopes = scoped @ env.mod_need_scopes }
 
   | Ast.DProofCap (name, _sp) ->
     (* Register proof cap: full qualified path → declaring module name.
