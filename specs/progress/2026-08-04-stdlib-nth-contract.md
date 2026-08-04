@@ -59,12 +59,46 @@ in the stdlib is the worst possible outcome for this feature's adoption.
 **Decision: proceed.** Zero new violations, no genuine bug to fix, no false
 positive to report.
 
+### `proved 1895 → 1895` is not a verdict on the contract
+
+That number says the stdlib's `nth` call sites are all loop arithmetic the
+solver cannot see. It says nothing about the contract's power, and reading it
+as "the contract is decorative" would be wrong. Independently confirmed during
+review: the obligation is discharged by a runtime guard
+(`if i >= 0 && i < List.length(xs) do List.nth(xs, i) …`), by a `match` arm
+that narrows the index, and by caller-side contract composition — the same
+three mechanisms that discharge `{List(a) | len(_) > 0}`. Twelve adversarial
+shapes were probed for false positives; none fired.
+
+### `cap verified` is the one mode where this is not silent
+
+In the default mode an unbounded index is skipped and silent. Under
+`cap verified` — whose entire premise is that every obligation is discharged —
+it is now a hard **error** where it compiled clean before:
+
+```
+`cap verified` module: cannot verify precondition `_ >= 0 && _ < len(xs)`
+on `List.nth` (solver-undecided: ...)
+```
+
+No stdlib module and none of the four sampled projects declare `cap verified`,
+and all 13 pre-existing contracts behave identically in that mode, so this is
+in-kind rather than novel. Worth stating anyway: the day anyone adds
+`cap verified` to forgepm's `totp.march`, its SHA-1 core produces 14 such
+errors at once.
+
 ## Witnesses
 
-- `test/test_refinecheck.ml`, suite `stdlib-nth-contract` — in-range proves;
+- `test/test_refinecheck.ml`, suite `stdlib-nth-contract` — in-range **proves**
+  (`proved >= 1`, not merely "no error": silence is what an absent contract
+  produces too, so only the ledger can tell a proof from a vacuum);
   `List.nth([1,2,3], 7)` and `List.nth([1,2,3], -1)` are violations; and an
-  **unknown** index is silent. That fourth case is the false-positive guard and
-  is the assertion that matters most. The fixtures restate the `nth` signature
+  **unknown** index is silent *because the obligation was raised and then
+  SKIPPED* (`skipped >= 1`), not because no obligation exists. That fourth case
+  is the false-positive guard and is the assertion that matters most — and
+  asserting only silence would have let it stay green if `List.nth`'s
+  obligation vanished entirely, the precise regression the definite-failure
+  stance exists to prevent. The fixtures restate the `nth` signature
   inline as a nested `mod List`, because this harness checks a single parsed
   string and — unlike `bin/main.ml` — does not prepend the stdlib; a bare
   `List.nth(…)` would resolve to nothing and all four cases would pass
@@ -79,9 +113,12 @@ positive to report.
 
 Reverting the parameter to a bare `n : Int`:
 
-- in `test/test_refinecheck.ml`'s fixture → suite cases 1 and 2 (the two
-  violation controls) go **red**; cases 0 and 3 stay green, as they must —
-  "no error, 0 violated" is exactly what an absent contract also produces.
+- in `test/test_refinecheck.ml`'s fixture → **all four** cases go red. The two
+  violation controls fail on the verdict; the in-range and unknown-index cases
+  fail on the ledger (`proved >= 1`, `skipped >= 1`). Those two ledger
+  assertions were added after review: as first written they asserted only
+  silence, which an absent contract satisfies just as well, so they could not
+  fail at all.
 - in `stdlib/list.march` → `reject/t142` exits **0 with zero bytes of
   diagnostic output**, i.e. the corpus witness dies.
 

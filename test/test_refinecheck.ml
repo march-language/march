@@ -8113,8 +8113,13 @@ let stdlib_nth_contract_suite =
             \  fn main() : Int do go() end"
         in
         Alcotest.(check bool) "no error" false (has_refine_error_d src);
-        let _, violated, _ = March_refinecheck.Obligation.summary () in
-        Alcotest.(check int) "violated" 0 violated)
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        (* Silence is NOT the assertion: "no error, 0 violated" holds just as
+           well if the contract were absent, if `List.nth` resolved to nothing,
+           or if the obligation were never created.  Only the LEDGER can tell
+           a proof from a vacuum. *)
+        Alcotest.(check bool) "proved" true (proved >= 1))
   ; gated "REJECT CONTROL: a provably out-of-range index is a violation"
       (fun () ->
         March_refinecheck.Obligation.reset ();
@@ -8147,8 +8152,14 @@ let stdlib_nth_contract_suite =
             \  fn main() : Int do go([1], 0) end"
         in
         Alcotest.(check bool) "no error" false (has_refine_error_d src);
-        let _, violated, _ = March_refinecheck.Obligation.summary () in
-        Alcotest.(check int) "violated" 0 violated)
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        (* And it must be silent because the obligation was RAISED and then
+           SKIPPED — not because no obligation exists.  Without this the case
+           stays green if `List.nth`'s contract vanishes entirely, which is the
+           precise regression the definite-failure stance exists to prevent. *)
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool) "skipped" true (skipped >= 1))
   ]
 
 let () =

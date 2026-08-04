@@ -112,8 +112,13 @@ git log is authoritative for exact commits.
   at all — so a *provably* out-of-range index compiled in silence. It is now a
   compile error: `List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are
   reported. This can turn previously-silent code into an error, which is why it
-  is listed here and not under Fixed. An index the checker cannot bound stays
-  skipped and silent, as March reports only definite failures; a blast-radius
+  is listed here and not under Fixed. In the default mode an index the checker
+  cannot bound stays skipped and silent, as March reports only definite
+  failures — but under `cap verified`, whose premise is that every obligation
+  is discharged, such an index is now a hard error where it previously compiled
+  clean. That is in-kind with all 13 pre-existing stdlib contracts rather than
+  novel, and no stdlib module or sampled project uses `cap verified`. A
+  blast-radius
   sweep taken before the change (all 112 stdlib modules plus the `forgepm`,
   `bastion`, `conduit` and `depot` projects) found **zero** new violations and
   only new skips. `List.nth_opt` remains the unconditional alternative.
