@@ -5483,11 +5483,20 @@ end|}
         Alcotest.(check bool)
           "stays general (solver-undecided)" true
           (contains msg "solver-undecided"));
-    gated "a FREE occurrence under a non-colliding binder still attributes"
+    gated "a FREE occurrence under a non-colliding binder is a free MENTION, but entails nothing"
       (fun () ->
-        (* The companion pin: `q > n` inside the lambda is a genuine free use
-           of the laundered length, so the attribution must still fire — the
-           free-occurrence fix must not over-retire. *)
+        (* Originally pinned as "the attribution must still fire" — `q > n`
+           inside the lambda IS a genuine free use of the laundered length
+           (the free-occurrence walk correctly does not stop at the
+           non-colliding `q` binder), so before Task 5 this counted as
+           evidence on its own.  It should not have: `q > n` says nothing
+           about `n`'s sign — `q` is an arbitrary value from an opaque
+           higher-order call, so this guard could never discharge
+           `len(ys) > 0` whether or not the alias was withdrawn.  Task 5's
+           entailment conjunct correctly reclassifies this as undecided
+           (kept general) rather than misattributing it — the free-occurrence
+           coverage itself is still exercised by this fixture, just no longer
+           conflated with "therefore it discharged". *)
         let msg =
           refine_error_text_d
             {|mod LA8 do
@@ -5507,11 +5516,11 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "does not blame the solver" false
-          (contains msg "solver-undecided");
+          "no longer misattributed to the withdrawal" false
+          (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "names the withdrawn spelling" true
-          (contains msg "List.length"));
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
     gated "a laundered guard on a DIFFERENT collection is not this guard"
       (fun () ->
         (* The laundered analogue of the WA control: the walk must consult
@@ -5759,7 +5768,62 @@ end|}
         in
         Alcotest.(check bool)
           "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"))
+          (contains msg "solver-undecided"));
+    gated "LA14: a guard that could never discharge is NOT blamed on the withdrawal"
+      (fun () ->
+        (* `List.length(ys) >= 0` is a tautology over a non-negative measure; it
+           proves nothing about the goal `len(ys) > 0`, so this call is skipped
+           whether or not the alias was withdrawn.  Blaming the withdrawal sends
+           the author to fix a competing `List.length` definition that was never
+           the cause — the same nested-`mod List` withdrawal LA1..LA13 already
+           use, so this isolates exactly the entailment gap and nothing else. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA14 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) >= 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not claim the withdrawal caused this" false
+          (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "LA15: CONTROL — a guard that WOULD have discharged is still blamed"
+      (fun () ->
+        (* The discrimination must be real: `List.length(ys) > 0` is exactly the
+           goal, so here the withdrawal genuinely IS why the call is skipped,
+           and the message must still say so.  Without this control, LA14
+           would pass by disabling the attribution entirely. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA15 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "still attributes to the withdrawal" true
+          (contains msg "alias-withdrawn"))
   ]
 
 (* ── Composing a LIST contract across a call boundary ───────────────────────

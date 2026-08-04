@@ -157,6 +157,19 @@ git log is authoritative for exact commits.
   array is never mutated out from under its alias. This is the same FBIP
   in-place-at-unique-ownership story March already applies to ADT reuse.
   Compiled-only (the interpreter uses a different NativeArray backend).
+- **A skipped obligation no longer blames a withdrawn `List.length`/
+  `String.byte_size` alias unless the guard would actually have discharged
+  it.** `if List.length(ys) >= 0 do head(ys) …` used to report `reason:
+  alias-withdrawn` — sending the author to rename an unrelated competing
+  `List.length` definition — even though `len(ys) >= 0` is a tautology that
+  proves nothing about the goal `len(ys) > 0`: the call is skipped whether or
+  not the alias was withdrawn. The attribution now requires the guard's own
+  comparison to syntactically entail the obligation's predicate (an
+  interval-subset check over `==`/`!=`/`<`/`<=`/`>`/`>=`); where entailment
+  can't be decided, the honest `solver-undecided` message is kept instead.
+  The verdict is unaffected — still `Skipped` either way — only the reason
+  string changes.
+
 - **A refined ADT return on a constructor-literal body is now actually
   checked.** `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
   Node(t, x, Leaf) end` — the simplest possible case, needing no induction at

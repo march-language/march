@@ -2965,6 +2965,31 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
    non-variable actual, or established in a caller, falls back to the general
    message.  That is the right trade — this reason exists to explain one
    specific confusion, not to claim every skip. *)
+(* ── Condition 5: the guard, read as a fact, must ENTAIL the predicate ─────
+   Condition 3 (below, [guard_applies]) only asks whether the guard applies
+   the withdrawn spelling to this obligation's own subject — not whether it
+   would have PROVED the goal.  `List.length(ys) >= 0` applies the spelling
+   to `ys` exactly as `List.length(ys) > 0` does, but it is a tautology over
+   a non-negative measure: it entails nothing about the goal `len(ys) > 0`,
+   so that call is skipped with or without the withdrawal.  Blaming the
+   withdrawal there sends the author to fix an import that was never the
+   cause — the harm this conjunct exists to prevent.
+
+   The check is a small syntactic interval-entailment over `==`/`!=`/`<`/
+   `<=`/`>`/`>=` against an integer literal, modeled on
+   [Division_safety.path_proves_nonzero]'s `dual`/`flip`/`proves` shape
+   (extended there to boolean connectives): normalise both sides to `X op n`
+   with `X` the measure application (or, laundered, the name it was bound
+   to), read each as a half-open/closed interval of integers, and ask
+   whether the guard's interval is a SUBSET of the predicate's.  `!=` is not
+   convex — no single interval represents "everything but n" — so it never
+   entails anything here; that is a missed proof, not a wrong one.
+
+   Where the shapes do not match this pattern at all (anything but a single
+   comparison against a literal on one side), entailment is UNDECIDED, and
+   per the fail-closed stance of this whole function, undecided means "do
+   not blame the withdrawal" — a generic `solver-undecided` message is a
+   smaller error than sending the author to fix an unrelated import. *)
 let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
     ~(subject_is_str : bool) ~(path : (A.expr * bool) list) ~(lets : launder)
     (r : Obligation.reason) : withdrawal option =
@@ -2983,12 +3008,170 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
              expr_mentions_free m cond && expr_applies_to_free w.wd_spelling sn.A.txt rhs)
            lets
     in
+    (* `a op b` <=> `b (flipped op) a` — used to normalise to `X op n`.  (No
+       `dual`/negation step is needed here, unlike
+       [Division_safety.path_proves_nonzero]: the caller below already
+       filters to a POSITIVE path entry before [guard_discharges] runs — see
+       condition 3's own "NEGATED guard" tests — so [cond] is always a fact
+       read at face value, never one that needs de-negating first.) *)
+    let flip = function
+      | "<" -> ">" | ">" -> "<" | "<=" -> ">=" | ">=" -> "<="
+      | op -> op (* == and != are symmetric *)
+    in
+    (* `X op n`, read as a closed-or-half-open integer interval.  [None] for
+       either bound means unbounded on that side; [None] for the whole thing
+       means "not a convex interval" (only `!=`). *)
+    let interval_of op n : (int option * int option) option =
+      match op with
+      | ">"  -> Some (Some (n + 1), None)
+      | ">=" -> Some (Some n, None)
+      | "<"  -> Some (None, Some (n - 1))
+      | "<=" -> Some (None, Some n)
+      | "==" -> Some (Some n, Some n)
+      | _ -> None
+    in
+    let interval_subset (lo1, hi1) (lo2, hi2) =
+      let lo_ok =
+        match lo2 with
+        | None -> true
+        | Some l2 -> (match lo1 with Some l1 -> l1 >= l2 | None -> false)
+      in
+      let hi_ok =
+        match hi2 with
+        | None -> true
+        | Some h2 -> (match hi1 with Some h1 -> h1 <= h2 | None -> false)
+      in
+      lo_ok && hi_ok
+    in
+    (* Is [e] the predicate's own measure application (`len(_)`, `len(xs)`,
+       …)?  Any application of the withdrawn measure name suffices — a
+       parameter predicate has exactly one subject to measure. *)
+    let is_measured_pred (w : withdrawal) (e : A.expr) : bool =
+      match e with A.EApp (A.EVar n, _, _) -> n.A.txt = w.wd_measure | _ -> false
+    in
+    (* Read [pred] itself as `measure(subject) op n`.  Computed once per
+       withdrawal candidate — [pred] does not vary with [cond]. *)
+    let atomic_cmp (is_subject : A.expr -> bool) (e : A.expr) : (string * int) option =
+      match e with
+      | A.EApp (A.EVar op0, [ a; b ], _)
+        when List.mem op0.A.txt [ "=="; "!="; "<"; "<="; ">"; ">=" ] -> (
+        match b with
+        | A.ELit (A.LitInt n, _) when is_subject a -> Some (op0.A.txt, n)
+        | _ -> (
+          match a with
+          | A.ELit (A.LitInt n, _) when is_subject b -> Some (flip op0.A.txt, n)
+          | _ -> None))
+      | _ -> None
+    in
+    (* Does some subterm of [e] compare the withdrawn measure applied to the
+       FREE subject against a literal, in a way that ENTAILS `(op2, n2)`
+       (already known to be [pred]'s own comparison)?  Mirrors
+       [expr_applies_to_free]'s shadow-respecting descent exactly — same
+       cases, same shadowing rules — because this is asking the same
+       question ("does the withdrawn spelling apply to the free subject
+       somewhere in here") plus one more thing: not just THAT it applies, but
+       WHAT the surrounding comparison says.  A guard buried inside an opaque
+       call (`check(fn q -> List.length(ys) > 0, zs)`) still has a genuine,
+       entailing comparison at that free position — nesting inside a call
+       this pass cannot otherwise reason about must not by itself defeat
+       entailment, or a case [guard_applies] already accepted (companion
+       control, "a FREE occurrence … still attributes") would regress.  A
+       lambda parameter that collides with the subject's name still closes
+       off descent into that lambda's body, exactly as [expr_applies_to_free]
+       already does — that is the discipline probe PE pinned, and this walk
+       must not reopen it. *)
+    let rec exists_discharging (w : withdrawal) (op2, n2) (e : A.expr) : bool =
+      let recur = exists_discharging w (op2, n2) in
+      let any = List.exists recur in
+      let binds ps = List.mem sn.A.txt ps in
+      let pbinds ps = List.exists (fun (p : A.param) -> p.A.param_name.A.txt = sn.A.txt) ps in
+      let is_subject e =
+        match e with
+        | A.EApp (A.EVar n, args, _) ->
+          n.A.txt = w.wd_spelling
+          && List.exists (function A.EVar v -> v.A.txt = sn.A.txt | _ -> false) args
+        | A.EVar { A.txt = m; _ } -> (
+          match List.assoc_opt m lets with
+          | Some (A.EApp (A.EVar n, args, _)) ->
+            n.A.txt = w.wd_spelling
+            && List.exists (function A.EVar v -> v.A.txt = sn.A.txt | _ -> false) args
+          | _ -> false)
+        | _ -> false
+      in
+      let cmp_here =
+        match atomic_cmp is_subject e with
+        | Some (op1, n1) -> (
+          match (interval_of op1 n1, interval_of op2 n2) with
+          | Some i1, Some i2 -> interval_subset i1 i2
+          | _ -> false)
+        | None -> false
+      in
+      cmp_here
+      ||
+      match e with
+      | A.EVar _ -> false
+      | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+      | A.EApp (f, args, _) -> recur f || any args
+      | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+      | A.ELam (ps, body, _) -> if pbinds ps then false else recur body
+      | A.EBlock (es, _) ->
+        let rec go = function
+          | [] -> false
+          | e :: rest ->
+            recur e
+            ||
+            (match e with
+             | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
+             | A.ELetFn (n, _, _, _, _) when n.A.txt = sn.A.txt -> false
+             | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+             | _ -> go rest)
+        in
+        go es
+      | A.ELet (b, _) -> recur b.A.bind_expr
+      | A.ELetFn (n, ps, _, body, _) ->
+        if n.A.txt = sn.A.txt || pbinds ps then false else recur body
+      | A.ELetQ (p, e1, e2, _) -> recur e1 || (if binds (pat_binders p) then false else recur e2)
+      | A.EMatch (subj, brs, _) ->
+        recur subj
+        || List.exists
+             (fun (br : A.branch) ->
+               if binds (pat_binders br.A.branch_pat) then false
+               else
+                 (match br.A.branch_guard with Some g -> recur g | None -> false)
+                 || recur br.A.branch_body)
+             brs
+      | A.ERecord (fs, _) -> List.exists (fun (_, v) -> recur v) fs
+      | A.ERecordUpdate (r, fs, _) -> recur r || List.exists (fun (_, v) -> recur v) fs
+      | A.EField (r, _, _) -> recur r
+      | A.EIf (c, t, el, _) -> any [ c; t; el ]
+      | A.ECond (arms, _) -> List.exists (fun (c, b) -> recur c || recur b) arms
+      | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
+      | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+      | A.EDbg (Some e, _) -> recur e
+    in
+    (* Does the guard fact [cond] — already known to apply [w]'s spelling to
+       this subject, and already filtered to a POSITIVE path entry by the
+       caller below — actually ENTAIL [pred]?  The laundered spelling (`if n
+       > 0 …` after `let n = List.length(ys)`) is handled by substituting the
+       laundering name's bound expression in wherever [cond] free-mentions
+       it, one hop only — mirroring [guard_applies]'s own laundered arm. *)
+    let guard_discharges (w : withdrawal) (cond : A.expr) : bool =
+      match atomic_cmp (is_measured_pred w) pred with
+      | None -> false
+      | Some (op2, n2) ->
+        exists_discharging w (op2, n2) cond
+        || List.exists
+             (fun (m, rhs) ->
+               expr_mentions_free m cond && exists_discharging w (op2, n2) rhs)
+             lets
+    in
     List.find_opt
       (fun w ->
         w.wd_str = subject_is_str
         && expr_applies w.wd_measure pred
         && List.exists
-             (fun (cond, negated) -> (not negated) && guard_applies w cond)
+             (fun (cond, negated) ->
+               (not negated) && guard_applies w cond && guard_discharges w cond)
              path)
       !withdrawals
   (* A non-variable actual (`head(f(xs))`) carries no name a guard could be
