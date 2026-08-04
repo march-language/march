@@ -225,14 +225,15 @@ let compile_sandboxed src_text out_bin =
          compiler_exe (Filename.quote out_bin) (Filename.quote src)
          (Filename.quote log))
   in
-  if rc <> 0 then begin
-    let ic = open_in log in
-    let tail = really_input_string ic (in_channel_length ic) in
-    close_in ic;
-    Alcotest.failf "--cap-sandbox compile failed (rc=%d):\n%s" rc tail
-  end;
+  let ic = open_in log in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
   Sys.remove src;
-  Sys.remove log
+  Sys.remove log;
+  (* Return the exit code rather than failing here, so each platform can
+     assert the behaviour that is correct FOR IT: macOS embeds a profile,
+     Linux rejects the flag outright. *)
+  (rc, out)
 
 let sb_net_src =
   {|
@@ -247,31 +248,58 @@ mod SbNetApp do
 end
 |}
 
+(* On Linux the #else runtime branch compiles, so MARCH_CAP_PROFILE is never
+   REFERENCED and the profile string never lands in the binary — the
+   macOS-shaped assertions below do not apply there.  Chasing that difference
+   is what surfaced the real bug: --cap-sandbox used to be accepted on Linux
+   and produced a binary that exits 70 on first run, with no warning at build
+   time. *)
+let is_macos = Sys.file_exists "/usr/lib/dyld"
+
 let test_cap_sandbox_profile_is_module_specific () =
   let pure_bin = Filename.temp_file "sb_pure" ".bin" in
   let net_bin = Filename.temp_file "sb_net" ".bin" in
-  compile_sandboxed pure_src pure_bin;
-  compile_sandboxed sb_net_src net_bin;
-  Alcotest.(check bool) "pure binary embeds a deny-default profile" true
-    (binary_contains pure_bin "deny default");
-  Alcotest.(check bool) "net binary embeds a deny-default profile" true
-    (binary_contains net_bin "deny default");
-  (* The discriminating assertion: a pure program must NOT be granted
-     network, or the profile is the app-invariant union. *)
-  Alcotest.(check bool) "pure binary is NOT granted network" false
-    (binary_contains pure_bin "allow network");
-  Alcotest.(check bool) "net binary IS granted network" true
-    (binary_contains net_bin "allow network");
-  (* And both must still run: a sandbox that breaks the program is not
-     enforcement. *)
-  let rc_p, out_p = run_capture pure_bin in
-  Alcotest.(check int) "sandboxed pure program exits 0" 0 rc_p;
-  Alcotest.(check string) "sandboxed pure program still prints" "2\n" out_p;
-  let rc_n, out_n = run_capture net_bin in
-  Alcotest.(check int) "sandboxed net program exits 0" 0 rc_n;
-  Alcotest.(check string) "granted network still binds" "BOUND\n" out_n;
-  Sys.remove pure_bin;
-  Sys.remove net_bin
+  let rc_p, out_p = compile_sandboxed pure_src pure_bin in
+  if not is_macos then begin
+    (* Linux: the compiler must REJECT the flag rather than emit a binary
+       that cannot start. *)
+    Alcotest.(check bool) "--cap-sandbox is rejected at compile time" true
+      (rc_p <> 0);
+    Alcotest.(check bool) "the rejection names the external alternative" true
+      (let re = Str.regexp_string "forge cap run" in
+       try
+         ignore (Str.search_forward re out_p 0);
+         true
+       with Not_found -> false)
+  end
+  else begin
+    if rc_p <> 0 then
+      Alcotest.failf "--cap-sandbox compile failed (rc=%d):\n%s" rc_p out_p;
+    let rc_n, out_n_log = compile_sandboxed sb_net_src net_bin in
+    if rc_n <> 0 then
+      Alcotest.failf "--cap-sandbox compile failed (rc=%d):\n%s" rc_n out_n_log;
+    Alcotest.(check bool) "pure binary embeds a deny-default profile" true
+      (binary_contains pure_bin "deny default");
+    Alcotest.(check bool) "net binary embeds a deny-default profile" true
+      (binary_contains net_bin "deny default");
+    (* The discriminating assertion: a pure program must NOT be granted
+       network, or the profile is the app-invariant union. *)
+    Alcotest.(check bool) "pure binary is NOT granted network" false
+      (binary_contains pure_bin "allow network");
+    Alcotest.(check bool) "net binary IS granted network" true
+      (binary_contains net_bin "allow network");
+    (* And both must still run: a sandbox that breaks the program is not
+       enforcement. *)
+    let rc_run_p, out_run_p = run_capture pure_bin in
+    Alcotest.(check int) "sandboxed pure program exits 0" 0 rc_run_p;
+    Alcotest.(check string) "sandboxed pure program still prints" "2\n"
+      out_run_p;
+    let rc_run_n, out_run_n = run_capture net_bin in
+    Alcotest.(check int) "sandboxed net program exits 0" 0 rc_run_n;
+    Alcotest.(check string) "granted network still binds" "BOUND\n" out_run_n;
+    (try Sys.remove net_bin with Sys_error _ -> ())
+  end;
+  (try Sys.remove pure_bin with Sys_error _ -> ())
 
 let tests =
   tests

@@ -3063,6 +3063,21 @@ let compile filename =
                  Baseline mirrors forge/lib/cap_sandbox.ml's sbpl_baseline;
                  the two are kept in step by test/test_cap_sandbox_profile.ml. *)
               if not !cap_sandbox then ""
+              else if link_is_linux then begin
+                (* Fail at COMPILE time rather than emitting a binary that
+                   exits 70 on first run.  The Linux runtime branch refuses
+                   (self-sandboxing needs in-process seccomp-bpf, which is
+                   not implemented), so accepting the flag here would hand
+                   the user a binary that cannot start — with no warning
+                   until they run it. *)
+                Printf.eprintf
+                  "march: --cap-sandbox is not supported for Linux targets \
+                   (self-imposed sandboxing needs in-process seccomp-bpf, \
+                   not yet implemented).\n\
+                   \  Use `forge cap run --allow-only <caps> <binary>` for \
+                   external enforcement, which is stronger anyway.\n";
+                exit 2
+              end
               else begin
                 (* Filter to THIS module's own functions.  Using the whole
                    closure table unions in every linked stdlib function and
