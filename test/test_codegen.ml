@@ -9140,6 +9140,7 @@ let test_guard_exhaustion_panics_compiled () =
   let project_root = march_project_root () in
   let src_text =
     "mod GuardEx do\n\
+    \  needs IO.Console\n\
     \  fn classify(n) do\n\
     \    match n do\n\
     \      x when x > 0 -> \"pos\"\n\
@@ -9229,6 +9230,7 @@ let write_march_source ~name src_text =
 let test_float_lit_match_arm_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat"
     "mod FloatPat do\n\
+    \  needs IO.Console\n\
     \  fn name(x) do\n\
     \    match x do\n\
     \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\" | _ -> \"other\"\n\
@@ -9272,6 +9274,7 @@ let test_float_lit_match_arm_compiled () =
    this program (the mis-lowering's fingerprint), and the binary must run. *)
 let unit_tail_discard_src =
   "mod UnitTail do\n\
+    \  needs IO.Console\n\
   \  fn f(a) do\n\
   \    let _ = a\n\
   \    ()\n\
@@ -9328,6 +9331,7 @@ let test_unit_tail_discard_runs_compiled () =
    rather than at the source line, so assert on a clean compile-and-run. *)
 let unit_tail_literal_discard_src =
   "mod UnitTailLit do\n\
+    \  needs IO.Console\n\
   \  fn f() do\n\
   \    let _ = 1\n\
   \    ()\n\
@@ -9368,6 +9372,7 @@ let test_unit_tail_literal_discard_runs_compiled () =
 let test_float_lit_no_wildcard_panics_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat_nowild"
     "mod FloatPatNoWild do\n\
+    \  needs IO.Console\n\
     \  fn name(x) do\n\
     \    match x do\n\
     \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\"\n\
@@ -9434,6 +9439,7 @@ let test_float_lit_no_wildcard_panics_compiled () =
 let test_string_literal_operand_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_strlitleak"
     "mod StrLitLeak do\n\
+    \  needs IO.Console\n\
     \  needs Ffi\n\
     \  needs IO.Foreign\n\
     \  extern \"m\" : Cap(Ffi) do\n\
@@ -9492,6 +9498,7 @@ let test_string_literal_operand_no_leak_compiled () =
 let test_static_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_staticcloleak"
     "mod StaticCloLeak do\n\
+    \  needs IO.Console\n\
     \  needs Ffi\n\
     \  needs IO.Foreign\n\
     \  extern \"m\" : Cap(Ffi) do\n\
@@ -9549,6 +9556,7 @@ let test_static_closure_materialization_no_leak_compiled () =
 let test_lambda_static_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_lambdacloleak"
     "mod LambdaCloLeak do\n\
+    \  needs IO.Console\n\
     \  needs Ffi\n\
     \  needs IO.Foreign\n\
     \  extern \"m\" : Cap(Ffi) do\n\
@@ -9607,6 +9615,7 @@ let test_lambda_static_closure_materialization_no_leak_compiled () =
 let test_capturing_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_capcloleak"
     "mod CapCloLeak do\n\
+    \  needs IO.Console\n\
     \  needs Ffi\n\
     \  needs IO.Foreign\n\
     \  extern \"m\" : Cap(Ffi) do\n\
@@ -9678,6 +9687,7 @@ let test_capturing_closure_materialization_no_leak_compiled () =
 let test_self_recursive_capturing_closure_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccap"
     "mod SelfRecCap do\n\
+    \  needs IO.Console\n\
     \  needs Ffi\n\
     \  needs IO.Foreign\n\
     \  extern \"m\" : Cap(Ffi) do\n\
@@ -9728,6 +9738,7 @@ let test_self_recursive_capturing_closure_no_leak_compiled () =
 let test_self_recursive_capturing_closure_correct_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccapcorrect"
     "mod SelfRecCapCorrect do\n\
+    \  needs IO.Console\n\
     \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
     \  fn outer(k : Int, n : Int) : Int do\n\
     \    fn helper(x : Int) : Int do\n\
@@ -9796,6 +9807,7 @@ let test_self_recursive_capturing_closure_correct_compiled () =
 let test_try_call_single_capture_no_double_free_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallcap"
     "mod TryCallCap do\n\
+    \  needs IO.Console\n\
     \  fn main() : Unit do\n\
     \    let threshold = 5\n\
     \    match __try_call(fn _ -> threshold > 0) do\n\
@@ -9822,6 +9834,7 @@ let test_try_call_single_capture_no_double_free_compiled () =
 let test_try_call_val_single_capture_no_double_free_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallvalcap"
     "mod TryCallValCap do\n\
+    \  needs IO.Console\n\
     \  fn main() : Unit do\n\
     \    let base = \"hi\"\n\
     \    match __try_call_val(fn _ -> base ++ \"!\") do\n\
@@ -9850,6 +9863,7 @@ let test_try_call_val_single_capture_no_double_free_compiled () =
 let test_try_call_panic_with_capture_no_double_free_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallpanic"
     "mod TryCallPanic do\n\
+    \  needs IO.Console\n\
     \  fn main() : Unit do\n\
     \    let label = \"boom\"\n\
     \    match __try_call(fn _ -> panic(label)) do\n\
@@ -9896,6 +9910,7 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
 let test_native_array_map_reused_capturing_closure_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrmapcap"
     "mod ArrMapCap do\n\
+    \  needs IO.Console\n\
     \  fn main() : Unit do\n\
     \    let k = 7\n\
     \    let closure = fn x -> x + k\n\
@@ -9937,6 +9952,7 @@ let test_native_array_map_reused_capturing_closure_compiled () =
 let test_blocking_ffi_pool_reuses_threads_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_blkpool"
     "mod BlkPool do\n\
+    \  needs IO.Console\n\
     \  needs IO\n\
     \  extern \"march\" : Cap(IO.Foreign) do\n\
     \    blocking fn nap(us : Int) : Int = \"march_test_blocking_nap\"\n\
@@ -9992,6 +10008,7 @@ let test_blocking_ffi_pool_reuses_threads_compiled () =
 let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_sigwatchcap"
     "mod SigWatchCap do\n\
+    \  needs IO.Console\n\
     \  fn main() do\n\
     \    let k = 99\n\
     \    Signal.watch(Signal.Usr2, fn -> println(\"caught \" ++ int_to_string(k)))\n\
@@ -10090,6 +10107,7 @@ let test_erased_option_niche_fbip_no_underflow_compiled () =
   let (project_root, main_exe, src, tmp) =
     write_march_source ~name:"march_erased_option_niche"
     "mod Main do\n\
+    \  needs IO.Console\n\
     \  needs IO.Spawn\n\
     \  type Conn = PgConn(Int) | LiteConn(String)\n\
     \  actor Pool do\n\
@@ -10161,6 +10179,7 @@ let test_erased_option_niche_fbip_no_underflow_compiled () =
 let test_nested_tuple_let_destructure_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let"
     "mod NestedTupleLet do\n\
+    \  needs IO.Console\n\
     \  fn main() do\n\
     \    let ((a, b), (c, d)) = ((1, 2), (3, 4))\n\
     \    println(int_to_string(a + b + c + d))\n\
@@ -10192,6 +10211,7 @@ let test_nested_tuple_let_destructure_compiled () =
 let test_nested_tuple_let_deep_wildcard_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let_deep"
     "mod NestedTupleLetDeep do\n\
+    \  needs IO.Console\n\
     \  fn main() do\n\
     \    let ((a, (b, c)), _, (d, e)) = ((1, (2, 3)), 99, (4, 5))\n\
     \    println(int_to_string(a + b + c + d + e))\n\
@@ -10233,6 +10253,7 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
 let test_nested_fn_name_shadows_toplevel_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_go_collision"
     "mod GoCollision do\n\
+    \  needs IO.Console\n\
     \  pfn go(xs, acc) do\n\
     \    match xs do\n\
     \    Nil -> acc\n\
@@ -10381,6 +10402,7 @@ let test_erased_update_single_dyn_call_ir () =
 let test_erased_update_missing_field_panics_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_miss"
     "mod ErasedUpdMiss do\n\
+    \  needs IO.Console\n\
     \  fn main() do\n\
     \    let built = record_from_list([(\"a\", 1)])\n\
     \    let bad = { built with z: 99 }\n\
@@ -10416,6 +10438,7 @@ let test_erased_update_missing_field_panics_compiled () =
 let test_erased_update_multi_field_values_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_multi"
     "mod ErasedUpdMulti do\n\
+    \  needs IO.Console\n\
     \  fn get_i(r, k) do\n\
     \    match record_get(r, k) do\n\
     \      Some(v) -> v\n\
@@ -10536,6 +10559,7 @@ let test_string_codepoint_parity () =
   assert_compiled_interp_parity
     ~name:"march_string_codepoint"
     ~src:"mod StringCodepoint do\n\
+    \  needs IO.Console\n\
          \  pfn opt(o) do\n\
          \    match o do\n\
          \      Some(x) -> x\n\
@@ -10570,6 +10594,7 @@ let test_compiled_int_div_euclid_parity () =
   assert_compiled_interp_parity
     ~name:"march_int_div_euclid"
     ~src:"mod IntDivEuclidParity do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println([int_div_euclid(7, 2), int_div_euclid(-7, 2), \
                         int_div_euclid(-7, -2), int_div_euclid(7, -2)])\n\
@@ -10587,6 +10612,7 @@ let test_compiled_int_mod_euclid_parity () =
   assert_compiled_interp_parity
     ~name:"march_int_mod_euclid"
     ~src:"mod IntModEuclidParity do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println([int_mod_euclid(7, 3), int_mod_euclid(-7, 3), \
                         int_mod_euclid(-7, -3), int_mod_euclid(7, -3)])\n\
@@ -10609,6 +10635,7 @@ let test_compiled_deque_pop_parity () =
   assert_compiled_interp_parity
     ~name:"march_deque_pop"
     ~src:"mod DequePop do\n\
+    \  needs IO.Console\n\
          \  pfn drain(d, acc : Int) : Int do\n\
          \    match Deque.pop_front(d) do\n\
          \    (None, _)    -> acc\n\
@@ -10641,6 +10668,7 @@ let test_compiled_iolist_deep_flatten_parity () =
   assert_compiled_interp_parity
     ~name:"march_iolist_deep_flatten"
     ~src:"mod IOListDeepFlatten do\n\
+    \  needs IO.Console\n\
          \  pfn build(n : Int, acc : IOList) : IOList do\n\
          \    if n == 0 do acc\n\
          \    else build(n - 1, IOList.append(acc, IOList.from_string(\"x\"))) end\n\
@@ -10666,6 +10694,7 @@ let test_compiled_let_shadowing_parity () =
   assert_compiled_interp_parity
     ~name:"march_let_shadowing"
     ~src:"mod LetShadowParity do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    let x = 10\n\
          \    let x = x + 5\n\
@@ -10691,6 +10720,7 @@ let test_compiled_entry_self_qual_parity () =
   assert_compiled_interp_parity
     ~name:"march_entry_self_qual"
     ~src:"mod Foo do\n\
+    \  needs IO.Console\n\
          \  fn bar(x) do x + 1 end\n\
          \  fn wrapped(x) do Foo.bar(x) end\n\
          \  fn main() do println(int_to_string(Foo.wrapped(5))) end\n\
@@ -10706,6 +10736,7 @@ let test_compiled_entry_self_qual_nested_parity () =
   assert_compiled_interp_parity
     ~name:"march_entry_self_qual_nested"
     ~src:"mod Outer do\n\
+    \  needs IO.Console\n\
          \  mod Inner do\n\
          \    fn helper(x) do x + 1 end\n\
          \    fn wrapped(x) do helper(x) end\n\
@@ -10723,6 +10754,7 @@ let test_compiled_entry_self_qual_no_overstrip_parity () =
   assert_compiled_interp_parity
     ~name:"march_entry_self_qual_no_overstrip"
     ~src:"mod Outer do\n\
+    \  needs IO.Console\n\
          \  mod Inner do\n\
          \    fn helper(x) do x + 1 end\n\
          \    fn wrapped(x) do helper(x) end\n\
@@ -10754,6 +10786,7 @@ let test_compiled_entry_self_qual_extern_parity () =
   assert_compiled_interp_parity
     ~name:"march_entry_self_qual_extern"
     ~src:"mod Foo do\n\
+    \  needs IO.Console\n\
          \  needs IO.Foreign\n\
          \  needs IO.FileSystem\n\
          \  extern \"libc\": Cap(IO.FileSystem) do\n\
@@ -10774,6 +10807,7 @@ let test_compiled_entry_self_qual_extern_nested_parity () =
   assert_compiled_interp_parity
     ~name:"march_entry_self_qual_extern_nested"
     ~src:"mod Foo do\n\
+    \  needs IO.Console\n\
          \  mod Bar do\n\
          \    needs IO.Foreign\n\
          \    needs IO.FileSystem\n\
@@ -10798,6 +10832,7 @@ let test_compiled_nested_interface_dispatch_parity () =
   assert_compiled_interp_parity
     ~name:"march_nested_interface_dispatch"
     ~src:"mod Foo do\n\
+    \  needs IO.Console\n\
          \  mod Bar do\n\
          \    interface Greeter(a) do\n\
          \      fn greet : a -> String\n\
@@ -10837,6 +10872,7 @@ let test_compiled_mpst_relay_parity () =
   assert_compiled_interp_parity
     ~name:"march_mpst_relay"
     ~src:"mod MpstRelayParity do\n\
+    \  needs IO.Console\n\
          \  type Client = Client\n\
          \  type Server = Server\n\
          \  type Logger = Logger\n\
@@ -10871,6 +10907,7 @@ let test_compiled_mpst_relay_distinct_parity () =
   assert_compiled_interp_parity
     ~name:"march_mpst_relay_distinct"
     ~src:"mod MpstRelayDistinctParity do\n\
+    \  needs IO.Console\n\
          \  type Client = Client\n\
          \  type Server = Server\n\
          \  type Logger = Logger\n\
@@ -10908,6 +10945,7 @@ let test_compiled_guarded_match_parity () =
   assert_compiled_interp_parity
     ~name:"march_guarded_match"
     ~src:"mod GuardedMatchParity do\n\
+    \  needs IO.Console\n\
          \  fn classify(x : Int) : String do\n\
          \    match x do\n\
          \      n when n > 0 -> \"pos\"\n\
@@ -10931,6 +10969,7 @@ let test_compiled_println_int_list_parity () =
   assert_compiled_interp_parity
     ~name:"march_ifaceimpl_intlist"
     ~src:"mod IfaceImplIntList do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println([1, 2, 3, 4, 5])\n\
          \  end\n\
@@ -10945,6 +10984,7 @@ let test_compiled_println_string_list_parity () =
   assert_compiled_interp_parity
     ~name:"march_ifaceimpl_stringlist"
     ~src:"mod IfaceImplStringList do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println([\"a\", \"b\"])\n\
          \  end\n\
@@ -10959,6 +10999,7 @@ let test_compiled_println_option_list_parity () =
   assert_compiled_interp_parity
     ~name:"march_ifaceimpl_optionlist"
     ~src:"mod IfaceImplOptionList do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println([Some(42), None])\n\
          \  end\n\
@@ -10977,6 +11018,7 @@ let test_compiled_println_nested_list_parity () =
   assert_compiled_interp_parity
     ~name:"march_ifaceimpl_nestedlist"
     ~src:"mod IfaceImplNestedList do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println([[1, 2], [3]])\n\
          \  end\n\
@@ -10997,6 +11039,7 @@ let test_compiled_println_atom_parity () =
   assert_compiled_interp_parity
     ~name:"march_atomshow"
     ~src:"mod AtomShow do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println(:ok)\n\
          \  end\n\
@@ -11012,6 +11055,7 @@ let test_compiled_show_atom_multi_parity () =
   assert_compiled_interp_parity
     ~name:"march_atomshow_multi"
     ~src:"mod AtomShowMulti do\n\
+    \  needs IO.Console\n\
          \  fn main() do\n\
          \    println(show(:hello) ++ \" \" ++ show(:world_123))\n\
          \  end\n\
@@ -11132,6 +11176,7 @@ let test_scrutinee_borrowed_cross_branch_no_double_dec () =
   assert_compiled_interp_parity
     ~name:"march_scrutdbl"
     ~src:"mod MinimalScrutDbl do\n\
+    \  needs IO.Console\n\
          \  fn f(xs : List(Int), flag : Bool) : Int do\n\
          \    match xs do\n\
          \      Cons(h, t) ->\n\
@@ -11182,6 +11227,7 @@ let test_newtype_derived_eq_operator_vs_named_parity () =
   assert_compiled_interp_parity
     ~name:"march_newtype_eq_op_vs_named"
     ~src:"mod NewtypeEqOpVsNamed do\n\
+    \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Eq for Wrap\n\
          \  fn main() do\n\
@@ -11204,6 +11250,7 @@ let test_newtype_derived_ord_hash_named_compiled () =
   assert_compiled_interp_parity
     ~name:"march_newtype_ord_hash"
     ~src:"mod NewtypeOrdHash do\n\
+    \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Ord, Hash for Wrap\n\
          \  fn main() do\n\
@@ -11221,6 +11268,7 @@ let test_newtype_derived_ord_string_payload_compiled () =
   assert_compiled_interp_parity
     ~name:"march_newtype_string_payload"
     ~src:"mod NewtypeStringPayload do\n\
+    \  needs IO.Console\n\
          \  type WrapS = WrapS(String)\n\
          \  derive Eq, Ord, Hash for WrapS\n\
          \  fn main() do\n\
@@ -11238,6 +11286,7 @@ let test_boxed_pair_derived_methods_unaffected_compiled () =
   assert_compiled_interp_parity
     ~name:"march_boxed_pair_control"
     ~src:"mod BoxedPairControl do\n\
+    \  needs IO.Console\n\
          \  type Pair = Pair(Int, Int)\n\
          \  derive Eq, Ord, Hash for Pair\n\
          \  fn main() do\n\
@@ -11255,6 +11304,7 @@ let test_multi_ctor_derived_methods_unaffected_compiled () =
   assert_compiled_interp_parity
     ~name:"march_multictor_control"
     ~src:"mod MultiCtorControl do\n\
+    \  needs IO.Console\n\
          \  type Shape = Circle(Int) | Square(Int)\n\
          \  derive Eq, Ord, Hash for Shape\n\
          \  fn main() do\n\
@@ -11280,6 +11330,7 @@ let test_derive_variant_name_collides_stdlib_record_compiled () =
   assert_compiled_interp_parity
     ~name:"march_derive_stdlib_name_collision"
     ~src:"mod ColorMod do\n\
+    \  needs IO.Console\n\
          \  type Color = Red | Green | Blue\n\
          \  derive Eq, Show for Color\n\
          \  fn main() do\n\
@@ -11300,6 +11351,7 @@ let test_derive_variant_name_collides_local_record_compiled () =
   assert_compiled_interp_parity
     ~name:"march_derive_local_name_collision"
     ~src:"mod SelfContained do\n\
+    \  needs IO.Console\n\
          \  mod Palette do\n\
          \    type Color = { hue: Int, sat: Int, lum: Int }\n\
          \  end\n\
@@ -11323,6 +11375,7 @@ let test_handwritten_impl_nested_match_newtype_compiled () =
   assert_compiled_interp_parity
     ~name:"march_newtype_handwritten_impl"
     ~src:"mod NewtypeHandwrittenImpl do\n\
+    \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  impl Eq(Wrap) do\n\
          \    fn eq(a, b) do\n\
@@ -11364,6 +11417,7 @@ let test_newtype_eq_operator_string_payload_compiled () =
   assert_compiled_interp_parity
     ~name:"march_newtype_eqop_string"
     ~src:"mod NewtypeEqOpString do\n\
+    \  needs IO.Console\n\
          \  type WrapS = WrapS(String)\n\
          \  derive Eq for WrapS\n\
          \  fn main() do\n\
@@ -11382,6 +11436,7 @@ let test_newtype_eq_operator_int_payload_control_compiled () =
   assert_compiled_interp_parity
     ~name:"march_newtype_eqop_int"
     ~src:"mod NewtypeEqOpInt do\n\
+    \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Eq for Wrap\n\
          \  fn main() do\n\
@@ -11401,6 +11456,7 @@ let test_newtype_eq_operator_boxed_payload_compiled () =
   assert_compiled_interp_parity
     ~name:"march_newtype_eqop_boxed"
     ~src:"mod NewtypeEqOpBoxed do\n\
+    \  needs IO.Console\n\
          \  type Inner = Inner(Int, Int)\n\
          \  type WrapR = WrapR(Inner)\n\
          \  derive Eq for Inner\n\
@@ -11427,6 +11483,7 @@ let test_newtype_eq_operator_generic_payload_compiled () =
   assert_compiled_interp_parity
     ~name:"march_newtype_eqop_generic"
     ~src:"mod NewtypeEqOpGeneric do\n\
+    \  needs IO.Console\n\
          \  type Wrap(a) = Wrap(a)\n\
          \  derive Eq for Wrap\n\
          \  fn main() do\n\
@@ -11462,6 +11519,7 @@ let test_msgpack_cross_module_ctor_resolution_compiled () =
   assert_compiled_interp_parity
     ~name:"march_msgpack_ctor_resolution"
     ~src:"mod MsgpackCtorResolution do\n\
+    \  needs IO.Console\n\
          \  fn describe(bs : List(Int)) : String do\n\
          \    match Msgpack.decode(bs) do\n\
          \      Ok(Msgpack.Int(n))   -> \"int:\" ++ String.from_int(n)\n\
@@ -11509,6 +11567,7 @@ let test_module_qualified_colliding_ctor_pattern_compiled () =
   assert_compiled_interp_parity
     ~name:"march_module_qualified_ctor_pattern"
     ~src:"mod ModQualCtorPattern do\n\
+    \  needs IO.Console\n\
          \  fn describe(s : String) : String do\n\
          \    match Json.parse(s) do\n\
          \      Ok(Json.Array(_))  -> \"array\"\n\
@@ -12365,6 +12424,7 @@ let test_cross_tls_gzip_linux_amd64_elf () =
        false negative.  The gzip calls are unconditional. *)
     let src_text =
       "mod XTls do\n\
+    \  needs IO.Console\n\
       \  needs IO.NetConnect.TLS\n\
       \  fn main() do\n\
       \    let payload = Bytes.from_string(\"march cross tls+gzip probe\")\n\
@@ -12437,6 +12497,7 @@ let test_compiled_default_args_parity () =
   assert_compiled_interp_parity
     ~name:"march_default_args_source_call"
     ~src:"mod M do\n\
+    \  needs IO.Console\n\
          \  fn greet(name, greeting \\\\ \"Hi\", punct \\\\ \"!\") do\n\
          \    greeting ++ \", \" ++ name ++ punct\n\
          \  end\n\
@@ -12458,6 +12519,7 @@ let test_compiled_nested_default_args_parity () =
   assert_compiled_interp_parity
     ~name:"march_nested_default_args"
     ~src:"mod A do\n\
+    \  needs IO.Console\n\
          \  mod B do\n\
          \    fn f(x, y \\\\ 100) do x + y end\n\
          \  end\n\

@@ -7,6 +7,7 @@ type t = {
   caps : string list;
   markers : string list;
   attribution : (string * string) list;
+  declarations : (string * string) list;
   rt_symbols : string list;
   build : build_kind;
   manifest : string option;
@@ -93,6 +94,11 @@ let markers_of_symbols syms =
    the separator even when the owner module itself contains one. *)
 let attrib_prefix = "__march_capfrom_"
 
+(* Declared needs, per module.  Distinct from [attrib_prefix] at the 12th
+   character and from [marker_prefix] likewise, so no channel can decode
+   another's symbols. *)
+let decl_prefix = "__march_capdecl_"
+
 let split_on_double_underscore s =
   let n = String.length s in
   let rec go i =
@@ -103,16 +109,15 @@ let split_on_double_underscore s =
   in
   go 0
 
-let attribution_of_symbols syms =
+let pairs_of_symbols prefix syms =
   List.filter_map
     (fun sym ->
       let sym = strip_underscore sym in
-      if not (has_prefix attrib_prefix sym) then None
+      if not (has_prefix prefix sym) then None
       else
         let rest =
-          String.sub sym
-            (String.length attrib_prefix)
-            (String.length sym - String.length attrib_prefix)
+          String.sub sym (String.length prefix)
+            (String.length sym - String.length prefix)
         in
         match split_on_double_underscore rest with
         (* The owner is emitted verbatim (dots and all — LLVM global names
@@ -123,6 +128,9 @@ let attribution_of_symbols syms =
         | _ -> None)
     syms
   |> List.sort_uniq compare
+
+let attribution_of_symbols = pairs_of_symbols attrib_prefix
+let declarations_of_symbols = pairs_of_symbols decl_prefix
 
 (* ── manifest channel ───────────────────────────────────────────────── *)
 
@@ -183,6 +191,7 @@ let read path : (t, string) result =
             let syms = read_symbols path in
             let markers = markers_of_symbols syms in
             let attribution = attribution_of_symbols syms in
+            let declarations = declarations_of_symbols syms in
             let rt_symbols =
               List.filter_map
                 (fun s ->
@@ -236,9 +245,9 @@ let read path : (t, string) result =
                 (* Reporting the full symbol set as "capabilities" would be
                    the app-invariance failure; report the build kind and no
                    cap list. Markers, if present, are still trustworthy. *)
-                Ok { caps = markers; markers; attribution; rt_symbols; build; manifest }
+                Ok { caps = markers; markers; attribution; declarations; rt_symbols; build; manifest }
             | Symbols_removed ->
-                Ok { caps = []; markers; attribution; rt_symbols; build; manifest }
+                Ok { caps = []; markers; attribution; declarations; rt_symbols; build; manifest }
             | Dead_stripped ->
                 let caps =
                   if markers <> [] then markers
@@ -247,4 +256,4 @@ let read path : (t, string) result =
                       rt_symbols
                     |> List.sort_uniq String.compare
                 in
-                Ok { caps; markers; attribution; rt_symbols; build; manifest }))
+                Ok { caps; markers; attribution; declarations; rt_symbols; build; manifest }))

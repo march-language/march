@@ -4424,6 +4424,7 @@ let test_session_compile_odd_int_roundtrip () =
   let (project_root, main_exe, src, tmp) =
     session_write_src ~name:"march_session_oddint"
       "mod Main do\n\
+      \  needs IO.Console\n\
       \  protocol Echo do\n\
       \    Client -> Server : Int\n\
       \    Server -> Client : Int\n\
@@ -4464,6 +4465,7 @@ let test_session_compile_bool_roundtrip () =
   let (project_root, main_exe, src, tmp) =
     session_write_src ~name:"march_session_bool"
       "mod Main do\n\
+      \  needs IO.Console\n\
       \  protocol B do\n\
       \    Client -> Server : Bool\n\
       \  end\n\

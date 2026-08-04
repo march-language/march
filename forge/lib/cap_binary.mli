@@ -36,6 +36,17 @@ type t = {
           statically known callee. Report that difference; do not present an
           empty owner set as "nothing uses it". Binaries built by a
           pre-attribution compiler have this empty entirely. *)
+  declarations : (string * string) list;
+      (** [(cap_path, owner_module)] from [__march_capdecl_*] globals: what
+          each module DECLARED, as opposed to what [attribution] shows it
+          uses. Both channels together let [forge cap inspect --strict]
+          re-check the capability ceiling on a binary it did not build —
+          attribution alone shows use but never the promise it should be
+          measured against.
+
+          Emitted only for modules that have attributed use, so a module
+          absent here is not necessarily undeclared. Empty for binaries from a
+          pre-attribution compiler. *)
   rt_symbols : string list;  (** cap-bearing runtime symbols present *)
   build : build_kind;
   manifest : string option;  (** raw JSON; [None] when absent *)

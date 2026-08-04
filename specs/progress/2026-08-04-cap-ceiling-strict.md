@@ -94,9 +94,30 @@ violations) rather than being served the cached artifact — the
   subsumption directions) and 6 end-to-end tests, one per route plus the
   dependency case and two accept cases
 
+## Follow-ups closed the same day
+
+- **The `println` inconsistency was root-caused**, and was never about
+  `println`. `prelude.march` is unwrapped into global scope, so its decls are
+  prepended to the ENTRY module's list; Check 1b keeps the first span per
+  capability; that span was in prelude; the driver filters stdlib spans. The
+  warning was generated and discarded — for every capability the standard
+  library uses, not just `IO.Console`. Fixed via
+  `Typecheck.stdlib_source_files`.
+- **No `ECallPtr` witness exists** among the shapes tried (builtin returned
+  from a branch, stored in a `Cons` and matched out, called through a
+  parameter). The atom scan catches a capability where its name is
+  *mentioned*, and a capability must be named to be obtained.
+  `Unattributed` remains a backstop with no known trigger.
+- **`forge cap inspect --strict`** ships: binaries carry
+  `__march_capdecl_<CAP>__<OWNER>` alongside `__march_capfrom_`, so the
+  ceiling is re-checkable on an artifact you did not build.
+
 ## Open
 
-See `specs/todos/2026-08-04-cap-ceiling-follow-ups.md` — notably an
-un-root-caused inconsistency where `println` does not trip Check 1b in a plain
-function body while `file_exists` does, no `forge cap inspect --strict`
-(binaries do not carry per-module declarations), and no migration autofix.
+See `specs/todos/2026-08-04-cap-ceiling-follow-ups.md`: `--cap-strict` is
+build-only (not available to `--check`), there is no migration autofix, and
+per-dependency budgets still need the module→package roll-up.
+
+For what a *provable* sandbox would additionally require — and why the
+artifact channel is the complement to a type-system proof rather than a
+substitute for it — see `specs/2026-08-04-provable-sandbox-design.md`.

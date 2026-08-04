@@ -581,6 +581,7 @@ let emit_module ~emit_expr
     ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(emit_main=true)
     ?(cap_attrib=([] : (string * string) list))
+    ?(cap_decls=([] : (string * string) list))
     (m : Tir.tir_module) : string =
   (* type defs are threaded via ctx.type_defs (set below); reset the
      repr-consistency audit per module emission. *)
@@ -1229,6 +1230,14 @@ let emit_module ~emit_expr
             owner <> "" && List.mem cap caps)
      |> List.sort_uniq compare
    in
+   let attributed_owners =
+     List.sort_uniq compare (List.map snd attrib)
+   in
+   let decls_emitted =
+     cap_decls
+     |> List.filter (fun (_, owner) -> List.mem owner attributed_owners)
+     |> List.sort_uniq compare
+   in
    if caps <> [] then begin
      List.iter
        (fun cap ->
@@ -1253,6 +1262,19 @@ let emit_module ~emit_expr
             (Printf.sprintf "@__march_capfrom_%s__%s = constant i8 1\n"
                (mangle_cap cap) owner))
        attrib;
+     (* Declared needs, per module.  Same encoding, separate prefix: with
+        both channels in the artifact, `forge cap inspect --strict` can
+        re-check the capability ceiling on a binary it did not build, which
+        the attribution channel alone cannot do (it shows what a module USES,
+        never what it PROMISED).  Emitted only for modules that actually have
+        attributed use, so this stays proportional to the report rather than
+        to the program's module count. *)
+     List.iter
+       (fun (cap, owner) ->
+          Buffer.add_string out
+            (Printf.sprintf "@__march_capdecl_%s__%s = constant i8 1\n"
+               (mangle_cap cap) owner))
+       decls_emitted;
      let refs =
        List.map
          (fun cap -> Printf.sprintf "ptr @__march_cap_%s" (mangle_cap cap))
@@ -1262,6 +1284,11 @@ let emit_module ~emit_expr
               Printf.sprintf "ptr @__march_capfrom_%s__%s" (mangle_cap cap)
                 owner)
            attrib
+       @ List.map
+           (fun (cap, owner) ->
+              Printf.sprintf "ptr @__march_capdecl_%s__%s" (mangle_cap cap)
+                owner)
+           decls_emitted
      in
      Buffer.add_string out
        (Printf.sprintf

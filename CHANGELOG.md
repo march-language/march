@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge cap inspect --strict`** re-checks the capability ceiling on a
+  binary you did not build. Binaries now carry each module's *declared* needs
+  alongside its measured use, so the two can be compared without the source.
+  Fails closed on a binary that carries no attribution rather than reporting a
+  clean ceiling for one whose ceiling cannot be read.
+
 - **`--cap-strict`: `needs` as a hard ceiling.** Opt-in build gate — every
   module's emitted code must stay within that module's own `needs`
   declarations, or the build fails naming the module.
@@ -108,6 +114,21 @@ git log is authoritative for exact commits.
   `docker inspect` precedent. No alias: the command is days old and unreleased.
 
 ### Fixed
+
+- **Capability warnings were silently discarded for anything the standard
+  library also uses.** `prelude.march` is unwrapped into global scope, so its
+  declarations ride in the *entry module's* declaration list. The body-scan
+  check keeps one span per capability and keeps the first, so a capability
+  prelude also used got a prelude span — which the driver then filtered out as
+  stdlib-internal. The warning was generated and thrown away.
+
+  Visible symptom: `println` in a plain function body produced no "does not
+  declare `needs IO.Console`" warning, while `file_exists` in the same module
+  did — purely because prelude calls `println` and never calls `file_exists`.
+  This affected every capability the standard library happens to use, not just
+  `IO.Console`. Existing code that relied on the silence will now see the
+  warnings it should always have had.
+
 
 - **`cap no_panic` no longer rejects a division guarded by a boolean
   condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a
