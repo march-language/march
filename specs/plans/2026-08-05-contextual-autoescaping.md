@@ -261,6 +261,26 @@ cover all types, and makes the now-unreachable runtime fallback abort."
 
 ---
 
+## Carried over from Task 0 (merged as #192, `37d1e166`)
+
+Task 0 was not just a bug fix — it established a rule the rest of this plan must respect:
+
+1. **No runtime dispatch on a heap tag, ever.** Constructor tags are per-type, so the runtime
+   cannot identify a value's type from its cell. Every escaper decision is made in `llvm_emit`
+   from the static TIR type, and C escapers receive an already-normalised String.
+2. **`TVar` is undecidable and must fail safe.** A value reaching a `~H` hole through a closure
+   stored in a container is not specialised by mono. Neither flattening nor stringifying is
+   correct for it; stringifying is merely not a vulnerability. Any new escaper path must make
+   the same choice, and Task 6's `Trusted` must be handled explicitly in the emitter rather
+   than left to a runtime check.
+3. **Compiled ADT rendering is `#<tag:N>`.** Two follow-ups are filed and unfixed:
+   `specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md` and
+   `specs/todos/2026-08-05-boxed-adt-type-id.md`. The second is the one that would let a
+   polymorphic hole become *correct* rather than merely safe; if it lands first, revisit
+   rule 2.
+
+---
+
 ## Task 1: Table format + parser
 
 **Files:**
@@ -595,6 +615,17 @@ git commit -m "feat(runtime): contextual escapers incl. URL scheme allowlist"
 **Interfaces:**
 - Consumes: `march_html_escape_ctx` from Task 3.
 - Produces: a March-visible builtin `html_escape_ctx : Int -> a -> String`, callable from desugared code.
+
+> **Constraint carried over from Task 0 — do not weaken it.** The March-level type stays
+> polymorphic (`a`) so the desugarer can emit the call without knowing the hole's type, but
+> `march_html_escape_ctx` **must never dispatch on a heap tag**. Constructor tags are numbered
+> per type, so a heap-tag dispatch cannot distinguish `IOList.Str` from any other tag-1
+> constructor — that was the XSS and the SIGSEGV fixed in
+> `specs/progress/2026-08-05-h-sigil-adt-misread.md`. `llvm_emit` must reuse the same
+> type-directed dispatch Task 0 installed for `html_auto_escape`: stringify anything that is
+> not a String, an immediate, or a statically-known real `IOList` — **including `TVar`**, the
+> undecidable case — and hand the C function a real String. Anything else in the C function is
+> a hard abort, not a guess.
 
 This task mirrors, line for line, the existing wiring of `html_auto_escape` — read all five call sites listed above first; each needs an analogous entry for the two-argument form. Note `llvm_emit.ml:1531-1548` documents a real hazard: the emitter special-cases the call because a scalar `i64` argument must be re-tagged before being passed as a generic `ptr`. The two-argument version has the same hazard on its *second* argument; the first (the escaper id) is a genuine `i64`.
 

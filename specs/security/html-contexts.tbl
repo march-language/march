@@ -1,0 +1,124 @@
+# HTML contextual-escaping transition table.
+#
+# SOURCE OF TRUTH. lib/ctxesc/table_data.ml and stdlib/ctx_table.march are
+# GENERATED from this file -- see specs/security/README.md for the format, the
+# regeneration command, and the invariant every row must preserve (a hole's
+# successor context must never depend on the interpolated value).
+#
+# Rows are tried IN ORDER; first match wins. Keep `any` last within each state.
+
+[tags]
+# tag-name-pattern | element class
+script             | script
+style              | style
+textarea           | textarea
+title              | title
+*                  | normal
+
+[attrs]
+# attr-name-pattern | attr class    (first match wins -- keep on* first)
+on*                 | script
+href                | url
+src                 | url
+action              | url
+formaction          | url
+poster              | url
+cite                | url
+background          | url
+style               | style
+*                   | normal
+
+[transitions]
+# from-context | pattern | substitution | successor-context | diagnostic
+
+# ── PCDATA ───────────────────────────────────────────────────────────────
+# A comment is entered before the `<` rules so `<!--` wins over `<`.
+pcdata,*,*,*          | lit:"<!--"      |  | comment,=,=,=            |
+pcdata,*,*,*          | lit:"</"        |  | closetagname,=,=,=       |
+pcdata,*,*,*          | lit:"<"         |  | tagname,=,=,=            |
+pcdata,*,*,*          | interp          |  | =,=,=,=                  |
+pcdata,*,*,*          | any             |  | =,=,=,=                  |
+
+# ── TAG NAME (opening) ───────────────────────────────────────────────────
+# `tag` consumes the name AND sets the element class from [tags].
+tagname,*,*,*         | interp          |  | =,=,=,=                  | Cannot interpolate an element name. No escaping can make an attacker-chosen tag name safe -- move the dynamic part into element content or an attribute value.
+tagname,*,*,*         | tag             |  | beforeattrname,=,=,=     |
+tagname,*,*,*         | any             |  | =,=,=,=                  |
+
+# ── TAG NAME (closing) ───────────────────────────────────────────────────
+# A close tag returns to PCDATA and clears the element class.
+closetagname,*,*,*    | interp          |  | =,=,=,=                  | Cannot interpolate an element name.
+closetagname,*,*,*    | lit:">"         |  | pcdata,normal,normal,none |
+closetagname,*,*,*    | any             |  | =,=,=,=                  |
+
+# ── BEFORE ATTRIBUTE NAME ────────────────────────────────────────────────
+# Leaving the tag enters RCDATA for script/style/textarea/title, PCDATA
+# otherwise -- hence the element-specific rows above the general one.
+beforeattrname,script,*,*   | lit:">"   |  | rcdata,=,normal,none     |
+beforeattrname,style,*,*    | lit:">"   |  | rcdata,=,normal,none     |
+beforeattrname,textarea,*,* | lit:">"   |  | rcdata,=,normal,none     |
+beforeattrname,title,*,*    | lit:">"   |  | rcdata,=,normal,none     |
+beforeattrname,*,*,*  | lit:"/>"        |  | pcdata,normal,normal,none |
+beforeattrname,*,*,*  | lit:">"         |  | pcdata,=,normal,none     |
+beforeattrname,*,*,*  | cls+:[ \t\r\n]  |  | =,=,=,=                  |
+beforeattrname,*,*,*  | interp          |  | =,=,=,=                  | Cannot interpolate where an attribute name is expected. An attacker-chosen name can introduce an event handler such as `onerror`, which no escaping prevents -- interpolate an attribute VALUE instead.
+beforeattrname,*,*,*  | name            |  | afterattrname,=,=,=      |
+beforeattrname,*,*,*  | any             |  | =,=,=,=                  |
+
+# ── AFTER ATTRIBUTE NAME ─────────────────────────────────────────────────
+afterattrname,*,*,*   | cls+:[ \t\r\n]  |  | =,=,=,=                  |
+afterattrname,*,*,*   | lit:"="         |  | beforeattrvalue,=,=,=    |
+afterattrname,*,*,*   | lit:"/>"        |  | pcdata,normal,normal,none |
+afterattrname,*,*,*   | lit:">"         |  | pcdata,=,normal,none     |
+afterattrname,*,*,*   | interp          |  | =,=,=,=                  | Cannot interpolate an attribute name.
+afterattrname,*,*,*   | any             |  | beforeattrname,=,=,=     |
+
+# ── BEFORE ATTRIBUTE VALUE ───────────────────────────────────────────────
+# The substitution rule: an unquoted value that is about to receive a hole gets
+# a `"` inserted, and `doublesubst` remembers to close it. Without this, a value
+# containing a space would end the attribute and start a new one.
+beforeattrvalue,*,*,* | cls+:[ \t\r\n]  |  | =,=,=,=                  |
+beforeattrvalue,*,*,* | lit:"\""        |  | attrvalue,=,=,double     |
+beforeattrvalue,*,*,* | lit:"'"         |  | attrvalue,=,=,single     |
+beforeattrvalue,*,*,* | interp          | "\"" | attrvalue,=,=,doublesubst |
+beforeattrvalue,*,*,* | any             |  | attrvalue,=,=,unquoted   |
+
+# ── ATTRIBUTE VALUE ──────────────────────────────────────────────────────
+attrvalue,*,*,double      | lit:"\""    |  | beforeattrname,=,normal,none |
+attrvalue,*,*,double      | interp      |  | =,=,=,=                  |
+attrvalue,*,*,double      | any         |  | =,=,=,=                  |
+
+attrvalue,*,*,single      | lit:"'"     |  | beforeattrname,=,normal,none |
+attrvalue,*,*,single      | interp      |  | =,=,=,=                  |
+attrvalue,*,*,single      | any         |  | =,=,=,=                  |
+
+# A substituted value is closed by the automaton, not by the source text: the
+# `"` in the substitution column is emitted on the way out.
+attrvalue,*,*,doublesubst | lit:"/>"    | "\"" | pcdata,normal,normal,none |
+attrvalue,*,*,doublesubst | lit:">"     | "\"" | pcdata,=,normal,none     |
+attrvalue,*,*,doublesubst | cls+:[ \t\r\n] | "\"" | beforeattrname,=,normal,none |
+attrvalue,*,*,doublesubst | interp      |  | =,=,=,=                  |
+attrvalue,*,*,doublesubst | any         |  | =,=,=,=                  |
+
+attrvalue,*,*,unquoted    | lit:"/>"    |  | pcdata,normal,normal,none |
+attrvalue,*,*,unquoted    | lit:">"     |  | pcdata,=,normal,none     |
+attrvalue,*,*,unquoted    | cls+:[ \t\r\n] |  | beforeattrname,=,normal,none |
+attrvalue,*,*,unquoted    | interp      |  | =,=,=,=                  |
+attrvalue,*,*,unquoted    | any         |  | =,=,=,=                  |
+
+# ── RCDATA / RAW TEXT (script, style, textarea, title bodies) ────────────
+# Exit only on the MATCHING close tag, case-insensitively -- `</b>` inside a
+# script string must not be mistaken for the end of the script.
+rcdata,script,*,*     | ilit:"</script"   |  | closetagname,normal,=,= |
+rcdata,style,*,*      | ilit:"</style"    |  | closetagname,normal,=,= |
+rcdata,textarea,*,*   | ilit:"</textarea" |  | closetagname,normal,=,= |
+rcdata,title,*,*      | ilit:"</title"    |  | closetagname,normal,=,= |
+rcdata,*,*,*          | interp            |  | =,=,=,=                 |
+rcdata,*,*,*          | any               |  | =,=,=,=                 |
+
+# ── COMMENT ──────────────────────────────────────────────────────────────
+# Nothing safe can be interpolated here: `--!>` and friends end a comment in
+# ways that vary across parsers, so a hole inside one is always a mistake.
+comment,*,*,*         | interp          |  | =,=,=,=                  | Cannot interpolate inside an HTML comment. Comment-ending sequences vary between parsers, so no escaping is reliable here.
+comment,*,*,*         | until:"-->"     |  | pcdata,=,=,=             |
+comment,*,*,*         | any             |  | =,=,=,=                  |
