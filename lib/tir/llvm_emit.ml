@@ -1568,8 +1568,57 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r fp);
     ("ptr", r)
 
+  (* Every OTHER type: the runtime's polymorphic dispatch is only safe for the
+     three representations it can actually recognise — a low-bit-tagged
+     immediate, a MARCH_STRING_TAG string, and a genuine IOList.  Its final
+     arm ("Constructor with tag >= 0: treat as IOList") is a guess, and it is
+     wrong for every user ADT: constructor tags are numbered per type from 0,
+     so `B(String)` (tag 1) was read as `IOList.Str` and its field emitted RAW
+     AND UNESCAPED, and `C(_, _)` (tag 2) was read as `IOList.Segments` and
+     its field walked as a cons list — a segfault.  Decide it here instead,
+     where the static TIR type is still known, and only route to the runtime
+     the cases it genuinely handles.  Anything else — user ADTs, records,
+     tuples, and the `Safe`-name-collision case that falls through the arm
+     above — goes through `march_value_to_string` first, then escapes the
+     resulting real String. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
+    let runtime_safe =
+      match atom_tir_ty a with
+      | Tir.TString | Tir.TInt | Tir.TFloat | Tir.TBool -> true
+      | Tir.TCon ("IOList", _) -> true
+      (* An unresolved type variable is the genuinely undecidable case, and it
+         is NOT hypothetical: a value reaching this hole through a closure
+         stored in a container (defunctionalized dispatch, e.g.
+         `Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))`) is not specialised by mono
+         and arrives as TVar.  Neither answer is right for it — an IOList
+         wants flattening, an ADT must not be flattened, and nothing at
+         runtime can tell them apart, which is the whole defect.
+
+         So choose the failure that is not a vulnerability: stringify.  A
+         genuine IOList partial reaching a polymorphic hole renders as
+         `#<tag:2>` instead of its markup — visibly wrong, and a real
+         regression for that (rare) pattern.  Routing it to the runtime
+         instead would leave a tag-1 ADT emitting its String field raw and
+         unescaped, and a tag-2 ADT segfaulting.  A wrong-looking page beats
+         an XSS and a crash.
+
+         Fixing this properly means giving the runtime a way to identify the
+         type — march_hdr.pad is free for non-record ADTs and could carry a
+         type id — which is out of scope here; see
+         specs/todos/2026-08-05-boxed-adt-type-id.md. *)
+      | Tir.TVar _ -> false
+      | _ -> false
+    in
     let v = emit_atom_as ctx "ptr" a in
+    let v =
+      if runtime_safe then v
+      else begin
+        let s = fresh ctx "hae_str" in
+        emit ctx
+          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" s v);
+        s
+      end
+    in
     let r = fresh ctx "hae" in
     emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r v);
     ("ptr", r)
