@@ -2002,6 +2002,11 @@ let compile filename =
        - transitive needs propagation across module imports
        - extern block capability gating
      See also: March_effects.Effects.check_capabilities *)
+  (* Tell the typechecker which files are stdlib BEFORE checking: Check 1b's
+     body scan must not attribute prelude's own capability uses to the entry
+     module (prelude is unwrapped into global scope, so its decls ride in the
+     entry module's list).  See Typecheck.stdlib_source_files. *)
+  March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
@@ -2575,6 +2580,24 @@ let compile filename =
        Runs BEFORE the CAS artifact lookup below, so a warm cache cannot
        skip it; "capstrict" is also in cas_flags so a strict build never
        reuses an artifact produced without the check. *)
+    (* Per-module declared needs, in the same (cap, owner) shape as
+       attribution.  Used both by --cap-strict below and, emitted into the
+       artifact, by `forge cap inspect --strict` on a binary it did not
+       build.  The entry module is unwrapped by desugar (~is_entry:true) so
+       it has no DMod and never lands in [module_caps]; its needs accumulate
+       in [mod_needs].  Attribution names it by [tm_name], so bind the two
+       together or every entry-module capability reads as undeclared. *)
+    let cap_module_caps =
+      (pre_opt_tir.March_tir.Tir.tm_name,
+       typecheck_env.March_typecheck.Typecheck.mod_needs)
+      :: typecheck_env.March_typecheck.Typecheck.module_caps
+    in
+    let cap_decls =
+      List.concat_map
+        (fun (m, needs) -> List.map (fun c -> (c, m)) needs)
+        cap_module_caps
+      |> List.sort_uniq compare
+    in
     if !cap_strict then begin
       let flat_caps =
         List.sort_uniq compare (List.map fst cap_attrib)
@@ -2907,7 +2930,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -3668,7 +3691,7 @@ let compile filename =
             end
           ) pre_fns
         in
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;

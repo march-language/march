@@ -3968,11 +3968,11 @@ let emit_main_wrapper = Llvm_toplevel.emit_main_wrapper
 let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
-    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib
+    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
     (m : Tir.tir_module) : string =
   Llvm_toplevel.emit_module ~emit_expr
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
-    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib m
+    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls m
 
 type repl_globals = Llvm_repl.repl_globals
 let emit_repl_globals_decl = Llvm_repl.emit_repl_globals_decl

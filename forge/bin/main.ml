@@ -997,14 +997,21 @@ let cap_inspect_cmd =
                  Without this, --deny/--allow-only fail closed on any binary \
                  whose coverage is not full.")
   in
-  let run bin json deny allow_only allow_foreign =
-    match Cmd_cap.inspect ~bin ~json ~deny ~allow_only ~allow_foreign () with
+  let strict =
+    Arg.(value & flag &
+         info ["strict"]
+           ~doc:"Re-check the capability ceiling from the artifact: fail if \
+                 any module uses a capability it did not declare. Fails \
+                 closed on a binary that carries no attribution.")
+  in
+  let run bin json deny allow_only allow_foreign strict =
+    match Cmd_cap.inspect ~bin ~json ~deny ~allow_only ~allow_foreign ~strict () with
     | Ok () -> ()
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "inspect"
            ~doc:"List the capabilities of a compiled March executable")
-    Term.(const run $ bin $ json $ deny $ allow_only $ allow_foreign)
+    Term.(const run $ bin $ json $ deny $ allow_only $ allow_foreign $ strict)
 
 let cap_run_cmd =
   let bin =

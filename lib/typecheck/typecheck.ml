@@ -1677,6 +1677,28 @@ let _t_pid    = t_pid
    duplicate of this table.
    ================================================================= *)
 
+(** Source files loaded as the standard library, set by the driver.
+
+    [prelude.march] is deliberately unwrapped into GLOBAL scope, so its
+    declarations are prepended to the ENTRY module's decl list and are
+    indistinguishable from the user's own by shape alone. Check 1b dedups its
+    body-scan to one (capability, span) pair and keeps the FIRST, so a
+    capability prelude also uses got a prelude span — which the driver's
+    [is_user_file] filter then discarded, silently.
+
+    Measured: [println] in a plain function body produced NO Check 1b warning
+    while [file_exists] in the same module did, purely because prelude calls
+    [println] three times and never calls [file_exists]. The diagnostic was
+    generated and thrown away. That suppressed Check 1b for every capability
+    the standard library happens to use, not just IO.Console.
+
+    Mirrors [Refine_check.stdlib_source_files], which exists for the same
+    "whose declaration is this really?" question. *)
+let stdlib_source_files : string list ref = ref []
+
+let span_is_stdlib (sp : Ast.span) : bool =
+  List.mem sp.Ast.file !stdlib_source_files
+
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
 let builtin_cap_table : (string * string) list = [
@@ -8132,6 +8154,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           ) actor.actor_handlers
       | _ -> []
     ) decls in
+    (* Drop capability uses that belong to the standard library rather than to
+       this module.  Without this, prelude's own calls (it is unwrapped into
+       global scope, so its decls ride in the entry module's list AHEAD of the
+       user's) win the dedup below and carry a stdlib span, which the driver
+       then filters out — generating the warning and discarding it.  See
+       [stdlib_source_files]. *)
+    let all = List.filter (fun (_, sp) -> not (span_is_stdlib sp)) all in
     List.fold_left (fun acc (cap_name, sp) ->
       if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
     ) [] all

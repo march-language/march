@@ -9,10 +9,10 @@ open March_forge
 (* A current-compiler binary carries markers for the caps it holds; [markers]
    defaults to [caps] so fixtures model that.  Pass ~markers:[] explicitly to
    model a pre-marker or non-March binary. *)
-let mk ?(caps = []) ?markers ?(rt_symbols = []) ?(attribution = [])
+let mk ?(caps = []) ?markers ?(rt_symbols = []) ?(attribution = []) ?(declarations = [])
     ?(build = Cap_binary.Dead_stripped) () =
   let markers = match markers with Some m -> m | None -> caps in
-  { Cap_binary.caps; markers; attribution; rt_symbols; build; manifest = None }
+  { Cap_binary.caps; markers; attribution; declarations; rt_symbols; build; manifest = None }
 
 let test_deny_uses_lattice_subsumption () =
   let t = mk ~caps:[ "IO.FileRead" ] () in
@@ -109,5 +109,37 @@ let tests =
     Alcotest.test_case "IO.Foreign is not gated as a capability" `Quick
       test_foreign_is_not_gated_as_a_cap;
   ]
+
+let test_ceiling_violation_read_from_the_artifact () =
+  (* The supply-chain case, re-checked from a binary we did not build: Dep
+     declared only IO.Console but its emitted code reads files. *)
+  let t =
+    mk ~caps:[ "IO.Console"; "IO.FileRead" ]
+      ~attribution:[ ("IO.Console", "App"); ("IO.FileRead", "Dep") ]
+      ~declarations:[ ("IO.Console", "App"); ("IO.Console", "Dep") ]
+      ()
+  in
+  Alcotest.(check int) "Dep exceeds its declaration" 1
+    (List.length (Cmd_cap.ceiling_violations t));
+  (* And a binary whose modules stay inside their declarations is clean —
+     without this the test cannot tell a working check from one that always
+     fires. *)
+  let ok =
+    mk ~caps:[ "IO.Console"; "IO.FileRead" ]
+      ~attribution:[ ("IO.Console", "App"); ("IO.FileRead", "Dep") ]
+      ~declarations:
+        [ ("IO.Console", "App"); ("IO.Console", "Dep");
+          ("IO.FileRead", "Dep") ]
+      ()
+  in
+  Alcotest.(check (list string)) "declared program is clean" []
+    (List.map March_caps.Cap_ceiling.describe (Cmd_cap.ceiling_violations ok))
+
+let tests =
+  tests
+  @ [
+      Alcotest.test_case "ceiling violation read from the artifact" `Quick
+        test_ceiling_violation_read_from_the_artifact;
+    ]
 
 let () = Alcotest.run "cap_audit" [ ("cap_audit", tests) ]

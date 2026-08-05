@@ -477,6 +477,10 @@ let render_json ~bin (t : Cap_binary.t) =
          `List (List.map (fun (c, o) ->
              `Assoc [ ("cap", `String c); ("module", `String o) ])
              t.Cap_binary.attribution));
+        ("declarations",
+         `List (List.map (fun (c, o) ->
+             `Assoc [ ("cap", `String c); ("module", `String o) ])
+             t.Cap_binary.declarations));
         ("rt_symbols", strs t.Cap_binary.rt_symbols);
         ("build", `String (build_str t.Cap_binary.build));
         ("coverage", `String (coverage_str (coverage_of t)));
@@ -528,16 +532,50 @@ let gate_violations ~deny ~allow_only ~allow_foreign (t : Cap_binary.t) =
        effective);
   List.rev !violations
 
-let inspect ~bin ~json ~deny ~allow_only ~allow_foreign () =
+(* --strict: re-check the capability ceiling from the ARTIFACT.  The compiler
+   applies the same rule at build time (--cap-strict), but this runs on a
+   binary you did not build, using the two channels the binary carries: what
+   each module was measured to use, and what it declared.
+
+   Refuses rather than passes when the declaration channel is missing.  A
+   binary from a pre-attribution compiler has no capdecl markers at all, and
+   reporting "no violations" for it would turn absence of evidence into a
+   clean bill — the failure mode this whole feature exists to avoid. *)
+let ceiling_violations (t : Cap_binary.t) =
+  let module_caps =
+    List.fold_left
+      (fun acc (cap, owner) ->
+         let prev = try List.assoc owner acc with Not_found -> [] in
+         (owner, cap :: prev) :: List.remove_assoc owner acc)
+      [] t.Cap_binary.declarations
+  in
+  March_caps.Cap_ceiling.check ~module_caps
+    ~attribution:t.Cap_binary.attribution ~caps:t.Cap_binary.caps
+
+let inspect ~bin ~json ~deny ~allow_only ~allow_foreign ~strict () =
   match Cap_binary.read bin with
   | Error e -> Error e
   | Ok t ->
     if json then print_string (render_json ~bin t)
     else print_string (render_report ~bin t);
-    (match gate_violations ~deny ~allow_only ~allow_foreign t with
+    let strict_vs =
+      if not strict then []
+      else if t.Cap_binary.attribution = [] && t.Cap_binary.declarations = []
+      then
+        [ "--strict: this binary carries no capability attribution — it was \
+           built by a compiler that predates it, or is not a March binary. \
+           Refusing to report a clean ceiling for a binary whose ceiling \
+           cannot be read." ]
+      else List.map March_caps.Cap_ceiling.describe (ceiling_violations t)
+    in
+    List.iter
+      (fun v -> Printf.eprintf "forge cap inspect: %s\n%!" v)
+      strict_vs;
+    (match gate_violations ~deny ~allow_only ~allow_foreign t @ strict_vs with
      | [] -> Ok ()
      | vs ->
-       List.iter (fun v -> Printf.eprintf "forge cap inspect: %s\n%!" v) vs;
+       List.iter (fun v -> Printf.eprintf "forge cap inspect: %s\n%!" v)
+         (gate_violations ~deny ~allow_only ~allow_foreign t);
        Error (Printf.sprintf "%d gate violation(s)" (List.length vs)))
 
 (* ------------------------------------------------------------------ *)

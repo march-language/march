@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge cap inspect --strict`** re-checks the capability ceiling on a
+  binary you did not build. Binaries now carry each module's *declared* needs
+  alongside its measured use, so the two can be compared without the source.
+  Fails closed on a binary that carries no attribution rather than reporting a
+  clean ceiling for one whose ceiling cannot be read.
+
 - **`--cap-strict`: `needs` as a hard ceiling.** Opt-in build gate — every
   module's emitted code must stay within that module's own `needs`
   declarations, or the build fails naming the module.
@@ -108,6 +114,27 @@ git log is authoritative for exact commits.
   `docker inspect` precedent. No alias: the command is days old and unreleased.
 
 ### Fixed
+
+- **Capability warnings were silently discarded in the entry module.**
+  `prelude.march` is unwrapped into global scope, so its declarations ride in
+  the *entry module's* declaration list. The body-scan check keeps one span
+  per capability and keeps the first, so a capability prelude also used got a
+  prelude span — which the driver then filtered out as stdlib-internal. The
+  warning was generated and thrown away.
+
+  Visible symptom: `println` at the top level of a program produced no "does
+  not declare `needs IO.Console`" warning, while `file_exists` in the same
+  module did — purely because prelude calls `println` and never calls
+  `file_exists`. The same code inside a nested module or an actor handler
+  warned correctly, which is why the existing enforcement tests passed.
+
+  In practice this only ever hid `IO.Console`, since `println`/`print` are the
+  only capability-bearing builtins prelude calls — the filesystem, network and
+  process warnings were never affected. The mechanism was general, though, and
+  any future prelude addition would have silently suppressed a real one.
+
+  **This is a visible change:** a program that prints at the top level without
+  `needs IO.Console` now gets the warning it should always have had.
 
 - **`RingBuf` gained a compiled backend.** The `ring_buf_*` builtins existed
   only in the interpreter, so any program using `RingBuf` failed to link under

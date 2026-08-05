@@ -1,62 +1,78 @@
-# `--cap-strict` capability ceiling — follow-ups
+# `--cap-strict` capability ceiling — remaining follow-ups
 
-Shipped 2026-08-04: `--cap-strict` checks each module's attributed capability
-use against its own `needs`. See
-`specs/progress/2026-08-04-cap-ceiling-strict.md`.
+Shipped 2026-08-04: `--cap-strict`, per-module attribution, and the three
+items closed below. See `specs/progress/2026-08-04-cap-ceiling-strict.md`.
 
-- [ ] **`println` does not trip Check 1b in a plain function body, but
-  `file_exists` does.** Found while sizing the ceiling work, NOT root-caused.
-  Both are in `builtin_cap_table`, both are collected by `calls_in_expr`
-  (which does descend into match arms), `declared_needs` is empty in both
-  cases, and no `IO.Console` exemption exists anywhere in `typecheck.ml`.
+## Closed 2026-08-04
 
-  Measured, same module and same shape:
+- **`println` not tripping Check 1b — root-caused and fixed.** It was never
+  about `println`. `prelude.march` is unwrapped into GLOBAL scope, so its
+  declarations are prepended to the ENTRY module's decl list. Check 1b dedups
+  its body scan to one `(capability, span)` pair and keeps the FIRST, so any
+  capability prelude also uses got a *prelude* span — which the driver's
+  `is_user_file` filter then discarded. The warning was generated and thrown
+  away.
 
-  ```march
-  mod P3 do
-    fn emit(s : String) : () do println(s) end          -- NO warning
-    fn touch(p : String) : Bool do
-      match file_exists(p) do true -> true  false -> false end   -- warns
-    end
-  end
-  ```
+  Scope, measured rather than assumed: `println`/`print` are the ONLY
+  cap-bearing builtins prelude calls, so in practice this only ever hid
+  `IO.Console`. Filesystem, network and process warnings were never
+  suppressed, and the same code inside a nested module or actor handler
+  warned correctly — which is why the three existing enforcement tests
+  passed. The mechanism is general, so any future prelude addition would have
+  suppressed a real warning silently. Fixed by `Typecheck.stdlib_source_files` +
+  `span_is_stdlib`, filtering stdlib-sourced uses out of the body scan.
+  Default-build warnings are now a faithful preview of what `--cap-strict`
+  demands. Two test fixtures needed `needs IO.Console` added — the migration
+  burden is real and immediate.
 
-  A test at `test/test_compiler.ml:3291` asserts `IO.Console` DOES warn for
-  actor handler bodies, so the diagnostic is not globally suppressed. This
-  inconsistency is invisible under `--cap-strict` (which derives from emitted
-  code and correctly requires `needs IO.Console`), but it means the default
-  build's warnings are not a reliable preview of what strict will demand.
+- **`ECallPtr` witness hunt — no witness found, and there is a reason.** The
+  atom scan added with `--cap-strict` catches a capability at the point its
+  name is *mentioned*, not where it is invoked. Tried and all attributed
+  correctly: builtin returned from a branch as a function value; builtin
+  stored in a `Cons` cell, pattern-matched out, and called through a function
+  parameter. A capability must be named somewhere to be obtained, and every
+  naming site is an atom position. `Cap_ceiling.Unattributed` remains as a
+  fail-closed backstop with no known trigger — worth revisiting if
+  reflection, dynamic module loading, or runtime-provided closures ever land.
 
-- [ ] **`ECallPtr`'s callee is still not statically known.** The atom scan now
-  attributes a builtin handed out as a value, which closed the common case,
-  but a capability reached only through a genuinely dynamic dispatch — a
-  closure selected at runtime from a table — has no owner. `Cap_ceiling`
-  reports these as `Unattributed` and fails closed.
+- **`forge cap inspect --strict`.** Binaries now carry a second per-module
+  channel, `__march_capdecl_<CAP>__<OWNER>` (what each module declared),
+  alongside `__march_capfrom_` (what it was measured to use). The ceiling can
+  therefore be re-checked on a binary you did not build. Fails closed when
+  the attribution channel is absent rather than reporting a clean ceiling for
+  a binary whose ceiling cannot be read.
 
-  Not yet verified: whether any construct in real March code actually produces
-  an `Unattributed` row today. The unit test covers the rule; there is no
-  end-to-end witness, so that path is currently exercised by construction
-  only. Worth finding a real witness or establishing that none exists.
+## Open
 
 - [ ] **`--cap-strict` is compile-only, not available to `--check`.** The
-  check needs TIR, and `--check` stops after typecheck, so editors and
-  `forge check` cannot preview ceiling violations. Either lower far enough
-  under a flag, or accept that strict is a build gate and say so in the docs.
+  check needs TIR and `--check` stops after typecheck, so editors and
+  `forge check` cannot preview ceiling violations. With the `println` fix
+  above, the *source-level warnings* are now a much better proxy than they
+  were — they cover the direct-builtin route faithfully — but they still miss
+  the stdlib-mediated and value-passing routes, which only the TIR channel
+  sees. Either lower far enough under a flag, or document strict as a build
+  gate and lean on the warnings for editor feedback.
 
-- [ ] **No `forge cap inspect --strict`.** The artifact carries per-module
-  attribution markers and the compiler knows each module's `needs`, but the
-  binary does not carry the declarations, so the ceiling cannot currently be
-  re-checked from an artifact alone. Embedding declared needs per module in
-  the manifest blob would let a consumer verify a ceiling on a binary they did
-  not build.
+- [ ] **No migration autofix.** `--cap-strict` rejects most existing code,
+  including this repo's own `examples/`, because `needs IO.Console` is almost
+  never declared. Check 1b already emits the right `FInsert` autofix, and
+  with the stdlib-span fix it now fires for every direct-builtin case, so a
+  `forge fix`-style bulk apply is mostly wiring. The stdlib-mediated route
+  still has no source-level diagnostic to hang a fix on.
 
-- [ ] **Migration story.** `--cap-strict` rejects most existing code, including
-  this repo's own `examples/`, because `needs IO.Console` is almost never
-  declared. The existing `warning_with_fix`/`FInsert` machinery already emits
-  the right autofix for Check 1b; wiring a `forge fix`-style bulk apply driven
-  by ceiling violations would make adoption mechanical rather than manual.
+- [ ] **Per-dependency capability budgets in `forge.toml`** — the original
+  motivation, now unblocked on both sides: attribution names the module and
+  the ceiling proves the module stays inside its declaration, verifiable from
+  source or from the artifact. What remains is the module→package mapping,
+  which `forge/lib/cap_package.ml` already computes from source. Design note
+  from the earlier analysis: check budgets against *reachability*, not
+  against the dependency's declared package set — the latter is stricter than
+  reality and would train people to widen budgets until they mean nothing.
 
-- [ ] **Per-dependency budgets in `forge.toml`** (the original motivation) are
-  now unblocked: attribution names the module and the ceiling check proves the
-  module stays inside its declaration. What remains is the module→package
-  mapping, which `forge/lib/cap_package.ml` already computes from source.
+- [ ] **Ceiling checking is per-module, so a package can still launder
+  authority internally.** Module A of a dependency may declare
+  `needs IO.FileRead` legitimately while module B calls A. Both stay inside
+  their own ceilings; the package as a whole holds the capability. This is
+  correct behaviour for the module rule, but it means "which package can
+  touch my files" needs the package-level roll-up above, not just the module
+  check.
