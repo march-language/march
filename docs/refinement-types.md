@@ -538,6 +538,9 @@ now. An index the compiler can't pin down — by far the common case — stays
 silent, just as `head(ys)` does for a list it can't see into. Before this
 shipped the whole standard library and four real projects (`forgepm`,
 `bastion`, `conduit`, `depot`) were swept for it: zero calls became errors.
+Under `cap verified`, though, that same unbindable index is a hard error
+instead of a silent skip — that mode's whole premise is that every obligation
+gets discharged, so "can't tell" is no longer good enough.
 
 An ordinary `List.length(xs) > 0` guard **does** satisfy the requirement, so these
 contracts bite on a list you checked at runtime and not just on literals — see

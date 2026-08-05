@@ -8,8 +8,13 @@
 - **Postconditions compose no measure through a return refinement.** Narrowed
   2026-07-30: `check_post` now *files* an obligation at every exit (so
   `--refine-report` counts return refinements) and `cap verified` escalates an
-  undischarged one. What remains open is composition — a list or ADT measure
-  still does not carry through a return refinement to a caller's goal.
+  undischarged one. What remains open is composition — a list or ~~ADT~~
+  measure still does not carry through a return refinement to a caller's goal.
+  **ADT half CLOSED 2026-08-04** — see the Task 6 investigation below: both
+  the Closed (`size(_) > 0`) and Relational (`size(_) == size(t) + 1`) ADT
+  shapes now compose through an unannotated `let` (suites
+  `post-compose-closed`, `post-compose-relational`). The List half is
+  unaffected and confirmed still open.
 - **The measure-alias gates are still unit-global**, except the selector-less
   `use X.List` arm, which since 2026-07-31 resolves its target and withdraws
   only if some match can provide the aliased member. The member gate,
