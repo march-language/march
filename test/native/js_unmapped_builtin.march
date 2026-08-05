@@ -4,6 +4,7 @@
 -- its value (2^62 - 1) is not representable in the JS target's double-backed
 -- Int, so it gets the tailored message.
 mod JsUnmappedBuiltin do
+  needs IO.Console
   fn main() : Unit do
     println(int_to_string(int_max_value(())))
   end
