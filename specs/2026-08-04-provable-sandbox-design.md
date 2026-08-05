@@ -163,6 +163,55 @@ or explicitly excluded from the claim:
 | **Actors / messages** | can a `Cap` travel in a message? | if yes, message types join the effect discipline; if no, that is a typing rule to add and test |
 | **`march_env`, raises** | env-routed error paths cross the boundary | audit |
 | **Dynamic dispatch** | interface method resolved at runtime | covered by the type system if rows are on method signatures |
+| **Console egress** | stdout is a live exfiltration channel that every profile grants | cannot be closed — see R8a |
+
+### R8a. Console egress is the hatch that never closes
+
+Every other row above can, in principle, be shut. This one cannot, and any
+claim containing the word "sandboxed" has to say so.
+
+**It is granted unconditionally, by construction.** `Cap_sandbox.enforceability`
+classifies `IO.Console` as `Advisory "stdout/stderr are required to report
+violations"`, and `sbpl_baseline` allows `file-write-data` to `/dev/stdout`,
+`/dev/stderr` and `/dev/tty` *before* any capability-derived rule is added.
+`--cap-sandbox`'s self-imposed profile does the same. The sandbox needs stdout
+to report its own denials, so a profile that denied console could not tell you
+it had denied anything.
+
+**It needs no other capability.** Code with no filesystem and no network access
+can still exfiltrate anything it can read, because stdout is not a void — it
+lands in CI logs (public, on public repositories), in log aggregators that
+index and retain, and in whatever pipeline the operator built. The attacker
+borrows the operator's plumbing rather than opening a channel of their own.
+
+**It is the last channel open in exactly the scenario capabilities are for.**
+Run untrusted code with everything else denied and stdout is what remains,
+because a program that cannot say anything is useless. That makes it the
+highest-value target precisely in the configuration meant to be safest.
+
+Secondary consequences of the same grant: log injection (forged lines,
+newline-smuggled timestamps) to hide activity or poison downstream alerting;
+ANSI sequences that overwrite already-printed output so what a terminal showed
+is not what was emitted; and corruption of programs whose stdout *is* their
+interface, where a dependency printing does not merely add noise but alters
+what the consumer parses.
+
+**What can be done instead.** Nothing at runtime — so the whole defense is
+static, which inverts the usual reasoning. Because console can never be gated,
+the declare-and-diff channel is not a weaker substitute for enforcement here;
+it is the only control that exists. Concretely:
+
+- per-module attribution names *which* module prints, and an unexpected
+  `println` in a JSON parser or a date formatter is exactly the shape of a
+  data-exfil backdoor, where the same call in a logging library is expected;
+- `--cap-strict` fails a build where a dependency prints without declaring it;
+- `forge audit` diffs the appearance of `IO.Console` on a dependency bump.
+
+This is why `IO.Console` must stay a real capability in the ceiling rather than
+be waved through as ceremony. The temptation to exempt it is strong — it is the
+most common builtin in the language and the warning is noisy — and it is
+exactly backwards: unenforceable is an argument for caring *more* about the
+static channel, not less.
 
 ### R9. The compiler
 
@@ -193,6 +242,13 @@ guarantee than one proof that trusts the toolchain.
 scheduling, cache. Any published claim must say so explicitly rather than
 leave it implied.
 
+Console egress (R8a) is a separate and more serious exclusion, and must not be
+folded into that sentence. A covert channel is low-bandwidth and requires
+effort to exploit; stdout is an *overt*, high-bandwidth, universally granted
+channel that carries whatever the program chooses to print. A reader who sees
+"excludes covert channels" will not infer "and also anything the program
+prints reaches your CI logs." Say it separately.
+
 ---
 
 ## 3. Claims earnable in order
@@ -206,12 +262,16 @@ shippable increment.
 | **1 — unforgeable** | R3, R4 | "capabilities cannot be fabricated, only received and narrowed" |
 | **2 — no ambient IO** | R1b, R2 | "a module can only perform IO with authority it was given" |
 | **3 — compositional** | R5 | "…and that holds for higher-order and library code, checked per-definition rather than per-program" |
-| **4 — proved** | R6, R7 | "provably capability-safe for the core language, modulo FFI and compiler correctness" |
+| **4 — proved** | R6, R7 | "provably capability-safe for the core language, modulo FFI, compiler correctness, and console egress" |
 | **5 — unqualified** | R9 | not reachable |
 
 Note stage 1 is **independent of everything else** and cheap. It is the only
 one that closes a practical attack (fabricate a `Cap` via `from_json`) rather
 than strengthening a claim.
+
+No stage closes console egress (R8a). Every row above should be read as
+"...for data the program does not print", and stage 5 does not fix it either
+— verified compilation makes the compiler trustworthy, not stdout private.
 
 ---
 
@@ -253,6 +313,14 @@ Defensible today:
 > module, checked against the code the compiler actually emits, enforced as a
 > hard ceiling on every dependency — including ones that never opted in — and
 > readable back off the compiled binary.
+
+Paired, wherever the word "sandbox" appears, with the exclusion that is easiest
+to forget and most likely to bite:
+
+> Console output is not contained and cannot be. Every profile grants stdout,
+> so a dependency that can print can exfiltrate through your CI logs without
+> needing any other capability. What March gives you there is attribution —
+> which module prints — not prevention.
 
 Not defensible, and should not be said until stage 4:
 
