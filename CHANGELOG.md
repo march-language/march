@@ -36,6 +36,18 @@ git log is authoritative for exact commits.
   it "moved" from a caller to the callee, this is why. `panic`/`panic_`/
   `todo_`/`unreachable_` and `Array.get`/`Array.set` keep their transitive
   blame unchanged.
+- **`cap no_panic` now reports one error per offending call site, not one per
+  function.** A function containing two unprovable `List.tail` calls reports
+  two errors where it used to report one. Nothing new is rejected — the same
+  function already failed — but you now see every offending call at once.
+- **`march check` and `march caps` stay conservative for the contracted
+  names.** Proving a call safe needs the refinement checker, and those two
+  commands are a package-level typecheck-only pass that does not run it (nor
+  does the LSP). They keep banning the contracted names by name, transitive
+  blame included, so a guarded `List.tail` that `march --check` accepts is
+  still reported by `march check`. This is the pre-existing behavior preserved;
+  nothing that passed `march check` before fails it now. Use `march --check` for
+  the proof-based answer.
 
 ### Fixed
 

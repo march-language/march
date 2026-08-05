@@ -46,30 +46,21 @@ module Err = March_errors.Errors
 module SS = Set.Make (String)
 
 (* ── The covered set ───────────────────────────────────────────────────────
-   Exactly the names REMOVED from [Typecheck.panic_surface_prelude] /
-   [Typecheck.panic_surface_stdlib] by this task, and therefore disjoint from
-   what remains there: `panic`/`panic_`/`todo_`/`unreachable_` (no contract is
-   possible) and `Array.get`/`Array.set` (no contract exists yet — Group B).
-   Every name here carries a refinement precondition in the stdlib as shipped;
+   Deliberately an ALIAS of [Typecheck.panic_surface_contracted], not a copy.
+   The typechecker needs the same set (it bans these names syntactically
+   whenever no proof-based pass will run — see [Typecheck.proof_based_panic_
+   surface]), and two hand-maintained lists would be free to drift, which for
+   this pair means a name banned in neither place: a call that can panic
+   compiling clean inside a capability that promised it cannot.  Sharing one
+   binding also makes "disjoint from the syntactic ban lists" structural.
+
+   Every name in it carries a refinement precondition in the stdlib as shipped;
    see specs/progress/2026-08-05-no-panic-ban-list-audit.md for the audit that
    established which ones do. *)
+let covered : SS.t =
+  March_typecheck.Typecheck.StringSet.fold SS.add
+    March_typecheck.Typecheck.panic_surface_contracted SS.empty
 
-(* Bare (prelude) spellings. *)
-let covered_prelude : SS.t =
-  SS.of_list [ "head"; "tail"; "last"; "unwrap"; "expect" ]
-
-(* Qualified stdlib spellings. *)
-let covered_stdlib : SS.t =
-  SS.of_list
-    [ "List.nth"; "List.head"; "List.last"; "List.tail";
-      "List.maximum_int"; "List.minimum_int";
-      "Option.unwrap"; "Option.expect";
-      "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
-      "Random.normal"; "Random.exponential"; "Random.bernoulli"; "Random.choice";
-      "DateTime.fixed_zone"; "DateTime.fixed_zone_hm";
-      "Stats.mean"; "Stats.min_val"; "Stats.max_val" ]
-
-let covered : SS.t = SS.union covered_prelude covered_stdlib
 let is_covered (name : string) : bool = SS.mem name covered
 
 (* ── Reading the verdict index ─────────────────────────────────────────────

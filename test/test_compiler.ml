@@ -6370,12 +6370,31 @@ let typecheck_with_divsafety src =
    silently green for the wrong reason.  No stdlib is loaded here, so a
    qualified call resolves to nothing, raises no obligation, and is rejected
    FAIL-CLOSED — which is exactly the property these fixtures assert. *)
+(* The TYPECHECKER ALONE, told that a proof-based pass will follow — i.e. what
+   `check_no_panic_module` contributes inside bin/main.ml's compile/`--check`
+   pipeline, with no refinecheck run here.  Isolates the syntactic half of the
+   answer, which is all this file can assert: admitting a guarded call needs a
+   verdict index, and building one needs the real stdlib (see
+   test_refinecheck.ml's `no-panic-by-proof` group). *)
+let typecheck_proof_mode src =
+  let m = parse_and_desugar src in
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_typecheck.Typecheck.proof_based_panic_surface := false;
+  errors
+
 let typecheck_with_no_panic_passes src =
   let m = parse_and_desugar src in
+  (* Mirror bin/main.ml: a pipeline that runs [Panic_surface_by_proof] tells
+     the typechecker to leave the contracted names to it.  Restored afterwards
+     so a later case using plain [typecheck] still sees the default (the
+     `march check` / LSP mode). *)
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
   let (errors, _) = March_typecheck.Typecheck.check_module m in
   March_refinecheck.Refine_check.check_module errors m;
   March_refinecheck.Division_safety.check_module errors m;
   March_refinecheck.Panic_surface_by_proof.check_module errors m;
+  March_typecheck.Typecheck.proof_based_panic_surface := false;
   errors
 
 let test_cap_no_panic_safe_no_error () =
@@ -6668,22 +6687,32 @@ let test_cap_no_panic_list_tail_error () =
    anyway.  The assertion is flipped here rather than replaced by a fresh test,
    so the two revisions of this one case document the before/after.
 
-   What it pins HERE is the syntactic half: `List.tail` is no longer on the
-   typechecker's ban list under any spelling, guarded or not.  Whether a
-   guarded call is actually ADMITTED — the proof, against the real
-   `stdlib/list.march` contract, with its unguarded and its undecidable
-   REJECT controls — is pinned in test_refinecheck.ml's `no-panic-by-proof`
-   group, because it needs the verdict index this harness does not build. *)
+   The flip is CONDITIONAL, because Task 3's answer is: whichever pipeline can
+   consult the contract admits the call, and whichever cannot still rejects it.
+   [typecheck_with_no_panic_passes] is the former (it runs the refinecheck
+   passes, so it sets [proof_based_panic_surface] the way bin/main.ml's
+   compile/`--check` path does); plain [typecheck] with the flag at its default
+   is the latter, and is what `march check`/`march caps`/the LSP do. Both
+   halves are asserted here so the divergence is a pinned property rather than
+   a surprise.
+
+   The proof itself — against the real `stdlib/list.march` contract, with its
+   unguarded and undecidable REJECT controls — lives in test_refinecheck.ml's
+   `no-panic-by-proof` group, which is the only harness that builds a verdict
+   index. *)
 let test_cap_no_panic_list_tail_guarded_still_error () =
-  let ctx = typecheck {|mod GT2 do
+  let src = {|mod GT2 do
     cap no_panic
     fn f(xs : List(Int)) : List(Int) do
       if List.length(xs) > 0 do List.tail(xs) else xs end
     end
   end|} in
   Alcotest.(check bool)
-    "cap no_panic + guarded List.tail is no longer banned by NAME: no error"
-    false (has_errors ctx)
+    "guarded List.tail is not banned by NAME when a proof pass will run"
+    false (has_errors (typecheck_proof_mode src));
+  Alcotest.(check bool)
+    "but a typecheck-only pipeline (march check, LSP) still rejects it"
+    true (has_errors (typecheck src))
 
 let test_cap_no_panic_list_maximum_int_error () =
   let ctx = typecheck_with_no_panic_passes {|mod GT3 do

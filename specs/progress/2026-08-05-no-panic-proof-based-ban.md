@@ -3,8 +3,8 @@
 **Date:** 2026-08-05
 **Files:** `lib/refinecheck/panic_surface_by_proof.ml` (new), `lib/refinecheck/dune`,
 `lib/typecheck/typecheck.ml`, `bin/main.ml`, `test/test_refinecheck.ml`,
-`test/test_compiler.ml`, `test/dune`, `docs/capabilities.md`,
-`specs/lang/capabilities.md`, `CHANGELOG.md`
+`test/test_compiler.ml`, `test/dune`, `lsp/test/test_lsp.ml`,
+`docs/capabilities.md`, `specs/lang/capabilities.md`, `CHANGELOG.md`
 
 Task 3 of `docs/superpowers/plans/2026-08-05-no-panic-proof-based-and-group-b.md`.
 Builds on Task 1 (ban-list audit, `specs/progress/2026-08-05-no-panic-ban-list-audit.md`)
@@ -180,3 +180,79 @@ The pre-change binary rejecting the guarded fixture is what proves the control c
 fail; the sweep is not a byte-identical no-op.
 
 Types corpus (`specs/lang/types/check_types.sh`): 244 passed, 0 failed.
+
+
+---
+
+## Review round 2 (2026-08-05): three pipelines, not two
+
+Review found the pass was wired into only two of March's **three** check
+pipelines. `bin/main.ml`'s `run_check_cmd` (`march check`, `march caps`) is a
+third, package-level, typecheck-only path that deliberately skips refinecheck;
+the LSP is a fourth consumer of the typechecker that never links
+march_refinecheck at all. With the contracted names removed from the syntactic
+ban unconditionally, `march check` exited **0** on provably panicky code.
+
+### The fix: a fail-closed opt-in flag
+
+`Typecheck.proof_based_panic_surface : bool ref`, **default false**. When false
+the contracted names are banned by name exactly as before 2026-08-05, transitive
+fixpoint included; the two proof-capable pipelines set it to true before calling
+`check_module`. A pipeline that forgets to opt in therefore gets the
+conservative answer, which is the only sound default for a guarantee.
+
+`march check` output on the control corpus is byte-identical to a binary built
+from the parent commit — no regression, and no proof-based widening there. The
+divergence (`march check` rejects a guarded `List.tail` that `march --check`
+accepts) is stated in both capability docs and the changelog.
+
+Route (b) of the two the reviewer offered. Route (a) — running `Refine_check`
+inside `run_check_cmd` — was rejected: that path is package-level over every
+file at once, is seeded from a cached stdlib typecheck env specifically to stay
+fast, and pulling the solver in would change both its cost and its semantics for
+a command whose job is a quick well-formedness answer.
+
+### `panic_surface_contracted` moved into `typecheck.ml`
+
+The typechecker now needs the set too, so it owns it and
+`Panic_surface_by_proof.covered` aliases the binding. Two hand-maintained copies
+could drift into a name banned in *neither* place.
+
+### The five BARE prelude names were inert — now fixed
+
+Measured, not assumed: bare `tail(xs)` **does** resolve for `Refine_check`
+(`--refine-report` showed `1 proved` for a guarded call), yet the call was still
+rejected with a *transitive* message. `bin/main.ml` unwraps prelude into the
+entry module, so prelude's own `fn tail`/`head`/`last`/`unwrap`/`expect` are
+`DFn`s of the `cap no_panic` module under check; their bodies call `panic`, so
+the fixpoint seeded them and blamed every caller. A transitive verdict never
+consults a proof, so the feature was inert for 5 of its 25 names, and the
+unguarded form reported twice (direct + transitive).
+
+Fix: `check_no_panic_module`'s `local_fns` excludes `panic_surface_contracted`.
+Sound in both modes — with the flag false those names are direct-banned and the
+transitive path is never needed; with it true, the proof pass owns the decision.
+
+### The LSP had nothing to lose
+
+Also measured: `lsp/lib/analysis.ml` goes through
+`Typecheck.check_module_with_env_full`, which — unlike `check_module_core` —
+never calls `check_no_panic_module`. `panic` inside a `cap no_panic` module
+produces no LSP diagnostic either, and `panic` is untouched by this task. So no
+editor squiggle was lost. `lsp/test/test_lsp.ml` now pins the *invariant*
+(a contracted name is reported exactly when `panic_` is) plus a
+not-vacuous control, so the day the LSP is wired to the panic surface, leaving
+the contracted names out fails a test.
+
+### One error per call site (documented behavior change)
+
+`check_no_panic_module`'s `site_map` held one site per function, so a function
+with two unprovable `List.tail` calls reported one error; the proof-based pass
+reports two. Verified against the pre-change binary (1 → 2 on a two-call
+fixture). Documented in both capability docs and the changelog. Nothing new is
+rejected.
+
+`mod_name` provenance was checked for divergence and does **not** diverge: the
+typechecker's `env.current_module` and this pass's AST `DMod` name are both the
+bare module name, and a nested-module fixture prints `` `mod Inner` `` from
+either path.

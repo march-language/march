@@ -9286,14 +9286,60 @@ let panic_surface_prelude : StringSet.t = StringSet.empty
    Group B — they panic out of bounds and no contract exists for them yet, so
    an unconditional ban is still the only sound answer.
 
-   Everything else that used to be here is now checked by proof; the covered
-   set is enumerated in [Panic_surface_by_proof.covered] and is DISJOINT from
-   this set by construction.  Ban-list audit 2026-08-05
+   Everything else that used to be here now carries a refinement contract and
+   lives in [panic_surface_contracted] below.  Ban-list audit 2026-08-05
    (specs/progress/2026-08-05-no-panic-ban-list-audit.md) is what established
    which names carry a real contract. *)
 let panic_surface_stdlib : StringSet.t = StringSet.of_list [
   "Array.get"; "Array.set";
 ]
+
+(* ── The CONTRACTED panic surface ─────────────────────────────────────────
+   Names that panic exactly when a declared refinement precondition fails, so
+   a call to one CAN be proved safe.  This is the single source of truth for
+   the set: [Panic_surface_by_proof.covered] (lib/refinecheck) aliases this
+   binding rather than repeating it, which is what makes "disjoint from the
+   syntactic ban lists" a structural property instead of a hand-checked one.
+
+   Whether these are banned by NAME here depends on
+   [proof_based_panic_surface] below. *)
+let panic_surface_contracted : StringSet.t = StringSet.of_list [
+  (* prelude spellings (prelude is unwrapped into global scope) *)
+  "head"; "tail"; "last"; "unwrap"; "expect";
+  (* qualified stdlib spellings *)
+  "List.nth"; "List.head"; "List.last"; "List.tail";
+  "List.maximum_int"; "List.minimum_int";
+  "Option.unwrap"; "Option.expect";
+  "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
+  "Random.normal"; "Random.exponential"; "Random.bernoulli"; "Random.choice";
+  "DateTime.fixed_zone"; "DateTime.fixed_zone_hm";
+  "Stats.mean"; "Stats.min_val"; "Stats.max_val";
+]
+
+(** Set by a pipeline that ALSO runs [Panic_surface_by_proof] (lib/refinecheck)
+    after [Refine_check.check_module].  When true, this syntactic check leaves
+    [panic_surface_contracted] alone and the proof-based pass decides those
+    call sites from their actual verdicts.
+
+    Default FALSE, and the default is the whole point.  March has three
+    separate check pipelines and only two of them run refinecheck at all:
+
+      - `bin/main.ml`'s compile/`--check` path and its `run_test_cmd` copy DO
+        (they set this to true);
+      - `bin/main.ml`'s [run_check_cmd] (`march check`, `march caps`) does NOT
+        — it is a package-level, typecheck-only path seeded from a cached
+        stdlib env, deliberately skipping the solver;
+      - the LSP (`lsp/lib`) does NOT — it does not even link march_refinecheck.
+
+    Without a verdict index there is nothing to consult, and `cap no_panic` is
+    a guarantee, so "cannot prove" must mean "reject".  Leaving the flag false
+    in those two pipelines therefore keeps the OLD unconditional ban (including
+    its transitive fixpoint) exactly as it was before 2026-08-05 — conservative,
+    no regression, just no proof-based widening there.  Getting this default
+    backwards would silently let genuinely panicky code pass `march check` and
+    make editor squiggles disappear, which is the failure direction the plan's
+    Global Constraints call as serious as a false positive. *)
+let proof_based_panic_surface : bool ref = ref false
 
 let panic_surface_all_direct : StringSet.t =
   StringSet.union panic_surface_direct panic_surface_prelude
@@ -9414,14 +9460,37 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
       | _ -> None
     ) decls
   in
+  (* Which local functions can carry TRANSITIVE blame to their callers.
+     A [panic_surface_contracted] name is excluded, and that exclusion is
+     load-bearing rather than cosmetic: `bin/main.ml` unwraps prelude into the
+     ENTRY module's own decl list, so prelude's `fn tail`/`head`/`last`/
+     `unwrap`/`expect` are literally `DFn`s of the `cap no_panic` module being
+     checked.  Their bodies call `panic`, so the fixpoint seeded them and then
+     blamed every caller "transitively calls `tail`" — which reintroduced the
+     chain-blaming this task removed, and (worse) rejected a call the proof
+     pass had just PROVED safe, since a transitive verdict never consults one.
+     A guarded bare `tail(xs)` was still an error for exactly this reason.
+
+     Excluding them is sound in both pipeline modes: when
+     [proof_based_panic_surface] is false these names are back in
+     [is_direct_panic_site] below, so a caller is rejected DIRECTLY and never
+     needs the transitive path; when it is true, the proof pass owns the
+     decision. A user-defined function that happens to be named `tail` is
+     likewise decided by the proof pass, which fail-closes when it carries no
+     contract. *)
   let local_fns =
-    List.fold_left (fun s (name, _, _) -> StringSet.add name s)
+    List.fold_left (fun s (name, _, _) ->
+      if StringSet.mem name panic_surface_contracted then s
+      else StringSet.add name s)
       StringSet.empty fn_entries
   in
   let _no_panic_mod_names = StringSet.of_list env.no_panic_modules in
   let is_direct_panic_site name =
     StringSet.mem name panic_surface_all_direct
     || StringSet.mem name panic_surface_stdlib
+    (* Only when no proof-based pass will run — see [proof_based_panic_surface]. *)
+    || ((not !proof_based_panic_surface)
+        && StringSet.mem name panic_surface_contracted)
   in
   let seed =
     List.fold_left (fun (panicky, site_map) (fn_name, calls, _span) ->

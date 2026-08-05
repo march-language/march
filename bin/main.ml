@@ -1376,6 +1376,10 @@ let run_test_cmd args =
       { desugared with
         March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
     in
+    (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
+       syntactic ban must leave the contracted names to it.  Set BEFORE
+       [check_module] — the flag is read during that call. *)
+    March_typecheck.Typecheck.proof_based_panic_surface := true;
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
@@ -2015,6 +2019,12 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
+     syntactic ban must leave the contracted names to it.  Set BEFORE
+     [check_module_full] — the flag is read during that call.  [run_check_cmd]
+     (`march check`/`march caps`) and the LSP deliberately do NOT set it: they
+     never run refinecheck, so they keep the old unconditional ban. *)
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms

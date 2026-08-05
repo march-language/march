@@ -5409,6 +5409,79 @@ end|} in
 (* Project-level diagnostics (Feature 17)                              *)
 (* ------------------------------------------------------------------ *)
 
+(* ── `cap no_panic` and the EDITOR ───────────────────────────────────────
+   The LSP links march_typecheck and never march_refinecheck, so it has no
+   verdict index and cannot run the proof-based panic-surface pass that Task 3
+   (2026-08-05) introduced for the contracted names (`List.tail`, `unwrap`,
+   `Stats.mean`, …).  The obvious worry is that those names lost their editor
+   squiggle with nothing replacing them.
+
+   Measured: they did not, because the LSP never had one.  `analysis.ml` goes
+   through [Typecheck.check_module_with_env_full], which — unlike
+   [check_module_core], the path `march --check` and `march check` use — does
+   NOT call [check_no_panic_module] at all.  `panic` inside a `cap no_panic`
+   module produces no LSP diagnostic either, and `panic` is untouched by Task 3.
+
+   So what these cases pin is the INVARIANT, not today's emptiness: whatever
+   the LSP reports for the unconditionally-banned `panic`, it must also report
+   for a contracted name. Written as an equality so it keeps its meaning if the
+   LSP is later wired to the panic surface — at which point a contracted name
+   left out would make the editor silently more permissive than the compiler. *)
+let no_panic_diags src =
+  let a = analyse src in
+  let has hay needle =
+    let n = String.length needle and h = String.length hay in
+    let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+    n = 0 || at 0
+  in
+  List.filter
+    (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with
+      | `String m -> has m "which can panic"
+      | `MarkupContent mc -> has mc.Lsp.Types.MarkupContent.value "which can panic")
+    a.An.diagnostics
+
+let np_panic_src =
+  "mod NPa do\n\
+  \  cap no_panic\n\
+  \  fn f(a : Int) : Int do panic_(\"x\") end\n\
+   end"
+
+let np_qualified_src =
+  "mod NPb do\n\
+  \  cap no_panic\n\
+  \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+   end"
+
+let np_bare_src =
+  "mod NPc do\n\
+  \  cap no_panic\n\
+  \  fn f(o : Option(Int)) : Int do unwrap(o) end\n\
+   end"
+
+let test_lsp_no_panic_contracted_matches_panic () =
+  let reports src = no_panic_diags src <> [] in
+  Alcotest.(check bool)
+    "a qualified contracted name is reported exactly when `panic_` is"
+    (reports np_panic_src) (reports np_qualified_src);
+  Alcotest.(check bool)
+    "a bare contracted name is reported exactly when `panic_` is"
+    (reports np_panic_src) (reports np_bare_src)
+
+let test_lsp_no_panic_filter_is_not_vacuous () =
+  (* Without this the equality above holds for a filter that matches nothing
+     ever — including one looking for a message string that no longer exists.
+     The compiler's own text is the reference, so assert the filter finds it
+     when handed that exact text. *)
+  let has hay needle =
+    let n = String.length needle and h = String.length hay in
+    let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+    n = 0 || at 0
+  in
+  Alcotest.(check bool) "the needle matches the compiler's wording" true
+    (has "`f` in `mod M` (declared `cap no_panic`) calls `List.tail`, \
+          which can panic." "which can panic")
+
 let test_project_diagnostics () =
   let good = "mod A do\n  fn f() : Int do 1 end\nend" in
   let bad  = "mod B do\n  fn g() : Int do \"oops\" end\nend" in
@@ -6519,6 +6592,12 @@ let () =
     ];
     "project diagnostics", [
       "per-file diagnostics across the workspace", `Quick, test_project_diagnostics;
+    ];
+    "cap no_panic diagnostics", [
+      "a contracted name is reported exactly when `panic_` is", `Quick,
+        test_lsp_no_panic_contracted_matches_panic;
+      "the diagnostic filter is not vacuous", `Quick,
+        test_lsp_no_panic_filter_is_not_vacuous;
     ];
     "refactor extras", [
       "generate doc comment", `Quick, test_generate_doc_comment;

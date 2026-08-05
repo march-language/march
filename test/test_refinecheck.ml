@@ -8323,36 +8323,51 @@ let verdict_query_suite =
    SHIPPED contract is what admits a guarded call, and an inline copy would
    keep passing after the shipped contract changed. *)
 
+let load_stdlib_march (name : string) : March_ast.Ast.module_ * string =
+  let candidates =
+    [ "stdlib/" ^ name; "../../../stdlib/" ^ name; "../../stdlib/" ^ name ]
+  in
+  match List.find_opt Sys.file_exists candidates with
+  | None ->
+    Alcotest.failf "cannot find stdlib/%s (searched: %s)" name
+      (String.concat ", " candidates)
+  | Some path ->
+    let src =
+      let ic = open_in_bin path in
+      let n = in_channel_length ic in
+      let buf = Bytes.create n in
+      really_input ic buf 0 n;
+      close_in ic;
+      Bytes.to_string buf
+    in
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <-
+      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+    let m =
+      March_parser.Parser.module_
+        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+    in
+    (March_desugar.Desugar.desugar_module m, path)
+
+(* `list.march` as a sibling `DMod` and `prelude.march` UNWRAPPED into the
+   entry module's own decl list — the two shapes bin/main.ml's [load_stdlib]
+   actually produces.  The unwrapping is not incidental: it is why prelude's
+   `fn tail` is a `DFn` of the `cap no_panic` module under check, which is what
+   made the bare spellings resolve for `Refine_check` AND made the syntactic
+   fixpoint blame their callers transitively.  A harness that wrapped prelude
+   in a `DMod` would exercise neither. *)
 let stdlib_list_mod : (March_ast.Ast.decl * string) Lazy.t =
   lazy
-    (let candidates =
-       [ "stdlib/list.march"; "../../../stdlib/list.march"; "../../stdlib/list.march" ]
-     in
-     match List.find_opt Sys.file_exists candidates with
-     | None ->
-       Alcotest.failf "cannot find stdlib/list.march (searched: %s)"
-         (String.concat ", " candidates)
-     | Some path ->
-       let src =
-         let ic = open_in_bin path in
-         let n = in_channel_length ic in
-         let buf = Bytes.create n in
-         really_input ic buf 0 n;
-         close_in ic;
-         Bytes.to_string buf
-       in
-       let lexbuf = Lexing.from_string src in
-       lexbuf.Lexing.lex_curr_p <-
-         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-       let m =
-         March_parser.Parser.module_
-           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-       in
-       let m = March_desugar.Desugar.desugar_module m in
-       ( March_ast.Ast.DMod
-           ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
-             m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
-         path ))
+    (let m, path = load_stdlib_march "list.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
+let stdlib_prelude_decls : (March_ast.Ast.decl list * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "prelude.march" in
+     (m.March_ast.Ast.mod_decls, path))
 
 (* Every `cap no_panic` diagnostic [src] produces, from EITHER pass.  Filtered
    on the shared "(declared `cap no_panic`)" phrasing rather than counting all
@@ -8361,18 +8376,36 @@ let stdlib_list_mod : (March_ast.Ast.decl * string) Lazy.t =
    reason. *)
 let no_panic_errors (src : string) : string list =
   let m = March_desugar.Desugar.desugar_module (parse src) in
-  let listmod, path = Lazy.force stdlib_list_mod in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
   let m =
-    { m with March_ast.Ast.mod_decls = listmod :: m.March_ast.Ast.mod_decls }
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
   in
+  (* Mirror bin/main.ml: a pipeline that runs [Panic_surface_by_proof] tells the
+     typechecker to leave the contracted names alone.  Set here rather than
+     globally so the [no-panic-syntactic-fallback] group below can exercise the
+     OTHER mode (`march check` / the LSP) in the same process. *)
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
   let errors, _ = March_typecheck.Typecheck.check_module m in
-  March_refinecheck.Refine_check.check_module ~stdlib_files:[ path ] errors m;
+  March_refinecheck.Refine_check.check_module
+    ~stdlib_files:[ list_path; prelude_path ] errors m;
   March_refinecheck.Division_safety.check_module errors m;
   March_refinecheck.Panic_surface_by_proof.check_module errors m;
+  March_typecheck.Typecheck.proof_based_panic_surface := false;
+  (* Only diagnostics pointing at the FIXTURE, mirroring bin/main.ml's
+     [is_user_file].  Prelude is unwrapped into this module, so its own
+     `fn tail`/`head`/`last`/`unwrap`/`expect` are decls under check and report
+     against themselves; the compiler never shows those to a user, and counting
+     them here would make every count assertion below meaningless.  A
+     string-parsed fixture's spans carry the empty filename. *)
   List.filter_map
     (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
       if
         d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
         && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
       then Some d.March_errors.Errors.message
       else None)
@@ -8439,6 +8472,42 @@ let no_panic_proof_suite =
         in
         Alcotest.(check int) "exactly one error, not three" 1 n)
 
+  ; (* The five BARE prelude spellings, which the qualified fixtures above do
+       not exercise at all.  They matter because they reach the checker by a
+       different route: prelude is UNWRAPPED into the entry module, so
+       `tail(xs)` resolves against a `DFn` sitting in this module's own decl
+       list rather than against a `DMod` member.
+
+       Measured while fixing this: bare calls DO resolve — `--refine-report`
+       showed `1 proved` for the guarded form — and yet the call was still
+       rejected, with a *transitive* message, because that same unwrapping put
+       prelude's `fn tail` into the syntactic fixpoint's `local_fns` and its
+       body calls `panic`. A proof-based verdict is never consulted on the
+       transitive path, so the feature was inert for 5 of its 25 names and the
+       unguarded form reported TWICE. Hence the count assertion here, not a
+       bool: a bool would have called the double-report a pass. *)
+    gated "cap no_panic: a PROVABLY safe BARE prelude tail compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error
+             "mod BT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do\n\
+             \    if List.length(xs) > 0 do tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded BARE prelude tail errors exactly ONCE"
+      (fun () ->
+        Alcotest.(check int)
+          "one error, not one direct plus one transitive" 1
+          (has_no_panic_error_count
+             "mod BTU do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do tail(xs) end\n\
+              end\n"))
+
   ; (* REGRESSION: `panic` keeps BOTH its syntactic ban and its transitive
        fixpoint.  Same shape as the case above, opposite expectation — three
        errors, because no contract exists or could exist for `panic`. *)
@@ -8454,6 +8523,93 @@ let no_panic_proof_suite =
              end\n"
         in
         Alcotest.(check int) "direct site plus two transitive callers" 3 n)
+  ]
+
+(* ── The typecheck-only FALLBACK (`march check`, `march caps`, the LSP) ────
+   March has three check pipelines and only two run refinecheck.
+   [run_check_cmd] (`march check` / `march caps`) is package-level and
+   typecheck-only, seeded from a cached stdlib env and deliberately skipping
+   the solver; the LSP does not even link march_refinecheck.  With no verdict
+   index there is nothing to consult, and `cap no_panic` is a guarantee, so
+   "cannot prove" has to mean "reject".
+
+   [Typecheck.proof_based_panic_surface] therefore defaults to FALSE and the
+   contracted names stay unconditionally banned — including their transitive
+   fixpoint — exactly as before 2026-08-05.  Between the first draft of this
+   task and now, that default was the difference between `march check` exiting
+   1 and exiting 0 on provably panicky code.
+
+   These cases run the typechecker ALONE with the flag at its default, which is
+   what those two pipelines do. *)
+let syntactic_no_panic_errors (src : string) : int =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  (* Default, not set: a pipeline that forgets to opt in must get the
+     conservative answer, so the absence of an assignment is the assertion. *)
+  let errors, _ = March_typecheck.Typecheck.check_module m in
+  List.length
+    (List.filter
+       (fun (d : March_errors.Errors.diagnostic) ->
+         d.March_errors.Errors.severity = March_errors.Errors.Error
+         && contains d.March_errors.Errors.message "(declared `cap no_panic`)")
+       errors.March_errors.Errors.diagnostics)
+
+let syntactic_fallback_suite =
+  [ Alcotest.test_case "an unguarded contracted call is still banned" `Quick
+      (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+              end\n"))
+
+  ; (* Deliberately MORE conservative than the full pipeline, which admits this
+       exact fixture. Documented as a divergence in both capability docs; the
+       alternative — staying silent — would let genuinely panicky code pass
+       `march check`. *)
+    Alcotest.test_case "a GUARDED contracted call is also banned (no prover here)"
+      `Quick (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do\n\
+             \    if List.length(xs) > 0 do List.tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; Alcotest.test_case "the bare prelude spelling is banned here too" `Quick
+      (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF3 do\n\
+             \  cap no_panic\n\
+             \  fn f(o : Option(Int)) : Int do unwrap(o) end\n\
+              end\n"))
+
+  ; (* And the OLD transitive blame is intact in this mode — three errors, the
+       pre-2026-08-05 behaviour, byte-for-byte what `march check` printed
+       before this task. *)
+    Alcotest.test_case "transitive blame is intact in the fallback" `Quick
+      (fun () ->
+        Alcotest.(check int) "direct site plus two callers" 3
+          (syntactic_no_panic_errors
+             "mod SF4 do\n\
+             \  cap no_panic\n\
+             \  fn helper(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+             \  fn caller1(xs : List(Int)) : List(Int) do helper(xs) end\n\
+             \  fn caller2(xs : List(Int)) : List(Int) do helper(xs) end\n\
+              end\n"))
+
+  ; (* REJECT control: the fallback must not have become a blanket rejector. *)
+    Alcotest.test_case "a safe cap no_panic module is silent in the fallback"
+      `Quick (fun () ->
+        Alcotest.(check int) "no error" 0
+          (syntactic_no_panic_errors
+             "mod SF5 do\n\
+             \  cap no_panic\n\
+             \  fn f(a : Int) : Int do a + 1 end\n\
+              end\n"))
   ]
 
 (* ── The verdict FILTER, unit-tested directly ──────────────────────────────
@@ -8614,4 +8770,5 @@ let () =
       ("stdlib-nth-contract", stdlib_nth_contract_suite);
       ("verdict-query", verdict_query_suite);
       ("no-panic-by-proof", no_panic_proof_suite);
-      ("no-panic-verdict-filter", verdict_filter_suite) ]
+      ("no-panic-verdict-filter", verdict_filter_suite);
+      ("no-panic-syntactic-fallback", syntactic_fallback_suite) ]
