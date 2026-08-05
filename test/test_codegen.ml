@@ -9920,6 +9920,82 @@ let test_native_array_map_reused_capturing_closure_compiled () =
         "[8, 9, 10]\n107" run_out
     done
 
+(* ── NativeArray.set_int FBIP in-place-at-rc==1 ──────────────────────────
+   native_int_arr_set / native_float_arr_set (runtime/march_runtime.c) take
+   their array under the owned/consumed convention (absent from borrow.ml's
+   extern_borrow_table, so Perceus emits no dec_rc after the call). They used
+   to *always* allocate a fresh backing array, memcpy, and return it —
+   WITHOUT ever releasing the consumed input. A hot loop threading the result
+   forward (last-use, rc==1) leaked one copy per op: a 2M-op set_int loop on
+   an 8-element array ramped to ~190MB RSS (linear in ops) while the same loop
+   without set_int held ~2.7MB flat.
+
+   Fixed by reusing the backing array in place when it is uniquely owned
+   (rc==1) — O(1), flat RSS — and preserving copy-on-write + releasing the
+   consumed reference only when the array is shared (rc>1). These two tests
+   pin BOTH halves of that contract; the correctness bug they guard is
+   compiled-only (the interpreter has a different NativeArray backend). *)
+
+(* rc>1 (aliased): the array is still live after set_int, so copy-on-write
+   MUST be preserved — the alias must observe the ORIGINAL, not the mutation. *)
+let test_native_array_set_int_alias_cow_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setalias"
+    "mod SetAlias do\n\
+    \  fn main() : Unit do\n\
+    \    let a = NativeArray.make_int(4, 0)\n\
+    \    let b = NativeArray.set_int(a, 0, 99)\n\
+    \    -- a is read AFTER set_int -> aliased (rc>1) -> must be unchanged.\n\
+    \    println(int_to_string(NativeArray.get_int(a, 0)))\n\
+    \    println(int_to_string(NativeArray.get_int(b, 0)))\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "setaliasbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "set_int on a SHARED (rc>1) array must copy-on-write: the alias reads 0 \
+       (unchanged original), the result reads 99 — in-place mutation here \
+       would corrupt the alias"
+      "0\n99" run_out
+
+(* rc==1 (unique, threaded forward): the in-place path must produce the SAME
+   final array as a copy would. A long churn loop that would crash / read
+   freed memory / diverge if in-place reuse ever freed a still-live array;
+   the value is the sum of the 8 last writes per position. *)
+let test_native_array_set_int_inplace_churn_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setchurn"
+    "mod SetChurn do\n\
+    \  fn go(arr, i : Int, n : Int) : Int do\n\
+    \    if i >= n do\n\
+    \      NativeArray.sum_int(arr)\n\
+    \    else\n\
+    \      let arr2 = NativeArray.set_int(arr, i % 8, i)\n\
+    \      go(arr2, i + 1, n)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let arr = NativeArray.make_int(8, 0)\n\
+    \    println(int_to_string(go(arr, 0, 2000000)))\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "setchurnbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    (* last write to position p is the largest i<2_000_000 with i%8==p:
+       1999992..1999999; their sum is 15999964. *)
+    Alcotest.(check string)
+      "set_int threaded forward at rc==1 mutates in place and stays correct \
+       over 2M ops (final array = sum of the last 8 writes)"
+      "15999964" run_out
+
 (* ── Blocking-FFI worker pool ────────────────────────────────────── *)
 
 (* Blocking externs used to get a fresh pthread_create + join PER CALL, which
@@ -13572,6 +13648,10 @@ let codegen_suites =
             test_try_call_panic_with_capture_no_double_free_compiled;
           Alcotest.test_case "NativeArray.map_int: reused capturing closure not freed mid-map (20x)" `Quick
             test_native_array_map_reused_capturing_closure_compiled;
+          Alcotest.test_case "NativeArray.set_int: aliased (rc>1) array is copy-on-write, not mutated" `Quick
+            test_native_array_set_int_alias_cow_compiled;
+          Alcotest.test_case "NativeArray.set_int: rc==1 in-place churn stays correct over 2M ops (flat RSS)" `Quick
+            test_native_array_set_int_inplace_churn_compiled;
           Alcotest.test_case "Signal.watch: capturing handler survives repeated delivery (25x)" `Quick
             test_signal_watch_capturing_handler_repeated_delivery_compiled;
         ] );
