@@ -101,6 +101,12 @@ let is_pascal_case s =
     (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
     (c >= '0' && c <= '9') || c = '_') s
 
+(** Compiler-generated names (default-argument arity variants [f$3], lambda
+    apply-wrappers [$lam$…], …) all carry a '$'.  Lint runs on the DESUGARED
+    AST, so these are visible as ordinary declarations — they must be exempt
+    from naming rules the user cannot possibly satisfy. *)
+let is_synthetic_name s = String.contains s '$'
+
 let to_snake_case name =
   let buf = Buffer.create (String.length name + 4) in
   String.iteri (fun i c ->
@@ -206,7 +212,7 @@ let check_naming ~config ~file ~acc decls =
     | Ast.DFn (fn, _) ->
       let name = fn.Ast.fn_name.Ast.txt in
       (match effective_severity config r_fn with
-       | Some sev when not (is_snake_case name) ->
+       | Some sev when not (is_snake_case name || is_synthetic_name name) ->
          emit acc file fn.Ast.fn_name.Ast.span r_fn sev
            (Printf.sprintf "function `%s` should be snake_case; rename to `%s`"
               name (to_snake_case name))
