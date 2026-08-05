@@ -1383,6 +1383,14 @@ let run_test_cmd args =
     if !refine_report then print_refine_report ~filename ~user_files ();
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
+    (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
+       refinement contract are admitted when their call site's PRECONDITION was
+       actually discharged, rather than banned by name.  It must run here, after
+       [Refine_check.check_module] has populated the per-call-site verdict index
+       (and after [Division_safety], which only adds to it) — inside the
+       typechecker, where the syntactic ban lives, that index does not exist
+       yet. *)
+    March_refinecheck.Panic_surface_by_proof.check_module errors desugared;
     (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
     March_refinecheck.No_alloc.check_module errors desugared;
     (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
@@ -2021,6 +2029,15 @@ let compile filename =
     print_refine_postconditions ~filename ~user_files desugared;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
+  (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
+     refinement contract are admitted when their call site's PRECONDITION was
+     actually discharged, rather than banned by name.  It must run here, after
+     [Refine_check.check_module] has populated the per-call-site verdict index
+     (and after [Division_safety], which only adds to it) — inside the
+     typechecker, where the syntactic ban lives, that index does not exist yet.
+     NOTE: [run_test_cmd] has its own copy of this pipeline and needs the same
+     call; the two are the only places these passes run. *)
+  March_refinecheck.Panic_surface_by_proof.check_module errors desugared;
   (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
   March_refinecheck.No_alloc.check_module errors desugared;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)

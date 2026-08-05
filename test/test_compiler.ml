@@ -6359,6 +6359,25 @@ let typecheck_with_divsafety src =
   March_refinecheck.Division_safety.check_module errors m;
   errors
 
+(* The FULL `cap no_panic` pipeline as bin/main.ml runs it: typecheck (which
+   owns the syntactic ban for the names with no contract), then Refine_check
+   (which populates the per-call-site verdict index), then Division_safety,
+   then Panic_surface_by_proof (which consults that index for the names that DO
+   carry a contract).
+
+   Needed since 2026-08-05 (Task 3): a contracted name is no longer rejected by
+   the typechecker alone, so a fixture checked with [typecheck] only would go
+   silently green for the wrong reason.  No stdlib is loaded here, so a
+   qualified call resolves to nothing, raises no obligation, and is rejected
+   FAIL-CLOSED — which is exactly the property these fixtures assert. *)
+let typecheck_with_no_panic_passes src =
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Refine_check.check_module errors m;
+  March_refinecheck.Division_safety.check_module errors m;
+  March_refinecheck.Panic_surface_by_proof.check_module errors m;
+  errors
+
 let test_cap_no_panic_safe_no_error () =
   let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
@@ -6460,7 +6479,7 @@ let test_cap_no_panic_unreachable_error () =
   Alcotest.(check bool) "cap no_panic + unreachable_: error" true (has_errors ctx)
 
 let test_cap_no_panic_unwrap_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_no_panic_passes {|mod Safe do
     cap no_panic
     fn extract(x : Option(Int)) : Int do unwrap(x) end
   end|} in
@@ -6636,15 +6655,25 @@ let test_cap_no_panic_slice_bytes_no_error () =
 (* Coverage hole: List.tail carries {List(a) | len(_) > 0} (stdlib/list.march:100)
    and panics on an empty list. An unguarded call must now be banned. *)
 let test_cap_no_panic_list_tail_error () =
-  let ctx = typecheck {|mod GT do
+  let ctx = typecheck_with_no_panic_passes {|mod GT do
     cap no_panic
     fn f(xs : List(Int)) : List(Int) do List.tail(xs) end
   end|} in
   Alcotest.(check bool) "cap no_panic + unguarded List.tail: error" true (has_errors ctx)
 
-(* Blunt-until-Task-3 control: Task 1 uses only the existing syntactic ban,
-   so a call guarded by a length check that WOULD satisfy the contract is
-   still rejected today — Task 3 is what will flip this to accept. *)
+(* INVERTED by Task 3 (2026-08-05, specs/progress/2026-08-05-no-panic-proof-based-ban.md).
+   This case used to read "guarded List.tail is STILL banned (blunt until
+   Task 3)" and assert an error: Task 1 had only the syntactic ban, so a call
+   guarded by a length check that WOULD satisfy the contract was rejected
+   anyway.  The assertion is flipped here rather than replaced by a fresh test,
+   so the two revisions of this one case document the before/after.
+
+   What it pins HERE is the syntactic half: `List.tail` is no longer on the
+   typechecker's ban list under any spelling, guarded or not.  Whether a
+   guarded call is actually ADMITTED — the proof, against the real
+   `stdlib/list.march` contract, with its unguarded and its undecidable
+   REJECT controls — is pinned in test_refinecheck.ml's `no-panic-by-proof`
+   group, because it needs the verdict index this harness does not build. *)
 let test_cap_no_panic_list_tail_guarded_still_error () =
   let ctx = typecheck {|mod GT2 do
     cap no_panic
@@ -6653,25 +6682,25 @@ let test_cap_no_panic_list_tail_guarded_still_error () =
     end
   end|} in
   Alcotest.(check bool)
-    "cap no_panic + guarded List.tail is STILL banned (blunt until Task 3): error"
-    true (has_errors ctx)
+    "cap no_panic + guarded List.tail is no longer banned by NAME: no error"
+    false (has_errors ctx)
 
 let test_cap_no_panic_list_maximum_int_error () =
-  let ctx = typecheck {|mod GT3 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT3 do
     cap no_panic
     fn f(xs : List(Int)) : Int do List.maximum_int(xs) end
   end|} in
   Alcotest.(check bool) "cap no_panic + unguarded List.maximum_int: error" true (has_errors ctx)
 
 let test_cap_no_panic_list_minimum_int_error () =
-  let ctx = typecheck {|mod GT4 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT4 do
     cap no_panic
     fn f(xs : List(Int)) : Int do List.minimum_int(xs) end
   end|} in
   Alcotest.(check bool) "cap no_panic + unguarded List.minimum_int: error" true (has_errors ctx)
 
 let test_cap_no_panic_random_normal_error () =
-  let ctx = typecheck {|mod GT5 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT5 do
     cap no_panic
     fn f(rng : Random.Rng, mu : Float, sigma : Float) : Float do
       let (v, _) = Random.normal(rng, mu, sigma)
@@ -6681,7 +6710,7 @@ let test_cap_no_panic_random_normal_error () =
   Alcotest.(check bool) "cap no_panic + unguarded Random.normal: error" true (has_errors ctx)
 
 let test_cap_no_panic_random_exponential_error () =
-  let ctx = typecheck {|mod GT6 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT6 do
     cap no_panic
     fn f(rng : Random.Rng, lambda : Float) : Float do
       let (v, _) = Random.exponential(rng, lambda)
@@ -6691,7 +6720,7 @@ let test_cap_no_panic_random_exponential_error () =
   Alcotest.(check bool) "cap no_panic + unguarded Random.exponential: error" true (has_errors ctx)
 
 let test_cap_no_panic_random_bernoulli_error () =
-  let ctx = typecheck {|mod GT7 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT7 do
     cap no_panic
     fn f(rng : Random.Rng, p : Float) : Bool do
       let (v, _) = Random.bernoulli(rng, p)
@@ -6701,7 +6730,7 @@ let test_cap_no_panic_random_bernoulli_error () =
   Alcotest.(check bool) "cap no_panic + unguarded Random.bernoulli: error" true (has_errors ctx)
 
 let test_cap_no_panic_random_choice_error () =
-  let ctx = typecheck {|mod GT8 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT8 do
     cap no_panic
     fn f(rng : Random.Rng, xs : List(Int)) : Int do
       let (v, _) = Random.choice(rng, xs)
@@ -6711,7 +6740,7 @@ let test_cap_no_panic_random_choice_error () =
   Alcotest.(check bool) "cap no_panic + unguarded Random.choice: error" true (has_errors ctx)
 
 let test_cap_no_panic_datetime_fixed_zone_error () =
-  let ctx = typecheck {|mod GT9 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT9 do
     cap no_panic
     fn f(name : String, offset_seconds : Int) : DateTime.Tz do
       DateTime.fixed_zone(name, offset_seconds)
@@ -6720,7 +6749,7 @@ let test_cap_no_panic_datetime_fixed_zone_error () =
   Alcotest.(check bool) "cap no_panic + unguarded DateTime.fixed_zone: error" true (has_errors ctx)
 
 let test_cap_no_panic_datetime_fixed_zone_hm_error () =
-  let ctx = typecheck {|mod GT10 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT10 do
     cap no_panic
     fn f(hours : Int, minutes : Int) : DateTime.Tz do
       DateTime.fixed_zone_hm(hours, minutes)
@@ -6729,21 +6758,21 @@ let test_cap_no_panic_datetime_fixed_zone_hm_error () =
   Alcotest.(check bool) "cap no_panic + unguarded DateTime.fixed_zone_hm: error" true (has_errors ctx)
 
 let test_cap_no_panic_stats_mean_error () =
-  let ctx = typecheck {|mod GT11 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT11 do
     cap no_panic
     fn f(xs : List(Float)) : Float do Stats.mean(xs) end
   end|} in
   Alcotest.(check bool) "cap no_panic + unguarded Stats.mean: error" true (has_errors ctx)
 
 let test_cap_no_panic_stats_min_val_error () =
-  let ctx = typecheck {|mod GT12 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT12 do
     cap no_panic
     fn f(xs : List(Float)) : Float do Stats.min_val(xs) end
   end|} in
   Alcotest.(check bool) "cap no_panic + unguarded Stats.min_val: error" true (has_errors ctx)
 
 let test_cap_no_panic_stats_max_val_error () =
-  let ctx = typecheck {|mod GT13 do
+  let ctx = typecheck_with_no_panic_passes {|mod GT13 do
     cap no_panic
     fn f(xs : List(Float)) : Float do Stats.max_val(xs) end
   end|} in

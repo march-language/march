@@ -8308,6 +8308,249 @@ let verdict_query_suite =
           all)
   ]
 
+(* ── `cap no_panic` by proof (Task 3) ──────────────────────────────────────
+   Before this task, every name on the panic-surface ban list was rejected
+   inside a `cap no_panic` module by a purely syntactic name match, plus a
+   transitive fixpoint that blamed every caller up the chain.  For the names
+   that carry a REAL refinement contract, the ban is now a question about the
+   call's own verdict: `Proved` (and only `Proved`) is silent.
+
+   These fixtures run the production pipeline — typecheck (which still owns the
+   syntactic ban for the uncontracted names), then [Refine_check] (which
+   populates the per-call-site verdict index), then [Division_safety], then
+   [Panic_surface_by_proof] — over the REAL `stdlib/list.march`.  The real
+   file, not an inline stand-in: the claim under test is that `List.tail`'s
+   SHIPPED contract is what admits a guarded call, and an inline copy would
+   keep passing after the shipped contract changed. *)
+
+let stdlib_list_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let candidates =
+       [ "stdlib/list.march"; "../../../stdlib/list.march"; "../../stdlib/list.march" ]
+     in
+     match List.find_opt Sys.file_exists candidates with
+     | None ->
+       Alcotest.failf "cannot find stdlib/list.march (searched: %s)"
+         (String.concat ", " candidates)
+     | Some path ->
+       let src =
+         let ic = open_in_bin path in
+         let n = in_channel_length ic in
+         let buf = Bytes.create n in
+         really_input ic buf 0 n;
+         close_in ic;
+         Bytes.to_string buf
+       in
+       let lexbuf = Lexing.from_string src in
+       lexbuf.Lexing.lex_curr_p <-
+         { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+       let m =
+         March_parser.Parser.module_
+           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+       in
+       let m = March_desugar.Desugar.desugar_module m in
+       ( March_ast.Ast.DMod
+           ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+             m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+         path ))
+
+(* Every `cap no_panic` diagnostic [src] produces, from EITHER pass.  Filtered
+   on the shared "(declared `cap no_panic`)" phrasing rather than counting all
+   errors, so unrelated type noise from checking a lone stdlib file in
+   isolation cannot make one of these assertions pass or fail for the wrong
+   reason. *)
+let no_panic_errors (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, path = Lazy.force stdlib_list_mod in
+  let m =
+    { m with March_ast.Ast.mod_decls = listmod :: m.March_ast.Ast.mod_decls }
+  in
+  let errors, _ = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Refine_check.check_module ~stdlib_files:[ path ] errors m;
+  March_refinecheck.Division_safety.check_module errors m;
+  March_refinecheck.Panic_surface_by_proof.check_module errors m;
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+let has_no_panic_error src = no_panic_errors src <> []
+let has_no_panic_error_count src = List.length (no_panic_errors src)
+
+let no_panic_proof_suite =
+  [ (* THE POINT OF THIS TASK.  Inverted from test_compiler.ml's
+       [test_cap_no_panic_list_tail_guarded_still_error], which Task 1 pinned
+       with the docstring "blunt until Task 3" — the two together document the
+       before/after. *)
+    gated "cap no_panic: a PROVABLY safe List.tail compiles clean" (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error
+             "mod PT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do\n\
+             \    if List.length(xs) > 0 do List.tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT control: the definite-failure floor must hold. *)
+    gated "cap no_panic: an unguarded List.tail still errors after Task 3"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error
+             "mod UT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+              end\n"))
+
+  ; (* Fail-closed: not provably safe, not provably unsafe — still an error,
+       matching `cap no_panic`'s conservative stance for division.  Getting
+       this direction backwards silently reopens every coverage hole Task 1
+       closed. *)
+    gated "cap no_panic: an UNDECIDABLE List.tail call still errors (fail-closed)"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error
+             "mod XT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int), flag : Bool) : List(Int) do\n\
+             \    if flag do List.tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* Dropped transitivity: ONE error at the real site, not one per caller.
+       Before this task the fixpoint reported three. *)
+    gated "cap no_panic: transitive blame is gone for proof-covered names"
+      (fun () ->
+        let n =
+          has_no_panic_error_count
+            "mod TB do\n\
+            \  cap no_panic\n\
+            \  fn helper(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+            \  fn caller1(xs : List(Int)) : List(Int) do helper(xs) end\n\
+            \  fn caller2(xs : List(Int)) : List(Int) do helper(xs) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "exactly one error, not three" 1 n)
+
+  ; (* REGRESSION: `panic` keeps BOTH its syntactic ban and its transitive
+       fixpoint.  Same shape as the case above, opposite expectation — three
+       errors, because no contract exists or could exist for `panic`. *)
+    Alcotest.test_case "cap no_panic: panic keeps its transitive blame" `Quick
+      (fun () ->
+        let n =
+          has_no_panic_error_count
+            "mod TP do\n\
+            \  cap no_panic\n\
+            \  fn helper(x : Int) : Int do panic(\"boom\") end\n\
+            \  fn caller1(x : Int) : Int do helper(x) end\n\
+            \  fn caller2(x : Int) : Int do helper(x) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "direct site plus two transitive callers" 3 n)
+  ]
+
+(* ── The verdict FILTER, unit-tested directly ──────────────────────────────
+   [Obligation.verdict_at] folds EVERY obligation kind at a span down to the
+   weakest verdict.  For this consumer that is actively wrong: a call site
+   whose precondition is `Proved` but which happens to share a span with an
+   unrelated `Division` or a different callee's obligation would fold to the
+   weaker verdict, and a provably-safe call would be REJECTED — a false
+   positive, this subsystem's cardinal sin.
+
+   So [Panic_surface_by_proof.verdict_for] filters to [Precondition]
+   obligations for the callee in question and folds weakest-wins over only
+   those.  Constructing the collision through real March source is not
+   currently possible (a postcondition keys on a clause span, a division on the
+   `/` node's own span), so the filter is exercised where it actually lives, by
+   recording obligations at a shared span by hand.  A test that could only
+   observe the filter through source would silently stop testing it the day
+   those spans stopped colliding. *)
+let vf_span : March_ast.Ast.span =
+  { March_ast.Ast.file = "filter.march"; start_line = 1; start_col = 1;
+    end_line = 1; end_col = 9 }
+
+let record_at ~callee ~kind ~verdict =
+  March_refinecheck.Obligation.record
+    { March_refinecheck.Obligation.span = vf_span; callee;
+      predicate = "len(_) > 0"; verdict; kind }
+
+let vname = Option.map March_refinecheck.Obligation.verdict_name
+
+let verdict_filter_suite =
+  [ Alcotest.test_case "a Proved precondition survives an unrelated Division skip"
+      `Quick (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        record_at ~callee:"d" ~kind:March_refinecheck.Obligation.Division
+          ~verdict:(March_refinecheck.Obligation.Skipped
+                      March_refinecheck.Obligation.Solver_undecided);
+        (* What bare [verdict_at] would have said — the false positive this
+           filter exists to avoid.  Asserted so the test still means something
+           if the fold order ever changes. *)
+        Alcotest.(check (option string))
+          "unfiltered fold is the WEAK verdict" (Some "skipped")
+          (vname (March_refinecheck.Obligation.verdict_at vf_span));
+        Alcotest.(check (option string))
+          "filtered fold is proved" (Some "proved")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail")))
+
+  ; Alcotest.test_case "a DIFFERENT callee's skip at the same span does not veto"
+      `Quick (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        record_at ~callee:"List.head" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:(March_refinecheck.Obligation.Skipped
+                      March_refinecheck.Obligation.Solver_undecided);
+        Alcotest.(check (option string))
+          "proved" (Some "proved")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail")))
+
+  ; Alcotest.test_case "weakest-wins WITHIN the filtered set" `Quick (fun () ->
+        (* One refined parameter proved and another skipped is NOT a proof.
+           The fold must stay pessimistic inside the set it does consider. *)
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:(March_refinecheck.Obligation.Skipped
+                      March_refinecheck.Obligation.Solver_undecided);
+        Alcotest.(check (option string))
+          "skipped" (Some "skipped")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail")))
+
+  ; Alcotest.test_case "no obligation for this callee reads as absent, never proved"
+      `Quick (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.head" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        Alcotest.(check bool) "absent" true
+          (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail" = None))
+
+  ; (* `@[trusted]` is an UNCHECKED user assertion.  Honouring it inside a
+       capability whose entire purpose is to GUARANTEE no panics would hollow
+       out the guarantee, so only [Proved] is silent here — even though
+       `cap verified` does accept [Trusted]. *)
+    Alcotest.test_case "Trusted is not a proof under cap no_panic" `Quick
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Trusted;
+        Alcotest.(check (option string))
+          "trusted, and therefore not admitted" (Some "trusted")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail"));
+        Alcotest.(check bool) "not admitted" false
+          (March_refinecheck.Panic_surface_by_proof.is_proved vf_span "List.tail"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -8369,4 +8612,6 @@ let () =
       ("post-compose-closed", post_compose_closed_suite);
       ("post-compose-relational", post_compose_relational_suite);
       ("stdlib-nth-contract", stdlib_nth_contract_suite);
-      ("verdict-query", verdict_query_suite) ]
+      ("verdict-query", verdict_query_suite);
+      ("no-panic-by-proof", no_panic_proof_suite);
+      ("no-panic-verdict-filter", verdict_filter_suite) ]

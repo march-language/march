@@ -281,7 +281,26 @@ end
 
 A module with `cap no_panic` must not contain any expression that can panic at runtime. The compiler enforces this with three sub-checks:
 
-1. **Panic-surface ban** (`check_no_panic_module`, `lib/typecheck/typecheck.ml`) — bans direct and *transitive* calls to a fixed panic surface: explicit `panic`/`todo`/`unreachable`, the prelude partial functions (`unwrap`, `expect`, `head`, `tail`, `last`), and dotted stdlib partials (`List.nth`, `Option.unwrap`, `Result.unwrap`, `Array.get`, …). Transitive means a local helper that calls one of these makes every local caller of that helper panicky too, computed as a fixpoint over the module's own functions.
+1. **Panic-surface check** — every call that could panic must be ruled out. Which of two mechanisms does the ruling out depends on whether the name has a refinement contract to check against:
+
+   - **Syntactic ban** (`check_no_panic_module`, `lib/typecheck/typecheck.ml`) for names with no contract: explicit `panic`/`panic_`/`todo_`/`unreachable_` (no precondition could ever make them safe) and `Array.get`/`Array.set` (no contract exists for them yet). Direct *and* transitive: a local helper that calls one of these makes every local caller of that helper panicky too, computed as a fixpoint over the module's own functions, and each caller gets its own error.
+   - **Proof-based check** (`lib/refinecheck/panic_surface_by_proof.ml`) for names that carry a real refinement precondition: the prelude partials (`unwrap`, `expect`, `head`, `tail`, `last`) and the contracted stdlib partials (`List.nth`, `List.head`, `List.last`, `List.tail`, `List.maximum_int`, `List.minimum_int`, `Option.unwrap`, `Option.expect`, `Result.unwrap`, `Result.expect`, `Result.unwrap_err`, `Random.normal`, `Random.exponential`, `Random.bernoulli`, `Random.choice`, `DateTime.fixed_zone`, `DateTime.fixed_zone_hm`, `Stats.mean`, `Stats.min_val`, `Stats.max_val`). A call to one of these is checked against its declared precondition:
+
+     ```march
+     mod Safe do
+       cap no_panic
+       -- Accepted: the guard proves `len(xs) > 0`, which is List.tail's contract.
+       fn rest(xs : List(Int)) : List(Int) do
+         if List.length(xs) > 0 do List.tail(xs) else xs end
+       end
+     end
+     ```
+
+     The check does not discharge anything itself — building a second VC generator would let it drift from the real one. It reads the per-call-site verdict `Refine_check` already recorded (`Obligation.obligations_at`, filtered to `Precondition` obligations for that callee, folded weakest-wins), which is why the pass runs after `Refine_check.check_module` rather than inside the typechecker: the verdict index does not exist until then. `bin/main.ml` calls it right after `Division_safety.check_module`.
+
+     **Only `Proved` is silent.** `Violated`, any `Skipped`, `Trusted`, and "no obligation was recorded at this site" all produce the panic-surface error, with the same message text the syntactic ban uses. `cap no_panic` is a guarantee, so fail-closed is the only sound direction — this deliberately inverts the definite-failure stance the refinement checker uses elsewhere. `Trusted` (an `@[trusted]` assertion, which `cap verified` does accept) is on the error side on purpose: honouring an unchecked assertion inside a capability whose purpose is to guarantee no panics would hollow out the guarantee.
+
+   **Behavior change (2026-08-05, Task 3 of the no-panic proof-based plan): contract-covered names no longer seed the transitive fixpoint.** An unprovable `List.tail(xs)` inside a helper used to produce one error at the helper and one at every local caller; it now produces exactly ONE error, at the real call site, matching how `Division_safety` has always reported. Removing these names from the ban list alone would not have achieved that — they had to be removed from what SEEDS `check_no_panic_module`'s fixpoint, or the chain-blaming would have survived. If an error appears to have "moved" from a caller to the callee, this is why. `panic`/`panic_`/`todo_`/`unreachable_` and `Array.get`/`Array.set` keep their fixpoint unchanged.
 2. **Division safety** (`lib/refinecheck/division_safety.ml`) proves every integer divisor is non-zero via the Z3 SMT solver — a separate pass from (1), gated on the same `cap no_panic` flag. Both literal divisors (`a / 0` → immediate error) and variable divisors are handled:
    - Variable with an Int refinement `{v | pred}`: Z3 discharges `pred ⊢ v ≠ 0`; fast syntactic short-circuit for common patterns (`v > 0`, `v >= 1`, `v != 0`, `v < 0`).
    - Let-bound variable: Z3 discharges `var = rhs ⊢ var ≠ 0` with param assumptions injected.

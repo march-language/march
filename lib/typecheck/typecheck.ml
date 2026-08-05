@@ -9271,28 +9271,28 @@ let panic_surface_direct : StringSet.t = StringSet.of_list [
   "panic"; "panic_"; "todo_"; "unreachable_";
 ]
 
-let panic_surface_prelude : StringSet.t = StringSet.of_list [
-  "unwrap"; "expect"; "head"; "tail"; "last";
-]
+(* EMPTY since 2026-08-05 (Task 3, specs/progress/2026-08-05-no-panic-proof-based-ban.md).
+   Every prelude name that used to live here — `unwrap`, `expect`, `head`,
+   `tail`, `last` — carries a real refinement precondition, so it is no longer
+   banned by NAME: [Panic_surface_by_proof] (lib/refinecheck) checks each call
+   site against its actual verdict instead, admitting the ones that are
+   provably safe.  The binding stays (rather than being deleted along with
+   [panic_surface_all_direct]) because it is the seam where a future prelude
+   name with NO possible contract would go. *)
+let panic_surface_prelude : StringSet.t = StringSet.empty
 
+(* What remains SYNTACTICALLY banned among qualified stdlib names: only the
+   ones with no refinement contract to consult.  `Array.get`/`Array.set` are
+   Group B — they panic out of bounds and no contract exists for them yet, so
+   an unconditional ban is still the only sound answer.
+
+   Everything else that used to be here is now checked by proof; the covered
+   set is enumerated in [Panic_surface_by_proof.covered] and is DISJOINT from
+   this set by construction.  Ban-list audit 2026-08-05
+   (specs/progress/2026-08-05-no-panic-ban-list-audit.md) is what established
+   which names carry a real contract. *)
 let panic_surface_stdlib : StringSet.t = StringSet.of_list [
-  "List.nth"; "List.head"; "List.last";
-  "Option.unwrap"; "Option.expect";
-  "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
   "Array.get"; "Array.set";
-  (* Ban-list audit 2026-08-05 (specs/progress/2026-08-05-no-panic-ban-list-audit.md):
-     "String.slice_bytes" removed — its docstring (stdlib/string.march:38-42)
-     states start/len are clamped and it never panics; "List.hd"/"List.tl"/
-     "List.min_elt"/"List.max_elt"/"String.nth"/"NativeArray.get"/
-     "NativeArray.set" removed — none exist under those names anywhere in
-     the stdlib (NativeArray's real accessors are get_int/set_int/
-     get_float/set_float).  The twelve entries below were coverage holes:
-     public functions carrying a real refinement precondition that panics
-     when violated, previously absent from this list under any spelling. *)
-  "List.tail"; "List.maximum_int"; "List.minimum_int";
-  "Random.normal"; "Random.exponential"; "Random.bernoulli"; "Random.choice";
-  "DateTime.fixed_zone"; "DateTime.fixed_zone_hm";
-  "Stats.mean"; "Stats.min_val"; "Stats.max_val";
 ]
 
 let panic_surface_all_direct : StringSet.t =

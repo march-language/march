@@ -560,7 +560,11 @@
 (test
  (name test_refinecheck)
  (modules test_refinecheck)
- (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck alcotest unix))
+ ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
+ ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
+ ; because the question it asks — "does a guarded call still error?" — spans
+ ; the syntactic ban in the typechecker AND the proof-based pass here.
+ (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck alcotest unix))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;

@@ -288,7 +288,25 @@ end
 
 A module with `cap no_panic` must not contain any expression that can panic at runtime. The compiler enforces this with three sub-checks:
 
-1. **Panic-surface ban** — bans direct and *transitive* calls to a fixed panic surface: explicit `panic`/`todo`/`unreachable`, the prelude partial functions (`unwrap`, `expect`, `head`, `tail`, `last`), and dotted stdlib partials (`List.nth`, `Option.unwrap`, `Result.unwrap`, `Array.get`, …). Transitive means a local helper that calls one of these makes every local caller of that helper panicky too.
+1. **Panic-surface check** — every call that could panic must be ruled out. How a given name is ruled out depends on whether it has a refinement contract to check against:
+
+   - **No contract possible → unconditional ban, with transitive blame.** `panic`, `panic_`, `todo_`, `unreachable_` panic by definition; no precondition could ever make them safe, so calling one is an error wherever it appears. This ban is *transitive*: a local helper that calls one makes every local caller of that helper panicky too, and each caller gets its own error.
+   - **No contract yet → unconditional ban, with transitive blame.** `Array.get` / `Array.set` panic out of bounds and carry no refinement today, so they are still banned by name exactly as above.
+   - **Has a contract → checked by proof.** The prelude partials (`unwrap`, `expect`, `head`, `tail`, `last`) and the contracted stdlib partials (`List.nth`, `List.head`, `List.last`, `List.tail`, `List.maximum_int`, `List.minimum_int`, `Option.unwrap`, `Option.expect`, `Result.unwrap`, `Result.expect`, `Result.unwrap_err`, `Random.normal`, `Random.exponential`, `Random.bernoulli`, `Random.choice`, `DateTime.fixed_zone`, `DateTime.fixed_zone_hm`, `Stats.mean`, `Stats.min_val`, `Stats.max_val`) each declare a refinement precondition that says exactly when they panic. A call to one of these is checked against that precondition, by the same solver and the same verdicts that discharge division safety — no separate proof mechanism. If the call site's precondition is **proved**, the call compiles clean:
+
+     ```march
+     mod Safe do
+       cap no_panic
+       -- Accepted: the guard proves `len(xs) > 0`, which is List.tail's contract.
+       fn rest(xs : List(Int)) : List(Int) do
+         if List.length(xs) > 0 do List.tail(xs) else xs end
+       end
+     end
+     ```
+
+     Anything short of proved is an error — refuted, undecided, unreflectable, or no obligation recorded at all. `cap no_panic` is a *guarantee*, so "the checker could not tell" is a rejection, not silence (this is the opposite of the definite-failure stance refinement checking uses elsewhere). An `@[trusted]` annotation does **not** count as proof here either: it is an unchecked assertion, and `cap no_panic` promises more than disclosure.
+
+   **Behavior change (2026-08-05): contract-covered names no longer produce transitive blame.** Before, an unprovable `List.tail(xs)` inside a helper produced one error at the helper *and* one at every local caller of it. Now it produces exactly ONE error, at the real call site — matching how division safety has always reported. If you are wondering why an error you used to see on a caller has "moved" to the callee, this is why. `panic`/`panic_`/`todo_`/`unreachable_` and `Array.get`/`Array.set` keep their transitive blame unchanged.
 2. **Division safety** — proves every integer divisor is non-zero via the Z3 SMT solver. Both literal divisors (`a / 0` → immediate error) and variable divisors are handled:
    - Variable with an Int refinement `{v | pred}`: Z3 discharges `pred ⊢ v ≠ 0`; fast syntactic short-circuit for common patterns (`v > 0`, `v >= 1`, `v != 0`, `v < 0`).
    - Let-bound variable: Z3 discharges `var = rhs ⊢ var ≠ 0` with param assumptions injected.

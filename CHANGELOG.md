@@ -11,6 +11,32 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **`cap no_panic` now consults a call's actual refinement contract instead of
+  banning it by name.** A partial stdlib or prelude function that declares a
+  refinement precondition — `unwrap`, `expect`, `head`, `tail`, `last`,
+  `List.nth`/`head`/`last`/`tail`/`maximum_int`/`minimum_int`,
+  `Option.unwrap`/`expect`, `Result.unwrap`/`expect`/`unwrap_err`,
+  `Random.normal`/`exponential`/`bernoulli`/`choice`,
+  `DateTime.fixed_zone`/`fixed_zone_hm`, `Stats.mean`/`min_val`/`max_val` — is
+  no longer rejected on sight inside a `cap no_panic` module. The call is
+  checked against its contract, by the same solver and the same verdicts that
+  discharge division safety, so a provably safe call compiles clean:
+  `if List.length(xs) > 0 do List.tail(xs) else xs end` is now accepted where
+  it used to be an error. Anything short of a proof — refuted, undecided, or
+  no obligation recorded at all — is still an error, because `cap no_panic` is
+  a guarantee; an `@[trusted]` assertion does not count as a proof here. Names
+  with no contract (`panic`, `panic_`, `todo_`, `unreachable_`, `Array.get`,
+  `Array.set`) are still banned unconditionally.
+- **`cap no_panic` no longer reports transitive blame for those
+  contract-covered names.** An unprovable `List.tail(xs)` inside a helper used
+  to produce one error at the helper *and* one at every local caller of it; it
+  now produces exactly one error, at the real call site. If an error looks like
+  it "moved" from a caller to the callee, this is why. `panic`/`panic_`/
+  `todo_`/`unreachable_` and `Array.get`/`Array.set` keep their transitive
+  blame unchanged.
+
 ### Fixed
 
 - **`cap no_panic`'s syntactic ban list had drifted from the real stdlib.**
