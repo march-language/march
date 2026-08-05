@@ -2068,14 +2068,70 @@ let scope_add_binding
           skipped even though the direct `needLow(mk())` is now checked; the
           two spellings must agree.
 
-          Any OTHER ADT sort (a plain variant, a String) is still refused: a
-          variant fact is carried only by [reflect_dt], which reaches it
-          through the expression, not through [scope]. *)
+          A plain multi-constructor ADT (`Tree`, `List(a)`) may too, at the
+          MEASURE-ONLY marker ([meas_sort_prefix]): [load_scope_measure_facts]
+          already reads exactly this shape for a refined PARAMETER
+          ([scope_add_param]) and treats a `$Meas:`-marked entry as an
+          assumption over the same measure-application symbol its goal uses,
+          so seeding one here for an unannotated `let` makes the two spellings
+          agree the same way the record case above does.
+
+          [postcond] (via [return_refine_sorted]) reports a plain ADT return at
+          its bare registered sort (`"M_Tree"`, from [is_adt_base]/
+          [adt_sort_name]) — the same convention [refined_param_ty] uses for a
+          refined PARAMETER — not at the `$Meas:`-prefixed marker
+          [refined_scope_ty] gives a directly-annotated local.  A non-record
+          registered ADT sort is re-tagged with [meas_sort_prefix] here so the
+          entry lands on the one spelling every scope consumer
+          ([load_scope_measure_facts] and its constructor-tag analogue) already
+          reads.
+
+          A String postcondition is still refused, but not because
+          [refined_scope_ty] cannot carry one — it has a `str_sort` arm.  The
+          gap is one step earlier: [return_refine_sorted] has no String arm at
+          all, so [postcond] never REPORTS a String return in the first place
+          and there is nothing here to admit.
+
+          ── The SELF-REBINDING guard on the ADT arm ────────────────────────
+          [scope_shadow] above retires PRE-EXISTING entries whose predicate
+          mentions one of this binding's binders.  The entry created HERE needs
+          the identical test applied to itself, and for the identical reason:
+
+            let t = push2(t, u)   -- push2 : {Tree | size(_) > size(t) + size(u)}
+            needs_smaller(w, t)   -- wants size(t) < size(w), for arbitrary w
+
+          [postcond_of] substitutes the call's ACTUALS, so `t` in the stored
+          predicate denotes the value BEFORE this binding.  But the entry is
+          filed under the name `t`, and [load_scope_measure_facts] accepts the
+          entry's own name as a spelling of the promised value ([is_self_spelling]
+          — correct for a refined PARAMETER, where the two really are the same
+          value, and wrong here).  The two collide onto one symbol and the
+          assumption becomes `size(t) > size(t) + size(u)`, i.e. `0 > size(u)` —
+          a CONTRADICTION under the `size >= 0` axiom, which discharges any goal
+          whatsoever.  A vacuously valid VC is a false proof, the one outcome
+          this subsystem exists to prevent.
+
+          Refusing to file such an entry is the whole fix: the predicate is
+          simply not usable at this name.  Note this hazard predates the
+          relational widening only in the sense that it was ACCIDENTALLY
+          masked — before it, `size(u)` was untranslatable and [smt_of] dropped
+          the predicate whole.
+
+          Deliberately on THIS arm only.  The scalar and record arms above have
+          the same shape and the same latent hole (reachable on the parent
+          commit through [reflect_scalar]'s `foreign_var` channel, which never
+          went through [load_scope_measure_facts] at all), but they are older,
+          broader, and out of scope here — recorded with repros in
+          `specs/todos/2026-08-04-postcond-let-self-rebinding-holes.md`. *)
        (match postcond fname args with
         | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
           (n.A.txt, (binder, pred, m)) :: sc
         | Some (binder, pred, Some srt) when is_record_sort srt ->
           (n.A.txt, (binder, pred, Some srt)) :: sc
+        | Some (binder, pred, Some srt)
+          when Hashtbl.mem adt_ctors srt
+               && not (expr_mentions (pat_binders b.A.bind_pat) pred) ->
+          (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
      | _ -> sc)
   | _ -> sc
@@ -2965,6 +3021,31 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
    non-variable actual, or established in a caller, falls back to the general
    message.  That is the right trade — this reason exists to explain one
    specific confusion, not to claim every skip. *)
+(* ── Condition 5: the guard, read as a fact, must ENTAIL the predicate ─────
+   Condition 3 (below, [guard_applies]) only asks whether the guard applies
+   the withdrawn spelling to this obligation's own subject — not whether it
+   would have PROVED the goal.  `List.length(ys) >= 0` applies the spelling
+   to `ys` exactly as `List.length(ys) > 0` does, but it is a tautology over
+   a non-negative measure: it entails nothing about the goal `len(ys) > 0`,
+   so that call is skipped with or without the withdrawal.  Blaming the
+   withdrawal there sends the author to fix an import that was never the
+   cause — the harm this conjunct exists to prevent.
+
+   The check is a small syntactic interval-entailment over `==`/`!=`/`<`/
+   `<=`/`>`/`>=` against an integer literal, modeled on
+   [Division_safety.path_proves_nonzero]'s `dual`/`flip`/`proves` shape
+   (extended there to boolean connectives): normalise both sides to `X op n`
+   with `X` the measure application (or, laundered, the name it was bound
+   to), read each as a half-open/closed interval of integers, and ask
+   whether the guard's interval is a SUBSET of the predicate's.  `!=` is not
+   convex — no single interval represents "everything but n" — so it never
+   entails anything here; that is a missed proof, not a wrong one.
+
+   Where the shapes do not match this pattern at all (anything but a single
+   comparison against a literal on one side), entailment is UNDECIDED, and
+   per the fail-closed stance of this whole function, undecided means "do
+   not blame the withdrawal" — a generic `solver-undecided` message is a
+   smaller error than sending the author to fix an unrelated import. *)
 let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
     ~(subject_is_str : bool) ~(path : (A.expr * bool) list) ~(lets : launder)
     (r : Obligation.reason) : withdrawal option =
@@ -2983,12 +3064,196 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
              expr_mentions_free m cond && expr_applies_to_free w.wd_spelling sn.A.txt rhs)
            lets
     in
+    (* `a op b` <=> `b (flipped op) a` — used to normalise to `X op n`.  (No
+       `dual`/negation step is needed here, unlike
+       [Division_safety.path_proves_nonzero]: the caller below already
+       filters to a POSITIVE path entry before [guard_discharges] runs — see
+       condition 3's own "NEGATED guard" tests — so [cond] is always a fact
+       read at face value, never one that needs de-negating first.) *)
+    let flip = function
+      | "<" -> ">" | ">" -> "<" | "<=" -> ">=" | ">=" -> "<="
+      | op -> op (* == and != are symmetric *)
+    in
+    (* `X op n`, read as a closed-or-half-open integer interval.  [None] for
+       either bound means unbounded on that side; [None] for the whole thing
+       means "not a convex interval" (only `!=`). *)
+    let interval_of op n : (int option * int option) option =
+      match op with
+      | ">"  -> Some (Some (n + 1), None)
+      | ">=" -> Some (Some n, None)
+      | "<"  -> Some (None, Some (n - 1))
+      | "<=" -> Some (None, Some n)
+      | "==" -> Some (Some n, Some n)
+      | _ -> None
+    in
+    let interval_subset (lo1, hi1) (lo2, hi2) =
+      let lo_ok =
+        match lo2 with
+        | None -> true
+        | Some l2 -> (match lo1 with Some l1 -> l1 >= l2 | None -> false)
+      in
+      let hi_ok =
+        match hi2 with
+        | None -> true
+        | Some h2 -> (match hi1 with Some h1 -> h1 <= h2 | None -> false)
+      in
+      lo_ok && hi_ok
+    in
+    (* Is [e] the predicate's own measure application (`len(_)`, `len(xs)`,
+       …)?  Any application of the withdrawn measure name suffices — a
+       parameter predicate has exactly one subject to measure. *)
+    let is_measured_pred (w : withdrawal) (e : A.expr) : bool =
+      match e with A.EApp (A.EVar n, _, _) -> n.A.txt = w.wd_measure | _ -> false
+    in
+    (* Read [pred] itself as `measure(subject) op n`.  Computed once per
+       withdrawal candidate — [pred] does not vary with [cond]. *)
+    let atomic_cmp (is_subject : A.expr -> bool) (e : A.expr) : (string * int) option =
+      match e with
+      | A.EApp (A.EVar op0, [ a; b ], _)
+        when List.mem op0.A.txt [ "=="; "!="; "<"; "<="; ">"; ">=" ] -> (
+        match b with
+        | A.ELit (A.LitInt n, _) when is_subject a -> Some (op0.A.txt, n)
+        | _ -> (
+          match a with
+          | A.ELit (A.LitInt n, _) when is_subject b -> Some (flip op0.A.txt, n)
+          | _ -> None))
+      | _ -> None
+    in
+    (* Does some subterm of [e] compare the withdrawn measure applied to the
+       FREE subject against a literal, in a way that ENTAILS `(op2, n2)`
+       (already known to be [pred]'s own comparison)?  Mirrors
+       [expr_applies_to_free]'s shadow-respecting descent — same cases, same
+       shadowing rules for the SUBJECT name (`sn`) — because this is asking
+       the same question ("does the withdrawn spelling apply to the free
+       subject somewhere in here") plus one more thing: not just THAT it
+       applies, but WHAT the surrounding comparison says.  A guard buried
+       inside an opaque call (`check(fn q -> List.length(ys) > 0, zs)`) still
+       has a genuine, entailing comparison at that free position — nesting
+       inside a call this pass cannot otherwise reason about must not by
+       itself defeat entailment, or a case [guard_applies] already accepted
+       ("a FREE occurrence … still attributes") would regress.  A lambda
+       parameter that collides with the SUBJECT's name still closes off
+       descent into that lambda's body, exactly as [expr_applies_to_free]
+       already does — that is the discipline probe PE pinned, and this walk
+       must not reopen it.
+
+       [is_subject] reads a SECOND name channel besides the subject —
+       [lets], the laundering table — and that channel needs its own
+       shadow discipline: `let n = List.length(ys); if n >= 0 && any_pos(zs,
+       fn n -> n > 0) do head(ys) …` must not read the LAMBDA's own `n` as
+       the laundered length just because the string "n" is a laundering key
+       somewhere in scope.  [shadowed] carries every name any binder passed
+       on the way down has rebound (lambda/`let`/`let fn`/`let?`/match-arm),
+       independent of whether that name happens to be the subject; a
+       laundering lookup that hits a shadowed name is retired exactly as a
+       path fact would be (see [path_shadow]) rather than trusted. *)
+    let rec exists_discharging (w : withdrawal) (op2, n2) ~(shadowed : string list)
+        (e : A.expr) : bool =
+      let recur ?(bind = []) e = exists_discharging w (op2, n2) ~shadowed:(bind @ shadowed) e in
+      let any ?(bind = []) es = List.exists (recur ~bind) es in
+      let binds ps = List.mem sn.A.txt ps in
+      let pbinds ps = List.exists (fun (p : A.param) -> p.A.param_name.A.txt = sn.A.txt) ps in
+      let param_names ps = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+      let is_subject e =
+        match e with
+        | A.EApp (A.EVar n, args, _) ->
+          n.A.txt = w.wd_spelling
+          && List.exists (function A.EVar v -> v.A.txt = sn.A.txt | _ -> false) args
+        | A.EVar { A.txt = m; _ } when not (List.mem m shadowed) -> (
+          match List.assoc_opt m lets with
+          | Some (A.EApp (A.EVar n, args, _)) ->
+            n.A.txt = w.wd_spelling
+            && List.exists (function A.EVar v -> v.A.txt = sn.A.txt | _ -> false) args
+          | _ -> false)
+        | _ -> false
+      in
+      let cmp_here =
+        match atomic_cmp is_subject e with
+        | Some (op1, n1) -> (
+          match (interval_of op1 n1, interval_of op2 n2) with
+          | Some i1, Some i2 -> interval_subset i1 i2
+          | _ -> false)
+        | None -> false
+      in
+      cmp_here
+      ||
+      match e with
+      | A.EVar _ -> false
+      | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+      | A.EApp (f, args, _) -> recur f || any args
+      | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+      | A.ELam (ps, body, _) -> if pbinds ps then false else recur ~bind:(param_names ps) body
+      | A.EBlock (es, _) ->
+        (* Sequential, like [expr_applies_to_free]'s own [EBlock] case: a
+           `let` (or `let fn`/`let?`) rebinding the SUBJECT shadows the rest
+           of the block exactly as there (the [binds]/[sn.A.txt] checks
+           below, unchanged); a `let` rebinding a LAUNDERING key instead
+           retires that key from [is_subject]'s lookup for the rest of the
+           block, via [shadowed], without discarding the whole branch — the
+           subject itself may still be free elsewhere. *)
+        let rec go (shadowed : string list) = function
+          | [] -> false
+          | e :: rest ->
+            exists_discharging w (op2, n2) ~shadowed e
+            ||
+            (match e with
+             | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
+             | A.ELetFn (n, _, _, _, _) when n.A.txt = sn.A.txt -> false
+             | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+             | A.ELet (b, _) -> go (pat_binders b.A.bind_pat @ shadowed) rest
+             | A.ELetFn (n, _, _, _, _) -> go (n.A.txt :: shadowed) rest
+             | A.ELetQ (p, _, _, _) -> go (pat_binders p @ shadowed) rest
+             | _ -> go shadowed rest)
+        in
+        go shadowed es
+      | A.ELet (b, _) -> recur b.A.bind_expr
+      | A.ELetFn (n, ps, _, body, _) ->
+        if n.A.txt = sn.A.txt || pbinds ps then false
+        else recur ~bind:(n.A.txt :: param_names ps) body
+      | A.ELetQ (p, e1, e2, _) ->
+        recur e1 || (if binds (pat_binders p) then false else recur ~bind:(pat_binders p) e2)
+      | A.EMatch (subj, brs, _) ->
+        recur subj
+        || List.exists
+             (fun (br : A.branch) ->
+               let bs = pat_binders br.A.branch_pat in
+               if binds bs then false
+               else
+                 (match br.A.branch_guard with Some g -> recur ~bind:bs g | None -> false)
+                 || recur ~bind:bs br.A.branch_body)
+             brs
+      | A.ERecord (fs, _) -> List.exists (fun (_, v) -> recur v) fs
+      | A.ERecordUpdate (r, fs, _) -> recur r || List.exists (fun (_, v) -> recur v) fs
+      | A.EField (r, _, _) -> recur r
+      | A.EIf (c, t, el, _) -> any [ c; t; el ]
+      | A.ECond (arms, _) -> List.exists (fun (c, b) -> recur c || recur b) arms
+      | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
+      | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+      | A.EDbg (Some e, _) -> recur e
+    in
+    (* Does the guard fact [cond] — already known to apply [w]'s spelling to
+       this subject, and already filtered to a POSITIVE path entry by the
+       caller below — actually ENTAIL [pred]?  The laundered spelling (`if n
+       > 0 …` after `let n = List.length(ys)`) is handled by substituting the
+       laundering name's bound expression in wherever [cond] free-mentions
+       it, one hop only — mirroring [guard_applies]'s own laundered arm. *)
+    let guard_discharges (w : withdrawal) (cond : A.expr) : bool =
+      match atomic_cmp (is_measured_pred w) pred with
+      | None -> false
+      | Some (op2, n2) ->
+        exists_discharging w (op2, n2) ~shadowed:[] cond
+        || List.exists
+             (fun (m, rhs) ->
+               expr_mentions_free m cond && exists_discharging w (op2, n2) ~shadowed:[] rhs)
+             lets
+    in
     List.find_opt
       (fun w ->
         w.wd_str = subject_is_str
         && expr_applies w.wd_measure pred
         && List.exists
-             (fun (cond, negated) -> (not negated) && guard_applies w cond)
+             (fun (cond, negated) ->
+               (not negated) && guard_applies w cond && guard_discharges w cond)
              path)
       !withdrawals
   (* A non-variable actual (`head(f(xs))`) carries no name a guard could be
@@ -3619,8 +3884,10 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
                whole VC above; a second, disconnected flag would leave the
                assumption in the VC with nothing to interpret it).
          - [resolve_var] is `None` throughout: the binder denotes a LIST, not a
-           scalar, so any predicate that mentions it outside a measure (or that
-           mentions any other variable) is dropped entirely.  No approximation.
+           scalar, so any predicate that mentions a variable OUTSIDE a measure
+           is dropped entirely.  No approximation.  A measure over some other
+           name IS translated — see [rm]'s non-self branch below — but only to
+           the term the goal side builds for that same name.
 
        Sound direction: this only ADDS a hypothesis that the caller's own
        signature already promises about this very value, over the same symbol.
@@ -3629,7 +3896,10 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
 
        Shadowing is handled upstream and not here: [scope_shadow] retires the
        name from [sc] at every binding construct, so after `let ys = tail(ys)`
-       the lookup simply finds nothing and no fact is loaded. *)
+       the lookup simply finds nothing and no fact is loaded.  Its SECOND
+       trigger covers the relational case: an entry whose predicate MENTIONS a
+       rebound name is retired too, so `let r = push(t, 5)` followed by a rebind
+       of `t` drops `r`'s promise rather than re-reading `t` at its new value. *)
     let scope_facts_loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
     let load_scope_measure_facts (x : string) : unit =
       if not (Hashtbl.mem scope_facts_loaded x) then begin
@@ -3642,8 +3912,69 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
              above; the goal side's [is_self]/[actual_of_name] pair already
              accepts the same three. *)
           let is_self_spelling n = n = b || n = "_" || n = x in
+          (* ── A RELATIONAL carried predicate's OTHER names ───────────────────
+             `fn push(t, x) : {Tree | size(_) == size(t) + 1}` stored against
+             `let r = push(t, 5)` arrives here as `size(_) == size(t) + 1`,
+             ALREADY in the caller's namespace ([postcond_of] substituted the
+             actuals simultaneously, or abandoned propagation entirely).  So a
+             non-self name denotes ITSELF, a caller-scope value — the same
+             discipline [foreign_var]/[foreign_measure] apply to a refined
+             parameter's own promise, and for the same reason: routing it
+             through the GOAL-side resolvers would silently re-point it at a
+             callee actual whenever a caller variable and a callee parameter
+             happen to share a spelling.
+
+             Refusing it outright (as this did until 2026-08-04) drops the
+             sub-term, and [smt_of] then drops the WHOLE predicate: no
+             assumption, VC satisfiable both ways, call silently skipped.  That
+             is what made the motivating repro `needs_bigger(t, r)` report
+             `1 proved, 1 skipped` with no diagnostic.
+
+             What is emitted must be the term the GOAL side builds for the same
+             name, or the fact connects to nothing and the skip merely looks
+             like a proof:
+               · axiomatised `@[measure]`: `(m n)` with `n` declared at the
+                 measure's ADT sort — exactly what [reflect_dt]'s `EVar` arm
+                 produces for this actual (goal side, [resolve_measure]), and
+                 what its caller-scope fallback produces when the name is not a
+                 callee parameter at all;
+               · everything else: the memoized `m$n` from [measure_of_var],
+                 which is literally the same call the goal side makes.
+             A FRESH constant here would be the `{List(a) | len(_) > 0}` bug
+             again — trivially satisfiable, hence a contract that enforces
+             nothing while appearing to work.  The REJECT CONTROL test (a
+             demand for a SMALLER tree, which `push` never provides) is what
+             distinguishes the two.
+
+             Shadowing needs nothing here: [scope_shadow] retires an entry both
+             when its own name is rebound AND when its predicate MENTIONS a
+             rebound name ([expr_mentions]), so a `t` rebound between the `let`
+             and the call removes the whole entry rather than re-pointing this
+             `Const t` at the new binding.  That second trigger already exists
+             precisely because a promise may mention another name.
+
+             Fail-closed: the sort guards (a `Str` name, a record name, a name
+             already pinned to a non-Int scalar sort) drop the sub-term — and
+             with it the whole fact — for a name this VC already knows at some
+             other sort.  They are a cheap FIRST filter, not the invariant: what
+             actually guarantees a one-symbol-two-sorts VC never reaches z3 (a
+             single error line there desynchronises the shared `z3 -in` channel
+             and silently switches refinement checking off for the rest of the
+             compilation) is the [sort_conflict decls] gate further down, which
+             sees the finished declaration list.  Losing a fact only loses a
+             proof. *)
           let rm m' n =
-            if not (is_self_spelling n) then None
+            if not (is_self_spelling n) then
+              if Hashtbl.mem str_names n || is_recvar n
+                 || caller_scalar_of n <> Smt.SInt
+              then None
+              else if is_axiom_measure m' then begin
+                let adt = Hashtbl.find axiom_measures m' in
+                uses_axiom := true;
+                decls := (n, Smt.SData adt) :: !decls;
+                Some (Smt.App (m', [ Smt.Const n ]))
+              end
+              else measure_of_var m' n
             else if is_axiom_measure m' then begin
               (* Gate the quantified-axiom preamble on the SHARED per-VC ref, so
                  `(m x)` here and `(m x)` in the goal are interpreted by the same
@@ -4739,8 +5070,14 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
    happened.  This function occupies exactly that previously-inert case, so it
    cannot regress any existing verdict.  It is VERDICT-ONLY: it returns "proven"
    or "not proven" and never reports a diagnostic, so the definition side of a
-   Tier 2 function stays silent no matter what the solver says.  Its only
-   observable effect is enabling PROPAGATION via [gate_unverified_posts].
+   Tier 2 function stays silent no matter what the solver says.  Its observable
+   effects are enabling PROPAGATION via [gate_unverified_posts] and — for the
+   constructor-literal shape only — writing a [Postcondition] entry to the
+   obligation ledger, so `--refine-report` can tell "attempted and proved" from
+   "never looked at".  That write is gated on [~record], NOT on emission,
+   because [check_fn_post_verdict] runs twice per refined-return function and
+   the same postcondition must never be counted twice; this mirrors exactly
+   what [check_post]'s own [record] parameter is for.
 
    Everything outside a narrow, recognised shape returns false (= not proven =
    skipped): several clauses, a clause guard, a catch-all arm, a nested pattern,
@@ -4760,7 +5097,7 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
 let ctor_belongs (ctor : string) (adt : string) : bool =
   match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false
 
-let check_post_induction ~root (fd : A.fn_def) : bool =
+let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
   let self = fd.A.fn_name.A.txt in
   let dummy_span = fd.A.fn_name.A.span in
   let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
@@ -4775,79 +5112,32 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
       | Closed -> Some []
       | Relational ps -> Some ps
     in
-    match ps, c.A.fc_body with
-    | None, _ -> false
-    (* The recognised shape: one clause whose whole body matches on a parameter. *)
-    | Some ps, A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
-      let mparam = sv.A.txt in
-      let mparam_idx =
-        let rec ix i = function
-          | [] -> -1
-          | x :: r -> if x = mparam then i else ix (i + 1) r
-        in
-        ix 0 params
-      in
-      let mparam_ty =
-        List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
-        |> (fun o -> Option.bind o param_ty_of)
-        |> (fun o -> Option.bind o smt_sort_of_ty)
-      in
-      match mparam_ty with
-      | Some (Smt.SData madt) when madt <> "Elem" ->
-        (* Every sort this VC family mentions must already be declared by the
-           measure preamble; otherwise the VC would reference an undeclared sort
-           and z3 would answer with an `(error …)` line — the failure mode that
-           desynchronises the shared solver channel.  (`--no-measure-axioms`
-           empties the preamble, so this also disables Tier 2 under that flag.) *)
-        if not (Hashtbl.mem measure_preamble_sorts ret_adt
-                && Hashtbl.mem measure_preamble_sorts madt)
-        then false
-        else begin
-          (* Structurally smaller variables, computed over the WHOLE clause body
-             so a nested match contributes its components too. *)
-          let sset = structural_subvars mparam c.A.fc_body in
-          let rec check_branch (br : A.branch) : bool =
-            match br.A.branch_pat with
-            | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
-              let ctor = ct.A.txt in
-              let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
-              if List.length subpats <> List.length fsorts then false
-              else
-                (* Only flat PatVar / PatWild sub-patterns: a nested pattern
-                   would need an equation we do not build. *)
-                let names =
-                  List.mapi
-                    (fun i p ->
-                      match p with
-                      | A.PatVar n -> Some n.A.txt
-                      | A.PatWild _ -> Some (Printf.sprintf "$w%s%d" ctor i)
-                      | _ -> None)
-                    subpats
-                in
-                if List.exists Option.is_none names then false
-                else
-                  let names = List.map Option.get names in
-                  (* A binder that reuses a parameter's name would be conflated
-                     with it (both reflect to `Const name`). *)
-                  if List.exists (fun n -> List.mem n params) names then false
-                  else
-                    let binder_sorts = List.combine names fsorts in
-                    let base_path =
-                      match br.A.branch_guard with Some g -> [ (g, false) ] | None -> []
-                    in
-                    let ts = tails base_path br.A.branch_body in
-                    (* Fold, not for_all: no short-circuit, so the VC cache is
-                       warmed uniformly and the verdict is order-independent. *)
-                    ts <> []
-                    && List.fold_left
-                         (fun acc t ->
-                           check_tail ~ctor ~binder_sorts t && acc)
-                         true ts)
-            (* A catch-all arm binds no constructor, so there is no pattern
-               equation pinning the scrutinee — nothing to prove from. *)
-            | _ -> false
-          and check_tail ~ctor ~binder_sorts ((path, tail_e) : (A.expr * bool) list * A.expr)
-              : bool =
+    (* Every sort this VC family mentions must already be declared by the
+       measure preamble; otherwise the VC would reference an undeclared sort and
+       z3 would answer with an `(error …)` line — the failure mode that
+       desynchronises the shared solver channel.  (`--no-measure-axioms` empties
+       the preamble, so this also disables Tier 2 under that flag.) *)
+    match ps with
+    | None -> false
+    | Some _ when not (Hashtbl.mem measure_preamble_sorts ret_adt) -> false
+    | Some ps ->
+      (* ── The single VC builder, shared by every accepted body shape ────────
+         [mctx] is the INDUCTION context — the matched parameter, its ADT sort,
+         its index in the parameter list, and the structurally-smaller variables
+         computed over the whole clause body.  It is the only thing that
+         licenses an induction hypothesis, so a body with no top-level match
+         passes [None] and can therefore never assume one.  [pat] is the pattern
+         equation for the arm under check (its constructor and flat binders); it
+         is meaningful only alongside an [mctx], since the equation's left-hand
+         side IS the matched parameter.
+
+         There is deliberately ONE generator: a second, parallel VC builder for
+         the non-match shape could drift from this one, the hazard recorded at
+         [postcond_infer.ml:25]. *)
+      let check_tail
+          ~(mctx : (string * string * int * (string, unit) Hashtbl.t) option)
+          ~(pat : (string * (string * Smt.sort) list) option) ~(refute : bool)
+          ((path, tail_e) : (A.expr * bool) list * A.expr) : Obligation.verdict option =
             (* ── Per-VC state ───────────────────────────────────────────────
                [declare] is the well-sortedness guard: one symbol at two sorts
                makes z3 emit an `(error …)`, which desynchronises the shared
@@ -4869,10 +5159,16 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
               Smt.Const n
             in
             let ok = ref true in
-            if not (declare mparam (Smt.SData madt)) then ok := false;
-            List.iter
-              (fun (n, s) -> if not (declare n s) then ok := false)
-              binder_sorts;
+            (match mctx with
+             | Some (mparam, madt, _, _) ->
+               if not (declare mparam (Smt.SData madt)) then ok := false
+             | None -> ());
+            (match pat with
+             | Some (_, binder_sorts) ->
+               List.iter
+                 (fun (n, s) -> if not (declare n s) then ok := false)
+                 binder_sorts
+             | None -> ());
             List.iter
               (fun fp ->
                 match Option.bind (param_ty_of fp) smt_sort_of_ty with
@@ -4910,14 +5206,24 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
                  position is a variable in [structural_subvars].  Any other
                  recursive call still reflects (so the arm can be attempted) but
                  carries NO assumption — an unconstrained constant proves
-                 nothing, which is exactly the skip we want. *)
+                 nothing, which is exactly the skip we want.  With no [mctx]
+                 there is no matched parameter and hence nothing that could be
+                 structurally smaller, so no IH is ever available. *)
               | A.EApp (A.EVar { A.txt = f; _ }, args, _) when f = self && d = ret_adt ->
                 incr ctr;
                 let nm = Printf.sprintf "$t2rec%d" !ctr in
                 Hashtbl.replace decls nm (Smt.SData ret_adt);
                 let cst = Smt.Const nm in
-                (match List.nth_opt args mparam_idx with
-                 | Some (A.EVar v) when Hashtbl.mem sset v.A.txt ->
+                let ih_arg =
+                  match mctx with
+                  | None -> None
+                  | Some (_, _, mparam_idx, sset) -> (
+                    match List.nth_opt args mparam_idx with
+                    | Some (A.EVar v) when Hashtbl.mem sset v.A.txt -> Some v
+                    | _ -> None)
+                in
+                (match ih_arg with
+                 | Some _ ->
                    let env =
                      List.mapi (fun i n -> (n, List.nth_opt args i)) params
                      |> List.filter_map (function
@@ -4928,7 +5234,7 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
                      (match pred_term cst (subst_params env pred) with
                       | Some t -> assume := t :: !assume
                       | None -> ())
-                 | _ -> ());
+                 | None -> ());
                 Some cst
               | _ -> None
             and reflect_int (e : A.expr) : Smt.term option =
@@ -4958,16 +5264,24 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
               in
               smt_of ~resolve_var:rv ~resolve_measure:rm' ~resolve_measure_app:rma p
             in
-            (* The pattern equation.  Without it the arm knows nothing about the
-               scrutinee, and even the BASE case (`size(t) + 1` with `t = Leaf`)
-               is unprovable. *)
-            let pat_eq =
-              List.fold_right
-                (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
-                binder_sorts (Some [])
-              |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, Smt.App (ctor, ts)))
-            in
-            (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false);
+            (* The pattern equation.  Without it a match arm knows nothing about
+               the scrutinee, and even the BASE case (`size(t) + 1` with `t =
+               Leaf`) is unprovable.  A body with no match has no scrutinee to
+               constrain — the parameters stay universally quantified, which is
+               strictly WEAKER than any equation, so omitting it cannot make a
+               goal provable that would otherwise fail. *)
+            (match pat, mctx with
+             | None, _ -> ()
+             | Some (ctor, binder_sorts), Some (mparam, _, _, _) ->
+               let pat_eq =
+                 List.fold_right
+                   (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
+                   binder_sorts (Some [])
+                 |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, Smt.App (ctor, ts)))
+               in
+               (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false)
+             (* A pattern with no matched parameter is not a shape we build. *)
+             | Some _, None -> ok := false);
             (* Reflecting the tail is what mints the IH assumptions, so it must
                happen before the assumption list is read. *)
             let tail_term = reflect_dt ret_adt tail_e in
@@ -4978,25 +5292,141 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
                 | None -> ())
               path;
             match tail_term with
-            | None -> false
+            | None -> None
             | Some tt -> (
               match pred_term tt pred with
-              | None -> false
+              | None -> None
               | Some goal ->
-                if (not !ok) || !conflict then false
+                if (not !ok) || !conflict then None
                 else
                   let decls =
                     Hashtbl.fold (fun n s acc -> (n, s) :: acc) decls []
                     |> List.sort compare
                   in
                   let vc = { Smt.decls; assumptions = !assume; goal } in
-                  Refine.discharge ~root ~preamble:!measure_preamble vc = Refine.Verified)
+                  match Refine.discharge ~root ~preamble:!measure_preamble vc with
+                  | Refine.Verified -> Some Obligation.Proved
+                  | _ when not refute -> Some (Obligation.Skipped Obligation.Solver_undecided)
+                  (* DEFINITE failure only: "not proved" is not "violated".  The
+                     predicate is reported as violated only when its NEGATION is
+                     itself Verified — i.e. it can never hold. *)
+                  | _ ->
+                    if Refine.discharge ~root ~preamble:!measure_preamble
+                         { vc with Smt.goal = Smt.Not goal }
+                       = Refine.Verified
+                    then Some Obligation.Violated
+                    else Some (Obligation.Skipped Obligation.Solver_undecided))
+      in
+      let proved_tail ~mctx ~pat t =
+        check_tail ~mctx ~pat ~refute:false t = Some Obligation.Proved
+      in
+      (match c.A.fc_body with
+      (* ── Shape 1: a constructor-literal body ───────────────────────────────
+         The simplest possible case, and one that needs no induction at all:
+         there is no recursive call to hypothesise over, so the goal is just the
+         predicate with its binder replaced by the constructed term, discharged
+         under the measure's own recursion axioms.  This shape used to fall
+         through to `false` SILENTLY — Tier 2 is verdict-only — so a
+         deliberately wrong postcondition on it reported no obligation of any
+         kind.  Checked BEFORE the match shape so the path that already worked
+         is reached unchanged. *)
+      | A.ECon _ as body ->
+        (* Unlike the match shape, this one RECORDS its verdict in the
+           obligation ledger.  Tier 2 stays verdict-only in the sense that
+           matters — it emits no diagnostic either way — but "attempted" has to
+           be distinguishable from "never looked at", and the ledger is the only
+           channel that carries that.  Gated on [record] (which the caller
+           threads from [emit]) so the pre-pass run does not double-count.
+           (Extending the same accounting to the match shape is a separate
+           change: it would move counts under every existing Tier 2 fixture, so
+           it is deliberately not bundled here.) *)
+        let v =
+          (* The refutation query exists only to classify a LEDGER verdict, so
+             it is pointless on the non-recording pass — and skipping it there
+             cannot change the boolean result, since [Violated] and
+             [Skipped Solver_undecided] are both "not proven". *)
+          match check_tail ~mctx:None ~pat:None ~refute:record ([], body) with
+          | Some v -> v
+          (* No VC could be built at all — reflection failed somewhere. *)
+          | None -> Obligation.Skipped Obligation.Unreflectable_predicate
+        in
+        if record then
+          Obligation.record
+            { Obligation.span = fd.A.fn_name.A.span
+            ; callee = self
+            ; predicate = pred_str pred
+            ; verdict = v
+            ; kind = Obligation.Postcondition };
+        v = Obligation.Proved
+      (* ── Shape 2: one clause whose whole body matches on a parameter ─────── *)
+      | A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
+        let mparam = sv.A.txt in
+        let mparam_idx =
+          let rec ix i = function
+            | [] -> -1
+            | x :: r -> if x = mparam then i else ix (i + 1) r
           in
-          branches <> []
-          && List.fold_left (fun acc br -> check_branch br && acc) true branches
-        end
-      | _ -> false)
-    | Some _, _ -> false)
+          ix 0 params
+        in
+        let mparam_ty =
+          List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
+          |> (fun o -> Option.bind o param_ty_of)
+          |> (fun o -> Option.bind o smt_sort_of_ty)
+        in
+        match mparam_ty with
+        | Some (Smt.SData madt) when madt <> "Elem" ->
+          if not (Hashtbl.mem measure_preamble_sorts madt) then false
+          else begin
+            (* Structurally smaller variables, computed over the WHOLE clause
+               body so a nested match contributes its components too. *)
+            let sset = structural_subvars mparam c.A.fc_body in
+            let mctx = Some (mparam, madt, mparam_idx, sset) in
+            let check_branch (br : A.branch) : bool =
+              match br.A.branch_pat with
+              | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
+                let ctor = ct.A.txt in
+                let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
+                if List.length subpats <> List.length fsorts then false
+                else
+                  (* Only flat PatVar / PatWild sub-patterns: a nested pattern
+                     would need an equation we do not build. *)
+                  let names =
+                    List.mapi
+                      (fun i p ->
+                        match p with
+                        | A.PatVar n -> Some n.A.txt
+                        | A.PatWild _ -> Some (Printf.sprintf "$w%s%d" ctor i)
+                        | _ -> None)
+                      subpats
+                  in
+                  if List.exists Option.is_none names then false
+                  else
+                    let names = List.map Option.get names in
+                    (* A binder that reuses a parameter's name would be
+                       conflated with it (both reflect to `Const name`). *)
+                    if List.exists (fun n -> List.mem n params) names then false
+                    else
+                      let binder_sorts = List.combine names fsorts in
+                      let base_path =
+                        match br.A.branch_guard with Some g -> [ (g, false) ] | None -> []
+                      in
+                      let ts = tails base_path br.A.branch_body in
+                      (* Fold, not for_all: no short-circuit, so the VC cache is
+                         warmed uniformly and the verdict is order-independent. *)
+                      ts <> []
+                      && List.fold_left
+                           (fun acc t ->
+                             proved_tail ~mctx ~pat:(Some (ctor, binder_sorts)) t && acc)
+                           true ts)
+              (* A catch-all arm binds no constructor, so there is no pattern
+                 equation pinning the scrutinee — nothing to prove from. *)
+              | _ -> false
+            in
+            branches <> []
+            && List.fold_left (fun acc br -> check_branch br && acc) true branches
+          end
+        | _ -> false)
+      | _ -> false))
   | _ -> false
 
 (* Check every return-position tail of every clause of [fd] against its declared
@@ -5006,10 +5436,13 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
 
    A return refinement [check_post] cannot handle at all (a variant-ADT return)
    falls through to [check_post_induction], the Tier 2 path.  That path never
-   emits, so this stays the single reporting site. *)
+   emits, so this stays the single reporting site.  [emit] IS threaded to it as
+   [~record], though: its constructor-literal shape writes an obligation, and
+   this function runs twice per refined-return function, so without the thread
+   every such postcondition would be counted twice in `--refine-report`. *)
 let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
   match return_refine_ext fd with
-  | None -> check_post_induction ~root fd
+  | None -> check_post_induction ~root ~record:emit fd
   | Some (binder, ret_pred, marker) ->
     (* [record_sort] must carry only a DECLARED sort name.  A scalar marker
        (`$Bool`) is not one: handing it here would send the return value down

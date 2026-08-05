@@ -106,6 +106,23 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`List.nth` now carries a bounds contract:
+  `n : {Int | _ >= 0 && _ < len(xs)}`.** `nth` panics on an out-of-range index
+  and, unlike its siblings `head`/`last`/`unwrap`/`expect`, carried no contract
+  at all — so a *provably* out-of-range index compiled in silence. It is now a
+  compile error: `List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are
+  reported. This can turn previously-silent code into an error, which is why it
+  is listed here and not under Fixed. In the default mode an index the checker
+  cannot bound stays skipped and silent, as March reports only definite
+  failures — but under `cap verified`, whose premise is that every obligation
+  is discharged, such an index is now a hard error where it previously compiled
+  clean. That is in-kind with all 13 pre-existing stdlib contracts rather than
+  novel, and no stdlib module or sampled project uses `cap verified`. A
+  blast-radius
+  sweep taken before the change (all 112 stdlib modules plus the `forgepm`,
+  `bastion`, `conduit` and `depot` projects) found **zero** new violations and
+  only new skips. `List.nth_opt` remains the unconditional alternative.
+
 - **`forge cap audit` is now `forge cap inspect`.** Two commands named "audit"
   answered different questions at different granularities — `forge audit` reads
   dependency declarations from source, the other reads a built artifact — which
@@ -157,6 +174,57 @@ git log is authoritative for exact commits.
   array is never mutated out from under its alias. This is the same FBIP
   in-place-at-unique-ownership story March already applies to ADT reuse.
   Compiled-only (the interpreter uses a different NativeArray backend).
+- **A skipped obligation no longer blames a withdrawn `List.length`/
+  `String.byte_size` alias unless the guard would actually have discharged
+  it.** `if List.length(ys) >= 0 do head(ys) …` used to report `reason:
+  alias-withdrawn` — sending the author to rename an unrelated competing
+  `List.length` definition — even though `len(ys) >= 0` is a tautology that
+  proves nothing about the goal `len(ys) > 0`: the call is skipped whether or
+  not the alias was withdrawn. The attribution now requires the guard's own
+  comparison to syntactically entail the obligation's predicate (an
+  interval-subset check over `==`/`<`/`<=`/`>`/`>=`; `!=` is not a convex
+  interval, so it never entails anything by this check); where entailment
+  can't be decided, the honest `solver-undecided` message is kept instead.
+  The verdict is unaffected — still `Skipped` either way — only the reason
+  string changes.
+
+- **A refined ADT return on a constructor-literal body is now actually
+  checked.** `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+  Node(t, x, Leaf) end` — the simplest possible case, needing no induction at
+  all — was never attempted: the postcondition prover recognised exactly one
+  body shape, a top-level `match` on a parameter, and everything else fell
+  through silently. A deliberately *wrong* postcondition on such a body
+  reported `0 proved, 0 violated, 0 skipped` in `--refine-report`: not
+  undecided, simply never looked at. Constructor-literal bodies are now
+  discharged against the measure's recursion equations, and — unlike the
+  `match` shape — record their verdict in the obligation ledger, so the report
+  can tell "attempted and proved" from "never attempted". A proved
+  postcondition also propagates to call sites, as with the `match` shape.
+
+- **A CLOSED measure postcondition on a plain multi-constructor ADT now
+  composes through an unannotated `let`.** `fn grow(t : Tree) : {Tree |
+  size(_) > 0} do … end` followed by `let r = grow(t); needs_nonempty(r)`
+  used to skip the second call: `scope_add_binding` seeded a refined-local
+  scope entry for a scalar- or record-sorted postcondition only, so a plain
+  variant ADT (`Tree`, `List(a)`) fell into the catch-all and the fact
+  vanished, even though the identically-annotated spelling (`let r : {Tree |
+  size(_) > 0} = grow(t)`) already worked. Only the CLOSED case (the
+  postcondition mentions no parameter besides the refined value itself) is
+  covered; see the next entry for the relational case.
+
+- **A RELATIONAL measure postcondition now composes through an unannotated
+  `let` too.** `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}`
+  followed by `let r = push(t, 5); needs_bigger(t, r)` used to skip the second
+  call. The carried promise mentions the caller's *other* variable `t`, and
+  the fact loader accepted only names denoting the promised value itself — so
+  `size(t)` failed to translate and, by the usual "untranslatable predicate
+  stays unasserted" rule, the whole promise was dropped in silence. A
+  caller-scope name under a measure now resolves to the same SMT term the goal
+  side builds for it (never a fresh constant, which would make such a contract
+  trivially satisfiable and enforce nothing). A name whose value has been
+  rebound between the `let` and the call still retires the whole fact rather
+  than being re-read at its new value, and a name that cannot be resolved
+  still drops the promise silently.
 
 - **`cap no_panic` no longer rejects a division guarded by a boolean
   condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a

@@ -4412,6 +4412,107 @@ let divsafety_error_texts src =
 
 let has_divsafety_error src = divsafety_error_texts src <> []
 
+(* ── Postcondition proof for a NON-MATCH ADT body ──────────────────────────
+   [check_post_induction] recognised exactly one clause-body shape: a top-level
+   `EMatch` on a structural parameter.  A body that is a bare constructor
+   application — the simplest case, no induction needed, just one unfolding of
+   the measure's definition — fell through and returned false SILENTLY (Tier 2
+   is verdict-only).  A deliberately WRONG postcondition on such a body
+   therefore reported `0 proved, 0 violated, 0 skipped`: never attempted, not
+   merely undecided.
+
+   The REJECT control is what makes this suite worth anything.  An accept-only
+   witness cannot tell "the checker proved it" from "the checker still is not
+   looking", because both report no error. *)
+let post_nonmatch_body_suite =
+  let tree_src body post = Printf.sprintf {|
+mod PN do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | %s} do %s end
+  fn main() : Int do size(push(Leaf, 1)) end
+end|} post body
+  in
+  [ gated "a constructor-literal body has its postcondition ATTEMPTED" (fun () ->
+        (* Before: 0 postcondition obligations of any kind — never attempted.
+
+           The counts are EXACT, not `>= 1`.  The fixture has exactly one
+           refined-return function, so it must leave exactly one ledger entry —
+           and `check_fn_post_verdict` runs TWICE per such function (once from
+           the [gate_unverified_posts] pre-pass with `~emit:false`, once from
+           the walk).  A `>= 1` assertion cannot see the resulting double-count,
+           and in fact did not: it shipped as `2 proved` and was caught in
+           review, not here. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src "Node(t, x, Leaf)" "size(_) == size(t) + 1" in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "exactly one postcondition proved, counted once"
+          1 proved)
+  ; gated "REJECT CONTROL: a FALSE postcondition on the same body is caught"
+      (fun () ->
+        (* `size(Node(t,x,Leaf))` is `size(t) + 1`, never `size(t) + 2`.
+           Without this control the accept case above passes just as well when
+           the checker is still not looking at the body at all.  Exact counts
+           for the same double-count reason as above. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src "Node(t, x, Leaf)" "size(_) == size(t) + 2" in
+        let _ = has_refine_error_d src in
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 0 proved;
+        Alcotest.(check int) "the false postcondition is reported exactly once"
+          1 violated)
+  ; gated "THIRD OUTCOME: an UNDECIDABLE postcondition stays silent" (fun () ->
+        (* Definite-failure-only, on the new path.  `Node(push(t, x), x, Leaf)`
+           has a self-recursive call, and the constructor-literal shape supplies
+           NO induction hypothesis (there is no matched parameter, so nothing
+           can be certified structurally smaller).  The call therefore reflects
+           to an unconstrained constant `c`, and the goal reduces to
+           `size(c) == size(t)` — neither provable nor refutable.
+
+           That must be a SKIP, not a violation.  This is the gap where a future
+           widening of the refutation would first go wrong: refuting a goal
+           merely because an opaque constant makes it unprovable would reject
+           correct code, which is this subsystem's cardinal sin.  Neither
+           counter may move. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src "Node(push(t, x), x, Leaf)" "size(_) == size(t) + 1" in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 0 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check bool) "recorded as a skip, so it is still countable" true
+          (List.exists (fun (_, n) -> n > 0) skips))
+  ; gated "the existing match-shaped body still verifies" (fun () ->
+        (* Regression guard: widening the accepted shapes must not disturb the
+           EMatch path that already worked. *)
+        March_refinecheck.Obligation.reset ();
+        let src = tree_src
+          "match t do Leaf -> Node(Leaf, x, Leaf) | Node(l, y, r) -> Node(Node(l, y, r), x, Leaf) end"
+          "size(_) == size(t) + 1"
+        in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        (* The EMatch path deliberately still records NOTHING in the ledger —
+           extending the accounting to it would move counts under every existing
+           Tier 2 fixture and is a separate change.  Pinned exactly so that if
+           someone does extend it, this test fails and forces the decision to be
+           made on purpose rather than as a side effect. *)
+        Alcotest.(check int) "the EMatch path records no obligation" 0 proved;
+        Alcotest.(check int) "…and no skip either" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ]
+
 (* NOTE ON GATING: none of these cases reaches the solver, so they must NOT be
    [gated] on z3 — a [gated] hole test would silently SKIP on a z3-less machine,
    i.e. the test whose whole point is fail-closed behaviour when verification is
@@ -5384,12 +5485,59 @@ end|}
           (contains msg "solver-undecided"));
     gated "a FREE occurrence under a non-colliding binder still attributes"
       (fun () ->
-        (* The companion pin: `q > n` inside the lambda is a genuine free use
-           of the laundered length, so the attribution must still fire — the
-           free-occurrence fix must not over-retire. *)
+        (* Companion control to LA7 (the colliding-binder case, just above):
+           LA7's `fn n -> n > 0` collides on the laundering name and must NOT
+           attribute; this one's `fn q -> n > 0` is a genuine free use of the
+           laundered length under a NON-colliding binder, and — unlike the
+           `q > n` shape this fixture used before Task 5 — `n > 0` is exactly
+           the entailing comparison, so the pair still discriminates the
+           free-occurrence walk: a regression that stopped descent at ANY
+           binder (colliding or not) would make LA7 wrongly attribute or make
+           this one wrongly stay general, and either failure is caught here.
+           (The `q > n` shape this fixture used to have never entailed
+           anything regardless of shadowing — see the sibling fixture below,
+           "a FREE occurrence … entails nothing", which keeps that shape and
+           asserts the now-correct undecided outcome instead.) *)
         let msg =
           refine_error_text_d
             {|mod LA8 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_over(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if any_over(zs, fn q -> n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "a FREE occurrence under a non-colliding binder entails nothing when it is not the goal"
+      (fun () ->
+        (* `q > n` inside the lambda IS a genuine free use of the laundered
+           length (the free-occurrence walk correctly does not stop at the
+           non-colliding `q` binder), so before Task 5 this counted as
+           evidence on its own.  It should not have: `q > n` says nothing
+           about `n`'s sign — `q` is an arbitrary value from an opaque
+           higher-order call, so this guard could never discharge
+           `len(ys) > 0` whether or not the alias was withdrawn.  Task 5's
+           entailment conjunct correctly reclassifies this as undecided
+           (kept general) rather than misattributing it — the free-occurrence
+           coverage itself is exercised (and asserted) by the sibling fixture
+           above, so this one only needs to pin the entailment half. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA8B do
   cap verified
   mod Internal do
     mod List do
@@ -5406,11 +5554,11 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "does not blame the solver" false
-          (contains msg "solver-undecided");
+          "no longer misattributed to the withdrawal" false
+          (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "names the withdrawn spelling" true
-          (contains msg "List.length"));
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
     gated "a laundered guard on a DIFFERENT collection is not this guard"
       (fun () ->
         (* The laundered analogue of the WA control: the walk must consult
@@ -5658,7 +5806,125 @@ end|}
         in
         Alcotest.(check bool)
           "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"))
+          (contains msg "solver-undecided"));
+    gated "LA14: a guard that could never discharge is NOT blamed on the withdrawal"
+      (fun () ->
+        (* `List.length(ys) >= 0` is a tautology over a non-negative measure; it
+           proves nothing about the goal `len(ys) > 0`, so this call is skipped
+           whether or not the alias was withdrawn.  Blaming the withdrawal sends
+           the author to fix a competing `List.length` definition that was never
+           the cause — the same nested-`mod List` withdrawal LA1..LA13 already
+           use, so this isolates exactly the entailment gap and nothing else. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA14 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) >= 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not claim the withdrawal caused this" false
+          (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "LA15: CONTROL — a guard that WOULD have discharged is still blamed"
+      (fun () ->
+        (* The discrimination must be real: `List.length(ys) > 0` is exactly the
+           goal, so here the withdrawal genuinely IS why the call is skipped,
+           and the message must still say so.  Without this control, LA14
+           would pass by disabling the attribution entirely. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA15 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "still attributes to the withdrawal" true
+          (contains msg "alias-withdrawn"));
+    gated "LA16: a lambda param reusing a LAUNDERING NAME is not read as that launder"
+      (fun () ->
+        (* [exists_discharging]'s [is_subject] reads a second name channel —
+           [lets], keyed by the laundering name `n` — and that channel needs
+           its own shadow discipline, independent of the SUBJECT's (`ys`).
+           `fn n -> n > 0` inside `any_pos` binds its OWN `n`; that `n` must
+           not be read as `List.length(ys)` just because "n" is a laundering
+           key somewhere in the enclosing scope.  Before this fixed, the
+           `if n >= 0 && …` conjunct alone should already stay general
+           (`>= 0` cannot discharge `> 0`), so if this ever reports
+           `alias-withdrawn` at all, it is because the lambda's `n` was
+           wrongly read as the laundered length. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA16 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_pos(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if n >= 0 && any_pos(zs, fn n -> n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the shadowed launder is not read as evidence" false
+          (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general (solver-undecided)" true
+          (contains msg "solver-undecided"));
+    gated "LA16 CONTROL: a non-colliding param leaves the launder readable"
+      (fun () ->
+        (* Same shape as LA16, but the lambda binds `q` instead of `n`, so
+           nothing shadows the laundering key — the discrimination must be
+           real, or LA16 would pass merely because this whole family of
+           guards is unreachable by [exists_discharging]. *)
+        let msg =
+          refine_error_text_d
+            {|mod LA16B do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn any_pos(xs : List(Int), f : (Int) -> Bool) : Bool do true end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    let n = List.length(ys)
+    if n >= 0 && any_pos(zs, fn q -> q > 0 && n > 0) do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "the unshadowed launder still attributes" true
+          (contains msg "alias-withdrawn"))
   ]
 
 (* ── Composing a LIST contract across a call boundary ───────────────────────
@@ -7559,6 +7825,343 @@ end|});
         Alcotest.(check int) "violated" 1 violated)
   ]
 
+(* ── Postcondition composition through an unannotated `let`: CLOSED case ───
+   `scope_add_binding`'s postcond arm seeds a refined-local scope entry only
+   for a scalar- or record-sorted postcondition; a plain multi-constructor ADT
+   fell into the catch-all and vanished.  The consumer
+   ([load_scope_measure_facts]) already existed and already reads exactly this
+   entry — only the producer was missing.
+
+   CLOSED means the postcondition mentions no parameter other than the refined
+   value itself (`size(_) > 0`).  The RELATIONAL case (`size(_) == size(t) + 1`)
+   needs Task 3 as well and is pinned there, NOT here — do not widen this
+   fixture to a relational predicate and expect it to pass. *)
+let post_compose_closed_suite =
+  let src = {|
+mod PC do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn grow(t : Tree) : {Tree | size(_) > 0} do
+    match t do
+      Leaf -> Node(Leaf, 1, Leaf)
+      Node(l, y, r) -> Node(Node(l, y, r), 1, Leaf)
+    end
+  end
+
+  fn needs_nonempty(x : {Tree | size(_) > 0}) : Int do 1 end
+
+  fn go(t : Tree) : Int do
+    let r = grow(t)
+    needs_nonempty(r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+  in
+  [ gated "a CLOSED measure postcondition composes through an unannotated let"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ; gated "REJECT CONTROL: rebinding `r` retires the carried fact" (fun () ->
+        (* If the fact survived a rebind, the entry is keyed wrongly and an
+           outer promise would be attributed to an inner binding — the
+           false-positive shape this subsystem has shipped three times. *)
+        let src' = {|
+mod PC2 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn grow(t : Tree) : {Tree | size(_) > 0} do
+    match t do
+      Leaf -> Node(Leaf, 1, Leaf)
+      Node(l, y, r) -> Node(Node(l, y, r), 1, Leaf)
+    end
+  end
+
+  fn needs_nonempty(x : {Tree | size(_) > 0}) : Int do 1 end
+
+  fn go(t : Tree) : Int do
+    let r = grow(t)
+    let r = Leaf
+    needs_nonempty(r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let proved, _, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool) "the rebound `r` does NOT inherit the promise" true
+          (skipped >= 1 || proved = 0))
+  ]
+
+(* ── Postcondition composition: the RELATIONAL case ────────────────────────
+   The motivating repro from the 2026-07-29 todo.  Needs Task 1 (so `push`'s
+   own postcondition is proven at its definition), Task 2 (so the `let` seeds a
+   measure-marked scope entry) AND this task (so the entry's relational
+   predicate can be translated).  Any one alone leaves it skipped. *)
+let post_compose_relational_suite =
+  let src = {|
+mod PR do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    Node(t, x, Leaf)
+  end
+
+  fn needs_bigger(before : Tree, after : {Tree | size(_) > size(before)}) : Int do 0 end
+
+  fn go(t : Tree) : Int do
+    let r = push(t, 5)
+    needs_bigger(t, r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+  in
+  [ gated "a RELATIONAL measure postcondition composes through a let" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ; gated "REJECT CONTROL: a caller-scope name must not resolve to a FRESH const"
+      (fun () ->
+        (* If `size(t)` resolved to a fresh unconstrained constant rather than
+           the goal side's own term for `t`, the predicate would be trivially
+           satisfiable and this FALSE goal would "prove" too.  `push` makes the
+           tree bigger, never smaller, so a demand for SMALLER must not pass. *)
+        let src' = {|
+mod PR2 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    Node(t, x, Leaf)
+  end
+
+  fn needs_smaller(before : Tree, after : {Tree | size(_) < size(before)}) : Int do 0 end
+
+  fn go(t : Tree) : Int do
+    let r = push(t, 5)
+    needs_smaller(t, r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool) "a FALSE relational goal is never proved" true
+          (violated >= 1 || skipped >= 1))
+  ; gated "REJECT CONTROL: rebinding the MENTIONED name retires the fact"
+      (fun () ->
+        (* `r`'s promise mentions `t`.  Rebinding `t` between the `let` and the
+           call makes the carried `size(t)` name a value that no longer exists;
+           translating it against the NEW `t` would attribute an outer fact to
+           an inner binding — the false positive this subsystem has shipped
+           three times.  The entry must be RETIRED, i.e. the call must go back
+           to being silently skipped. *)
+        let src' = {|
+mod PR3 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    Node(t, x, Leaf)
+  end
+
+  fn needs_bigger(before : Tree, after : {Tree | size(_) > size(before)}) : Int do 0 end
+
+  fn go(t : Tree) : Int do
+    let r = push(t, 5)
+    let t = Leaf
+    needs_bigger(t, r)
+  end
+  fn main() : Int do go(Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check int) "no violation invented" 0 violated;
+        Alcotest.(check bool) "the stale `size(t)` fact does NOT survive" true
+          (skipped >= 1))
+  ; gated "REJECT CONTROL: a `let` REBINDING a name its own promise mentions"
+      (fun () ->
+        (* The dangerous shape, and the one the two controls above miss.
+           `push2`'s promise mentions `t`; the `let` binds its result to `t`
+           as well.  [postcond_of] substituted the ACTUAL, so the predicate's
+           `t` is the value BEFORE the binding — but the entry is filed under
+           `t`, and the fact loader reads the entry's own name as a spelling
+           of the promised value.  The two collide onto one symbol and the
+           assumption becomes `size(t) > size(t) + size(u)`, i.e. `0 >
+           size(u)`: a CONTRADICTION, which discharges anything at all.  Here
+           it would "prove" that an arbitrary `w` is bigger than the tree
+           `push2` just grew — a false proof, not merely an over-approximation.
+           Base behaviour (273b4ef2) is `1 proved, 1 skipped`. *)
+        let src' = {|
+mod PR4 do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+
+  fn push2(t : Tree, u : Tree) : {Tree | size(_) > size(t) + size(u)} do
+    Node(t, 1, u)
+  end
+
+  fn needs_smaller(before : Tree, after : {Tree | size(_) < size(before)}) : Int do 0 end
+
+  fn go(t : Tree, u : Tree, w : Tree) : Int do
+    let t = push2(t, u)
+    needs_smaller(w, t)
+  end
+  fn main() : Int do go(Leaf, Leaf, Leaf) end
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        let _ = has_refine_error_d src' in
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool)
+          "an IMPOSSIBLE goal is never proved from a self-rebinding promise"
+          true (violated >= 1 || skipped >= 1))
+  ]
+
+(* ── `List.nth` carries a bounds contract ──────────────────────────────────
+   `nth` panics on an out-of-range index and, unlike `head`/`last`/`unwrap`,
+   carried no contract at all — so a provably-out-of-range index compiled
+   silently.  The contract is cross-parameter (`n` bounded by a measure of
+   `xs`), a shape verified working before this task was planned.
+
+   The fixtures restate the stdlib `List.nth` signature inline because this
+   harness checks a single parsed string: unlike `bin/main.ml`, it does NOT
+   prepend the stdlib, so a bare `List.nth(…)` would resolve to nothing and
+   every case here would pass vacuously.  The restated signature is copied
+   verbatim from `stdlib/list.march` — Step 5's revert-the-signature mutation
+   is what keeps the two in step. *)
+let nth_fixture name body =
+  Printf.sprintf
+    "mod %s do\n\
+    \  mod List do\n\
+    \    fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do\n\
+    \      match xs do\n\
+    \      Nil        -> panic(\"List.nth: index out of bounds\")\n\
+    \      Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end\n\
+    \      end\n\
+    \    end\n\
+    \  end\n\
+     %s\n\
+     end\n"
+    name body
+
+let stdlib_nth_contract_suite =
+  [ gated "an in-range literal index proves" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthOk"
+            "  fn go() : Int do List.nth([1, 2, 3], 1) end\n\
+            \  fn main() : Int do go() end"
+        in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        (* Silence is NOT the assertion: "no error, 0 violated" holds just as
+           well if the contract were absent, if `List.nth` resolved to nothing,
+           or if the obligation were never created.  Only the LEDGER can tell
+           a proof from a vacuum. *)
+        Alcotest.(check bool) "proved" true (proved >= 1))
+  ; gated "REJECT CONTROL: a provably out-of-range index is a violation"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthBad"
+            "  fn go() : Int do List.nth([1, 2, 3], 7) end\n\
+            \  fn main() : Int do go() end"
+        in
+        let _ = has_refine_error_d src in
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check bool) "reported" true (violated >= 1))
+  ; gated "a negative literal index is a violation" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthNeg"
+            "  fn go() : Int do List.nth([1, 2, 3], -1) end\n\
+            \  fn main() : Int do go() end"
+        in
+        let _ = has_refine_error_d src in
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check bool) "reported" true (violated >= 1))
+  ; gated "an unknown index is SILENT, not reported" (fun () ->
+        (* The definite-failure stance: an index the checker cannot bound is
+           accepted in silence.  This is the false-positive guard, and it is
+           the assertion that matters most in this suite. *)
+        March_refinecheck.Obligation.reset ();
+        let src =
+          nth_fixture "NthUnknown"
+            "  fn go(xs : List(Int), i : Int) : Int do List.nth(xs, i) end\n\
+            \  fn main() : Int do go([1], 0) end"
+        in
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let _, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 0 violated;
+        (* And it must be silent because the obligation was RAISED and then
+           SKIPPED — not because no obligation exists.  Without this the case
+           stays green if `List.nth`'s contract vanishes entirely, which is the
+           precise regression the definite-failure stance exists to prevent. *)
+        let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+        Alcotest.(check bool) "skipped" true (skipped >= 1))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -7598,6 +8201,7 @@ let () =
       ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
+      ("post-nonmatch-body", post_nonmatch_body_suite);
       ("divsafety-boolean-guard", divsafety_boolean_guard_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite);
@@ -7615,4 +8219,7 @@ let () =
       ("resolve-precedence", resolve_precedence_suite);
       ("caller-promise", caller_promise_suite);
       ("arm-exclusion", arm_exclusion_suite);
-      ("measure-base-case-axiom", measure_base_case_axiom_suite) ]
+      ("measure-base-case-axiom", measure_base_case_axiom_suite);
+      ("post-compose-closed", post_compose_closed_suite);
+      ("post-compose-relational", post_compose_relational_suite);
+      ("stdlib-nth-contract", stdlib_nth_contract_suite) ]

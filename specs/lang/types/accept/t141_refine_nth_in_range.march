@@ -1,0 +1,40 @@
+-- `List.nth` carries a bounds contract, and an in-range index satisfies it
+-- (2026-08-04).  `nth` panics on an out-of-range index; unlike its siblings
+-- `head`/`last`/`unwrap`/`expect` it carried NO contract at all, so a
+-- provably out-of-range index compiled in silence.  The contract is
+--
+--   fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a
+--
+-- which is CROSS-PARAMETER: the bound on `n` mentions a measure of `xs`.
+--
+-- This is the accept half of the pair; `reject/t142_refine_nth_out_of_range`
+-- is the one that proves the contract is enforced rather than merely present.
+-- An accept-only witness cannot tell a working contract from one that checks
+-- nothing (cf. `accept/t118` / `reject/t117`), so read the two together.
+--
+-- `unknown` is the false-positive guard, and it is the assertion that matters
+-- most here: an index the checker cannot bound must be accepted in SILENCE,
+-- not reported.  March reports only DEFINITE failures.  A blast-radius sweep
+-- before this contract shipped (112 stdlib modules, plus forgepm, bastion,
+-- conduit and depot) found zero new violations and only new SKIPS — this
+-- program pins that stance so a future tightening cannot quietly break it.
+mod T141 do
+
+  fn in_range() : Int do
+    List.nth([1, 2, 3], 1)
+  end
+
+  fn first() : Int do
+    List.nth([10, 20], 0)
+  end
+
+  -- The checker can bound neither `i` nor `len(xs)` here: SILENCE is correct.
+  fn unknown(xs : List(Int), i : Int) : Int do
+    List.nth(xs, i)
+  end
+
+  fn main() : Int do
+    in_range() + first() + unknown([7], 0)
+  end
+
+end

@@ -1,4 +1,4 @@
-# Refinement contract composition follow-ups (OPEN, from the 2026-07-29 call-boundary composition work)
+# Refinement contract composition follow-ups (CLOSED 2026-08-04, from the 2026-07-29 call-boundary composition work)
 
 
 - **A caller-established runtime GUARD is a different mechanism** from a
@@ -8,8 +8,13 @@
 - **Postconditions compose no measure through a return refinement.** Narrowed
   2026-07-30: `check_post` now *files* an obligation at every exit (so
   `--refine-report` counts return refinements) and `cap verified` escalates an
-  undischarged one. What remains open is composition — a list or ADT measure
-  still does not carry through a return refinement to a caller's goal.
+  undischarged one. What remains open is composition — a list or ~~ADT~~
+  measure still does not carry through a return refinement to a caller's goal.
+  **ADT half CLOSED 2026-08-04** — see the Task 6 investigation below: both
+  the Closed (`size(_) > 0`) and Relational (`size(_) == size(t) + 1`) ADT
+  shapes now compose through an unannotated `let` (suites
+  `post-compose-closed`, `post-compose-relational`). The List half is
+  unaffected and confirmed still open.
 - **The measure-alias gates are still unit-global**, except the selector-less
   `use X.List` arm, which since 2026-07-31 resolves its target and withdraws
   only if some match can provide the aliased member. The member gate,
@@ -175,20 +180,52 @@ predicate remains broken (see above).
 **Net: closing the exact brief repro needs THREE independent things, only
 one of which (the scope_add_binding producer widening) was actually
 prototyped here:**
-1. `scope_add_binding` must seed a `$Meas:`-marked scope entry for a plain
-   ADT return from an unannotated `let` (prototyped, verified, reverted).
-2. `load_scope_measure_facts`'s resolver must be widened to resolve OTHER
+1. ~~`scope_add_binding` must seed a `$Meas:`-marked scope entry for a plain
+   ADT return from an unannotated `let` (prototyped, verified, reverted).~~
+   **CLOSED 2026-08-04** — re-landed. `scope_add_binding`'s postcond arm now
+   also seeds an entry for a non-record registered ADT sort, re-tagged with
+   `meas_sort_prefix` so it lands on the spelling `load_scope_measure_facts`
+   already reads (the postcond side reports the return's sort at the bare
+   `adt_sort_name`, e.g. `"M_Tree"`, not at the `$Meas:`-prefixed marker
+   `refined_scope_ty` gives a directly-annotated local — the two conventions
+   differ and the fix reconciles them at the point of insertion). Covers only
+   the **Closed** case (`size(_) > 0`); item 2 below remains open and is what
+   the **Relational** case (`size(_) == size(t) + 1`) still needs. Suite:
+   `post-compose-closed`.
+2. ~~`load_scope_measure_facts`'s resolver must be widened to resolve OTHER
    caller-scope names appearing in a Relational predicate (i.e. `t`, not
    just the entry's own self-spellings) to the SAME term the goal side would
-   build for them — this is real, non-trivial new work, not a small filter
-   tweak, and is exactly the risk the task-6 brief flagged and asked to be
-   re-scoped rather than built under this task's budget.
-3. `check_post_induction` must handle a non-match, non-recursive
+   build for them.~~
+   **CLOSED 2026-08-04** — `rm`'s `if not (is_self_spelling n) then None`
+   early return is replaced by a caller-namespace resolution path. The
+   carried predicate is ALREADY in the caller's namespace (`postcond_of`
+   substitutes the actuals simultaneously or abandons propagation), so a
+   non-self name denotes itself; it is emitted as the term the GOAL side
+   builds for that same name — `(m n)` with `n` declared at the measure's
+   ADT sort for an axiomatised `@[measure]` (what `reflect_dt`'s `EVar` arm
+   produces), and the memoized `m$n` from `measure_of_var` otherwise. Never a
+   fresh constant: the reject-control test (a demand for a SMALLER tree,
+   which `push` never provides) is what distinguishes a working contract from
+   one that checks nothing. Two `str_names`/`is_recvar`/scalar-sort guards
+   keep it fail-closed. Shadowing needed no new code: `scope_shadow` already
+   retires an entry both when its own name is rebound AND when its predicate
+   MENTIONS a rebound name (`expr_mentions`), which is exactly the trigger
+   this widening makes load-bearing — pinned by a third test. Suite:
+   `post-compose-relational`. The brief repro now reports
+   `2 proved, 0 violated, 0 skipped`.
+3. ~~`check_post_induction` must handle a non-match, non-recursive
    constructor-literal clause body for a refined ADT return (trivial case:
    no induction, no recursive IH needed — but it is currently a completely
    separate, unhandled shape) — this is unrelated to composition/consumption
    and belongs to the "postcondition proof, definition side" half of this
-   backlog's first bullet, not the "composition" half.
+   backlog's first bullet, not the "composition" half.~~
+   **CLOSED 2026-08-04** — see `specs/progress/2026-08-04-post-nonmatch-body.md`.
+   The VC builder inside `check_post_induction` was hoisted out of the `EMatch`
+   arm and re-parameterised on an optional *induction context*, so the
+   constructor-literal shape reuses the one generator with no induction
+   hypothesis available to it. That shape also now records a `Postcondition`
+   obligation, so a wrong postcondition on it is countable instead of
+   `0 proved, 0 violated, 0 skipped`. Suite: `post-nonmatch-body`.
 
 No code was kept from this investigation (the prototype patch to
 `scope_add_binding` plus its regression tests were reverted cleanly after

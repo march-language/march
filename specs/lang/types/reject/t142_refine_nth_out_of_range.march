@@ -1,0 +1,28 @@
+-- EXPECT-ERROR: refinement violation
+--
+-- A provably out-of-range `List.nth` index is a refinement violation
+-- (2026-08-04).  This is the load-bearing half of the pair whose accept
+-- companion is `accept/t141_refine_nth_in_range`: `t141` exits 0 whether the
+-- contract is enforced or silently absent, so only this witness can tell the
+-- two apart.
+--
+-- `List.nth` is declared
+--
+--   fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a
+--
+-- and `List.nth([1, 2, 3], 7)` refutes `7 < len([1, 2, 3])` definitely — the
+-- literal list gives the solver `len(_) = 3`, so this is not an undecided
+-- obligation the checker waves through but a program that WILL panic.
+-- Mutation-verified: restore the parameter to a bare `n : Int` in
+-- `stdlib/list.march` and this program exits 0 with no diagnostic at all.
+mod T142 do
+
+  fn out_of_range() : Int do
+    List.nth([1, 2, 3], 7)
+  end
+
+  fn main() : Int do
+    out_of_range()
+  end
+
+end

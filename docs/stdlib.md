@@ -84,7 +84,7 @@ List.range_step(0, 10, 2)            -- [0, 2, 4, 6, 8]
 List.head([1, 2, 3])                 -- 1  (panics if empty)
 List.head_opt([1, 2, 3])             -- Some(1)
 List.last([1, 2, 3])                 -- 3
-List.nth([10, 20, 30], 1)            -- 20  (0-indexed)
+List.nth([10, 20, 30], 1)            -- 20  (0-indexed; n : {Int | _ >= 0 && _ < len(xs)})
 List.nth_opt([10, 20], 5)            -- None
 
 -- Predicates

@@ -709,6 +709,25 @@ is derived from that function's own panic message, so the contract is never
 stronger than the check the code already performs, and the `panic` remains as the
 runtime backstop for the arguments the checker skips.
 
+`List.nth` is the fourteenth, and the only one whose contract is
+**cross-parameter** rather than over the refined value itself (2026-08-04):
+
+```march
+fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do ... end
+```
+
+`List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are reported; an index the
+checker cannot bound — the overwhelmingly common case — stays **skipped and
+silent**, exactly as `head(ys)` does for an unknown list. That is not a
+concession, it is the point: a blast-radius sweep taken before the contract
+shipped (all 112 stdlib modules plus the `forgepm`, `bastion`, `conduit` and
+`depot` projects) produced **zero** new violations and only new skips. Witnesses
+`accept/t141`, `reject/t142`. That silence is conditional on being outside
+`cap verified`, though: inside a `cap verified` module the same unbindable
+index is an undischarged precondition, and therefore a hard error, not a skip
+(see [`cap verified` — turning silence into an
+error](#cap-verified--turning-silence-into-an-error)).
+
 An ordinary `List.length(ys) > 0` guard **does** discharge this obligation, so
 the contract bites on a list you validated at runtime and not only on literals:
 
@@ -1869,6 +1888,13 @@ edges:
   **What is proven:**
   - a single-clause, unguarded function whose whole body is a `match` on one
     parameter, with flat constructor-pattern arms;
+  - a single-clause, unguarded function whose whole body is a **constructor
+    application** — `fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}
+    do Node(t, x, Leaf) end`. No induction is needed here (there is no recursive
+    call to hypothesise over), just one unfolding of the measure's recursion
+    equation. Unlike the `match` shape, this one also **records its verdict in
+    the obligation ledger**, so `--refine-report` distinguishes "attempted and
+    proved" from "never looked at"; it still emits no diagnostic either way;
   - a return refinement over a **variant ADT** (`{Tree | …}`, `{List(Int) | …}`)
     whose predicate mentions a **`@[measure]`**;
   - self-recursion into any recursive component (left or right, it is the

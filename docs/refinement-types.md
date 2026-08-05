@@ -526,6 +526,22 @@ Each contract is taken from that function's own panic message, so it never
 demands more than the code already checked, and every `panic` stays in place to
 catch the cases the compiler skips.
 
+`List.nth` is the fourteenth, and the only one whose contract talks about a
+*different* parameter rather than the refined value itself:
+
+```march
+fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do ... end
+```
+
+So `List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are compile errors
+now. An index the compiler can't pin down — by far the common case — stays
+silent, just as `head(ys)` does for a list it can't see into. Before this
+shipped the whole standard library and four real projects (`forgepm`,
+`bastion`, `conduit`, `depot`) were swept for it: zero calls became errors.
+Under `cap verified`, though, that same unbindable index is a hard error
+instead of a silent skip — that mode's whole premise is that every obligation
+gets discharged, so "can't tell" is no longer good enough.
+
 An ordinary `List.length(xs) > 0` guard **does** satisfy the requirement, so these
 contracts bite on a list you checked at runtime and not just on literals — see
 [the solver really does connect `List.length` to
@@ -1126,10 +1142,15 @@ dependent typing. Know the edges:
   that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
   — is proven by supplying the induction hypothesis at each recursive call whose
   argument is a proper component of the matched parameter, then discharging each
-  `match` arm against the measure's recursion equations. Only a postcondition
-  actually *proved* propagates, so an unprovable one stays legal but tells
-  callers nothing. Still silent: mutual recursion, a recursive call inside a
-  lambda or behind a nested `match`, and any non-structural recursion.
+  `match` arm against the measure's recursion equations. A body that is a bare
+  **constructor application** — `fn push(t, x) : {Tree | size(_) == size(t) + 1}
+  do Node(t, x, Leaf) end` — is proven too, and needs no induction at all: there
+  is no recursive call to hypothesise over, only one unfolding of the measure's
+  recursion equation. That shape also records its verdict in the obligation
+  ledger, so `--refine-report` shows it as attempted rather than absent. Only a
+  postcondition actually *proved* propagates, so an unprovable one stays legal
+  but tells callers nothing. Still silent: mutual recursion, a recursive call
+  inside a lambda or behind a nested `match`, and any non-structural recursion.
 - **A measure over a built-in `List` with a non-scalar element does not
   axiomatise.** `List(Int)` is fine; `List(SomeAdt)` collapses the element to an
   opaque sort and the measure is never usable. A user-defined list type with the
