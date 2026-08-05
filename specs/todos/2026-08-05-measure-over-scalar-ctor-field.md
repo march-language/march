@@ -102,6 +102,27 @@ it, while advertising the name as proof-checked. Under `cap verified` it would
 surface a permanently-undischargeable obligation. Both are worse than the
 current honest syntactic ban.
 
+## Partially mitigated 2026-08-05: the inertness is no longer silent
+
+The underlying limitation is still open (everything above stands), but the
+*silence* is fixed. `build_measure_preamble` now records an axiomatised measure
+whose arm body is a bare erased-field read into `measure_scalar_field_dep`, and
+`check_module` emits a warning at the measure's definition:
+
+> `@[measure] `length` reads a constructor field that is not itself a data
+> type, so its value cannot be computed at a call site and refinements using it
+> will never be proved or refuted.`
+
+Diagnostic only — it feeds no axiom, VC or verdict, so it cannot change what
+any existing contract proves. It deliberately **under**-reports: the predicate
+is "the body IS a bare field read", not "the body mentions an erased field",
+because the broader version had a real false positive (`Zleaf(n) -> 0 * n`
+mentions `n` but does not depend on it — caught by the LOAD-BEARING case in
+test_refinecheck.ml's `measure-base-case-axiom` group while the broad version
+was in tree). So `Node(n, m) -> n + 0` is equally inert and still draws
+nothing. Tests: `measure-scalar-field-warn` (warn case, two negative controls,
+plus the `0 * n` false-positive regression control).
+
 ## What a fix would look like
 
 Reflect a scalar constructor field CONCRETELY when the actual argument is a
@@ -118,6 +139,7 @@ prove, so it needs a full stdlib + ecosystem `--refine-report` sweep for new
 violations (false positives), not just a "still compiles" check.
 
 Only after that lands can `Array.get`/`Array.set`/`Array.pop` be contracted.
-Until then `Array.get`/`Array.set` stay on the syntactic `cap no_panic` ban
-list, where they are today. `Array.pop` is on NEITHER list and can panic —
-see `specs/todos/2026-08-05-array-pop-not-on-no-panic-ban-list.md`.
+Until then `Array.get`/`Array.set`/`Array.pop` stay on the syntactic
+`cap no_panic` ban list. (`Array.pop` was on NEITHER list when this was filed
+and could panic inside `cap no_panic`; fixed the same day —
+`specs/progress/2026-08-05-array-pop-not-on-no-panic-ban-list.md`.)

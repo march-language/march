@@ -6816,6 +6816,66 @@ let test_cap_no_panic_stats_max_val_error () =
   end|} in
   Alcotest.(check bool) "cap no_panic + unguarded Stats.max_val: error" true (has_errors ctx)
 
+(* ── `Array.pop` (2026-08-05) ──────────────────────────────────────────────
+   `Array` has exactly three public functions that can panic on a precondition:
+   `get`, `set` (index out of range) and `pop` (empty vector,
+   stdlib/array.march's `PVec(0, _, _, _) -> panic("Array.pop: empty vector")`).
+   The 2026-08-05 ban-list audit added the first two and MISSED `pop`, which
+   was on neither [panic_surface_stdlib] nor [panic_surface_contracted] — so a
+   `cap no_panic` module could call it and compile clean.  That is the
+   direction this plan's constraints call as serious as a false positive: a
+   guarantee that does not hold.
+
+   Asserted on the MESSAGE, not on [has_errors].  A bare boolean here would go
+   green if any unrelated diagnostic appeared in the fixture — including one
+   about `Array.get` — and would not distinguish "`Array.pop` is banned" from
+   "something in this module is wrong".  The RED run before the fix confirmed
+   the fixture was otherwise error-free.
+
+   `Array.pop` is deliberately NOT in [panic_surface_contracted]: the
+   2026-08-05 feasibility gate came back NO-GO (a measure over a scalar
+   constructor field is inert — specs/todos/2026-08-05-measure-over-scalar-
+   ctor-field.md), so there is no contract to consult and the ban must stay
+   purely syntactic. *)
+let no_panic_error_naming (ctx : March_errors.Errors.ctx) (needle : string) : bool =
+  List.exists
+    (fun (d : March_errors.Errors.diagnostic) ->
+      d.March_errors.Errors.severity = March_errors.Errors.Error
+      && contains needle d.March_errors.Errors.message
+      && contains "can panic" d.March_errors.Errors.message)
+    (March_errors.Errors.sorted ctx)
+
+let test_cap_no_panic_array_pop_error () =
+  let src = {|mod GT14 do
+    cap no_panic
+    fn f(v) do
+      let (v2, x) = Array.pop(v)
+      x
+    end
+  end|} in
+  let ctx = typecheck_with_no_panic_passes src in
+  Alcotest.(check bool) "cap no_panic + unguarded Array.pop: error naming Array.pop"
+    true (no_panic_error_naming ctx "Array.pop");
+  (* The ban is SYNTACTIC (no contract exists), so the typecheck-only pipeline
+     — `march check`, `march caps`, the LSP — must reject it identically.  For
+     a CONTRACTED name these two halves diverge (see
+     [test_cap_no_panic_list_tail_guarded_still_error]); for this one they must
+     not, and that is what keeps `Array.pop` out of the covered set honest. *)
+  Alcotest.(check bool) "typecheck-only pipeline rejects it too"
+    true (no_panic_error_naming (typecheck src) "Array.pop")
+
+(* The same call OUTSIDE `cap no_panic` must stay silent — the ban is scoped to
+   the capability, not a global prohibition on `Array.pop`. Without this, a
+   change that reported the name everywhere would still pass the case above. *)
+let test_cap_no_panic_array_pop_unscoped_ok () =
+  let ctx = typecheck_with_no_panic_passes {|mod GT15 do
+    fn f(v) do
+      let (v2, x) = Array.pop(v)
+      x
+    end
+  end|} in
+  Alcotest.(check bool) "Array.pop without cap no_panic: no error" false (has_errors ctx)
+
 (* Division-safety guard / path-context tests *)
 
 let test_divsafety_match_guard_neq_zero_ok () =
@@ -12006,6 +12066,8 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + unguarded Random.choice: error"     `Quick test_cap_no_panic_random_choice_error;
           Alcotest.test_case "cap no_panic + unguarded DateTime.fixed_zone: error" `Quick test_cap_no_panic_datetime_fixed_zone_error;
           Alcotest.test_case "cap no_panic + unguarded DateTime.fixed_zone_hm: error" `Quick test_cap_no_panic_datetime_fixed_zone_hm_error;
+          Alcotest.test_case "cap no_panic + unguarded Array.pop: error" `Quick test_cap_no_panic_array_pop_error;
+          Alcotest.test_case "Array.pop outside cap no_panic: no error" `Quick test_cap_no_panic_array_pop_unscoped_ok;
           Alcotest.test_case "cap no_panic + unguarded Stats.mean: error"        `Quick test_cap_no_panic_stats_mean_error;
           Alcotest.test_case "cap no_panic + unguarded Stats.min_val: error"     `Quick test_cap_no_panic_stats_min_val_error;
           Alcotest.test_case "cap no_panic + unguarded Stats.max_val: error"     `Quick test_cap_no_panic_stats_max_val_error;

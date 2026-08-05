@@ -9282,16 +9282,28 @@ let panic_surface_direct : StringSet.t = StringSet.of_list [
 let panic_surface_prelude : StringSet.t = StringSet.empty
 
 (* What remains SYNTACTICALLY banned among qualified stdlib names: only the
-   ones with no refinement contract to consult.  `Array.get`/`Array.set` are
-   Group B — they panic out of bounds and no contract exists for them yet, so
-   an unconditional ban is still the only sound answer.
+   ones with no refinement contract to consult.  `Array.get`/`Array.set`/
+   `Array.pop` are Group B — they panic (out of bounds, and on an empty vector
+   respectively) and no contract exists for them, so an unconditional ban is
+   still the only sound answer.
+
+   And it is the only answer AVAILABLE for them, not merely the one nobody got
+   to yet: the 2026-08-05 feasibility gate established that a contract on these
+   three cannot currently be discharged at all.  `Array.length` is a scalar
+   CONSTRUCTOR FIELD read (`PVec(n,_,_,_) -> n`), and call-site reflection
+   erases every non-datatype constructor field to a fresh unconstrained
+   constant, so the measure is inert — see
+   `specs/todos/2026-08-05-measure-over-scalar-ctor-field.md`.  Do not move
+   these into [panic_surface_contracted] until that todo is closed: the
+   proof-based pass is fail-closed on `Skipped`, so an inert contract would
+   reject every call while advertising the name as proof-checked.
 
    Everything else that used to be here now carries a refinement contract and
    lives in [panic_surface_contracted] below.  Ban-list audit 2026-08-05
    (specs/progress/2026-08-05-no-panic-ban-list-audit.md) is what established
    which names carry a real contract. *)
 let panic_surface_stdlib : StringSet.t = StringSet.of_list [
-  "Array.get"; "Array.set";
+  "Array.get"; "Array.set"; "Array.pop";
 ]
 
 (* ── The CONTRACTED panic surface ─────────────────────────────────────────
@@ -9362,6 +9374,8 @@ let panic_surface_suggestion : string -> string = function
     "\n\nUse `Result.unwrap_or` or match on `Ok`/`Err` to handle the error case."
   | "Array.get" | "Array.set" ->
     "\n\nBounds-check the index before access, or use a bounds-checked variant."
+  | "Array.pop" ->
+    "\n\nCheck `Array.length(v) > 0` before calling."
   | "Random.normal" | "Random.exponential" | "Random.bernoulli" ->
     "\n\nGuard the parameter before the call (e.g. clamp `sigma`/`lambda`/`p` to its \
      valid range) so the refinement precondition provably holds."

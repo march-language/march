@@ -7619,6 +7619,135 @@ end|}));
    leaves MA1/MA2 (and the whole 437/437 suite at the time this was found)
    green, so it needs its own witness: a user `@[measure]` over a user ADT,
    which has no built-in special case to fall back on. *)
+(* ── The silent-inert measure warning (2026-08-05) ─────────────────────────
+   A `@[measure]` whose value reads a SCALAR constructor field — the shape
+   `Array.length` has (`PVec(n,_,_,_) -> n`) — is axiomatised correctly and is
+   nonetheless completely inert: [reflect_field] erases every non-datatype
+   constructor field to a fresh unconstrained constant, so the measure applied
+   to a literal constructor is unknown and neither the predicate nor its
+   negation is provable.
+
+   Every symptom of a working measure is present (no error, correct preamble,
+   obligations raised), which is why this cost a full investigation to find.
+   The warning is the signal that was missing.  See
+   specs/todos/2026-08-05-measure-over-scalar-ctor-field.md.
+
+   These cases are NOT [gated]: the warning is computed from the AST at
+   preamble-build time and needs no solver, so gating it would disable it
+   exactly where a developer without z3 would still benefit. *)
+let measure_scalar_field_warn src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  ( List.exists
+      (fun (d : March_errors.Errors.diagnostic) ->
+        d.March_errors.Errors.severity = March_errors.Errors.Warning
+        && contains d.March_errors.Errors.message "reads a constructor field")
+      (March_errors.Errors.sorted ctx)
+  , March_errors.Errors.has_errors ctx )
+
+let measure_scalar_field_suite =
+  [ Alcotest.test_case "a measure reading a scalar ctor field warns" `Quick
+      (fun () ->
+        (* The real `Array.length` shape, transcribed from stdlib/array.march. *)
+        let warned, errored =
+          measure_scalar_field_warn {|
+mod AW do
+  type TrieNode(a) = TrieEmpty | TrieLeaf(List(a))
+  type PVec(a) = PVec(Int, Int, TrieNode(a), List(a))
+  @[measure]
+  fn length(v : PVec(a)) : Int do
+    match v do
+    PVec(n, _, _, _) -> n
+    end
+  end
+  fn aget(v : PVec(a), idx : {Int | _ >= 0 && _ < length(v)}) : a do aget(v, idx) end
+end
+|}
+        in
+        Alcotest.(check bool) "warns" true warned;
+        (* A warning, not an error: the measure is sound and its predicates stay
+           legal vocabulary, so nothing that compiled before stops compiling. *)
+        Alcotest.(check bool) "no error" false errored)
+
+  ; Alcotest.test_case "a structurally recursive measure does NOT warn" `Quick
+      (fun () ->
+        (* The control.  Without it, a warning that fired on EVERY measure
+           would pass the case above — and would bury the real signal under
+           noise on every working contract in the tree, `List.nth` included. *)
+        let warned, errored =
+          measure_scalar_field_warn {|
+mod SW do
+  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+  @[measure]
+  fn size(t : Tree(a)) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, x, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn tget(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do tget(t, i) end
+end
+|}
+        in
+        Alcotest.(check bool) "no warning" false warned;
+        Alcotest.(check bool) "no error" false errored)
+
+  ; Alcotest.test_case "a ctor with a scalar field NOT read does NOT warn" `Quick
+      (fun () ->
+        (* Sharper control: the constructor HAS an erased `Int` field, but the
+           measure's value does not depend on it, so the erasure is harmless
+           and the measure proves fine (this is the `probeH` shape, measured as
+           `1 proved`).  Warning here would be a false positive. *)
+        let warned, _ =
+          measure_scalar_field_warn {|
+mod NW do
+  type T3 = L3 | N3(Int, T3)
+  @[measure]
+  fn size3(t : T3) : Int do
+    match t do
+    L3 -> 0
+    N3(k, rest) -> 1 + size3(rest)
+    end
+  end
+  fn tget3(t : T3, i : {Int | _ >= 0 && _ < size3(t)}) : Int do tget3(t, i) end
+end
+|}
+        in
+        Alcotest.(check bool) "no warning" false warned)
+
+  ; Alcotest.test_case "REGRESSION: a body that MENTIONS an erased field but \
+                        does not depend on it does NOT warn" `Quick
+      (fun () ->
+        (* The first version of this warning asked "does the arm body mention
+           an erased field anywhere", and this shape is why that was wrong:
+           `0 * n` mentions `n`, but its value is 0 regardless, so the measure
+           still evaluates and warning would be a false positive.  It was
+           caught by the LOAD-BEARING case in [measure_base_case_axiom_suite],
+           which uses this exact fixture for an unrelated reason — pinned here
+           too so the connection is explicit rather than incidental.
+
+           The narrowed predicate ("the body IS a bare field read") therefore
+           under-covers on purpose: `Node(n, m) -> n + 0` is equally inert and
+           draws nothing.  Under-warning is the safe direction. *)
+        let warned, _ =
+          measure_scalar_field_warn {|
+mod ZW do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(n) -> 0 * n
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+end
+|}
+        in
+        Alcotest.(check bool) "no warning" false warned)
+  ]
+
 let measure_base_case_axiom_suite =
   [ gated "a user measure's nullary-arm exclusion reaches the base-case axiom"
       (fun () ->
@@ -8777,6 +8906,7 @@ let () =
       ("caller-promise", caller_promise_suite);
       ("arm-exclusion", arm_exclusion_suite);
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
+      ("measure-scalar-field-warn", measure_scalar_field_suite);
       ("post-compose-closed", post_compose_closed_suite);
       ("post-compose-relational", post_compose_relational_suite);
       ("stdlib-nth-contract", stdlib_nth_contract_suite);

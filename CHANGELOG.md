@@ -28,14 +28,14 @@ git log is authoritative for exact commits.
   no obligation recorded at all — is still an error, because `cap no_panic` is
   a guarantee; an `@[trusted]` assertion does not count as a proof here. Names
   with no contract (`panic`, `panic_`, `todo_`, `unreachable_`, `Array.get`,
-  `Array.set`) are still banned unconditionally.
+  `Array.set`, `Array.pop`) are still banned unconditionally.
 - **`cap no_panic` no longer reports transitive blame for those
   contract-covered names.** An unprovable `List.tail(xs)` inside a helper used
   to produce one error at the helper *and* one at every local caller of it; it
   now produces exactly one error, at the real call site. If an error looks like
   it "moved" from a caller to the callee, this is why. `panic`/`panic_`/
-  `todo_`/`unreachable_` and `Array.get`/`Array.set` keep their transitive
-  blame unchanged.
+  `todo_`/`unreachable_` and `Array.get`/`Array.set`/`Array.pop` keep their
+  transitive blame unchanged.
 - **`cap no_panic` now reports one error per offending call site, not one per
   function.** A function containing two unprovable `List.tail` calls reports
   two errors where it used to report one. Nothing new is rejected — the same
@@ -50,6 +50,32 @@ git log is authoritative for exact commits.
   the proof-based answer.
 
 ### Fixed
+
+- **A `@[measure]` that silently proved nothing now says so.** A measure whose
+  value is a constructor field read (`PVec(n,_,_,_) -> n` — how a
+  count-carrying container like `Array` writes `length`) is accepted, passes
+  the soundness gate, and generates a correct axiom, yet can never discharge
+  anything: the refinement checker erases non-datatype constructor fields at
+  call sites, so the measure applied to a literal evaluates to an unknown.
+  Every symptom of a working measure was present and contracts using it simply
+  never fired. This is now a warning at the measure's definition. It is
+  advisory only — no verdict, error, or accepted program changes — and it
+  deliberately under-reports rather than risk a false positive: only a bare
+  field read is flagged, so `-> n + 0` (equally inert) stays silent.
+
+- **`cap no_panic` compiled clean for `Array.pop`, which can genuinely panic.**
+  `Array.pop` panics on an empty vector (`Array.pop: empty vector`), but it was
+  on neither `cap no_panic`'s syntactic ban list nor its contract-covered set,
+  so a module declaring `cap no_panic` could call it and pass — the capability
+  promising no panics while admitting a call that can panic. It is now banned
+  by name, with a suggestion to check `Array.length(v) > 0` first, joining
+  `Array.get` and `Array.set`. If you were calling `Array.pop` inside a
+  `cap no_panic` module, that module now fails to compile; guard the call and
+  use the length check, or drop the capability. Found while gating a bounds
+  contract for the `Array` accessors — that contract is NOT shipped, because
+  `Array.length` is a scalar constructor-field read and the refinement
+  checker's call-site reflection erases such fields, leaving the measure unable
+  to prove anything (`specs/todos/2026-08-05-measure-over-scalar-ctor-field.md`).
 
 - **`cap no_panic`'s syntactic ban list had drifted from the real stdlib.**
   An audit found three problems in `panic_surface_stdlib`
