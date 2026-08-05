@@ -69,9 +69,79 @@ type t =
   }
 
 let log : t list ref = ref []
-let reset () = log := []
-let record (o : t) : unit = log := o :: !log
+
+(* ── Per-call-site index ───────────────────────────────────────────────────
+   The ledger above answers "how many obligations of each verdict does this
+   module have"; [by_span] answers "what did the checker conclude about THIS
+   site".  A later pass that wants to admit a call because its precondition
+   was actually discharged — rather than banning it by name — needs the second
+   question, and there was no way to ask it.
+
+   It is populated HERE, in [record], on purpose: [record] is the single point
+   every verdict in this subsystem already passes through (four call sites
+   today — [Refine_check]'s precondition [note], its postcondition [note], its
+   match-tail postcondition, and [Division_safety]), so the index cannot go
+   partially stale as those paths change, and it cannot disagree with what
+   `--refine-report` prints because it holds the very same records.  Deriving
+   a verdict any other way would be a second discharge path, free to drift
+   from the real one.
+
+   Keyed on the obligation's own [span], which for a precondition is the span
+   [Refine_check.visit] hands [check_call] as [~span] — the CALL EXPRESSION's
+   span, i.e. the [sp] of [A.EApp (_, _, sp)].  A consumer must key on the
+   same thing; the callee NAME's span is a different span and would silently
+   never match. *)
+let by_span : (March_ast.Ast.span, t list) Hashtbl.t = Hashtbl.create 64
+
+(* Cleared with the ledger, so the index's lifetime is exactly one module —
+   [Refine_check.check_module] calls [reset] at its top.  Leaking an entry
+   across modules would let a later module read a `Proved` that was never
+   established for it, which is strictly worse than reading nothing. *)
+let reset () = log := []; Hashtbl.reset by_span
+
+let record (o : t) : unit =
+  log := o :: !log;
+  Hashtbl.replace by_span o.span (o :: Option.value ~default:[] (Hashtbl.find_opt by_span o.span))
+
 let all () : t list = List.rev !log
+
+(* Every obligation recorded at [span], in the order they were recorded.  One
+   call site can raise several — one per refined parameter — so this is a list,
+   not an option, and a consumer must decide about ALL of them. *)
+let obligations_at (span : March_ast.Ast.span) : t list =
+  List.rev (Option.value ~default:[] (Hashtbl.find_opt by_span span))
+
+(* The WEAKEST verdict recorded at [span], or [None] when no obligation was
+   raised there at all.
+
+   Weakest, never first-wins: a call whose first parameter proved and whose
+   second was skipped has not been proved safe, and a consumer folding this
+   the optimistic way would admit exactly the calls it must not.  [None] means
+   "the checker said nothing about this site" — an unrefined call, or one the
+   walk never reached — and must NOT be read as either a proof or a failure;
+   it is the absence of information. *)
+let verdict_at (span : March_ast.Ast.span) : verdict option =
+  let rank = function
+    | Violated -> 0
+    | Skipped _ -> 1
+    | Trusted -> 2
+    | Proved -> 3
+  in
+  List.fold_left
+    (fun acc (o : t) ->
+      match acc with
+      | Some v when rank v <= rank o.verdict -> acc
+      | _ -> Some o.verdict)
+    None (obligations_at span)
+
+(* Slug for a verdict, mirroring [reason_name]'s role for a skip's reason.
+   Exists so a consumer (and a test) can name a verdict without re-matching
+   this type's constructors, which would break every time one is added. *)
+let verdict_name = function
+  | Proved -> "proved"
+  | Violated -> "violated"
+  | Trusted -> "trusted"
+  | Skipped _ -> "skipped"
 
 let reason_name = function
   | Unreflectable_predicate -> "unreflectable-predicate"

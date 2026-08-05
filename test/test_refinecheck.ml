@@ -8162,6 +8162,152 @@ let stdlib_nth_contract_suite =
         Alcotest.(check bool) "skipped" true (skipped >= 1))
   ]
 
+(* ── Per-call-site verdict INDEX ───────────────────────────────────────────
+   [Obligation.summary] answers "how many proved" for a whole module; nothing
+   answered "what did THIS call site prove", which is what a consumer wanting
+   to admit a provably-safe call (rather than banning it by name) needs.
+
+   The span keyed on is the one [Refine_check] itself passes as [~span] to
+   [check_call] from its [A.EApp (A.EVar f, args, sp)] case — the CALL
+   EXPRESSION's own span, not the callee name's span.  [call_span_of] below
+   re-derives it from the AST rather than reading it back off the ledger: a
+   test that queried with a span it got from [Obligation.all ()] would pass
+   for any keying whatsoever, including one no later pass could reproduce. *)
+let call_span_of (src : string) (fname : string) : March_ast.Ast.span =
+  let open March_ast.Ast in
+  let found = ref None in
+  let take sp = if !found = None then found := Some sp in
+  let rec ex (e : expr) =
+    match e with
+    | EApp (EVar n, args, sp) ->
+      if n.txt = fname then take sp;
+      List.iter ex args
+    | EApp (f, args, _) -> ex f; List.iter ex args
+    | EBlock (es, _) -> List.iter ex es
+    | ECon (_, args, _) | EAtom (_, args, _) | ETuple (args, _) -> List.iter ex args
+    | EIf (c, t, f, _) -> ex c; ex t; ex f
+    | EAnnot (e, _, _) | EField (e, _, _) | ELam (_, e, _) -> ex e
+    | ELet (b, _) -> ex b.bind_expr
+    | EMatch (s, brs, _) -> ex s; List.iter (fun b -> ex b.branch_body) brs
+    | _ -> ()
+  in
+  List.iter
+    (fun d ->
+      match d with
+      | DFn (fd, _) -> List.iter (fun c -> ex c.fc_body) fd.fn_clauses
+      | _ -> ())
+    (parse src).mod_decls;
+  match !found with
+  | Some sp -> sp
+  (* Loud, not silent: the walker above has a catch-all, so a fixture shape it
+     does not descend into must fail the test rather than quietly hand back a
+     dummy span that the index would legitimately miss. *)
+  | None -> Alcotest.failf "no call to `%s` found in fixture" fname
+
+let verdict_query_suite =
+  [ gated "a proved call's verdict is queryable by its call span" (fun () ->
+        let src =
+          "mod VQ do\n\
+          \  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end\n\
+          \  fn go() : Int do head([1]) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check (option string))
+          "proved at the call span" (Some "proved")
+          (Option.map March_refinecheck.Obligation.verdict_name
+             (March_refinecheck.Obligation.verdict_at (call_span_of src "head"))))
+
+  ; gated "REJECT CONTROL: a violated call reports Violated, not just `some verdict`"
+      (fun () ->
+        let src =
+          "mod VQBad do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn go() : Int do takepos(0 - 5) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check (option string))
+          "violated at the call span" (Some "violated")
+          (Option.map March_refinecheck.Obligation.verdict_name
+             (March_refinecheck.Obligation.verdict_at (call_span_of src "takepos"))))
+
+  ; gated "a skipped call reports the skip, never `proved`" (fun () ->
+        let src =
+          "mod VQSkip do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn go(n : Int) : Int do takepos(n) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check (option string))
+          "skipped at the call span" (Some "skipped")
+          (Option.map March_refinecheck.Obligation.verdict_name
+             (March_refinecheck.Obligation.verdict_at (call_span_of src "takepos"))))
+
+  ; (* A call with no refined parameter raises no obligation at all, so the
+       query must answer "nothing known" and NOT be conflated with `proved` —
+       a consumer that admits a call on `verdict_at <> None` would otherwise
+       admit every unrefined call in the language. *)
+    gated "an unrefined call is absent from the index" (fun () ->
+        let src =
+          "mod VQNone do\n\
+          \  fn plain(k : Int) : Int do k end\n\
+          \  fn go() : Int do plain(5) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check bool) "absent" true
+          (March_refinecheck.Obligation.verdict_at (call_span_of src "plain") = None))
+
+  ; (* Lifecycle: the index is per-module state cleared by the same [reset]
+       [Refine_check.check_module] already calls at its top.  A verdict that
+       outlived its module would let a later module read a `proved` that was
+       never established for it — the worst failure this index can have. *)
+    Alcotest.test_case "reset clears the index" `Quick (fun () ->
+        let src =
+          "mod VQReset do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn go() : Int do takepos(1) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        let sp = call_span_of src "takepos" in
+        Alcotest.(check bool) "recorded before reset" true
+          (March_refinecheck.Obligation.verdict_at sp <> None);
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "gone after reset" true
+          (March_refinecheck.Obligation.verdict_at sp = None))
+
+  ; (* The index must agree with the ledger `--refine-report` prints, entry
+       for entry — they are the same records seen two ways, and a divergence
+       between them is exactly the drift this mechanism exists to avoid. *)
+    gated "every ledger entry is reachable through the index" (fun () ->
+        let src =
+          "mod VQAgree do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn nonzero(d : {Int | _ != 0}) : Int do d end\n\
+          \  fn go() : Int do takepos(1) + nonzero(2) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        let all = March_refinecheck.Obligation.all () in
+        Alcotest.(check bool) "ledger non-empty" true (all <> []);
+        List.iter
+          (fun (o : March_refinecheck.Obligation.t) ->
+            Alcotest.(check bool) "indexed" true
+              (List.exists
+                 (fun (o' : March_refinecheck.Obligation.t) -> o' == o)
+                 (March_refinecheck.Obligation.obligations_at o.March_refinecheck.Obligation.span)))
+          all)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -8222,4 +8368,5 @@ let () =
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
       ("post-compose-closed", post_compose_closed_suite);
       ("post-compose-relational", post_compose_relational_suite);
-      ("stdlib-nth-contract", stdlib_nth_contract_suite) ]
+      ("stdlib-nth-contract", stdlib_nth_contract_suite);
+      ("verdict-query", verdict_query_suite) ]
