@@ -4220,3 +4220,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/h_sigil_safe_collision.expected native_h_sigil_safe_collision.out)))
+
+; ── Contextual escaper unit test (Task 3) ────────────────────────────────
+; Links runtime/march_ctx_escape.c ALONE -- no runtime, no allocator -- which
+; is why the escaper core works on plain buffers rather than march_strings.
+; Modelled on the cap-lattice C table test above.
+;
+; Also asserts that the MARCH_ESC_* ids agree with Context.escaper_id in
+; lib/ctxesc/context.ml. That pairing is the one cross-language contract the
+; generated-table drift check does not cover, and a mismatch would silently
+; apply the wrong escaper.
+(rule
+ (targets test_ctx_escape_runner)
+ (deps    test_ctx_escape.c
+          ../runtime/march_ctx_escape.c
+          ../runtime/march_ctx_escape.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_ctx_escape.c ../runtime/march_ctx_escape.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_ctx_escape_runner))
+ (action  (run ./test_ctx_escape_runner)))

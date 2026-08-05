@@ -146,6 +146,33 @@ row — one less thing to get out of sync:
 | `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS escape |
 | `attrvalue` with `attr = script`, or `rcdata` in `script` | JS string escape |
 
+## Escaper implementations
+
+The escapers live in `runtime/march_ctx_escape.c` and are unit-tested standalone
+by `test/test_ctx_escape.c` (no runtime, no allocator — the core works on plain
+buffers, two-pass: measure, then write).
+
+Two notes on what they refuse, since both are deliberately stricter than they
+might first appear:
+
+- **Whole-URL** is an allowlist (`http` `https` `mailto` `tel` `ftp`, plus any
+  relative reference), not a `javascript:` denylist. Browsers strip leading
+  whitespace and C0 control bytes before parsing a URL and ignore them *inside*
+  a scheme, so `  javascript:` and `java\tscript:` both defeat a naive prefix
+  check; the scheme is therefore extracted by skipping those bytes rather than
+  by comparing a prefix. Anything not on the list becomes
+  `about:invalid#zSoyz`.
+- **CSS** is an allowlist too — anything outside `[A-Za-z0-9-_#%., ]` becomes a
+  `\XX ` hex escape. That means interpolating a whole declaration
+  (`style="${'color: red'}"`) will not work: the colon is escaped. This is
+  intended. CSS has too many routes to a URL or an expression for a denylist to
+  be credible, and a hole should be a *value*, not a declaration.
+
+**The `MARCH_ESC_*` ids in `march_ctx_escape.h` must match `Context.escaper_id`
+in `lib/ctxesc/context.ml`.** That pairing is the one cross-language contract
+the generated-table drift check does not cover, so `test_ctx_escape.c` asserts
+it explicitly. A mismatch would silently apply the wrong escaper.
+
 ## Regenerating
 
 The `.tbl` is the source of truth. After editing it:
