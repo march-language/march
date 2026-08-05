@@ -8498,6 +8498,18 @@ let stdlib_prelude_decls : (March_ast.Ast.decl list * string) Lazy.t =
     (let m, path = load_stdlib_march "prelude.march" in
      (m.March_ast.Ast.mod_decls, path))
 
+(* Same shape as [stdlib_list_mod], for Task 5's `Random.choice_weighted`
+   fixtures: the real `stdlib/random.march`, as a sibling `DMod`. Loaded
+   alongside `list.march` (its body calls `List.fold_left`/`List.length`) and
+   prelude, mirroring bin/main.ml's actual stdlib prepend. *)
+let stdlib_random_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "random.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
 (* Every `cap no_panic` diagnostic [src] produces, from EITHER pass.  Filtered
    on the shared "(declared `cap no_panic`)" phrasing rather than counting all
    errors, so unrelated type noise from checking a lone stdlib file in
@@ -8554,6 +8566,47 @@ let no_panic_errors (src : string) : string list =
 
 let has_no_panic_error src = no_panic_errors src <> []
 let has_no_panic_error_count src = List.length (no_panic_errors src)
+
+(* Same as [no_panic_errors], with `random.march` prepended alongside
+   `list.march` and prelude, for Task 5's `Random.choice_weighted` fixtures
+   (whose contract is `{List((a, Float)) | len(_) > 0}` — the first name in
+   this plan whose refined parameter is a list of TUPLES rather than a plain
+   list). *)
+let no_panic_errors_with_random (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let randmod, rand_path = Lazy.force stdlib_random_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: randmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; rand_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+let has_no_panic_error_random src = no_panic_errors_with_random src <> []
 
 let no_panic_proof_suite =
   [ (* THE POINT OF THIS TASK.  Inverted from test_compiler.ml's
@@ -8664,6 +8717,58 @@ let no_panic_proof_suite =
              end\n"
         in
         Alcotest.(check int) "direct site plus two transitive callers" 3 n)
+
+  ; (* ── Task 5: `Random.choice_weighted` (2026-08-05) ───────────────────
+       Same shape as the `List.tail` trio above, over the real
+       `stdlib/random.march`. The contract is `{List((a, Float)) | len(_) >
+       0}` — a tuple-ELEMENT list, the first this plan's proof machinery has
+       had to discharge `len` over. A guarded call must be PROVED, not merely
+       accepted for some unrelated reason (e.g. a solver-undecided call being
+       silently let through) — this is the positive-discharge control that
+       distinguishes a working contract from one that checks nothing. *)
+    gated
+      "cap no_panic: a PROVABLY safe Random.choice_weighted (guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_random
+             "mod RW1 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float))) : (Int, Random.Rng) do\n\
+             \    if List.length(items) > 0 do Random.choice_weighted(rng, items)\n\
+             \    else (0, rng) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT control: the definite-failure floor must hold — an unguarded
+       call still errors after the contract is wired into the covered set. *)
+    gated "cap no_panic: an unguarded Random.choice_weighted still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_random
+             "mod RW2 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float))) : (Int, Random.Rng) do\n\
+             \    Random.choice_weighted(rng, items)\n\
+             \  end\n\
+              end\n"))
+
+  ; (* Fail-closed: an undecidable guard (a Bool flag, not a length check)
+       must still error — matching the `List.tail` undecidable case above. *)
+    gated
+      "cap no_panic: an UNDECIDABLE Random.choice_weighted call still errors (fail-closed)"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_random
+             "mod RW3 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float)), flag : Bool)\n\
+             \      : (Int, Random.Rng) do\n\
+             \    if flag do Random.choice_weighted(rng, items) else (0, rng) end\n\
+             \  end\n\
+              end\n"))
   ]
 
 (* ── The typecheck-only FALLBACK (`march check`, `march caps`, the LSP) ────
@@ -8750,6 +8855,23 @@ let syntactic_fallback_suite =
              "mod SF5 do\n\
              \  cap no_panic\n\
              \  fn f(a : Int) : Int do a + 1 end\n\
+              end\n"))
+
+  ; (* Task 5: even a length-guarded Random.choice_weighted call is banned in
+       this mode — same divergence as List.tail's SF2 case above, since this
+       mode never builds a verdict index to consult. *)
+    Alcotest.test_case
+      "a GUARDED Random.choice_weighted is also banned (no prover here)" `Quick
+      (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF6 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float)))\n\
+             \      : (Int, Random.Rng) do\n\
+             \    if List.length(items) > 0 do Random.choice_weighted(rng, items)\n\
+             \    else (0, rng) end\n\
+             \  end\n\
               end\n"))
   ]
 

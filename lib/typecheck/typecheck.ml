@@ -9324,6 +9324,7 @@ let panic_surface_contracted : StringSet.t = StringSet.of_list [
   "Option.unwrap"; "Option.expect";
   "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
   "Random.normal"; "Random.exponential"; "Random.bernoulli"; "Random.choice";
+  "Random.choice_weighted";
   "DateTime.fixed_zone"; "DateTime.fixed_zone_hm";
   "Stats.mean"; "Stats.min_val"; "Stats.max_val";
 ]

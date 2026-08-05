@@ -18,7 +18,7 @@ git log is authoritative for exact commits.
   refinement precondition — `unwrap`, `expect`, `head`, `tail`, `last`,
   `List.nth`/`head`/`last`/`tail`/`maximum_int`/`minimum_int`,
   `Option.unwrap`/`expect`, `Result.unwrap`/`expect`/`unwrap_err`,
-  `Random.normal`/`exponential`/`bernoulli`/`choice`,
+  `Random.normal`/`exponential`/`bernoulli`/`choice`/`choice_weighted`,
   `DateTime.fixed_zone`/`fixed_zone_hm`, `Stats.mean`/`min_val`/`max_val` — is
   no longer rejected on sight inside a `cap no_panic` module. The call is
   checked against its contract, by the same solver and the same verdicts that
