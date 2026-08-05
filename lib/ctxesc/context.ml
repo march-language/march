@@ -22,7 +22,16 @@ type state =
 
 type element = ElNormal | ElScript | ElStyle | ElTextarea | ElTitle
 
-type attr = AtNormal | AtUrl | AtStyle | AtScript
+type attr =
+  | AtNormal
+  | AtUrl
+      (** a URL attribute value, at the START of the value — an interpolation
+          here is the whole URL, so it needs a scheme allowlist *)
+  | AtUrlMid
+      (** a URL attribute value with literal content already before the hole —
+          the interpolation is a component, so it needs percent-encoding *)
+  | AtStyle
+  | AtScript
 
 type delim =
   | DlNone
@@ -46,7 +55,7 @@ let all_states =
     Beforeattrvalue; Attrvalue; Comment ]
 
 let all_elements = [ ElNormal; ElScript; ElStyle; ElTextarea; ElTitle ]
-let all_attrs = [ AtNormal; AtUrl; AtStyle; AtScript ]
+let all_attrs = [ AtNormal; AtUrl; AtUrlMid; AtStyle; AtScript ]
 let all_delims = [ DlNone; DlSingle; DlDouble; DlUnquoted; DlDoubleSubst ]
 
 let state_name = function
@@ -70,6 +79,7 @@ let element_name = function
 let attr_name = function
   | AtNormal -> "normal"
   | AtUrl -> "url"
+  | AtUrlMid -> "urlmid"
   | AtStyle -> "style"
   | AtScript -> "script"
 
@@ -97,7 +107,8 @@ let describe c =
   | Beforeattrname, _, _ -> "where an attribute name is expected"
   | Afterattrname, _, _ -> "just after an attribute name"
   | Beforeattrvalue, _, _ -> "just before an attribute value"
-  | Attrvalue, AtUrl, _ -> "in a URL attribute value"
+  | Attrvalue, AtUrl, _ -> "at the start of a URL attribute value"
+  | Attrvalue, AtUrlMid, _ -> "inside a URL attribute value"
   | Attrvalue, AtStyle, _ -> "in a CSS style attribute value"
   | Attrvalue, AtScript, _ -> "in an event-handler attribute value"
   | Attrvalue, _, DlUnquoted -> "in an unquoted attribute value"

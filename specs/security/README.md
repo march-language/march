@@ -47,13 +47,20 @@ Four fields, exactly as the paper describes:
 |---|---|
 | `state` | `pcdata` `rcdata` `tagname` `closetagname` `beforeattrname` `afterattrname` `beforeattrvalue` `attrvalue` `comment` |
 | `element` | `normal` `script` `style` `textarea` `title` |
-| `attr` | `normal` `url` `style` `script` |
+| `attr` | `normal` `url` `urlmid` `style` `script` |
 | `delim` | `none` `single` `double` `unquoted` `doublesubst` |
 
 `element` tracks which element's content we are inside, because `<script>` and
 `<style>` bodies are not HTML. `attr` is set when an attribute name is read, and
 selects the subsidiary language for its value (`href` → URL, `style` → CSS,
 `on*` → JS). `delim` tracks how an attribute value is quoted.
+
+`urlmid` is `url` after at least one literal character of the value has been
+seen. The distinction is load-bearing: a hole at the *start* of a URL attribute
+**is** the whole URL and needs a scheme allowlist (`href="${u}"` must not accept
+`javascript:`), while a hole after literal text is a *component* and needs
+percent-encoding (`href="/search?q=${q}"`). Rather than add a fifth context
+field, the table demotes `url` → `urlmid` on the first literal character.
 
 ### `doublesubst` — the substitution mechanism
 
@@ -134,8 +141,8 @@ row — one less thing to get out of sync:
 |---|---|
 | `pcdata`, `rcdata` in `textarea`/`title` | HTML entity-encode |
 | `attrvalue` with `attr = normal` | HTML entity-encode, plus backtick |
-| `attrvalue` with `attr = url`, at the **start** of the value | URL scheme allowlist |
-| `attrvalue` with `attr = url`, mid-value | percent-encode |
+| `attrvalue` with `attr = url` (start of value) | URL scheme allowlist |
+| `attrvalue` with `attr = urlmid` | percent-encode |
 | `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS escape |
 | `attrvalue` with `attr = script`, or `rcdata` in `script` | JS string escape |
 

@@ -7,6 +7,7 @@
 
 module C = March_ctxesc.Context
 module P = March_ctxesc.Tbl_parse
+module A = March_ctxesc.Automaton
 
 (* The repo has no `astring`; substring checks use a local helper, matching the
    convention in test_compiler.ml. *)
@@ -167,6 +168,160 @@ let test_shipped_table_parses () =
            (List.mem st sources))
       C.all_states
 
+
+(* ── The automaton ────────────────────────────────────────────────────────
+   These exercise the SHIPPED table, not a fixture: Task 1 only proved the
+   table parses, and a table that parses can still be wrong. *)
+
+let table = lazy (
+  let candidates =
+    [ "specs/security/html-contexts.tbl";
+      "../../specs/security/html-contexts.tbl";
+      "../../../specs/security/html-contexts.tbl" ] in
+  match List.find_opt Sys.file_exists candidates with
+  | None -> Alcotest.failf "shipped table not found (cwd %s)" (Sys.getcwd ())
+  | Some p ->
+    (match P.parse_file p with
+     | Ok t -> A.compile t
+     | Error e -> Alcotest.failf "shipped table failed to parse: %s" e))
+
+let walk src =
+  match A.consume_literal (Lazy.force table) C.initial src with
+  | Ok o -> o
+  | Error (m, off) -> Alcotest.failf "unexpected error at byte %d: %s" off m
+
+let ctx_after src = (walk src).A.ctx
+
+let esc_after src =
+  match A.consume_interp (Lazy.force table) (ctx_after src) with
+  | Ok (e, _, _) -> e
+  | Error d -> Alcotest.failf "unexpected reject: %s" d
+
+let reject_after src =
+  match A.consume_interp (Lazy.force table) (ctx_after src) with
+  | Ok _ -> Alcotest.failf "expected a rejection after %S" src
+  | Error d -> d
+
+let escaper = Alcotest.testable
+    (fun ppf e -> Format.pp_print_string ppf (C.escaper_name e)) ( = )
+
+let test_pcdata_stays_pcdata () =
+  Alcotest.(check bool) "plain text" true ((ctx_after "hello world").C.state = C.Pcdata);
+  Alcotest.check escaper "html escaper" C.EscHtml (esc_after "<p>")
+
+let test_enters_double_quoted_url_attr () =
+  let c = ctx_after "<a href=\"" in
+  Alcotest.(check bool) "in attr value" true (c.C.state = C.Attrvalue);
+  Alcotest.(check bool) "double delim" true (c.C.delim = C.DlDouble);
+  Alcotest.(check bool) "url attr" true (c.C.attr = C.AtUrl)
+
+let test_url_start_vs_mid () =
+  (* href="${u}" is the WHOLE url -> scheme allowlist *)
+  Alcotest.check escaper "whole-url at start" C.EscUrlWhole (esc_after "<a href=\"");
+  (* href="/x?q=${q}" is a component -> percent-encode *)
+  Alcotest.check escaper "component mid-value" C.EscUrlComponent
+    (esc_after "<a href=\"/search?q=")
+
+let test_script_body_is_js () =
+  let c = ctx_after "<script>" in
+  Alcotest.(check bool) "script element" true (c.C.element = C.ElScript);
+  Alcotest.(check bool) "rcdata" true (c.C.state = C.Rcdata);
+  Alcotest.check escaper "js escaper" C.EscJsString (esc_after "<script>var x = ")
+
+let test_style_body_is_css () =
+  Alcotest.check escaper "css escaper" C.EscCss (esc_after "<style>a{color:")
+
+let test_textarea_body_is_html () =
+  Alcotest.check escaper "html in textarea" C.EscHtml (esc_after "<textarea>")
+
+let test_close_tag_leaves_raw_text () =
+  let c = ctx_after "<script>var x = 1;</script>" in
+  Alcotest.(check bool) "back to pcdata" true (c.C.state = C.Pcdata);
+  Alcotest.(check bool) "element cleared" true (c.C.element = C.ElNormal)
+
+let test_close_tag_is_case_insensitive () =
+  let c = ctx_after "<script>x</SCRIPT>" in
+  Alcotest.(check bool) "uppercase close still exits" true (c.C.element = C.ElNormal)
+
+let test_unrelated_close_tag_stays_in_script () =
+  let c = ctx_after "<script>var s = \"</b>\";" in
+  Alcotest.(check bool) "still in script" true (c.C.element = C.ElScript)
+
+let test_event_handler_attr_is_js () =
+  Alcotest.check escaper "onclick is js" C.EscJsString (esc_after "<a onclick=\"")
+
+let test_style_attr_is_css () =
+  Alcotest.check escaper "style attr is css" C.EscCss (esc_after "<div style=\"")
+
+let test_plain_attr_is_attr_escaper () =
+  Alcotest.check escaper "class is attr" C.EscAttr (esc_after "<div class=\"")
+
+let test_unquoted_attr_gets_substituted_quote () =
+  match A.consume_interp (Lazy.force table) (ctx_after "<div class=") with
+  | Error d -> Alcotest.failf "unexpected reject: %s" d
+  | Ok (_, subst, c') ->
+    Alcotest.(check string) "opening quote substituted" "\"" subst;
+    Alcotest.(check bool) "delim marked substituted" true (c'.C.delim = C.DlDoubleSubst)
+
+let test_substituted_quote_is_closed () =
+  (* the automaton emits the closing quote the source text never had *)
+  let o = walk "<div class=" in
+  let after_hole =
+    match A.consume_interp (Lazy.force table) o.A.ctx with
+    | Ok (_, _, c) -> c
+    | Error d -> Alcotest.failf "unexpected reject: %s" d in
+  match A.consume_literal (Lazy.force table) after_hole ">x" with
+  | Error (m, _) -> Alcotest.failf "unexpected error: %s" m
+  | Ok o2 ->
+    Alcotest.(check string) "closing quote emitted" "\">x" o2.A.emit
+
+let test_rejected_positions () =
+  (* Positions where no escaping can make an interpolation safe. Each must
+     reject, and each must say something useful -- a bare "not allowed" would
+     leave the author with nowhere to go. *)
+  List.iter
+    (fun src ->
+       let d = reject_after src in
+       Alcotest.(check bool)
+         (Printf.sprintf "rejection after %S is explained" src) true
+         (String.length d > 20))
+    [ "<div "; "<"; "<!-- " ]
+
+let test_terminal_validity () =
+  Alcotest.(check bool) "balanced template is a valid end state" true
+    (A.is_valid_terminal (ctx_after "<p>hello</p>"));
+  Alcotest.(check bool) "open tag is not" false
+    (A.is_valid_terminal (ctx_after "<div"));
+  Alcotest.(check bool) "open attribute is not" false
+    (A.is_valid_terminal (ctx_after "<div class=\"x"));
+  Alcotest.(check bool) "unclosed script is not" false
+    (A.is_valid_terminal (ctx_after "<script>var x = 1;"));
+  Alcotest.(check bool) "unclosed comment is not" false
+    (A.is_valid_terminal (ctx_after "<!-- hi"))
+
+let test_literal_is_emitted_unchanged_when_no_substitution () =
+  let o = walk "<p>hello &amp; goodbye</p>" in
+  Alcotest.(check string) "emit is verbatim" "<p>hello &amp; goodbye</p>" o.A.emit
+
+let automaton_tests =
+  [ Alcotest.test_case "pcdata" `Quick test_pcdata_stays_pcdata;
+    Alcotest.test_case "enters url attr" `Quick test_enters_double_quoted_url_attr;
+    Alcotest.test_case "url start vs mid" `Quick test_url_start_vs_mid;
+    Alcotest.test_case "script body is js" `Quick test_script_body_is_js;
+    Alcotest.test_case "style body is css" `Quick test_style_body_is_css;
+    Alcotest.test_case "textarea body is html" `Quick test_textarea_body_is_html;
+    Alcotest.test_case "close tag leaves raw text" `Quick test_close_tag_leaves_raw_text;
+    Alcotest.test_case "close tag case-insensitive" `Quick test_close_tag_is_case_insensitive;
+    Alcotest.test_case "unrelated close tag stays" `Quick test_unrelated_close_tag_stays_in_script;
+    Alcotest.test_case "event handler attr is js" `Quick test_event_handler_attr_is_js;
+    Alcotest.test_case "style attr is css" `Quick test_style_attr_is_css;
+    Alcotest.test_case "plain attr" `Quick test_plain_attr_is_attr_escaper;
+    Alcotest.test_case "unquoted attr substitution" `Quick test_unquoted_attr_gets_substituted_quote;
+    Alcotest.test_case "substituted quote closed" `Quick test_substituted_quote_is_closed;
+    Alcotest.test_case "rejected positions" `Quick test_rejected_positions;
+    Alcotest.test_case "terminal validity" `Quick test_terminal_validity;
+    Alcotest.test_case "literal emitted verbatim" `Quick test_literal_is_emitted_unchanged_when_no_substitution ]
+
 let tests =
   [ ("ctxesc table parser",
      [ Alcotest.test_case "minimal transition" `Quick test_parses_a_minimal_transition;
@@ -179,4 +334,5 @@ let tests =
        Alcotest.test_case "rejects unknown class" `Quick test_rejects_unknown_class_name;
        Alcotest.test_case "rejects wrong field count" `Quick test_rejects_wrong_field_count;
        Alcotest.test_case "rejects row outside section" `Quick test_rejects_row_outside_a_section;
-       Alcotest.test_case "shipped table parses" `Quick test_shipped_table_parses ]) ]
+       Alcotest.test_case "shipped table parses" `Quick test_shipped_table_parses ]);
+    ("ctxesc automaton", automaton_tests) ]

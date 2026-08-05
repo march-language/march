@@ -84,27 +84,36 @@ beforeattrvalue,*,*,* | interp          | "\"" | attrvalue,=,=,doublesubst |
 beforeattrvalue,*,*,* | any             |  | attrvalue,=,=,unquoted   |
 
 # ── ATTRIBUTE VALUE ──────────────────────────────────────────────────────
-attrvalue,*,*,double      | lit:"\""    |  | beforeattrname,=,normal,none |
-attrvalue,*,*,double      | interp      |  | =,=,=,=                  |
-attrvalue,*,*,double      | any         |  | =,=,=,=                  |
+# ORDER MATTERS HERE, twice over.
+#
+# 1. The rows that END the value come first. They are delimiter-specific, and
+#    if any catch-all sat above them it would swallow the closing quote and the
+#    automaton would never leave the attribute.
+# 2. URL position: a hole at the START of a url attribute IS the whole URL and
+#    needs a scheme allowlist (`href="${u}"` with `javascript:` must not pass),
+#    while a hole after literal content is a COMPONENT needing percent-encoding.
+#    Rather than add a fifth context field, the first literal character of a
+#    url-classified value demotes `url` -> `urlmid`.
 
-attrvalue,*,*,single      | lit:"'"     |  | beforeattrname,=,normal,none |
-attrvalue,*,*,single      | interp      |  | =,=,=,=                  |
-attrvalue,*,*,single      | any         |  | =,=,=,=                  |
-
+# -- rows that leave the attribute value --
+attrvalue,*,*,double      | lit:"\""       |  | beforeattrname,=,normal,none |
+attrvalue,*,*,single      | lit:"'"        |  | beforeattrname,=,normal,none |
 # A substituted value is closed by the automaton, not by the source text: the
-# `"` in the substitution column is emitted on the way out.
-attrvalue,*,*,doublesubst | lit:"/>"    | "\"" | pcdata,normal,normal,none |
-attrvalue,*,*,doublesubst | lit:">"     | "\"" | pcdata,=,normal,none     |
+# quote in the substitution column is emitted on the way out.
+attrvalue,*,*,doublesubst | lit:"/>"       | "\"" | pcdata,normal,normal,none |
+attrvalue,*,*,doublesubst | lit:">"        | "\"" | pcdata,=,normal,none     |
 attrvalue,*,*,doublesubst | cls+:[ \t\r\n] | "\"" | beforeattrname,=,normal,none |
-attrvalue,*,*,doublesubst | interp      |  | =,=,=,=                  |
-attrvalue,*,*,doublesubst | any         |  | =,=,=,=                  |
-
-attrvalue,*,*,unquoted    | lit:"/>"    |  | pcdata,normal,normal,none |
-attrvalue,*,*,unquoted    | lit:">"     |  | pcdata,=,normal,none     |
+attrvalue,*,*,unquoted    | lit:"/>"       |  | pcdata,normal,normal,none |
+attrvalue,*,*,unquoted    | lit:">"        |  | pcdata,=,normal,none     |
 attrvalue,*,*,unquoted    | cls+:[ \t\r\n] |  | beforeattrname,=,normal,none |
-attrvalue,*,*,unquoted    | interp      |  | =,=,=,=                  |
-attrvalue,*,*,unquoted    | any         |  | =,=,=,=                  |
+
+# -- URL position tracking (must precede the generic `any`) --
+attrvalue,*,url,*         | interp         |  | =,=,=,=                  |
+attrvalue,*,url,*         | any            |  | =,=,urlmid,=             |
+
+# -- generic within-value rows --
+attrvalue,*,*,*           | interp         |  | =,=,=,=                  |
+attrvalue,*,*,*           | any            |  | =,=,=,=                  |
 
 # ── RCDATA / RAW TEXT (script, style, textarea, title bodies) ────────────
 # Exit only on the MATCHING close tag, case-insensitively -- `</b>` inside a
