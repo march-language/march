@@ -13,9 +13,13 @@ items closed below. See `specs/progress/2026-08-04-cap-ceiling-strict.md`.
   `is_user_file` filter then discarded. The warning was generated and thrown
   away.
 
-  That suppressed Check 1b for **every capability the standard library
-  happens to use**, not just `IO.Console`. `file_exists` warned only because
-  prelude never calls it. Fixed by `Typecheck.stdlib_source_files` +
+  Scope, measured rather than assumed: `println`/`print` are the ONLY
+  cap-bearing builtins prelude calls, so in practice this only ever hid
+  `IO.Console`. Filesystem, network and process warnings were never
+  suppressed, and the same code inside a nested module or actor handler
+  warned correctly — which is why the three existing enforcement tests
+  passed. The mechanism is general, so any future prelude addition would have
+  suppressed a real warning silently. Fixed by `Typecheck.stdlib_source_files` +
   `span_is_stdlib`, filtering stdlib-sourced uses out of the body scan.
   Default-build warnings are now a faithful preview of what `--cap-strict`
   demands. Two test fixtures needed `needs IO.Console` added — the migration

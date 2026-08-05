@@ -100,9 +100,13 @@ violations) rather than being served the cached artifact — the
   `println`. `prelude.march` is unwrapped into global scope, so its decls are
   prepended to the ENTRY module's list; Check 1b keeps the first span per
   capability; that span was in prelude; the driver filters stdlib spans. The
-  warning was generated and discarded — for every capability the standard
-  library uses, not just `IO.Console`. Fixed via
-  `Typecheck.stdlib_source_files`.
+  warning was generated and discarded. In practice this only ever hid
+  `IO.Console` — `println`/`print` are the only cap-bearing builtins prelude
+  calls, so filesystem/network/process warnings were never affected, and the
+  same code in a nested module or actor handler warned correctly (which is
+  why the existing enforcement tests passed). The mechanism was general
+  though: any future prelude addition would have suppressed a real one. Fixed
+  via `Typecheck.stdlib_source_files`.
 - **No `ECallPtr` witness exists** among the shapes tried (builtin returned
   from a branch, stored in a `Cons` and matched out, called through a
   parameter). The atom scan catches a capability where its name is

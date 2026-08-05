@@ -115,19 +115,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
-- **Capability warnings were silently discarded for anything the standard
-  library also uses.** `prelude.march` is unwrapped into global scope, so its
-  declarations ride in the *entry module's* declaration list. The body-scan
-  check keeps one span per capability and keeps the first, so a capability
-  prelude also used got a prelude span — which the driver then filtered out as
-  stdlib-internal. The warning was generated and thrown away.
+- **Capability warnings were silently discarded in the entry module.**
+  `prelude.march` is unwrapped into global scope, so its declarations ride in
+  the *entry module's* declaration list. The body-scan check keeps one span
+  per capability and keeps the first, so a capability prelude also used got a
+  prelude span — which the driver then filtered out as stdlib-internal. The
+  warning was generated and thrown away.
 
-  Visible symptom: `println` in a plain function body produced no "does not
-  declare `needs IO.Console`" warning, while `file_exists` in the same module
-  did — purely because prelude calls `println` and never calls `file_exists`.
-  This affected every capability the standard library happens to use, not just
-  `IO.Console`. Existing code that relied on the silence will now see the
-  warnings it should always have had.
+  Visible symptom: `println` at the top level of a program produced no "does
+  not declare `needs IO.Console`" warning, while `file_exists` in the same
+  module did — purely because prelude calls `println` and never calls
+  `file_exists`. The same code inside a nested module or an actor handler
+  warned correctly, which is why the existing enforcement tests passed.
+
+  In practice this only ever hid `IO.Console`, since `println`/`print` are the
+  only capability-bearing builtins prelude calls — the filesystem, network and
+  process warnings were never affected. The mechanism was general, though, and
+  any future prelude addition would have silently suppressed a real one.
+
+  **This is a visible change:** a program that prints at the top level without
+  `needs IO.Console` now gets the warning it should always have had.
 
 
 - **`cap no_panic` no longer rejects a division guarded by a boolean
