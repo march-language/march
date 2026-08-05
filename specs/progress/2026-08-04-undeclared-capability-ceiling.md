@@ -100,3 +100,44 @@ Suggested order: add the missing `needs` to those 20 first (harmless on its own,
 and it makes stdlib self-describing for `forge audit`), then measure the
 corpora, then decide between promoting the check and gating it behind
 `cap strict`.
+
+---
+
+## Resolved 2026-08-04 — `--cap-strict`
+
+Option 2 (gate it), with two departures from the plan above, both of which
+made it cheaper than costed here.
+
+**A compiler flag, not a module-level `cap strict`.** `--cap-strict` is a
+build gate. A module-level opt-in would have let a dependency decline the
+property, which is backwards for the threat this exists to address — the
+consumer, not the publisher, is the party who wants the ceiling.
+
+**Checked against emitted code, not by promoting Check 1b.** This is why the
+"20 stdlib modules" survey above turned out not to be on the critical path.
+Attribution charges a stdlib-mediated call to the *calling* module, so
+`needs IO.FileWrite` is demanded of the module that called `File.write`, and
+nothing is asked of `file.march` itself. The 20 one-line additions were never
+needed.
+
+Promoting Check 1b would also have closed the smaller hole. Measured while
+implementing: the direct-builtin route was a warning, but the **stdlib-mediated
+route produced no diagnostic at all** — `mod M` calling `File.write` with no
+`needs` typechecked silently at rc=0, because the import check walks `use`
+declarations and stdlib modules are ambiently available without one. That is
+the most common route in real code, and promoting Check 1b would have left it
+open.
+
+**What the declared set now guarantees.** With `--cap-strict`, a ceiling on
+every module including dependencies that never opted in, verified against the
+code the compiler emits and re-checkable from the artifact via
+`forge cap inspect --strict`. Without it, unchanged: a floor for
+capability-passing code, plus warnings.
+
+The docs wording this file was filed against ("a floor that capability-passing
+code cannot go under, not a ceiling on everything") remains correct for the
+default build and should stay.
+
+See `specs/progress/2026-08-04-cap-ceiling-strict.md` for the implementation,
+and `specs/todos/2026-08-04-cap-ceiling-follow-ups.md` for what is still open
+(no `--check` support, no migration autofix, no per-package roll-up).

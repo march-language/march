@@ -40,7 +40,7 @@ Two commands use that.
 | Command | Asks | Needs a build? | Attributes to a dependency? |
 |---|---|---|---|
 | `forge audit` | Did my dependencies' **declared** capabilities change? | No | **Yes** |
-| `forge cap inspect <binary>` | What does this **compiled artifact** actually hold? | Yes | No |
+| `forge cap inspect <binary>` | What does this **compiled artifact** actually hold? | Yes | **Yes** (per module) |
 
 They answer different questions and neither replaces the other. This page is
 about the first; see [`forge cap inspect`](#auditing-a-compiled-binary) below for
@@ -195,14 +195,51 @@ runtime symbols surviving dead-strip, and an embedded manifest when present. The
 gate is fail-closed: `--deny` and `--allow-only` fail on a binary whose coverage
 is not full, and foreign code requires an explicit `--allow-foreign`.
 
+It also reports **which module** performs each capability's IO, not merely that
+the binary performs it:
+
+```
+Capabilities — ./build/myapp
+  IO.Console              [march_print]
+  IO.FileRead             [march_file_read]
+
+Attributed to
+  IO.Console            MyApp
+  IO.FileRead           Conduit.Store
+```
+
+That is the difference between "this binary reads files" and "this binary reads
+files *because of this dependency*". Attribution is computed before inlining —
+by codegen time a small dependency function has been folded into its caller, and
+attributing there would credit the dependency's IO to your application. A
+capability reached only through an indirect call is reported as *unattributed*
+rather than omitted.
+
+Add `--strict` to re-check the capability ceiling on a binary you did not build:
+
+```
+$ forge cap inspect --strict ./build/myapp
+forge cap inspect: module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`
+```
+
+Binaries carry each module's declared `needs` alongside its measured use, so the
+two can be compared without the source. It fails closed on a binary that carries
+no attribution, rather than reporting a clean ceiling for one whose ceiling
+cannot be read.
+
 Use both. `forge audit` tells you which dependency changed and does so before
 anything is built; `forge cap inspect` tells you what the artifact you are about
-to ship actually carries.
+to ship actually carries, and which module in it is responsible.
 
 ### Reading is not enforcing
 
 Both commands on this page *read* — they report authority, they do not restrain
-it. The rows above marked "bounds nothing" (`IO.Foreign`, raw syscalls, an
+it. The one place a capability declaration is *enforced* at build time is
+`march --cap-strict`, which fails the build when any module's emitted code uses
+a capability it did not declare — including a dependency that never opted in.
+See [capability ceilings]({{ site.baseurl }}/docs/capabilities/#cap-strict).
+
+The rows above marked "bounds nothing" (`IO.Foreign`, raw syscalls, an
 undeclared builtin call) are a limit of *reading a declaration or a symbol
 table*, not a limit of what March can enforce. To turn the declared set into an
 actual OS-level confinement — one that bounds even `extern` C and raw syscalls
