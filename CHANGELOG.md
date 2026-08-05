@@ -11,6 +11,29 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cap no_panic`'s syntactic ban list had drifted from the real stdlib.**
+  An audit found three problems in `panic_surface_stdlib`
+  (`lib/typecheck/typecheck.ml`), the name list `cap no_panic` uses to reject
+  calls to functions that can panic. Most seriously: **twelve public stdlib
+  functions that carry a real refinement precondition and panic when it's
+  violated — `List.tail`, `List.maximum_int`, `List.minimum_int`,
+  `Random.normal`, `Random.exponential`, `Random.bernoulli`, `Random.choice`,
+  `DateTime.fixed_zone`, `DateTime.fixed_zone_hm`, `Stats.mean`,
+  `Stats.min_val`, `Stats.max_val` — were absent from the list under any
+  spelling, so a `cap no_panic` module could call one of them unguarded and
+  compile clean today (`exit 0`, only a silent hint). All twelve are now
+  banned. Also fixed: `String.slice_bytes` was banned despite its own
+  docstring stating it never panics (`start`/`len` are clamped) — removed, so
+  a `cap no_panic` module can now call it. And seven entries
+  (`List.hd`/`List.tl`/`List.min_elt`/`List.max_elt`/`String.nth`/
+  `NativeArray.get`/`NativeArray.set`) named functions that don't exist under
+  those names anywhere in the stdlib — removed as harmless drift. This is a
+  syntactic-only fix (no new mechanism); a properly *guarded* call to one of
+  the twelve is still rejected today, a known limitation a follow-up proof-
+  based check will lift.
+
 ### Added
 
 - **`forge cap inspect --strict`** re-checks the capability ceiling on a

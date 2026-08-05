@@ -6615,6 +6615,140 @@ let test_plain_guarded_nonexhaustive_match_ok () =
   end|} in
   Alcotest.(check bool) "plain (non-cap) guarded non-exhaustive match: no error" false (has_errors ctx)
 
+(* ── Task 1: ban-list audit (2026-08-05) ─────────────────────────────────
+   `panic_surface_stdlib` had drifted from the real stdlib in three ways:
+   a false positive (`String.slice_bytes`, which the stdlib docstring says
+   never panics), seven dead entries naming functions that no longer exist,
+   and twelve live coverage holes — public functions carrying a real
+   refinement precondition that panics when violated, but absent from the
+   ban list under any spelling. See specs/progress/2026-08-05-no-panic-ban-list-audit.md. *)
+
+(* False positive: String.slice_bytes clamps out-of-range start/len and never
+   panics (stdlib/string.march:38-42), so a `cap no_panic` module must be
+   allowed to call it unguarded. *)
+let test_cap_no_panic_slice_bytes_no_error () =
+  let ctx = typecheck {|mod SB do
+    cap no_panic
+    fn f(s : String) : String do String.slice_bytes(s, 0, 5) end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + String.slice_bytes: no error" false (has_errors ctx)
+
+(* Coverage hole: List.tail carries {List(a) | len(_) > 0} (stdlib/list.march:100)
+   and panics on an empty list. An unguarded call must now be banned. *)
+let test_cap_no_panic_list_tail_error () =
+  let ctx = typecheck {|mod GT do
+    cap no_panic
+    fn f(xs : List(Int)) : List(Int) do List.tail(xs) end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded List.tail: error" true (has_errors ctx)
+
+(* Blunt-until-Task-3 control: Task 1 uses only the existing syntactic ban,
+   so a call guarded by a length check that WOULD satisfy the contract is
+   still rejected today — Task 3 is what will flip this to accept. *)
+let test_cap_no_panic_list_tail_guarded_still_error () =
+  let ctx = typecheck {|mod GT2 do
+    cap no_panic
+    fn f(xs : List(Int)) : List(Int) do
+      if List.length(xs) > 0 do List.tail(xs) else xs end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "cap no_panic + guarded List.tail is STILL banned (blunt until Task 3): error"
+    true (has_errors ctx)
+
+let test_cap_no_panic_list_maximum_int_error () =
+  let ctx = typecheck {|mod GT3 do
+    cap no_panic
+    fn f(xs : List(Int)) : Int do List.maximum_int(xs) end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded List.maximum_int: error" true (has_errors ctx)
+
+let test_cap_no_panic_list_minimum_int_error () =
+  let ctx = typecheck {|mod GT4 do
+    cap no_panic
+    fn f(xs : List(Int)) : Int do List.minimum_int(xs) end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded List.minimum_int: error" true (has_errors ctx)
+
+let test_cap_no_panic_random_normal_error () =
+  let ctx = typecheck {|mod GT5 do
+    cap no_panic
+    fn f(rng : Random.Rng, mu : Float, sigma : Float) : Float do
+      let (v, _) = Random.normal(rng, mu, sigma)
+      v
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded Random.normal: error" true (has_errors ctx)
+
+let test_cap_no_panic_random_exponential_error () =
+  let ctx = typecheck {|mod GT6 do
+    cap no_panic
+    fn f(rng : Random.Rng, lambda : Float) : Float do
+      let (v, _) = Random.exponential(rng, lambda)
+      v
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded Random.exponential: error" true (has_errors ctx)
+
+let test_cap_no_panic_random_bernoulli_error () =
+  let ctx = typecheck {|mod GT7 do
+    cap no_panic
+    fn f(rng : Random.Rng, p : Float) : Bool do
+      let (v, _) = Random.bernoulli(rng, p)
+      v
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded Random.bernoulli: error" true (has_errors ctx)
+
+let test_cap_no_panic_random_choice_error () =
+  let ctx = typecheck {|mod GT8 do
+    cap no_panic
+    fn f(rng : Random.Rng, xs : List(Int)) : Int do
+      let (v, _) = Random.choice(rng, xs)
+      v
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded Random.choice: error" true (has_errors ctx)
+
+let test_cap_no_panic_datetime_fixed_zone_error () =
+  let ctx = typecheck {|mod GT9 do
+    cap no_panic
+    fn f(name : String, offset_seconds : Int) : DateTime.Tz do
+      DateTime.fixed_zone(name, offset_seconds)
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded DateTime.fixed_zone: error" true (has_errors ctx)
+
+let test_cap_no_panic_datetime_fixed_zone_hm_error () =
+  let ctx = typecheck {|mod GT10 do
+    cap no_panic
+    fn f(hours : Int, minutes : Int) : DateTime.Tz do
+      DateTime.fixed_zone_hm(hours, minutes)
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded DateTime.fixed_zone_hm: error" true (has_errors ctx)
+
+let test_cap_no_panic_stats_mean_error () =
+  let ctx = typecheck {|mod GT11 do
+    cap no_panic
+    fn f(xs : List(Float)) : Float do Stats.mean(xs) end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded Stats.mean: error" true (has_errors ctx)
+
+let test_cap_no_panic_stats_min_val_error () =
+  let ctx = typecheck {|mod GT12 do
+    cap no_panic
+    fn f(xs : List(Float)) : Float do Stats.min_val(xs) end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded Stats.min_val: error" true (has_errors ctx)
+
+let test_cap_no_panic_stats_max_val_error () =
+  let ctx = typecheck {|mod GT13 do
+    cap no_panic
+    fn f(xs : List(Float)) : Float do Stats.max_val(xs) end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + unguarded Stats.max_val: error" true (has_errors ctx)
+
 (* Division-safety guard / path-context tests *)
 
 let test_divsafety_match_guard_neq_zero_ok () =
@@ -11793,6 +11927,21 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + guarded non-exhaustive match: error" `Quick test_cap_no_panic_guarded_nonexhaustive_match_error;
           Alcotest.test_case "cap no_panic + guarded guardless-catchall: no error" `Quick test_cap_no_panic_guarded_guardless_catchall_ok;
           Alcotest.test_case "plain guarded non-exhaustive match: no error" `Quick test_plain_guarded_nonexhaustive_match_ok;
+          (* Task 1: ban-list audit — false positive + 12 coverage holes *)
+          Alcotest.test_case "cap no_panic + String.slice_bytes: no error"       `Quick test_cap_no_panic_slice_bytes_no_error;
+          Alcotest.test_case "cap no_panic + unguarded List.tail: error"         `Quick test_cap_no_panic_list_tail_error;
+          Alcotest.test_case "cap no_panic + guarded List.tail still banned"     `Quick test_cap_no_panic_list_tail_guarded_still_error;
+          Alcotest.test_case "cap no_panic + unguarded List.maximum_int: error"  `Quick test_cap_no_panic_list_maximum_int_error;
+          Alcotest.test_case "cap no_panic + unguarded List.minimum_int: error"  `Quick test_cap_no_panic_list_minimum_int_error;
+          Alcotest.test_case "cap no_panic + unguarded Random.normal: error"     `Quick test_cap_no_panic_random_normal_error;
+          Alcotest.test_case "cap no_panic + unguarded Random.exponential: error" `Quick test_cap_no_panic_random_exponential_error;
+          Alcotest.test_case "cap no_panic + unguarded Random.bernoulli: error"  `Quick test_cap_no_panic_random_bernoulli_error;
+          Alcotest.test_case "cap no_panic + unguarded Random.choice: error"     `Quick test_cap_no_panic_random_choice_error;
+          Alcotest.test_case "cap no_panic + unguarded DateTime.fixed_zone: error" `Quick test_cap_no_panic_datetime_fixed_zone_error;
+          Alcotest.test_case "cap no_panic + unguarded DateTime.fixed_zone_hm: error" `Quick test_cap_no_panic_datetime_fixed_zone_hm_error;
+          Alcotest.test_case "cap no_panic + unguarded Stats.mean: error"        `Quick test_cap_no_panic_stats_mean_error;
+          Alcotest.test_case "cap no_panic + unguarded Stats.min_val: error"     `Quick test_cap_no_panic_stats_min_val_error;
+          Alcotest.test_case "cap no_panic + unguarded Stats.max_val: error"     `Quick test_cap_no_panic_stats_max_val_error;
           (* Division-safety Z3 cases *)
           Alcotest.test_case "divsafety: v > 0 refinement suppresses"     `Quick test_divsafety_positive_refinement_ok;
           Alcotest.test_case "divsafety: v != 0 refinement suppresses"    `Quick test_divsafety_nonzero_refinement_ok;

@@ -9276,13 +9276,23 @@ let panic_surface_prelude : StringSet.t = StringSet.of_list [
 ]
 
 let panic_surface_stdlib : StringSet.t = StringSet.of_list [
-  "List.nth"; "List.hd"; "List.tl"; "List.head"; "List.last";
-  "List.min_elt"; "List.max_elt";
+  "List.nth"; "List.head"; "List.last";
   "Option.unwrap"; "Option.expect";
   "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
   "Array.get"; "Array.set";
-  "String.slice_bytes"; "String.nth";
-  "NativeArray.get"; "NativeArray.set";
+  (* Ban-list audit 2026-08-05 (specs/progress/2026-08-05-no-panic-ban-list-audit.md):
+     "String.slice_bytes" removed — its docstring (stdlib/string.march:38-42)
+     states start/len are clamped and it never panics; "List.hd"/"List.tl"/
+     "List.min_elt"/"List.max_elt"/"String.nth"/"NativeArray.get"/
+     "NativeArray.set" removed — none exist under those names anywhere in
+     the stdlib (NativeArray's real accessors are get_int/set_int/
+     get_float/set_float).  The twelve entries below were coverage holes:
+     public functions carrying a real refinement precondition that panics
+     when violated, previously absent from this list under any spelling. *)
+  "List.tail"; "List.maximum_int"; "List.minimum_int";
+  "Random.normal"; "Random.exponential"; "Random.bernoulli"; "Random.choice";
+  "DateTime.fixed_zone"; "DateTime.fixed_zone_hm";
+  "Stats.mean"; "Stats.min_val"; "Stats.max_val";
 ]
 
 let panic_surface_all_direct : StringSet.t =
@@ -9291,20 +9301,32 @@ let panic_surface_all_direct : StringSet.t =
 let panic_surface_suggestion : string -> string = function
   | "List.nth" ->
     "\n\nUse `List.nth_opt` to return `Option(a)` instead of panicking on out-of-bounds."
-  | "List.hd" | "List.head" | "head" ->
+  | "List.head" | "head" ->
     "\n\nUse `List.head_opt` (or match on `Cons`/`Nil` directly) to avoid panicking on empty."
-  | "List.tl" | "List.tail" | "tail" ->
+  | "List.tail" | "tail" ->
     "\n\nUse `List.tail_opt` or match on `Nil` to avoid panicking on empty."
+  | "List.maximum_int" | "List.minimum_int" ->
+    "\n\nCheck `List.length(xs) > 0` before calling, or use a `List.length` guard \
+     followed by a total fold instead."
   | "unwrap" | "Option.unwrap" ->
     "\n\nUse `unwrap_or(opt, default)` or `match opt do Some(x) -> ... | None -> ... end`."
   | "expect" | "Option.expect" ->
     "\n\nUse `unwrap_or` or an explicit match to handle the `None` case."
   | "Result.unwrap" | "Result.expect" ->
     "\n\nUse `Result.unwrap_or` or match on `Ok`/`Err` to handle the error case."
-  | "Array.get" | "Array.set" | "NativeArray.get" | "NativeArray.set" ->
+  | "Array.get" | "Array.set" ->
     "\n\nBounds-check the index before access, or use a bounds-checked variant."
-  | "String.slice_bytes" | "String.nth" ->
-    "\n\nBounds-check the index/range before access."
+  | "Random.normal" | "Random.exponential" | "Random.bernoulli" ->
+    "\n\nGuard the parameter before the call (e.g. clamp `sigma`/`lambda`/`p` to its \
+     valid range) so the refinement precondition provably holds."
+  | "Random.choice" ->
+    "\n\nCheck `List.length(xs) > 0` before calling."
+  | "DateTime.fixed_zone" ->
+    "\n\nGuard `offset_seconds` to the range `-50400..=50400` before calling."
+  | "DateTime.fixed_zone_hm" ->
+    "\n\nGuard `minutes` to the range `0..<60` before calling."
+  | "Stats.mean" | "Stats.min_val" | "Stats.max_val" ->
+    "\n\nCheck `List.length(xs) > 0` before calling."
   | "panic" | "panic_" ->
     "\n\nReturn an error value (`Result`, `Option`) instead of calling `panic`."
   | "todo_" ->
