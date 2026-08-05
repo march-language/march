@@ -652,11 +652,13 @@ function syntaxHL(code, dark) {
     'impl','interface','derive','forge','needs','property']);
   const D = {
     kw:'oklch(74% 0.11 200)', tp:'oklch(82% 0.12 70)', st:'oklch(82% 0.11 200)',
-    nm:'oklch(78% 0.09 265)', cm:'oklch(42% 0.07 215)', op:'oklch(57% 0.09 205)'
+    nm:'oklch(78% 0.09 265)', cm:'oklch(42% 0.07 215)', op:'oklch(57% 0.09 205)',
+    al:'oklch(74% 0.16 55)'
   };
   const L = {
     kw:'oklch(32% 0.11 215)', tp:'oklch(42% 0.12 55)', st:'oklch(28% 0.11 215)',
-    nm:'oklch(36% 0.09 265)', cm:'oklch(62% 0.06 215)', op:'oklch(38% 0.07 215)'
+    nm:'oklch(36% 0.09 265)', cm:'oklch(62% 0.06 215)', op:'oklch(38% 0.07 215)',
+    al:'oklch(54% 0.17 48)'
   };
   const syn = dark ? D : L;
   const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -665,7 +667,9 @@ function syntaxHL(code, dark) {
   while (i < s.length) {
     if (s[i] === '-' && s[i+1] === '-') {
       let end = s.indexOf('\n', i); if (end < 0) end = s.length;
-      res += sp(syn.cm, s.slice(i, end)); i = end; continue;
+      const line = s.slice(i, end);
+      // A `-- !` comment line is an alert callout (e.g. a forge audit catch).
+      res += sp(/^--\s*!/.test(line) ? syn.al : syn.cm, line); i = end; continue;
     }
     if (s[i] === '{' && s[i+1] === '-') {
       let end = s.indexOf('-}', i+2); if (end < 0) end = s.length - 2;
@@ -740,24 +744,22 @@ fn with_db(path : String) : List(String) do
   Db.close(conn2)                -- consumed
   rows
 end` },
-  { label: 'Capabilities', learn: '/docs/capabilities/', code: `-- Capabilities are proof tokens tracked by the type system
-mod Config do
-  needs IO.FileSystem
+  { label: 'Capabilities', learn: '/docs/capability-audit/', code: `-- Every module declares the authority it holds — here, file reads.
+-- The value isn't the label. It's that nothing widens it unseen.
+mod ImageThumb do
+  needs IO.FileRead
 
-  fn read_config(path : String) : String do
-    File.read(path)
+  fn thumbnail(path : String) : Bytes do
+    File.read(path) |> Image.scale(128)
   end
+end
 
-  -- No capabilities needed: always safe, even in pure tests
-  fn transform(s : String) : String do
-    s |> String.trim |> String.to_upper
-  end
-
-  fn main() : Unit do
-    read_config("/etc/march/config.toml")
-    |> transform |> println
-  end
-end` },
+-- A dependency ships an update. Did its authority change?
+--   $ forge audit
+--   ! image-thumb — now ALSO needs: IO.Network
+--   1 dependency is asking for capabilities it did not have.
+--
+-- Not a vuln-database lookup — a diff of what code can touch.` },
   { label: 'Property Tests', learn: '/docs/property-testing/', code: `-- Checked with 100s of randomly generated inputs
 test "reverse is involutive" do
   Check.all(Gen.list(Gen.int(-50, 50)), fn xs ->
