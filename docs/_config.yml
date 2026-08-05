@@ -1,5 +1,5 @@
 title: March Lang
-description: A statically-typed functional language in the ML/Elixir tradition, compiled to native code via LLVM.
+description: A statically-typed, capability-based functional language in the ML/Elixir tradition, with a compile-time effect system and native-code compilation via LLVM.
 baseurl: ""
 url: "https://march-lang.org"
 
