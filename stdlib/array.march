@@ -222,6 +222,15 @@ mod Array do
             if slot == n do
               ascend(TrieBranch(lst_snoc(children, new_path(leaf_values, s - 5))), path)
             else
+              -- `lst_nth(children, n - 1)` cannot panic: a TrieBranch is dense
+              -- and never empty by construction, so `n >= 1` here and `n - 1`
+              -- is always in range. `Array.push` is therefore TOTAL from a
+              -- caller's view, which is why it is deliberately absent from
+              -- `cap no_panic`'s ban list (`panic_surface_stdlib`) even though
+              -- it reaches a panicking private helper — banning it would reject
+              -- correct code. Only `get`/`set`/`pop` panic on a real
+              -- precondition. See specs/progress/2026-08-05-array-pop-not-on-
+              -- no-panic-ban-list.md.
               descend(lst_nth(children, n - 1), s - 5, Cons((children, n - 1), path))
             end
           end

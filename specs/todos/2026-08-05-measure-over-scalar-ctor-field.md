@@ -123,6 +123,27 @@ was in tree). So `Node(n, m) -> n + 0` is equally inert and still draws
 nothing. Tests: `measure-scalar-field-warn` (warn case, two negative controls,
 plus the `0 * n` false-positive regression control).
 
+### The warning's reach is narrower than its justification
+
+Two gaps, both worth closing if this area is revisited. Neither is a bug in the
+warning; both shrink the set of people who will ever see a diagnostic whose
+entire reason for existing is that the failure is otherwise invisible.
+
+- [ ] **`--no-measure-axioms` silences it.** The warning sits inside
+      `check_module`'s `if measure_axioms then begin … end`, alongside the M-b
+      soundness gate. That is the natural place — it is computed from
+      `build_measure_preamble`'s output — but it means the flag that disables
+      *axiomatisation* also disables the notice that a measure can never be
+      axiomatised usefully. Arguably it should be hoisted out of the guard,
+      since the property it reports is a fact about the measure's shape, not
+      about whether axioms were requested this run.
+- [ ] **It never reaches the editor.** `march-lsp` does not link
+      `march_refinecheck` at all, so no refinement diagnostic — this one
+      included — appears as a squiggle. A user writing a measure in an editor
+      sees nothing until they run the compiler. Related to, but broader than,
+      this item; the `cap no_panic` split has the same shape (see
+      `Typecheck.proof_based_panic_surface`).
+
 ## What a fix would look like
 
 Reflect a scalar constructor field CONCRETELY when the actual argument is a

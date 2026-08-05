@@ -584,7 +584,9 @@ be used at all — a **hard compile error** if it isn't. A `@[measure]` is rejec
 
 A measure that is sound but outside what the encoding can model (see
 limitations, below) isn't an error — it simply falls back to weaker, symbolic
-reasoning.
+reasoning. "Weaker" can mean *nothing at all*: a measure whose value is a
+scalar constructor field discharges neither a predicate nor its negation. See
+[Limitations](#limitations) — that case is not always warned about.
 
 ---
 
@@ -1151,6 +1153,29 @@ dependent typing. Know the edges:
   postcondition actually *proved* propagates, so an unprovable one stays legal
   but tells callers nothing. Still silent: mutual recursion, a recursive call
   inside a lambda or behind a nested `match`, and any non-structural recursion.
+- **A measure whose value is a *scalar constructor field* never discharges
+  anything.** A measure that reads a field out of its constructor —
+  `fn length(v) do match v do PVec(n, _, _, _) -> n end end`, the natural way to
+  write `length` for a container that stores its own count — is accepted, passes
+  the soundness gate, and gets a correct axiom, and yet proves nothing in
+  *either* direction. When the checker reflects a constructor at a call site, it
+  replaces every field that is not itself a data type with a fresh unconstrained
+  constant (`reflect_field`): sound for a structurally recursive measure, whose
+  value depends only on tags and sub-measures, and fatal for one whose value
+  *is* the field. So `length(PVec(3, 0, TrieEmpty, Nil))` reaches the solver as
+  an unknown `Int`, and an obviously in-range index is neither proved nor
+  refuted — it is `solver-undecided` and silently accepted. This is why
+  `Array.get`/`set`/`pop` carry no bounds contract today and stay on the
+  `cap no_panic` ban list instead.
+
+  The compiler **warns** at the measure's definition when it sees this, but the
+  warning fires **only on a bare field read** (`-> n`). A body that merely
+  *computes* with the erased field — `-> n + 1`, `-> n * 2` — is equally inert
+  and draws **no warning at all**: the check is deliberately narrow, because a
+  broader one flagged bodies like `-> 0 * n` that mention the field without
+  depending on it, and a false positive is worse. **Silence here does not mean
+  your measure works.** If a measure's value depends on a scalar constructor
+  field in any way, expect it to prove nothing.
 - **A measure over a built-in `List` with a non-scalar element does not
   axiomatise.** `List(Int)` is fine; `List(SomeAdt)` collapses the element to an
   opaque sort and the measure is never usable. A user-defined list type with the

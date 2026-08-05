@@ -973,7 +973,9 @@ mathematical function — the solver trusts it, so a broken one would let it
 
 A measure that is sound but outside what the encoding can model (see
 limitations) isn't an error — it simply falls back to weaker, symbolic
-reasoning.
+reasoning. "Weaker" can mean *nothing at all*: a measure whose value is a
+scalar constructor field discharges neither a predicate nor its negation, and
+that case is not always warned about. See [Limitations](#limitations).
 
 ---
 
@@ -1926,6 +1928,58 @@ edges:
 
   Int-returning postconditions are unaffected: they still go down the Tier 0/1
   path, which this does not touch.
+
+- **A measure whose value is a *scalar constructor field* is INERT — it
+  discharges nothing in either direction.** Established by a feasibility gate on
+  2026-08-05 while attempting a bounds contract for `Array.get`/`set`/`pop`.
+  `Array` stores its own count, so `Array.length` is a single-arm field read:
+
+  ```march
+  @[measure]
+  fn length(v : PVec(a)) : Int do
+    match v do
+    PVec(n, _, _, _) -> n
+    end
+  end
+  ```
+
+  This is accepted with no error and no warning from the soundness gate, is
+  shape-OK for `build_measure_preamble`, and produces a **correct** axiom
+  (`forall ((n Int) …) (= (length (PVec n …)) n)`). It still proves nothing. The
+  cause is upstream of the axioms, in call-site reflection: `reflect_field`
+  recurses into a constructor field only when its sort is a data type other
+  than the opaque `Elem`, and mints a **fresh unconstrained constant** for
+  everything else, on the (until now universally true) assumption that a scalar
+  field is "irrelevant to a structural measure". So
+  `length(PVec(3, 0, TrieEmpty, Cons(x, Nil)))` reaches z3 as
+  `(length (PVec _e3 _e2 TrieEmpty (Cons _e1 Nil)))` — the literal `3` erased —
+  and `1 < _e3` is neither valid nor unsatisfiable. Both directions are
+  `solver-undecided`.
+
+  Note what is **not** the cause, each falsified by a dedicated probe: a
+  single-arm measure is fine (`Box(_, _) -> 3` proves), non-recursion is fine,
+  a constructor whose scalar field the measure does *not* read is fine
+  (`N3(k, rest) -> 1 + size3(rest)` proves), and the syntactic non-negativity
+  classification is irrelevant. The sole discriminator is whether the measure's
+  **value depends on an erased field**.
+
+  A **warning** is emitted at the measure's definition — but only for a **bare
+  field read** (`-> n`). A body that computes with the erased field (`-> n + 0`,
+  `-> n * 2`) is equally inert and warns **not at all**. The predicate is
+  deliberately narrow because the broader "mentions an erased field" version
+  false-positived on `Zleaf(n) -> 0 * n`, whose value does not actually depend
+  on `n`; under-warning is the safe direction, but it means **silence is not
+  evidence that a measure works**.
+
+  Consequence: `Array.get`/`set`/`pop` cannot be given a dischargeable bounds
+  contract today and remain on `cap no_panic`'s syntactic ban list. Fixing this
+  means reflecting a scalar field concretely when the actual argument is a
+  literal (`term_fits_sort` already admits a scalar term at an `SInt`/`SBool`
+  field, so the ill-sorted-VC hazard that motivated the erasure does not apply
+  to that case), keeping the fresh constant only for a non-literal scalar.
+  Because that widens what **every** existing contract can prove, it needs a
+  full stdlib + ecosystem sweep for new false positives, not a "still compiles"
+  check. Tracked in `specs/todos/2026-08-05-measure-over-scalar-ctor-field.md`.
 
 - **The stdlib HAMT (`Map`) is well beyond this.** `stdlib/map.march` stores
   `HEntry(k,v) = HEmpty | HLeaf(Int,k,v) | HBranch(Int, List(HEntry(k,v))) |

@@ -6849,7 +6849,7 @@ let test_cap_no_panic_array_pop_error () =
   let src = {|mod GT14 do
     cap no_panic
     fn f(v) do
-      let (v2, x) = Array.pop(v)
+      let (_, x) = Array.pop(v)
       x
     end
   end|} in
@@ -6870,7 +6870,7 @@ let test_cap_no_panic_array_pop_error () =
 let test_cap_no_panic_array_pop_unscoped_ok () =
   let ctx = typecheck_with_no_panic_passes {|mod GT15 do
     fn f(v) do
-      let (v2, x) = Array.pop(v)
+      let (_, x) = Array.pop(v)
       x
     end
   end|} in
