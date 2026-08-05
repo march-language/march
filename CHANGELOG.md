@@ -136,6 +136,27 @@ git log is authoritative for exact commits.
   **This is a visible change:** a program that prints at the top level without
   `needs IO.Console` now gets the warning it should always have had.
 
+- **`RingBuf` gained a compiled backend.** The `ring_buf_*` builtins existed
+  only in the interpreter, so any program using `RingBuf` failed to link under
+  `march --compile` (`Undefined symbols: _ring_buf_make …`). RingBuf now has a
+  full native backend — a resource-cell-backed circular buffer whose destructor
+  releases live elements on drop — matching the interpreter's semantics for
+  `make`/`push`/`pop`/`get`/`peek_*`/`size`/`cap`/`clear`/`to_list`, including
+  wraparound eviction and element reference counting for heap-typed elements.
+- **`NativeArray.set_int` / `set_float` no longer leak (or churn) a copy per
+  call when the array is uniquely owned.** The C runtime's
+  `native_int_arr_set` / `native_float_arr_set` are passed their array under
+  the owned/consumed convention, but they only ever allocated a fresh backing
+  array, `memcpy`'d, and returned it — without ever releasing the consumed
+  input. A hot loop threading the result forward (last-use, RC=1) leaked one
+  copy per op: a 2M-op `set_int` loop on an 8-element array ramped to ~190 MB
+  RSS (linear in ops) while the same loop without it held ~2.7 MB flat. They
+  now reuse the backing array in place when it is uniquely owned (rc == 1) —
+  O(1) and flat RSS — and preserve copy-on-write (allocate, copy, then release
+  the consumed reference) only when the array is shared (rc > 1), so an aliased
+  array is never mutated out from under its alias. This is the same FBIP
+  in-place-at-unique-ownership story March already applies to ADT reuse.
+  Compiled-only (the interpreter uses a different NativeArray backend).
 
 - **`cap no_panic` no longer rejects a division guarded by a boolean
   condition.** `if p > 0 && d > 0 do n / d else 0 end` was reported as a
