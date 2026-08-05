@@ -1,0 +1,26 @@
+-- Capability unforgeability (R3), the OVER-BREADTH guard (2026-08-05).
+--
+-- Accept companion to reject/t143. The rule is "`Cap` may not appear in the
+-- solved result type of `from_json`", NOT "`from_json` is suspicious in a
+-- module that handles capabilities". This module does both things at once:
+-- it narrows a real capability AND decodes an ordinary `Int`.
+--
+-- The check must read the SOLVED result type and find `Int`. An
+-- implementation that keys off the module's `needs`, off the presence of a
+-- `Cap` anywhere in scope, or off `from_json` appearing near cap code at all
+-- would reject this file.
+--
+-- Note this file passes today, before the check exists — trivially, since
+-- nothing rejects anything yet. That is not the point of it. Its job is to
+-- still pass AFTER Check A lands; read it together with reject/t143, because
+-- an accept-only witness cannot tell a working contract from one that checks
+-- nothing.
+mod OrdinaryDecode do
+  needs IO
+
+  fn main() do
+    let console : Cap(IO.Console) = cap_narrow(root_cap)
+    let n : Int = from_json("1")
+    println(int_to_string(n))
+  end
+end

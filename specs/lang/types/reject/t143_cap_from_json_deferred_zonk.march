@@ -1,0 +1,37 @@
+-- EXPECT-ERROR: `Cap(IO)` cannot be deserialized
+-- Capability unforgeability (R3), THE DECISIVE CASE (2026-08-05).
+--
+-- `from_json` is typed `poly2 (fun a b -> TArrow (a, b))` — fully
+-- unconstrained — so nothing in its type stops it from producing a `Cap`.
+-- Before this check existed the program below typechecked with exit 0,
+-- `--cap-strict` included, fabricating root authority from a string literal.
+--
+-- What makes THIS file the one that matters: `from_json`'s result type is a
+-- bare `TVar` at the application site on line 1 of `main`. It is pinned to
+-- `Cap(IO)` only by the LATER `cap_narrow(x)` on the next line, because
+-- `cap_narrow : Cap(IO) -> Cap(a)` unifies its argument with `Cap(IO)`.
+--
+-- An eager check at the `from_json` call site therefore sees an unsolved
+-- variable and passes — it would report nothing here while still passing
+-- every reject case that writes the annotation inline. That is the same trap
+-- documented for `cap_narrow` at lib/typecheck/typecheck.ml:5490-5496 ("`a`
+-- is pinned by LATER unification"). This file is what forces the check to be
+-- a DEFERRED end-of-module pass that zonks recorded application vars, rather
+-- than an inline test that only appears to work.
+--
+-- `needs IO` is deliberate: it makes the module's declaration broad enough
+-- that the needs-coverage checks stay silent, so a failure here can only be
+-- Check A and never Check B.
+--
+-- Accept companion: accept/t142, `from_json` producing an ordinary type in a
+-- module that also handles capabilities — proving the check reads the solved
+-- result type rather than blanket-rejecting `from_json` in cap-using code.
+mod ZonkForge do
+  needs IO
+
+  fn main() do
+    let x = from_json("{}")
+    let w = cap_narrow(x)
+    println("forged root authority from a string literal")
+  end
+end

@@ -11248,6 +11248,7 @@ let compiler_suites =
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
+      ("cap_unforgeable", Test_cap_unforgeable.tests);
       ( "match_diagnostics",
         [
           Alcotest.test_case "or-pattern binding accepted" `Quick

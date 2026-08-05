@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: `Cap(IO.NetConnect)` used in module `VariantCap` but `IO.NetConnect` is not declared in `needs`
+-- `needs` coverage, VARIANT ARGUMENT position (2026-08-05).
+--
+-- The variant spelling of reject/t148. Separate file because record fields
+-- and variant arguments are distinct arms of `type_def`: a walk wired into
+-- only `TDRecord` still passes t148 while leaving this open.
+mod VariantCap do
+  needs IO.Console
+
+  type Conn = Idle | Live(Cap(IO.NetConnect))
+
+  fn main() do
+    println("a capability this module never declared")
+  end
+end

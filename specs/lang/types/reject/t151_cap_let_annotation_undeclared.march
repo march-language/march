@@ -1,0 +1,30 @@
+-- EXPECT-ERROR: `Cap(IO.FileWrite)` used in module `LetAnnCap` but `IO.FileWrite` is not declared in `needs`
+-- `needs` coverage, LET ANNOTATION position (2026-08-05).
+--
+-- Check 1 read function SIGNATURES. A `let` annotation inside a body is not
+-- part of the signature, so `bind_ty` was never walked and this typechecked
+-- with exit 0 — `--cap-strict` included — while declaring only `IO.Console`.
+--
+-- The route matters, and it is not exotic. `root_cap : Cap(IO)` is AMBIENT:
+-- any module can name it, whatever it declared. So a module needing only
+-- console can take the root, narrow it to file-write, and bind the result —
+-- all without ever putting a capability in a signature, which is the only
+-- place the old walk looked. The module ends up operating a rung above its
+-- own declaration, silently, which is the one thing the ceiling is supposed
+-- to be unable to miss.
+--
+-- (That `root_cap` is reachable at all is a separate and larger question —
+-- requirement R2, "a single root, minted at the boundary", in
+-- specs/2026-08-04-provable-sandbox-design.md. This file does not close that;
+-- it makes the resulting capability visible to `needs`.)
+--
+-- Companion: reject/t152 is the `EAnnot` spelling — a distinct AST node.
+-- Accept companion: accept/t145.
+mod LetAnnCap do
+  needs IO.Console
+
+  fn main() do
+    let w : Cap(IO.FileWrite) = cap_narrow(root_cap)
+    println("narrowed a capability this module never declared")
+  end
+end

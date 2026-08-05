@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: `Cap(IO.FileWrite)` used in module `FieldCap` but `IO.FileWrite` is not declared in `needs`
+-- `needs` coverage, TYPE DECLARATION positions (2026-08-05).
+--
+-- Check 1's decl walk visited `DFn` signatures, actor handler signatures and
+-- extern cap types, then ended in a `| _ -> ()` wildcard — so a capability
+-- named in a type DECLARATION was never looked at. This program typechecked
+-- with exit 0, `--cap-strict` included, while declaring only `IO.Console`.
+--
+-- The module cannot OBTAIN a `Cap(IO.FileWrite)` by declaring this field. It
+-- can hold one and pass one, which is exactly what the ceiling exists to make
+-- visible, and it is already how the identical capability is treated when it
+-- appears in a function signature. Unlike the deserialization hole (Check A),
+-- reaching this one needs no unimplemented feature.
+--
+-- Accept companion: accept/t144, the same declarations under a covering
+-- `needs`, which must typecheck AND raise no "declared but never used"
+-- warning — these positions count as uses.
+mod FieldCap do
+  needs IO.Console
+
+  type Handle = { id : Int, tok : Cap(IO.FileWrite) }
+
+  fn main() do
+    println("a capability this module never declared")
+  end
+end

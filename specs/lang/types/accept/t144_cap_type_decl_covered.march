@@ -1,0 +1,29 @@
+-- `needs` coverage, TYPE DECLARATION positions, COVERED (2026-08-05).
+--
+-- Accept companion to reject/t148, t149 and t150: the same three shapes — a
+-- record field, a variant argument, and a capability nested inside a
+-- container — under a `needs` that covers them. All must typecheck.
+--
+-- This file carries a second, easily-missed requirement that the corpus
+-- runner cannot express (it only checks exit status): these positions must
+-- count as USES, so `needs` must not then report "declared but never used".
+-- Otherwise fixing the error from t148 just trades it for a warning and the
+-- check reads as broken. That silence is asserted in test_caps.ml; this file
+-- pins the accept half.
+--
+-- `IO.FileSystem` covering both `IO.FileRead` and `IO.FileWrite` is
+-- deliberate: it also proves lattice subsumption reaches the new positions
+-- rather than requiring an exact string match on the declared capability.
+mod CoveredDecls do
+  needs IO.Console
+  needs IO.FileSystem
+  needs IO.NetConnect
+
+  type Handle = { id : Int, tok : Cap(IO.FileWrite) }
+  type Conn = Idle | Live(Cap(IO.NetConnect))
+  type Bag = { label : String, items : List(Cap(IO.FileRead)) }
+
+  fn main() do
+    println("every capability named here is declared")
+  end
+end

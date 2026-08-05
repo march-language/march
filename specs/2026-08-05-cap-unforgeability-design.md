@@ -1,6 +1,20 @@
 # Capability unforgeability (R3), and the `needs` coverage gap it uncovered
 
-Status: **design, approved, not implemented.**
+Status: **implemented 2026-08-05.** See
+`specs/progress/2026-08-05-cap-unforgeability.md` for what actually landed.
+
+Three claims below were wrong and are corrected in place, marked
+**[corrected]** — the design said to cover a `let`-annotation position, an
+`EAnnot` position and an alias right-hand side, and predicted the deferred
+sweep would be sufficient on its own:
+
+1. `EAnnot` and alias-RHS have no source spelling, so neither has a reject
+   witness; both are covered defensively.
+2. The deferred sweep alone was **not** sufficient — the value restriction was
+   also required, or `let x = from_json(s)` generalizes and the recorded node
+   never gets pinned.
+3. The migration-cost estimate for Check B named three affected test sites; the
+   real number was zero, because all three already sat under a covering `needs`.
 
 Implements **R3** and pins **R4** from
 `specs/2026-08-04-provable-sandbox-design.md`, which names R3 as the only item
@@ -123,6 +137,9 @@ affected sites, all in tests and all the same shape —
 any does not, that is Check B finding a real gap on its first run, and the fix
 is to add the declaration, not to weaken the check.
 
+**[corrected]** The real cost was zero: all three already sat under a covering
+`needs`, and all four test suites passed unchanged.
+
 **Two implementation sites, and they differ.**
 
 *Derive* is eager. `derive Json for T` walks `T`'s declaration directly; no
@@ -140,6 +157,16 @@ application's relevant type var in an env-side list — mirroring the existing
 `mint_cap_sites` mechanism — and runs a **deferred pass at end-of-module
 checking**, zonking each recorded var then.
 
+**[corrected]** Deferring is necessary but was *not* sufficient. Even with the
+sweep in place, `let x = from_json(s)` let-generalizes `x` to `∀b. b`: every
+use instantiates a fresh var pinned to that use's type while the single
+recorded node stays unbound forever, so the sweep still read `TVar` and
+reported nothing. The fix is `demote_to_monomorphic` on the instantiated arrow,
+exactly as `cap_narrow` and `mint_cap` already do — that function's docstring
+had already described this failure ("REOPENING the forge in every
+let-/generic-flow position"). The deferred-zonk test caught it after the other
+four reject cases were green.
+
 ### Check B — type declarations and `let` annotations are cap uses
 
 Extend Check 1 past function signatures to:
@@ -147,6 +174,19 @@ Extend Check 1 past function signatures to:
 - `DType` / `DAlwaysLinearType`: record fields, variant arguments, alias RHS,
 - `bind_ty` on `let` bindings,
 - `EAnnot` in expression position.
+
+**[corrected]** Two of these are defensive only — they are walked, but no
+source program can reach them, so neither has a reject witness:
+
+- **alias RHS**: `type T = Cap(IO.FileRead)` parses as a VARIANT declaring a
+  constructor named `Cap` (verified — `T` does not unify with `Cap(_)`), and
+  `type T = (Cap(IO.FileRead), Int)` does not parse at all.
+- **`EAnnot`**: the parser never produces one. Desugar synthesizes the sole
+  instance, a hardcoded `SupervisorSpec` on an `app` block's spec field.
+
+The reject witness for the container case (`List(Cap(X))`) took the alias
+slot instead, and is better coverage: it is the shape a real evasion takes,
+and it fails a walk that does not recurse through type arguments.
 
 `type Handle = { c : Cap(IO.FileWrite) }` under `needs IO.Console` becomes an
 error. The module cannot *obtain* a `FileWrite` by declaring that field, but it

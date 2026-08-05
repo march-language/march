@@ -92,7 +92,30 @@ caps and wrong for IO: it would let any module mint what it needs. For IO the
 minting surface must be exactly one place, and that place must not be
 expressible in March.
 
-### R3. Unforgeability, checked
+### R3. Unforgeability, checked — **SHIPPED 2026-08-05**
+
+Implemented; see `specs/progress/2026-08-05-cap-unforgeability.md` and
+`specs/2026-08-05-cap-unforgeability-design.md`. Two corrections to what this
+section says:
+
+- it was **two** vectors, not four. March has no `unsafe_cast`/`transmute`/
+  coercion builtin and no default-value construction, so those two bullets had
+  nothing to close. The live hole was `to_json`/`from_json`/`from_json_events`
+  — the only three builtins typed `poly2 (fun a b -> TArrow (a, b))` — plus
+  `derive Json` over a cap-bearing type.
+- it also uncovered a gap this section does not mention: `needs` was checked
+  against function SIGNATURES only, so a capability named in a type
+  declaration (`type Handle = { tok : Cap(IO.FileWrite) }`) or a `let`
+  annotation escaped it entirely, `--cap-strict` included. Unlike the
+  deserialization hole, that one needed no unimplemented feature to reach.
+
+"a walk over type declarations and derive lists" understated it in one place:
+the call-site half cannot be a walk at all. `from_json`'s result type is
+usually an unsolved variable at the application site, so the check has to be a
+deferred end-of-module sweep *plus* a value restriction, or it silently checks
+nothing.
+
+Stage 1 of §3 is therefore earned. R4 was pinned alongside it.
 
 A capability must not be constructible except by receipt. Concretely, `Cap(X)`
 must be excluded from:
@@ -106,13 +129,24 @@ This is a real check, not a proof obligation — a walk over type declarations
 and derive lists. It is cheap and should be built *before* the proof work,
 because it is where a practical break would come from.
 
-### R4. Monotone attenuation
+### R4. Monotone attenuation — **PINNED 2026-08-05**
 
 `cap_narrow` must only move down the lattice. Provable from `Cap_lattice`, but
 it must be *stated and pinned*: the subsumption direction was written
-backwards twice during the sandbox work, and the second time it shipped. A
-property test over the lattice (`∀ a b. narrow a b ⟹ subsumes a b`) belongs
-next to the existing `test_cap_scope.ml` subsumption tests.
+backwards twice during the sandbox work, and the second time it shipped.
+
+Pinned in `test/test_cap_unforgeable.ml`. No production change was needed —
+attenuation was already monotone, measured both directions.
+
+One correction to the plan above: **a property test over the lattice is the
+wrong instrument.** The lattice is not what enforces this at run time.
+`cap_narrow` is typed so that narrowing to `Cap(IO.FileWrite)` demands the
+*parent* `Cap(IO)` at its argument, so the direction is enforced structurally
+through unification, not by a lattice call — and `march_cap_narrow` in the C
+runtime is literally `return cap;`, deliberate erasure, because the gating is
+entirely compile-time. A property test over `Cap_lattice` would pass whether
+or not `cap_narrow` consulted it. What pins the behaviour is an accept/reject
+pair of real programs over both directions.
 
 ### R5. Effect polymorphism that survives higher-order code
 
