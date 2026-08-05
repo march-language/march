@@ -4161,3 +4161,62 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/preempt_starvation.expected native_preempt_starvation.out)))
+
+; ── Regression: ~H must not misread a non-IOList ADT as an IOList ─────────
+; Constructor tags are numbered per type, so any user ADT collided with
+; IOList's Empty|Str|Segments tags in march_html_auto_escape's polymorphic
+; fallback: tag-0 ADTs rendered empty, tag-1 ADTs emitted their String field
+; raw and unescaped (XSS), tag-2 ADTs walked field 0 as a cons list (SIGSEGV).
+; The interpreter was always correct, so .expected is the interpreter's output
+; and this rule is an interpreter/compiled parity check.
+(rule
+ (targets native_h_sigil_adt_interp native_h_sigil_adt_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/h_sigil_adt_interp.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_h_sigil_adt_interp
+        native/h_sigil_adt_interp.march)
+   (with-stdout-to native_h_sigil_adt_interp.out
+        (system "./native_h_sigil_adt_interp")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_sigil_adt_interp.expected native_h_sigil_adt_interp.out)))
+
+; ── Regression: Html.raw dropped under a `Safe` short-name collision ──────
+; llvm_emit's verbatim-insertion arm declines to fire when another module also
+; declares a type named `Safe`; that fell through to the IOList misread and
+; rendered `<p></p>`, silently discarding the wrapped markup. Separate file
+; from h_sigil_adt_interp because declaring Other.Safe makes every `Safe` in
+; the program collide.
+(rule
+ (targets native_h_sigil_safe_collision native_h_sigil_safe_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/h_sigil_safe_collision.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_h_sigil_safe_collision
+        native/h_sigil_safe_collision.march)
+   (with-stdout-to native_h_sigil_safe_collision.out
+        (system "./native_h_sigil_safe_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_sigil_safe_collision.expected native_h_sigil_safe_collision.out)))
