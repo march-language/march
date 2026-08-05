@@ -23,6 +23,14 @@ if [ ! -x "$bin" ]; then
   exit 2
 fi
 
+if [ "$(uname -s)" = "Darwin" ] && pgrep -qf 'com\.crowdstrike\.falcon\.Agent' 2>/dev/null; then
+  echo "SKIP: CrowdStrike Falcon (EndpointSecurity system extension) detected on this Mac." >&2
+  echo "Falcon's syscall interception hangs ASAN's shadow-memory mmap setup on every binary," >&2
+  echo "even a no-op 'printf' program — this is environmental, not a golden regression." >&2
+  echo "Run this gate on a host without Falcon (e.g. CI) instead." >&2
+  exit 0
+fi
+
 export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"
 export MARCH_STDLIB="${MARCH_STDLIB:-$root/stdlib}"
 
