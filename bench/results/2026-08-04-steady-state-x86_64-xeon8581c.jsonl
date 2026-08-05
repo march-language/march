@@ -1,0 +1,5 @@
+{"meta":true,"date":"2026-08-04T21:35:06Z","host":"Linux 6.17.0-1021-gcp x86_64","cpu":"INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz","cores":4,"ops":2000000,"work":512,"sibwork":28,"load":"0.52, 0.15, 0.05"}
+{"scenario":"steady_state_ring","siblings":0,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":8192,"p999_ns":16384,"min_ns":3099,"max_ns":513315,"rss_kb_min":4932,"rss_kb_max":4932,"wall_s":7.24}
+{"scenario":"steady_state_ring","siblings":4,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":4096,"p999_ns":32768,"min_ns":3099,"max_ns":4930734,"rss_kb_min":4944,"rss_kb_max":4956,"wall_s":9.34}
+{"scenario":"steady_state_ring","siblings":8,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":4096,"p999_ns":4194304,"min_ns":3099,"max_ns":9648084,"rss_kb_min":5004,"rss_kb_max":5016,"wall_s":16.61}
+{"scenario":"steady_state_ring","siblings":16,"ops":2000000,"work":512,"p50_ns":4096,"p90_ns":4096,"p99_ns":4096,"p999_ns":8388608,"min_ns":3099,"max_ns":17668724,"rss_kb_min":5012,"rss_kb_max":5012,"wall_s":30.77}
