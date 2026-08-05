@@ -306,7 +306,9 @@ A module with `cap no_panic` must not contain any expression that can panic at r
    |---|---|---|
    | `bin/main.ml` compile / `--check`, and `run_test_cmd` (`march test`) | yes | checked by proof |
    | `bin/main.ml` `run_check_cmd` (`march check`, `march caps`) | no — package-level, typecheck-only, seeded from a cached stdlib env | banned by name, with transitive blame (pre-2026-08-05 behavior) |
-   | the LSP (`lsp/lib`) | no — it does not link `march_refinecheck` | same as above. Note the LSP's `Analysis` entry point goes through `Typecheck.check_module_with_env`, which does not call `check_no_panic_module` at all, so it reports no panic-surface diagnostics for *any* name, `panic` included |
+   | the LSP (`lsp/lib`) | no — it does not link `march_refinecheck` | same as above |
+
+   The LSP's coverage is uneven in a way worth knowing before reading too much into an absent squiggle. `Analysis` goes through `Typecheck.check_module_with_env`, which — unlike `check_module_core` — does **not** call `check_no_panic_module` on the **entry** module, so a top-level `cap no_panic` module gets no panic-surface diagnostic from the editor for *any* name, `panic` included. A **nested** `mod` does: `check_decl`'s `DMod` branch calls `check_no_panic_module` on the inner declarations. So editor squiggles for the contracted names exist for nested modules only, and it is the `proof_based_panic_surface` default above that keeps them there — the LSP has no verdict index and so must ban by name. Pinned by the `cap no_panic diagnostics` group in `lsp/test/test_lsp.ml`, whose fixtures are nested for exactly this reason.
 
    The flag **defaults to false** (ban by name) and the two proof-capable paths opt in, so a pipeline that forgets to opt in gets the conservative answer. `cap no_panic` is a guarantee, so a checker with no verdict index must reject rather than stay silent. The visible consequence: `march check` reports a guarded `List.tail` that `march --check` accepts. That is the old behavior preserved, not a new restriction.
 

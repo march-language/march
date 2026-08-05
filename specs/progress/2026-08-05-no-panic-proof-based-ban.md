@@ -233,16 +233,25 @@ Fix: `check_no_panic_module`'s `local_fns` excludes `panic_surface_contracted`.
 Sound in both modes — with the flag false those names are direct-banned and the
 transitive path is never needed; with it true, the proof pass owns the decision.
 
-### The LSP had nothing to lose
+### The LSP: nested modules DID lose diagnostics, top-level ones never had any
 
-Also measured: `lsp/lib/analysis.ml` goes through
-`Typecheck.check_module_with_env_full`, which — unlike `check_module_core` —
-never calls `check_no_panic_module`. `panic` inside a `cap no_panic` module
-produces no LSP diagnostic either, and `panic` is untouched by this task. So no
-editor squiggle was lost. `lsp/test/test_lsp.ml` now pins the *invariant*
-(a contracted name is reported exactly when `panic_` is) plus a
-not-vacuous control, so the day the LSP is wired to the panic surface, leaving
-the contracted names out fails a test.
+`lsp/lib/analysis.ml` goes through `Typecheck.check_module_with_env`, which —
+unlike `check_module_core` — never calls `check_no_panic_module` on the ENTRY
+module. So a top-level `cap no_panic` module gets no editor squiggle for any
+name, `panic_` included.
+
+A NESTED `mod` is different: `check_decl`'s `DMod` branch does call
+`check_no_panic_module` on the inner decls. Nested modules therefore genuinely
+lost the contracted names' diagnostics when the syntactic ban was narrowed, and
+genuinely regain them from `proof_based_panic_surface` defaulting to false. (A
+first pass adjudicated this as "nothing was lost" on the strength of a top-level
+probe; that conclusion was right only for top-level modules and is corrected
+here and in `specs/lang/capabilities.md`.)
+
+`lsp/test/test_lsp.ml`'s `cap no_panic diagnostics` group pins it with NESTED
+fixtures — the only shape where the assertion can fail — and asserts first that
+the reference case actually fires (`panic_` IS reported), then that a qualified
+and a bare contracted name are reported exactly when it is.
 
 ### One error per call site (documented behavior change)
 
@@ -256,3 +265,25 @@ rejected.
 typechecker's `env.current_module` and this pass's AST `DMod` name are both the
 bare module name, and a nested-module fixture prints `` `mod Inner` `` from
 either path.
+
+
+## Review round 3 (2026-08-05): three Minor closures
+
+- **The LSP test group was vacuous.** Its fixtures were top-level modules, for
+  which the LSP emits no panic-surface diagnostic at all, so the
+  `reports panic_ = reports List.tail` equality held `false = false` regardless
+  of the ban lists. Rewritten with NESTED fixtures (`mod Outer do mod Inner do
+  cap no_panic … end end`), plus a leading assertion that the reference case
+  fires. Load-bearing: dropping `panic_surface_contracted` from
+  `is_direct_panic_site` while keeping `panic_` makes it fail
+  (`Expected true, Received false`).
+- **The doc sentence was false.** `specs/lang/capabilities.md` claimed the LSP
+  reports no panic-surface diagnostics "for *any* name". True only for the entry
+  module. Replaced with the nested-vs-top-level distinction; `docs/capabilities.md`
+  gained the user-facing version ("trust `march --check`, not the squiggle").
+- **Flag mutations are now `Fun.protect`ed** in `test/test_compiler.ml`
+  (`typecheck_proof_mode`, `typecheck_with_no_panic_passes`) and
+  `test/test_refinecheck.ml` (`no_panic_errors`). A bare reset would leak `true`
+  past an exception into the `no-panic-syntactic-fallback` group, whose whole
+  subject is the false default — weakening those assertions instead of failing
+  them.

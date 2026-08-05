@@ -6378,10 +6378,15 @@ let typecheck_with_divsafety src =
    test_refinecheck.ml's `no-panic-by-proof` group). *)
 let typecheck_proof_mode src =
   let m = parse_and_desugar src in
+  (* [Fun.protect]: the flag is process-global and defaults to FALSE for
+     safety, so an exception escaping [check_module] with a bare reset would
+     leak `true` into every later case in this binary — silently WEAKENING the
+     default-mode assertions instead of failing them. *)
   March_typecheck.Typecheck.proof_based_panic_surface := true;
-  let (errors, _) = March_typecheck.Typecheck.check_module m in
-  March_typecheck.Typecheck.proof_based_panic_surface := false;
-  errors
+  Fun.protect
+    ~finally:(fun () ->
+      March_typecheck.Typecheck.proof_based_panic_surface := false)
+    (fun () -> fst (March_typecheck.Typecheck.check_module m))
 
 let typecheck_with_no_panic_passes src =
   let m = parse_and_desugar src in
@@ -6390,12 +6395,16 @@ let typecheck_with_no_panic_passes src =
      so a later case using plain [typecheck] still sees the default (the
      `march check` / LSP mode). *)
   March_typecheck.Typecheck.proof_based_panic_surface := true;
-  let (errors, _) = March_typecheck.Typecheck.check_module m in
-  March_refinecheck.Refine_check.check_module errors m;
-  March_refinecheck.Division_safety.check_module errors m;
-  March_refinecheck.Panic_surface_by_proof.check_module errors m;
-  March_typecheck.Typecheck.proof_based_panic_surface := false;
-  errors
+  (* See [typecheck_proof_mode] for why this is [Fun.protect]ed. *)
+  Fun.protect
+    ~finally:(fun () ->
+      March_typecheck.Typecheck.proof_based_panic_surface := false)
+    (fun () ->
+      let (errors, _) = March_typecheck.Typecheck.check_module m in
+      March_refinecheck.Refine_check.check_module errors m;
+      March_refinecheck.Division_safety.check_module errors m;
+      March_refinecheck.Panic_surface_by_proof.check_module errors m;
+      errors)
 
 let test_cap_no_panic_safe_no_error () =
   let ctx = typecheck_with_divsafety {|mod Safe do

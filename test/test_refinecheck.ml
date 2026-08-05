@@ -8387,13 +8387,25 @@ let no_panic_errors (src : string) : string list =
      typechecker to leave the contracted names alone.  Set here rather than
      globally so the [no-panic-syntactic-fallback] group below can exercise the
      OTHER mode (`march check` / the LSP) in the same process. *)
+  (* [Fun.protect]: the flag is process-global and defaults to FALSE for safety.
+     An exception escaping any of these passes with a bare reset would leak
+     `true` into every later case in this binary — including the
+     [no-panic-syntactic-fallback] group below, whose entire subject is that
+     default.  That would WEAKEN those assertions rather than fail them, which
+     is the worst failure shape a fail-closed default can have. *)
   March_typecheck.Typecheck.proof_based_panic_surface := true;
-  let errors, _ = March_typecheck.Typecheck.check_module m in
-  March_refinecheck.Refine_check.check_module
-    ~stdlib_files:[ list_path; prelude_path ] errors m;
-  March_refinecheck.Division_safety.check_module errors m;
-  March_refinecheck.Panic_surface_by_proof.check_module errors m;
-  March_typecheck.Typecheck.proof_based_panic_surface := false;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
   (* Only diagnostics pointing at the FIXTURE, mirroring bin/main.ml's
      [is_user_file].  Prelude is unwrapped into this module, so its own
      `fn tail`/`head`/`last`/`unwrap`/`expect` are decls under check and report

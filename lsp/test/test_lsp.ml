@@ -5411,22 +5411,34 @@ end|} in
 
 (* ── `cap no_panic` and the EDITOR ───────────────────────────────────────
    The LSP links march_typecheck and never march_refinecheck, so it has no
-   verdict index and cannot run the proof-based panic-surface pass that Task 3
+   verdict index and cannot run the proof-based panic-surface pass Task 3
    (2026-08-05) introduced for the contracted names (`List.tail`, `unwrap`,
-   `Stats.mean`, …).  The obvious worry is that those names lost their editor
-   squiggle with nothing replacing them.
+   `Stats.mean`, …).  The worry is that those names lost their editor squiggle
+   with nothing replacing them.
 
-   Measured: they did not, because the LSP never had one.  `analysis.ml` goes
-   through [Typecheck.check_module_with_env_full], which — unlike
-   [check_module_core], the path `march --check` and `march check` use — does
-   NOT call [check_no_panic_module] at all.  `panic` inside a `cap no_panic`
-   module produces no LSP diagnostic either, and `panic` is untouched by Task 3.
+   Whether they could depends on where the module sits, which is why every
+   fixture below is NESTED:
 
-   So what these cases pin is the INVARIANT, not today's emptiness: whatever
-   the LSP reports for the unconditionally-banned `panic`, it must also report
-   for a contracted name. Written as an equality so it keeps its meaning if the
-   LSP is later wired to the panic surface — at which point a contracted name
-   left out would make the editor silently more permissive than the compiler. *)
+   - a TOP-LEVEL module gets no panic-surface diagnostic from the LSP at all.
+     `analysis.ml` goes through [Typecheck.check_module_with_env], which — unlike
+     [check_module_core], the path `march --check`/`march check` use — never
+     calls [check_no_panic_module] for the entry module.  `panic_` produces
+     nothing there either, so a top-level fixture asserts nothing: the equality
+     below would hold `false = false` no matter what the ban lists said.
+   - a NESTED `mod` DOES get one: [check_decl]'s [A.DMod] branch calls
+     [check_no_panic_module] on the inner decls (typecheck.ml, search
+     `if inner_env.no_panic_mod`).  So nested modules really did lose these
+     diagnostics when the contracted names left the syntactic ban, and really do
+     get them back from [Typecheck.proof_based_panic_surface] defaulting to
+     false.  That is the only path where this test can fail, so it is the only
+     path worth testing.
+
+   Asserted as an EQUALITY against the unconditionally-banned `panic_` rather
+   than as "reports something": if the LSP is ever wired to the proof-based
+   pass, or the entry module ever starts being checked, the right answer is
+   still "whatever `panic_` gets, a contracted name gets", and leaving a
+   contracted name out would make the editor silently more permissive than the
+   compiler. *)
 let no_panic_diags src =
   let a = analyse src in
   let has hay needle =
@@ -5441,26 +5453,32 @@ let no_panic_diags src =
       | `MarkupContent mc -> has mc.Lsp.Types.MarkupContent.value "which can panic")
     a.An.diagnostics
 
-let np_panic_src =
-  "mod NPa do\n\
-  \  cap no_panic\n\
-  \  fn f(a : Int) : Int do panic_(\"x\") end\n\
-   end"
+let nested_np name body =
+  Printf.sprintf
+    "mod Outer do\n\
+    \  mod %s do\n\
+    \    cap no_panic\n\
+    \    %s\n\
+    \  end\n\
+    \  fn main() : Int do 0 end\n\
+     end" name body
+
+let np_panic_src = nested_np "NPa" "fn f(a : Int) : Int do panic_(\"x\") end"
 
 let np_qualified_src =
-  "mod NPb do\n\
-  \  cap no_panic\n\
-  \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
-   end"
+  nested_np "NPb" "fn f(xs : List(Int)) : List(Int) do List.tail(xs) end"
 
-let np_bare_src =
-  "mod NPc do\n\
-  \  cap no_panic\n\
-  \  fn f(o : Option(Int)) : Int do unwrap(o) end\n\
-   end"
+let np_bare_src = nested_np "NPc" "fn f(o : Option(Int)) : Int do unwrap(o) end"
 
 let test_lsp_no_panic_contracted_matches_panic () =
   let reports src = no_panic_diags src <> [] in
+  (* NOT VACUOUS: the reference side must actually fire, or the two equalities
+     below hold trivially.  This is the assertion the previous revision of this
+     group was missing — its fixtures were top-level, so nothing ever fired and
+     `false = false` passed regardless of the ban lists. *)
+  Alcotest.(check bool)
+    "the reference case fires: a nested `panic_` IS reported by the LSP"
+    true (reports np_panic_src);
   Alcotest.(check bool)
     "a qualified contracted name is reported exactly when `panic_` is"
     (reports np_panic_src) (reports np_qualified_src);
@@ -5468,19 +5486,11 @@ let test_lsp_no_panic_contracted_matches_panic () =
     "a bare contracted name is reported exactly when `panic_` is"
     (reports np_panic_src) (reports np_bare_src)
 
-let test_lsp_no_panic_filter_is_not_vacuous () =
-  (* Without this the equality above holds for a filter that matches nothing
-     ever — including one looking for a message string that no longer exists.
-     The compiler's own text is the reference, so assert the filter finds it
-     when handed that exact text. *)
-  let has hay needle =
-    let n = String.length needle and h = String.length hay in
-    let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
-    n = 0 || at 0
-  in
-  Alcotest.(check bool) "the needle matches the compiler's wording" true
-    (has "`f` in `mod M` (declared `cap no_panic`) calls `List.tail`, \
-          which can panic." "which can panic")
+let test_lsp_no_panic_clean_module_silent () =
+  (* REJECT control: the filter is not matching every nested `cap no_panic`
+     module regardless of content. *)
+  Alcotest.(check bool) "a safe nested cap no_panic module is silent" true
+    (no_panic_diags (nested_np "NPOk" "fn f(a : Int) : Int do a + 1 end") = [])
 
 let test_project_diagnostics () =
   let good = "mod A do\n  fn f() : Int do 1 end\nend" in
@@ -6594,10 +6604,10 @@ let () =
       "per-file diagnostics across the workspace", `Quick, test_project_diagnostics;
     ];
     "cap no_panic diagnostics", [
-      "a contracted name is reported exactly when `panic_` is", `Quick,
+      "a nested contracted name is reported exactly when `panic_` is", `Quick,
         test_lsp_no_panic_contracted_matches_panic;
-      "the diagnostic filter is not vacuous", `Quick,
-        test_lsp_no_panic_filter_is_not_vacuous;
+      "a safe nested cap no_panic module is silent", `Quick,
+        test_lsp_no_panic_clean_module_silent;
     ];
     "refactor extras", [
       "generate doc comment", `Quick, test_generate_doc_comment;
