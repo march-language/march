@@ -5504,6 +5504,141 @@ void *native_float_arr_filter_mask(void *arr, void *mask) {
     return out;
 }
 
+/* ── RingBuf: mutable fixed-capacity circular buffer ──────────────────────
+ * Compiled backend for stdlib/ring_buf.march.  Mirrors the interpreter
+ * (lib/eval/eval.ml ring_create/ring_push/ring_get/ring_pop_oldest).  RingBuf
+ * is a single-owner primitive (the typechecker rejects it in send() payloads),
+ * so there is no cross-heap-copy or concurrent-alias concern.
+ *
+ * A RingBuf(a) value is a resource cell (MARCH_RESOURCE_TAG, 40-byte layout
+ *   [rc@0][tag@8][pad@12][native_ptr@16][dtor@24][type_id@32])
+ * whose native_ptr points at a separately-calloc'd backing store and whose
+ * dtor (march_ring_dtor) decrefs any live elements and frees the store when the
+ * cell's refcount hits 0 — so dropping the buffer releases its contents.  The
+ * backing store is deliberately NOT march_alloc'd: it is freed manually by the
+ * dtor, so keeping it off the RC / live-alloc ledger stays symmetric.
+ *
+ * Elements are stored as uniform march_value words (heap ptr as-is, Int as
+ * (n<<1)|1).  march_incrc/march_decrc are IS_HEAP_PTR-guarded, so immediates
+ * are refcount-free.  Ownership discipline (mirrors NativeArray's element RC):
+ *   - push transfers one reference into a slot (owned arg, no incref);
+ *     overwriting a full slot decrefs the displaced oldest element.
+ *   - pop moves a reference out (slot cleared, no decref).
+ *   - get / peek / to_list alias a COPY out (march_incrc first — the buffer
+ *     keeps its own reference).
+ *   - the dtor decrefs every still-occupied slot.
+ * clear only resets the cursors (matches the interpreter: the backing array is
+ * not zeroed), so its stale references are released later by overwrite or drop.
+ *
+ * Backing store: { int64 cap, head, size; int64 slots[cap] }.  head = next
+ * write position; the logical index convention (0 = oldest) matches the March
+ * API.  Occupancy is driven entirely by head/size, never by slot nullness. */
+typedef struct { int64_t cap; int64_t head; int64_t size; int64_t slots[]; } march_ring;
+
+static void march_ring_dtor(void *p) {
+    march_ring *r = (march_ring *)p;
+    if (!r) return;
+    for (int64_t i = 0; i < r->cap; i++)
+        if (r->slots[i]) march_decrc((void *)(uintptr_t)r->slots[i]);
+    free(r);
+}
+
+static inline march_ring *ring_of(void *cell) {
+    return (march_ring *)*(void **)((char *)cell + 16);
+}
+
+/* Physical slot index for logical position [i] (0 = oldest). Caller guarantees
+ * 0 <= i < size. Oldest lives at head-size; C's signed % can go negative, so
+ * normalise with (+cap)%cap. */
+static inline int64_t ring_slot_idx(march_ring *r, int64_t i) {
+    return (((r->head - r->size + i) % r->cap) + r->cap) % r->cap;
+}
+
+void *ring_buf_make(int64_t cap) {
+    if (cap <= 0) {
+        fprintf(stderr, "march: ring_buf_make: capacity must be > 0, got %lld\n",
+                (long long)cap);
+        exit(1);
+    }
+    march_ring *r = (march_ring *)calloc(1, sizeof(march_ring) + (size_t)cap * 8);
+    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
+    r->cap = cap; r->head = 0; r->size = 0;
+    void *cell = march_alloc(40);
+    ((march_hdr *)cell)->tag = MARCH_RESOURCE_TAG;
+    *(void **)((char *)cell + 16) = r;
+    *(void (**)(void *))((char *)cell + 24) = march_ring_dtor;
+    /* type_id@32 stays 0; ring cells never go through march_resource_get. */
+    return cell;
+}
+
+/* push(rb, x): x arrives as a uniform march_value word. Owned — stored without
+ * an incref. Overwriting a full slot decrefs the displaced oldest element. */
+void ring_buf_push(void *cell, void *x) {
+    march_ring *r = ring_of(cell);
+    int64_t old = r->slots[r->head];
+    if (old) march_decrc((void *)(uintptr_t)old);
+    r->slots[r->head] = (int64_t)(uintptr_t)x;
+    r->head = (r->head + 1) % r->cap;
+    if (r->size < r->cap) r->size++;
+}
+
+/* pop(rb): remove and return the oldest element as Option(a) (niche: None=0,
+ * Some(v)=v). Ownership moves to the caller; the slot is cleared without a
+ * decref. */
+void *ring_buf_pop(void *cell) {
+    march_ring *r = ring_of(cell);
+    if (r->size == 0) return (void *)0;
+    int64_t idx = ring_slot_idx(r, 0);
+    void *v = (void *)(uintptr_t)r->slots[idx];
+    r->slots[idx] = 0;
+    r->size--;
+    return v;
+}
+
+/* get(rb, i): element at logical index i (0 = oldest) as Option(a). The buffer
+ * keeps its reference, so the aliased-out copy is incref'd. */
+void *ring_buf_get(void *cell, int64_t i) {
+    march_ring *r = ring_of(cell);
+    if (i < 0 || i >= r->size) return (void *)0;
+    void *v = (void *)(uintptr_t)r->slots[ring_slot_idx(r, i)];
+    march_incrc(v);
+    return v;
+}
+
+void *ring_buf_peek_oldest(void *cell) {
+    return ring_buf_get(cell, 0);
+}
+
+void *ring_buf_peek_newest(void *cell) {
+    march_ring *r = ring_of(cell);
+    return ring_buf_get(cell, r->size - 1);
+}
+
+int64_t ring_buf_size(void *cell) { return ring_of(cell)->size; }
+int64_t ring_buf_cap(void *cell)  { return ring_of(cell)->cap; }
+
+/* clear(rb): reset cursors only. Matches the interpreter — the backing array is
+ * not zeroed, so any stale references remain owned by the buffer and are
+ * released on a later overwrite or when the buffer is dropped. */
+void ring_buf_clear(void *cell) {
+    march_ring *r = ring_of(cell);
+    r->head = 0;
+    r->size = 0;
+}
+
+/* to_list(rb): snapshot oldest-to-newest as List(a). Each aliased element is
+ * incref'd (the list gets its own references; the buffer keeps its copies). */
+void *ring_buf_to_list(void *cell) {
+    march_ring *r = ring_of(cell);
+    void *lst = make_nil();
+    for (int64_t i = r->size - 1; i >= 0; i--) {
+        void *v = (void *)(uintptr_t)r->slots[ring_slot_idx(r, i)];
+        march_incrc(v);
+        lst = make_cons(v, lst);
+    }
+    return lst;
+}
+
 /* ── UUID v7 ──────────────────────────────────────────────────────────── */
 #include <sys/time.h>
 

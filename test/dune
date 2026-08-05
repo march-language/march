@@ -962,6 +962,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/lazy_niche.expected native_lazy_niche.out)))
 
+; ── RingBuf compiled backend (runtime/march_runtime.c ring_buf_*) ──
+; The ring_buf_* builtins existed only in the interpreter; a compiled program
+; using RingBuf failed to link. This fixture exercises every op with both Int
+; (immediate) and String (heap, RC-managed) elements — make, push past capacity
+; (wraparound), pop, get, peek, size, cap, clear, to_list — and diffs stdout
+; against the interpreter's output. Guards the erased-i64 element round-trip
+; (odd value 7) and element RC on overwrite/pop/clear/drop.
+(rule
+ (targets native_ring_buf_ops native_ring_buf_ops.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/ring_buf_ops.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ring_buf_ops
+        native/ring_buf_ops.march)
+   (with-stdout-to native_ring_buf_ops.out
+        (system "./native_ring_buf_ops")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ring_buf_ops.expected native_ring_buf_ops.out)))
+
 ; ── Regression: burst-of-task_spawn must not race the Task object ──
 ; march_task_spawn_thunk initialised the Task's proc-handle/result/done-flag
 ; AFTER march_sched_spawn published the proc, so a work-stealing scheduler

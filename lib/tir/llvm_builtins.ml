@@ -635,6 +635,30 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_alloc_raw(i64 %len)" };
   { march_name = "native_arr_map2_check_len"; c_name = None; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)" };
+  (* RingBuf — mutable fixed-capacity circular buffer (runtime/march_runtime.c).
+     Elements are erased (TVar "_"); the buffer stores/returns the uniform
+     march_value word, so push/pop/get/peek/to_list all use "ptr" element slots
+     and pop/get/peek return niche-encoded Option(a) (None=0, Some(v)=v). *)
+  { march_name = "ring_buf_make"; c_name = None; ret_ty = Some (Tir.TCon ("RingBuf", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_make(i64 %cap)" };
+  { march_name = "ring_buf_push"; c_name = None; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @ring_buf_push(ptr %rb, ptr %x)" };
+  { march_name = "ring_buf_pop"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_pop(ptr %rb)" };
+  { march_name = "ring_buf_get"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_get(ptr %rb, i64 %i)" };
+  { march_name = "ring_buf_peek_oldest"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_peek_oldest(ptr %rb)" };
+  { march_name = "ring_buf_peek_newest"; c_name = None; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_peek_newest(ptr %rb)" };
+  { march_name = "ring_buf_size"; c_name = None; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @ring_buf_size(ptr %rb)" };
+  { march_name = "ring_buf_cap"; c_name = None; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @ring_buf_cap(ptr %rb)" };
+  { march_name = "ring_buf_clear"; c_name = None; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @ring_buf_clear(ptr %rb)" };
+  { march_name = "ring_buf_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_to_list(ptr %rb)" };
   { march_name = "unix_time"; c_name = Some "march_unix_time"; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
   { march_name = "tcp_connect"; c_name = Some "march_tcp_connect"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
@@ -1264,6 +1288,17 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_int_arr_alloc_raw";
   PDeclare "native_float_arr_alloc_raw";
   PDeclare "native_arr_map2_check_len";
+  PComment "; RingBuf builtins — mutable fixed-capacity circular buffer";
+  PDeclare "ring_buf_make";
+  PDeclare "ring_buf_push";
+  PDeclare "ring_buf_pop";
+  PDeclare "ring_buf_get";
+  PDeclare "ring_buf_peek_oldest";
+  PDeclare "ring_buf_peek_newest";
+  PDeclare "ring_buf_size";
+  PDeclare "ring_buf_cap";
+  PDeclare "ring_buf_clear";
+  PDeclare "ring_buf_to_list";
   PComment "; Time builtins";
   PDeclare "march_unix_time";
   PDeclare "march_tcp_connect";
@@ -1414,6 +1449,32 @@ let builtin_declare_sig_tbl : (string, string) Hashtbl.t =
       | None -> ())
     builtins;
   tbl
+
+(** Builtins with a genuinely GENERIC (TVar) element parameter declared as
+    "ptr" — a uniform/erased slot that must receive the boxed representation of
+    a scalar argument (Int tagged (n<<1)|1, Float boxed), NOT the raw i64/double
+    bits.  The general builtin call path only coerces the ptr→scalar direction
+    (see the long comment at the coercion site in llvm_emit.ml — scalar→ptr is
+    deliberately skipped there because several builtins declare "ptr" for an
+    opaque native handle whose March type is a plain Int and must stay raw).
+    This table opts specific (builtin, param_idx) slots INTO scalar→ptr boxing
+    because their March type really is a generic TVar, so an inlined raw-scalar
+    argument would otherwise be stored/compared at the wrong representation
+    (RingBuf.push(rb, 7) stored 7 raw; the erased-i64 conditional untag then
+    read odd 7 back as 3). Keyed on the slot, so opaque-handle builtins are
+    untouched. *)
+let builtin_boxed_generic_params_tbl : (string, int list) Hashtbl.t =
+  let tbl = Hashtbl.create 8 in
+  (* ring_buf_push(rb, x): x (index 1) is the erased element. *)
+  Hashtbl.replace tbl "ring_buf_push" [1];
+  tbl
+
+(** True iff parameter [idx] of builtin [name] is a generic erased slot that
+    must receive a boxed scalar (see [builtin_boxed_generic_params_tbl]). *)
+let builtin_param_is_boxed_generic (name : string) (idx : int) : bool =
+  match Hashtbl.find_opt builtin_boxed_generic_params_tbl name with
+  | Some idxs -> List.mem idx idxs
+  | None -> false
 
 (** name → parameter LLVM types (bare tokens: "ptr", "i64", "double", ...),
     in declaration order, parsed from [declare_sig].  [None] when the
