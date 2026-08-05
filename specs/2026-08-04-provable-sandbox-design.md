@@ -78,7 +78,13 @@ where the row is inferred and written only at boundaries. `main` is the sole
 place a row is discharged against a granted capability set.
 
 **Recommendation: R1b.** R1a is unadoptable for a language with a 112-module
-stdlib. `lib/effects/` is where this lives.
+stdlib.
+
+**There is no substrate for this today, and the directory name is misleading.**
+`lib/effects/effects.ml` is 22 lines: a call-site hook that delegates to
+`Typecheck.check_module` so capability enforcement runs on both the eval and
+compile paths. It contains no effect representation, no rows, and no
+inference. R1b starts from zero regardless of where it eventually lives.
 
 The migration cost is real and should not be understated: this is a breaking
 change to the type of every stdlib function that touches IO. It is
@@ -106,13 +112,39 @@ This is a real check, not a proof obligation — a walk over type declarations
 and derive lists. It is cheap and should be built *before* the proof work,
 because it is where a practical break would come from.
 
-### R4. Monotone attenuation
+### R4. Monotone attenuation — already sound, not yet pinned
 
-`cap_narrow` must only move down the lattice. Provable from `Cap_lattice`, but
-it must be *stated and pinned*: the subsumption direction was written
-backwards twice during the sandbox work, and the second time it shipped. A
-property test over the lattice (`∀ a b. narrow a b ⟹ subsumes a b`) belongs
-next to the existing `test_cap_scope.ml` subsumption tests.
+Measured 2026-08-05, both directions:
+
+| | result |
+|---|---|
+| `Cap(IO.Console)` → `Cap(IO.FileWrite)` (widen) | **rejected**: ``expected `IO` but got `IO.Console` `` |
+| `Cap(IO)` → `Cap(IO.FileWrite)` (narrow) | accepted, rc=0 |
+
+So attenuation is monotone today. This item is "pin existing behaviour", not
+"fix a hole" — but it is still worth doing, because the subsumption direction
+was written backwards twice during the sandbox work and shipped once.
+
+Correcting where the enforcement lives, since it is not where you would guess:
+
+- **Compile time is the whole story.** `cap_narrow` is typed such that
+  narrowing to `Cap(IO.FileWrite)` demands the *parent* `Cap(IO)` at the
+  argument, which is what produces the error above. The lattice is enforced
+  structurally through unification, not by a separate lattice call.
+- **The runtime is deliberate erasure, not a gap.** `march_cap_narrow` in
+  `runtime/march_runtime.c` is literally `return cap;`, and `eval.ml` documents
+  why: capabilities are opaque unit sentinels and `mint_cap` is "a no-op alias
+  of cap_narrow" at runtime because the gating is a compile-time check. Do not
+  "fix" the identity function.
+- **The gating that does exist** is `check_mint_cap_sites` in
+  `lib/typecheck/typecheck.ml`, plus `cap_narrow_factory_fns` and
+  `mint_cap_sites` in the env. It enforces that `mint_cap` appears only in a
+  public function of the proof cap's declaring module, and that `mint_cap` is
+  refused for IO caps ("that's `cap_narrow`'s job").
+
+The test to add is therefore an accept/reject pair over `cap_narrow` in both
+lattice directions, next to `test_cap_scope.ml`'s subsumption tests — not a
+property test over a runtime function that does nothing.
 
 ### R5. Effect polymorphism that survives higher-order code
 
@@ -144,7 +176,8 @@ The theorem is about a paper language; the checker is OCaml. Bridging options,
 cheapest first:
 
 1. a conformance corpus pinning every typing rule (March has the machinery —
-   `test/conformance/types/` with accept/reject pairs);
+   `specs/lang/types/{accept,reject}/`, driven by the CI-only `@types-check`
+   alias, which asserts diagnostic *text* and not merely accept/reject);
 2. a differential oracle against a reference implementation of the calculus;
 3. extraction of the checker from the mechanized development.
 
@@ -277,19 +310,28 @@ No stage closes console egress (R8a). Every row above should be read as
 
 ## 4. Recommended sequencing
 
-**Now — R3 + R4.** A type-declaration walk excluding `Cap(X)` from derive,
-deserialization, and default-construction positions, plus a lattice property
-test for attenuation monotonicity. Days, not weeks. Closes a real hole and
-needs no language change. **Do this first regardless of whether the rest ever
+**Now — R3, plus R4 as a regression pin.** R3 is the only item on this page
+that closes a live hole: a type-declaration walk excluding `Cap(X)` from
+derive, deserialization, and default-construction positions. Days, not weeks,
+no language change. **Do this first regardless of whether the rest ever
 happens.**
+
+R4 rides along and is smaller than first written: attenuation is already
+monotone (measured — see R4), so it needs an accept/reject pair pinning both
+lattice directions, not a fix. An afternoon.
+
+Both are self-contained: neither depends on R1b, and neither is wasted if the
+effect-row work never happens.
 
 **Next — R8 audit.** Answer, with tests rather than reasoning: can a `Cap`
 travel in an actor message? Does hot reload bypass the ceiling? These are
 questions about the system as it exists, and the answers change what today's
 claim may say. Cheap, and the results could invalidate stage-0 wording.
 
-**Then — decide on R1b.** This is the fork. Effect rows over IO are a major
-version and a stdlib-wide signature change. The honest framing for that
+**Then — decide on R1b.** This is the fork, and it is a from-scratch build:
+`lib/effects/` is a 22-line delegation shim, not a foundation. Effect rows
+over IO are a major version and a stdlib-wide signature change. The honest
+framing for that
 decision is: it converts a *whole-program build gate* into a *per-definition
 property*, which is what lets library authors ship a capability-clean library
 without seeing the application. That is the real user-facing win — bigger than
