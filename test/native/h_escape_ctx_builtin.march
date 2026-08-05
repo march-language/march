@@ -1,0 +1,42 @@
+-- html_escape_ctx: the contextual escaper builtin (Task 4 of
+-- specs/plans/2026-08-05-contextual-autoescaping.md).
+--
+-- The escaper id is chosen at COMPILE time from the parse context
+-- (lib/ctxesc/automaton.ml) and arrives as a literal; ids are defined by
+-- Context.escaper_id and mirrored in runtime/march_ctx_escape.h.
+--
+-- This file is a compiled/interpreted PARITY test. The .expected below is the
+-- interpreter's output, and the dune rule diffs the COMPILED binary against
+-- it. Parity is the property that matters here: the ~H ADT misread
+-- (specs/progress/2026-08-05-h-sigil-adt-misread.md) was invisible for as long
+-- as it was precisely because only compiled output was wrong.
+--
+-- Two cases carry the real weight:
+--   urlw_bad  -- the scheme allowlist, which closes the live `href` hole
+--   iolist_*  -- a nested ~H partial is already-safe HTML, so it is inserted
+--                VERBATIM in an HTML context but flattened AND escaped in any
+--                other. Compiled must reach the same answer as interpreted by a
+--                different route: march_value_to_string cannot flatten an
+--                IOList (it renders `#<tag:2>`), so the emitter routes a known
+--                IOList through march_html_auto_escape instead.
+mod HEscapeCtxBuiltin do
+  fn main() : Unit do
+    println("html=" ++ html_escape_ctx(0, "<b>&\"'"))
+    println("attr=" ++ html_escape_ctx(1, "a\" onload=\"x"))
+    println("urlc=" ++ html_escape_ctx(2, "a b&c"))
+    println("urlw_bad=" ++ html_escape_ctx(3, "javascript:alert(1)"))
+    println("urlw_case=" ++ html_escape_ctx(3, "JaVaScRiPt:alert(1)"))
+    println("urlw_ok=" ++ html_escape_ctx(3, "https://example.com/a?b=c"))
+    println("urlw_rel=" ++ html_escape_ctx(3, "/relative/path"))
+    println("css=" ++ html_escape_ctx(4, "expression(alert(1))"))
+    println("js=" ++ html_escape_ctx(5, "</script>"))
+    println("none=" ++ html_escape_ctx(6, "<b>"))
+    println("int=" ++ html_escape_ctx(0, 42))
+    let io = ~H"<i>x</i>"
+    println("iolist_html=" ++ html_escape_ctx(0, io))
+    println("iolist_attr=" ++ html_escape_ctx(1, io))
+    let safe = Html.raw("<b>ok</b>")
+    println("safe_html=" ++ html_escape_ctx(0, safe))
+    println("safe_attr=" ++ html_escape_ctx(1, safe))
+  end
+end

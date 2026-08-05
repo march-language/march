@@ -138,6 +138,7 @@ let builtin_names : StringSet.t =
       "to_json"; "from_json";
       (* HTML builtins *)
       "html_auto_escape";
+      "html_escape_ctx";
       (* Show builtins *)
       "show"; "to_string";
       (* Native array builtins *)

@@ -6,4 +6,4 @@
 ; specs/plans/2026-08-05-contextual-autoescaping.md.
 (library
  (name march_ctxesc)
- (modules context tbl_parse automaton))
+ (modules context tbl_parse automaton escape))
