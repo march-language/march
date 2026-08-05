@@ -5116,11 +5116,37 @@ int64_t native_int_arr_get(void *arr, int64_t i) {
     return *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
 }
 
+/* FBIP in-place update at unique ownership.
+ *
+ * [arr] is passed under the owned/consumed convention — native_int_arr_set is
+ * absent from borrow.ml's extern_borrow_table, so Perceus transfers one
+ * reference into this call and emits no dec_rc after it. This function
+ * therefore owns exactly one reference to [arr] and is responsible for
+ * releasing it.
+ *
+ * When that reference is the ONLY one (rc == 1, the same unique-ownership
+ * predicate LLVM-generated FBIP `reuse … as …` uses, which also reads ->rc as
+ * a plain non-atomic load — safe precisely because a unique owner has no
+ * concurrent observer), we mutate the backing array in place and hand our
+ * reference straight to the result: O(1), no allocation, no copy, no free.
+ * That is what keeps a threaded-forward set_int accumulator flat in RSS
+ * instead of leaking (or churning) a fresh 8-element copy on every call.
+ *
+ * When the array is SHARED (rc > 1) an alias may still observe it, so
+ * copy-on-write MUST be preserved: allocate a fresh array, copy, write the new
+ * value, then release our owned reference (march_decrc drops our count; the
+ * alias keeps its own). The rc == 1 gate also excludes interned/immortal
+ * arrays (rc >= MARCH_RC_IMMORTAL), which are never mutated in place. */
 void *native_int_arr_set(void *arr, int64_t i, int64_t val) {
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = val;
+        return arr;
+    }
     int64_t len = native_int_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
     memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
     *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = val;
+    march_decrc(arr);
     return new_arr;
 }
 
@@ -5282,11 +5308,19 @@ double native_float_arr_get(void *arr, int64_t i) {
     double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); return v;
 }
 
+/* In-place-at-rc==1 FBIP update — see native_int_arr_set above for the full
+ * ownership contract (identical: owned/consumed arg, unique-owner mutates in
+ * place, shared array copies-on-write then releases our reference). */
 void *native_float_arr_set(void *arr, int64_t i, double val) {
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &val, 8);
+        return arr;
+    }
     int64_t len = native_float_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
     memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
     memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &val, 8);
+    march_decrc(arr);
     return new_arr;
 }
 
