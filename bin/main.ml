@@ -841,16 +841,33 @@ let do_check       = ref false   (* --check: typecheck only, no codegen or eval 
       file or a pure program reports "needs everything".
 
     Shared by `march caps` and --cap-sandbox so the reported set and the
-    embedded sandbox profile cannot disagree. *)
+    embedded sandbox profile cannot disagree.
 
-let own_caps_of_this_module typecheck_env (m : March_ast.Ast.module_) : string list =
+    [stdlib_files] must list the files whose declarations are the standard
+    library's (see [stdlib_span_files]).  The callers pass [desugared] AFTER
+    the stdlib prepend — it has to be that module, since that is what gets
+    lowered — so the prelude's own top-level functions (`println`, `debug`, …)
+    ride in the entry module's decl list.  Without this filter they were
+    registered as functions "this file declares", and their capabilities were
+    credited to the user's module: measured, `mod M do fn main() do () end end`
+    reported IO.Console, which made --cap-strict reject the emptiest possible
+    program (IO.Console in the used set with no attributed owner reads as
+    "cannot be attributed to any module").  Same gate the typechecker's Check
+    1b uses, for the same reason. *)
+
+let own_caps_of_this_module ~stdlib_files typecheck_env
+    (m : March_ast.Ast.module_) : string list =
   let own = March_typecheck.Typecheck.fn_own_capability_closures typecheck_env in
+  let is_stdlib (sp : March_ast.Ast.span) =
+    List.mem sp.March_ast.Ast.file stdlib_files
+  in
   let user_fn_names = Hashtbl.create 64 in
   let rec walk decls =
     List.iter (fun (d : March_ast.Ast.decl) ->
         match d with
-        | March_ast.Ast.DFn (fd, _) ->
-          Hashtbl.replace user_fn_names fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
+        | March_ast.Ast.DFn (fd, sp) ->
+          if not (is_stdlib sp) then
+            Hashtbl.replace user_fn_names fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
         | March_ast.Ast.DMod (_, _, inner, _) -> walk inner
         | _ -> ()) decls
   in
@@ -2173,9 +2190,11 @@ let compile filename =
        that `use`s another inherits an obligation to cover that module's
        declared needs.
 
-       module_caps is keyed by BARE module name and is consed onto the head
-       as each DMod finishes, so it can (and, with a nested user module that
-       shadows a stdlib name, does) contain duplicate keys. march's own
+       module_caps is keyed by module name — each module contributes its
+       fully-qualified path plus, when it differs, its bare name — and is
+       consed onto the head as each DMod finishes, so it can (and, with a
+       nested user module that shadows a stdlib name, does) contain
+       duplicate keys. march's own
        Check 4 resolves this same table via [List.assoc_opt imported
        env.module_caps] (typecheck.ml:6832, :7068) on the unsorted, cons-order
        list — [List.assoc_opt] returns the FIRST match it finds scanning from
@@ -2640,7 +2659,8 @@ let compile filename =
     if !cap_strict then begin
       let flat_caps =
         List.sort_uniq compare (List.map fst cap_attrib)
-        @ own_caps_of_this_module typecheck_env desugared
+        @ own_caps_of_this_module
+          ~stdlib_files:(stdlib_span_files stdlib_decls) typecheck_env desugared
         |> List.sort_uniq compare
       in
       (* The entry module is unwrapped by desugar (~is_entry:true), so it has
@@ -3216,7 +3236,8 @@ let compile filename =
                    would grant a pure program network and filesystem write
                    access, i.e. a sandbox that sandboxes nothing.  Same
                    filtering as `march caps`. *)
-                let caps = own_caps_of_this_module typecheck_env desugared in
+                let caps = own_caps_of_this_module
+          ~stdlib_files:(stdlib_span_files stdlib_decls) typecheck_env desugared in
                 let declared_scopes =
                   March_typecheck.Typecheck.declared_cap_scopes typecheck_env in
                 let holds klass =

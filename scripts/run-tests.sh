@@ -59,7 +59,13 @@ fi
 
 # Build phase: dune handles concurrent build requests internally
 echo "==> dune build"
-BUILD_TARGETS=()
+# @test/stage-source-trees carries no action: it exists so dune refreshes its
+# COPIES of runtime/ and stdlib/ under _build/default. Tests that shell out to
+# the compiler for a native compile link and read those copies, and building
+# only test/*.exe does not refresh them — a stale copy has shown up as an
+# undefined-symbol link error and as a --cap-sandbox binary with no embedded
+# profile, neither of which is a real March bug. See the rule in test/dune.
+BUILD_TARGETS=("@test/stage-source-trees")
 for r in "${RUNNERS[@]}"; do
   BUILD_TARGETS+=("test/${r}.exe")
 done
