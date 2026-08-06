@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Concurrency"
 permalink: /docs/cookbook/concurrency/
+scrollmd: true
 ---
 
 # Concurrency
@@ -14,6 +15,7 @@ March has two concurrency primitives: **Tasks** for async work and **Actors** fo
 
 `Task.async` starts a concurrent computation. `Task.await` blocks until it finishes:
 
+<!-- scroll:skip -->
 ```march
 let t = Task.async(fn () -> expensive_computation())
 let result = Task.await(t)
@@ -21,6 +23,7 @@ let result = Task.await(t)
 
 Run multiple tasks in parallel and collect all results:
 
+<!-- scroll:skip -->
 ```march
 let tasks = List.map(urls, fn url -> Task.async(fn () -> fetch(url)))
 let results = Task.await_many(tasks)
@@ -28,6 +31,7 @@ let results = Task.await_many(tasks)
 
 Race — first to finish wins, others are cancelled:
 
+<!-- scroll:skip -->
 ```march
 match Task.race([
   Task.async(fn () -> primary_source()),
@@ -44,6 +48,7 @@ end
 
 An actor has isolated state and processes messages one at a time. No shared memory — data races are impossible by construction:
 
+<!-- scroll:skip -->
 ```march
 actor Counter do
   state { value : Int }
@@ -62,6 +67,7 @@ end
 
 Spawn an actor and send messages:
 
+<!-- scroll:skip -->
 ```march
 let pid = spawn(Counter)
 send(pid, Increment(5))
@@ -86,6 +92,7 @@ let results = Task.async_stream(urls, fn url ->
 
 For structured coordination, use an actor as a mailbox — tasks send to it, it accumulates results:
 
+<!-- scroll:skip -->
 ```march
 actor Collector do
   state { items : List(String), done : Int, total : Int }
@@ -112,7 +119,9 @@ end
 
 ```march
 mod Parallel do
-  pfn sum_to(n : Int) : Int do
+  needs IO.Console
+
+  fn sum_to(n : Int) : Int do
     List.fold_left(List.range(1, n + 1), 0, fn (acc, x) -> acc + x)
   end
 

@@ -111,6 +111,18 @@ attrvalue,*,*,unquoted    | cls+:[ \t\r\n] |  | beforeattrname,=,normal,none |
 attrvalue,*,url,*         | interp         |  | =,=,=,=                  |
 attrvalue,*,url,*         | any            |  | =,=,urlmid,=             |
 
+# -- CSS position tracking --
+# A style attribute alternates between DECLARATION and VALUE positions, and the
+# two need different escapers: a declaration list may contain `:` and `;`, a
+# value may not (either would let it start a new declaration). The discriminator
+# is CSS syntax, not offset -- `style="a:b;${decls}"` is a declaration position
+# even though literal text precedes it, and `style="color:${v}"` is a value
+# position. Measured against forgepm, both shapes occur in real templates.
+attrvalue,*,style,*       | lit:":"        |  | =,=,stylevalue,=         |
+attrvalue,*,stylevalue,*  | lit:";"        |  | =,=,style,=              |
+attrvalue,*,style,*       | interp         |  | =,=,=,=                  |
+attrvalue,*,stylevalue,*  | interp         |  | =,=,=,=                  |
+
 # -- generic within-value rows --
 attrvalue,*,*,*           | interp         |  | =,=,=,=                  |
 attrvalue,*,*,*           | any            |  | =,=,=,=                  |

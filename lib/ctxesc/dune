@@ -4,6 +4,32 @@
 ; it and (later, via emit_tables) generates both the OCaml and March copies.
 ; See specs/security/README.md and
 ; specs/plans/2026-08-05-contextual-autoescaping.md.
+;; The transition table is EMBEDDED as text, generated from the single source
+;; of truth by the rule below. The compiler cannot read a repo-relative file at
+;; runtime -- an installed `march` has no specs/ directory -- and generating it
+;; from the .tbl on every build makes drift structurally impossible, so no
+;; freshness check is needed for this pair.
+(rule
+ (targets table_data.ml)
+ (deps    %{project_root}/specs/security/html-contexts.tbl)
+ (action
+  (with-stdout-to table_data.ml
+   (progn
+    (echo "(* GENERATED from specs/security/html-contexts.tbl by lib/ctxesc/dune.\n")
+    (echo "   Do not edit -- edit the .tbl instead. *)\n")
+    (echo "let contents = {tbl|")
+    (cat %{deps})
+    (echo "|tbl}\n")))))
+
 (library
  (name march_ctxesc)
- (modules context tbl_parse automaton escape))
+ (modules context tbl_parse table_data automaton escape))
+
+; Dry-run blast-radius scanner: walks every ~H template in a source tree
+; through the automaton and reports what Task 5's desugar WOULD do. A report,
+; not a gate -- used to measure a real corpus (bastion, forgepm) before
+; changing behaviour rather than discovering the fallout afterwards.
+(executable
+ (name scan_templates)
+ (modules scan_templates)
+ (libraries march_ctxesc march_ast march_lexer march_parser))

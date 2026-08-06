@@ -31,6 +31,13 @@ type attr =
       (** a URL attribute value with literal content already before the hole —
           the interpolation is a component, so it needs percent-encoding *)
   | AtStyle
+      (** a `style` attribute at a DECLARATION position — the start of the
+          value, or just after a `;`. A hole here is a declaration list
+          (`color:red;background:blue`), so `:` and `;` are structural. *)
+  | AtStyleValue
+      (** a `style` attribute at a VALUE position — after a `:`. A hole here is
+          a single value (`#fff`, `var(--x)`), so `:` and `;` are NOT allowed:
+          either would let the value start a new declaration. *)
   | AtScript
 
 type delim =
@@ -55,7 +62,7 @@ let all_states =
     Beforeattrvalue; Attrvalue; Comment ]
 
 let all_elements = [ ElNormal; ElScript; ElStyle; ElTextarea; ElTitle ]
-let all_attrs = [ AtNormal; AtUrl; AtUrlMid; AtStyle; AtScript ]
+let all_attrs = [ AtNormal; AtUrl; AtUrlMid; AtStyle; AtStyleValue; AtScript ]
 let all_delims = [ DlNone; DlSingle; DlDouble; DlUnquoted; DlDoubleSubst ]
 
 let state_name = function
@@ -81,6 +88,7 @@ let attr_name = function
   | AtUrl -> "url"
   | AtUrlMid -> "urlmid"
   | AtStyle -> "style"
+  | AtStyleValue -> "stylevalue"
   | AtScript -> "script"
 
 let delim_name = function
@@ -109,7 +117,8 @@ let describe c =
   | Beforeattrvalue, _, _ -> "just before an attribute value"
   | Attrvalue, AtUrl, _ -> "at the start of a URL attribute value"
   | Attrvalue, AtUrlMid, _ -> "inside a URL attribute value"
-  | Attrvalue, AtStyle, _ -> "in a CSS style attribute value"
+  | Attrvalue, AtStyle, _ -> "at a declaration position in a style attribute"
+  | Attrvalue, AtStyleValue, _ -> "at a value position in a style attribute"
   | Attrvalue, AtScript, _ -> "in an event-handler attribute value"
   | Attrvalue, _, DlUnquoted -> "in an unquoted attribute value"
   | Attrvalue, _, _ -> "in an attribute value"
@@ -125,24 +134,33 @@ type escaper =
   | EscAttr
   | EscUrlComponent
   | EscUrlWhole
-  | EscCss
+  | EscCssValue
+      (** a single CSS value: identifiers, numbers, colours, and calls to an
+          allowlisted set of functions (`var`, `rgb`, `calc`, ...) *)
   | EscJsString
   | EscNone
+  | EscCssDecl
+      (** a CSS declaration LIST: as EscCssValue, plus `:` and `;` so a hole can
+          carry `color:red;background:blue`. Appended rather than inserted so
+          the existing ids stay stable -- they are shared verbatim with the C
+          runtime's MARCH_ESC_* defines. *)
 
 let escaper_id = function
   | EscHtml -> 0
   | EscAttr -> 1
   | EscUrlComponent -> 2
   | EscUrlWhole -> 3
-  | EscCss -> 4
+  | EscCssValue -> 4
   | EscJsString -> 5
   | EscNone -> 6
+  | EscCssDecl -> 7
 
 let escaper_name = function
   | EscHtml -> "html"
   | EscAttr -> "attr"
   | EscUrlComponent -> "url_component"
   | EscUrlWhole -> "url_whole"
-  | EscCss -> "css"
+  | EscCssValue -> "css_value"
   | EscJsString -> "js_string"
   | EscNone -> "none"
+  | EscCssDecl -> "css_decl"

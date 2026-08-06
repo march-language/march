@@ -25,7 +25,7 @@ actor Counter do
   end
 
   on Probe(label : String) do
-    println("[Counter] probe from " ++ label ++ ", value: " ++ int_to_string(state.value))
+    println("[Counter] probe from " ++ label ++ ", value: " ++ String.from_int(state.value))
     state
   end
 end
@@ -39,12 +39,12 @@ actor Logger do
 
   on Log(msg : String) do
     let n = state.count + 1
-    println("[LOG #" ++ int_to_string(n) ++ "] " ++ msg)
+    println("[LOG #" ++ String.from_int(n) ++ "] " ++ msg)
     { state with count: n }
   end
 
   on Stats() do
-    println("[Logger] total messages logged: " ++ int_to_string(state.count))
+    println("[Logger] total messages logged: " ++ String.from_int(state.count))
     state
   end
 end

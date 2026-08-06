@@ -23,9 +23,9 @@ mod ModuleDemo do
     let a = MathUtils.square(4)     -- 16
     let b = MathUtils.cube(3)       -- 27
     let c = MathUtils.abs_val(0 - 5) -- 5
-    println("square(4)=" ++ int_to_string(a)
-      ++ "  cube(3)=" ++ int_to_string(b)
-      ++ "  abs(-5)=" ++ int_to_string(c))
+    println("square(4)=" ++ String.from_int(a)
+      ++ "  cube(3)=" ++ String.from_int(b)
+      ++ "  abs(-5)=" ++ String.from_int(c))
   end
 
   -- ── Part 2: Two-level nesting ────────────────────────────────────────────
@@ -45,9 +45,9 @@ mod ModuleDemo do
     let ra = Geometry.Rect.area(6, 7)            -- 42
     let rp = Geometry.Rect.perimeter(6, 7)       -- 26
     let ta = Geometry.Triangle.area(10, 4)       -- 20
-    println("Rect.area=" ++ int_to_string(ra)
-      ++ "  Rect.perimeter=" ++ int_to_string(rp)
-      ++ "  Triangle.area=" ++ int_to_string(ta))
+    println("Rect.area=" ++ String.from_int(ra)
+      ++ "  Rect.perimeter=" ++ String.from_int(rp)
+      ++ "  Triangle.area=" ++ String.from_int(ta))
   end
 
   -- ── Part 3: Public vs private (pfn) ─────────────────────────────────────
@@ -73,8 +73,8 @@ mod ModuleDemo do
   fn demo_private() do
     let encoded = SecretCode.encode(42)
     let decoded = SecretCode.decode(encoded)
-    println("encode(42)=" ++ int_to_string(encoded)
-      ++ "  decode(encode(42))=" ++ int_to_string(decoded))
+    println("encode(42)=" ++ String.from_int(encoded)
+      ++ "  decode(encode(42))=" ++ String.from_int(decoded))
   end
 
   fn main() do

@@ -8,6 +8,22 @@
 
 **Tech Stack:** OCaml 5.3.0 / dune, March stdlib, C runtime (escapers), alcotest.
 
+## Status (updated 2026-08-06)
+
+| task | state |
+|---|---|
+| 0 — ADT misread (XSS + SIGSEGV) | **landed** — #192, `37d1e166` |
+| 1–2 — table + automaton | **landed** — #194, `6cfdc005` |
+| 3–5 — escapers, builtin, desugar fold | **landed** — #202, `a8707c78` |
+| 6 — context-indexed `Html.Trusted` | open |
+| 7 — codegen + drift guard | **mostly obsolete** — see the task |
+| 8 — corpus validation | open — highest remaining value |
+| 9 — `Html.tag` non-sigil path | open — **added 2026-08-06**, newly found |
+
+`~H` escapes by parse context on `main`. Recommended order for what remains:
+**8, then 9, then 6.** Task 8 converts two unverified assumptions into evidence
+and should not wait behind design work.
+
 ## Source
 
 Samuel, Palmer, Summa & Grayson, *Compile-time Security Analysis and Optimization of Sensitive String Producers* (Temper Systems), arXiv:2605.16561v1. Sections 4.6 (substitutions) and the transition-table figures are the normative reference for table semantics.
@@ -882,12 +898,26 @@ git commit -m "feat(stdlib): context-indexed Html.Trusted alongside legacy Safe"
 
 ---
 
-## Task 7: Codegen wiring, drift guard, and docs
+## Task 7: Codegen wiring, drift guard, and docs — MOSTLY OBSOLETE
+
+> **Revised 2026-08-06.** The OCaml half landed inside Task 5 out of necessity —
+> the desugarer needs the table at compile time and an installed `march` has no
+> `specs/` directory. `lib/ctxesc/dune` `cat`s the `.tbl` into a generated
+> module, which makes drift **structurally impossible**: dune regenerates from
+> the source of truth on every build, so there is nothing for a freshness check
+> to catch. That is strictly better than the emitter-plus-diff design below.
+>
+> What remains is only `stdlib/ctx_table.march` — the March-side copy — and it
+> has no consumer unless the runtime accumulator is built. See the revised
+> follow-up section: the recommendation is now to **drop it** rather than defer
+> it. Do not build this task speculatively.
+>
+> The steps below are kept for the record and for the case where a March-side
+> consumer does appear.
 
 **Files:**
 - Create: `lib/ctxesc/emit_tables.ml`
 - Modify: `lib/ctxesc/dune`, `test/dune`, `CHANGELOG.md`
-- Move: `specs/todos/<this>.md` → `specs/progress/2026-08-05-contextual-autoescaping.md`
 
 Up to this point `table_data.ml` may be hand-written. This task makes the `.tbl` file the real source of truth and adds the anti-drift check, modelled on `lib/caps/emit_c_table.ml` + the freshness rule at `test/dune:176`.
 
@@ -961,17 +991,171 @@ That page renders untrusted `user_agent` and `path`. Render it before and after 
 
 ---
 
-## Follow-up plan (not in scope here)
+## Task 9: Close the non-sigil composition path (`Html.tag`)
 
-**"Runtime accumulator + generic sigils"** — Layer A. Ports the automaton to March (`stdlib/ctx_accumulator.march`, consuming the generated `stdlib/ctx_table.march`), exposes `Acc.new/append_fixed/append_unsafe/collected`, and changes `desugar.ml:741` so non-`~H` sigils receive their static/dynamic *segments* instead of a pre-concatenated string. Two payoffs: an escape hatch for dynamic composition that today has none, and a differential test oracle — the March runtime automaton and the OCaml constant-folder read the same generated tables and must agree on every input, which is a far stronger correctness argument than either has alone.
+> **Added 2026-08-06**, after Tasks 3–5 landed. Not in the original plan — found
+> while asking whether any of this still belongs in a March library. It is the
+> characteristic blind spot of a compile-time-only design: the analysis sees
+> `~H` templates and nothing else.
 
-Note the performance caveat from the design discussion: the runtime accumulator pays a real per-character scan over fixed chunks. It is the substrate and the escape hatch, not the ergonomic front door. `~H` must keep going through the compile-time fold.
+**Files:**
+- Modify: `stdlib/html.march:113` (`escape_attr`), `:134` (`tag`)
+- Test: `test/native/h_tag_attr_context.march` + `.expected`, `test/dune`
+
+### The gap
+
+`Html.tag` composes HTML **outside** the sigil, so it never reaches the context
+automaton. Its attribute escaping is:
+
+```march
+fn escape_attr(s : String) : String do
+  escape(s)     -- HTML entity-encoding, and nothing else
+end
+```
+
+Entity-encoding does not touch a colon, so:
+
+```march
+Html.tag("a", [("href", "javascript:alert(1)")], body)
+```
+
+emits `href="javascript:alert(1)"` — exactly the hole Task 5 closed for `~H`,
+still open on this path.
+
+*(Read from the source, not executed. The two functions are short and
+unambiguous, but Step 1 below should confirm it by running.)*
+
+**Not currently live.** The only real call site is
+`bastion/lib/security/csrf.march:96`, `Html.tag("form", [("method", "post")], …)`
+— a constant. But the API's shape invites the bug back, and an API that is safe
+only because nobody has used it yet is not safe.
+
+### Why fix rather than deprecate
+
+`Html.tag` is one call site away from removable, so deprecation is tempting. It
+is the wrong call: the machinery to make it correct now exists, the fix is small,
+and leaving a known-unsafe constructor in the stdlib while shipping "~H is
+contextually safe" invites exactly the wrong conclusion about the rest of the
+module.
+
+- [ ] **Step 1: Write the failing test, and confirm the gap is real**
+
+`test/native/h_tag_attr_context.march`, a compiled/interpreted golden diff like
+`h_escape_ctx_builtin.march`:
+
+```march
+mod HTagAttrContext do
+  fn main() : Unit do
+    let bad = "javascript:alert(1)"
+    println("href=" ++ IOList.to_string(
+      Html.tag("a", [("href", bad)], IOList.from_string("x"))))
+    println("src=" ++ IOList.to_string(
+      Html.tag("img", [("src", bad)], IOList.empty())))
+    -- an ordinary attribute must keep entity-encoding, unchanged
+    println("class=" ++ IOList.to_string(
+      Html.tag("div", [("class", "a\"b")], IOList.empty())))
+    -- a legitimate URL must survive intact
+    println("ok=" ++ IOList.to_string(
+      Html.tag("a", [("href", "/packages/bastion?tab=readme")], IOList.empty())))
+  end
+end
+```
+
+Expected BEFORE the fix: `href="javascript:alert(1)"` passes through verbatim.
+**Record that output in the commit message** — it is the evidence the gap was
+real, and the test is worthless without it.
+
+- [ ] **Step 2: Classify the attribute name, then escape by class**
+
+`escape_attr` currently ignores its key. Give `tag` the same classification the
+table already performs, reusing `[attrs]` from
+`specs/security/html-contexts.tbl` rather than a second hand-written list — a
+duplicate list is precisely the hazard this plan keeps tripping over.
+
+The classification lives OCaml-side (`Tbl_parse.classify`), and `Html.tag` is
+March, so the escaping must go through the builtin:
+`html_escape_ctx(<id>, value)` with the id chosen from the attribute's class.
+That needs the class computed at runtime from a `String` key, which the compile
+time analysis cannot do — so this path necessarily pays a small runtime cost the
+sigil path does not. That is acceptable: it is a handful of attributes per tag,
+and correctness beats a saved comparison.
+
+Simplest sound implementation: a `Html.attr_escaper_id(name : String) : Int`
+in March mirroring the `[attrs]` rules (`on*` → script, `href`/`src`/… → url,
+`style` → style, else normal), then `html_escape_ctx(id, v)`.
+
+**If that mirroring is written by hand, it is a fourth copy of the attribute
+classification.** Prefer generating it from the `.tbl` — this is the one place a
+`stdlib/ctx_table.march` fragment genuinely earns its keep, and it would revive
+the useful half of Task 7 with a real consumer.
+
+- [ ] **Step 3: Verify and pin**
+
+`href`/`src` with `javascript:` → `about:invalid#zSoyz`; `class` unchanged from
+today; a legitimate URL intact. Regenerate `.expected` and confirm
+interpreted == compiled.
+
+- [ ] **Step 4: Sweep the rest of the `Html` module**
+
+`tag` is the one this task fixes, but the same question applies to every function
+that emits markup from untrusted parts: `list`, `join`, `render_partial`,
+`render_collection`, `layout`. Check each for a path that concatenates a
+caller-supplied `String` into markup without going through a context. Record the
+result — a clean sweep is worth writing down, since it bounds the audit.
+
+- [ ] **Step 5: Commit**
+
+Include the before/after output from Step 1, and state plainly that `Html.tag`
+was reachable-but-unreached rather than a live vulnerability.
+
+---
+
+## Follow-up plan — REVISED 2026-08-06: recommend dropping
+
+**"Runtime accumulator + generic sigils"** (Layer A) was to port the automaton to
+March (`stdlib/ctx_accumulator.march` over a generated `stdlib/ctx_table.march`)
+and change `desugar.ml`'s non-`~H` sigil path to pass segments instead of a
+pre-concatenated string.
+
+**The recommendation is now to drop it**, on evidence gathered while building
+Tasks 1–5. Both original justifications weakened:
+
+- *"An escape hatch for dynamic composition that today has none."* The corpora do
+  not need one. All 121 `~H` templates across bastion and forgepm go through the
+  sigil; `Html.escape` appears in application code **zero** times (every apparent
+  hit was the stdlib function inside generated `.ll` files); `Html.tag` has
+  exactly one real call site. There is no demand for `~SQL`/`~SH` either.
+
+- *"A differential test oracle — the March automaton and the OCaml folder read
+  the same tables and must agree."* This was oversold. A two-implementation
+  cross-check already exists and is enforced: `lib/ctxesc/escape.ml` (interpreter)
+  against `runtime/march_ctx_escape.c` (compiled), pinned by
+  `test/native/h_escape_ctx_builtin.march` as a golden parity diff. A March copy
+  would make **three** implementations of the same escaping logic.
+
+That last point is the deciding one. This plan has already been bitten twice by
+the same failure mode — the same information duplicated across places with
+nothing forcing agreement:
+`specs/todos/2026-08-05-runtime-source-list-duplication.md` (six hand-maintained
+runtime source lists) and the golden LLVM preamble, which went stale twice. A
+third copy of the escaping logic buys a weaker check than the one already in
+place, at the cost of exactly the maintenance hazard that keeps causing problems
+here.
+
+**What would change the answer:** a concrete consumer — a `~SQL`/`~SH` sigil
+someone actually wants, genuine dynamic HTML composition, or a March-implemented
+tool (formatter, LSP feature) that needs the tables at runtime. Until one of
+those exists, this is speculative work.
+
+Note also the original performance caveat, which still holds and argues the same
+way: the runtime accumulator pays a per-character scan over fixed chunks that the
+compile-time fold does not. It could never be the front door for `~H`.
 
 ---
 
 ## Self-Review
 
-**Spec coverage.** Transition tables → Tasks 1, 7. Context tuple → Task 1. Subsidiary automata (URL/CSS/JS) → Tasks 1, 3. Epsilon transitions with substitutions → Tasks 1, 2, 5. Escaper selection + accumulator erasure → Task 5 (erasure is total here, by constant folding). Compile-time diagnostics → Tasks 2, 5. `isValidTerminalContext` → Tasks 2, 5. Merge at join points → **deliberately not implemented**: `~H` has no in-template control flow, so no join points exist. If in-template `if`/`for` is ever added to `~H`, `Automaton.merge` becomes required and this is the gap to close first.
+**Spec coverage.** Transition tables → Tasks 1, 7. Non-sigil composition → Task 9 (added after the fact; the original plan assumed `~H` was the only way markup got built, which was wrong). Context tuple → Task 1. Subsidiary automata (URL/CSS/JS) → Tasks 1, 3. Epsilon transitions with substitutions → Tasks 1, 2, 5. Escaper selection + accumulator erasure → Task 5 (erasure is total here, by constant folding). Compile-time diagnostics → Tasks 2, 5. `isValidTerminalContext` → Tasks 2, 5. Merge at join points → **deliberately not implemented**: `~H` has no in-template control flow, so no join points exist. If in-template `if`/`for` is ever added to `~H`, `Automaton.merge` becomes required and this is the gap to close first.
 
 **Type consistency.** `Context.t` field names (`state`/`element`/`attr`/`delim`) are used identically in Tasks 1, 2 and 5. `escaper_id` ids in `context.ml` and the `MARCH_ESC_*` C defines in Task 3 must agree — Task 7's drift guard covers the OCaml↔March pair but **not** the OCaml↔C pair. Add that assertion to Task 3's C test.
 

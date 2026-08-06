@@ -141,23 +141,23 @@ end
 
 fn main() : Unit do
   -- Section 1: basic trace + :diff demo
-  println("--- sum_to(5) = " ++ int_to_string(sum_to(5)))
+  println("--- sum_to(5) = " ++ String.from_int(sum_to(5)))
 
   -- Section 2: dbg(expr) logs to stderr, no REPL
-  println("--- factorial(6) = " ++ int_to_string(factorial(6)))
+  println("--- factorial(6) = " ++ String.from_int(factorial(6)))
 
   -- Section 3: conditional breakpoint (triggers when element > 4)
   let lst = ICons(1, ICons(3, ICons(7, ICons(2, INil))))
-  println("--- find_large result = " ++ int_to_string(find_large(lst, 4)))
+  println("--- find_large result = " ++ String.from_int(find_large(lst, 4)))
 
   -- Section 4: :find demo
-  println("--- running_sum(10) = " ++ int_to_string(running_sum(10)))
+  println("--- running_sum(10) = " ++ String.from_int(running_sum(10)))
 
   -- Section 5: :watch demo
-  println("--- count_down(10) = " ++ int_to_string(count_down(10)))
+  println("--- count_down(10) = " ++ String.from_int(count_down(10)))
 
   -- Section 6: :tsave/:tload demo
-  println("--- build_trace(7) = " ++ int_to_string(build_trace(7)))
+  println("--- build_trace(7) = " ++ String.from_int(build_trace(7)))
 
   -- Section 7: actor history (:actors / :actor)
   let c = spawn(Counter)

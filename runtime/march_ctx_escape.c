@@ -164,20 +164,98 @@ static void esc_js_string(sink *s, const char *src, size_t len) {
     }
 }
 
-/* ── CSS ───────────────────────────────────────────────────────────────────
- * Allowlist rather than denylist: CSS has too many ways to reach a URL or an
- * expression for a blocklist to be credible. Anything outside a small safe set
- * becomes a `\XX ` hex escape, which CSS reads as a literal character and
- * which can never re-open a construct. */
-static void esc_css(sink *s, const char *src, size_t len) {
+/* CSS -- two positions, two escapers; see march_ctx_escape.h.
+ *
+ * Both allow calls to an ALLOWLISTED set of functions. An earlier version
+ * escaped every `(`, which is safe but broke real templates: `var(--text-muted)`
+ * became `var\28 --text-muted\29 `, and a whole declaration interpolated after a
+ * `;` was destroyed entirely. Both shapes occur in forgepm. A denylist of
+ * `expression(` / `url(` is not credible -- CSS has too many routes to a URL --
+ * so the rule is: a function call survives only if its name is on the list.
+ *
+ * `url(`, `expression(`, `image-set(`, `element(` and `attr(` are all absent
+ * from the list, so they are escaped like any other unknown identifier. */
+
+static const char *const css_fn_allow[] = {
+    "var", "calc", "min", "max", "clamp",
+    "rgb", "rgba", "hsl", "hsla",
+    "translate", "translatex", "translatey", "translate3d",
+    "scale", "scalex", "scaley", "rotate", "rotatex", "rotatey", "rotatez",
+    "skew", "skewx", "skewy", "matrix", "matrix3d", "perspective",
+    "cubic-bezier", "steps",
+    "linear-gradient", "radial-gradient", "conic-gradient",
+    "repeating-linear-gradient", "repeating-radial-gradient",
+    NULL
+};
+
+static int css_fn_allowed(const char *name, size_t len) {
+    if (len == 0 || len > 32) return 0;
+    char low[33];
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    low[len] = '\0';
+    for (int i = 0; css_fn_allow[i]; i++)
+        if (strcmp(low, css_fn_allow[i]) == 0) return 1;
+    return 0;
+}
+
+static int css_ident_char(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9') || c == '-' || c == '_';
+}
+
+/* Plain value bytes, excluding the structural ones handled per-mode. */
+static int css_plain(unsigned char c, int decl) {
+    if (css_ident_char(c)) return 1;
+    if (c == '#' || c == '%' || c == '.' || c == ',' || c == ' ') return 1;
+    if (decl && (c == ':' || c == ';')) return 1;
+    return 0;
+}
+
+/* Decide, in one pass, whether the whole string is safe-shaped: every `(` is
+ * preceded by an allowlisted function name, parens balance, and every other
+ * byte is a plain value byte. Anything else and we escape EVERYTHING strictly
+ * -- a partially-escaped CSS string is far harder to reason about than a wholly
+ * escaped one, and the strict form is always safe. */
+static int css_is_safe_shaped(const char *s, size_t len, int decl) {
+    size_t i = 0;
+    int depth = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)s[i];
+        if (css_ident_char(c)) {
+            size_t j = i;
+            while (j < len && css_ident_char((unsigned char)s[j])) j++;
+            if (j < len && s[j] == '(') {
+                if (!css_fn_allowed(s + i, j - i)) return 0;
+                depth++;
+                i = j + 1;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        if (c == ')') {
+            if (depth == 0) return 0;
+            depth--; i++; continue;
+        }
+        if (c == '(') return 0;  /* `(` with no function name before it */
+        if (!css_plain(c, decl)) return 0;
+        i++;
+    }
+    return depth == 0;
+}
+
+static void esc_css(sink *s, const char *src, size_t len, int decl) {
+    if (css_is_safe_shaped(src, len, decl)) {
+        put(s, src, len);
+        return;
+    }
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)src[i];
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-            || (c >= '0' && c <= '9')
-            || c == '-' || c == '_' || c == '#' || c == '%' || c == '.'
-            || c == ',' || c == ' ') {
-            put1(s, (char)c);
-        } else {
+        if (css_plain(c, decl)) put1(s, (char)c);
+        else {
             put1(s, '\\');
             put_hex2(s, c);
             put1(s, ' ');  /* terminate the escape so the next char is literal */
@@ -192,7 +270,8 @@ size_t march_ctx_escape(int escaper_id, const char *src, size_t len, char *out) 
     case MARCH_ESC_ATTR:          esc_html_like(&s, src, len, 1); break;
     case MARCH_ESC_URL_COMPONENT: esc_url_component(&s, src, len); break;
     case MARCH_ESC_URL_WHOLE:     esc_url_whole(&s, src, len); break;
-    case MARCH_ESC_CSS:           esc_css(&s, src, len); break;
+    case MARCH_ESC_CSS_VALUE:     esc_css(&s, src, len, 0); break;
+    case MARCH_ESC_CSS_DECL:      esc_css(&s, src, len, 1); break;
     case MARCH_ESC_JS_STRING:     esc_js_string(&s, src, len); break;
     case MARCH_ESC_NONE:          put(&s, src, len); break;
     default:

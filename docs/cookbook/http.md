@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: HTTP"
 permalink: /docs/cookbook/http/
+scrollmd: true
 ---
 
 # HTTP
@@ -40,6 +41,7 @@ end
 
 With a configured client (base URL, auth, retries):
 
+<!-- scroll:skip -->
 ```march
 let client =
   HttpClient.new_client()
@@ -60,6 +62,7 @@ end
 
 A minimal HTTP handler:
 
+<!-- scroll:skip -->
 ```march
 fn handle(conn) do
   match HttpServer.method(conn) do
@@ -74,6 +77,7 @@ end
 
 Path-based routing:
 
+<!-- scroll:skip -->
 ```march
 fn route(conn) do
   match (HttpServer.method(conn), HttpServer.path(conn)) do
@@ -92,6 +96,8 @@ end
 
 ```march
 mod EchoServer do
+  needs IO.Console
+
   fn handle(conn) do
     match (HttpServer.method(conn), HttpServer.path(conn)) do
       (:post, "/echo") ->

@@ -5,6 +5,13 @@
  * lib/ctxesc/automaton.ml and inlined as a constant id at the call site, so
  * nothing here ever inspects a value to decide what it is.
  *
+ * CSS has two escapers because a style attribute alternates between two
+ * positions with different syntax: a DECLARATION list (`color:red;...`), where
+ * `:` and `;` are structural, and a VALUE (`#fff`, `var(--x)`), where either
+ * would let the value start a new declaration. Both permit calls to an
+ * allowlisted set of functions -- rejecting `var()` outright broke real
+ * templates, and a denylist of `expression(`/`url(` is not credible.
+ *
  * THE IDS BELOW MUST MATCH Context.escaper_id IN lib/ctxesc/context.ml.
  * That pairing is not covered by the generated-table drift check, so
  * test/test_ctx_escape.c asserts it explicitly against a copy of the OCaml
@@ -20,10 +27,11 @@
 #define MARCH_ESC_ATTR          1
 #define MARCH_ESC_URL_COMPONENT 2
 #define MARCH_ESC_URL_WHOLE     3
-#define MARCH_ESC_CSS           4
+#define MARCH_ESC_CSS_VALUE     4
 #define MARCH_ESC_JS_STRING     5
 #define MARCH_ESC_NONE          6
-#define MARCH_ESC__COUNT        7
+#define MARCH_ESC_CSS_DECL      7
+#define MARCH_ESC__COUNT        8
 
 /* What a URL that failed the scheme allowlist is replaced with. Chosen to be
  * inert in every context: it navigates nowhere and executes nothing. */

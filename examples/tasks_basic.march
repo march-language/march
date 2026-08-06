@@ -49,15 +49,15 @@ fn main() : Unit do
 
   -- Two independent tasks
   let r = two_tasks()
-  println("collatz(27) + collatz(871) = " ++ int_to_string(r))
+  println("collatz(27) + collatz(871) = " ++ String.from_int(r))
 
   -- Chained tasks
   let c = chained_tasks()
-  println("chained: (10 + 20) * 3 = " ++ int_to_string(c))
+  println("chained: (10 + 20) * 3 = " ++ String.from_int(c))
 
   -- Fan-out over 1..100
   let f = fan_out(100)
-  println("sum of collatz(1..100) = " ++ int_to_string(f))
+  println("sum of collatz(1..100) = " ++ String.from_int(f))
 end
 
 end

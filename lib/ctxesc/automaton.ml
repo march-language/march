@@ -150,13 +150,14 @@ let escaper_for (c : C.t) =
   | C.Rcdata ->
     (match c.C.element with
      | C.ElScript -> C.EscJsString
-     | C.ElStyle -> C.EscCss
+     | C.ElStyle -> C.EscCssDecl
      | _ -> C.EscHtml)
   | C.Attrvalue ->
     (match c.C.attr with
      | C.AtUrl -> C.EscUrlWhole
      | C.AtUrlMid -> C.EscUrlComponent
-     | C.AtStyle -> C.EscCss
+     | C.AtStyle -> C.EscCssDecl
+     | C.AtStyleValue -> C.EscCssValue
      | C.AtScript -> C.EscJsString
      | C.AtNormal -> C.EscAttr)
   | _ -> C.EscAttr  (* unreachable: every other state rejects holes *)
@@ -189,5 +190,18 @@ let consume_interp t (c : C.t) =
    next, which is exactly the composition hazard this analysis exists to stop. *)
 let is_valid_terminal (c : C.t) =
   c.C.state = C.Pcdata && c.C.element = C.ElNormal
+
+(* The table the compiler uses, parsed once from the embedded copy. A failure
+   here is a build-time defect in the .tbl, not a user error -- the parser
+   rejects unknown tokens precisely so this cannot silently degrade. *)
+let default =
+  lazy
+    (match P.parse_string ~name:"specs/security/html-contexts.tbl"
+             Table_data.contents with
+     | Ok t -> compile t
+     | Error e ->
+       failwith
+         ("march: the embedded HTML context table failed to parse. This is a \
+           compiler build defect, not a problem with your source. " ^ e))
 
 let describe = C.describe

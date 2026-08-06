@@ -80,21 +80,21 @@ mod Tetris do
   end
 
   fn state_el() do
-    match Dom.find("game-state") do
+    match Js.Dom.find("game-state") do
       Some(el) -> el
       None     -> panic("Tetris: #game-state element missing")
     end
   end
 
   fn get_int_attr(el, name: String, default: Int) : Int do
-    match Dom.get_attr(el, name) do
+    match Js.Dom.get_attr(el, name) do
       Some(s) -> Option.unwrap_or(string_to_int(s), default)
       None    -> default
     end
   end
 
   fn get_str_attr(el, name: String, default: String) : String do
-    match Dom.get_attr(el, name) do
+    match Js.Dom.get_attr(el, name) do
       Some(s) -> s
       None    -> default
     end
@@ -132,12 +132,12 @@ mod Tetris do
         let idx = TetrisLogic.cell_index(x, y)
         let v = Array.get(board, idx)
         let id = "cell-" ++ int_to_string(x) ++ "-" ++ int_to_string(y)
-        match Dom.find(id) do
+        match Js.Dom.find(id) do
           None -> ()
           Some(cell) ->
             match v == 0 do
-              true  -> Dom.set_style(cell, "background", "")
-              false -> Dom.set_style(cell, "background", TetrisLogic.color_of_index(v))
+              true  -> Js.Dom.set_style(cell, "background", "")
+              false -> Js.Dom.set_style(cell, "background", TetrisLogic.color_of_index(v))
             end
         end
       )
@@ -156,9 +156,9 @@ mod Tetris do
             false -> ()
             true ->
               let id = "cell-" ++ int_to_string(x) ++ "-" ++ int_to_string(y)
-              match Dom.find(id) do
+              match Js.Dom.find(id) do
                 None -> ()
-                Some(cell) -> Dom.set_style(cell, "background", TetrisLogic.piece_color(piece))
+                Some(cell) -> Js.Dom.set_style(cell, "background", TetrisLogic.piece_color(piece))
               end
           end
       end
@@ -166,9 +166,9 @@ mod Tetris do
   end
 
   fn set_text_if_found(id: String, text: String) : Unit do
-    match Dom.find(id) do
+    match Js.Dom.find(id) do
       None -> ()
-      Some(el) -> Dom.set_text(el, text)
+      Some(el) -> Js.Dom.set_text(el, text)
     end
   end
 
@@ -206,25 +206,25 @@ mod Tetris do
               false -> ""
             end
             set_text_if_found("game-over", game_over_text)
-            Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board2)))
-            Dom.set_attr(el, "data-piece", piece_to_string(piece2))
-            Dom.set_attr(el, "data-rot", int_to_string(rot2))
-            Dom.set_attr(el, "data-x", int_to_string(x2))
-            Dom.set_attr(el, "data-y", int_to_string(y2))
-            Dom.set_attr(el, "data-next", piece_to_string(next2))
-            Dom.set_attr(el, "data-score", int_to_string(score2))
-            Dom.set_attr(el, "data-lines", int_to_string(lines2))
-            Dom.set_attr(el, "data-rng", int_to_string(rng2))
+            Js.Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board2)))
+            Js.Dom.set_attr(el, "data-piece", piece_to_string(piece2))
+            Js.Dom.set_attr(el, "data-rot", int_to_string(rot2))
+            Js.Dom.set_attr(el, "data-x", int_to_string(x2))
+            Js.Dom.set_attr(el, "data-y", int_to_string(y2))
+            Js.Dom.set_attr(el, "data-next", piece_to_string(next2))
+            Js.Dom.set_attr(el, "data-score", int_to_string(score2))
+            Js.Dom.set_attr(el, "data-lines", int_to_string(lines2))
+            Js.Dom.set_attr(el, "data-rng", int_to_string(rng2))
             let over2_s = match over2 do
               true  -> "true"
               false -> "false"
             end
-            Dom.set_attr(el, "data-over", over2_s)
+            Js.Dom.set_attr(el, "data-over", over2_s)
             -- Bumped ONLY here and in restart — the two paths that genuinely
             -- advance gameplay. The time-travel history recorder (host JS,
             -- tetris-playground.js) watches this attribute alone to decide
             -- when to snapshot, so pausing/scrubbing/restoring never records.
-            Dom.set_attr(el, "data-seq", int_to_string(seq + 1))
+            Js.Dom.set_attr(el, "data-seq", int_to_string(seq + 1))
         end
     end
   end
@@ -258,7 +258,7 @@ mod Tetris do
       true  -> "Paused — press P to resume"
       false -> ""
     end
-    Dom.set_attr(el, "data-paused", paused_s)
+    Js.Dom.set_attr(el, "data-paused", paused_s)
     set_text_if_found("pause-status", status_s)
   end
 
@@ -287,14 +287,14 @@ mod Tetris do
     end
   end
 
-  -- Self-rescheduling rather than a single fixed-rate Dom.set_interval, so
+  -- Self-rescheduling rather than a single fixed-rate Js.Dom.set_interval, so
   -- the drop rate can actually speed up as the level rises: TetrisLogic's
   -- drop_interval_ms(level) is re-read fresh before every tick. Keeps
   -- rescheduling even while paused (tick() itself no-ops then) so play
   -- resumes automatically without any separate timer wiring.
   fn schedule_tick() : Unit do
     let level = TetrisLogic.level_for_lines(get_int_attr(state_el(), "data-lines", 0))
-    Dom.set_timeout(TetrisLogic.drop_interval_ms(level), fn _ -> do
+    Js.Dom.set_timeout(TetrisLogic.drop_interval_ms(level), fn _ -> do
       tick()
       schedule_tick()
     end)
@@ -351,17 +351,17 @@ mod Tetris do
             set_text_if_found("next", "Next: " ++ piece_to_string(next))
             set_text_if_found("game-over", "")
             set_paused(el, false)
-            Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board)))
-            Dom.set_attr(el, "data-piece", piece_to_string(piece))
-            Dom.set_attr(el, "data-rot", int_to_string(rot))
-            Dom.set_attr(el, "data-x", int_to_string(x))
-            Dom.set_attr(el, "data-y", int_to_string(y))
-            Dom.set_attr(el, "data-next", piece_to_string(next))
-            Dom.set_attr(el, "data-score", "0")
-            Dom.set_attr(el, "data-lines", "0")
-            Dom.set_attr(el, "data-rng", int_to_string(rng2))
-            Dom.set_attr(el, "data-over", "false")
-            Dom.set_attr(el, "data-seq", int_to_string(get_int_attr(el, "data-seq", 0) + 1))
+            Js.Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board)))
+            Js.Dom.set_attr(el, "data-piece", piece_to_string(piece))
+            Js.Dom.set_attr(el, "data-rot", int_to_string(rot))
+            Js.Dom.set_attr(el, "data-x", int_to_string(x))
+            Js.Dom.set_attr(el, "data-y", int_to_string(y))
+            Js.Dom.set_attr(el, "data-next", piece_to_string(next))
+            Js.Dom.set_attr(el, "data-score", "0")
+            Js.Dom.set_attr(el, "data-lines", "0")
+            Js.Dom.set_attr(el, "data-rng", int_to_string(rng2))
+            Js.Dom.set_attr(el, "data-over", "false")
+            Js.Dom.set_attr(el, "data-seq", int_to_string(get_int_attr(el, "data-seq", 0) + 1))
         end
     end
   end
@@ -373,7 +373,7 @@ mod Tetris do
   -- js_emit doesn't export top-level fns today — so this goes through the
   -- DOM, the same bridge keyboard input already uses.
   fn restore_from_request() : Unit do
-    match Dom.find("restore-request") do
+    match Js.Dom.find("restore-request") do
       None -> ()
       Some(req) ->
         let el = state_el()
@@ -405,20 +405,20 @@ mod Tetris do
         end
         set_text_if_found("game-over", game_over_text)
         set_paused(el, paused)
-        Dom.set_attr(el, "data-board", board_s)
-        Dom.set_attr(el, "data-piece", piece_s)
-        Dom.set_attr(el, "data-rot", int_to_string(rot))
-        Dom.set_attr(el, "data-x", int_to_string(x))
-        Dom.set_attr(el, "data-y", int_to_string(y))
-        Dom.set_attr(el, "data-next", next_s)
-        Dom.set_attr(el, "data-score", int_to_string(score))
-        Dom.set_attr(el, "data-lines", int_to_string(lines))
-        Dom.set_attr(el, "data-rng", rng_s)
+        Js.Dom.set_attr(el, "data-board", board_s)
+        Js.Dom.set_attr(el, "data-piece", piece_s)
+        Js.Dom.set_attr(el, "data-rot", int_to_string(rot))
+        Js.Dom.set_attr(el, "data-x", int_to_string(x))
+        Js.Dom.set_attr(el, "data-y", int_to_string(y))
+        Js.Dom.set_attr(el, "data-next", next_s)
+        Js.Dom.set_attr(el, "data-score", int_to_string(score))
+        Js.Dom.set_attr(el, "data-lines", int_to_string(lines))
+        Js.Dom.set_attr(el, "data-rng", rng_s)
         let over_s = match over do
           true  -> "true"
           false -> "false"
         end
-        Dom.set_attr(el, "data-over", over_s)
+        Js.Dom.set_attr(el, "data-over", over_s)
         -- data-seq is deliberately left untouched: restoring a snapshot is
         -- never itself a new gameplay event, whether it's a passive scrub
         -- (paused=true) or a resume-and-branch (paused=false) — the very
@@ -429,15 +429,15 @@ mod Tetris do
 
   fn build_board_dom(container) : Unit do
     List.each(List.range(0, TetrisLogic.board_height()), fn y -> do
-      let row = Dom.create("div")
-      Dom.add_class(row, "tetris-row")
+      let row = Js.Dom.create("div")
+      Js.Dom.add_class(row, "tetris-row")
       List.each(List.range(0, TetrisLogic.board_width()), fn x -> do
-        let cell = Dom.create("div")
-        Dom.add_class(cell, "tetris-cell")
-        Dom.set_attr(cell, "id", "cell-" ++ int_to_string(x) ++ "-" ++ int_to_string(y))
-        Dom.append(row, cell)
+        let cell = Js.Dom.create("div")
+        Js.Dom.add_class(cell, "tetris-cell")
+        Js.Dom.set_attr(cell, "id", "cell-" ++ int_to_string(x) ++ "-" ++ int_to_string(y))
+        Js.Dom.append(row, cell)
       end)
-      Dom.append(container, row)
+      Js.Dom.append(container, row)
     end)
   end
 
@@ -453,12 +453,12 @@ mod Tetris do
   end
 
   fn handle_key(ev) : Unit do
-    let key = Dom.event_key(ev)
+    let key = Js.Dom.event_key(ev)
     -- Arrow keys and Space scroll the page by default; prevented
     -- unconditionally (not just while an action fires) so the game stays
     -- put whether it's mid-move, paused, or time-traveling.
     match is_scroll_key(key) do
-      true  -> Dom.prevent_default(ev)
+      true  -> Js.Dom.prevent_default(ev)
       false -> ()
     end
     match key do
@@ -483,16 +483,16 @@ mod Tetris do
   end
 
   fn main() : Unit do
-    match Dom.find("board") do
+    match Js.Dom.find("board") do
       None -> ()
       Some(board_el) ->
         build_board_dom(board_el)
         restart()
-        Dom.listen(Dom.body(), "keydown", fn ev -> handle_key(ev))
+        Js.Dom.listen(Js.Dom.body(), "keydown", fn ev -> handle_key(ev))
         schedule_tick()
-        match Dom.find("restore-trigger") do
+        match Js.Dom.find("restore-trigger") do
           None -> ()
-          Some(trigger) -> Dom.listen(trigger, "click", fn _ -> restore_from_request())
+          Some(trigger) -> Js.Dom.listen(trigger, "click", fn _ -> restore_from_request())
         end
     end
   end

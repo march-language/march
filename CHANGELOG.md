@@ -46,6 +46,48 @@ git log is authoritative for exact commits.
   narrowed. An import into a cyclic module group falls back conservatively to
   the old whole-module set.
 
+- **`~H` now escapes by HTML parse context, not with one escaper everywhere.**
+  Previously every interpolation was HTML entity-encoded regardless of where it
+  landed, which is correct in element content and wrong everywhere else. The
+  desugarer now walks a template's literal chunks through a context automaton at
+  compile time and gives each hole the escaper its position calls for.
+
+  **This changes rendered output.** Measured across bastion and forgepm — 121
+  templates, 253 interpolations — 40 holes change:
+
+  | context | before | now |
+  |---|---|---|
+  | element content (213 holes) | entity-encoded | unchanged |
+  | attribute value (17) | entity-encoded | + backtick |
+  | URL component (14) | entity-encoded | percent-encoded |
+  | `style` attribute (7) | entity-encoded | CSS declaration/value escape |
+  | start of `href`/`src` (2) | entity-encoded | **URL scheme allowlist** |
+
+  The last row closes a real hole: `~H"<a href=\"${url}\">"` accepted
+  `javascript:alert(1)`, since entity-encoding does not touch a scheme. Such
+  URLs now render as `about:invalid#zSoyz`.
+
+  An **unquoted attribute value** receiving an interpolation is now quoted
+  automatically — `<div class=${x}>` emits `<div class="…">` — so a value
+  containing a space can no longer start a new attribute.
+
+  Interpolations that no escaping can make safe are now **compile errors**
+  rather than silently-wrong output: an attribute name, an element name, the
+  interior of a comment, and a template that ends mid-tag or mid-attribute.
+  Nothing in bastion or forgepm hits any of these.
+
+  Escaping tables live in `specs/security/html-contexts.tbl` and are documented
+  in `specs/security/README.md`.
+
+- **Breaking: the three JS-only stdlib modules are now namespaced under `Js.`.**
+  `mod Audio`, `mod Canvas`, `mod Dom` are `mod Js.Audio`, `mod Js.Canvas`,
+  `mod Js.Dom` — these are the only stdlib modules that panic at runtime when
+  called from a native build, and the shared prefix puts that constraint at
+  every call site instead of only in a doc comment. Filenames
+  (`stdlib/{audio,canvas,dom}.march`) are unchanged. No back-compat aliasing
+  exists for module names, so every caller (`Audio.beep(...)` →
+  `Js.Audio.beep(...)`, etc.) must update in lockstep. See
+  `specs/progress/2026-08-05-js-namespace-audio-canvas-dom.md`.
 - **`cap no_panic` now consults a call's actual refinement contract instead of
   banning it by name.** A partial stdlib or prelude function that declares a
   refinement precondition — `unwrap`, `expect`, `head`, `tail`, `last`,
@@ -93,6 +135,15 @@ git log is authoritative for exact commits.
   still reported by `march check`. This is the pre-existing behavior preserved;
   nothing that passed `march check` before fails it now. Use `march --check` for
   the proof-based answer.
+
+### Removed
+
+- **`demo_app/perihelion`, `demo_app/dom_demo`, and `demo_app/canvas_demo`.**
+  Along with the live `docs/perihelion.html` page, its checked-in compiled
+  assets (`docs/assets/perihelion/`), the CI workflow that regenerated them
+  (`gen-perihelion-assets.yml`), and the now-dead `build-dom-demo` slash
+  command. `demo_app/tetris` and `demo_app/tetris_logic` are unaffected and
+  updated for the `Js.*` rename above.
 
 ### Fixed
 
