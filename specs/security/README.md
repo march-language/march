@@ -47,7 +47,7 @@ Four fields, exactly as the paper describes:
 |---|---|
 | `state` | `pcdata` `rcdata` `tagname` `closetagname` `beforeattrname` `afterattrname` `beforeattrvalue` `attrvalue` `comment` |
 | `element` | `normal` `script` `style` `textarea` `title` |
-| `attr` | `normal` `url` `urlmid` `style` `script` |
+| `attr` | `normal` `url` `urlmid` `style` `stylevalue` `script` |
 | `delim` | `none` `single` `double` `unquoted` `doublesubst` |
 
 `element` tracks which element's content we are inside, because `<script>` and
@@ -143,7 +143,8 @@ row — one less thing to get out of sync:
 | `attrvalue` with `attr = normal` | HTML entity-encode, plus backtick |
 | `attrvalue` with `attr = url` (start of value) | URL scheme allowlist |
 | `attrvalue` with `attr = urlmid` | percent-encode |
-| `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS escape |
+| `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS **declaration** escape |
+| `attrvalue` with `attr = stylevalue` | CSS **value** escape |
 | `attrvalue` with `attr = script`, or `rcdata` in `script` | JS string escape |
 
 ## Escaper implementations
