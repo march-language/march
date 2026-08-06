@@ -13,6 +13,28 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`~H` no longer emits two CSRF tokens when a form already interpolates one.**
+  The desugar injects a hidden `_csrf_token` input after a mutating `<form>`
+  whenever a `conn` binding is in scope. If the author also wrote
+  `${CSRF.tag(conn)}`, both were emitted — silently, because `CSRF.tag` returns
+  `IOList` and passes through unescaped. With `CSRF.tag_string`, which returns
+  `String`, the contextual escaper treated it as untrusted text and rendered a
+  visible chunk of escaped markup onto the page.
+
+  Injection is now skipped for a form that already contains an explicit token,
+  and a **warning** points out that the explicit call is redundant.
+
+  Detection is scoped **per form**, not per template: a template with two forms
+  where only one carries an explicit token keeps injection on the other. A
+  template-wide check would have turned a cosmetic duplicate into an
+  unprotected form.
+
+- **Desugar diagnostics are labelled by their actual severity.** Both printers
+  in `bin/main.ml` hardcoded `error:`, which was harmless only while the desugar
+  emitted nothing but errors. The warning above is the first exception, and a
+  warning printed as `error:` misleads people and any tooling that greps the
+  output. The exit decision is unchanged — it still keys off `has_errors`.
+
 - **`~xml`, `~toml` and `~yaml` allowed an interpolated value to change the
   parsed structure; interpolation into them is now a compile error.** These
   sigils hand their handler a single already-concatenated string which the
