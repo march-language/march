@@ -182,7 +182,11 @@
       letter-spacing: -0.02em; color: var(--text); margin-bottom: 56px; line-height: 1.15;
     }
     .m-feature-grid {
-      display: grid; grid-template-columns: 1fr 1fr;
+      /* minmax(0,1fr), not 1fr: a plain 1fr is minmax(auto,1fr), so a wide
+         min-content in one column (the flip card's hidden benchmark table)
+         inflates that track and makes the columns unequal. minmax(0,…) clamps
+         both to an even half. */
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 1px; background: var(--border); border: 1px solid var(--border);
       border-radius: 8px; overflow: hidden;
     }
