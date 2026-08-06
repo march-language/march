@@ -106,6 +106,29 @@ caps and wrong for IO: it would let any module mint what it needs. For IO the
 minting surface must be exactly one place, and that place must not be
 expressible in March.
 
+**Measured 2026-08-05, and it is worse than "the minting surface is too
+wide": there is no minting step to gate.** `root_cap` is an ordinary global of
+type `Cap(IO)`, in scope in every module. A module declaring **no `needs` at
+all** can write `let x = root_cap` and hold the root capability; the only
+diagnostic such a program gets is about its `println`. Narrowing from there to
+any descendant is then free and legitimate, since `cap_narrow` demands exactly
+the parent it now has.
+
+Two consequences worth being explicit about:
+
+- **This bounds what R3 earned.** Stage 1's claim has to be stated as "a
+  capability cannot be fabricated from data", not "a capability can only be
+  received" — see §5. Nothing was received here.
+- **R2 is now the cheapest item that materially strengthens the claim**, and
+  unlike R1b it is not a language-wide signature change. It is roughly: make
+  `root_cap` not nameable from user code, thread `Cap(IO)` in through `main`'s
+  parameter instead, and decide what happens to the ambient-IO builtins that
+  currently need no token at all (which is R1, and is where the cost lives —
+  R2 without R1 moves the root but leaves `file_read(p)` working regardless).
+
+That last parenthesis is the real sequencing question, and it is why R2 and R1
+may not be separable in practice even though this page lists them apart.
+
 ### R3. Unforgeability, checked — **SHIPPED 2026-08-05**
 
 A capability must not be constructible except by receipt. Concretely, `Cap(X)`
@@ -401,15 +424,29 @@ Defensible today:
 
 Newly defensible as of 2026-08-05 (stage 1, R3/R4):
 
-> A capability in March can be received and narrowed, never constructed. It
-> cannot be deserialized, derived, or cast into existence.
+> A capability in March cannot be deserialized, derived, or cast into
+> existence.
 
-State it on its own rather than folding it into the sentence above — it is a
-narrower claim than it sounds. It says a capability VALUE cannot be
-fabricated. It does **not** say a module needs one to perform IO: built-in IO
-is still ambient (R1), so `file_read(p)` compiles with no token in scope. A
-reader who hears "capabilities are unforgeable" will assume the second thing
-unless told otherwise.
+State it on its own rather than folding it into the sentence above, and resist
+the shorter phrasing "capabilities can only be received, never constructed" —
+that one is not yet true, for two separate reasons:
+
+- **built-in IO is ambient** (R1), so a module performs IO with no capability
+  at all; `file_read(p)` compiles with no token in scope;
+- **the root capability is ambient too** (R2). Measured 2026-08-05: a module
+  declaring *no* `needs` whatsoever can write `let x = root_cap` and hold
+  `Cap(IO)`, with no diagnostic naming it. So "received" is doing more work
+  than it looks — the root is received from a global that is in scope
+  everywhere, which is no-authority-from-nothing violated at the source rather
+  than at the construction site.
+
+What R3 closed is the *fabrication-from-data* route: a capability cannot be
+conjured out of a JSON string, a derive, or a cast. That is worth stating and
+is genuinely new. It is not the same as "you must be given authority to have
+it", and a reader will hear the second unless the sentence is kept narrow.
+
+**R2 is therefore the item that most directly strengthens this claim**, and it
+is cheap next to R1b.
 
 Paired, wherever the word "sandbox" appears, with the exclusion that is easiest
 to forget and most likely to bite:
