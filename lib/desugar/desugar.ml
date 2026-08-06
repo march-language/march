@@ -879,7 +879,49 @@ let rec desugar_expr (e : expr) : expr =
          Html.escape, and build a multi-segment IOList directly. *)
       html_interp_to_iolist content' sp
     else begin
-      (* Other sigils: ~R"..." → Sigil.r(content), ~xml"..." → Sigil.xml(content), etc. *)
+      (* Other sigils: ~R"..." → Sigil.r(content), ~xml"..." → Sigil.xml(content), etc.
+      
+         These hand the handler a single ALREADY-CONCATENATED string, which it
+         then PARSES. So an interpolated value is spliced into the source text
+         before parsing and can change the parsed STRUCTURE, not just a value
+         in it. Demonstrated on every shipped handler:
+
+           ~xml"<user><name>${v}</name></user>"
+             v = "</name><admin>true</admin><name>"
+             -> <user><name/><admin>true</admin><name/></user>   3 children
+
+           ~toml"name = \"${v}\""   -> injects a whole new key
+           ~yaml"name: ${v}"        -> injects a whole new key
+
+         ~H solves its version of this by escaping per parse context, but ~H
+         must emit TEXT and has no alternative. These sigils produce a parsed
+         STRUCTURE, so the sound fix is to supply values as data rather than as
+         source text — the parameterisation analogue — not a second family of
+         escapers. YAML in particular cannot be made safe by escaping in any way
+         worth trusting.
+
+         Until a handler offers that, interpolation here is refused. It is used
+         nowhere: across the compiler, bastion, forgepm, conduit, depot and
+         march_doc there are six uses of these sigils, all in this repo's own
+         tests, and NONE with interpolation. *)
+      let parts = decompose_concat content' in
+      let has_hole =
+        List.exists
+          (function
+            | EApp (EVar { txt = "to_string"; _ }, _, _) -> true
+            | _ -> false)
+          parts
+      in
+      if has_hole then
+        desugar_expr_error ~sp
+          ~hint:("Build the value programmatically instead — e.g. parse a "
+                 ^ "literal document and set fields on it — so the "
+                 ^ "interpolated value is data rather than source text.")
+          (Printf.sprintf
+             "Cannot interpolate into a ~%s sigil. Its content is parsed, so an \
+              interpolated value would be spliced into the source text and could \
+              change the parsed structure rather than appear as a value in it."
+             name);
       let fn_name = "Sigil." ^ String.lowercase_ascii name in
       EApp (EVar { txt = fn_name; span = sp }, [content'], sp)
     end

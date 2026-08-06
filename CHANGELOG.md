@@ -11,6 +11,34 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`~xml`, `~toml` and `~yaml` allowed an interpolated value to change the
+  parsed structure; interpolation into them is now a compile error.** These
+  sigils hand their handler a single already-concatenated string which the
+  handler then *parses*, so a hole was spliced into the source text before
+  parsing. Measured before the fix:
+
+  ```march
+  let evil = "</name><admin>true</admin><name>"
+  ~xml"<user><name>${evil}</name></user>"
+  -- <user><name/><admin>true</admin><name/></user>   3 children, not 1
+  ```
+
+  `~toml"name = \"${v}\""` and `~yaml"name: ${v}"` likewise injected entire new
+  keys.
+
+  `~H` is unaffected and keeps its interpolation: it must emit *text*, so it
+  escapes per parse context. These sigils produce a *structure*, where the sound
+  fix is supplying values as data rather than as source text — the
+  parameterisation analogue — not a second family of escapers. YAML in
+  particular cannot be made safe by escaping in any way worth trusting.
+
+  Sigils without interpolation are unchanged. Nothing is known to break: across
+  the compiler, bastion, forgepm, conduit, depot and march_doc there are six
+  uses of these sigils, all in the compiler's own tests, and none with a hole.
+
+
 ### Added
 
 - **Context-indexed trust for `~H`: `Html.TrustedHtml` / `TrustedAttr` /

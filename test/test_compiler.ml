@@ -11519,8 +11519,88 @@ let test_or_pattern_binding_type_mismatch_rejected () =
   Alcotest.(check bool) "same binder at differing types: rejected" true
     (has_errors ctx)
 
+(* ── Parsed sigils refuse interpolation ───────────────────────────────────
+   ~xml / ~toml / ~yaml hand their handler a single already-concatenated string
+   which the handler then PARSES, so an interpolated value is spliced into the
+   source text before parsing and can change the parsed STRUCTURE. Measured
+   before this was refused:
+
+     ~xml"<user><name>${v}</name></user>" with v = "</name><admin>true</admin><name>"
+       -> <user><name/><admin>true</admin><name/></user>     3 children, not 1
+     ~toml"name = \"${v}\""  -> injected a whole new key
+     ~yaml"name: ${v}"      -> injected a whole new key
+
+   ~H is different: it must emit TEXT, so it escapes per parse context. These
+   produce a STRUCTURE, where the sound fix is supplying values as data rather
+   than as source text. Until a handler offers that, the hole is refused. *)
+
+(* The refusal is raised in the DESUGAR pass, so drive it the way the
+   satisfy/derive desugar-error tests do. *)
+let sigil_interp_errors src =
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+       if d.March_errors.Errors.severity = March_errors.Errors.Error
+       then Some d.March_errors.Errors.message else None)
+    errors.March_errors.Errors.diagnostics
+
+let sigil_contains_sub s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+  m = 0 || go 0
+
+let test_xml_sigil_refuses_interpolation () =
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~xml"<a>${v}</a>" end end|} in
+  Alcotest.(check bool) "an error is reported" true (msgs <> []);
+  Alcotest.(check bool) "it names the sigil" true
+    (List.exists (fun m -> sigil_contains_sub m "~xml sigil") msgs)
+
+let test_toml_sigil_refuses_interpolation () =
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~toml"k = ${v}" end end|} in
+  Alcotest.(check bool) "it names the sigil" true
+    (List.exists (fun m -> sigil_contains_sub m "~toml sigil") msgs)
+
+let test_yaml_sigil_refuses_interpolation () =
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~yaml"k: ${v}" end end|} in
+  Alcotest.(check bool) "it names the sigil" true
+    (List.exists (fun m -> sigil_contains_sub m "~yaml sigil") msgs)
+
+let test_parsed_sigils_without_holes_still_work () =
+  let msgs = sigil_interp_errors {|mod T do fn f() do ~xml"<a>b</a>" end end|} in
+  Alcotest.(check bool) "no error for a literal document" true (msgs = [])
+
+let test_h_sigil_still_allows_interpolation () =
+  (* ~H must keep working -- it escapes per context rather than refusing. *)
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~H"<p>${v}</p>" end end|} in
+  Alcotest.(check bool) "~H is unaffected" true
+    (not (List.exists (fun m -> sigil_contains_sub m "Cannot interpolate into a ~") msgs))
+
+let sigil_interp_suite =
+  ( "parsed_sigil_interpolation", [
+      Alcotest.test_case "~xml refuses a hole" `Quick
+        test_xml_sigil_refuses_interpolation;
+      Alcotest.test_case "~toml refuses a hole" `Quick
+        test_toml_sigil_refuses_interpolation;
+      Alcotest.test_case "~yaml refuses a hole" `Quick
+        test_yaml_sigil_refuses_interpolation;
+      Alcotest.test_case "a literal document is still fine" `Quick
+        test_parsed_sigils_without_holes_still_work;
+      Alcotest.test_case "~H is unaffected" `Quick
+        test_h_sigil_still_allows_interpolation;
+    ] )
+
 let compiler_suites =
   [
+      sigil_interp_suite;
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
       ("cap_markers", Test_cap_markers.tests);
