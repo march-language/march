@@ -173,6 +173,15 @@ See [specs/lang/surface-syntax.md](specs/lang/surface-syntax.md) for a complete 
 - Module: `mod Name do ... end` (not `module`)
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
 - Conditionals: `if cond do ... else ... end` — `else` is MANDATORY (omitting it: "March `if` expressions always need an `else` branch"); `then` is rejected ("I don't recognize `then` here — March uses do/end blocks instead.")
+- **`else if` chains need one `end` per `if`, not one for the chain.** A two-branch
+  chain ends `end end`, a three-branch chain `end end end`. There is no
+  `elif`/`elsif`, and `else if` is genuinely a nested `if` in the else position:
+  ```march
+  if a do 1 else if b do 2 else 3 end end          -- two ifs, two ends
+  ```
+  Getting this wrong gives a confusing "I got stuck here" pointing at the NEXT
+  declaration, not at the `if` — the parser only notices when it runs out of
+  input. See `stdlib/uri.march:62` (`else -1 end end end`) for a real one.
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
 - Result propagation: `let? p = e` binds the `Ok` payload and returns `Err(e)` immediately; RHS must be `Result`; cannot be the last expr in a block
 - No `;` — use newlines to separate block expressions

@@ -332,6 +332,49 @@ let automaton_tests =
     Alcotest.test_case "terminal validity" `Quick test_terminal_validity;
     Alcotest.test_case "literal emitted verbatim" `Quick test_literal_is_emitted_unchanged_when_no_substitution ]
 
+(* ── Attribute classification agrees with the shipped table ───────────────
+   stdlib/html.march carries a SECOND copy of the [attrs] rules, because
+   Html.tag classifies attribute names at runtime and stdlib is loaded from a
+   directory (a generated _build artifact would not be on the shipped path).
+   This test is what keeps the copy honest: it pins what the .tbl classifies
+   these names as, so editing the table without editing html.march fails here.
+
+   Duplication caught by a test rather than prevented by construction is a
+   compromise, and it is only acceptable because Html.tag is deprecated in
+   favour of ~H, which needs no runtime classification at all. *)
+
+let test_attr_classification_matches_html_march () =
+  let t =
+    let candidates =
+      [ "specs/security/html-contexts.tbl";
+        "../../specs/security/html-contexts.tbl";
+        "../../../specs/security/html-contexts.tbl" ] in
+    match List.find_opt Sys.file_exists candidates with
+    | None -> Alcotest.failf "shipped table not found (cwd %s)" (Sys.getcwd ())
+    | Some p ->
+      (match P.parse_file p with
+       | Ok t -> t
+       | Error e -> Alcotest.failf "shipped table failed to parse: %s" e)
+  in
+  let cls name = P.classify t.P.attrs name in
+  let check name expected =
+    Alcotest.(check (option string))
+      (Printf.sprintf "attr %S classifies as %s" name expected)
+      (Some expected) (cls name)
+  in
+  (* Every url attribute listed in Html.url_attr_names(). *)
+  List.iter (fun n -> check n "url")
+    [ "href"; "src"; "action"; "formaction"; "poster"; "cite"; "background" ];
+  check "style" "style";
+  (* Event handlers -- Html.tag refuses these outright rather than escaping. *)
+  List.iter (fun n -> check n "script") [ "onerror"; "onclick"; "onload"; "on" ];
+  (* Everything else falls through to normal. *)
+  List.iter (fun n -> check n "normal")
+    [ "class"; "id"; "data-id"; "title"; "alt"; "width" ];
+  (* Case-insensitivity: HTML attribute names are, and so is the classifier. *)
+  check "HREF" "url";
+  check "OnClick" "script"
+
 let tests =
   [ ("ctxesc table parser",
      [ Alcotest.test_case "minimal transition" `Quick test_parses_a_minimal_transition;
@@ -345,4 +388,7 @@ let tests =
        Alcotest.test_case "rejects wrong field count" `Quick test_rejects_wrong_field_count;
        Alcotest.test_case "rejects row outside section" `Quick test_rejects_row_outside_a_section;
        Alcotest.test_case "shipped table parses" `Quick test_shipped_table_parses ]);
-    ("ctxesc automaton", automaton_tests) ]
+    ("ctxesc automaton", automaton_tests);
+    ("ctxesc attr classification",
+     [ Alcotest.test_case "html.march copy matches the shipped table" `Quick
+         test_attr_classification_matches_html_march ]) ]

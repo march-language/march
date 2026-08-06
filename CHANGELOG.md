@@ -11,6 +11,34 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Html.tag` had three injection holes; it now validates names and escapes
+  values by context.** `Html.tag` composes markup outside the `~H` sigil, so it
+  never reached the contextual analysis added for `~H`. Measured before the fix:
+
+  | call | emitted |
+  |---|---|
+  | `Html.tag("div onload=alert(1)", …)` | `<div onload=alert(1)>` — element name concatenated raw |
+  | `Html.tag("div", [("onerror", "alert(1)")], …)` | `<div onerror="alert(1)">` — entity-encoding does nothing to `onerror` |
+  | `Html.tag("a", [("href", "javascript:alert(1)")], …)` | the URL verbatim |
+
+  Attribute **values** are now escaped for the context their name implies — url
+  attributes get the scheme allowlist, `style` gets CSS declaration escaping,
+  everything else attribute escaping. Element and attribute **names** are
+  validated and an invalid one **panics**: escaping cannot help there, since
+  `onerror` has no character to escape, so a name built from untrusted input is
+  a programming error rather than a data condition. Event-handler attributes
+  (`on*`) are refused outright — their value is JavaScript, and `Html.tag` has
+  no way to know whether the caller meant that.
+
+  Reachable but unreached: the only call site in the ecosystem passes literals.
+
+  `Html.tag` and `Html.escape_attr` are now documented as **deprecated** in
+  favour of `~H`, which gets the same analysis at compile time and needs no
+  runtime checks. Neither is removed — `bastion` is published at 0.2.3.
+
+
 ### Changed
 
 - **`~H` now escapes by HTML parse context, not with one escaper everywhere.**

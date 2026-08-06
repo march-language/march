@@ -1698,14 +1698,40 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       ("ptr", r)
     end
 
-  (* A non-literal escaper id would mean the desugarer failed to constant-fold
-     the context walk, which is the whole point of the analysis. Fail loudly
-     rather than emit a call whose escaper is chosen at runtime. *)
-  | Tir.EApp (f, [_; _]) when f.Tir.v_name = "html_escape_ctx" ->
-    failwith
-      "html_escape_ctx: escaper id is not a compile-time literal. The ~H \
-       desugar must fold the context walk statically; see \
-       specs/plans/2026-08-05-contextual-autoescaping.md."
+  (* A RUNTIME escaper id.
+     
+     This used to be a hard failure, on the premise that only the ~H desugar
+     calls html_escape_ctx and it always folds the context statically. That
+     premise was wrong: Html.tag (stdlib/html.march) classifies an attribute
+     NAME at runtime and picks the escaper from it, because it composes markup
+     outside the sigil and has no compile-time context to fold. A dynamic id is
+     correct there, not a bug.
+
+     The ~H path is unaffected — it always emits a literal and takes the arm
+     above, which is also where the already-safe-HTML specialisation lives.
+     That specialisation needs a literal id and is simply not available here;
+     a dynamic caller passes a String, so it does not apply.
+
+     Safety is unchanged: march_html_escape_ctx validates the id and aborts on
+     one it does not know, so a wrong id fails loudly rather than silently
+     skipping an escaper. *)
+  | Tir.EApp (f, [idx; a]) when f.Tir.v_name = "html_escape_ctx" ->
+    let id_v = emit_atom_as ctx "i64" idx in
+    let v = emit_atom_as ctx "ptr" a in
+    let v =
+      match atom_tir_ty a with
+      | Tir.TString -> v
+      | _ ->
+        let sv = fresh ctx "hecd_str" in
+        emit ctx
+          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
+        sv
+    in
+    let r = fresh ctx "hecd" in
+    emit ctx
+      (Printf.sprintf "%s = call ptr @march_html_escape_ctx(i64 %s, ptr %s)"
+         r id_v v);
+    ("ptr", r)
 
   (* ── Bitwise integer builtins ─────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->

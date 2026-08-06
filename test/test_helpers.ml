@@ -1213,6 +1213,16 @@ let eval_with_iolist src =
   let iolist_decl = load_stdlib_file_for_test "iolist.march" in
   eval_with_stdlib [string_decl; iolist_decl] src
 
+(* Html.tag classifies attribute names and escapes values contextually, so it
+   needs string/list/char alongside iolist. *)
+let eval_with_html src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let list_decl   = load_stdlib_file_for_test "list.march" in
+  let char_decl   = load_stdlib_file_for_test "char.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  let html_decl   = load_stdlib_file_for_test "html.march" in
+  eval_with_stdlib [string_decl; list_decl; char_decl; iolist_decl; html_decl] src
+
 let eval_with_http src =
   let string_decl = load_stdlib_file_for_test "string.march" in
   let http_decl = load_stdlib_file_for_test "http.march" in

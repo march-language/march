@@ -1,0 +1,57 @@
+-- Html.tag hardening (Task 9 of specs/plans/2026-08-05-contextual-autoescaping.md).
+--
+-- Html.tag composes markup OUTSIDE the ~H sigil, so it never reaches the
+-- context automaton. Measured on main @ a8707c78, it had THREE injection holes:
+--
+--   Html.tag("div onload=alert(1)", [], body)
+--     -> <div onload=alert(1)>x</div onload=alert(1)>   element name RAW
+--   Html.tag("div", [("onerror", "alert(1)")], body)
+--     -> <div onerror="alert(1)">x</div>                entity-encoding is a no-op
+--   Html.tag("a", [("href", "javascript:alert(1)")], body)
+--     -> <a href="javascript:alert(1)">x</a>            context-blind value
+--
+-- The first two CANNOT be closed by escaping. They sit where the automaton
+-- emits a hard error for ~H, for the same reason: `onerror` contains no
+-- character an encoder could touch. Those are validated and refused (panic);
+-- only the third is an escaping problem.
+--
+-- Compiled/interpreted golden diff -- .expected is the interpreter's output and
+-- the dune rule diffs the compiled binary against it. Parity is the property
+-- that matters here (see specs/progress/2026-08-05-h-sigil-adt-misread.md,
+-- where only compiled output was wrong).
+--
+-- The panic cases cannot live in this file: a panic ends the program. They are
+-- covered in test/test_stdlib_suite.ml instead.
+mod HTagHardening do
+  fn main() : Unit do
+    let body = IOList.from_string("x")
+
+    -- Ordinary attribute: unchanged from before the fix.
+    println("class   : " ++ IOList.to_string(
+      Html.tag("div", [("class", "a\"b")], body)))
+
+    -- URL attribute: an attribute value passed whole to Html.tag IS the whole
+    -- URL, so it gets the scheme allowlist -- as a hole at the start of an
+    -- href does under ~H.
+    println("href_bad: " ++ IOList.to_string(
+      Html.tag("a", [("href", "javascript:alert(1)")], body)))
+    println("href_ok : " ++ IOList.to_string(
+      Html.tag("a", [("href", "/packages/bastion?tab=readme")], body)))
+    println("src_bad : " ++ IOList.to_string(
+      Html.tag("img", [("src", "javascript:alert(1)")], IOList.empty())))
+
+    -- style is a declaration list, so `:` and `;` are structural and an
+    -- allowlisted function survives.
+    println("style   : " ++ IOList.to_string(
+      Html.tag("div", [("style", "color:var(--text-muted);display:flex")], body)))
+    println("style_x : " ++ IOList.to_string(
+      Html.tag("div", [("style", "background:url(javascript:alert(1))")], body)))
+
+    -- Valid names with the shapes HTML actually allows.
+    println("dashed  : " ++ IOList.to_string(
+      Html.tag("my-element", [("data-id", "7")], body)))
+    println("multi   : " ++ IOList.to_string(
+      Html.tag("a", [("href", "/x"), ("class", "b")], body)))
+    println("noattrs : " ++ IOList.to_string(Html.tag("br", [], IOList.empty())))
+  end
+end

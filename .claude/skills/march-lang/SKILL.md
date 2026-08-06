@@ -266,7 +266,14 @@ end
 
 ### If / Else
 
+Each `if` needs its own `end`. An `else if` chain is a nested `if` in the else
+position, so a two-branch chain closes with `end end` and a three-branch chain
+with `end end end` — see `stdlib/uri.march:62`. There is no `elif`. A missing
+`end` reports "I got stuck here" at the *next declaration*, not at the `if`.
+
 ```march
+if a do 1 else if b do 2 else 3 end end   -- two ifs, two ends
+
 if condition do expr end
 
 if condition do
@@ -785,7 +792,7 @@ pfn insert(t : Tree, v : Int) : Tree do
   Node(l, x, r) ->
     if v < x do Node(insert(l, v), x, r)
     else if v > x do Node(l, x, insert(r, v))
-    else t end
+    else t end end          -- one `end` per `if`, NOT one per chain
   end
 end
 ```
