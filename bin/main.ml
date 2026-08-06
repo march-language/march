@@ -2135,9 +2135,11 @@ let compile filename =
        that `use`s another inherits an obligation to cover that module's
        declared needs.
 
-       module_caps is keyed by BARE module name and is consed onto the head
-       as each DMod finishes, so it can (and, with a nested user module that
-       shadows a stdlib name, does) contain duplicate keys. march's own
+       module_caps is keyed by module name — each module contributes its
+       fully-qualified path plus, when it differs, its bare name — and is
+       consed onto the head as each DMod finishes, so it can (and, with a
+       nested user module that shadows a stdlib name, does) contain
+       duplicate keys. march's own
        Check 4 resolves this same table via [List.assoc_opt imported
        env.module_caps] (typecheck.ml:6832, :7068) on the unsorted, cons-order
        list — [List.assoc_opt] returns the FIRST match it finds scanning from

@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--cap-strict` falsely rejected modules nested two or more levels deep.** A
+  module like `mod App do mod Inner do mod Deep do needs IO.FileWrite` was
+  reported as "uses `IO.FileWrite` but does not declare `needs IO.FileWrite`"
+  even though it declared exactly that. The typechecker recorded each module's
+  declared `needs` under its BARE name, while the ceiling check matches emitted
+  code against the fully-qualified owner (`Inner.Deep`) — and an entry recorded
+  inside an enclosing `mod` was dropped at that boundary before the check ever
+  saw it. At one level of nesting the bare and qualified spellings coincide, so
+  only depth >= 2 was affected. Declarations are now keyed by qualified path
+  (bare name kept as an alias for `use` lookups) and propagate outward; a
+  doubly-nested module that omits its `needs` is still reported, under its
+  qualified name.
+
 - **`~H` misread non-IOList ADTs as IOLists — unescaped output and a SIGSEGV.**
   `march_html_auto_escape` ended by assuming any constructor with `tag >= 0` was
   an `IOList` and flattening it verbatim. Constructor tags are numbered per type

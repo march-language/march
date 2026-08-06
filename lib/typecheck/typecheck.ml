@@ -562,7 +562,12 @@ type env = {
       [needs IO.FileRead("/a"), IO.FileRead("/b")] permits both subtrees. *)
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
-      Populated when a [DMod] is fully checked; used for transitive enforcement. *)
+      Populated when a [DMod] is fully checked; used for transitive enforcement.
+      Each module contributes an entry under its fully-qualified path (matching
+      TIR attribution, which the --cap-strict ceiling joins against) and, when
+      that differs, a second one under its bare name (matching `use` paths as
+      written, which Check 4 looks up).  Entries from modules nested inside a
+      [DMod] propagate outward through it. *)
   protocols  : proto_info StrMap.t; (** Registered session-type protocols *)
   impls      : (ty * Ast.span * string option) list StrMap.t;
   (** iface_name → (bare impl head type, decl span, resolved declaring-module of
@@ -10014,6 +10019,32 @@ let rec check_decl env (d : Ast.decl) : env =
     let inner_needs = List.concat_map (function
         | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
         | _ -> []) decls in
+    (* Key those needs by the FULLY-QUALIFIED module path, the same one
+       [check_module_needs] is given as [~cap_qname_prefix] just above and the
+       same convention TIR attribution uses (lower.ml's [mod_prefix]) — the
+       --cap-strict ceiling in bin/main.ml matches [module_caps] against that
+       attribution by owner name.  Keying by the BARE name made every module
+       nested two or more deep read as "uses X but does not declare needs X"
+       even when it declared exactly X, because attribution named it
+       `Outer.Inner` while this list said `Inner`.  At depth 1 the two spellings
+       coincide (the entry module is unwrapped, so [cap_qual_prefix] is "" in
+       its body), which is why the bug only showed from depth 2.
+
+       The bare key is kept alongside it: Check 4 and [module_wide_caps] look
+       up `use` paths AS WRITTEN, so a sibling imported by its short name must
+       still resolve.  And [inner_env.module_caps] — not the outer env's — is
+       carried outward, or entries recorded by modules nested inside this one
+       (which is exactly where the mis-keyed ones lived) are dropped at this
+       boundary and never reach the ceiling check at all. *)
+    let cap_qname =
+      if env.cap_qual_prefix = "" then name.txt
+      else env.cap_qual_prefix ^ "." ^ name.txt
+    in
+    let module_caps' =
+      let with_qual = (cap_qname, inner_needs) :: inner_env.module_caps in
+      if cap_qname = name.txt then with_qual
+      else (name.txt, inner_needs) :: with_qual
+    in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
        Export both the local name ("JobRow") and the fully-qualified name
@@ -10049,7 +10080,7 @@ let rec check_decl env (d : Ast.decl) : env =
                     Some merged) all_new env'.ctors);
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       qual_fn_names = StrMap.union (fun _k a _ -> Some a) new_fn_quals env'.qual_fn_names;
-      module_caps = (name.txt, inner_needs) :: env'.module_caps;
+      module_caps = module_caps';
       proof_caps = inner_env.proof_caps;
       always_linear_types = inner_env.always_linear_types;
       no_panic_modules = no_panic_modules';

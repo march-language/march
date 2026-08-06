@@ -139,6 +139,19 @@ let accepts name src =
   let rc, out = compile_strict src in
   if rc <> 0 then Alcotest.failf "%s should compile but did not:\n%s" name out
 
+(* Like [rejects], but pins the TEXT of the ceiling violation.  Needed for the
+   nesting cases below: what was wrong there was the module NAME the ceiling
+   reported, so a test that only checks "some ceiling violation fired" would
+   pass on the buggy spelling too. *)
+let rejects_naming name ~expect src =
+  let rc, out = compile_strict src in
+  if rc = 0 then
+    Alcotest.failf "%s should have failed --cap-strict but compiled" name;
+  match Str.search_forward (Str.regexp_string expect) out 0 with
+  | _ -> ()
+  | exception Not_found ->
+    Alcotest.failf "%s: expected %S in the output, got:\n%s" name expect out
+
 (* Route 1: a direct builtin call.  Warning-only without --cap-strict. *)
 let test_direct_builtin_route () =
   rejects "direct builtin call"
@@ -246,6 +259,62 @@ mod CeilParent do
 end
 |}
 
+(* A module nested TWO levels deep that declares exactly what it uses.  This
+   was reported as "uses IO.FileWrite but does not declare needs IO.FileWrite"
+   even though it plainly declared it: [module_caps] keyed the needs by the
+   module's BARE name while TIR attribution names the owner by its qualified
+   path, so `Innocent.DeeplyNested` never found its own declaration (and, being
+   recorded inside an enclosing DMod's scope, was dropped at that boundary
+   before the ceiling ever ran).  At depth 1 the two spellings coincide — hence
+   a test at depth >= 2, where they do not. *)
+let test_doubly_nested_module_declaring_its_own_needs () =
+  accepts "doubly-nested module with its own needs"
+    {|
+mod CeilDeepOkay do
+  needs IO.Console
+  mod Innocent do
+    mod DeeplyNested do
+      needs IO.FileWrite
+      fn write_it(data : String) : Bool do
+        match file_write("/tmp/ceil_deep_ok", data) do
+          Ok(_)  -> true
+          Err(_) -> false
+        end
+      end
+    end
+  end
+  fn main() : () do
+    if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
+  end
+end
+|}
+
+(* And the same shape WITHOUT the declaration must still be caught — reported
+   under the qualified name, so the fix above did not buy silence by simply
+   dropping deep modules from the ceiling. *)
+let test_doubly_nested_module_without_needs_is_still_caught () =
+  rejects_naming "doubly-nested module missing needs"
+    ~expect:
+      "module `Innocent.DeeplyNested` uses `IO.FileWrite` but does not declare"
+    {|
+mod CeilDeepBad do
+  needs IO.Console
+  mod Innocent do
+    mod DeeplyNested do
+      fn write_it(data : String) : Bool do
+        match file_write("/tmp/ceil_deep_bad", data) do
+          Ok(_)  -> true
+          Err(_) -> false
+        end
+      end
+    end
+  end
+  fn main() : () do
+    if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
+  end
+end
+|}
+
 let tests =
   unit_tests
   @ [
@@ -261,4 +330,8 @@ let tests =
         test_a_correctly_declared_program_compiles;
       Alcotest.test_case "parent capability satisfies the ceiling" `Slow
         test_parent_declaration_satisfies_the_ceiling;
+      Alcotest.test_case "doubly-nested module declaring its own needs" `Slow
+        test_doubly_nested_module_declaring_its_own_needs;
+      Alcotest.test_case "doubly-nested module missing needs is caught" `Slow
+        test_doubly_nested_module_without_needs_is_still_caught;
     ]
