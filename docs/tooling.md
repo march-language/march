@@ -119,16 +119,16 @@ node dist/app.mjs
 march --target js --no-copy-runtime -o dist/app.mjs src/app.march
 ```
 
-The JS backend auto-loads `dom.march` from stdlib, so `Dom.*` functions are available without any extra imports in JS builds:
+The JS backend auto-loads `dom.march` from stdlib, so `Js.Dom.*` functions are available without any extra imports in JS builds:
 
 ```march
 mod Counter do
   fn main() : Unit do
-    match Dom.find("counter") do
+    match Js.Dom.find("counter") do
       None    -> ()
       Some(el) ->
-        Dom.set_text(el, "0")
-        Dom.listen(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
+        Js.Dom.set_text(el, "0")
+        Js.Dom.listen(el, "click", fn _ -> Js.Dom.set_text(el, "clicked!"))
     end
   end
 end
@@ -140,7 +140,7 @@ In HTML, import the output as an ES module:
 <script type="module" src="dist/app.mjs"></script>
 ```
 
-The `Dom` module is JS-only — calling DOM functions in a native build is a compile-time error at the capability level, but a runtime panic if you bypass the type system with FFI.
+The `Js.Dom` module is JS-only — calling DOM functions in a native build is a compile-time error at the capability level, but a runtime panic if you bypass the type system with FFI.
 
 #### forge build and watch with --target js
 

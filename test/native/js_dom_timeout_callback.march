@@ -1,4 +1,4 @@
--- Regression: Dom.set_timeout's callback is declared `Int -> Unit` (a dummy,
+-- Regression: Js.Dom.set_timeout's callback is declared `Int -> Unit` (a dummy,
 -- ignored Int arg), not `Unit -> Unit`. A true zero-arg lambda (`fn -> body`)
 -- types to its body's result directly (no arrow wrapper), so it can never
 -- unify with a declared `Unit -> Unit` extern parameter — see the module doc
@@ -7,6 +7,6 @@
 -- `cb._0(cb, 0)` JS closure-call ABI in runtime/march_dom.mjs.
 mod JsDomTimeoutCallback do
   fn main() : Unit do
-    Dom.set_timeout(0, fn _ -> println("fired"))
+    Js.Dom.set_timeout(0, fn _ -> println("fired"))
   end
 end

@@ -4,11 +4,11 @@
 -- Requires --target js; calling these functions from a native build panics.
 --
 -- Usage:
---   match Dom.find("counter") do
+--   match Js.Dom.find("counter") do
 --     None    -> ()
 --     Some(el) ->
---       Dom.set_text(el, "0")
---       Dom.on(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
+--       Js.Dom.set_text(el, "0")
+--       Js.Dom.on(el, "click", fn _ -> Js.Dom.set_text(el, "clicked!"))
 --   end
 --
 -- Note: set_timeout/set_interval/on_frame take a zero-arg callback typed
@@ -16,7 +16,7 @@
 -- `fn -> body` against a `Unit -> Unit` parameter, treating it as a
 -- unit-consuming thunk.)
 
-mod Dom do
+mod Js.Dom do
   needs Ffi
 
   -- Opaque handle to a DOM Element.
