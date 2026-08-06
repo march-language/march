@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "march_ctx_escape.h"
 #include <stdarg.h>
 #include <pthread.h>
 #include <time.h>
@@ -2404,6 +2405,37 @@ static int64_t mh_iolist_copy(void *iolist, char *buf, int64_t off) {
         return off;
     }
     return off;
+}
+
+/* Contextual escaper entry point for ~H (Task 4).
+ *
+ * Takes an escaper id chosen at COMPILE time from the parse context (see
+ * lib/ctxesc/automaton.ml) and a value the EMITTER has already normalised to a
+ * real march_string.
+ *
+ * It does not, and must not, inspect the value to decide what it is. That was
+ * the defect fixed in specs/progress/2026-08-05-h-sigil-adt-misread.md:
+ * constructor tags are numbered per type, so a heap-tag dispatch cannot tell
+ * IOList.Str from any other tag-1 constructor. Anything that is not a string
+ * here means llvm_emit and this function have diverged, so it aborts rather
+ * than guessing. */
+void *march_html_escape_ctx(int64_t escaper_id, void *v) {
+    if (!v) return march_string_lit("", 0);
+    if (((uintptr_t)v & 1u) != 0 || ((march_hdr *)v)->tag != MARCH_STRING_TAG) {
+        fprintf(stderr,
+                "march_html_escape_ctx: expected a String, got %s. The caller "
+                "in lib/tir/llvm_emit.ml must normalise the value before "
+                "calling; this function never dispatches on a heap tag.\n",
+                (((uintptr_t)v & 1u) != 0) ? "an immediate" : "a constructor");
+        abort();
+    }
+    march_string *s = (march_string *)v;
+    size_t need = march_ctx_escape((int)escaper_id, s->data, (size_t)s->len, NULL);
+    char *out = (char *)malloc(need + 1);
+    size_t wrote = march_ctx_escape((int)escaper_id, s->data, (size_t)s->len, out);
+    void *r = march_string_lit(out, (int64_t)wrote);
+    free(out);
+    return r;
 }
 
 void *march_html_auto_escape(void *v) {
