@@ -150,13 +150,14 @@ let escaper_for (c : C.t) =
   | C.Rcdata ->
     (match c.C.element with
      | C.ElScript -> C.EscJsString
-     | C.ElStyle -> C.EscCss
+     | C.ElStyle -> C.EscCssDecl
      | _ -> C.EscHtml)
   | C.Attrvalue ->
     (match c.C.attr with
      | C.AtUrl -> C.EscUrlWhole
      | C.AtUrlMid -> C.EscUrlComponent
-     | C.AtStyle -> C.EscCss
+     | C.AtStyle -> C.EscCssDecl
+     | C.AtStyleValue -> C.EscCssValue
      | C.AtScript -> C.EscJsString
      | C.AtNormal -> C.EscAttr)
   | _ -> C.EscAttr  (* unreachable: every other state rejects holes *)
