@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: DOM"
 permalink: /docs/cookbook/dom/
+scrollmd: true
 ---
 
 # DOM
@@ -147,6 +148,7 @@ end
 
 ## Attributes, classes, and styles
 
+<!-- scroll:skip -->
 ```march
 -- Attributes
 Dom.set_attr(el, "href", "#section-2")
@@ -171,6 +173,7 @@ Dom.set_style(el, "transform", "")   -- empty string removes the property
 
 `Dom.listen` attaches a handler that receives the `Event`:
 
+<!-- scroll:skip -->
 ```march
 Dom.listen(btn, "click", fn ev ->
   Dom.prevent_default(ev)
@@ -180,6 +183,7 @@ Dom.listen(btn, "click", fn ev ->
 
 The handler is a regular March lambda, so it can close over local variables:
 
+<!-- scroll:skip -->
 ```march
 fn add_item(list, label: String) : Unit do
   let li = Dom.create("li")
@@ -196,6 +200,7 @@ Common events: `"click"`, `"input"`, `"change"`, `"keydown"`, `"keyup"`,
 
 To read back the element that fired the event:
 
+<!-- scroll:skip -->
 ```march
 Dom.listen(container, "click", fn ev ->
   let target = Dom.event_target(ev)
@@ -206,6 +211,7 @@ Dom.listen(container, "click", fn ev ->
 `Dom.event_key` reads the key that triggered a `"keydown"`/`"keyup"` event
 (e.g. `"ArrowLeft"`, `"a"`, `" "` for space):
 
+<!-- scroll:skip -->
 ```march
 Dom.listen(Dom.body(), "keydown", fn ev ->
   match Dom.event_key(ev) do
@@ -220,6 +226,7 @@ Dom.listen(Dom.body(), "keydown", fn ev ->
 
 ## Form inputs
 
+<!-- scroll:skip -->
 ```march
 match Dom.find("search-box") do
   None -> ()
@@ -237,6 +244,7 @@ end
 
 ## Timers and animation
 
+<!-- scroll:skip -->
 ```march
 -- Run once after 500 ms
 Dom.set_timeout(500, fn _ ->
@@ -343,6 +351,7 @@ The full runnable version lives in `demo_app/dom_demo/`.
 **`Node` can be annotated directly.** Resource types from an external module
 can be spelled as `Dom.Node` (or bare `Node`) in type annotations:
 
+<!-- scroll:skip -->
 ```march
 fn highlight(el: Dom.Node) : Unit do
   Dom.add_class(el, "selected")
@@ -351,6 +360,7 @@ end
 
 Letting inference handle it works too, if you'd rather not annotate:
 
+<!-- scroll:skip -->
 ```march
 fn highlight(el) do
   Dom.add_class(el, "selected")

@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Basics"
 permalink: /docs/cookbook/basics/
+scrollmd: true
 ---
 
 # Basics
@@ -14,6 +15,7 @@ March is expression-oriented: almost everything returns a value. This chapter co
 
 `fn name(params) do ... end` defines a named function. The last expression in the body is the return value — no `return` keyword.
 
+<!-- scroll:skip -->
 ```march
 fn add(x : Int, y : Int) : Int do
   x + y
@@ -22,6 +24,7 @@ end
 
 Type annotations are optional everywhere — the compiler infers them:
 
+<!-- scroll:skip -->
 ```march
 fn add(x, y) do x + y end
 ```
@@ -48,6 +51,7 @@ end
 
 `let` binds a name. No `in` keyword — subsequent expressions in the block see the binding automatically:
 
+<!-- scroll:skip -->
 ```march
 fn run() do
   let x = 10
@@ -68,6 +72,7 @@ let count : Int = 0
 
 `type` defines a sum type. Constructors are capitalized; no leading `|` on the first case:
 
+<!-- scroll:skip -->
 ```march
 type Shape =
   Circle(Float)
@@ -77,6 +82,7 @@ type Shape =
 
 Create values by applying constructors:
 
+<!-- scroll:skip -->
 ```march
 let c = Circle(3.14)
 let r = Rect(4.0, 6.0)
@@ -84,6 +90,7 @@ let r = Rect(4.0, 6.0)
 
 Record types use named fields:
 
+<!-- scroll:skip -->
 ```march
 type User = { name : String, age : Int }
 
@@ -98,6 +105,7 @@ let older = { u with age: 31 }
 
 `match` inspects a value and dispatches on its shape. The compiler rejects non-exhaustive patterns:
 
+<!-- scroll:skip -->
 ```march
 fn area(s : Shape) : Float do
   match s do
@@ -110,6 +118,7 @@ end
 
 Guards narrow a pattern with a `when` condition:
 
+<!-- scroll:skip -->
 ```march
 match n do
   x when x > 100 -> "big"
@@ -120,6 +129,7 @@ end
 
 `match do` without a subject is a cond — works like chained if/else:
 
+<!-- scroll:skip -->
 ```march
 match do
   score >= 90 -> "A"
@@ -134,6 +144,7 @@ end
 
 `let? p = e` binds the `Ok` payload and short-circuits on `Err`, returning the error from the enclosing function immediately:
 
+<!-- scroll:skip -->
 ```march
 fn load_config(path : String) : Result(Config, String) do
   let? src  = File.read(path)
