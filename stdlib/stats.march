@@ -64,7 +64,7 @@ mod Stats do
   Percentile using linear interpolation.
   p must be in [0.0, 100.0]. Panics on empty list or out-of-range p.
   """
-  fn percentile(xs : List(Float), p : {Float | _ >= 0.0 && _ <= 100.0}) : Float do
+  fn percentile(xs : {List(Float) | len(_) > 0}, p : {Float | _ >= 0.0 && _ <= 100.0}) : Float do
     match xs do
     Nil -> panic("Stats.percentile: empty list")
     _ -> do
@@ -248,7 +248,7 @@ mod Stats do
   existing `percentile(xs, p)` is equivalent to
   `quantile(xs, p / 100.0, Linear)`.
   """
-  fn quantile(xs : List(Float), q : {Float | _ >= 0.0 && _ <= 1.0}, method : QuantileMethod) : Float do
+  fn quantile(xs : {List(Float) | len(_) > 0}, q : {Float | _ >= 0.0 && _ <= 1.0}, method : QuantileMethod) : Float do
     match xs do
     Nil -> panic("Stats.quantile: empty list")
     _ -> do
@@ -275,7 +275,7 @@ mod Stats do
   Batched quantiles: returns `[quantile(xs, q, method) for q in qs]`.
   Sorts the input once and reuses it for each q.
   """
-  fn quantiles(xs : List(Float), qs : List(Float), method : QuantileMethod) : List(Float) do
+  fn quantiles(xs : {List(Float) | len(_) > 0}, qs : List(Float), method : QuantileMethod) : List(Float) do
     match xs do
     Nil -> panic("Stats.quantiles: empty list")
     _ -> do
@@ -310,7 +310,7 @@ mod Stats do
   Five-number summary with selectable method: (min, Q1, median, Q3, max).
   Panics on empty list.
   """
-  fn five_number_summary(xs : List(Float), method : QuantileMethod) : (Float, Float, Float, Float, Float) do
+  fn five_number_summary(xs : {List(Float) | len(_) > 0}, method : QuantileMethod) : (Float, Float, Float, Float, Float) do
     match xs do
     Nil -> panic("Stats.five_number_summary: empty list")
     _ -> do
@@ -367,7 +367,7 @@ mod Stats do
   where the naive two-pass sum-of-squares would suffer catastrophic
   cancellation (near-constant data, shifted distributions).
   """
-  fn variance(xs : List(Float)) : Float do
+  fn variance(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.variance: empty list")
     Cons(_, Nil) -> 0.0
@@ -412,7 +412,7 @@ mod Stats do
   When there are ties, returns the first value encountered (in sorted order).
   Panics on empty list.
   """
-  fn mode(xs : List(Float)) : Float do
+  fn mode(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.mode: empty list")
     _ -> do

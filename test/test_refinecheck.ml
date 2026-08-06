@@ -8510,6 +8510,18 @@ let stdlib_random_mod : (March_ast.Ast.decl * string) Lazy.t =
            m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
        path ))
 
+(* Same shape again, for Task 6's six `Stats` functions: the real
+   `stdlib/stats.march`. `Stats` calls `List.fold_left`/`List.length`/
+   `List.sort_by`/`List.nth`/`List.map`, so it is loaded alongside
+   `list.march` and prelude, same as `Random.choice_weighted` above. *)
+let stdlib_stats_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "stats.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
 (* Every `cap no_panic` diagnostic [src] produces, from EITHER pass.  Filtered
    on the shared "(declared `cap no_panic`)" phrasing rather than counting all
    errors, so unrelated type noise from checking a lone stdlib file in
@@ -8607,6 +8619,44 @@ let no_panic_errors_with_random (src : string) : string list =
     errors.March_errors.Errors.diagnostics
 
 let has_no_panic_error_random src = no_panic_errors_with_random src <> []
+
+(* Same as [no_panic_errors], with `stats.march` prepended alongside
+   `list.march` and prelude, for Task 6's six `Stats` fixtures. *)
+let no_panic_errors_with_stats (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let statsmod, stats_path = Lazy.force stdlib_stats_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: statsmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; stats_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+let has_no_panic_error_stats src = no_panic_errors_with_stats src <> []
 
 let no_panic_proof_suite =
   [ (* THE POINT OF THIS TASK.  Inverted from test_compiler.ml's
@@ -8768,6 +8818,113 @@ let no_panic_proof_suite =
              \      : (Int, Random.Rng) do\n\
              \    if flag do Random.choice_weighted(rng, items) else (0, rng) end\n\
              \  end\n\
+              end\n"))
+
+  ; (* ── Task 6: `Stats` — six functions needing only the length
+       precondition (2026-08-05) ──────────────────────────────────────────
+       `percentile`, `quantile`, `quantiles`, `five_number_summary`,
+       `variance`, `mode` all panic on `Nil` with their own "empty list"
+       message and none carried `{List(Float) | len(_) > 0}` before this
+       task (unlike `Stats.mean`/`min_val`/`max_val`, contracted earlier).
+       Six REJECT controls below, one per function — each is a call into
+       that function's own real body in `stdlib/stats.march`, so each
+       exercises its own panic message and precondition wiring, not just a
+       shared shape. Only two ACCEPT cases are written (the shared shape is
+       proven once), but one of them — `percentile` — is the two-refined-
+       parameter case: it must discharge BOTH the `xs` length precondition
+       added here AND the pre-existing `p ∈ [0, 100]` precondition
+       together, confirming the two coexist. *)
+    gated
+      "cap no_panic: a PROVABLY safe Stats.percentile (both preconditions guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SP1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), p : Float) : Float do\n\
+             \    if List.length(xs) > 0 && p >= 0.0 && p <= 100.0 do Stats.percentile(xs, p)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: a PROVABLY safe Stats.variance (guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SV1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : Float do\n\
+             \    if List.length(xs) > 0 do Stats.variance(xs) else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.percentile still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SPR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), p : Float) : Float do Stats.percentile(xs, p) end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.quantile still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SQR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), q : Float) : Float do\n\
+             \    Stats.quantile(xs, q, Stats.Linear)\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.quantiles still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SQSR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), qs : List(Float)) : List(Float) do\n\
+             \    Stats.quantiles(xs, qs, Stats.Linear)\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.five_number_summary still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SFR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : (Float, Float, Float, Float, Float) do\n\
+             \    Stats.five_number_summary(xs, Stats.Linear)\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.variance still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SVR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : Float do Stats.variance(xs) end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.mode still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SMR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : Float do Stats.mode(xs) end\n\
               end\n"))
   ]
 

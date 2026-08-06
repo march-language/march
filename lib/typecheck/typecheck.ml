@@ -9327,6 +9327,8 @@ let panic_surface_contracted : StringSet.t = StringSet.of_list [
   "Random.choice_weighted";
   "DateTime.fixed_zone"; "DateTime.fixed_zone_hm";
   "Stats.mean"; "Stats.min_val"; "Stats.max_val";
+  "Stats.percentile"; "Stats.quantile"; "Stats.quantiles";
+  "Stats.five_number_summary"; "Stats.variance"; "Stats.mode";
 ]
 
 (** Set by a pipeline that ALSO runs [Panic_surface_by_proof] (lib/refinecheck)
