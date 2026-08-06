@@ -113,15 +113,18 @@ Keying, which is load-bearing:
 
 - a `DLet` is keyed like a `DFn` of the same name, for each name its pattern
   binds, so an ordinary reference to it resolves;
-- a `DInterface` default body is keyed by the bare method name — that name is
-  the dispatch node callers reference;
-- a `DImpl` method is keyed by TIR's `Iface$Ty.method` mangling, which cannot
-  collide with a `DFn` (an ordinary qualified name never contains `$`) nor with
-  another impl of the same method for a different type. The bare method name
-  additionally becomes a *dispatch node* carrying an edge to each impl — the
-  union over impls, the sound reading of a name whose target is chosen by type —
-  emitted only when the module declares no `DFn` of that name, so a plain
-  function's identity can never be absorbed;
+- a `DImpl` method is keyed by TIR's `Iface$Ty.method` mangling, and a
+  `DInterface` default body by the parallel `Iface$default.method`. Neither can
+  collide with a `DFn` (an ordinary qualified name never contains `$`), nor with
+  another impl of the same method for a different type. In both cases the bare
+  method name additionally becomes a *dispatch node* carrying an edge to each
+  implementation — the union over them, the sound reading of a name whose target
+  is chosen by type — emitted **only when the module declares no `DFn` of that
+  name**, so a plain function's identity can never be absorbed. That guard is
+  load-bearing, not hygiene: a module may legally declare an interface method
+  with a default body *and* a top-level `fn` of the same name, and without the
+  guard the pure `fn` silently inherits the default body's capabilities on the
+  hot-deploy manifest, which reads the own-caps table unfiltered;
 - a default argument is walked directly when the module is undesugared, and via
   an alias from desugar's arity-mangled `f$N` declarations onto the base name
   `f` on the production path (`expand_defaults_decl` moves the default into

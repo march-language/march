@@ -88,11 +88,11 @@ get an `own(...)` entry and reference edges:
 | Form | Key |
 |---|---|
 | module-level `DLet` body | `cap_qname n` for every `n` the pattern binds — keyed exactly like a `DFn` of that name, so an ordinary reference resolves |
-| `DInterface` default method body | `cap_qname md_name` — the bare method name IS the dispatch node callers reference |
+| `DInterface` default method body | `cap_qname (Iface ^ "$default." ^ method)`, parallel to the impl mangling |
 | `DImpl` method body | `cap_qname (Iface ^ "$" ^ TyKey ^ "." ^ method)`, mirroring TIR's `Iface$Ty.method` mangling |
 | default argument | walked directly (undesugared path) **and** via an alias from desugar's arity-mangled `f$N` onto the base name `f` (production path) |
 
-**`DImpl` keying, stated because a colliding key would silently merge two
+**Method keying, stated because a colliding key would silently merge two
 functions' capabilities.** An ordinary qualified name never contains `$` (see
 `Tir_names.is_iface_mangled`), so the mangled key cannot collide with a `DFn` of
 the same short name, and two impls of the same method for different types get
@@ -102,6 +102,29 @@ union over impls, which is the sound reading of a name whose target is chosen by
 type. It is emitted only when the module declares no `DFn` of that name, so a
 plain function's identity can never be absorbed
 (`test_impl_dispatch_node_does_not_capture_a_same_named_fn`).
+
+An interface default body gets the **same** treatment, keyed
+`Iface$default.method`. The first version of this change did not: it wrote the
+default body's caps straight onto the bare `cap_qname md_name` with no mangling
+and no guard, on the (false) assumption that a module could not declare both an
+interface method and a plain `fn` of that name. It can —
+
+```march
+mod Inner do
+  interface Greeter(a) do
+    fn greet : a -> Unit
+    fn greet_loud : a -> Unit do fn (x) -> print("loud") end
+  end
+  fn greet_loud(n : Int) : Int do n + 1 end
+end
+```
+
+typechecks with exit 0, and since `record_fn_caps` merges, the pure `greet_loud`
+absorbed `IO.Console` — visible on the hot-deploy manifest, which reads
+`fn_own_capability_closures` unfiltered, so Check 4's `mod_caps` filter offers no
+protection there. Caught in review, fixed, and pinned by
+`test_interface_default_does_not_capture_a_same_named_fn`, whose FIRST assertion
+is on the own-caps table because that is the table the manifest reads.
 
 **Default arguments, traced rather than assumed.** Desugar's
 `expand_defaults_decl` runs *before* the typechecker and rewrites
@@ -115,7 +138,11 @@ demand set rather than returning the demand set. The result is a subset of
 `mod_caps` by construction, so no addition to `own_cap_closures` can require
 more than the old module-granular answer.
 
-**Blast radius, measured.** `--check` over `stdlib/*.march`,
+**Blast radius, measured.** *(Round-1 text below; a per-function sweep was added
+in review — see the paragraph after it. The diagnostic byte-diff and the
+module-level `march caps` union are both insensitive to per-function
+misattribution WITHIN a module, which is how the interface-default false
+positive above escaped them.)* `--check` over `stdlib/*.march`,
 `test/native/*.march` and `bench/*.march` (277 files) against a compiler built
 from `11f9acdf`: **byte-identical output on every file**, so zero newly-erroring
 files and no false positives. `march caps` over the same corpus: identical on
@@ -140,3 +167,19 @@ prefixed key never `belongs` and the new entries are invisible to it. `march
 caps` uses a *different* `belongs` (module-name prefix, `run_check_cmd`) and does
 see them. The two surfaces therefore do not share a filter, contrary to
 `own_caps_of_this_module`'s docstring.
+
+
+**Per-function own-caps sweep (added in review).** A temporary
+`MARCH_DUMP_FN_CAPS` hook, patched into both `bin/main.ml` copies and reverted
+after, dumped every `fn_own_capability_closures` pair for all 277 corpus files
+per side. Result: **0 keys removed, 0 keys where the same function's own-caps
+changed**, and 6,316 purely additive new keys (5,491 impl-mangled, 824 bare —
+module `let`s, dispatch nodes and arity aliases — 1 interface-default-mangled).
+No pre-existing function anywhere in the corpus gained or lost a capability, and
+no dispatch node collided with an existing key.
+
+Its limit, stated because it matters more than the result: this sweep would
+**not** have caught the interface-default false positive either. The corpus
+holds exactly one interface default method and no module declaring both a
+default and a same-named `fn`. Corpus sweeps bound the blast radius; only a
+REJECT test pinning a specific function at EMPTY catches misattribution.

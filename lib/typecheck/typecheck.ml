@@ -8457,7 +8457,17 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   in
   (* An [impl]'s target type, keyed the way lib/tir/lower.ml keys it when it
      builds the [Iface$Ty.method] mangled symbol — same four cases, same
-     arity-keyed tuple spelling. *)
+     arity-keyed tuple spelling.
+
+     NOT a full mirror, deliberately: lower.ml additionally applies a
+     COLLISION-CONDITIONAL module qualification (lower.ml:1299-1301) when a
+     short type name is declared more than once in the program, so two impls of
+     a general interface for same-short-named types get distinct symbols. This
+     key does not reproduce that, so two such impls in ONE module would share a
+     cap-closure key and their capabilities would merge. Harmless today —
+     nothing cross-references the TIR symbol from here, and the merge is a
+     union within a single module's own impls — but it is the one place where
+     these two manglings can disagree. *)
   let impl_ty_key (t : Ast.ty) : string =
     match t with
     | Ast.TyCon (n, _) -> n.Ast.txt
@@ -8511,13 +8521,40 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         List.iter
           (fun n -> record_expr_owner (cap_qname n) [] [ b.Ast.bind_expr ])
           (free_vars_pattern b.Ast.bind_pat)
-      (* An interface DEFAULT body belongs to the bare method name — that name
-         IS the dispatch node callers reference. *)
+      (* An interface DEFAULT body is keyed by a mangled name for exactly the
+         reason an impl method is, and the bare name is only a dispatch edge.
+
+         The first version of this change wrote the default body's caps
+         DIRECTLY onto [cap_qname md_name] with no mangling and no guard, on
+         the assumption that a module could not declare both an interface
+         method and a plain [fn] of that name.  That assumption is false —
+
+           mod Inner do
+             interface Greeter(a) do
+               fn greet : a -> Unit
+               fn greet_loud : a -> Unit do fn (x) -> print("loud") end
+             end
+             fn greet_loud(n : Int) : Int do n + 1 end
+           end
+
+         typechecks with exit 0, and [record_fn_caps] MERGES, so the pure
+         [greet_loud] silently absorbed [IO.Console].  That is a false
+         positive, and it was observable on the hot-deploy manifest, which
+         reads [fn_own_capability_closures] unfiltered — no Check-4
+         [mod_caps] filter stands between it and a deploy capability gate.
+         Pinned by [test_interface_default_does_not_capture_a_same_named_fn]. *)
       | Ast.DInterface (idef, _) ->
         List.iter (fun (m : Ast.method_decl) ->
             match m.Ast.md_default with
             | None -> ()
-            | Some e -> record_expr_owner (cap_qname m.Ast.md_name.Ast.txt) [] [ e ])
+            | Some e ->
+              let mangled =
+                cap_qname
+                  (idef.Ast.iface_name.Ast.txt ^ "$default." ^ m.Ast.md_name.Ast.txt)
+              in
+              record_expr_owner mangled [] [ e ];
+              if not (List.mem m.Ast.md_name.Ast.txt module_fn_names) then
+                record_dispatch_edge (cap_qname m.Ast.md_name.Ast.txt) mangled)
           idef.Ast.iface_methods
       (* An impl method is keyed by TIR's [Iface$Ty.method] mangling.  This is
          collision-free in both directions that matter: an ordinary qualified

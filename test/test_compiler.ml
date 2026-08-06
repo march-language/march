@@ -9229,7 +9229,58 @@ let test_transitive_cap_via_interface_default_method () =
   Alcotest.(check (list string)) "IO.Console reached through an interface default body"
     [ "IO.Console" ] (transitive_caps_of src "shout");
   Alcotest.(check (list string)) "a sibling that never calls the method stays empty"
-    [] (transitive_caps_of src "quiet")
+    [] (transitive_caps_of src "quiet");
+  (* The default body's OWN entry is keyed by a mangled name, exactly like an
+     impl method's, so a [DFn] elsewhere could never absorb it. *)
+  Alcotest.(check (list string)) "default body keyed by the Iface$default.method mangling"
+    [ "IO.Console" ] (transitive_caps_of src "Greeter$default.greet_loud")
+
+(* Form 2, REJECT control for the dispatch node — the false positive this
+   subsystem calls its cardinal sin, found in review after the first version of
+   this change shipped the interface-default caps DIRECTLY onto the bare method
+   key with no mangling and no guard.
+
+   This program is LEGAL and typechecks with exit 0: a module may declare an
+   interface whose method has a default body AND a plain top-level [fn] of the
+   same name. With the caps written straight to [cap_qname md_name], the pure
+   [fn greet_loud] silently absorbed the default body's IO.Console — visible on
+   the hot-deploy manifest, which reads [fn_own_capability_closures] unfiltered:
+
+     base:  Inner.greet_loud <hash> <hash> caps=
+     head:  Inner.greet_loud <hash> <hash> caps=IO.Console
+
+   Note what did NOT catch it: a --check diagnostic diff and the `march caps`
+   module-level UNION are both insensitive to per-function misattribution
+   WITHIN a module, and Check 4's [mod_caps] filter does not apply to the
+   manifest at all. Only an assertion pinning a specific function at EMPTY
+   does. *)
+let test_interface_default_does_not_capture_a_same_named_fn () =
+  let src = {|mod Inner do
+    interface Greeter(a) do
+      fn greet : a -> Unit
+      fn greet_loud : a -> Unit do fn (x) -> print("loud") end
+    end
+    fn greet_loud(n : Int) : Int do n + 1 end
+  end|} in
+  (* The OWN table first, because it is the one that corresponds to the
+     measured manifest regression: the manifest reads
+     [fn_own_capability_closures] (bin/main.ml:3534) unfiltered, and the bug
+     was a DIRECT write to that table rather than a reference edge. *)
+  let (_errors, _tm, env) =
+    March_typecheck.Typecheck.check_module_full (parse_and_desugar src) in
+  Alcotest.(check (list string)) "its OWN caps entry — what the manifest reads — is empty"
+    []
+    (Option.value ~default:[]
+       (List.assoc_opt "greet_loud"
+          (March_typecheck.Typecheck.fn_own_capability_closures env)));
+  Alcotest.(check (list string))
+    "and a plain fn named like an interface method absorbs nothing"
+    [] (transitive_caps_of src "greet_loud");
+  (* Control for the control: the default body's capability is still recorded
+     under its own mangled key, so the EMPTY above is about the guard and not
+     about the interface arm having stopped recording anything. *)
+  Alcotest.(check (list string)) "while the default body itself still holds it"
+    [ "IO.Console" ] (transitive_caps_of src "Greeter$default.greet_loud")
 
 (* Form 3 — an impl method body.  The impl method itself is keyed by TIR's
    [Iface$Ty.method] mangling so it can never collide with a [DFn] of the same
@@ -12828,6 +12879,7 @@ let compiler_suites =
           Alcotest.test_case "cyclic modules still enforce"                          `Quick test_cyclic_modules_still_enforce;
           Alcotest.test_case "a cap reached only via a module-level let propagates"  `Quick test_transitive_cap_via_module_let;
           Alcotest.test_case "a cap reached only via an interface default method"    `Quick test_transitive_cap_via_interface_default_method;
+          Alcotest.test_case "an interface default does not capture a same-named fn" `Quick test_interface_default_does_not_capture_a_same_named_fn;
           Alcotest.test_case "a cap reached only via an impl method"                 `Quick test_transitive_cap_via_impl_method;
           Alcotest.test_case "the impl dispatch node does not capture a same-named fn" `Quick test_impl_dispatch_node_does_not_capture_a_same_named_fn;
           Alcotest.test_case "a cap reached only via a default argument"             `Quick test_transitive_cap_via_default_argument;

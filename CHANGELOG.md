@@ -26,8 +26,11 @@ git log is authoritative for exact commits.
   under-declares today; measured over `stdlib/*.march`, `test/native/*.march`
   and `bench/*.march` (277 files), diagnostics are byte-identical, and `march
   caps`, `--cap-sandbox` and the hot-deploy manifest are unchanged on that
-  corpus. An `impl` method is keyed by its `Iface$Ty.method` mangling so it can
-  never be merged with a plain function of the same name.
+  corpus. An `impl` method is keyed by its `Iface$Ty.method` mangling and an
+  interface default body by `Iface$default.method`, and the bare method name
+  carries dispatch edges only when the module declares no plain function of that
+  name — so a `fn` that happens to share a method's name can never be credited
+  with that method's capabilities.
 
 - **Importing a module no longer requires declaring capabilities used only by
   functions you don't reference.** `import M` / `use M` used to force *every*
