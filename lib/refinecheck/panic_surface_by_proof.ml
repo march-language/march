@@ -100,63 +100,15 @@ let is_proved (span : A.span) (callee : string) : bool =
   verdict_for span callee = Some Obligation.Proved
 
 (* ── Call collection ───────────────────────────────────────────────────────
-   Structurally a copy of [Typecheck.calls_in_expr] — the same expression forms
-   are descended into, so this pass sees exactly the call sites the syntactic
-   ban used to see and no others — except that each site carries TWO spans:
+   [March_ast.Calls.calls_in_expr] — the shared walker in [march_ast] — sees
+   exactly the call sites the syntactic ban used to see and no others, and
+   each site carries TWO spans:
 
    - [name_span], where the diagnostic's caret goes (what the syntactic ban
      reported at, kept so the error text and position are unchanged);
    - [app_span], the whole `EApp` node's span, which is the key
      [Obligation.record] filed the precondition under.  Keying the lookup on
      the callee NAME's span instead would silently never match. *)
-let rec calls_in_expr (acc : (string * A.span * A.span) list) (e : A.expr)
-  : (string * A.span * A.span) list =
-  match e with
-  | A.EApp (A.EVar fn_name, args, sp) ->
-    let acc = (fn_name.A.txt, fn_name.A.span, sp) :: acc in
-    List.fold_left calls_in_expr acc args
-  | A.EApp (A.EField (A.EVar mod_name, fn_name, _), args, sp) ->
-    let qname = mod_name.A.txt ^ "." ^ fn_name.A.txt in
-    let acc = (qname, fn_name.A.span, sp) :: acc in
-    List.fold_left calls_in_expr acc args
-  | A.EApp (f, args, _) ->
-    List.fold_left calls_in_expr (calls_in_expr acc f) args
-  | A.ECon (_, args, _) -> List.fold_left calls_in_expr acc args
-  | A.ELam (_, body, _) -> calls_in_expr acc body
-  | A.EBlock (es, _) -> List.fold_left calls_in_expr acc es
-  | A.ELet (b, _) -> calls_in_expr acc b.A.bind_expr
-  | A.EMatch (scrut, arms, _) ->
-    let acc = calls_in_expr acc scrut in
-    List.fold_left
-      (fun a (arm : A.branch) ->
-        let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.A.branch_guard in
-        calls_in_expr a arm.A.branch_body)
-      acc arms
-  | A.ETuple (es, _) -> List.fold_left calls_in_expr acc es
-  | A.ERecord (fields, _) ->
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | A.ERecordUpdate (base, fields, _) ->
-    let acc = calls_in_expr acc base in
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | A.EField (inner, _, _) -> calls_in_expr acc inner
-  | A.EIf (cond, then_, else_, _) ->
-    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
-  | A.ECond (arms, _) ->
-    List.fold_left (fun a (ce, be) -> calls_in_expr (calls_in_expr a ce) be) acc arms
-  | A.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | A.EAnnot (ex, _, _) -> calls_in_expr acc ex
-  | A.EHole _ -> acc
-  | A.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
-  | A.ESend (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | A.ESpawn (e, _) -> calls_in_expr acc e
-  | A.EResultRef _ -> acc
-  | A.EDbg (None, _) -> acc
-  | A.EDbg (Some inner, _) -> calls_in_expr acc inner
-  | A.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
-  | A.ELetQ (_, rhs, body, _) -> calls_in_expr (calls_in_expr acc rhs) body
-  | A.EAssert (e, _) -> calls_in_expr acc e
-  | A.ESigil (_, content, _) -> calls_in_expr acc content
-  | A.ELit _ | A.EVar _ -> acc
 
 (* ── Module walk ──────────────────────────────────────────────────────────
    Scoped to exactly what [Typecheck.check_no_panic_module] scanned: the `DFn`
@@ -175,7 +127,8 @@ let rec check_decls (errctx : Err.ctx) (mod_name : string) (decls : A.decl list)
       | A.DFn (def, _) when no_panic ->
         let calls =
           List.fold_left
-            (fun acc (clause : A.fn_clause) -> calls_in_expr acc clause.A.fc_body)
+            (fun acc (clause : A.fn_clause) ->
+               March_ast.Calls.calls_in_expr acc clause.A.fc_body)
             [] def.A.fn_clauses
         in
         List.iter

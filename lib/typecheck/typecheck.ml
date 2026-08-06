@@ -7914,72 +7914,6 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
     end
   end
 
-(** Walk an expression and collect all direct function call names.
-    Returns [(fn_name, span)] for every EApp where the callee is a bare
-    variable or a qualified module-path field access.  Used by the
-    body-scanning pass to detect builtin capability uses.
-
-    KEEP IN SYNC with [March_refinecheck.Panic_surface_by_proof.calls_in_expr],
-    which is a structural copy of this walk (it carries a second span per site,
-    so it cannot simply call this one; [march_refinecheck] also depends on
-    [march_typecheck], not the reverse, so the sharing would have to go the
-    other way).  That copy is what enforces `cap no_panic` for every name in
-    [panic_surface_contracted] — those names were REMOVED from this module's
-    syntactic ban rather than double-checked, so the drift is fail-OPEN: a new
-    [Ast.expr] form added here and not there makes a call that can panic
-    compile clean inside a capability that promised it cannot. Add new
-    expression forms to BOTH. *)
-let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
-    : (string * Ast.span) list =
-  match e with
-  | Ast.EApp (Ast.EVar fn_name, args, _) ->
-    let acc = (fn_name.txt, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
-    let qname = mod_name.txt ^ "." ^ fn_name.txt in
-    let acc = (qname, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (f, args, _) ->
-    List.fold_left calls_in_expr (calls_in_expr acc f) args
-  | Ast.ECon (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ELam (_, body, _) -> calls_in_expr acc body
-  | Ast.EBlock (es, _) ->
-    List.fold_left calls_in_expr acc es
-  | Ast.ELet (b, _) ->
-    calls_in_expr acc b.Ast.bind_expr
-  | Ast.EMatch (scrut, arms, _) ->
-    let acc = calls_in_expr acc scrut in
-    List.fold_left (fun a arm ->
-      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
-      calls_in_expr a arm.Ast.branch_body) acc arms
-  | Ast.ETuple (es, _) -> List.fold_left calls_in_expr acc es
-  | Ast.ERecord (fields, _) ->
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.ERecordUpdate (base, fields, _) ->
-    let acc = calls_in_expr acc base in
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
-  | Ast.EIf (cond, then_, else_, _) ->
-    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
-  | Ast.ECond (arms, _) ->
-    List.fold_left (fun a (ce, be) ->
-      calls_in_expr (calls_in_expr a ce) be) acc arms
-  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.EAnnot (ex, _, _) -> calls_in_expr acc ex
-  | Ast.EHole _ -> acc
-  | Ast.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ESend (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.ESpawn (e, _) -> calls_in_expr acc e
-  | Ast.EResultRef _ -> acc
-  | Ast.EDbg (None, _) -> acc
-  | Ast.EDbg (Some inner, _) -> calls_in_expr acc inner
-  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
-  | Ast.ELetQ (_, rhs, body, _) ->
-    calls_in_expr (calls_in_expr acc rhs) body
-  | Ast.EAssert (e, _) -> calls_in_expr acc e
-  | Ast.ESigil (_, content, _) -> calls_in_expr acc content
-  | Ast.ELit _ | Ast.EVar _ -> acc
-
 (** [cap_annots_in_expr acc e] collects every capability named by a type
     ANNOTATION inside an expression: a [let] binding's [bind_ty], a lambda or
     local-function parameter type, a local function's return type, and
@@ -7999,7 +7933,8 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     inherit the coverage rather than quietly reopen the gap.
 
     Exhaustive over [Ast.expr] with no wildcard arm, mirroring
-    [calls_in_expr] above; a new expression form must break this build. *)
+    [March_ast.Calls.calls_in_expr]; a new expression form must break this
+    build. *)
 let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   : (string * Ast.span) list =
   let of_ty acc (sp : Ast.span) (t : Ast.ty) =
@@ -8241,7 +8176,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
           let body_caps = List.filter_map (fun (call_name, _) ->
               List.assoc_opt call_name builtin_cap_table
-            ) (calls_in_expr [] h.Ast.ah_body) in
+            ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
           record_fn_caps fn_qname body_caps
         ) actor.actor_handlers;
       List.concat_map (fun (h : Ast.actor_handler) ->
@@ -8364,7 +8299,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             match List.assoc_opt call_name builtin_cap_table with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
-          ) (calls_in_expr [] clause.Ast.fc_body)
+          ) (March_ast.Calls.names_and_name_spans clause.Ast.fc_body)
         ) def.fn_clauses in
         let qname = cap_qname def.fn_name.txt in
         record_fn_caps qname (List.concat_map (List.map fst) per_clause);
@@ -8374,7 +8309,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           match List.assoc_opt call_name builtin_cap_table with
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
-        ) (calls_in_expr [] b.Ast.bind_expr)
+        ) (March_ast.Calls.names_and_name_spans b.Ast.bind_expr)
       (* C1 fix (part 2): fold actor handler bodies into the SAME body-scan
          this branch already performs for DFn/DLet, rather than a second/
          parallel AST walk — a handler doing undeclared IO must trip the
@@ -8389,7 +8324,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               match List.assoc_opt call_name builtin_cap_table with
               | Some cap_name -> Some (cap_name, call_span)
               | None -> None
-            ) (calls_in_expr [] h.Ast.ah_body)
+            ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body)
           ) actor.actor_handlers
       | _ -> []
     ) decls in
@@ -9707,57 +9642,6 @@ let panic_surface_suggestion : string -> string = function
     "\n\nAdd a proof comment if this branch is truly unreachable, or handle it explicitly."
   | _ -> ""
 
-let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
-    : (string * Ast.span) list =
-  match e with
-  | Ast.EApp (Ast.EVar fn_name, args, _) ->
-    let acc = (fn_name.txt, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
-    let qname = mod_name.txt ^ "." ^ fn_name.txt in
-    let acc = (qname, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (f, args, _) ->
-    List.fold_left calls_in_expr (calls_in_expr acc f) args
-  | Ast.ECon (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ELam (_, body, _) -> calls_in_expr acc body
-  | Ast.EBlock (es, _) ->
-    List.fold_left calls_in_expr acc es
-  | Ast.ELet (b, _) ->
-    calls_in_expr acc b.Ast.bind_expr
-  | Ast.EMatch (scrut, arms, _) ->
-    let acc = calls_in_expr acc scrut in
-    List.fold_left (fun a arm ->
-      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
-      calls_in_expr a arm.Ast.branch_body) acc arms
-  | Ast.ETuple (es, _) -> List.fold_left calls_in_expr acc es
-  | Ast.ERecord (fields, _) ->
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.ERecordUpdate (base, fields, _) ->
-    let acc = calls_in_expr acc base in
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
-  | Ast.EIf (cond, then_, else_, _) ->
-    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
-  | Ast.ECond (arms, _) ->
-    List.fold_left (fun a (ce, be) ->
-      calls_in_expr (calls_in_expr a ce) be) acc arms
-  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.EAnnot (ex, _, _) -> calls_in_expr acc ex
-  | Ast.EHole _ -> acc
-  | Ast.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ESend (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.ESpawn (e, _) -> calls_in_expr acc e
-  | Ast.EResultRef _ -> acc
-  | Ast.EDbg (None, _) -> acc
-  | Ast.EDbg (Some inner, _) -> calls_in_expr acc inner
-  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
-  | Ast.ELetQ (_, rhs, body, _) ->
-    calls_in_expr (calls_in_expr acc rhs) body
-  | Ast.EAssert (e, _) -> calls_in_expr acc e
-  | Ast.ESigil (_, content, _) -> calls_in_expr acc content
-  | Ast.ELit _ | Ast.EVar _ -> acc
-
 (** [span_within inner outer] is true when [inner] is nested inside [outer] by
     source position — same file, and [inner]'s start/end fall within [outer]'s
     line/column bounds.  Used to attribute a recorded non-exhaustive-match span
@@ -9779,8 +9663,9 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
       | Ast.DFn (def, fn_span) ->
         let all_calls =
           List.fold_left (fun acc clause ->
-            calls_in_expr acc clause.Ast.fc_body
+            March_ast.Calls.calls_in_expr acc clause.Ast.fc_body
           ) [] def.Ast.fn_clauses
+          |> List.map (fun (n, name_span, _app_span) -> (n, name_span))
         in
         Some (def.Ast.fn_name.txt, all_calls, fn_span)
       | _ -> None
@@ -9925,7 +9810,7 @@ let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : u
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
-        let calls = calls_in_expr [] clause.Ast.fc_body in
+        let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
           if StringSet.mem name pure_banned then
             Err.error errors ~span:site_span
@@ -9990,7 +9875,7 @@ let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl 
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
-        let calls = calls_in_expr [] clause.Ast.fc_body in
+        let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
           if StringSet.mem name deterministic_banned then
             Err.error errors ~span:site_span
