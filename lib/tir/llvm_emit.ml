@@ -1650,15 +1650,44 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        differently. march_html_auto_escape's C body does not understand Safe at
        all — Task 0 fixed that case in the emitter, by loading field 0 — so
        handing it a Safe returns the empty string. Keep the two apart. *)
-    let is_safe =
-      match atom_tir_ty a with
-      | Tir.TCon ("Safe", _) ->
-        not (Collision_set.is_colliding ctx.collision_set "Safe")
-      | _ -> false
+    (* Context-indexed trust. Each Trusted* type names the ONE context its
+       string may be inserted into verbatim; anywhere else it is escaped like
+       any other value. `Safe` is the legacy context-free form and is treated
+       as HTML trust.
+
+       This is resolved entirely here, at compile time: the type is static and
+       the escaper id was folded by the desugar, so a mismatch costs nothing at
+       runtime -- it just takes the escaping path. That is why these are
+       separate types rather than one type carrying a context tag; a tag would
+       be runtime data and could not be resolved statically.
+
+       All are single-field ADTs, so unwrapping is the same field-0 load the
+       Safe path already used.
+
+       Escaper ids are Context.escaper_id / MARCH_ESC_* (see
+       runtime/march_ctx_escape.h). A url trust covers both the whole-URL and
+       component escapers, and a css trust both the value and declaration
+       ones, because those pairs differ in POSITION within one language, not in
+       which language the string is. *)
+    let trusted_for name =
+      if Collision_set.is_colliding ctx.collision_set name then None
+      else
+        match name with
+        | "Safe" | "TrustedHtml" -> Some [ 0 ]
+        | "TrustedAttr" -> Some [ 1 ]
+        | "TrustedUrl" -> Some [ 2; 3 ]
+        | "TrustedCss" -> Some [ 4; 7 ]
+        | "TrustedJs" -> Some [ 5 ]
+        | _ -> None
     in
+    let trusted_ids =
+      match atom_tir_ty a with
+      | Tir.TCon (n, _) -> trusted_for n
+      | _ -> None
+    in
+    let is_safe = trusted_ids <> None in
     let is_iolist =
       match atom_tir_ty a with Tir.TCon ("IOList", _) -> true | _ -> false in
-    let already_html = is_safe || is_iolist in
     let v = emit_atom_as ctx "ptr" a in
     (* Normalise to a real String first, by whichever route actually works for
        this type. `march_value_to_string` CANNOT flatten an IOList — it renders
@@ -1687,8 +1716,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
         sv
     in
-    if is_html_ctx && already_html then
-      (* Already-safe HTML landing in an HTML context: insert verbatim. *)
+    let trust_covers_this_context =
+      match trusted_ids with
+      | Some ids -> List.mem id ids
+      | None -> is_html_ctx && is_iolist
+    in
+    if trust_covers_this_context then
+      (* The value is trusted for exactly this context: insert verbatim. *)
       ("ptr", v)
     else begin
       let r = fresh ctx "hec" in
@@ -1698,14 +1732,40 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       ("ptr", r)
     end
 
-  (* A non-literal escaper id would mean the desugarer failed to constant-fold
-     the context walk, which is the whole point of the analysis. Fail loudly
-     rather than emit a call whose escaper is chosen at runtime. *)
-  | Tir.EApp (f, [_; _]) when f.Tir.v_name = "html_escape_ctx" ->
-    failwith
-      "html_escape_ctx: escaper id is not a compile-time literal. The ~H \
-       desugar must fold the context walk statically; see \
-       specs/plans/2026-08-05-contextual-autoescaping.md."
+  (* A RUNTIME escaper id.
+     
+     This used to be a hard failure, on the premise that only the ~H desugar
+     calls html_escape_ctx and it always folds the context statically. That
+     premise was wrong: Html.tag (stdlib/html.march) classifies an attribute
+     NAME at runtime and picks the escaper from it, because it composes markup
+     outside the sigil and has no compile-time context to fold. A dynamic id is
+     correct there, not a bug.
+
+     The ~H path is unaffected — it always emits a literal and takes the arm
+     above, which is also where the already-safe-HTML specialisation lives.
+     That specialisation needs a literal id and is simply not available here;
+     a dynamic caller passes a String, so it does not apply.
+
+     Safety is unchanged: march_html_escape_ctx validates the id and aborts on
+     one it does not know, so a wrong id fails loudly rather than silently
+     skipping an escaper. *)
+  | Tir.EApp (f, [idx; a]) when f.Tir.v_name = "html_escape_ctx" ->
+    let id_v = emit_atom_as ctx "i64" idx in
+    let v = emit_atom_as ctx "ptr" a in
+    let v =
+      match atom_tir_ty a with
+      | Tir.TString -> v
+      | _ ->
+        let sv = fresh ctx "hecd_str" in
+        emit ctx
+          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
+        sv
+    in
+    let r = fresh ctx "hecd" in
+    emit ctx
+      (Printf.sprintf "%s = call ptr @march_html_escape_ctx(i64 %s, ptr %s)"
+         r id_v v);
+    ("ptr", r)
 
   (* ── Bitwise integer builtins ─────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->

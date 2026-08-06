@@ -11,6 +11,64 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Context-indexed trust for `~H`: `Html.TrustedHtml` / `TrustedAttr` /
+  `TrustedUrl` / `TrustedCss` / `TrustedJs`.** `Html.Safe` says a string is
+  trusted but not trusted *where*, so a value trusted anywhere was trusted
+  everywhere. These types name the context the trust applies to, and trust does
+  not travel between them:
+
+  ```march
+  let h = Html.trust_html("<b>hi</b>")
+  ~H"<p>${h}</p>"                -- <p><b>hi</b></p>        verbatim
+  ~H"<a href=\"${h}\">x</a>"      -- &lt;b&gt;hi&lt;/b&gt;   escaped
+  ```
+
+  Constructors `Html.trust_html` / `trust_attr` / `trust_url` / `trust_css` /
+  `trust_js`, with matching `untrust_*`. Prefer `~H` itself, which needs no
+  trust at all — reach for these only when a string genuinely is markup, a URL,
+  CSS or JS from a source you control.
+
+  Resolved **entirely at compile time**: the emitter matches the static type
+  against the escaper id the `~H` desugar already folded, so a mismatch costs
+  nothing at runtime — it simply escapes. That is why these are separate types
+  rather than one type carrying a context tag; a tag would be runtime data and
+  could not be resolved statically.
+
+  `Html.Safe` and `Html.raw` are unchanged and keep working — they are treated
+  as HTML trust — but are now documented as deprecated in favour of the
+  context-indexed types.
+
+
+### Fixed
+
+- **`Html.tag` had three injection holes; it now validates names and escapes
+  values by context.** `Html.tag` composes markup outside the `~H` sigil, so it
+  never reached the contextual analysis added for `~H`. Measured before the fix:
+
+  | call | emitted |
+  |---|---|
+  | `Html.tag("div onload=alert(1)", …)` | `<div onload=alert(1)>` — element name concatenated raw |
+  | `Html.tag("div", [("onerror", "alert(1)")], …)` | `<div onerror="alert(1)">` — entity-encoding does nothing to `onerror` |
+  | `Html.tag("a", [("href", "javascript:alert(1)")], …)` | the URL verbatim |
+
+  Attribute **values** are now escaped for the context their name implies — url
+  attributes get the scheme allowlist, `style` gets CSS declaration escaping,
+  everything else attribute escaping. Element and attribute **names** are
+  validated and an invalid one **panics**: escaping cannot help there, since
+  `onerror` has no character to escape, so a name built from untrusted input is
+  a programming error rather than a data condition. Event-handler attributes
+  (`on*`) are refused outright — their value is JavaScript, and `Html.tag` has
+  no way to know whether the caller meant that.
+
+  Reachable but unreached: the only call site in the ecosystem passes literals.
+
+  `Html.tag` and `Html.escape_attr` are now documented as **deprecated** in
+  favour of `~H`, which gets the same analysis at compile time and needs no
+  runtime checks. Neither is removed — `bastion` is published at 0.2.3.
+
+
 ### Changed
 
 - **A capability reached through a module-level `let`, an interface or `impl`
@@ -209,6 +267,32 @@ git log is authoritative for exact commits.
   syntactic-only fix (no new mechanism). A properly *guarded* call to one of
   the twelve is accepted, but by the proof-based check described under
   **Changed** above, not by this list.
+
+- **`--cap-strict` rejected programs that use no capability at all.** `mod M do
+  fn main() do () end end` failed with `` `IO.Console` is used but cannot be
+  attributed to any module``, and declaring the capability could not help (an
+  unattributed capability has no owner to check a declaration against, by
+  design). The module's own capability set was computed from the decl list
+  *after* the stdlib prepend, so the prelude's top-level `println`/`debug`
+  counted as functions the user's file declares and their `IO.Console` was
+  credited to the user's module. In practice `--cap-strict` only passed if the
+  program itself called `println`. Stdlib-declared functions are now excluded by
+  span, the same gate the typechecker already uses; a real undeclared console
+  use is still reported. The `--cap-sandbox` profile is unaffected (it derives
+  its grants from FileWrite/Network/Process only).
+
+- **`--cap-strict` falsely rejected modules nested two or more levels deep.** A
+  module like `mod App do mod Inner do mod Deep do needs IO.FileWrite` was
+  reported as "uses `IO.FileWrite` but does not declare `needs IO.FileWrite`"
+  even though it declared exactly that. The typechecker recorded each module's
+  declared `needs` under its BARE name, while the ceiling check matches emitted
+  code against the fully-qualified owner (`Inner.Deep`) — and an entry recorded
+  inside an enclosing `mod` was dropped at that boundary before the check ever
+  saw it. At one level of nesting the bare and qualified spellings coincide, so
+  only depth >= 2 was affected. Declarations are now keyed by qualified path
+  (bare name kept as an alias for `use` lookups) and propagate outward; a
+  doubly-nested module that omits its `needs` is still reported, under its
+  qualified name.
 
 - **`~H` misread non-IOList ADTs as IOLists — unescaped output and a SIGSEGV.**
   `march_html_auto_escape` ended by assuming any constructor with `tag >= 0` was

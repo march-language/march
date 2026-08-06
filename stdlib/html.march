@@ -10,8 +10,105 @@
 
 mod Html do
 
-  -- Html.Safe wraps a string that should NOT be escaped (already safe HTML)
+  -- Html.Safe wraps a string that should NOT be escaped (already safe HTML).
+  -- DEPRECATED in favour of the context-indexed Trusted* types below: `Safe` is
+  -- context-free, so a value trusted anywhere is trusted everywhere. Kept
+  -- working unchanged because bastion is published at 0.2.3.
   type Safe = Safe(String)
+
+  -- ── Context-indexed trust ───────────────────────────────────────────────
+  --
+  -- `Safe` says a string is trusted, but not trusted WHERE. Once a value is
+  -- trusted anywhere it is trusted everywhere, which is the same category error
+  -- this whole feature exists to fix: safety is a property of a value IN A
+  -- POSITION, not of a value.
+  --
+  --     let s = Html.raw("<b>bold</b>")   -- trusted as HTML
+  --     ~H"<p>${s}</p>"                   -- fine
+  --     ~H"<a href=\"${s}\">x</a>"        -- HTML trust says nothing about URLs
+  --
+  -- These types name the context the trust applies to. A `TrustedUrl` inserted
+  -- into element content is escaped as ordinary text; a `TrustedHtml` in an
+  -- `href` still gets the URL scheme allowlist. Trust does not travel.
+  --
+  -- The check is entirely COMPILE TIME. lib/tir/llvm_emit.ml matches on the
+  -- static type and on the escaper id the ~H desugar already folded, so a
+  -- mismatch costs nothing at runtime -- it simply escapes. That is why these
+  -- are separate types rather than one type carrying a context tag: a tag would
+  -- be runtime data, and the emitter could not resolve it.
+
+  -- Markup trusted as HTML element content. Inserted verbatim in a PCDATA
+  -- position; escaped anywhere else.
+  type TrustedHtml = TrustedHtml(String)
+
+  -- A string trusted as an attribute value. Inserted verbatim in an ordinary
+  -- attribute; escaped anywhere else.
+  type TrustedAttr = TrustedAttr(String)
+
+  -- A string trusted as a URL. Inserted verbatim in a url attribute (href,
+  -- src, ...); escaped anywhere else -- notably NOT trusted as HTML.
+  type TrustedUrl = TrustedUrl(String)
+
+  -- A string trusted as CSS. Inserted verbatim in a `style` attribute or a
+  -- <style> body; escaped anywhere else.
+  type TrustedCss = TrustedCss(String)
+
+  -- A string trusted as JavaScript. Inserted verbatim inside <script>;
+  -- escaped anywhere else.
+  type TrustedJs = TrustedJs(String)
+
+  doc """
+  Trust a string as HTML element content.
+
+  Inserted verbatim where the surrounding template is element content, and
+  escaped anywhere else — trusting a string as HTML says nothing about whether
+  it is a safe URL, so the same value in an `href` still gets the scheme
+  allowlist.
+
+  Prefer building markup with the ~H sigil, which needs no trust at all. Reach
+  for this only when a string genuinely is markup from a source you control.
+  """
+  fn trust_html(s : String) : TrustedHtml do TrustedHtml(s) end
+
+  doc "Trust a string as an ordinary attribute value. See `trust_html`."
+  fn trust_attr(s : String) : TrustedAttr do TrustedAttr(s) end
+
+  doc """
+  Trust a string as a URL. It bypasses the scheme allowlist, so only use it on a
+  URL you constructed yourself. See `trust_html`.
+  """
+  fn trust_url(s : String) : TrustedUrl do TrustedUrl(s) end
+
+  doc "Trust a string as CSS. See `trust_html`."
+  fn trust_css(s : String) : TrustedCss do TrustedCss(s) end
+
+  doc "Trust a string as JavaScript. See `trust_html`."
+  fn trust_js(s : String) : TrustedJs do TrustedJs(s) end
+
+  doc "Unwrap trusted HTML back to a plain String."
+  fn untrust_html(t : TrustedHtml) : String do
+    match t do TrustedHtml(s) -> s end
+  end
+
+  doc "Unwrap a trusted attribute value back to a plain String."
+  fn untrust_attr(t : TrustedAttr) : String do
+    match t do TrustedAttr(s) -> s end
+  end
+
+  doc "Unwrap a trusted URL back to a plain String."
+  fn untrust_url(t : TrustedUrl) : String do
+    match t do TrustedUrl(s) -> s end
+  end
+
+  doc "Unwrap trusted CSS back to a plain String."
+  fn untrust_css(t : TrustedCss) : String do
+    match t do TrustedCss(s) -> s end
+  end
+
+  doc "Unwrap trusted JavaScript back to a plain String."
+  fn untrust_js(t : TrustedJs) : String do
+    match t do TrustedJs(s) -> s end
+  end
 
   doc """
   Escape HTML entities in a string: & < > " '
@@ -110,8 +207,99 @@ mod Html do
   attribute-specific escaping rules can be tightened in the future without
   breaking call sites.
   """
+  -- DEPRECATED — context-blind by nature: it entity-encodes and nothing more,
+  -- which is correct for an ordinary attribute value and wrong for a URL, a
+  -- style or a script one. `Html.tag` no longer uses it for values. Kept
+  -- because bastion is published at 0.2.3 and callers may depend on it.
   fn escape_attr(s : String) : String do
     escape(s)
+  end
+
+  -- ── Attribute classification, for Html.tag ──────────────────────────────
+  --
+  -- These mirror the [attrs] section of specs/security/html-contexts.tbl, which
+  -- is the source of truth the ~H desugar uses. THIS IS A SECOND COPY, kept
+  -- honest by a conformance test rather than prevented by construction: the
+  -- "attr classification agrees with the shipped table" case in
+  -- test/test_ctxesc.ml asserts that the .tbl classifies exactly these names
+  -- this way. If you edit the table, that test tells you to edit this too.
+  --
+  -- A generated fragment would be better in principle, but stdlib is loaded
+  -- from a directory and a _build-only artifact is not on the shipped path.
+  -- The duplication is accepted here because Html.tag is deprecated in favour
+  -- of ~H, which needs no runtime classification at all.
+
+  doc "Attribute names whose value is a whole URL. Mirrors `[attrs]` in specs/security/html-contexts.tbl."
+  pfn url_attr_names() : List(String) do
+    ["href", "src", "action", "formaction", "poster", "cite", "background"]
+  end
+
+  -- Escaper ids from Context.escaper_id (lib/ctxesc/context.ml) and
+  -- MARCH_ESC_* (runtime/march_ctx_escape.h). The C test asserts the two agree.
+  pfn esc_id_attr() : Int do 1 end
+  pfn esc_id_url_whole() : Int do 3 end
+  pfn esc_id_css_decl() : Int do 7 end
+
+  doc """
+  Which escaper an attribute's value needs, from the attribute's name.
+
+  A value handed whole to `Html.tag` IS the whole URL, so url attributes get the
+  scheme allowlist — the same escaper a hole at the *start* of an `href` gets
+  under `~H`. `style` is a declaration list, where `:` and `;` are structural.
+  Event handlers never reach here: `tag` refuses them outright.
+  """
+  pfn attr_escaper_id(k : String) : Int do
+    let lk = String.to_lowercase(k)
+    -- Each `if` needs its own `end` in March (see stdlib/uri.march:62).
+    if List.member(url_attr_names(), lk) do esc_id_url_whole()
+    else if lk == "style" do esc_id_css_decl()
+    else esc_id_attr() end end
+  end
+
+  -- ── Name validation ─────────────────────────────────────────────────────
+  --
+  -- Element and attribute NAMES cannot be made safe by escaping. `onerror`
+  -- contains no character an encoder could touch, and a tag name is not a
+  -- string context at all. These are exactly the positions where the ~H
+  -- desugar emits a hard compile error; `Html.tag` takes them as `String`, so
+  -- it can only validate and refuse at runtime.
+
+  pfn tag_char_ok(c : String) : Bool do
+    Char.is_alphanumeric(c) || c == "-"
+  end
+
+  pfn attr_char_ok(c : String) : Bool do
+    Char.is_alphanumeric(c) || c == "-" || c == "_" || c == ":" || c == "."
+  end
+
+  pfn name_shape_ok(s : String, rest_ok : String -> Bool) : Bool do
+    match string_chars(s) do
+    Nil -> false
+    Cons(h, t) -> Char.is_alpha(h) && List.all(t, rest_ok)
+    end
+  end
+
+  pfn check_tag_name(name : String) : String do
+    if name_shape_ok(name, tag_char_ok) do name
+    else
+      panic("Html.tag: `" ++ name ++ "` is not a valid element name. An element "
+        ++ "name built from untrusted input cannot be made safe by escaping — "
+        ++ "use a ~H template with a literal tag instead.")
+    end
+  end
+
+  pfn check_attr_name(k : String) : String do
+    let lk = String.to_lowercase(k)
+    if String.starts_with(lk, "on") do
+      panic("Html.tag: refusing the event-handler attribute `" ++ k ++ "`. Its "
+        ++ "value is JavaScript, and Html.tag cannot tell whether you meant "
+        ++ "that — use a ~H template, where the parse context is known.")
+    else if name_shape_ok(k, attr_char_ok) do k
+    else
+      panic("Html.tag: `" ++ k ++ "` is not a valid attribute name. An "
+        ++ "attribute name built from untrusted input cannot be made safe by "
+        ++ "escaping — use a ~H template with a literal attribute instead.")
+    end end
   end
 
   doc """
@@ -123,7 +311,24 @@ mod Html do
       Html.tag("br", [], IOList.empty())
       -- "<br></br>"  (use self-closing syntax in static HTML if needed)
 
-  Attribute keys and values are both run through `Html.escape_attr`.
+  DEPRECATED — prefer a `~H` template. `~H` walks its literal chunks through the
+  HTML context automaton at compile time and escapes every interpolation for the
+  position it actually lands in, with unsafe positions reported as compile
+  errors. `Html.tag` builds markup outside the sigil, so none of that analysis
+  applies and it must check at runtime instead.
+
+  Attribute VALUES are escaped for the context their attribute name implies:
+  a url attribute (`href`, `src`, `action`, …) gets the URL scheme allowlist,
+  `style` gets CSS declaration escaping, everything else gets attribute
+  escaping.
+
+  Element and attribute NAMES are validated, not escaped, and an invalid one
+  PANICS. Escaping cannot help there — `onerror` has no character to escape —
+  so a name built from untrusted input is a programming error, not a data
+  condition. Event-handler attributes (`on*`) are refused outright: their value
+  is JavaScript, and `Html.tag` has no way to know whether the caller meant
+  that.
+
   The content is an IOList so it can be a composed partial or ~H result.
   Passing the result of a ~H sigil as content is safe: it will not be
   double-escaped.
@@ -132,13 +337,15 @@ mod Html do
   plus O(1) for IOList wrapping.
   """
   fn tag(name : String, attrs : List((String, String)), content : IOList) : IOList do
+    let tag_name = check_tag_name(name)
     let attr_str = List.fold_left(attrs, "", fn (acc, pair) ->
       match pair do
       (k, v) ->
-        acc ++ " " ++ escape_attr(k) ++ "=\"" ++ escape_attr(v) ++ "\""
+        let key = check_attr_name(k)
+        acc ++ " " ++ key ++ "=\"" ++ html_escape_ctx(attr_escaper_id(key), v) ++ "\""
       end)
-    let open_tag = "<" ++ name ++ attr_str ++ ">"
-    let close_tag = "</" ++ name ++ ">"
+    let open_tag = "<" ++ tag_name ++ attr_str ++ ">"
+    let close_tag = "</" ++ tag_name ++ ">"
     IOList.from_string(open_tag)
     |> IOList.append(content)
     |> IOList.append(IOList.from_string(close_tag))

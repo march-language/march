@@ -1,0 +1,13 @@
+html_in_html: <p><b>hi</b></p>
+html_in_href: <a href="&lt;b&gt;hi&lt;/b&gt;">x</a>
+url_in_href : <a href="javascript:trusted()">x</a>
+url_in_html : <p>javascript:trusted()</p>
+css_in_style: <div style="color:red;background:url(x)">y</div>
+css_in_html : <p>color:red;background:url(x)</p>
+js_in_script: <script>var x = 1 < 2;</script>
+js_in_html  : <p>var x = 1 &lt; 2;</p>
+attr_in_attr: <div class="a`b">z</div>
+attr_in_html: <p>a`b</p>
+safe_in_html: <p><i>legacy</i></p>
+safe_in_href: <a href="&lt;i&gt;legacy&lt;/i&gt;">x</a>
+plain_html  : <p>&lt;b&gt;&amp;</p>

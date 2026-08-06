@@ -4362,10 +4362,22 @@ let base_env : env =
          (* Already-safe HTML, and the context is HTML: insert verbatim.
             Anywhere else it is a context mismatch, so it gets flattened and
             then escaped for wherever it actually landed. *)
-         | VCon ("Safe", [VString s]) when is_html_ctx -> VString s
+         (* Context-indexed trust: each Trusted* type names the one context
+            its string may be inserted into verbatim. `Safe` is the legacy
+            context-free form, treated as HTML trust. Mirrors the table in
+            lib/tir/llvm_emit.ml -- the compiled backend resolves this
+            statically, the interpreter at runtime, and they must agree. *)
+         | VCon (("Safe" | "TrustedHtml"), [VString s]) when id = 0 -> VString s
+         | VCon ("TrustedAttr", [VString s]) when id = 1 -> VString s
+         | VCon ("TrustedUrl", [VString s]) when id = 2 || id = 3 -> VString s
+         | VCon ("TrustedCss", [VString s]) when id = 4 || id = 7 -> VString s
+         | VCon ("TrustedJs", [VString s]) when id = 5 -> VString s
+         (* Trusted, but not for THIS context -- escape it like anything else. *)
+         | VCon (("Safe" | "TrustedHtml" | "TrustedAttr" | "TrustedUrl"
+                 | "TrustedCss" | "TrustedJs"), [VString s]) ->
+           VString (March_ctxesc.Escape.apply_id id s)
          | (VCon ("Empty", []) | VCon ("Str", _) | VCon ("Segments", _))
            when is_html_ctx -> VString (iolist_flatten v)
-         | VCon ("Safe", [VString s]) -> VString (March_ctxesc.Escape.apply_id id s)
          | VCon ("Empty", []) | VCon ("Str", _) | VCon ("Segments", _) ->
            VString (March_ctxesc.Escape.apply_id id (iolist_flatten v))
          | VString s -> VString (March_ctxesc.Escape.apply_id id s)

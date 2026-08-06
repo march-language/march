@@ -18,6 +18,39 @@
 module C = March_ctxesc.Context
 module P = March_ctxesc.Tbl_parse
 module A = March_ctxesc.Automaton
+module E = March_ctxesc.Escape
+
+(* --diff mode: render each behaviour-changing hole BOTH ways -- as ~H used to
+   (HTML entity-encode everything) and as it does now (contextual) -- against a
+   probe value, and show the surrounding literal context. Answers the question
+   the escaper counts cannot: does the OUTPUT change in a way that breaks the
+   page? *)
+let diff_mode = ref false
+
+(* Probes chosen to be REALISTIC for the position, not adversarial: the point is
+   to find legitimate values the new escapers would mangle. The attack cases are
+   already covered by test_ctx_escape.c. *)
+let probes_for (e : C.escaper) =
+  match e with
+  | C.EscUrlComponent ->
+    [ "bastion"; "march_doc"; "0.2.3"; "readme"; "before"; "a b"; "x/y" ]
+  | C.EscUrlWhole ->
+    [ "/packages/bastion"; "/admin/users"; "https://example.com/a?b=c"; "#frag";
+      "/x?a=b&c=d"; "back`tick" ]
+  | C.EscCssValue ->
+    [ "#22d3ee"; "transparent"; "var(--text-muted)"; "inline-block"; "none" ]
+  | C.EscCssDecl ->
+    [ "border:1px solid rgba(34,211,238,0.35);background:transparent";
+      "display:flex;gap:8px" ]
+  (* The backtick matters: EscAttr escapes it (old IE attribute-delimiter
+     quirk) and the old EscHtml did not, so it is the one byte whose attribute
+     rendering changes for an entirely benign value. *)
+  | C.EscAttr -> [ "hello"; "a b"; "quote\"here"; "back`tick"; "a&b" ]
+  | C.EscJsString -> [ "hello"; "a\"b" ]
+  | _ -> [ "plain" ]
+
+let mangled : (string * int * string * string * string * string) list ref = ref []
+
 
 type finding =
   | Ok_hole of C.escaper
@@ -65,8 +98,21 @@ let scan_sigil tbl file line content =
           | Ok (esc, _, c') ->
             ctx := c';
             bump escaper_counts (C.escaper_name esc);
-            if esc <> C.EscHtml then
+            if esc <> C.EscHtml then begin
               changed := (file, line, C.escaper_name esc) :: !changed;
+              (* Old behaviour was EscHtml for EVERY hole, whatever the
+                 context. Compare against that. *)
+              if !diff_mode then
+                List.iter
+                  (fun probe ->
+                     let old_out = E.apply C.EscHtml probe in
+                     let new_out = E.apply esc probe in
+                     if old_out <> new_out then
+                       mangled :=
+                         (file, line, C.escaper_name esc, probe, old_out, new_out)
+                         :: !mangled)
+                  (probes_for esc)
+            end;
             ignore (Ok_hole esc)
           | Error d ->
             problems := (file, line, Rejected d) :: !problems)
@@ -158,13 +204,20 @@ let () =
     prerr_endline "usage: scan_templates.exe <table.tbl> <dir> [<dir> ...]";
     exit 2
   end;
+  let args = Array.to_list Sys.argv in
+  let args = List.filter (fun a -> if a = "--diff" then (diff_mode := true; false) else true) args in
+  let args = Array.of_list args in
+  if Array.length args < 3 then begin
+    prerr_endline "usage: scan_templates.exe [--diff] <table.tbl> <dir> [<dir> ...]";
+    exit 2
+  end;
   let tbl =
-    match P.parse_file Sys.argv.(1) with
+    match P.parse_file args.(1) with
     | Ok t -> A.compile t
     | Error e -> prerr_endline e; exit 2
   in
-  for i = 2 to Array.length Sys.argv - 1 do
-    walk Sys.argv.(i) (scan_file tbl)
+  for i = 2 to Array.length args - 1 do
+    walk args.(i) (scan_file tbl)
   done;
   Printf.printf "templates: %d   holes: %d\n\n" !n_templates !n_holes;
   print_endline "escaper selected per hole:";
@@ -173,6 +226,17 @@ let () =
   Printf.printf "\nBEHAVIOUR CHANGES (compile fine, output differs): %d\n"
     (List.length chg);
   List.iter (fun (f, l, e) -> Printf.printf "  %-14s %s:%d\n" e f l) chg;
+  (if !diff_mode then begin
+     let m = List.rev !mangled in
+     Printf.printf
+       "\nRENDERED DIFFS (realistic probe values whose output changes): %d\n"
+       (List.length m);
+     List.iter
+       (fun (f, l, e, probe, o, n) ->
+          Printf.printf "  %s:%d  [%s]\n    probe: %s\n    was:   %s\n    now:   %s\n"
+            (Filename.basename f) l e probe o n)
+       m
+   end);
   let probs = List.rev !problems in
   Printf.printf "\nWOULD-BREAK: %d\n" (List.length probs);
   List.iter
