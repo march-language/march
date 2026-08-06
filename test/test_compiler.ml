@@ -8816,6 +8816,29 @@ let transitive_caps_of (src : string) (qname : string) : string list =
   | None -> []
   | Some caps -> List.sort compare caps
 
+(* Union of a set of functions' capabilities under BOTH tables, read from ONE
+   typechecked env so the two sides cannot come from different compilations.
+
+   Returns [(union_of_transitive, union_of_own)]. The second is exactly how
+   `march caps` computes a module's capability set (see
+   [bin/main.ml]'s [own_caps_of_this_module]: union of
+   [fn_own_capability_closures] over the file's functions, sort_uniq,
+   normalize) — so comparing the two is a genuine cross-check against the
+   module-level analysis rather than against a hardcoded literal. *)
+let transitive_and_module_level_unions (src : string) (fns : string list)
+  : string list * string list =
+  let m = parse_and_desugar src in
+  let (_errors, _tm, env) = March_typecheck.Typecheck.check_module_full m in
+  let union tbl =
+    List.concat_map
+      (fun f -> Option.value ~default:[] (List.assoc_opt f tbl)) fns
+    |> List.sort_uniq compare
+    |> March_caps.Cap_lattice.normalize
+    |> List.sort compare
+  in
+  ( union (March_typecheck.Typecheck.fn_transitive_capability_closures env),
+    union (March_typecheck.Typecheck.fn_own_capability_closures env) )
+
 (* The whole point: `public_reader` calls a PRIVATE helper that calls a
    capability builtin. Its OWN caps are empty — the body scan sees a call to
    `helper`, which is not in [builtin_cap_table] — so the pre-existing
@@ -8891,12 +8914,60 @@ let test_transitive_cap_nested_module_dotted_refs () =
   Alcotest.(check (list string)) "dotted intra-module reference resolves"
     [ "IO.FileRead" ] (transitive_caps_of src "Lib.probe")
 
-(* Anti-drift (the verification that matters): a per-function closure that
-   silently reports LESS than the module-level analysis would be a guarantee
-   hole, and one that reports MORE would be a false positive. The union over
-   a module's functions must equal the module's own capability set exactly —
-   an accept-only test cannot tell a working closure from one that returns
-   everything. *)
+(* REJECT control #2: a PARAMETER whose name collides with a sibling function
+   must not fabricate a reference edge. `wrap`'s parameter is named `helper`,
+   shadowing the impure sibling `helper` for the whole body — so `wrap` is
+   pure and its closure must be empty.
+
+   [free_vars_expr] binds lambda / `let` / match-arm / `let?` binders itself
+   but cannot see a clause's PARAMETER list, so this only holds because
+   [record_fn_refs] seeds `bound` with the clause's parameter names. Passing
+   [] instead makes `wrap` inherit IO.FileRead — a false positive, which this
+   subsystem treats as its cardinal sin. *)
+let test_transitive_cap_param_shadowing_sibling_fn () =
+  let src = {|mod Shadow do
+    pfn helper(p) do
+      match file_read(p) do
+        Ok(s) -> Ok(s)
+        Err(_) -> Err("boom")
+      end
+    end
+    fn wrap(helper) do helper(1) end
+  end|} in
+  Alcotest.(check (list string))
+    "a parameter shadowing a sibling fn fabricates no edge"
+    [] (transitive_caps_of src "wrap");
+  (* Control for the control: with no shadowing, the edge IS there — so the
+     assertion above is about shadowing, not about the fixture being inert. *)
+  let unshadowed = {|mod Shadow do
+    pfn helper(p) do
+      match file_read(p) do
+        Ok(s) -> Ok(s)
+        Err(_) -> Err("boom")
+      end
+    end
+    fn wrap(q) do helper(q) end
+  end|} in
+  Alcotest.(check (list string)) "without shadowing the edge is present"
+    [ "IO.FileRead" ] (transitive_caps_of unshadowed "wrap")
+
+(* No-loss cross-check: the union over a module's functions' TRANSITIVE
+   closures must equal the module-level capability set — computed from the
+   SAME env as the union over [fn_own_capability_closures], which is exactly
+   how `march caps` derives a module's set. So drift in EITHER analysis fails
+   this, and no literal is hardcoded.
+
+   What this does and does not prove, stated precisely because a later task
+   will rely on it: it proves the new per-function analysis LOSES NOTHING the
+   module-level one finds, and ADDS NOTHING at module granularity. It does
+   NOT by itself catch per-function over-approximation — a closure that
+   returned the module union for every function would produce the identical
+   union and pass. That failure mode is caught by
+   [test_transitive_cap_pure_sibling_unaffected] and
+   [test_transitive_cap_param_shadowing_sibling_fn], which pin specific
+   functions at EMPTY inside modules that do have capabilities. The three
+   tests together cover both directions; none of them substitutes for the
+   others. *)
 let test_transitive_cap_union_matches_module_level () =
   let src = {|mod Agg do
     pfn reader(p) do
@@ -8909,13 +8980,16 @@ let test_transitive_cap_union_matches_module_level () =
     fn b(m) do print(m) end
     fn c(x) do x + 1 end
   end|} in
-  let union =
-    [ "reader"; "a"; "b"; "c" ]
-    |> List.concat_map (transitive_caps_of src)
-    |> List.sort_uniq compare
+  let (transitive_union, module_level) =
+    transitive_and_module_level_unions src [ "reader"; "a"; "b"; "c" ]
   in
-  Alcotest.(check (list string)) "union equals the module's own set"
-    [ "IO.Console"; "IO.FileRead" ] union
+  Alcotest.(check (list string))
+    "transitive union equals the module-level set, read from the same env"
+    module_level transitive_union;
+  (* Guard against a vacuously-equal pass: if BOTH unions came back empty the
+     assertion above would hold while proving nothing. *)
+  Alcotest.(check (list string)) "and that set is non-trivial"
+    [ "IO.Console"; "IO.FileRead" ] module_level
 
 (* migrate_state calling file_write with no declared needs -> IO-free error. *)
 let test_migrate_state_file_write_error () =
@@ -12400,6 +12474,7 @@ let compiler_suites =
           Alcotest.test_case "a cap propagates through a function passed as a value" `Quick test_transitive_cap_through_value_reference;
           Alcotest.test_case "mutually recursive functions reach a fixpoint"         `Quick test_transitive_cap_mutual_recursion_fixpoint;
           Alcotest.test_case "a dotted nested-module reference resolves"             `Quick test_transitive_cap_nested_module_dotted_refs;
+          Alcotest.test_case "a param shadowing a sibling fn fabricates no edge"     `Quick test_transitive_cap_param_shadowing_sibling_fn;
           Alcotest.test_case "union over a module's functions matches module level"  `Quick test_transitive_cap_union_matches_module_level;
         ] );
       ( "cap_propagation", [

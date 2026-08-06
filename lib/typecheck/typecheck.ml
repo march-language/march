@@ -8156,15 +8156,36 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      shadowing, so an inner binding that happens to share a top-level
      function's name does not manufacture a spurious edge.
 
-     [bound] starts empty (parameters are not pre-bound): a parameter name
-     that shadows nothing simply fails to resolve to any function key and
-     contributes nothing, whereas pre-binding it would be free to do but is
-     not needed for correctness. Merged with any prior entry, matching
-     [record_fn_caps]'s accumulate-across-call-sites behavior. *)
-  let record_fn_refs (fn_qname : string) (bodies : Ast.expr list) =
-    let refs = List.concat_map (free_vars_expr []) bodies in
+     Each body is paired with the names ITS OWN PARAMETERS bind, and those seed
+     [free_vars_expr]'s [bound] list. This is load-bearing, not hygiene:
+     [free_vars_expr] binds lambda / [let] / match-arm / [let?] binders
+     internally, but it has no visibility into a clause's parameter list, so
+     passing [] would let
+
+       pfn helper(p) do file_read(p) end
+       fn wrap(helper) do helper(1) end
+
+     record an edge from [wrap] to the SIBLING [helper] — [wrap] would inherit
+     [IO.FileRead] while being pure. That is a false positive, which this
+     subsystem treats as its cardinal sin. (Note [dependency_order_dfn_run]'s
+     [deps_of] does pass []; there an over-approximation only perturbs
+     dependency ORDERING, which is harmless. Here it fabricates a capability.)
+
+     Merged with any prior entry, matching [record_fn_caps]'s
+     accumulate-across-call-sites behavior. *)
+  let record_fn_refs (fn_qname : string) (bodies : (string list * Ast.expr) list) =
+    let refs = List.concat_map (fun (bound, e) -> free_vars_expr bound e) bodies in
     let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
     Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior))
+  in
+  (* Names bound by a clause's parameter list. [FPPat] goes through
+     [free_vars_pattern] so a destructuring head ([fn f((a, b))]) binds its
+     components too, not just a bare [PatVar]. *)
+  let fn_clause_param_names (c : Ast.fn_clause) : string list =
+    List.concat_map (function
+      | Ast.FPNamed p | Ast.FPDefault (p, _) -> [ p.Ast.param_name.txt ]
+      | Ast.FPPat pat -> free_vars_pattern pat)
+      c.Ast.fc_params
   in
   let used_caps : (string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
@@ -8213,7 +8234,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               List.assoc_opt call_name builtin_cap_table
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
           record_fn_caps fn_qname body_caps;
-          record_fn_refs fn_qname [ h.Ast.ah_body ]
+          record_fn_refs fn_qname
+            [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
+               h.Ast.ah_body) ]
         ) actor.actor_handlers;
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
@@ -8343,7 +8366,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
            helper is as much a reference as the body is. *)
         record_fn_refs qname
           (List.concat_map (fun (c : Ast.fn_clause) ->
-               c.Ast.fc_body :: Option.to_list c.Ast.fc_guard)
+               let bound = fn_clause_param_names c in
+               List.map (fun e -> (bound, e))
+                 (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard))
              def.fn_clauses);
         List.concat per_clause
       | Ast.DLet (_vis, b, _) ->

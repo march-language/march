@@ -25,7 +25,23 @@ of the design wires it into import propagation.
 
 `env.fn_refs : (string, string list) Hashtbl.t` records, per function, every
 name its body (and its clause guards) references, collected with
-`free_vars_expr`.
+`free_vars_expr`, **seeded with the clause's parameter names as `bound`**.
+
+Seeding `bound` is load-bearing, not hygiene. `free_vars_expr` binds lambda,
+`let`, match-arm and `let?` binders itself, but it cannot see a clause's
+parameter list. With an empty `bound`:
+
+```march
+pfn helper(p) do file_read(p) end   -- own = {IO.FileRead}
+fn wrap(helper) do helper(1) end     -- ref "helper" resolves to the SIBLING
+```
+
+`wrap` inherits `IO.FileRead` while being pure — a **false positive**, which
+the design calls this subsystem's cardinal sin. Pinned by
+`test_transitive_cap_param_shadowing_sibling_fn`, which fails with
+`Received: ["IO.FileRead"]` when the seeding is removed.
+(`dependency_order_dfn_run`'s `deps_of` does pass `[]`, but there an
+over-approximation only perturbs dependency *ordering*, which is harmless.)
 
 Using `March_ast.Calls` here would have been **fail-open**: it collects only
 `EApp` callees, so a function passed as a *value* — `apply_to(noisy, m)` —
@@ -64,6 +80,12 @@ bare intra-module reference inside a nested `DMod` to the dotted form
 dotted `EVar` — while the entry module's own top-level bodies keep bare names.
 So `resolve` tries the owner-module-prefixed form first, then the raw name.
 
+The brief's fixtures assumed `"CapProbe.public_reader"` for an entry-module
+function. Because the test helper returns `[]` for an absent key, using that
+key would have made the **accept** cases go loudly RED (not silently green);
+only the REJECT case, which expects `[]`, would have passed vacuously. The
+keys above are what the analysis actually produces.
+
 ## Termination bug found and fixed during implementation
 
 `Cap_lattice.normalize` drops caps *subsumed* by another, but its filter skips
@@ -83,13 +105,29 @@ With the `from_refs` term disabled (`merged = normalize own`):
 | cap through a value reference | **FAIL** |
 | mutual-recursion fixpoint | **FAIL** |
 | dotted nested-module reference | **FAIL** |
-| union == module level (anti-drift) | pass |
+| param shadowing a sibling fn (REJECT control) | pass |
+| union == module level | pass |
 
-The anti-drift case passing under the mutation is expected and worth
-recording: it is a *no-loss* check (the union over a module's functions must
-still equal the module-level answer), not a transitivity check. It catches an
-over-approximating or under-reporting closure; the four accept cases catch a
-missing transitive term. Both halves are needed.
+## What each test does and does not prove
+
+Stated precisely, because a later task will rely on it.
+
+- The **union** test is a *no-loss / no-gain-at-module-granularity*
+  cross-check: it reads the module-level answer from the **same env** (the
+  union over `fn_own_capability_closures`, which is exactly how `march caps`
+  derives a module's set) and asserts equality against the union over the
+  transitive closures. Drift in *either* analysis fails it. It hardcodes no
+  capability list; a second assertion pins the set as non-trivial so a
+  both-empty result cannot pass vacuously.
+- The union test **cannot** catch per-function over-approximation. A closure
+  that returned the module union for *every* function yields the identical
+  union and passes. That failure mode is caught instead by the two REJECT
+  controls, which pin specific functions at **empty** inside modules that do
+  have capabilities.
+- The four accept cases catch a missing transitive term (they flip under the
+  Step 7 mutation).
+
+None of the three groups substitutes for the others.
 
 ## Known coverage gap (inherited, not introduced)
 
@@ -110,5 +148,6 @@ question). Recorded in the accessor's doc comment as well.
 ## Files
 
 - `lib/typecheck/typecheck.ml` — `env.fn_refs` field + init, `record_fn_refs`
-  and its two call sites, `fn_transitive_capability_closures`.
-- `test/test_compiler.ml` — the `cap-closure` suite (6 cases).
+  (+ `fn_clause_param_names`) and its two call sites,
+  `fn_transitive_capability_closures`.
+- `test/test_compiler.ml` — the `cap-closure` suite (7 cases).
