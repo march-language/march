@@ -1377,6 +1377,10 @@ let run_test_cmd args =
       { desugared with
         March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
     in
+    (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
+       syntactic ban must leave the contracted names to it.  Set BEFORE
+       [check_module] — the flag is read during that call. *)
+    March_typecheck.Typecheck.proof_based_panic_surface := true;
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
@@ -1384,6 +1388,14 @@ let run_test_cmd args =
     if !refine_report then print_refine_report ~filename ~user_files ();
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
+    (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
+       refinement contract are admitted when their call site's PRECONDITION was
+       actually discharged, rather than banned by name.  It must run here, after
+       [Refine_check.check_module] has populated the per-call-site verdict index
+       (and after [Division_safety], which only adds to it) — inside the
+       typechecker, where the syntactic ban lives, that index does not exist
+       yet. *)
+    March_refinecheck.Panic_surface_by_proof.check_module errors desugared;
     (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
     March_refinecheck.No_alloc.check_module errors desugared;
     (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
@@ -2008,20 +2020,46 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
+     syntactic ban must leave the contracted names to it.  Set BEFORE
+     [check_module_full] — the flag is read during that call.  [run_check_cmd]
+     (`march check`/`march caps`) and the LSP deliberately do NOT set it: they
+     never run refinecheck, so they keep the old unconditional ban. *)
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
-  (* Precondition suggestion.  Must follow the report: every hypothesis probe
-     resets the obligation ledger, so a report printed after this one would
-     describe the last hypothesis rather than the program. *)
+  (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
+  March_refinecheck.Division_safety.check_module errors desugared;
+  (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
+     refinement contract are admitted when their call site's PRECONDITION was
+     actually discharged, rather than banned by name.  It must run here, after
+     [Refine_check.check_module] has populated the per-call-site verdict index
+     (and after [Division_safety], which only adds to it) — inside the
+     typechecker, where the syntactic ban lives, that index does not exist yet.
+     NOTE: [run_test_cmd] has its own copy of this pipeline and needs the same
+     call; the two are the only places these passes run.
+
+     These two run BEFORE the suggestion printers below, matching
+     [run_test_cmd]'s order.  They used to run after, and that was a live
+     soundness hole: every suggestion probe refills the per-call-site verdict
+     index from a HYPOTHESIS module, so this pass read a speculative
+     contract's verdicts as if they were the program's.  `--refine-suggest-all`
+     (and `forge refine`, which shells out to `--refine-suggest-json`) flipped
+     `cap no_panic` in both directions — an unguarded `List.tail` compiled
+     clean, a correctly-guarded one errored.  The probes are also
+     non-destructive now ([Obligation.with_scratch]), so this ordering is
+     belt-and-braces rather than the only thing holding it up; keep both. *)
+  March_refinecheck.Panic_surface_by_proof.check_module errors desugared;
+  (* Precondition suggestion.  Must follow the report and the two passes above:
+     every hypothesis probe resets the obligation ledger, so anything that reads
+     it afterwards would describe the last hypothesis rather than the program. *)
   if !refine_suggest_target <> None || !refine_suggest_all then
     print_refine_suggestions ~filename ~user_files desugared;
   if !refine_suggest_post <> None || !refine_suggest_post_all then
     print_refine_postconditions ~filename ~user_files desugared;
-  (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
-  March_refinecheck.Division_safety.check_module errors desugared;
   (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
   March_refinecheck.No_alloc.check_module errors desugared;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)

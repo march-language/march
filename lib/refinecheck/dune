@@ -1,5 +1,10 @@
 (library
  (name march_refinecheck)
- (libraries march_ast march_errors march_refine march_caps)
+ ; march_typecheck is a dependency only of [panic_surface_by_proof], which
+ ; reuses [Typecheck.panic_surface_suggestion] so the remedy text a `cap
+ ; no_panic` user sees is written in exactly ONE place regardless of which of
+ ; the two passes (syntactic ban, proof-based check) reported it.  No cycle:
+ ; march_typecheck depends on ast/errors/modules/caps only.
+ (libraries march_ast march_errors march_refine march_caps march_typecheck)
  (modules refine_check division_safety no_alloc return_infer precond_infer postcond_infer cap_infer
-          obligation))
+          obligation panic_surface_by_proof))
