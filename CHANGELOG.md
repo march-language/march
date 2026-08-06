@@ -13,6 +13,39 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`~H` now escapes by HTML parse context, not with one escaper everywhere.**
+  Previously every interpolation was HTML entity-encoded regardless of where it
+  landed, which is correct in element content and wrong everywhere else. The
+  desugarer now walks a template's literal chunks through a context automaton at
+  compile time and gives each hole the escaper its position calls for.
+
+  **This changes rendered output.** Measured across bastion and forgepm — 121
+  templates, 253 interpolations — 40 holes change:
+
+  | context | before | now |
+  |---|---|---|
+  | element content (213 holes) | entity-encoded | unchanged |
+  | attribute value (17) | entity-encoded | + backtick |
+  | URL component (14) | entity-encoded | percent-encoded |
+  | `style` attribute (7) | entity-encoded | CSS declaration/value escape |
+  | start of `href`/`src` (2) | entity-encoded | **URL scheme allowlist** |
+
+  The last row closes a real hole: `~H"<a href=\"${url}\">"` accepted
+  `javascript:alert(1)`, since entity-encoding does not touch a scheme. Such
+  URLs now render as `about:invalid#zSoyz`.
+
+  An **unquoted attribute value** receiving an interpolation is now quoted
+  automatically — `<div class=${x}>` emits `<div class="…">` — so a value
+  containing a space can no longer start a new attribute.
+
+  Interpolations that no escaping can make safe are now **compile errors**
+  rather than silently-wrong output: an attribute name, an element name, the
+  interior of a comment, and a template that ends mid-tag or mid-attribute.
+  Nothing in bastion or forgepm hits any of these.
+
+  Escaping tables live in `specs/security/html-contexts.tbl` and are documented
+  in `specs/security/README.md`.
+
 - **Breaking: the three JS-only stdlib modules are now namespaced under `Js.`.**
   `mod Audio`, `mod Canvas`, `mod Dom` are `mod Js.Audio`, `mod Js.Canvas`,
   `mod Js.Dom` — these are the only stdlib modules that panic at runtime when

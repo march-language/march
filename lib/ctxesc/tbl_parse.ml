@@ -211,9 +211,8 @@ let parse_transition line s =
        (from | pattern | substitution | successor | diagnostic), got %d"
       (List.length fields)
 
-let parse_file path =
+let parse_channel path ic =
   try
-    let ic = open_in path in
     let tags = ref [] and attrs = ref [] and trans = ref [] in
     let section = ref `None in
     let lineno = ref 0 in
@@ -259,13 +258,33 @@ let parse_file path =
               | `Transitions -> trans := parse_transition line s :: !trans)
        done
      with End_of_file -> ());
-    close_in ic;
     Ok { tags = List.rev !tags;
          attrs = List.rev !attrs;
          transitions = List.rev !trans }
   with
   | Bad (msg, line) -> Error (Printf.sprintf "%s: line %d: %s" path line msg)
   | Sys_error e -> Error e
+
+let parse_file path =
+  match open_in path with
+  | exception Sys_error e -> Error e
+  | ic ->
+    let r = parse_channel path ic in
+    close_in ic;
+    r
+
+(* Used by the compiler, which cannot read a repo-relative file: the table text
+   is embedded via a dune rule (see table_data.ml) and parsed once at startup. *)
+let parse_string ~name text =
+  let tmp = Filename.temp_file "ctxtbl" ".tbl" in
+  let oc = open_out tmp in
+  output_string oc text;
+  close_out oc;
+  let ic = open_in tmp in
+  let r = parse_channel name ic in
+  close_in ic;
+  (try Sys.remove tmp with Sys_error _ -> ());
+  r
 
 (** Classify a tag or attribute name against a [name_rule] list. First match
     wins, so ordering in the file is significant (e.g. `on*` above `*`). *)

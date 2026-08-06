@@ -191,4 +191,17 @@ let consume_interp t (c : C.t) =
 let is_valid_terminal (c : C.t) =
   c.C.state = C.Pcdata && c.C.element = C.ElNormal
 
+(* The table the compiler uses, parsed once from the embedded copy. A failure
+   here is a build-time defect in the .tbl, not a user error -- the parser
+   rejects unknown tokens precisely so this cannot silently degrade. *)
+let default =
+  lazy
+    (match P.parse_string ~name:"specs/security/html-contexts.tbl"
+             Table_data.contents with
+     | Ok t -> compile t
+     | Error e ->
+       failwith
+         ("march: the embedded HTML context table failed to parse. This is a \
+           compiler build defect, not a problem with your source. " ^ e))
+
 let describe = C.describe

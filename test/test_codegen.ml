@@ -7686,13 +7686,22 @@ let test_h_sigil_int_interp_coerces_arg_to_ptr () =
   let ir = emit_ir_with_iolist {|mod Test do
     fn render(n : Int) : String do IOList.to_string(~H"<p>n=${n}</p>") end
   end|} in
-  (* The runtime march_html_auto_escape takes a tagged ptr; an int arg must be
-     tagged via i64->ptr coercion, never passed as `i64 N` against the `ptr`
-     declaration (which segfaulted). *)
-  Alcotest.(check bool) "html_auto_escape called with a ptr arg" true
-    (ir_contains ir "call ptr @march_html_auto_escape(ptr");
-  Alcotest.(check bool) "html_auto_escape NOT called with a raw i64 arg" false
-    (ir_contains ir "@march_html_auto_escape(i64")
+  (* Contextual escaping (Task 5) replaced html_auto_escape with
+     html_escape_ctx(id, v), but the hazard this test exists for is unchanged:
+     the VALUE argument must arrive as a tagged ptr, never as a raw `i64 N`
+     against a `ptr` declaration, which segfaulted. The escaper id is a
+     genuine i64 and is the FIRST argument, so the shape to pin is
+     `(i64 <id>, ptr ...)`.
+
+     Also pins the contextual decision itself at the IR level: a hole in
+     element content must select escaper 0 (Context.EscHtml). *)
+  Alcotest.(check bool) "html_escape_ctx called with (i64 id, ptr value)" true
+    (ir_contains ir "call ptr @march_html_escape_ctx(i64 0, ptr");
+  Alcotest.(check bool) "value arg is NOT a raw i64" false
+    (ir_contains ir "@march_html_escape_ctx(i64 0, i64");
+  (* An Int reaches the escaper via to_string, and must be tagged on the way. *)
+  Alcotest.(check bool) "int is coerced through the ptr path" true
+    (ir_contains ir "call ptr @march_value_to_string(ptr")
 
 (* ── Http stdlib module tests ──────────────────────────────────────────── *)
 
