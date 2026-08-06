@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Capabilities can now be attenuated at any level, not just from the root.**
+  `cap_narrow` was typed `Cap(IO) -> Cap(a)`, so its argument was literally the
+  root capability — a holder of `Cap(IO.FileSystem)` could not narrow to
+  `Cap(IO.FileRead)`, and every attenuation had to happen in `main` with the
+  narrowed values threaded down.
+
+  It is now `Cap(a) -> Cap(b)`, and the compiler checks that the source
+  capability subsumes the target. Widening (`IO.Console` → `IO.FileWrite`) and
+  lateral moves between siblings (`IO.FileRead` → `IO.FileWrite`) are still
+  errors — the message names both capabilities and says which is not below the
+  other.
+
+  This makes delegation-with-attenuation writable: hand a subsystem
+  `Cap(IO.FileSystem)`, let it hand a helper `Cap(IO.FileRead)`.
+
 - **Context-indexed trust for `~H`: `Html.TrustedHtml` / `TrustedAttr` /
   `TrustedUrl` / `TrustedCss` / `TrustedJs`.** `Html.Safe` says a string is
   trusted but not trusted *where*, so a value trusted anywhere was trusted

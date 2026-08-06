@@ -741,6 +741,17 @@ type env = {
       pinned result is [Cap(P)] with [P] a proof cap whose declaring module is
       [current_module] AND [cur_fn_public]; a proof cap from another module, a
       private fn, or a non-proof (IO) target is rejected. *)
+  cap_narrow_sites : (Ast.span * ty) list ref;
+  (** Every [cap_narrow] application site, as (span, the INSTANTIATED arrow).
+      Swept by [check_cap_narrow_sites] to enforce that the source capability
+      SUBSUMES the target — R4a's replacement for the monotonicity the old
+      [Cap(IO) -> Cap(a)] argument type enforced through unification.
+
+      Deferred for the same reason as [mint_cap_sites] and [json_cap_sites]:
+      the result type is a bare var at the application site and is pinned by
+      LATER unification.  See
+      [specs/lang/types/reject/t155_cap_narrow_widen_deferred.march], which
+      exists to fail if this is ever made eager. *)
   json_cap_sites : (Ast.span * ty * string) list ref;
   (** Every [to_json] / [from_json] / [from_json_events] application site,
       recorded as (span, the INSTANTIATED arrow type of the builtin, builtin
@@ -881,6 +892,7 @@ let make_env errors type_map = {
   cap_producer_ivars = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
   mint_cap_sites = ref [];
+  cap_narrow_sites = ref [];
   json_cap_sites = ref [];
   pure_mod = false;
   no_extern_mod = false;
@@ -2311,7 +2323,18 @@ let builtin_bindings : (string * scheme) list =
     (* Capability builtins.  root_cap is a bare value (use `root_cap`, never
        `root_cap()`) — see [noncallable_builtin_values]. *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
-    ("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+    (* R4a (2026-08-06): source is [Cap(a)], not [Cap(IO)], so attenuation can
+       CHAIN — a holder of [Cap(IO.FileSystem)] can hand out
+       [Cap(IO.FileRead)].  Before this, the argument was literally the root,
+       so only [main] could attenuate and least-privilege threading was
+       unwritable past the first hop.
+       The monotonicity that the old argument type enforced structurally (a
+       widen simply failed to unify) now lives in [check_cap_narrow_sites].
+       That is weaker IN KIND — an application site the sweep does not record
+       is a silently permitted widen — which is why every site is recorded at
+       one place below and why reject/t153-t155 are the load-bearing witnesses
+       rather than decorative ones. *)
+    ("cap_narrow", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), TCon ("Cap", [b]))));
     (* mint_cap: the gated proof-cap mint. Same scheme as cap_narrow
        (Cap(IO) -> Cap(a)); the GATE (declaring-module + public fn, proof-cap
        target only) is enforced in the EApp special-case, not the scheme.
@@ -5646,6 +5669,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let rty = infer_app env sp f_ty [arg] 0 in
       demote_to_monomorphic rty;
       tag_cap_producer_result env rty sp;
+      (* R4a: record the INSTANTIATED arrow so the sweep can read BOTH the
+         source and the target once unification has pinned them. *)
+      env.cap_narrow_sites := (sp, f_ty) :: !(env.cap_narrow_sites);
       rty
 
     (* mint_cap (Part 2): the GATED proof-cap mint.  Same Cap(IO) -> Cap(a)
@@ -9186,6 +9212,57 @@ let rec cap_in_solved_ty (t : ty) : string option =
   | TChan _ -> None     (* session_ty carries no capability *)
   | TError -> None      (* already-reported error sentinel; stay quiet *)
 
+(** R4a: attenuation must move DOWN the lattice, or stay level.
+
+    This is what stops [cap_narrow] widening now that its argument type is
+    [Cap(a)] rather than [Cap(IO)].  Before R4a the argument type did the work
+    through unification and there was nothing to bypass; this sweep is weaker
+    in kind, so its coverage is the whole guarantee.
+
+    Deferred, not eager, for the same reason as every other capability sweep
+    here: the result var is pinned by LATER unification (reject/t155).
+
+    Enforced only when BOTH sides resolve to concrete IO-lattice capabilities:
+
+    - A PROOF cap on either side is left alone.  Proof capabilities are not in
+      the IO lattice, and they have their own discipline ([mint_cap]'s gate and
+      Check 6).  [cap_narrow(root) : Cap(Db.Migrated)] typechecks today and is
+      governed by Check 6 on the way out; making subsumption reject it here
+      would silently change proof-cap semantics under cover of an IO change.
+    - An UNPINNED side is silent.  A [cap_narrow] whose result never gets
+      pinned to a concrete capability is a result never USED as one, so no
+      authority is exercised and there is nothing to widen into.  (I proposed
+      failing closed here and was wrong: the R3 argument for silence on an
+      unresolved [from_json] result applies unchanged, and failing closed would
+      reject ordinary code that narrows into a polymorphic position.) *)
+let check_cap_narrow_sites (env : env) : unit =
+  let concrete t = match repr t with
+    | TCon ("Cap", [inner]) ->
+      (match repr inner with TCon (p, []) -> Some p | _ -> None)
+    | _ -> None
+  in
+  let is_proof p = List.mem_assoc p env.proof_caps in
+  List.iter (fun (sp, f_ty) ->
+      match repr f_ty with
+      | TArrow (src_ty, dst_ty) ->
+        (match concrete src_ty, concrete dst_ty with
+         | Some src, Some dst
+           when not (is_proof src) && not (is_proof dst)
+             && not (March_caps.Cap_lattice.cap_subsumes src dst) ->
+           Err.error env.errors ~span:sp
+             (render_parts [
+               MPCode ("Cap(" ^ src ^ ")");
+               MPText " cannot be widened to "; MPCode ("Cap(" ^ dst ^ ")");
+               MPText " — "; MPCode "cap_narrow";
+               MPText " only attenuates, so the source capability must subsume the target.";
+               MPBreak;
+               MPText "help: "; MPCode ("Cap(" ^ dst ^ ")");
+               MPText " is not below "; MPCode ("Cap(" ^ src ^ ")");
+               MPText " in the capability lattice. Receive it from a caller that holds an ancestor of it." ])
+         | _ -> ())
+      | _ -> ()
+    ) !(env.cap_narrow_sites)
+
 (** Capability unforgeability (R3), the call-site half.  [to_json] is checked
     on its argument, the [from_json] family on its result; see
     [env.json_cap_sites] for why this runs deferred and why it inspects the
@@ -12479,6 +12556,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      at the entry module covers every nested module's sites. *)
   check_mint_cap_sites final_env;
   check_json_cap_sites final_env;
+  check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:
      TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]

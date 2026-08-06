@@ -1,0 +1,43 @@
+-- R4a — ATTENUATION CHAINS: a non-root holder can narrow further (2026-08-06).
+--
+-- `cap_narrow` was typed `Cap(IO) -> Cap(a)`: its argument was LITERALLY the
+-- root. So a holder of anything narrower could not attenuate, and this file
+-- was an error before R4a:
+--
+--     expected `IO` but got `IO.FileSystem`
+--
+-- Delegation with attenuation at each hop — hand a subsystem
+-- `Cap(IO.FileSystem)`, let it hand a helper `Cap(IO.FileRead)` — is the core
+-- object-capability discipline, and it was not expressible. Every narrowing
+-- had to happen up at `main` with the already-narrowed values threaded down.
+--
+-- That matters now rather than later because R2 made `main` the sole source of
+-- authority, and R1 will make every IO call need a token: "least privilege,
+-- threaded down" becomes the normal way to write March, and it was the one
+-- idiom the typing forbade.
+--
+-- Read with reject/t153 (widening), reject/t154 (siblings) and reject/t155
+-- (the deferred case). This file alone cannot tell a working subsumption
+-- check from one that permits everything.
+mod ChainedAttenuation do
+  needs IO
+
+  -- The middle hop: holds FileSystem, hands out something strictly narrower.
+  pfn reader_from(fs : Cap(IO.FileSystem)) : Cap(IO.FileRead) do
+    cap_narrow(fs)
+  end
+
+  -- Identity: a capability subsumes ITSELF, so narrowing to the same level is
+  -- legal. `cap_subsumes p p` is true, and a check written with a strict
+  -- ancestor test would wrongly reject this.
+  pfn same_level(r : Cap(IO.FileRead)) : Cap(IO.FileRead) do
+    cap_narrow(r)
+  end
+
+  fn main(cap : Cap(IO)) do
+    let fs : Cap(IO.FileSystem) = cap_narrow(cap)
+    let r  = reader_from(fs)
+    let r2 = same_level(r)
+    println("attenuation chained two hops below the root")
+  end
+end

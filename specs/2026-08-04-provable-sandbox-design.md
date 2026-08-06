@@ -220,7 +220,7 @@ than in `test_cap_scope.ml`, because that file tests the pure `Cap_scope`
 functions and these need real programs typechecked. No production change was
 required, exactly as this section predicted.
 
-### R4a. Attenuation does not CHAIN — a prerequisite nobody had noticed
+### R4a. Attenuation does not CHAIN — **FIXED 2026-08-06**
 
 Measured 2026-08-05, and it is a gap in the ocap story rather than in the
 lattice. `cap_narrow` is typed `Cap(IO) -> Cap(a)`: its argument is *literally
@@ -242,15 +242,44 @@ helper `Cap(IO.FileRead)` — is the core object-capability discipline and is
 The same applies to `mint_cap : Cap(IO) -> Cap(a)`: minting even a *proof* cap
 consumes the root, so a module that mints must be handed root authority.
 
-This matters for sequencing, not for correctness of what shipped: R2 makes
-`main` the sole source, and R1 would make every IO call need a token — and the
-two together make "least privilege threaded down" the normal way to write
-March. That idiom is exactly the one this typing prevents. **Fixing
-`cap_narrow` to accept any ancestor rather than only the root is a
-prerequisite for R1 being usable**, and it is small next to R1 itself: the
-argument type wants to be "some `Cap(P)` where `P` subsumes the result", which
-the lattice already knows how to answer (`Cap_lattice.cap_subsumes`) but
-unification alone cannot express.
+This mattered for sequencing: R2 makes `main` the sole source, and R1 would
+make every IO call need a token — the two together make "least privilege
+threaded down" the normal way to write March, and that idiom was exactly the
+one this typing prevented.
+
+**Fixed 2026-08-06** — `specs/progress/2026-08-06-cap-narrow-chains.md`.
+`cap_narrow` is now typed `Cap(a) -> Cap(b)` with subsumption enforced by
+`check_cap_narrow_sites`, a deferred sweep over recorded application sites.
+
+The tradeoff is worth stating because it is a real weakening, accepted
+deliberately. Monotonicity used to be enforced **structurally through
+unification** — the argument type literally was `Cap(IO)`, so a widen failed
+to unify and there was nothing to bypass. It now lives in a post-pass, which
+is weaker *in kind*: an application site the sweep fails to record is a
+silently permitted widen. HM unification cannot express a subtyping relation,
+so there was no way to have both chaining and structural enforcement; the
+mitigation is that `reject/t153`–`t155` are the load-bearing witnesses rather
+than decorative ones, and that every site is recorded at a single place.
+
+Two scoping decisions in the sweep:
+
+- **Proof caps are left alone** on either side. They are not in the IO lattice
+  and have their own discipline (`mint_cap`'s gate, Check 6).
+  `cap_narrow(root) : Cap(Db.Migrated)` typechecks today and is governed on the
+  way out; making subsumption reject it here would have changed proof-cap
+  semantics under cover of an IO change.
+- **An unpinned side is silent.** A `cap_narrow` whose result is never pinned
+  to a concrete capability is a result never *used* as one, so no authority is
+  exercised. (Failing closed was proposed and was wrong — it would reject
+  ordinary code that narrows into a polymorphic position.)
+
+One knock-on, recorded because it looks like a regression and is not:
+`reject/t143` (R3's deferred-zonk witness) now reports `Cap(_)` rather than
+`Cap(IO)`. `cap_narrow` no longer pins its argument to the root, so nothing in
+that program determines *which* capability is being forged — only that one is.
+R3 still rejects it because `cap_in_solved_ty` reports an unpinned capability
+argument as `_` rather than skipping it. Had it skipped, R4a would have
+silently reopened R3's hole and the corpus would have gone green doing it.
 
 ### R5. Effect polymorphism that survives higher-order code
 
