@@ -10,8 +10,105 @@
 
 mod Html do
 
-  -- Html.Safe wraps a string that should NOT be escaped (already safe HTML)
+  -- Html.Safe wraps a string that should NOT be escaped (already safe HTML).
+  -- DEPRECATED in favour of the context-indexed Trusted* types below: `Safe` is
+  -- context-free, so a value trusted anywhere is trusted everywhere. Kept
+  -- working unchanged because bastion is published at 0.2.3.
   type Safe = Safe(String)
+
+  -- ── Context-indexed trust ───────────────────────────────────────────────
+  --
+  -- `Safe` says a string is trusted, but not trusted WHERE. Once a value is
+  -- trusted anywhere it is trusted everywhere, which is the same category error
+  -- this whole feature exists to fix: safety is a property of a value IN A
+  -- POSITION, not of a value.
+  --
+  --     let s = Html.raw("<b>bold</b>")   -- trusted as HTML
+  --     ~H"<p>${s}</p>"                   -- fine
+  --     ~H"<a href=\"${s}\">x</a>"        -- HTML trust says nothing about URLs
+  --
+  -- These types name the context the trust applies to. A `TrustedUrl` inserted
+  -- into element content is escaped as ordinary text; a `TrustedHtml` in an
+  -- `href` still gets the URL scheme allowlist. Trust does not travel.
+  --
+  -- The check is entirely COMPILE TIME. lib/tir/llvm_emit.ml matches on the
+  -- static type and on the escaper id the ~H desugar already folded, so a
+  -- mismatch costs nothing at runtime -- it simply escapes. That is why these
+  -- are separate types rather than one type carrying a context tag: a tag would
+  -- be runtime data, and the emitter could not resolve it.
+
+  -- Markup trusted as HTML element content. Inserted verbatim in a PCDATA
+  -- position; escaped anywhere else.
+  type TrustedHtml = TrustedHtml(String)
+
+  -- A string trusted as an attribute value. Inserted verbatim in an ordinary
+  -- attribute; escaped anywhere else.
+  type TrustedAttr = TrustedAttr(String)
+
+  -- A string trusted as a URL. Inserted verbatim in a url attribute (href,
+  -- src, ...); escaped anywhere else -- notably NOT trusted as HTML.
+  type TrustedUrl = TrustedUrl(String)
+
+  -- A string trusted as CSS. Inserted verbatim in a `style` attribute or a
+  -- <style> body; escaped anywhere else.
+  type TrustedCss = TrustedCss(String)
+
+  -- A string trusted as JavaScript. Inserted verbatim inside <script>;
+  -- escaped anywhere else.
+  type TrustedJs = TrustedJs(String)
+
+  doc """
+  Trust a string as HTML element content.
+
+  Inserted verbatim where the surrounding template is element content, and
+  escaped anywhere else — trusting a string as HTML says nothing about whether
+  it is a safe URL, so the same value in an `href` still gets the scheme
+  allowlist.
+
+  Prefer building markup with the ~H sigil, which needs no trust at all. Reach
+  for this only when a string genuinely is markup from a source you control.
+  """
+  fn trust_html(s : String) : TrustedHtml do TrustedHtml(s) end
+
+  doc "Trust a string as an ordinary attribute value. See `trust_html`."
+  fn trust_attr(s : String) : TrustedAttr do TrustedAttr(s) end
+
+  doc """
+  Trust a string as a URL. It bypasses the scheme allowlist, so only use it on a
+  URL you constructed yourself. See `trust_html`.
+  """
+  fn trust_url(s : String) : TrustedUrl do TrustedUrl(s) end
+
+  doc "Trust a string as CSS. See `trust_html`."
+  fn trust_css(s : String) : TrustedCss do TrustedCss(s) end
+
+  doc "Trust a string as JavaScript. See `trust_html`."
+  fn trust_js(s : String) : TrustedJs do TrustedJs(s) end
+
+  doc "Unwrap trusted HTML back to a plain String."
+  fn untrust_html(t : TrustedHtml) : String do
+    match t do TrustedHtml(s) -> s end
+  end
+
+  doc "Unwrap a trusted attribute value back to a plain String."
+  fn untrust_attr(t : TrustedAttr) : String do
+    match t do TrustedAttr(s) -> s end
+  end
+
+  doc "Unwrap a trusted URL back to a plain String."
+  fn untrust_url(t : TrustedUrl) : String do
+    match t do TrustedUrl(s) -> s end
+  end
+
+  doc "Unwrap trusted CSS back to a plain String."
+  fn untrust_css(t : TrustedCss) : String do
+    match t do TrustedCss(s) -> s end
+  end
+
+  doc "Unwrap trusted JavaScript back to a plain String."
+  fn untrust_js(t : TrustedJs) : String do
+    match t do TrustedJs(s) -> s end
+  end
 
   doc """
   Escape HTML entities in a string: & < > " '

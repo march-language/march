@@ -11,6 +11,36 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Context-indexed trust for `~H`: `Html.TrustedHtml` / `TrustedAttr` /
+  `TrustedUrl` / `TrustedCss` / `TrustedJs`.** `Html.Safe` says a string is
+  trusted but not trusted *where*, so a value trusted anywhere was trusted
+  everywhere. These types name the context the trust applies to, and trust does
+  not travel between them:
+
+  ```march
+  let h = Html.trust_html("<b>hi</b>")
+  ~H"<p>${h}</p>"                -- <p><b>hi</b></p>        verbatim
+  ~H"<a href=\"${h}\">x</a>"      -- &lt;b&gt;hi&lt;/b&gt;   escaped
+  ```
+
+  Constructors `Html.trust_html` / `trust_attr` / `trust_url` / `trust_css` /
+  `trust_js`, with matching `untrust_*`. Prefer `~H` itself, which needs no
+  trust at all — reach for these only when a string genuinely is markup, a URL,
+  CSS or JS from a source you control.
+
+  Resolved **entirely at compile time**: the emitter matches the static type
+  against the escaper id the `~H` desugar already folded, so a mismatch costs
+  nothing at runtime — it simply escapes. That is why these are separate types
+  rather than one type carrying a context tag; a tag would be runtime data and
+  could not be resolved statically.
+
+  `Html.Safe` and `Html.raw` are unchanged and keep working — they are treated
+  as HTML trust — but are now documented as deprecated in favour of the
+  context-indexed types.
+
+
 ### Fixed
 
 - **`Html.tag` had three injection holes; it now validates names and escapes
