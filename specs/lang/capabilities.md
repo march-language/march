@@ -93,13 +93,27 @@ two modules importing the same library can owe different capabilities.
 The result is always a **subset** of what the older module-granular rule required,
 by construction — the demand set filters the imported module's declared `needs`, it
 never adds to it. So this rule can only ever require less, and no module that
-compiles today can start failing because of it. Two conservative carve-overs remain,
-both erring toward requiring more: a referenced name with no per-function record
+compiles today can start failing because of it. Two conservative carve-overs err
+toward requiring more: a referenced name with no per-function record
 (a module-level `let`, an interface or `impl` method — `record_fn_caps` covers
 `DFn`s, actor handlers and externs only) falls back to the imported module's whole
 declared set, and so does an import whose target has not been analyzed yet because
 the two modules import each other cyclically (the module topological sort tolerates
 cycles rather than rejecting them).
+
+**Known incompleteness — the transitive case is NOT covered.** The fallback above
+fires only for a name referenced **directly** with no `own(...)` entry. A
+referenced `DFn` that merely *reaches* a `DLet` body, interface method or `impl`
+method does have an entry, so `caps_of_name` returns that entry's silently
+truncated closure and the fallback never fires. A capability the pre-2026-08-06
+Check 4 required can therefore be dropped along that path — the fail-open
+direction, which the design's constraints treat as no less serious than a false
+positive. It is bounded (the referenced function must reach the capability
+*exclusively* through an uncovered form; any path through an ordinary `DFn` or a
+builtin call is still counted) but real. Closing it means giving those three
+forms an `own(...)` entry in `record_fn_caps`, which is **not** in the
+strictly-loosening class and needs its own corpus sweep. Tracked in
+`specs/todos/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`.
 
 ### Capability hierarchy
 

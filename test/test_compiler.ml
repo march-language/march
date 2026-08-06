@@ -9086,48 +9086,80 @@ let test_fallback_does_not_fire_for_locals () =
     end
   end|}))
 
-(* Ruling 2 — cyclic modules. The module topological sort TOLERATES cycles,
-   so one of a mutually-referencing pair is checked before the other's caps
-   are known. That must not silently drop enforcement: whichever way the sort
-   lands, importing a module for its impure function still errors. *)
+(* Ruling 2 — cyclic modules. The module topological sort TOLERATES cycles
+   rather than rejecting them, so one module of a mutually-referencing pair is
+   checked before the other's capabilities are known. The question this pins is
+   whether that can silently DROP enforcement.
+
+   Built as a 2x2 over (cyclic?) x (references the impure fn or the pure one),
+   on module bodies that are otherwise byte-identical. `A` declares nothing and
+   `B` declares `needs IO.Console`, so referencing `B`'s impure function owes
+   an error and referencing its pure one does not:
+
+     cyclic=no,  impure -> ERROR   (the acyclic control)
+     cyclic=YES, impure -> ERROR   (the cycle does NOT drop enforcement)
+     cyclic=no,  pure   -> clean   (the loosening)
+     cyclic=YES, pure   -> clean   (the loosening survives the cycle)
+
+   The two impure rows are what make the two pure rows meaningful: without
+   them, "no error" would be indistinguishable from enforcement having been
+   dropped for every shape. Measured against a binary built at the base commit
+   (fd73127b), the impure rows were 1/1 and the pure rows 1/1 — so the pure
+   rows are exactly the intended loosening and the cyclic impure row is
+   unchanged.
+
+   Mechanism, traced rather than assumed: `env.module_caps` and
+   `own_cap_closures` are populated in the SAME pass — `check_module_needs`
+   runs `record_fn_caps`, and the `DMod` arm appends `(name, inner_needs)` to
+   `module_caps` immediately after. They are therefore never out of step: a
+   module the sort has not reached yet has NEITHER, so `module_level_caps`
+   returns [] and `import_required_caps`'s early exit reproduces the old code's
+   `None -> ()` branch exactly. There is no state in which the old code
+   required something and the new code requires less.
+
+   Known and PRE-EXISTING, deliberately not asserted here: declaration order
+   decides this, not cyclicity. With `A` declared BEFORE `B`, all four rows are
+   clean — on the base binary too (verified 0/0/0/0 both sides). A module that
+   imports a sibling declared later than itself is simply not reached by Check
+   4, cycle or no cycle. That is a property of the sort, untouched by this
+   change, and pinning it here would pin a bug as correct. *)
 let test_cyclic_modules_still_enforce () =
-  let src = {|mod Root do
-  mod A do
-    needs IO.Console
-    import B
-    fn a_pure(x : Int) : Int do x + 1 end
-    fn a_noisy(m : String) : Unit do print(m) end
-    fn a_uses_b(x : Int) : Int do b_pure(x) end
-  end
+  let impure_variant ~cyclic = Printf.sprintf {|mod Root do
   mod B do
     needs IO.Console
-    import A
+    %s
     fn b_pure(x : Int) : Int do x * 2 end
-    fn b_calls_a_noisy(m : String) : Unit do a_noisy(m) end
+    fn b_noisy(m : String) : Unit do print(m) end
   end
-end|} in
-  (* Both modules DO declare needs IO.Console, so no Check-4 error is expected;
-     what this pins is that the analysis terminates and does not crash on a
-     cycle. The enforcement half is pinned by the variant below. *)
-  Alcotest.(check bool) "cyclic pair with declared needs: no error" false
-    (has_cap_needs_error src);
-  let undeclared = {|mod Root do
   mod A do
-    needs IO.Console
     import B
     fn a_pure(x : Int) : Int do x + 1 end
-    fn a_noisy(m : String) : Unit do print(m) end
+    fn a_uses_b(m : String) : Unit do b_noisy(m) end
+  end
+end|} (if cyclic then "import A" else "")
+  in
+  let pure_variant ~cyclic = Printf.sprintf {|mod Root do
+  mod B do
+    needs IO.Console
+    %s
+    fn b_pure(x : Int) : Int do x * 2 end
+    fn b_noisy(m : String) : Unit do print(m) end
+  end
+  mod A do
+    import B
+    fn a_pure(x : Int) : Int do x + 1 end
     fn a_uses_b(x : Int) : Int do b_pure(x) end
   end
-  mod B do
-    import A
-    fn b_pure(x : Int) : Int do x * 2 end
-    fn b_calls_a_noisy(m : String) : Unit do a_noisy(m) end
-  end
-end|} in
-  Alcotest.(check bool)
-    "cyclic pair, B references A's impure fn without declaring: still errors"
-    true (has_cap_needs_error undeclared)
+end|} (if cyclic then "import A" else "")
+  in
+  Alcotest.(check bool) "acyclic control: impure reference must error"
+    true (has_cap_needs_error (impure_variant ~cyclic:false));
+  Alcotest.(check bool) "CYCLIC: impure reference still errors"
+    true (has_cap_needs_error (impure_variant ~cyclic:true));
+  Alcotest.(check bool) "acyclic: pure reference costs nothing"
+    false (has_cap_needs_error (pure_variant ~cyclic:false));
+  Alcotest.(check bool) "CYCLIC: pure reference costs nothing"
+    false (has_cap_needs_error (pure_variant ~cyclic:true))
 
 (* migrate_state calling file_write with no declared needs -> IO-free error. *)
 let test_migrate_state_file_write_error () =

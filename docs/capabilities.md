@@ -83,7 +83,9 @@ which import requires which cap — e.g. a `Caller` module `use`ing `Server` wit
 `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`. `` (This signature/`use`/`extern`
 surface is the hard-error side of the line drawn in ["What the compiler tells you"](#what-the-compiler-tells-you).)
 
-**Propagation is demand-driven: you inherit only what you actually reference.**
+### Propagation is demand-driven
+
+You inherit only what you actually reference.
 Importing a module costs you the capabilities of the *functions you reference from
 it*, not the imported module's whole set. So importing `List` to call `map` costs
 nothing, even though `List.pmap` spawns tasks; you would only owe `needs IO.Spawn`
@@ -94,11 +96,24 @@ the same library can owe different capabilities.
 
 This rule only ever requires **less** than the older module-granular one, so no
 module that compiles today can start failing because of it. Two conservative
-carve-overs remain, both erring toward requiring more: a referenced name the
-compiler has no per-function record for (a module-level `let`, an interface or
-`impl` method) falls back to the imported module's whole declared set, and so does
-an import whose target has not been analyzed yet because the two modules import each
-other cyclically.
+carve-overs err toward requiring more: a referenced name the compiler has no
+per-function record for (a module-level `let`, an interface or `impl` method)
+falls back to the imported module's whole declared set, and so does an import
+whose target has not been analyzed yet because the two modules import each other
+cyclically.
+
+**A known gap, stated plainly.** The compiler records per-function capabilities
+for `fn`s, actor handlers and `extern` blocks, but not for module-level `let`
+bindings, interface methods, or `impl` methods. The carve-over above catches
+those only when you reference one *directly*. If you reference an ordinary
+function that reaches a capability **exclusively** through one of them — say a
+`fn` whose only impure act is to evaluate a module-level `let` that prints — the
+compiler currently will not ask you to declare that capability, where before
+2026-08-06 importing the module would have. Any path through an ordinary
+function or a builtin call is still counted, so this is narrow, but it is a real
+hole: do not read a clean `--check` as proof that an imported module's `let`
+bindings are pure. Tracked in
+`specs/todos/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`.
 
 ### Capability hierarchy
 
@@ -173,7 +188,7 @@ Use the **narrowest capability that accurately describes what the code actually 
 
 There are two severities, and which one you get depends on *where* the uncovered capability shows up — this honest distinction matters, so it's stated explicitly rather than glossed over.
 
-**Signature, transitive `use`, or `extern` — a build-breaking ERROR (`--check` exits 1).** If `Cap(X)` appears in a function/actor/extern parameter, or you `use` a module and reference a function from it that needs a capability you haven't declared, there is no way to ship without fixing it. (Note the scope: it is the functions you *reference* that count, not the imported module as a whole — see ["Propagation is demand-driven"](#io-capabilities) above.)
+**Signature, transitive `use`, or `extern` — a build-breaking ERROR (`--check` exits 1).** If `Cap(X)` appears in a function/actor/extern parameter, or you `use` a module and reference a function from it that needs a capability you haven't declared, there is no way to ship without fixing it. (Note the scope: it is the functions you *reference* that count, not the imported module as a whole — see ["Propagation is demand-driven"](#propagation-is-demand-driven) above.)
 
 ```
 $ march --check caller.march   # `use`s a module needing Cap(IO.Network), no `needs IO.Network` of its own

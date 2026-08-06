@@ -8061,10 +8061,25 @@ let is_migrate_fn_name (fn_name : string) : bool =
     local binding, a parameter, a constructor, an unloaded module's member —
     contributes nothing: it has no entry, so the lookup yields [].
 
-    Coverage caveat, inherited from [record_fn_caps] and NOT introduced here:
-    [DLet] bodies, interface methods and impl methods get no [own(...)] entry,
-    so an edge pointing at one contributes nothing. That is fail-open, and must
-    be closed before this table is made load-bearing for enforcement.
+    KNOWN INCOMPLETENESS, inherited from [record_fn_caps] and not introduced
+    here: [DLet] bodies, interface methods and impl methods get no [own(...)]
+    entry, so an edge pointing at one contributes nothing and the closure of
+    anything that reaches one is silently truncated.
+
+    This table IS load-bearing for enforcement as of 2026-08-06 —
+    [check_module_needs]'s Check 4 consults it (see [import_required_caps]) —
+    so state the consequence precisely rather than deferring it. Check 4 guards
+    the DIRECT case: a referenced name with no entry at all falls back to the
+    imported module's whole declared set, i.e. today's module-granular answer.
+    It does NOT guard the TRANSITIVE case: a referenced [DFn] that merely
+    REACHES a [DLet] body / interface method / impl method does have an entry,
+    so [caps_of_name] returns that entry's truncated closure and the fallback
+    never fires. A capability the pre-2026-08-06 Check 4 required can therefore
+    be dropped along that path.
+
+    Closing it means giving those forms an [own(...)] entry in
+    [record_fn_caps]; tracked in
+    [specs/todos/2026-08-06-record-fn-caps-misses-dlet-and-methods.md].
 
     Returns the raw table so an in-pass consumer ([check_module_needs]'s
     demand-driven import propagation) gets O(1) lookups;
