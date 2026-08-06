@@ -72,11 +72,11 @@ fn main() : Unit do
 
   -- Sum 1..10000 using fork-join (threshold=500)
   let total = par_sum(1, 10000, 500)
-  println("par_sum(1..10000) = " ++ int_to_string(total))
+  println("par_sum(1..10000) = " ++ String.from_int(total))
 
   -- Max Collatz steps in 1..10000
   let max_steps = max_collatz(1, 10000, 500)
-  println("max collatz steps in 1..10000 = " ++ int_to_string(max_steps))
+  println("max collatz steps in 1..10000 = " ++ String.from_int(max_steps))
 end
 
 end

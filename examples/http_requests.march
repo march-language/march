@@ -13,7 +13,7 @@ mod HttpExample do
   fn print_result(label, result) do
     match result do
     Ok(resp) ->
-      print(label ++ ": OK (status " ++ int_to_string(Http.response_status_code(resp)) ++ ")")
+      print(label ++ ": OK (status " ++ String.from_int(Http.response_status_code(resp)) ++ ")")
       print("  body: " ++ Http.response_body(resp))
     Err(_) ->
       print(label ++ ": ERROR")

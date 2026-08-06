@@ -302,6 +302,8 @@ end
 
 There is no `then` keyword in March — `if c then e1 else e2` is rejected with "I don't recognize `then` here — March uses do/end blocks instead."
 
+> **Prefer [`match`](#match) for anything beyond a single two-way choice.** `if`/`else` is fine for one boolean condition, but pattern matching is March's primary control-flow construct — it branches on multiple cases and destructures data, checked for exhaustiveness by the compiler.
+
 ---
 
 ## Match

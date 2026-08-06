@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Vault"
 permalink: /docs/cookbook/vault/
+scrollmd: true
 ---
 
 # Vault
