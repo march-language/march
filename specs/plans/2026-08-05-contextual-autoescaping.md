@@ -15,14 +15,23 @@
 | 0 — ADT misread (XSS + SIGSEGV) | **landed** — #192, `37d1e166` |
 | 1–2 — table + automaton | **landed** — #194, `6cfdc005` |
 | 3–5 — escapers, builtin, desugar fold | **landed** — #202, `a8707c78` |
-| 6 — context-indexed `Html.Trusted` | open |
+| 6 — context-indexed trust | **done** — PR #208 (as `Trusted*` types, not `Trusted(Ctx, _)`; see the task) |
 | 7 — codegen + drift guard | **mostly obsolete** — see the task |
 | 8 — corpus validation | **done** — PR #204, awaiting CI |
-| 9 — `Html.tag` non-sigil path | open — **planned 2026-08-06**; 3 holes measured, 2 unfixable by escaping |
+| 9 — `Html.tag` non-sigil path | **done** — PR #208 |
 
-`~H` escapes by parse context on `main`. Recommended order for what remains:
-**8, then 9, then 6.** Task 8 converts two unverified assumptions into evidence
-and should not wait behind design work.
+`~H` escapes by parse context on `main`. **Every task is now done or in review.**
+Open PRs: #204 (Task 8), #208 (Tasks 9 and 6). Task 7's remainder is
+recommended for dropping rather than building — see that task and the follow-up
+section.
+
+Task 6 deviated from its own spec, deliberately: it shipped as five
+context-named types (`TrustedHtml`, `TrustedAttr`, `TrustedUrl`, `TrustedCss`,
+`TrustedJs`) rather than one `Trusted(Ctx, String)`. A context tag would be
+runtime data the emitter cannot resolve, forcing a runtime comparison on every
+trusted value; separate types are matched statically against the escaper id the
+desugar already folded, so a mismatch costs nothing. Reasoning is recorded in
+`stdlib/html.march` at the type definitions.
 
 ## Source
 
