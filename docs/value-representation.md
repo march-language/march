@@ -1,4 +1,15 @@
+---
+layout: docs
+title: Value Representation (compiler internals)
+nav_order: 95
+permalink: /docs/value-representation/
+---
+
 # Value Representation Contract
+
+> **Compiler internals.** This documents how the compiler lays out values in
+> memory — for contributors to the compiler, not for using March. Learning or
+> evaluating the language? Skip this.
 
 This is the compiler-internals reference for how March values are laid out in
 memory and on the wire between passes — the object header, the tagged-scalar

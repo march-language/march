@@ -21,7 +21,11 @@ below.
 
 ## Install
 
-`march-lsp` speaks LSP over **stdio**. Build it and put it on your `PATH`:
+`march-lsp` speaks LSP over **stdio**. It ships in the released March toolchain, so if
+you installed a release build, `march-lsp` is already on your `PATH` — check with
+`march-lsp --version` and skip straight to [Editor setup](#editor-setup).
+
+Building from source? Compile it and put it on your `PATH`:
 
 ```sh
 dune build lsp/bin/main.exe       # produces _build/default/lsp/bin/main.exe

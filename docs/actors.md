@@ -9,7 +9,7 @@ permalink: /docs/actors/
 
 March's concurrency model is built on **actors** and **tasks**. Actors are isolated processes that communicate exclusively through message passing — no shared mutable state. Tasks are lightweight one-off computations that run concurrently and return a value. Both run whether you use the interpreter or compile to a native binary.
 
-Most of what's on this page — spawning, sending, receiving, checking liveness, killing — behaves identically either way. A few newer features (capability-based messaging, reading a supervised actor's state from outside, and `Actor.call`) are still interpreter-only or have known bugs when compiled; each is called out where it matters, and there's a one-line summary in the [Builtins Reference](#builtins-reference) table below.
+Most of what's on this page — spawning, sending, receiving, checking liveness, killing, and request-reply built on plain `send` — behaves identically either way. Only a few newer conveniences diverge on the compiled backend: **capability-based messaging** (`get_cap`/`send_checked`), **reading a supervised actor's state from outside** (`get_actor_field`/`pid_of_int`), and **`Actor.call`'s return value**. Those are the compiled-backend gaps; each is called out where it matters below, and all three are collected in one place in the [Builtins Reference](#builtins-reference) table. Where a gap affects a pattern you need compiled, the portable alternative is given right there (for synchronous calls, see [Request-Reply That Works Compiled](#request-reply-that-works-compiled)).
 
 ---
 
@@ -173,7 +173,36 @@ Use capabilities when you hold a reference across an actor restart boundary and 
 
 ---
 
+## Request-Reply That Works Compiled
+
+Before reaching for the `Actor.call` convenience below — whose *return value* is
+interpreter-only today — know the pattern that works on **both** backends: pass a reply
+address and get the answer back as an ordinary message. It's built entirely from `send`,
+which behaves identically interpreted and compiled.
+
+The requester includes its own `Pid` (from `self()`) in the message; the handler replies
+with a plain `send` to that address:
+
+```march
+on Ask(question : String, reply_to) do
+  send(reply_to, Answer(compute_answer(question)))
+  state
+end
+```
+
+The caller — itself an actor, or the top-level process — handles the `Answer(...)` reply
+in its own `on` clause (this is the same reply-address idea as [`self()`](#actor-identity-self)).
+Prefer this whenever a compiled binary needs to see the result; reach for `Actor.call`
+only under the interpreter, where its return value is reliable.
+
+---
+
 ## Synchronous Request-Reply via `Actor.call`
+
+> **Interpreter-only convenience.** `Actor.call` is a nicer synchronous wrapper, but its
+> *return value* is unreliable when compiled (see the known-bug note at the end of this
+> section). For a compiled binary, use [Request-Reply That Works
+> Compiled](#request-reply-that-works-compiled) above instead.
 
 The `Actor` module provides a synchronous call pattern. You pass a **zero-arg
 sentinel constructor** as the call message; its tag selects which handler receives
@@ -429,7 +458,17 @@ mod MyService do
 end
 ```
 
-The `app` declaration integrates with the supervision system — see [Supervision Trees]({{ site.baseurl }}/docs/supervision/) for the full tutorial.
+**How this relates to the `supervise` block.** These are two spellings of the same idea.
+The `supervise do strategy one_for_one … Child field end` block you put *inside an
+ordinary actor* (see [Supervision Trees]({{ site.baseurl }}/docs/supervision/)) declares
+that actor's supervised children with a small DSL. An `app` body instead evaluates to a
+`Supervisor.Spec` **value** — `Supervisor.spec(:one_for_one, [worker(Worker), …])` is the
+value-level counterpart of that block, and it defines the application's single top-level
+supervisor. Note the two surfaces spell the strategy differently: a bare `one_for_one` in
+the `supervise` block versus the atom `:one_for_one` passed to `Supervisor.spec`. Reach
+for `supervise` to give an actor children; reach for `app` to declare the root of a
+long-running application. See [Supervision Trees]({{ site.baseurl }}/docs/supervision/)
+for the full tutorial.
 
 > **Reading a supervised child's state is interpreter-only, today.** Restart itself
 > (`one_for_one` etc.) is correct on both backends. But the only way to reach a supervised

@@ -1,7 +1,7 @@
 ---
 layout: docs
 title: Hot Code Reload
-nav_order: 10.8
+nav_order: 10.9
 permalink: /docs/hot-code-reload/
 ---
 
@@ -91,7 +91,7 @@ forge deploy hot --so /path/to/my_app.so
 > needs a Linux-built artifact passed via `--so`. Native cross-compilation of
 > reload units (`--compile-so --target linux/…`) is planned; today, cross builds
 > cover the initial binary — see
-> [Cross-compiling to Linux](tooling.md#cross-compiling-to-linux).
+> [Cross-compiling to Linux]({{ site.baseurl }}/docs/tooling/#cross-compiling-to-linux).
 
 On a successful deploy you see:
 
@@ -110,6 +110,42 @@ If nothing has changed since the last deploy, forge detects this from the conten
 ```
 No changes detected — server is already up to date.
 ```
+
+---
+
+## Actor state migration
+
+When an actor's state record changes between deploys, the server needs to know how to upgrade the existing in-memory state of every live actor. You provide a `migrate_state` function:
+
+```march
+mod MyApp do
+
+  -- v2: add a `history` field to track previous counts
+  actor Counter do
+    state { count: Int, history: List(Int) }
+    init  { count: 0, history: [] }
+
+    on Inc() do
+      let n = state.count + 1
+      { count: n, history: List.append([state.count], state.history) }
+    end
+
+    on PrintCount(label) do
+      println(label ++ int_to_string(state.count))
+      state
+    end
+  end
+
+  -- Magic name: <actor_lowercase>_migrate_state
+  -- Called once per live Counter actor at deploy time.
+  fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
+    { count: old.count, history: [] }
+  end
+
+end
+```
+
+The naming convention is `<actor_name_lowercase>_migrate_state`. The parameter type is the **old** state shape; the return type is the **new** state shape. Every live actor is migrated before it processes any further messages.
 
 ---
 
@@ -306,42 +342,6 @@ A policy constrains what *hot-patched* functions may do; it does not retroactive
 ### Backward compatibility
 
 Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A node with no `MARCH_DEPLOY_POLICY` admits everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading — re-run with `--no-cap-gate` if you deliberately want the legacy path.
-
----
-
-## Actor state migration
-
-When an actor's state record changes between deploys, the server needs to know how to upgrade the existing in-memory state of every live actor. You provide a `migrate_state` function:
-
-```march
-mod MyApp do
-
-  -- v2: add a `history` field to track previous counts
-  actor Counter do
-    state { count: Int, history: List(Int) }
-    init  { count: 0, history: [] }
-
-    on Inc() do
-      let n = state.count + 1
-      { count: n, history: List.append([state.count], state.history) }
-    end
-
-    on PrintCount(label) do
-      println(label ++ int_to_string(state.count))
-      state
-    end
-  end
-
-  -- Magic name: <actor_lowercase>_migrate_state
-  -- Called once per live Counter actor at deploy time.
-  fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
-    { count: old.count, history: [] }
-  end
-
-end
-```
-
-The naming convention is `<actor_name_lowercase>_migrate_state`. The parameter type is the **old** state shape; the return type is the **new** state shape. Every live actor is migrated before it processes any further messages.
 
 ---
 

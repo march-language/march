@@ -102,9 +102,9 @@ mod Main do
     end
   end
 
-  -- Outside Token: values are meant to flow only through the module's own
-  -- functions — Token(_) itself should be inaccessible outside the defining
-  -- module (see the enforcement gap noted below).
+  -- Outside Token: values flow through the module's own functions. Callers
+  -- use `Token.make` to build one and `Token.value` to read it, rather than
+  -- constructing `Token(_)` directly.
   fn process(t) do
     println(Token.value(t))
   end
@@ -117,14 +117,8 @@ end
 
 An explicit qualified annotation like `t : Token.Token` in a caller outside the `Token`
 module unifies correctly with the bare `Token` type `Token.make` returns, so you can
-write either form.
-
-> **Known gap: `opaque type` doesn't stop a cross-file bypass.** Constructor-hiding is
-> enforced for a same-file reference, but not yet against a qualified reference to the
-> constructor from a *separate* file reached via `MARCH_LIB_PATH`/auto-discovery — e.g.
-> `OqToken.Token("bypass")` from an unrelated sibling file will typecheck and construct a
-> real value today, even though `Token`'s constructor is declared `opaque`. Don't rely on
-> `opaque type` alone for encapsulation across a multi-file project until this is closed.
+write either form. (One caveat on cross-file enforcement is in
+[Known limitations](#known-limitations) below.)
 
 ---
 
@@ -320,7 +314,7 @@ In a `forge` project, each file typically contains one module. Files are discove
 
 ```
 my_app/
-├── src/
+├── lib/
 │   ├── my_app.march          -- mod MyApp do ... end
 │   ├── my_app/router.march   -- mod MyApp.Router do ... end
 │   └── my_app/templates.march-- mod MyApp.Templates do ... end
@@ -328,7 +322,7 @@ my_app/
 
 Build with:
 ```sh
-MARCH_LIB_PATH=src ./_build/default/bin/main.exe --compile -o my_app src/my_app.march
+MARCH_LIB_PATH=lib march --compile -o my_app lib/my_app.march
 ```
 
 `forge build` handles this automatically.
@@ -355,6 +349,18 @@ mod Main do
   end
 end
 ```
+
+---
+
+## Known limitations
+
+**`opaque type` doesn't stop a cross-file bypass.** Constructor-hiding is enforced
+for a same-file reference, but not yet against a qualified reference to the
+constructor from a *separate* file reached via `MARCH_LIB_PATH`/auto-discovery —
+e.g. `OqToken.Token("bypass")` from an unrelated sibling file will typecheck and
+construct a real value today, even though `Token`'s constructor is declared
+`opaque`. Don't rely on `opaque type` alone for encapsulation across a multi-file
+project until this is closed.
 
 ---
 

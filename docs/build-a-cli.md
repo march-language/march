@@ -241,10 +241,11 @@ mat: 1
 ```
 
 Since `TopWords.main` works on an inline string literal — no argv, no files — you
-can run it directly:
+can drop it in its own file and run it directly; `main()` is invoked
+automatically:
 
-```march
-TopWords.main()
+```sh
+march topwords.march
 ```
 
 ---

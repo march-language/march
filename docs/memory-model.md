@@ -153,10 +153,12 @@ observe later), there is no observer to fool. The language semantics say "old
 value gone, new value fresh"; the runtime says "same bytes, rewritten." Both
 agree because no one else is looking.
 
-> This is why `tree_transform` (the FBIP benchmark) runs roughly 15× faster than
-> the equivalent C that allocates and frees a fresh tree each pass, and several
-> times faster than OCaml's tracing GC: it does no allocator work at all in
-> steady state.
+> This is why [`tree_transform`](https://github.com/march-language/march/blob/main/bench/tree_transform.march)
+> (the FBIP benchmark) runs roughly 15× faster than the equivalent C that
+> allocates and frees a fresh tree each pass, and several times faster than
+> OCaml's tracing GC: it does no allocator work at all in steady state. See the
+> [benchmark results](https://github.com/march-language/march/blob/main/bench/RESULTS.md)
+> for the full numbers.
 
 **Try it.** The `TreeDemo` module above is runnable — this cell builds the sample
 tree `Node(Leaf(1), Node(Leaf(2), Leaf(3)))`, runs `inc_leaves`, and sums the
