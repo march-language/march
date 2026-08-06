@@ -308,8 +308,31 @@ let process_island_tags (parts : expr list) (sp : span) : expr list =
    (function/lambda parameter, `let`/`let?` binding earlier in the block, or
    a match-branch pattern). Templates without `conn` render verbatim and
    never see an unbound-`conn` error; templates following the Bastion
-   convention keep automatic CSRF protection. An explicit
-   `${CSRF.tag_string(conn)}` interpolation still works either way. *)
+   convention keep automatic CSRF protection.
+
+   DO NOT ALSO INTERPOLATE A TOKEN YOURSELF. An earlier version of this comment
+   claimed an explicit `${CSRF.tag_string(conn)}` "still works either way". It
+   does not — injection is unconditional once `conn` is in scope, so an explicit
+   token is emitted IN ADDITION to the injected one. Measured:
+
+     ~H"<form method=\"post\"></form>"
+       -> <form method="post"><input _csrf ...></form>          correct
+
+     ~H"<form method=\"post\">${CSRF.tag(conn)}</form>"
+       -> <form ...><input _csrf ...><input _csrf ...></form>   DUPLICATE
+
+     ~H"<form method=\"post\">${CSRF.tag_string(conn)}</form>"
+       -> <form ...><input _csrf ...>&lt;input name=&quot;...   ESCAPED GARBAGE
+
+   The `tag_string` case is the worse-looking one — it returns `String`, so the
+   contextual escaper treats it as untrusted text and renders a visible chunk of
+   escaped markup on the page. The `tag` case returns `IOList`, which passes
+   through unescaped and duplicates SILENTLY, which is the more dangerous of the
+   two.
+
+   Inside a ~H template with `conn` in scope, write the bare form tag and let
+   the injection do it. Explicit token helpers are for markup built OUTSIDE ~H
+   (see bastion's Form.render, which concatenates strings and is correct). *)
 
 (** Is a `conn` binding lexically in scope at the expression currently being
     desugared?  Maintained imperatively (like [expr_err_ctx]) because
