@@ -315,6 +315,40 @@ mod CeilDeepBad do
 end
 |}
 
+(* A program that uses NO capability at all must compile under --cap-strict.
+   It did not: `own_caps_of_this_module` was handed the module AFTER the stdlib
+   prepend, so the prelude's own top-level `println`/`debug` counted as
+   functions "this file declares" and their IO.Console was credited to the user's
+   module — present in the used set, owned by nobody, reported as
+   "cannot be attributed to any module".  Every accept test in this file happens
+   to call println, which is what hid it: the capability was attributed as soon
+   as the program's own code used it. *)
+let test_a_program_using_no_capability_compiles () =
+  accepts "capability-free program"
+    {|
+mod CeilNoCaps do
+  fn main() : () do
+    ()
+  end
+end
+|}
+
+(* The guard on that filter: dropping the prelude's declarations from the OWN
+   set must not stop a real console use from being seen.  `println` here is the
+   user's own call, so it is attributed to `CeilConsoleUndeclared` and must be
+   reported against its (absent) `needs`. *)
+let test_console_use_without_needs_is_still_caught () =
+  rejects_naming "undeclared console use"
+    ~expect:
+      "module `CeilConsoleUndeclared` uses `IO.Console` but does not declare"
+    {|
+mod CeilConsoleUndeclared do
+  fn main() : () do
+    println("hi")
+  end
+end
+|}
+
 let tests =
   unit_tests
   @ [
@@ -334,4 +368,8 @@ let tests =
         test_doubly_nested_module_declaring_its_own_needs;
       Alcotest.test_case "doubly-nested module missing needs is caught" `Slow
         test_doubly_nested_module_without_needs_is_still_caught;
+      Alcotest.test_case "capability-free program compiles" `Slow
+        test_a_program_using_no_capability_compiles;
+      Alcotest.test_case "undeclared console use still caught" `Slow
+        test_console_use_without_needs_is_still_caught;
     ]

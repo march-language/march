@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--cap-strict` rejected programs that use no capability at all.** `mod M do
+  fn main() do () end end` failed with `` `IO.Console` is used but cannot be
+  attributed to any module``, and declaring the capability could not help (an
+  unattributed capability has no owner to check a declaration against, by
+  design). The module's own capability set was computed from the decl list
+  *after* the stdlib prepend, so the prelude's top-level `println`/`debug`
+  counted as functions the user's file declares and their `IO.Console` was
+  credited to the user's module. In practice `--cap-strict` only passed if the
+  program itself called `println`. Stdlib-declared functions are now excluded by
+  span, the same gate the typechecker already uses; a real undeclared console
+  use is still reported. The `--cap-sandbox` profile is unaffected (it derives
+  its grants from FileWrite/Network/Process only).
+
 - **`--cap-strict` falsely rejected modules nested two or more levels deep.** A
   module like `mod App do mod Inner do mod Deep do needs IO.FileWrite` was
   reported as "uses `IO.FileWrite` but does not declare `needs IO.FileWrite`"

@@ -796,6 +796,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (setenv MARCH_BIN %{exe:../bin/main.exe}
           (run bash %{dep:cas_runtime_dir_check.sh}))))
 
+; ── Staging-only alias: refresh _build/default/{runtime,stdlib} ───────────
+; Every test that shells out to the built compiler for a NATIVE compile links
+; _build/default/runtime/*.c and reads _build/default/stdlib — those are dune
+; COPIES of the source trees, and a targeted `dune build test/run_x.exe` does
+; not refresh them, so a runtime or stdlib edit is simply absent from what the
+; test compiles.  Measured, that produced two failures that look like real
+; March bugs and are not: an undefined-symbol link error for a test helper
+; added to runtime/march_ffi.c, and a --cap-sandbox binary with no embedded
+; SBPL profile (the -D define is only referenced by march_runtime.c, so a
+; stale copy without that block silently drops the string).  This rule has no
+; action; its only purpose is to make dune stage the trees, so it costs a
+; directory copy and nothing else.  scripts/run-tests.sh builds it before
+; running any suite.
+(rule
+ (alias stage-source-trees)
+ (deps (source_tree ../runtime) (source_tree ../stdlib))
+ (action (progn)))
+
 ; ── Regression: whole-program assembly must not leak named-type placeholders ──
 ; `forge build` typechecks each lib file individually (`march --check <file>`)
 ; with the sibling modules discovered via MARCH_LIB_PATH, so any lib file can be
