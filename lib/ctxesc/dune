@@ -7,3 +7,12 @@
 (library
  (name march_ctxesc)
  (modules context tbl_parse automaton escape))
+
+; Dry-run blast-radius scanner: walks every ~H template in a source tree
+; through the automaton and reports what Task 5's desugar WOULD do. A report,
+; not a gate -- used to measure a real corpus (bastion, forgepm) before
+; changing behaviour rather than discovering the fallout afterwards.
+(executable
+ (name scan_templates)
+ (modules scan_templates)
+ (libraries march_ctxesc march_ast march_lexer march_parser))
