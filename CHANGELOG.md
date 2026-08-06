@@ -125,6 +125,33 @@ git log is authoritative for exact commits.
   syntactic-only fix (no new mechanism); a properly *guarded* call to one of
   the twelve is still rejected today, a known limitation a follow-up proof-
   based check will lift.
+### Fixed
+
+- **`~H` misread non-IOList ADTs as IOLists — unescaped output and a SIGSEGV.**
+  `march_html_auto_escape` ended by assuming any constructor with `tag >= 0` was
+  an `IOList` and flattening it verbatim. Constructor tags are numbered per type
+  from 0, so every ADT aliased `IOList`'s `Empty|Str|Segments`: a tag-1
+  constructor had its `String` field emitted **raw and unescaped**, a tag-2
+  constructor crashed walking field 0 as a cons list, and a tag-0 constructor
+  rendered empty. The widest case needed no custom type at all: `Cons` is tag 1
+  with the element in field 0, so interpolating a plain `List(String)` emitted
+  its head element raw and unescaped. `Option`/`Result` were not exempt — only `Some(x)` is
+  niche-optimised, so `Err("<b>")` leaked its payload unescaped and `Ok(...)`
+  was silently dropped. `Html.raw` content was also discarded whenever another
+  module declared a type named `Safe`. The interpreter was correct throughout;
+  this was compiled-only. The escaper now dispatches on the argument's static
+  type in `llvm_emit` rather than guessing from a heap tag. A hole whose type is
+  unresolved (a value reaching it through a closure stored in a container) is
+  stringified rather than flattened, since nothing at runtime can tell an
+  `IOList` from an ADT there; that makes a genuine `IOList` partial at such a
+  hole render `#<tag:N>` instead of its markup, which is a real but narrow
+  regression accepted over leaving an XSS and a crash in place.
+
+  Note one visible consequence: a user ADT interpolated into `~H` now renders as
+  `#<tag:N>` compiled, where the interpreter renders `Point(1, 2)`. That is a
+  pre-existing gap in compiled `to_string` (it has no constructor-name
+  metadata), now reachable from templates; tracked in
+  `specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md`.
 
 ### Added
 

@@ -2654,6 +2654,14 @@ let builtin_bindings : (string * scheme) list =
        Accepts any value: Html.Safe, IOList, String, or other (escaped).
        The desugar emits html_auto_escape(x) for each ${x} in ~H sigils. *)
     ("html_auto_escape",   poly1 (fun a -> TArrow (a, t_string)));
+    (* html_escape_ctx: ∀a. Int -> a -> String
+       The escaper id is chosen at COMPILE time from the parse context
+       (lib/ctxesc/automaton.ml) and arrives as a literal. The value stays
+       polymorphic so the desugarer need not know the hole's type, but
+       llvm_emit normalises it to a String before the call — the runtime must
+       never dispatch on a heap tag. See the "Carried over from Task 0" note in
+       specs/plans/2026-08-05-contextual-autoescaping.md. *)
+    ("html_escape_ctx",    poly1 (fun a -> TArrow (t_int, TArrow (a, t_string))));
     (* iolist_hash_fnv1a: IOList -> String
        FNV-1a 64-bit hash over segments, returns 16-char hex string.
        Used by IOList.hash and Html.content_hash for ETag generation. *)

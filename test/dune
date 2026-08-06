@@ -11,8 +11,8 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (modules test_compiler test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_ctxesc)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
  (name march_test_eval)
@@ -156,7 +156,7 @@
           ../runtime/march_gc.c ../runtime/march_gc.h
           ../runtime/march_message.c ../runtime/march_message.h
           ../runtime/march_deque.h
-          ../runtime/march_extras.c ../runtime/march_compress.c
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
          
@@ -167,7 +167,7 @@
                test_float_box.c ../runtime/march_runtime.c
                ../runtime/march_scheduler.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
-               ../runtime/march_extras.c ../runtime/march_compress.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
                ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
               
@@ -922,7 +922,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/default_args_nested.march))
  (action
@@ -951,7 +951,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/lazy_niche.march)
        (file ../stdlib/lazy_niche_probe.march))
@@ -982,7 +982,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ring_buf_ops.march)
        (source_tree ../stdlib))
@@ -1018,7 +1018,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/task_burst_await.march))
  (action
@@ -1065,7 +1065,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/signal_watch.march)
        (source_tree ../stdlib))
@@ -1099,7 +1099,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/as_pattern.march))
  (action
@@ -1134,7 +1134,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/record_pattern.march))
  (action
@@ -1165,7 +1165,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/record_pattern_partial.march))
  (action
@@ -1198,7 +1198,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/or_pattern.march))
  (action
@@ -1225,7 +1225,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/signal_term_suppress.march)
        (source_tree ../stdlib))
@@ -1280,7 +1280,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/float_boxing.march)
        (source_tree ../stdlib))
@@ -1308,7 +1308,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/nested_mod_qualcall.march)
        (file ../stdlib/crdt.march))
@@ -1371,7 +1371,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
        (file native/rpc_hash_live.march)
@@ -1406,7 +1406,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/tuple_scalar_fields.march))
  (action
@@ -1437,7 +1437,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/niche_reuse_closure.march))
  (action
@@ -1467,7 +1467,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/closure_bool_field.march))
  (action
@@ -1500,7 +1500,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/rrb_push_float.march))
  (action
@@ -1527,7 +1527,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/let_tuple_destructure.march))
  (action
@@ -1560,7 +1560,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/let_shadow_rebind.march))
  (action
@@ -1593,7 +1593,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/zero_arg_closure_default.march))
  (action
@@ -1618,7 +1618,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/unit_callback_zero_arg.march))
  (action
@@ -1648,7 +1648,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/qualified_ctor_pattern.march))
  (action
@@ -1677,7 +1677,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/atom_ctor_field.march))
  (action
@@ -1705,7 +1705,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/tco_fresh_arg_decrc.march))
  (action
@@ -1732,7 +1732,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/toml_get_int.march))
  (action
@@ -1756,7 +1756,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/main_cap_io.march))
  (action
@@ -1781,7 +1781,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/newtype_counter.march))
  (action
@@ -2045,7 +2045,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/option_niche.march))
  (action
@@ -2070,7 +2070,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/result_int_match.march))
  (action
@@ -2103,7 +2103,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files_rec native/xmod_ctor_collision/*.march))
  (action
@@ -2138,7 +2138,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/adt_eq_native/*.march))
  (action (system
@@ -2165,7 +2165,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/speak_collision_native/*.march))
  (action (system
@@ -2194,7 +2194,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/speak_double_collision_native/*.march))
  (action (system
@@ -2220,7 +2220,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/record_native/*.march))
  (action (system
@@ -2259,7 +2259,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/param_shadow_native/*.march))
  (action (system
@@ -2283,7 +2283,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/same_mod_shadow_native/*.march))
  (action (system
@@ -2298,7 +2298,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/actor_counter.march))
  (action
@@ -2325,7 +2325,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/actor_call_timeout.march))
  (action
@@ -2351,7 +2351,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/pid_of_int_roundtrip.march))
  (action
@@ -2378,7 +2378,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/get_actor_field_direct.march))
  (action
@@ -2404,7 +2404,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/supervisor_spawn_children.march))
  (action
@@ -2431,7 +2431,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/supervisor_one_for_one_restart.march))
  (action
@@ -2456,7 +2456,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/supervisor_one_for_all_restart.march))
  (action
@@ -2481,7 +2481,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/supervisor_rest_for_one_restart.march))
  (action
@@ -2510,7 +2510,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/task_await_int.march))
  (action
@@ -2539,7 +2539,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file apps/actor_stress.march))
  (action
@@ -2569,7 +2569,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/task_await_ptr.march))
  (action
@@ -2594,7 +2594,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_leak.march))
  (action
@@ -2619,7 +2619,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/iface_method_collision.march))
  (action
@@ -2647,7 +2647,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/iface_collision_ambiguous_call.march))
  (action
@@ -2672,7 +2672,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_option.march))
  (action
@@ -2697,7 +2697,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_resource.march))
  (action
@@ -2726,7 +2726,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_result.march))
  (action
@@ -2752,7 +2752,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_interp.march))
  (action
@@ -2774,7 +2774,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_interp2.march))
  (action
@@ -2806,7 +2806,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_shim.c)
        native_ffi_shim.so
@@ -2842,7 +2842,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_blocking.march))
  (action
@@ -2866,7 +2866,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_variant.march))
  (action
@@ -2891,7 +2891,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_codec.march) (file native/ffi_codec.c))
  (action
@@ -2917,7 +2917,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_raise.march))
  (action
@@ -2942,7 +2942,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_upcall.march))
  (action
@@ -3383,7 +3383,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_float.march))
  (action
@@ -3408,7 +3408,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_optres.march) (file native/ffi_optres.c))
  (action
@@ -3433,7 +3433,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_codec2.march) (file native/ffi_codec2.c))
  (action
@@ -3456,7 +3456,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file ../runtime/march_remote_registry.c)
        (file native/remote_ref_hashes.march))
@@ -3481,7 +3481,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file ../runtime/march_http.c) (file ../runtime/march_http.h)
        (file ../runtime/march_remote_registry.c)
@@ -3528,7 +3528,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file ../runtime/march_http.c) (file ../runtime/march_http.h)
        (file native/node_discovery.march)
@@ -3587,7 +3587,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file ../runtime/march_http.c) (file ../runtime/march_http.h)
        (file ../runtime/march_remote_registry.c)
@@ -3634,7 +3634,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/march_prefixed_local.march))
  (action
@@ -3665,7 +3665,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/shadow_selfref_let.march))
  (action
@@ -3693,7 +3693,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/tagged_int_rc.march)
        (source_tree ../stdlib))
@@ -3717,7 +3717,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/closure_scalar_abi.march)
        (source_tree ../stdlib))
@@ -4041,7 +4041,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/float_generic_field_abi.march)
        (source_tree ../stdlib))
@@ -4065,7 +4065,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/string_to_float_option.march)
        (source_tree ../stdlib))
@@ -4089,7 +4089,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/html_safe_raw.march)
        (source_tree ../stdlib))
@@ -4120,7 +4120,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file ../stdlib/csv.march) (file ../stdlib/file.march)
        (file native/csv_niche_row.march))
@@ -4151,7 +4151,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/preempt_starvation.march)
        (source_tree ../stdlib))
@@ -4165,3 +4165,115 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/preempt_starvation.expected native_preempt_starvation.out)))
+
+; ── Regression: ~H must not misread a non-IOList ADT as an IOList ─────────
+; Constructor tags are numbered per type, so any user ADT collided with
+; IOList's Empty|Str|Segments tags in march_html_auto_escape's polymorphic
+; fallback: tag-0 ADTs rendered empty, tag-1 ADTs emitted their String field
+; raw and unescaped (XSS), tag-2 ADTs walked field 0 as a cons list (SIGSEGV).
+; The interpreter was always correct, so .expected is the interpreter's output
+; and this rule is an interpreter/compiled parity check.
+(rule
+ (targets native_h_sigil_adt_interp native_h_sigil_adt_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/h_sigil_adt_interp.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_h_sigil_adt_interp
+        native/h_sigil_adt_interp.march)
+   (with-stdout-to native_h_sigil_adt_interp.out
+        (system "./native_h_sigil_adt_interp")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_sigil_adt_interp.expected native_h_sigil_adt_interp.out)))
+
+; ── Regression: Html.raw dropped under a `Safe` short-name collision ──────
+; llvm_emit's verbatim-insertion arm declines to fire when another module also
+; declares a type named `Safe`; that fell through to the IOList misread and
+; rendered `<p></p>`, silently discarding the wrapped markup. Separate file
+; from h_sigil_adt_interp because declaring Other.Safe makes every `Safe` in
+; the program collide.
+(rule
+ (targets native_h_sigil_safe_collision native_h_sigil_safe_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/h_sigil_safe_collision.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_h_sigil_safe_collision
+        native/h_sigil_safe_collision.march)
+   (with-stdout-to native_h_sigil_safe_collision.out
+        (system "./native_h_sigil_safe_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_sigil_safe_collision.expected native_h_sigil_safe_collision.out)))
+
+; ── Contextual escaper unit test (Task 3) ────────────────────────────────
+; Links runtime/march_ctx_escape.c ALONE -- no runtime, no allocator -- which
+; is why the escaper core works on plain buffers rather than march_strings.
+; Modelled on the cap-lattice C table test above.
+;
+; Also asserts that the MARCH_ESC_* ids agree with Context.escaper_id in
+; lib/ctxesc/context.ml. That pairing is the one cross-language contract the
+; generated-table drift check does not cover, and a mismatch would silently
+; apply the wrong escaper.
+(rule
+ (targets test_ctx_escape_runner)
+ (deps    test_ctx_escape.c
+          ../runtime/march_ctx_escape.c
+          ../runtime/march_ctx_escape.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_ctx_escape.c ../runtime/march_ctx_escape.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_ctx_escape_runner))
+ (action  (run ./test_ctx_escape_runner)))
+
+; ── html_escape_ctx builtin: compiled/interpreted parity (Task 4) ─────────
+; .expected is the INTERPRETER's output; this rule diffs the compiled binary
+; against it. Parity is the property that matters: the ~H ADT misread
+; (specs/progress/2026-08-05-h-sigil-adt-misread.md) stayed hidden precisely
+; because only compiled output was wrong.
+(rule
+ (targets native_h_escape_ctx_builtin native_h_escape_ctx_builtin.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c)
+       (file ../runtime/march_ctx_escape.h) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/h_escape_ctx_builtin.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_h_escape_ctx_builtin
+        native/h_escape_ctx_builtin.march)
+   (with-stdout-to native_h_escape_ctx_builtin.out
+        (system "./native_h_escape_ctx_builtin")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_escape_ctx_builtin.expected native_h_escape_ctx_builtin.out)))

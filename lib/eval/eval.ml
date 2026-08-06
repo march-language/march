@@ -4335,6 +4335,42 @@ let base_env : env =
     (* ---- HTML template builtins ---- *)
 
     (* html_escape_str: OCaml-level HTML entity escaping for the auto-escape builtin. *)
+  (* Contextual escaper: the interpreter's half of html_escape_ctx. The
+     escapers themselves live in March_ctxesc.Escape so the interpreter and the
+     C runtime cannot drift apart -- an interpreter that escapes differently
+     from compiled code is precisely how the ~H ADT misread stayed hidden (see
+     specs/progress/2026-08-05-h-sigil-adt-misread.md). *)
+  ; ("html_escape_ctx", VBuiltin ("html_escape_ctx",
+      let rec iolist_flatten v =
+        match v with
+        | VCon ("Empty", []) -> ""
+        | VCon ("Str", [VString s]) -> s
+        | VCon ("Segments", [lst]) ->
+          let rec concat_list l =
+            match l with
+            | VCon ("Nil", []) -> ""
+            | VCon ("Cons", [h; t]) -> iolist_flatten h ^ concat_list t
+            | _ -> ""
+          in
+          concat_list lst
+        | _ -> ""
+      in
+      function
+      | [VInt id; v] ->
+        let is_html_ctx = id = 0 in
+        (match v with
+         (* Already-safe HTML, and the context is HTML: insert verbatim.
+            Anywhere else it is a context mismatch, so it gets flattened and
+            then escaped for wherever it actually landed. *)
+         | VCon ("Safe", [VString s]) when is_html_ctx -> VString s
+         | (VCon ("Empty", []) | VCon ("Str", _) | VCon ("Segments", _))
+           when is_html_ctx -> VString (iolist_flatten v)
+         | VCon ("Safe", [VString s]) -> VString (March_ctxesc.Escape.apply_id id s)
+         | VCon ("Empty", []) | VCon ("Str", _) | VCon ("Segments", _) ->
+           VString (March_ctxesc.Escape.apply_id id (iolist_flatten v))
+         | VString s -> VString (March_ctxesc.Escape.apply_id id s)
+         | v -> VString (March_ctxesc.Escape.apply_id id (value_display v)))
+      | _ -> eval_error "html_escape_ctx: expected (Int, value)"))
   ; ("html_auto_escape", VBuiltin ("html_auto_escape",
       let html_escape_str s =
         (* Replace & first to avoid double-escaping *)

@@ -1568,11 +1568,144 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r fp);
     ("ptr", r)
 
+  (* Every OTHER type: the runtime's polymorphic dispatch is only safe for the
+     three representations it can actually recognise — a low-bit-tagged
+     immediate, a MARCH_STRING_TAG string, and a genuine IOList.  Its final
+     arm ("Constructor with tag >= 0: treat as IOList") is a guess, and it is
+     wrong for every user ADT: constructor tags are numbered per type from 0,
+     so `B(String)` (tag 1) was read as `IOList.Str` and its field emitted RAW
+     AND UNESCAPED, and `C(_, _)` (tag 2) was read as `IOList.Segments` and
+     its field walked as a cons list — a segfault.  Decide it here instead,
+     where the static TIR type is still known, and only route to the runtime
+     the cases it genuinely handles.  Anything else — user ADTs, records,
+     tuples, and the `Safe`-name-collision case that falls through the arm
+     above — goes through `march_value_to_string` first, then escapes the
+     resulting real String. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
+    let runtime_safe =
+      match atom_tir_ty a with
+      | Tir.TString | Tir.TInt | Tir.TFloat | Tir.TBool -> true
+      | Tir.TCon ("IOList", _) -> true
+      (* An unresolved type variable is the genuinely undecidable case, and it
+         is NOT hypothetical: a value reaching this hole through a closure
+         stored in a container (defunctionalized dispatch, e.g.
+         `Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))`) is not specialised by mono
+         and arrives as TVar.  Neither answer is right for it — an IOList
+         wants flattening, an ADT must not be flattened, and nothing at
+         runtime can tell them apart, which is the whole defect.
+
+         So choose the failure that is not a vulnerability: stringify.  A
+         genuine IOList partial reaching a polymorphic hole renders as
+         `#<tag:2>` instead of its markup — visibly wrong, and a real
+         regression for that (rare) pattern.  Routing it to the runtime
+         instead would leave a tag-1 ADT emitting its String field raw and
+         unescaped, and a tag-2 ADT segfaulting.  A wrong-looking page beats
+         an XSS and a crash.
+
+         Fixing this properly means giving the runtime a way to identify the
+         type — march_hdr.pad is free for non-record ADTs and could carry a
+         type id — which is out of scope here; see
+         specs/todos/2026-08-05-boxed-adt-type-id.md. *)
+      | Tir.TVar _ -> false
+      | _ -> false
+    in
     let v = emit_atom_as ctx "ptr" a in
+    let v =
+      if runtime_safe then v
+      else begin
+        let s = fresh ctx "hae_str" in
+        emit ctx
+          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" s v);
+        s
+      end
+    in
     let r = fresh ctx "hae" in
     emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r v);
     ("ptr", r)
+
+  (* ── ~H sigil: html_escape_ctx(id, v) ─────────────────────────────────
+     The contextual successor to html_auto_escape. The escaper id is chosen at
+     COMPILE time from the parse context (lib/ctxesc/automaton.ml) and arrives
+     as a literal, so both decisions this arm makes are static.
+
+     CARRIED OVER FROM THE ADT-misread fix (see
+     specs/progress/2026-08-05-h-sigil-adt-misread.md): the runtime must NEVER
+     dispatch on a heap tag. Constructor tags are numbered per type, so a
+     tag-1 user ADT is indistinguishable from IOList.Str, which is how that bug
+     emitted unescaped output and segfaulted. `march_html_escape_ctx` therefore
+     takes a real String and aborts on anything else; normalising is this arm's
+     job.
+
+     One case must NOT be escaped: a nested `~H` partial is an IOList of
+     already-safe HTML, and escaping it would double-escape the markup. That is
+     only sound when the surrounding context is HTML too — an IOList spliced
+     into an href is a context mismatch, so it is flattened and then escaped
+     for whatever context it actually landed in. Type-indexed trust
+     (Html.Trusted) makes this precise in a later task; until then the rule is
+     "verbatim only when the escaper is EscHtml". *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt id); a])
+    when f.Tir.v_name = "html_escape_ctx" ->
+    let is_html_ctx = id = 0 (* Context.escaper_id EscHtml *) in
+    (* Html.Safe and IOList are both already-safe HTML, but they are UNWRAPPED
+       differently. march_html_auto_escape's C body does not understand Safe at
+       all — Task 0 fixed that case in the emitter, by loading field 0 — so
+       handing it a Safe returns the empty string. Keep the two apart. *)
+    let is_safe =
+      match atom_tir_ty a with
+      | Tir.TCon ("Safe", _) ->
+        not (Collision_set.is_colliding ctx.collision_set "Safe")
+      | _ -> false
+    in
+    let is_iolist =
+      match atom_tir_ty a with Tir.TCon ("IOList", _) -> true | _ -> false in
+    let already_html = is_safe || is_iolist in
+    let v = emit_atom_as ctx "ptr" a in
+    (* Normalise to a real String first, by whichever route actually works for
+       this type. `march_value_to_string` CANNOT flatten an IOList — it renders
+       the constructor spine as `#<tag:2>` — so a known IOList/Safe must go
+       through `march_html_auto_escape`, whose IOList path flattens verbatim.
+       Everything else, including TVar (the undecidable case), takes
+       to_string. *)
+    let v =
+      match atom_tir_ty a with
+      | Tir.TString -> v
+      | _ when is_safe ->
+        (* Boxed single-field ADT: the wrapped String is at offset +16. *)
+        let fp = fresh ctx "hec_safe_fp" in
+        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp v);
+        let sv = fresh ctx "hec_safe_s" in
+        emit ctx (Printf.sprintf "%s = load ptr, ptr %s" sv fp);
+        sv
+      | _ when is_iolist ->
+        let fv = fresh ctx "hec_flat" in
+        emit ctx
+          (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" fv v);
+        fv
+      | _ ->
+        let sv = fresh ctx "hec_str" in
+        emit ctx
+          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
+        sv
+    in
+    if is_html_ctx && already_html then
+      (* Already-safe HTML landing in an HTML context: insert verbatim. *)
+      ("ptr", v)
+    else begin
+      let r = fresh ctx "hec" in
+      emit ctx
+        (Printf.sprintf
+           "%s = call ptr @march_html_escape_ctx(i64 %d, ptr %s)" r id v);
+      ("ptr", r)
+    end
+
+  (* A non-literal escaper id would mean the desugarer failed to constant-fold
+     the context walk, which is the whole point of the analysis. Fail loudly
+     rather than emit a call whose escaper is chosen at runtime. *)
+  | Tir.EApp (f, [_; _]) when f.Tir.v_name = "html_escape_ctx" ->
+    failwith
+      "html_escape_ctx: escaper id is not a compile-time literal. The ~H \
+       desugar must fold the context walk statically; see \
+       specs/plans/2026-08-05-contextual-autoescaping.md."
 
   (* ── Bitwise integer builtins ─────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->

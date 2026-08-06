@@ -105,6 +105,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_io_read_byte()" };
   { march_name = "html_auto_escape"; c_name = Some "march_html_auto_escape"; ret_ty = Some Tir.TString;
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_html_auto_escape(ptr %v)" };
+  { march_name = "html_escape_ctx"; c_name = Some "march_html_escape_ctx"; ret_ty = Some Tir.TString;
+    in_is_builtin = false; declare_sig = Some "declare ptr  @march_html_escape_ctx(i64 %id, ptr %v)" };
   { march_name = "record_keys"; c_name = Some "march_record_keys"; ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_record_keys(ptr %rec)" };
   { march_name = "record_values"; c_name = Some "march_record_values"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "_"]));
@@ -961,6 +963,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_lit";
   PDeclare "march_string_lit_static";
   PDeclare "march_html_auto_escape";
+  PDeclare "march_html_escape_ctx";
   PDeclare "march_record_shape_intern";
   PDeclare "march_record_set_shape";
   PDeclare "march_record_keys";

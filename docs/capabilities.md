@@ -5,9 +5,9 @@ nav_order: 5.6
 permalink: /docs/capabilities/
 ---
 
-# Capabilities
+# Capabilities: March's Effect & Capability System
 
-March makes side effects **visible in your types** — zero runtime overhead, enforced at compile time. This guide explains what capabilities are, when to reach for each kind, when to leave them alone, and how they compose.
+March is a **capability-based language**: side effects are **visible in your types** — zero runtime overhead, enforced at compile time. This guide explains what capabilities are, when to reach for each kind, when to leave them alone, and how they compose.
 
 ---
 
@@ -174,7 +174,51 @@ $ echo $?
 0
 ```
 
-Follow the hint either way — it's always correct, and cleaning up the warning keeps a module's `needs` list an accurate account of what it does. But **don't rely on the warning to block a merge or a release**: it won't. If you need "this module absolutely cannot read files" as a hard, CI-enforced guarantee, thread `Cap(IO.FileRead)` through the relevant signatures so the violation lands on the ERROR side of this line, not the WARNING side.
+Follow the hint either way — it's always correct, and cleaning up the warning keeps a module's `needs` list an accurate account of what it does. But **don't rely on the warning to block a merge or a release**: it won't. For a hard, CI-enforced guarantee you have two options: thread `Cap(IO.FileRead)` through the relevant signatures so the violation lands on the ERROR side of this line, or build with `--cap-strict`, below.
+
+### `--cap-strict` — the declared set as a hard ceiling
+{#cap-strict}
+
+`march --cap-strict` turns `needs` from a floor into a ceiling: the build fails
+if **any** module's emitted code uses a capability that module did not declare.
+
+```
+$ march --cap-strict --compile -o app app.march
+-- CAPABILITY CEILING --
+module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`
+
+--cap-strict: 1 capability ceiling violation(s).
+```
+
+Three things make it stronger than the warnings above.
+
+**It covers every route to a capability.** The check runs against the code the
+compiler is about to emit, not the surface syntax, so a direct builtin call, a
+call through a stdlib wrapper like `File.write`, and a builtin handed out as a
+value all collapse into the same rule. Re-routing a call through a helper does
+not evade it.
+
+**It applies per module, including dependencies that never opted in.** March
+dependencies ship as source, so the check runs on your build of their code. A
+dependency declaring only `needs IO.Console` whose helper reads `/etc/passwd`
+builds clean by default and fails under `--cap-strict`. You do not need the
+publisher's cooperation.
+
+**It fails closed.** A capability the compiler cannot attribute to any module —
+reached only through an indirect call — is reported as a violation rather than
+passed, because that is exactly the route an attacker would use.
+
+Because attribution charges a stdlib-mediated call to the *calling* module, the
+standard library's own declarations are not involved: the module that called
+`File.write` is the one required to declare `needs IO.FileWrite`.
+
+It is opt-in, and it is strict — most existing code needs `needs` declarations
+added before it passes, `needs IO.Console` most commonly. `IO.Foreign` is
+excluded: `extern` blocks are already an error when undeclared, and what linked
+C code does is outside the capability model entirely.
+
+To re-check the same ceiling on a binary you did not build, see
+[`forge cap inspect --strict`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary).
 
 ### When *not* to use IO caps
 

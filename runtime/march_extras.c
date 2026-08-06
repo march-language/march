@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "march_ctx_escape.h"
 #include <stdarg.h>
 #include <pthread.h>
 #include <time.h>
@@ -2406,6 +2407,37 @@ static int64_t mh_iolist_copy(void *iolist, char *buf, int64_t off) {
     return off;
 }
 
+/* Contextual escaper entry point for ~H (Task 4).
+ *
+ * Takes an escaper id chosen at COMPILE time from the parse context (see
+ * lib/ctxesc/automaton.ml) and a value the EMITTER has already normalised to a
+ * real march_string.
+ *
+ * It does not, and must not, inspect the value to decide what it is. That was
+ * the defect fixed in specs/progress/2026-08-05-h-sigil-adt-misread.md:
+ * constructor tags are numbered per type, so a heap-tag dispatch cannot tell
+ * IOList.Str from any other tag-1 constructor. Anything that is not a string
+ * here means llvm_emit and this function have diverged, so it aborts rather
+ * than guessing. */
+void *march_html_escape_ctx(int64_t escaper_id, void *v) {
+    if (!v) return march_string_lit("", 0);
+    if (((uintptr_t)v & 1u) != 0 || ((march_hdr *)v)->tag != MARCH_STRING_TAG) {
+        fprintf(stderr,
+                "march_html_escape_ctx: expected a String, got %s. The caller "
+                "in lib/tir/llvm_emit.ml must normalise the value before "
+                "calling; this function never dispatches on a heap tag.\n",
+                (((uintptr_t)v & 1u) != 0) ? "an immediate" : "a constructor");
+        abort();
+    }
+    march_string *s = (march_string *)v;
+    size_t need = march_ctx_escape((int)escaper_id, s->data, (size_t)s->len, NULL);
+    char *out = (char *)malloc(need + 1);
+    size_t wrote = march_ctx_escape((int)escaper_id, s->data, (size_t)s->len, out);
+    void *r = march_string_lit(out, (int64_t)wrote);
+    free(out);
+    return r;
+}
+
 void *march_html_auto_escape(void *v) {
     /* Immediate (tagged int / nullary constructor): low bit set. */
     if (((uintptr_t)v & 1u) != 0) {
@@ -2434,7 +2466,32 @@ void *march_html_auto_escape(void *v) {
         free(out);
         return r;
     }
-    /* Constructor with tag >= 0: treat as IOList and flatten verbatim. */
+    /* Constructor with tag >= 0.  This USED to assume "it must be an IOList"
+       and flatten it verbatim, which was a guess the runtime cannot make:
+       constructor tags are numbered per type starting at 0, so every user ADT
+       aliases IOList's Empty|Str|Segments.  tag-1 ADTs had field 0 emitted raw
+       and unescaped (XSS); tag-2 ADTs had field 0 walked as a cons list
+       (SIGSEGV); tag-0 ADTs rendered empty.
+
+       llvm_emit now decides this from the argument's static TIR type and only
+       routes genuine IOLists here, so reaching this arm with a non-IOList
+       means a caller reintroduced the polymorphic path.  Fail loudly rather
+       than silently emitting unescaped bytes — the emitter is the real fix,
+       this is defense in depth.
+
+       Note the limit of this guard: IOList has three constructors, so tags
+       0..2 remain genuinely ambiguous here and cannot be rejected. Only a tag
+       of 3 or more is PROVABLY not an IOList. That is exactly why the real
+       fix has to live in the emitter, where the type is known. */
+    if (((march_hdr *)v)->tag > 2) {
+        fprintf(stderr,
+                "march_html_auto_escape: refusing to flatten constructor tag "
+                "%d as an IOList (IOList has only tags 0..2). Pass a String, "
+                "an immediate, or a real IOList; see the html_auto_escape "
+                "dispatch in lib/tir/llvm_emit.ml.\n",
+                ((march_hdr *)v)->tag);
+        abort();
+    }
     int64_t sz = mh_iolist_size(v);
     char *buf = (char *)malloc((size_t)(sz + 1));
     mh_iolist_copy(v, buf, 0);
