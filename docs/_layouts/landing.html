@@ -915,7 +915,8 @@ end
 -- amt arrives at runtime — the if-guard discharges the precondition
 fn on_withdraw(bal : {Int | _ >= 0}, amt : Int) : Int do
   if amt > 0 && amt <= bal do
-    withdraw(bal, amt)   -- proved by the guard; drop it and it won't compile
+    -- proved by the guard; drop it and it won't compile
+    withdraw(bal, amt)
   else
     bal
   end
