@@ -27,16 +27,20 @@ fn variance(xs : {List(Float) | len(_) > 0}) : Float do
 fn mode(xs : {List(Float) | len(_) > 0}) : Float do
 ```
 
-`percentile`/`quantile`/`quantiles` already carried a float-range precondition
-on their second parameter (`p ∈ [0, 100]` / `q ∈ [0, 1]`) before this task;
-that precondition was not touched. `quantiles`/`five_number_summary` also take
-a `method : QuantileMethod` parameter, unaffected.
+`percentile`/`quantile` already carried a float-range precondition on their
+second parameter (`p ∈ [0, 100]` / `q ∈ [0, 1]`) before this task; that
+precondition was not touched. `quantiles`'s second parameter, `qs`, is a
+plain unrefined `List(Float)` — a batch of quantile levels validated
+per-element by a runtime `panic` inside `List.map`, not a type-level
+precondition — so `quantiles` carries only the one `xs` precondition added
+by this task, not two. `quantiles`/`five_number_summary` also take a
+`method : QuantileMethod` parameter, unaffected either way.
 
 ## Two preconditions on one callee — confirmed to coexist, not just compile
 
-`percentile`/`quantile`/`quantiles` now carry two independent precondition
-obligations per call site. Confirmed empirically that BOTH discharge together
-(`--refine-report`, guarding both `xs` and `p`):
+`percentile`/`quantile` (NOT `quantiles` — see above) now carry two
+independent precondition obligations per call site. Confirmed empirically
+that BOTH discharge together (`--refine-report`, guarding both `xs` and `p`):
 
 ```
 refinement obligations (user code): 2 proved, 0 violated, 0 trusted, 0 skipped
@@ -238,7 +242,48 @@ runs the full suite independently per this plan's operating notes.
   `no_panic_proof_suite`.
 - `docs/capabilities.md`, `specs/lang/capabilities.md` — six names added to
   the contracted-names list; a new paragraph in each on the two-coexisting-
-  preconditions behavior for `percentile`/`quantile`/`quantiles`.
+  preconditions behavior for `percentile`/`quantile` (NOT `quantiles`, whose
+  `qs` parameter is unrefined — a review correction, see below).
 - `CHANGELOG.md` — the six names added to the existing `### Changed` bullet's
   list of newly-proof-checked partials.
 - This file.
+
+## Review correction (post-commit)
+
+An earlier version of this note and both doc copies incorrectly grouped
+`Stats.quantiles` with `percentile`/`quantile` as a "two independent
+preconditions" callee. `stdlib/stats.march:278`'s `quantiles` signature is
+`(xs : {List(Float) | len(_) > 0}, qs : List(Float), method :
+QuantileMethod)` — `qs` is a **plain, unrefined** `List(Float)` (a batch of
+quantile levels validated per-element by a runtime `panic` inside
+`List.map`, not a type-level precondition). `quantiles` therefore has exactly
+ONE refined parameter, the `xs` length precondition added by this task, same
+as `five_number_summary`/`variance`/`mode`. Re-verified in source that
+`percentile`'s `p : {Float | _ >= 0.0 && _ <= 100.0}` and `quantile`'s
+`q : {Float | _ >= 0.0 && _ <= 1.0}` ARE both still present exactly as
+claimed — the drift was isolated to `quantiles` being wrongly lumped in with
+those two, not a wider inaccuracy. Both doc copies and this note corrected to
+remove `quantiles` from that callout; no code or test changes were needed
+(the two-precondition ACCEPT test was already `percentile`-only, consistent
+with the corrected claim).
+
+## Carry-forward for later tasks in this plan
+
+The `dune build --root . bin/main.exe` staging trap encountered during this
+task's investigation (see above) is a standing hazard for any task in this
+plan that measures behavior against a targeted build of `bin/main.exe`: a
+*targeted* build does not restage `stdlib/*.march` into
+`_build/default/stdlib/`, so `bin/main.exe --check`/`--refine-report` can
+silently consult a stale, pre-edit stdlib copy after editing any
+`stdlib/*.march` file and rebuilding only `bin/main.exe`. It produced a very
+convincing false "compiler bug" signal here (4 of 6 functions appeared not to
+discharge against the "full stdlib" when in fact the full stdlib being
+consulted was stale). Fix: `dune build --root . @test/cas-runtime-dir` (a
+target carrying a `(source_tree ../stdlib)` dependency) restages it cheaply,
+without a full targetless build. Verify with
+`diff stdlib/stats.march _build/default/stdlib/stats.march` (or the
+equivalent file) before trusting any `bin/main.exe`-based measurement. Note
+this trap does NOT affect the OCaml unit-test harness in
+`test/test_refinecheck.ml` — `load_stdlib_march` there resolves
+`stdlib/<name>` against the real repo-root source tree directly, never
+through `_build/default/stdlib/`.
