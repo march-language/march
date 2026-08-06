@@ -444,6 +444,18 @@ type import_entry = {
   ie_desc    : string;              (** human-readable warning message *)
   ie_matches : string -> bool;      (** does looking up [name] count as "using" this? *)
   ie_used    : bool ref;
+  ie_used_names : (string, unit) Hashtbl.t;
+  (** WHICH of this import's names were actually referenced.  [record_use]
+      already computes this -- the index hit tells us precisely which imported
+      name a reference resolved to -- and until now it was collapsed to
+      [ie_used] and discarded.  Demand-driven capability propagation (Check 4)
+      consumes it: an importer inherits only the capabilities of the functions
+      it actually references, not the imported module's whole set.
+
+      Bare names for the exact-name index (a rebound short name from
+      `import M`), FULL DOTTED names for the prefix index (a qualified
+      `M.foo` reference under `use M`).  Both spellings are resolved against
+      the closure table by [check_module_needs]. *)
 }
 
 (* Index bookkeeping for [record_use]'s import-tracker lookup.  [record_use]
@@ -787,6 +799,18 @@ type env = {
       [needs IO.Console] for its *handlers* must not be falsely flagged just
       because the module-wide merge would attribute that cap to it too.
       Read via [fn_own_capability_closures]. *)
+  fn_refs : (string, string list) Hashtbl.t;
+  (** Per-function REFERENCE edges: fully-qualified function name ("Mod.fn",
+      or the BARE name for a top-level function of the entry module — the same
+      key convention as [cap_closures]) -> every name its body references.
+
+      Collected with [free_vars_expr], NOT with [March_ast.Calls]: a function
+      passed as a VALUE ([map(xs, helper)]) is a real capability edge and a
+      calls-only walk misses it entirely, which is fail-open. Mutated in place
+      like [cap_closures], so it survives the per-declaration env folds.
+
+      Recorded at exactly the [record_fn_caps] call sites, so a key here is a
+      key there. Consumed only by [fn_transitive_capability_closures]. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -863,6 +887,7 @@ let make_env errors type_map = {
   deterministic_mod = false;
   cap_closures = Hashtbl.create 64;
   own_cap_closures = Hashtbl.create 64;
+  fn_refs = Hashtbl.create 64;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
@@ -3646,9 +3671,18 @@ let record_use name span env =
      is qualified (contains a '.').  Both indices were populated from the
      exact same names/prefixes each entry's [ie_matches] closure compares
      against, so this is behavior-preserving, just no longer O(n) per call. *)
+  (* [ie_used_names] is recorded alongside [ie_used] at both index hits: the
+     index that matched already tells us exactly WHICH imported name this
+     reference resolved to, which is the demand side of demand-driven
+     capability propagation (see [ie_used_names]).  The exact index records the
+     bare name; the prefix index records the FULL dotted name, since that is
+     what identifies the member under a qualified `M.foo` reference. *)
   (match Hashtbl.find_opt env.import_idx.ie_exact_index name with
    | None -> ()
-   | Some entries -> List.iter (fun ie -> ie.ie_used := true) entries);
+   | Some entries ->
+     List.iter (fun ie ->
+         ie.ie_used := true;
+         Hashtbl.replace ie.ie_used_names name ()) entries);
   (match String.index_opt name '.' with
    | None -> ()
    | Some dot ->
@@ -3656,7 +3690,11 @@ let record_use name span env =
      match Hashtbl.find_opt env.import_idx.ie_prefix_index prefix_root with
      | None -> ()
      | Some entries ->
-       List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true) entries);
+       List.iter (fun ie ->
+           if ie.ie_matches name then begin
+             ie.ie_used := true;
+             Hashtbl.replace ie.ie_used_names name ()
+           end) entries);
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
   | Some le ->
@@ -6963,19 +7001,25 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
    ================================================================= *)
 
 (** Collect all free variable names referenced in [e].
-    Only [EVar] nodes with no dot (non-qualified names) are collected.
+    Every [EVar] node is collected, QUALIFIED (dotted) names included.
     Re-bindings introduced by [ELet]/[EMatch]/[ELam] are accounted for so
     we never report a variable that is shadowed by an inner binding. *)
 let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   match e with
   | Ast.EVar n ->
     (* Keep DOTTED names too (e.g. `App.id`, produced by desugar's
-       [qualify_module_refs] for an intra-nested-module reference).  The only two
-       callers are [dependency_order_dfn_run]'s [deps_of] — which maps a dotted
-       name's suffix to a local fn so a nested-module forward reference is ordered
-       helper-first (closing the qualified-prebind type-erasure forward-ref hole)
-       — and [warn_unused_params], which only compares against bare param names, so
-       a dotted entry is inert there.  A bound name is still dropped. *)
+       [qualify_module_refs] for an intra-nested-module reference).  Do NOT
+       "clean this up" to bare names — dotted entries are LOAD-BEARING for one
+       of the three callers:
+       - [dependency_order_dfn_run]'s [deps_of] maps a dotted name's suffix to a
+         local fn so a nested-module forward reference is ordered helper-first
+         (closing the qualified-prebind type-erasure forward-ref hole);
+       - [warn_unused_params] only compares against bare param names;
+       - [record_fn_refs] feeds the per-function transitive CAPABILITY closure,
+         where a dropped dotted name silently truncates the closure of every
+         nested-module reference (pinned by
+         [test_transitive_cap_nested_module_dotted_refs]).
+       A bound name is still dropped. *)
     if List.mem n.txt bound then [] else [n.txt]
   | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> []
   | Ast.EDbg (Some inner, _) -> free_vars_expr bound inner
@@ -7934,72 +7978,6 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
     end
   end
 
-(** Walk an expression and collect all direct function call names.
-    Returns [(fn_name, span)] for every EApp where the callee is a bare
-    variable or a qualified module-path field access.  Used by the
-    body-scanning pass to detect builtin capability uses.
-
-    KEEP IN SYNC with [March_refinecheck.Panic_surface_by_proof.calls_in_expr],
-    which is a structural copy of this walk (it carries a second span per site,
-    so it cannot simply call this one; [march_refinecheck] also depends on
-    [march_typecheck], not the reverse, so the sharing would have to go the
-    other way).  That copy is what enforces `cap no_panic` for every name in
-    [panic_surface_contracted] — those names were REMOVED from this module's
-    syntactic ban rather than double-checked, so the drift is fail-OPEN: a new
-    [Ast.expr] form added here and not there makes a call that can panic
-    compile clean inside a capability that promised it cannot. Add new
-    expression forms to BOTH. *)
-let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
-    : (string * Ast.span) list =
-  match e with
-  | Ast.EApp (Ast.EVar fn_name, args, _) ->
-    let acc = (fn_name.txt, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
-    let qname = mod_name.txt ^ "." ^ fn_name.txt in
-    let acc = (qname, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (f, args, _) ->
-    List.fold_left calls_in_expr (calls_in_expr acc f) args
-  | Ast.ECon (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ELam (_, body, _) -> calls_in_expr acc body
-  | Ast.EBlock (es, _) ->
-    List.fold_left calls_in_expr acc es
-  | Ast.ELet (b, _) ->
-    calls_in_expr acc b.Ast.bind_expr
-  | Ast.EMatch (scrut, arms, _) ->
-    let acc = calls_in_expr acc scrut in
-    List.fold_left (fun a arm ->
-      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
-      calls_in_expr a arm.Ast.branch_body) acc arms
-  | Ast.ETuple (es, _) -> List.fold_left calls_in_expr acc es
-  | Ast.ERecord (fields, _) ->
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.ERecordUpdate (base, fields, _) ->
-    let acc = calls_in_expr acc base in
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
-  | Ast.EIf (cond, then_, else_, _) ->
-    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
-  | Ast.ECond (arms, _) ->
-    List.fold_left (fun a (ce, be) ->
-      calls_in_expr (calls_in_expr a ce) be) acc arms
-  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.EAnnot (ex, _, _) -> calls_in_expr acc ex
-  | Ast.EHole _ -> acc
-  | Ast.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ESend (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.ESpawn (e, _) -> calls_in_expr acc e
-  | Ast.EResultRef _ -> acc
-  | Ast.EDbg (None, _) -> acc
-  | Ast.EDbg (Some inner, _) -> calls_in_expr acc inner
-  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
-  | Ast.ELetQ (_, rhs, body, _) ->
-    calls_in_expr (calls_in_expr acc rhs) body
-  | Ast.EAssert (e, _) -> calls_in_expr acc e
-  | Ast.ESigil (_, content, _) -> calls_in_expr acc content
-  | Ast.ELit _ | Ast.EVar _ -> acc
-
 (** [cap_annots_in_expr acc e] collects every capability named by a type
     ANNOTATION inside an expression: a [let] binding's [bind_ty], a lambda or
     local-function parameter type, a local function's return type, and
@@ -8019,7 +7997,8 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     inherit the coverage rather than quietly reopen the gap.
 
     Exhaustive over [Ast.expr] with no wildcard arm, mirroring
-    [calls_in_expr] above; a new expression form must break this build. *)
+    [March_ast.Calls.calls_in_expr]; a new expression form must break this
+    build. *)
 let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   : (string * Ast.span) list =
   let of_ty acc (sp : Ast.span) (t : Ast.ty) =
@@ -8086,6 +8065,110 @@ let is_migrate_fn_name (fn_name : string) : bool =
   let sfx = "_migrate_state" in
   let nl = String.length fn_name and sl = String.length sfx in
   nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+
+(** [fn_transitive_capability_closures_tbl env] is each function's capability set
+    including everything it reaches through the reference graph:
+
+      caps(f) = own(f) ∪ ⋃ { caps(g) | g ∈ refs(f) }
+
+    computed to fixpoint. Sets only grow and the capability lattice is finite,
+    so this terminates; mutual recursion is handled by ITERATING rather than by
+    descending, so no cycle detection is needed.
+
+    Built on [own_cap_closures] and NOT [cap_closures], deliberately: the
+    latter folds in [module_wide_caps], which itself contains
+    module-granularly-propagated import caps, so deriving this from it would be
+    circular — and would reintroduce exactly the over-approximation this exists
+    to remove (importing [List] to call [map] would inherit [pmap]'s
+    [IO.Spawn]).
+
+    Edges come from [free_vars_expr] (see [env.fn_refs]), never from a
+    calls-only walk. A reference that does not resolve to a known function — a
+    local binding, a parameter, a constructor, an unloaded module's member —
+    contributes nothing: it has no entry, so the lookup yields [].
+
+    This table IS load-bearing for enforcement as of 2026-08-06 —
+    [check_module_needs]'s Check 4 consults it (see [import_required_caps]).
+
+    [record_fn_caps] covers every declaration form that can hold an expression:
+    [DFn] signatures/bodies/guards, default-argument expressions, actor
+    handlers, [DExtern]s, module-level [DLet] bodies, [DInterface] default
+    method bodies and [DImpl] method bodies. The last four were added
+    2026-08-06 (see
+    [specs/progress/2026-08-06-record-fn-caps-misses-dlet-and-methods.md]);
+    until then they had no entry, so an edge pointing at one contributed
+    nothing and the closure of anything that REACHED one was silently
+    truncated — dropping a capability the pre-demand-driven Check 4 required.
+    Keep this list in step with the walks in [check_module_needs]: a form with
+    no entry is a fail-open hole, not merely a missing analysis.
+
+    Returns the raw table so an in-pass consumer ([check_module_needs]'s
+    demand-driven import propagation) gets O(1) lookups;
+    [fn_transitive_capability_closures] is the sorted-assoc-list public view.
+
+    Defined ABOVE [check_module_needs] because that function consumes it —
+    Check 4 asks what the functions an importer actually references require,
+    rather than what the imported module as a whole requires. *)
+let fn_transitive_capability_closures_tbl (env : env)
+  : (string, string list) Hashtbl.t =
+  let current : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  Hashtbl.iter (fun k v -> Hashtbl.replace current k v) env.own_cap_closures;
+  (* Resolve a reference name to a function key.
+
+     Observed key shapes (verified against the existing cap-closure tests and
+     [bin/main.ml]'s [own_caps_of_this_module]): a top-level function of the
+     ENTRY module is keyed BARE ("public_reader") because [check_module_core]
+     passes ~cap_qname_prefix:"" for it, mirroring TIR's unwrapping of the
+     entry module; a nested [DMod]'s function is keyed by its dotted path
+     relative to the entry ("Lib.Sub.f").
+
+     Reference names arrive already DESUGARED: desugar's [qualify_module_refs]
+     rewrites a bare intra-module reference inside a nested [DMod] to the
+     dotted form ("Lib.touch"), and its [EField] arm flattens `A.B.c` into a
+     single dotted [EVar] — while the entry module's own top-level bodies keep
+     bare names. So both spellings occur, and both must resolve: try the
+     owner-module-prefixed form first (bare reference from a nested module),
+     then the raw name (an already-dotted reference, or an entry-level bare
+     one). *)
+  let resolve (owner : string) (r : string) : string option =
+    let qualified =
+      match String.rindex_opt owner '.' with
+      | Some i -> String.sub owner 0 i ^ "." ^ r
+      | None -> r
+    in
+    if Hashtbl.mem current qualified then Some qualified
+    else if Hashtbl.mem current r then Some r
+    else None
+  in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    Hashtbl.iter (fun fn_qname refs ->
+        let own = Option.value ~default:[] (Hashtbl.find_opt current fn_qname) in
+        let from_refs =
+          List.concat_map (fun r ->
+              match resolve fn_qname r with
+              | None -> []
+              | Some key -> Option.value ~default:[] (Hashtbl.find_opt current key))
+            refs
+        in
+        (* [List.sort_uniq] BEFORE normalize is load-bearing, not tidiness:
+           [Cap_lattice.normalize] drops caps SUBSUMED by another, but its
+           filter skips the [other <> c] case, so it does NOT drop an exact
+           DUPLICATE. Without the dedup, [own @ from_refs] grows by one copy of
+           each already-held cap on every sweep, the value never compares equal
+           to the previous one, and the fixpoint spins forever. Observed as a
+           hang on the very first test case before this was added. *)
+        let merged =
+          March_caps.Cap_lattice.normalize (List.sort_uniq compare (own @ from_refs))
+        in
+        if List.sort compare merged <> List.sort compare own then begin
+          Hashtbl.replace current fn_qname merged;
+          changed := true
+        end)
+      env.fn_refs
+  done;
+  current
 
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
@@ -8189,16 +8272,117 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      or signature is walked twice. Merge order across the three call sites
      doesn't matter: [record_fn_caps] always merges with whatever is already
      in [env.cap_closures] for that qualified name. *)
+  (* ── Demand-driven import propagation ──────────────────────────────────
+     What an `import M` / `use M` costs this module.
+
+     It used to be M's WHOLE capability set: importing [List] to call [map]
+     inherited [pmap]'s [IO.Spawn].  Now it is the union of the transitive
+     capability closures of the functions this module actually REFERENCES from
+     M — [record_use] recorded exactly those into [ie_used_names] as it
+     resolved each [EVar].  This can only ever require LESS than before, so no
+     module that compiles today can start failing.
+
+     [trans_closures] is [lazy] because it runs a fixpoint over the whole
+     program's reference graph: this must not be paid by the (many) modules
+     that import nothing, and both consumers below share the one computation.
+
+     FALLBACK: a referenced name with no closure entry falls back to
+     [env.module_caps], i.e. exactly the pre-demand-driven module-granular
+     answer, because reading "no entry" as "no capabilities" would silently
+     drop enforcement.  Since 2026-08-06 [record_fn_caps] covers every
+     declaration form that can hold an expression (see
+     [fn_transitive_capability_closures_tbl]), so this branch is a DEFENSIVE
+     backstop for a key-shape miss rather than a routinely exercised path —
+     measured: with it instrumented it fires zero times across the whole
+     run_compiler suite and across a --check sweep of stdlib/*.march,
+     test/native/*.march and bench/*.march.  Do not read its survival as
+     coverage for an uncovered declaration form; add the form instead.  The
+     separate [[] -> mod_caps] early exit above still carries the live cases:
+     an import that produced no tracker entry, and a cyclic module group whose
+     importee has not been analyzed yet.
+
+     The fallback is deliberately scoped to names in [ie_used_names] — names
+     the index proved came from THIS import.  Applying it to every unresolved
+     reference would catch every local and parameter and degenerate straight
+     back to module granularity. *)
+  let trans_closures = lazy (fn_transitive_capability_closures_tbl env) in
+  let module_level_caps (imported : string) : string list =
+    match List.assoc_opt imported env.module_caps with
+    | None -> [] | Some req_caps -> req_caps
+  in
+  let import_required_caps (ud : Ast.use_decl) (sp : Ast.span) (imported : string)
+    : string list =
+    match module_level_caps imported with
+    | [] ->
+      (* The import required nothing before, so it requires nothing now.  The
+         early exit is also what keeps this affordable: the fixpoint is never
+         forced for the overwhelming majority of imports, whose target declares
+         no [needs] at all. *)
+      []
+    | mod_caps ->
+      (* [UseSingle]/[UseAll]/[UseExcept] file one entry at the decl's own span;
+         [UseNames] files one per listed name, at that name's span. *)
+      let spans = sp :: (match ud.Ast.use_sel with
+        | Ast.UseNames names -> List.map (fun (n : Ast.name) -> n.Ast.span) names
+        | Ast.UseAll | Ast.UseSingle | Ast.UseExcept _ -> []) in
+      (match List.filter (fun ie -> List.mem ie.ie_span spans) !(env.import_tracker) with
+       | [] -> mod_caps   (* no tracker entry to read demand from: as before *)
+       | entries ->
+         let used =
+           List.concat_map
+             (fun ie -> Hashtbl.fold (fun k () acc -> k :: acc) ie.ie_used_names [])
+             entries
+         in
+         let tbl = Lazy.force trans_closures in
+         let caps_of_name (n : string) : string list =
+           (* A recorded name is either bare ("pure_double", rebound by
+              `import M`) or fully dotted ("M.pure_double" / "Sub.pure_double",
+              matched by the prefix index).  Closure keys are "Mod.fn" for a
+              nested module and BARE for the entry module's own top-level
+              functions, so try, in order: the imported module's own
+              qualification of a bare name; the name verbatim; and — for
+              `use A.B` re-exporting under the short "B.f" spelling — the
+              imported path plus the name's tail. *)
+           let candidates =
+             (imported ^ "." ^ n) :: n ::
+             (match String.index_opt n '.' with
+              | Some i ->
+                [ imported ^ "." ^ String.sub n (i + 1) (String.length n - i - 1) ]
+              | None -> [])
+           in
+           match List.find_map (fun k -> Hashtbl.find_opt tbl k) candidates with
+           | Some caps -> caps
+           | None -> mod_caps
+         in
+         let demanded = List.concat_map caps_of_name used in
+         (* FILTER [mod_caps] rather than return [demanded] directly.  The
+            result is a SUBSET of what this import required before, by
+            construction — which is the whole safety property: this change may
+            only ever require less, so nothing that compiles today can start
+            failing.  Returning [demanded] itself would not have that property:
+            a referenced function's closure can contain a capability the
+            imported module never declared (Check 1b only WARNS about a
+            capability builtin called directly in a body), and propagating that
+            outward would be a brand-new error on code that compiles today.
+
+            A declared cap is kept when some referenced function demands
+            something related to it in either direction: [cap_subsumes c d] for
+            an umbrella declaration ([needs IO] kept by a demanded IO.Console),
+            [cap_subsumes d c] for the exact/narrower case. *)
+         List.filter
+           (fun c -> List.exists
+               (fun d -> cap_subsumes c d || cap_subsumes d c) demanded)
+           mod_caps)
+  in
   let module_wide_caps : string list =
     (* Caps that apply to every function in this module regardless of which
        function's own signature/body/extern-block produced them: declared
        [needs] (in-scope for the whole module body) and caps propagated in
        from imported modules (Check 4). *)
     let propagated = List.concat_map (function
-      | Ast.DUse (ud, _) ->
+      | Ast.DUse (ud, sp) ->
         let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
-        (match List.assoc_opt imported env.module_caps with
-         | None -> [] | Some req_caps -> req_caps)
+        import_required_caps ud sp imported
       | _ -> []
     ) decls in
     declared_needs @ propagated
@@ -8216,6 +8400,214 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let merged_own = March_caps.Cap_lattice.normalize (own_caps @ prior_own) in
     Hashtbl.replace env.own_cap_closures fn_qname merged_own
   in
+  (* Reference edges for the per-function TRANSITIVE capability closure
+     ([fn_transitive_capability_closures]). Purely additive bookkeeping — no
+     Check 1/1b/1c/2/3/4/5/6 diagnostic reads [env.fn_refs].
+
+     [free_vars_expr] rather than [March_ast.Calls]: the call-walker collects
+     only [EApp] callees, so a function passed as a VALUE — [apply(xs, noisy)]
+     — would contribute no edge and its capabilities would silently vanish
+     from the caller's closure. That is the fail-open direction. The
+     free-variable walk collects every [EVar], bare and dotted, and respects
+     shadowing, so an inner binding that happens to share a top-level
+     function's name does not manufacture a spurious edge.
+
+     Each body is paired with the names ITS OWN PARAMETERS bind, and those seed
+     [free_vars_expr]'s [bound] list. This is load-bearing, not hygiene:
+     [free_vars_expr] binds lambda / [let] / match-arm / [let?] binders
+     internally, but it has no visibility into a clause's parameter list, so
+     passing [] would let
+
+       pfn helper(p) do file_read(p) end
+       fn wrap(helper) do helper(1) end
+
+     record an edge from [wrap] to the SIBLING [helper] — [wrap] would inherit
+     [IO.FileRead] while being pure. That is a false positive, which this
+     subsystem treats as its cardinal sin. (Note [dependency_order_dfn_run]'s
+     [deps_of] does pass []; there an over-approximation only perturbs
+     dependency ORDERING, which is harmless. Here it fabricates a capability.)
+
+     Merged with any prior entry, matching [record_fn_caps]'s
+     accumulate-across-call-sites behavior. *)
+  let record_fn_refs (fn_qname : string) (bodies : (string list * Ast.expr) list) =
+    let refs = List.concat_map (fun (bound, e) -> free_vars_expr bound e) bodies in
+    let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
+    Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior))
+  in
+  (* Names bound by a clause's parameter list. [FPPat] goes through
+     [free_vars_pattern] so a destructuring head ([fn f((a, b))]) binds its
+     components too, not just a bare [PatVar]. *)
+  let fn_clause_param_names (c : Ast.fn_clause) : string list =
+    List.concat_map (function
+      | Ast.FPNamed p | Ast.FPDefault (p, _) -> [ p.Ast.param_name.txt ]
+      | Ast.FPPat pat -> free_vars_pattern pat)
+      c.Ast.fc_params
+  in
+  (* ── Coverage-gap closure, 2026-08-06 ────────────────────────────────
+     [record_fn_caps]/[record_fn_refs] used to fire for [DFn]s, actor handlers
+     and [DExtern]s only.  Module-level [DLet] bodies, interface default-method
+     bodies, impl-method bodies and default-argument expressions got NO
+     own(...) entry, so an edge pointing at one contributed nothing and the
+     transitive closure of anything that REACHED one came back silently
+     truncated — dropping a capability Check 4 required before demand-driven
+     propagation landed (see
+     specs/progress/2026-08-06-record-fn-caps-misses-dlet-and-methods.md).
+
+     Unlike the [DFn] scan, none of this feeds the Check 1b/Check 2
+     DIAGNOSTIC lists ([body_cap_uses] / [used_caps]): it only populates the
+     closure tables.  Keeping the diagnostic surface byte-identical is
+     deliberate — this change exists to restore ENFORCEMENT that the closure
+     lost, not to start warning about forms that never warned. *)
+  let builtin_caps_of_expr (e : Ast.expr) : string list =
+    List.filter_map
+      (fun (call_name, _) -> List.assoc_opt call_name builtin_cap_table)
+      (March_ast.Calls.names_and_name_spans e)
+  in
+  let default_param_exprs (c : Ast.fn_clause) : Ast.expr list =
+    List.filter_map (function Ast.FPDefault (_, e) -> Some e | _ -> None)
+      c.Ast.fc_params
+  in
+  (* Record one non-[DFn] expression owner: its own builtin-implied caps and
+     its reference edges, with [bound] seeding [free_vars_expr] exactly the way
+     [record_fn_refs] does for a clause's parameters. *)
+  let record_expr_owner (qname : string) (bound : string list)
+      (es : Ast.expr list) =
+    record_fn_caps qname (List.concat_map builtin_caps_of_expr es);
+    record_fn_refs qname (List.map (fun e -> (bound, e)) es)
+  in
+  (* An [impl]'s target type, keyed the way lib/tir/lower.ml keys it when it
+     builds the [Iface$Ty.method] mangled symbol — same four cases, same
+     arity-keyed tuple spelling.
+
+     NOT a full mirror, deliberately: lower.ml additionally applies a
+     COLLISION-CONDITIONAL module qualification (lower.ml:1299-1301) when a
+     short type name is declared more than once in the program, so two impls of
+     a general interface for same-short-named types get distinct symbols. This
+     key does not reproduce that, so two such impls in ONE module would share a
+     cap-closure key and their capabilities would merge. Harmless today —
+     nothing cross-references the TIR symbol from here, and the merge is a
+     union within a single module's own impls — but it is the one place where
+     these two manglings can disagree. *)
+  let impl_ty_key (t : Ast.ty) : string =
+    match t with
+    | Ast.TyCon (n, _) -> n.Ast.txt
+    | Ast.TyTuple tys -> Printf.sprintf "$Tuple%d" (List.length tys)
+    | Ast.TyRecord _ -> "$Record"
+    | _ -> "$Unknown"
+  in
+  (* [DFn]s declared directly in this module — the guard that keeps the impl
+     DISPATCH node below from ever claiming a plain function's key. *)
+  let module_fn_names =
+    List.filter_map (function
+        | Ast.DFn (def, _) -> Some def.Ast.fn_name.Ast.txt
+        | _ -> None)
+      decls
+  in
+  (* Append a single reference edge without a body walk. Used only for the
+     impl dispatch node, which owns no expression of its own. *)
+  let record_dispatch_edge (dispatch_qname : string) (target : string) =
+    let prior =
+      Option.value ~default:[] (Hashtbl.find_opt env.fn_refs dispatch_qname)
+    in
+    Hashtbl.replace env.fn_refs dispatch_qname
+      (List.sort_uniq compare (target :: prior))
+  in
+  (* Desugar's [expand_defaults_decl] rewrites [fn f(x \\ d)] into arity-
+     mangled [f$0]/[f$1] declarations with [d] moved into [f$0]'s BODY, and it
+     runs before the typechecker (bin/main.ml, and [parse_and_desugar] in the
+     tests).  It does NOT rewrite call sites — those still say [f] — and it
+     emits no dispatcher [DFn], so the base name had no closure entry at all
+     and every caller's closure was truncated.  Recording each variant's caps
+     and edges under the base name too is what makes a reference to [f]
+     resolve.  A user cannot write ['$'] in an identifier, so this can only
+     ever fire on a desugar-generated name. *)
+  let arity_mangled_base (n : string) : string option =
+    match String.rindex_opt n '$' with
+    | None -> None
+    | Some i ->
+      let suffix = String.sub n (i + 1) (String.length n - i - 1) in
+      if i > 0 && suffix <> ""
+         && String.for_all (fun c -> c >= '0' && c <= '9') suffix
+      then Some (String.sub n 0 i)
+      else None
+  in
+  List.iter (fun (d : Ast.decl) ->
+      match d with
+      (* A module-level binding is an ordinary value name: key it exactly the
+         way a [DFn] of that name would be keyed, so a reference to it
+         resolves.  A destructuring binding attributes the body to EVERY name
+         it binds — any of them can be the route a caller takes. *)
+      | Ast.DLet (_, b, _) ->
+        List.iter
+          (fun n -> record_expr_owner (cap_qname n) [] [ b.Ast.bind_expr ])
+          (free_vars_pattern b.Ast.bind_pat)
+      (* An interface DEFAULT body is keyed by a mangled name for exactly the
+         reason an impl method is, and the bare name is only a dispatch edge.
+
+         The first version of this change wrote the default body's caps
+         DIRECTLY onto [cap_qname md_name] with no mangling and no guard, on
+         the assumption that a module could not declare both an interface
+         method and a plain [fn] of that name.  That assumption is false —
+
+           mod Inner do
+             interface Greeter(a) do
+               fn greet : a -> Unit
+               fn greet_loud : a -> Unit do fn (x) -> print("loud") end
+             end
+             fn greet_loud(n : Int) : Int do n + 1 end
+           end
+
+         typechecks with exit 0, and [record_fn_caps] MERGES, so the pure
+         [greet_loud] silently absorbed [IO.Console].  That is a false
+         positive, and it was observable on the hot-deploy manifest, which
+         reads [fn_own_capability_closures] unfiltered — no Check-4
+         [mod_caps] filter stands between it and a deploy capability gate.
+         Pinned by [test_interface_default_does_not_capture_a_same_named_fn]. *)
+      | Ast.DInterface (idef, _) ->
+        List.iter (fun (m : Ast.method_decl) ->
+            match m.Ast.md_default with
+            | None -> ()
+            | Some e ->
+              let mangled =
+                cap_qname
+                  (idef.Ast.iface_name.Ast.txt ^ "$default." ^ m.Ast.md_name.Ast.txt)
+              in
+              record_expr_owner mangled [] [ e ];
+              if not (List.mem m.Ast.md_name.Ast.txt module_fn_names) then
+                record_dispatch_edge (cap_qname m.Ast.md_name.Ast.txt) mangled)
+          idef.Ast.iface_methods
+      (* An impl method is keyed by TIR's [Iface$Ty.method] mangling.  This is
+         collision-free in both directions that matter: an ordinary qualified
+         name never contains ['$'] (see [Tir_names.is_iface_mangled]), so a
+         [DFn] of the same short name can never share the key and have its
+         capabilities silently merged; and two impls of the same method for
+         DIFFERENT types get distinct keys, so a caller cannot inherit a
+         sibling impl's capabilities.
+
+         A reference site says the BARE method name, though, so the mangled key
+         alone would leave every caller truncated.  The bare name therefore
+         becomes a DISPATCH node whose only content is an edge to each impl —
+         the union over impls, which is the sound reading of a name whose
+         target is chosen by type.  It is emitted only when this module
+         declares no [DFn] of that name, so the dispatch node can never absorb
+         a plain function's identity. *)
+      | Ast.DImpl (idef, _) ->
+        let ty_key = impl_ty_key idef.Ast.impl_ty in
+        List.iter (fun ((mn : Ast.name), (def : Ast.fn_def)) ->
+            let mangled =
+              cap_qname
+                (idef.Ast.impl_iface.Ast.txt ^ "$" ^ ty_key ^ "." ^ mn.Ast.txt)
+            in
+            List.iter (fun (c : Ast.fn_clause) ->
+                record_expr_owner mangled (fn_clause_param_names c)
+                  (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard
+                   @ default_param_exprs c))
+              def.Ast.fn_clauses;
+            if not (List.mem mn.Ast.txt module_fn_names) then
+              record_dispatch_edge (cap_qname mn.Ast.txt) mangled)
+          idef.Ast.impl_methods
+      | _ -> ())
+    decls;
   let used_caps : (string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
       let param_tys = List.filter_map (fun p ->
@@ -8261,8 +8653,11 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
           let body_caps = List.filter_map (fun (call_name, _) ->
               List.assoc_opt call_name builtin_cap_table
-            ) (calls_in_expr [] h.Ast.ah_body) in
-          record_fn_caps fn_qname body_caps
+            ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
+          record_fn_caps fn_qname body_caps;
+          record_fn_refs fn_qname
+            [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
+               h.Ast.ah_body) ]
         ) actor.actor_handlers;
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
@@ -8384,17 +8779,48 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             match List.assoc_opt call_name builtin_cap_table with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
-          ) (calls_in_expr [] clause.Ast.fc_body)
+          ) (March_ast.Calls.names_and_name_spans clause.Ast.fc_body)
         ) def.fn_clauses in
         let qname = cap_qname def.fn_name.txt in
-        record_fn_caps qname (List.concat_map (List.map fst) per_clause);
+        (* Default-argument expressions count as this function's own: the
+           default is evaluated at every call site that omits the parameter.
+           This arm only sees them when the typechecker runs on an UNdesugared
+           module (the LSP's analysis route); the production pipeline desugars
+           first, and there the default has already moved into an arity-mangled
+           [f$N] body, which the base-name alias below re-attaches to [f].
+           Both routes are covered so neither can silently truncate. *)
+        let own_caps =
+          List.concat_map (List.map fst) per_clause
+          @ List.concat_map
+              (fun (c : Ast.fn_clause) ->
+                 List.concat_map builtin_caps_of_expr (default_param_exprs c))
+              def.fn_clauses
+        in
+        (* Guards are part of the function too: a guard calling an impure
+           helper is as much a reference as the body is. *)
+        let own_refs =
+          List.concat_map (fun (c : Ast.fn_clause) ->
+              let bound = fn_clause_param_names c in
+              List.map (fun e -> (bound, e))
+                (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard
+                 @ default_param_exprs c))
+            def.fn_clauses
+        in
+        record_fn_caps qname own_caps;
+        record_fn_refs qname own_refs;
+        (match arity_mangled_base def.fn_name.txt with
+         | None -> ()
+         | Some base ->
+           let base_qname = cap_qname base in
+           record_fn_caps base_qname own_caps;
+           record_fn_refs base_qname own_refs);
         List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
           match List.assoc_opt call_name builtin_cap_table with
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
-        ) (calls_in_expr [] b.Ast.bind_expr)
+        ) (March_ast.Calls.names_and_name_spans b.Ast.bind_expr)
       (* C1 fix (part 2): fold actor handler bodies into the SAME body-scan
          this branch already performs for DFn/DLet, rather than a second/
          parallel AST walk — a handler doing undeclared IO must trip the
@@ -8409,7 +8835,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               match List.assoc_opt call_name builtin_cap_table with
               | Some cap_name -> Some (cap_name, call_span)
               | None -> None
-            ) (calls_in_expr [] h.Ast.ah_body)
+            ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body)
           ) actor.actor_handlers
       | _ -> []
     ) decls in
@@ -8550,8 +8976,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   List.iter (function
     | Ast.DUse (ud, sp) ->
       let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
-      (match List.assoc_opt imported env.module_caps with
-       | None | Some [] -> ()
+      (* Demand-driven (see [import_required_caps]): only what the functions
+         this module actually references from [imported] require, not the
+         imported module's whole set.  The per-cap [covered] loop, the
+         diagnostic text and its span are unchanged — only the SET of required
+         capabilities narrowed. *)
+      (match (match import_required_caps ud sp imported with
+              | [] -> None | caps -> Some caps) with
+       | None -> ()
        | Some req_caps ->
          List.iter (fun req_cap ->
            let covered =
@@ -8885,6 +9317,13 @@ let declared_cap_scopes (env : env) : (string * string option) list =
 let fn_own_capability_closures (env : env) : (string * string list) list =
   (* Sort by key for the same determinism reason as [fn_capability_closures]. *)
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []
+  |> List.sort (fun (a, _) (b, _) -> compare a b)
+
+(** Sorted-by-key public view of [fn_transitive_capability_closures_tbl] (the
+    sort is for determinism, like [fn_capability_closures]). *)
+let fn_transitive_capability_closures (env : env) : (string * string list) list =
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+    (fn_transitive_capability_closures_tbl env) []
   |> List.sort (fun (a, _) (b, _) -> compare a b)
 
 (* =================================================================
@@ -9727,57 +10166,6 @@ let panic_surface_suggestion : string -> string = function
     "\n\nAdd a proof comment if this branch is truly unreachable, or handle it explicitly."
   | _ -> ""
 
-let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
-    : (string * Ast.span) list =
-  match e with
-  | Ast.EApp (Ast.EVar fn_name, args, _) ->
-    let acc = (fn_name.txt, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
-    let qname = mod_name.txt ^ "." ^ fn_name.txt in
-    let acc = (qname, fn_name.span) :: acc in
-    List.fold_left calls_in_expr acc args
-  | Ast.EApp (f, args, _) ->
-    List.fold_left calls_in_expr (calls_in_expr acc f) args
-  | Ast.ECon (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ELam (_, body, _) -> calls_in_expr acc body
-  | Ast.EBlock (es, _) ->
-    List.fold_left calls_in_expr acc es
-  | Ast.ELet (b, _) ->
-    calls_in_expr acc b.Ast.bind_expr
-  | Ast.EMatch (scrut, arms, _) ->
-    let acc = calls_in_expr acc scrut in
-    List.fold_left (fun a arm ->
-      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
-      calls_in_expr a arm.Ast.branch_body) acc arms
-  | Ast.ETuple (es, _) -> List.fold_left calls_in_expr acc es
-  | Ast.ERecord (fields, _) ->
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.ERecordUpdate (base, fields, _) ->
-    let acc = calls_in_expr acc base in
-    List.fold_left (fun a (_, ex) -> calls_in_expr a ex) acc fields
-  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
-  | Ast.EIf (cond, then_, else_, _) ->
-    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
-  | Ast.ECond (arms, _) ->
-    List.fold_left (fun a (ce, be) ->
-      calls_in_expr (calls_in_expr a ce) be) acc arms
-  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.EAnnot (ex, _, _) -> calls_in_expr acc ex
-  | Ast.EHole _ -> acc
-  | Ast.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
-  | Ast.ESend (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
-  | Ast.ESpawn (e, _) -> calls_in_expr acc e
-  | Ast.EResultRef _ -> acc
-  | Ast.EDbg (None, _) -> acc
-  | Ast.EDbg (Some inner, _) -> calls_in_expr acc inner
-  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
-  | Ast.ELetQ (_, rhs, body, _) ->
-    calls_in_expr (calls_in_expr acc rhs) body
-  | Ast.EAssert (e, _) -> calls_in_expr acc e
-  | Ast.ESigil (_, content, _) -> calls_in_expr acc content
-  | Ast.ELit _ | Ast.EVar _ -> acc
-
 (** [span_within inner outer] is true when [inner] is nested inside [outer] by
     source position — same file, and [inner]'s start/end fall within [outer]'s
     line/column bounds.  Used to attribute a recorded non-exhaustive-match span
@@ -9799,8 +10187,9 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
       | Ast.DFn (def, fn_span) ->
         let all_calls =
           List.fold_left (fun acc clause ->
-            calls_in_expr acc clause.Ast.fc_body
+            March_ast.Calls.calls_in_expr acc clause.Ast.fc_body
           ) [] def.Ast.fn_clauses
+          |> List.map (fun (n, name_span, _app_span) -> (n, name_span))
         in
         Some (def.Ast.fn_name.txt, all_calls, fn_span)
       | _ -> None
@@ -9945,7 +10334,7 @@ let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : u
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
-        let calls = calls_in_expr [] clause.Ast.fc_body in
+        let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
           if StringSet.mem name pure_banned then
             Err.error errors ~span:site_span
@@ -10010,7 +10399,7 @@ let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl 
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
-        let calls = calls_in_expr [] clause.Ast.fc_body in
+        let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
           if StringSet.mem name deterministic_banned then
             Err.error errors ~span:site_span
@@ -10864,25 +11253,35 @@ let rec check_decl env (d : Ast.decl) : env =
              if StrMap.mem short_key env.vars then acc
              else (short_key, sch) :: acc
            else acc) env.vars [] in
-       if new_bindings <> [] then begin
-         let entry = { ie_span = sp
-                     ; ie_desc = Printf.sprintf
-                         "Unused import: nothing from `%s` is used.\n\
-                          Remove this import or use something from it." mod_str
-                     ; ie_matches = (fun name ->
-                         name = mod_str
-                         || (String.length name > String.length short_prefix
-                             && String.sub name 0 (String.length short_prefix) = short_prefix)
-                         || (String.length name > String.length prefix
-                             && String.sub name 0 (String.length prefix) = prefix))
-                     ; ie_used = ref false } in
-         env.import_tracker := entry :: !(env.import_tracker);
-         import_index_add_exact env.import_idx mod_str entry;
-         import_index_add_prefix env.import_idx last_seg entry;
-         let prefix_root = match String.index_opt mod_str '.' with
-           | Some i -> String.sub mod_str 0 i | None -> mod_str in
-         import_index_add_prefix env.import_idx prefix_root entry
-       end;
+       (* The entry is registered UNCONDITIONALLY, but pre-marked used when it
+          rebound nothing.  A single-segment `use Foo` rebinds nothing (every
+          "Foo.bar" short key is already the qualified key), so it used to file
+          no entry at all and therefore tracked no references — which left
+          demand-driven capability propagation (see [import_required_caps])
+          with nothing to go on and forced it back to the module-granular
+          answer for exactly the qualified-reference form `use` exists to
+          serve.  Seeding [ie_used] with [new_bindings = []] keeps the
+          unused-import warning byte-identical to before (a rebind-nothing
+          `use` never warned, because it had no entry); the entry now exists
+          purely so [record_use] can record WHICH members were referenced. *)
+       let entry = { ie_span = sp
+                   ; ie_desc = Printf.sprintf
+                       "Unused import: nothing from `%s` is used.\n\
+                        Remove this import or use something from it." mod_str
+                   ; ie_matches = (fun name ->
+                       name = mod_str
+                       || (String.length name > String.length short_prefix
+                           && String.sub name 0 (String.length short_prefix) = short_prefix)
+                       || (String.length name > String.length prefix
+                           && String.sub name 0 (String.length prefix) = prefix))
+                   ; ie_used = ref (new_bindings = [])
+                   ; ie_used_names = Hashtbl.create 8 } in
+       env.import_tracker := entry :: !(env.import_tracker);
+       import_index_add_exact env.import_idx mod_str entry;
+       import_index_add_prefix env.import_idx last_seg entry;
+       let prefix_root = match String.index_opt mod_str '.' with
+         | Some i -> String.sub mod_str 0 i | None -> mod_str in
+       import_index_add_prefix env.import_idx prefix_root entry;
        bind_vars new_bindings env
      | Ast.UseAll ->
        (* Find all vars with "Prefix.name" and rebind them as plain "name".
@@ -10925,7 +11324,8 @@ let rec check_decl env (d : Ast.decl) : env =
                          || name = mod_str
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
-                     ; ie_used = ref false } in
+                     ; ie_used = ref false
+                     ; ie_used_names = Hashtbl.create 8 } in
          env.import_tracker := entry :: !(env.import_tracker);
          (* Index for O(1) [record_use] lookup: every rebound short name is an
             exact-match key, as is the bare module name itself (ie_matches's
@@ -10954,7 +11354,8 @@ let rec check_decl env (d : Ast.decl) : env =
                              "Unused import `%s` from `%s`.\n\
                               Remove it from the import list or use it." n.Ast.txt mod_str
                          ; ie_matches = (fun name -> name = n.Ast.txt)
-                         ; ie_used = ref false } in
+                         ; ie_used = ref false
+                         ; ie_used_names = Hashtbl.create 8 } in
              env.import_tracker := entry :: !(env.import_tracker);
              import_index_add_exact env.import_idx n.Ast.txt entry;
              bind_var n.Ast.txt sch env
@@ -10992,7 +11393,8 @@ let rec check_decl env (d : Ast.decl) : env =
                          || name = mod_str
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
-                     ; ie_used = ref false } in
+                     ; ie_used = ref false
+                     ; ie_used_names = Hashtbl.create 8 } in
          env.import_tracker := entry :: !(env.import_tracker);
          List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
          import_index_add_exact env.import_idx mod_str entry;
@@ -11024,7 +11426,8 @@ let rec check_decl env (d : Ast.decl) : env =
                       let plen = String.length short_prefix in
                       (String.length name >= plen && String.sub name 0 plen = short_prefix)
                       || name = short_name)
-                  ; ie_used = ref false } in
+                  ; ie_used = ref false
+                  ; ie_used_names = Hashtbl.create 8 } in
       env.import_tracker := entry :: !(env.import_tracker);
       (* [short_name] has no dots, so it is both the exact-match key (bare
          alias reference) and the prefix-index key (qualified reference

@@ -71,6 +71,39 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A capability reached through a module-level `let`, an interface or `impl`
+  method, or a default argument is now attributed to the function that reaches
+  it.** The per-function capability record covered `fn` signatures/bodies, actor
+  handlers and `extern` blocks only, so a function whose sole impure act was to
+  read a module-level `let` that prints carried an empty capability set — and an
+  importer that referenced only that function was not asked to declare the
+  capability, where the older module-granular rule would have. All four forms
+  are now recorded, including default-argument expressions (evaluated at every
+  call site that omits the parameter) on both the desugared and undesugared
+  paths. This can newly require a `needs` declaration on code that
+  under-declares today; measured over `stdlib/*.march`, `test/native/*.march`
+  and `bench/*.march` (277 files), diagnostics are byte-identical, and `march
+  caps`, `--cap-sandbox` and the hot-deploy manifest are unchanged on that
+  corpus. An `impl` method is keyed by its `Iface$Ty.method` mangling and an
+  interface default body by `Iface$default.method`, and the bare method name
+  carries dispatch edges only when the module declares no plain function of that
+  name — so a `fn` that happens to share a method's name can never be credited
+  with that method's capabilities.
+
+- **Importing a module no longer requires declaring capabilities used only by
+  functions you don't reference.** `import M` / `use M` used to force *every*
+  capability `M` declares onto the importer, so importing a library for one pure
+  function cost you its impure siblings' capabilities — importing `List` to call
+  `map` would have owed `needs IO.Spawn` on account of `List.pmap`. Propagation
+  is now demand-driven: you inherit the capabilities of the functions you
+  actually reference, computed per import site over the transitive reference
+  graph (a function passed as a *value* counts, and a capability reached only
+  through a private helper counts). The result is always a subset of what was
+  required before, so nothing that compiles today can start failing; the error
+  message and its caret are unchanged, only the set of required capabilities
+  narrowed. An import into a cyclic module group falls back conservatively to
+  the old whole-module set.
+
 - **`~H` now escapes by HTML parse context, not with one escaper everywhere.**
   Previously every interpolation was HTML entity-encoded regardless of where it
   landed, which is correct in element content and wrong everywhere else. The

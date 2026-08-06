@@ -1,21 +1,29 @@
 -- Capabilities widening, Task 2 -- Check 4 (transitive `use`), the ACCEPT
--- side. `Vault` (`stdlib/vault.march:26`) declares `needs IO.Mut`. Any module
--- that `use`s `Vault` inherits an obligation to cover `IO.Mut` too --
--- `check_module_needs`'s Check 4 (`typecheck.ml:5661`) walks every `DUse`,
--- looks up the imported module's own declared-needs in `env.module_caps`
--- (populated when the imported module finished checking, `typecheck.ml:7012`,
--- `(name.txt, inner_needs) :: env'.module_caps`), and requires each of THOSE
--- caps to be covered -- via the same `cap_subsumes` subsumption Check 1 uses
--- -- by the IMPORTING module's own `needs`. Here `Main` declares `needs
--- IO.Mut` itself, so the transitive obligation from `use Vault` is satisfied
--- (`cap_subsumes "IO.Mut" "IO.Mut"` holds reflexively). See reject/t39 for
--- the same shape with the `needs IO.Mut` line removed. See
--- core-march-types.md §2.8.6.
+-- side. `Vault` (`stdlib/vault.march:26`) declares `needs IO.Mut`. A module
+-- that `use`s `Vault` AND REFERENCES a function requiring `IO.Mut` inherits an
+-- obligation to cover `IO.Mut` too -- `check_module_needs`'s Check 4 walks
+-- every `DUse`, works out which capabilities the referenced functions require,
+-- and requires each of THOSE caps to be covered -- via the same `cap_subsumes`
+-- subsumption Check 1 uses -- by the IMPORTING module's own `needs`. Here
+-- `Main` declares `needs IO.Mut` itself, so the transitive obligation from
+-- `use Vault` + `Vault.new` is satisfied (`cap_subsumes "IO.Mut" "IO.Mut"`
+-- holds reflexively). See reject/t39 for the same shape with the `needs
+-- IO.Mut` line removed. See core-march-types.md 2.8.6.
+--
+-- The `Vault.new` reference is load-bearing as of 2026-08-06: Check 4
+-- propagation is DEMAND-DRIVEN, so an importer inherits only the capabilities
+-- of the functions it actually references. This fixture's body used to be a
+-- bare `()` with no reference at all, which now (correctly) costs nothing --
+-- meaning it would have accepted even if Check 4 were deleted outright. A
+-- witness that passes with the mechanism removed proves nothing, so the
+-- reference is what keeps this an ACCEPT witness for Check 4 rather than for
+-- the mere presence of a `use`.
 mod Main do
   needs IO.Mut
   use Vault
 
   fn main() do
+    let _ = Vault.new("t")
     ()
   end
 end

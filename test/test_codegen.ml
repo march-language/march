@@ -8695,6 +8695,17 @@ let test_cap_parse_needs_dotted () =
 
 (* ── Transitive capability enforcement tests ────────────────────────────── *)
 
+(* Mirrors [has_message_containing] in test_compiler.ml: matches on diagnostic
+   TEXT rather than on [has_errors], so a capability assertion cannot be
+   satisfied (or broken) by an unrelated error in the same fixture. *)
+let has_message_containing ctx needle =
+  List.exists (fun d ->
+    let m = d.March_errors.Errors.message in
+    let nl = String.length needle and ml = String.length m in
+    let rec scan i = i + nl <= ml && (String.sub m i nl = needle || scan (i + 1)) in
+    scan 0)
+    ctx.March_errors.Errors.diagnostics
+
 (* Module that imports another with matching needs declared — should be ok *)
 let test_cap_transitive_ok () =
   let ctx = typecheck {|mod Outer do
@@ -8719,10 +8730,28 @@ let test_cap_transitive_missing_error () =
     end
     mod Test do
       use Lib.*
+      fn run(cap) do connect(cap) end
+    end
+  end|} in
+  Alcotest.(check bool) "transitive import without needs is an error" true (has_errors ctx);
+  (* Propagation is demand-driven: the same import that REFERENCES NOTHING from
+     `Lib` costs nothing. This fixture used to be `fn run(x) do x end` and
+     asserted an error, pinning the old module-granular over-approximation —
+     importing a module for one pure function used to cost you its impure
+     siblings' capabilities. The reference above is what makes the assertion
+     above about propagation rather than about the mere presence of a `use`. *)
+  let unreferenced = typecheck {|mod Outer do
+    mod Lib do
+      needs IO.Network
+      fn connect(cap : Cap(IO.Network)) do cap end
+    end
+    mod Test do
+      use Lib.*
       fn run(x) do x end
     end
   end|} in
-  Alcotest.(check bool) "transitive import without needs is an error" true (has_errors ctx)
+  Alcotest.(check bool) "an import that references nothing costs nothing" false
+    (has_errors unreferenced)
 
 (* Module declares parent cap (IO) which covers imported module's child (IO.Network) *)
 let test_cap_transitive_supertype_ok () =
@@ -8753,10 +8782,20 @@ let test_cap_transitive_chain_error () =
     end
     mod C do
       use B.*
-      fn run(x) do x end
+      fn run(cap) do do_read(cap) end
     end
   end|} in
-  Alcotest.(check bool) "chain: C must declare needs covered by B" true (has_errors ctx)
+  (* `fn run(x) do x end` here until 2026-08-06: propagation is demand-driven,
+     so C only owes B's capabilities for the functions C actually references.
+     `do_read` is `B`'s OWN name (not one of `A`'s re-exported through it), so
+     `use B.*` binds it and the fixture has no unresolved names — asserted
+     below, because a `has_errors`-only assertion would be satisfied just as
+     well by a typo in the reference. Assert on the Check-4 message text for
+     the same reason. *)
+  Alcotest.(check bool) "chain: C must declare needs covered by B" true
+    (has_message_containing ctx "which requires");
+  Alcotest.(check bool) "and the fixture resolves every name it references" false
+    (has_message_containing ctx "I cannot find")
 
 (* extern with capability declared in needs — ok *)
 let test_cap_extern_with_needs_ok () =

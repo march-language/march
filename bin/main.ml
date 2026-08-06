@@ -840,6 +840,18 @@ let do_check       = ref false   (* --check: typecheck only, no codegen or eval 
       typechecker saw, including linked stdlib, so it must be filtered to this
       file or a pure program reports "needs everything".
 
+    Read by --cap-sandbox and --cap-strict.  This used to claim it was shared
+    with `march caps` "so the reported set and the embedded sandbox profile
+    cannot disagree" — that is FALSE and was corrected 2026-08-06.  `march
+    caps` goes through [run_check_cmd ~emit_caps:true] and applies its OWN
+    [belongs], keyed on the module names the listed files declare; this one
+    builds [user_fn_names] from [DFn] declarations only, so a key that is not a
+    [DFn] name (a module-level [let]'s, or an impl method's
+    "Iface$Ty.method") never belongs here while `march caps` does see it.  The
+    two therefore CAN disagree, and since 2026-08-06 they demonstrably do for a
+    module whose only IO lives in a module-level [let].  Tracked in
+    specs/todos/2026-08-06-cap-sandbox-belongs-filter-misses-non-dfn-keys.md;
+    do not restore the sharing claim without actually sharing the predicate. *)
     Shared by `march caps` and --cap-sandbox so the reported set and the
     embedded sandbox profile cannot disagree.
 
