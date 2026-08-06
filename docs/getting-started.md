@@ -9,6 +9,8 @@ permalink: /docs/getting-started/
 
 This guide walks you from zero to a working March program. See [Installation](installation.md) first if you haven't installed March yet.
 
+> **How to run March.** Use `march file.march` to run a single file, and `forge run` inside a `forge` project. If you built March from source instead of installing a binary, prefix the compiler invocations with `dune exec` — e.g. `dune exec march -- hello.march`, `dune exec forge -- run` — everywhere this guide writes `march …` or `forge …`.
+
 ---
 
 ## Hello, World
@@ -30,8 +32,6 @@ Run it:
 ```sh
 march hello.march
 ```
-
-(Building from source instead of using an installed binary? Use `dune exec march -- hello.march`.)
 
 Output:
 ```
@@ -69,8 +69,6 @@ Run it:
 march greet.march
 ```
 
-(Source build: `dune exec march -- greet.march`.)
-
 Output:
 ```
 Hello, World!
@@ -96,8 +94,6 @@ march --compile -o greet greet.march
 ./greet
 ```
 
-(Source build: `dune exec march -- --compile -o greet greet.march`.)
-
 The compiler runs LLVM, links the C runtime, and produces a native executable.
 
 ---
@@ -110,15 +106,12 @@ Start an interactive session:
 march repl
 ```
 
-(`march` with no arguments also drops you into the REPL. Building from source:
-`dune exec march -- repl`.)
+(`march` with no arguments also drops you into the REPL.)
 
 Or via forge:
 ```sh
 forge interactive
 ```
-
-(Source build: `dune exec forge -- interactive`.)
 
 The REPL loads the standard library and drops you into a numbered prompt:
 
@@ -166,13 +159,11 @@ forge new my_app
 cd my_app
 ```
 
-(Source build: `dune exec forge -- new my_app`.)
-
 This scaffolds:
 ```
 my_app/
 ├── forge.toml          # project manifest
-├── src/
+├── lib/
 │   └── my_app.march    # entry point
 └── test/
     └── my_app_test.march
@@ -188,8 +179,6 @@ Run tests:
 ```sh
 forge test
 ```
-
-(Source build: prefix each with `dune exec forge --`, e.g. `dune exec forge -- build`.)
 
 ---
 

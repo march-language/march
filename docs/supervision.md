@@ -125,6 +125,14 @@ Use `rest_for_one` when later children depend on earlier ones.
 as a redundant example; this inline copy is now the canonical source and is
 verified directly against the compiler.)
 
+> **Interpreter-only, as written.** Restart itself (`one_for_one` etc.) is correct on
+> both backends, but this example reaches a supervised child from *outside* the tree with
+> `get_actor_field(sup, …)` + `pid_of_int(…)`, and that pair **crashes in a compiled
+> binary** (compiled builds also skip a child's `init` at `spawn(Sup)`). Run it under the
+> interpreter (`march run` / `run_until_idle()`); see
+> [Actors → App Entry Point]({{ site.baseurl }}/docs/actors/) for the same caveat in the
+> Builtins table.
+
 ```march
 mod BasicSupervision do
 
@@ -280,7 +288,8 @@ A crash in the Web tier doesn't affect the DB tier. A crash in the DB tier escal
 
 ## App-Level Entry Point
 
-The `app` declaration is a shorthand for defining the top-level supervisor:
+The `app` declaration is a shorthand for defining the **top-level** supervisor of a
+long-running application:
 
 ```march
 mod MyService do
@@ -295,6 +304,17 @@ mod MyService do
   end
 end
 ```
+
+This is the value-level counterpart of the [`supervise` block](#declaring-a-supervisor)
+used everywhere else on this page: the `app` body evaluates to a `Supervisor.Spec`, where
+`Supervisor.spec(:one_for_one, [worker(Worker), …])` says the same thing as
+`supervise do strategy one_for_one; Worker … end` inside an actor. The differences are
+scope and spelling — `app` defines the *single application root* (not an inner actor's
+children), and the strategy is passed as the atom `:one_for_one` rather than the bare
+`one_for_one` keyword the block DSL uses. Use `supervise` to give an actor children; use
+`app` for the application's root supervisor. See
+[Actors → App Entry Point]({{ site.baseurl }}/docs/actors/) for the same note from the
+actor side.
 
 ---
 
@@ -349,6 +369,8 @@ That's the whole job processor — but if `Process` ever crashes, the worker is 
 ### Step 2 — put it under a supervisor (crash recovery)
 
 Wrap the worker in a `one_for_one` supervisor. Now a crash is *recovered from*: the supervisor restarts the worker (with fresh state) instead of losing it.
+
+> **Interpreter-only, as written** — like the [Full Supervision Example](#a-full-supervision-example) above, this reads the child PID back out with `get_actor_field` + `pid_of_int`, which crash in a compiled binary. Run it under the interpreter.
 
 ```march
 mod JobProcessorV2 do

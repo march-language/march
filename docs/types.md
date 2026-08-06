@@ -9,6 +9,8 @@ permalink: /docs/types/
 
 March uses Hindley-Milner type inference with bidirectional checking at function boundaries. You get the convenience of inferred types with the safety of static checking.
 
+> **New here? Read the first half.** Everything up through [Opaque Types](#opaque-types) — ADTs, records, `Option`, `Result`, tuples, lists — is the everyday type system and all you need to start writing March. The later sections ([Dependent Types](#dependent-types), the safety-tool matrix, and the inference deep-dive) are **advanced — come back to them later**, once the basics feel natural.
+
 ---
 
 ## Primitive Types
@@ -276,7 +278,7 @@ Functions that can fail return `Result`:
 ```march
 fn parse_int(s : String) : Result(Int, String) do
   -- returns Ok(n) or Err("not a valid integer")
-  Option.to_result(string_to_int(s), "not a valid integer")
+  Option.to_result(String.to_int(s), "not a valid integer")
 end
 ```
 

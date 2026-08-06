@@ -20,7 +20,7 @@
       --border: #0f2438;
       --text: #cce5f5;
       --text-muted: #5389ac;
-      --text-faint: #1e4060;
+      --text-faint: #3f6f94;
       --accent: oklch(65% 0.12 207);
       --accent-border: oklch(26% 0.09 215);
       --accent-text: #020c18;
@@ -28,7 +28,7 @@
       --syn-tp: oklch(82% 0.12 70);
       --syn-st: oklch(82% 0.11 200);
       --syn-nm: oklch(78% 0.09 265);
-      --syn-cm: oklch(42% 0.07 215);
+      --syn-cm: oklch(56% 0.06 215);
       --syn-op: oklch(57% 0.09 205);
       --syn-id: oklch(95% 0.02 207);
     }
@@ -85,7 +85,7 @@
       display: none; align-items: center; justify-content: center;
       background: none; border: 1px solid var(--border); color: var(--text-muted);
       cursor: pointer; padding: 7px 9px; border-radius: 5px; line-height: 1;
-      touch-action: manipulation;
+      min-width: 44px; min-height: 44px; touch-action: manipulation;
     }
     .m-nav-hamburger:hover { border-color: var(--text-faint); color: var(--text); }
     .m-nav-drawer {

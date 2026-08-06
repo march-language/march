@@ -212,12 +212,22 @@ end
 
 ## Documentation
 
+### Start here
+
+New to March? Read these three in order, then branch out.
+
 | Guide | What it covers |
 |-------|---------------|
-| [Try It Out](playground.md) | Interactive REPL — run March in your browser |
-| [Installation](installation.md) | Build from source, prerequisites |
+| [Installation](installation.md) | Prebuilt binaries (recommended); building from source |
 | [Getting Started](getting-started.md) | Hello world, compiling, running the REPL |
 | [Language Tour](tour.md) | Variables, functions, types, pipes — the essentials |
+
+Prefer to poke at it live? [Try It Out](playground.md) runs March in your browser.
+
+### Guides and reference
+
+| Guide | What it covers |
+|-------|---------------|
 | [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
 | [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
 | [Type System](types.md) | ADTs, records, generics, Option, Result |

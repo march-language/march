@@ -82,10 +82,9 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
 ```
 
 **Note:** the stdlib's own `Handle` type (used for files and similar resources) is
-always linear, even without writing the `linear` keyword — see `always_linear` types
-below for how that works. One consequence: if you declare your own type also named
-`Handle`, it silently inherits that same linearity, which can be surprising. Avoid
-reusing that name for something unrelated.
+always linear, even without writing the `linear` keyword — see [`always_linear`
+types](#always_linear-types) below for how that works (and for the name-collision
+hazard that shared linearity brings).
 
 ### Linear Let Bindings
 

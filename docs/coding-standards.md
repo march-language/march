@@ -1,3 +1,10 @@
+---
+layout: docs
+title: Coding Standards
+nav_order: 15.7
+permalink: /docs/coding-standards/
+---
+
 # March Coding Standards
 
 Canonical reference for March style, safety, and idiom rules. This document is the
@@ -24,6 +31,15 @@ Each rule has:
 
 ## Naming
 
+> **Some violations never reach the linter — the parser rejects them first.** March
+> reserves leading-*uppercase* identifiers for types, modules, and constructors, and
+> leading-*lowercase* identifiers for values, so several "Bad" examples below (an
+> uppercase function name, a lowercase type/module/constructor name, an untyped state
+> field) are hard parse errors, not lint findings you'll ever see. The rules here exist
+> for the cases that *do* parse — a `camelCase` function name, a `snake_case`
+> constructor written where the parser happens to allow it — and it's those the linter
+> and LSP flag. Individual rules no longer repeat this caveat.
+
 ### `naming/snake-case-functions`
 
 **Severity:** warning  
@@ -47,11 +63,6 @@ fn my_function(x : Int) : Int do
 end
 ```
 
-(A leading-uppercase name like `MyFunction` isn't just a style violation — the
-parser reserves uppercase-initial identifiers for types/modules/constructors,
-so `fn MyFunction(...)` is a hard parse error, not something this lint rule
-needs to catch.)
-
 ---
 
 ### `naming/pascal-case-types`
@@ -70,11 +81,6 @@ type my_result = Ok(Int) | err(String)
 -- Good
 type MyResult = Ok(Int) | Err(String)
 ```
-
-(Both the lowercase type name and the lowercase constructor `err` are actually
-parser-level errors in March — a leading-lowercase identifier can't name a
-type or constructor at all, so the "Bad" form above doesn't parse, let alone
-compile-with-a-warning.)
 
 ---
 
@@ -98,9 +104,6 @@ mod MyModule do
 end
 ```
 
-(`mod my_module do ... end` is a parser-level error, not a lint warning — a
-leading-lowercase identifier can't name a module.)
-
 ---
 
 ### `naming/pascal-case-constructors`
@@ -119,9 +122,6 @@ type Status = active | inactive | pending(String)
 -- Good
 type Status = Active | Inactive | Pending(String)
 ```
-
-(Lowercase-initial constructor names are a parser-level error in March, not a
-lint warning — the "Bad" form above doesn't parse.)
 
 ---
 
@@ -638,8 +638,8 @@ Actor state is long-lived, potentially serialised, and inspected by supervision
 tooling — implicit types are a maintenance hazard.
 
 ```march
--- Bad (illustrative only — untyped state fields are actually a parser-level
--- error in March, not a lint warning; every state field requires `: Type`)
+-- Bad (illustrative only — untyped state fields don't parse; see the note at
+-- the top of Naming. Every state field requires `: Type`.)
 actor Cache do
   state { entries, ttl, hits }
   ...
