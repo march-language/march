@@ -8784,6 +8784,139 @@ let test_fn_own_cap_closure_excludes_module_wide () =
   Alcotest.(check (list string)) "own closure is EMPTY for pure_fn (module-wide needs excluded)" []
     (match List.assoc_opt "pure_fn" own with Some cs -> cs | None -> [])
 
+(* ── fn_transitive_capability_closures: per-function TRANSITIVE closure ───
+   caps(f) = own(f) ∪ ⋃ { caps(g) | g ∈ refs(f) }, to fixpoint.
+
+   The reference edges deliberately come from a FREE-VARIABLE walk, not from
+   a calls-only walk: a function passed as a VALUE (`apply_to(noisy, m)`) is a
+   real capability edge that a calls-only basis misses entirely, which is
+   fail-open. The "value reference" case below is the witness for that.
+
+   KEY SHAPES (observed, not assumed — see the notes on
+   [test_fn_cap_closure_declared_needs] and
+   [test_fn_cap_closure_two_level_nesting] above): the ENTRY module's own
+   top-level functions are keyed by their BARE name (TIR unwraps the entry
+   module, and [check_module_core] passes ~cap_qname_prefix:"" for it), while
+   a nested [DMod]'s functions are keyed by their dotted path relative to the
+   entry ("Lib.probe"). Both are exercised here.
+
+   Unlike [typecheck_full], this helper DESUGARS first, matching the real
+   driver (bin/main.ml desugars before [check_module]). That matters for the
+   edge basis: desugar flattens `A.b` from an [EField] chain into a single
+   dotted [EVar], and qualifies bare intra-module references inside nested
+   [DMod]s — so the reference names the closure sees here are the ones
+   production sees. *)
+let transitive_caps_of (src : string) (qname : string) : string list =
+  let m = parse_and_desugar src in
+  let (_errors, _tm, env) = March_typecheck.Typecheck.check_module_full m in
+  match
+    List.assoc_opt qname
+      (March_typecheck.Typecheck.fn_transitive_capability_closures env)
+  with
+  | None -> []
+  | Some caps -> List.sort compare caps
+
+(* The whole point: `public_reader` calls a PRIVATE helper that calls a
+   capability builtin. Its OWN caps are empty — the body scan sees a call to
+   `helper`, which is not in [builtin_cap_table] — so the pre-existing
+   own-closure says {} and a per-function propagation built on it would
+   UNDER-report. The transitive closure must say IO.FileRead. *)
+let test_transitive_cap_via_private_helper () =
+  let src = {|mod CapProbe do
+    pfn helper(p) do
+      match file_read(p) do
+        Ok(s) -> Ok(s)
+        Err(_) -> Err("boom")
+      end
+    end
+    fn public_reader(p) do helper(p) end
+  end|} in
+  Alcotest.(check (list string)) "IO.FileRead propagated through the helper"
+    [ "IO.FileRead" ] (transitive_caps_of src "public_reader")
+
+(* REJECT control: a genuinely pure function in the SAME module must NOT pick
+   the capability up. Without this, a closure that simply returned the
+   module's union would pass the accept case above. *)
+let test_transitive_cap_pure_sibling_unaffected () =
+  let src = {|mod CapProbe do
+    pfn helper(p) do
+      match file_read(p) do
+        Ok(s) -> Ok(s)
+        Err(_) -> Err("boom")
+      end
+    end
+    fn genuinely_pure(a, b) do a + b end
+  end|} in
+  Alcotest.(check (list string)) "pure sibling inherits nothing"
+    [] (transitive_caps_of src "genuinely_pure")
+
+(* A function referenced as a VALUE, never called directly. A calls-only edge
+   basis misses this entirely — the fail-open case. `shout` CALLS only
+   `apply_to` (which is pure); the capability arrives solely because `noisy`
+   is mentioned as an argument. *)
+let test_transitive_cap_through_value_reference () =
+  let src = {|mod CapValue do
+    pfn noisy(m) do print(m) end
+    fn apply_to(f, m) do f(m) end
+    fn shout(m) do apply_to(noisy, m) end
+  end|} in
+  Alcotest.(check (list string)) "IO.Console via a value reference"
+    [ "IO.Console" ] (transitive_caps_of src "shout")
+
+(* Mutual recursion must reach a fixpoint, not diverge: the iteration is over
+   a grow-only set on a finite lattice, so a cycle terminates. *)
+let test_transitive_cap_mutual_recursion_fixpoint () =
+  let src = {|mod Mutual do
+    fn ping(n) do
+      if n <= 0 do print("done") else pong(n - 1) end
+    end
+    fn pong(n) do ping(n - 1) end
+  end|} in
+  Alcotest.(check (list string)) "ping has IO.Console"
+    [ "IO.Console" ] (transitive_caps_of src "ping");
+  Alcotest.(check (list string)) "pong inherits it through the cycle"
+    [ "IO.Console" ] (transitive_caps_of src "pong")
+
+(* Nested-module key shape: a nested [DMod]'s functions are keyed "Lib.fn",
+   and desugar has already rewritten the intra-module reference to the dotted
+   `EVar "Lib.touch"` — so [resolve] must fall back to the RAW reference name
+   after the owner-prefixed form misses ("Lib.Lib.touch"). *)
+let test_transitive_cap_nested_module_dotted_refs () =
+  let src = {|mod Entry do
+    mod Lib do
+      pfn touch(p) do file_exists(p) end
+      fn probe(p) do touch(p) end
+    end
+  end|} in
+  Alcotest.(check (list string)) "dotted intra-module reference resolves"
+    [ "IO.FileRead" ] (transitive_caps_of src "Lib.probe")
+
+(* Anti-drift (the verification that matters): a per-function closure that
+   silently reports LESS than the module-level analysis would be a guarantee
+   hole, and one that reports MORE would be a false positive. The union over
+   a module's functions must equal the module's own capability set exactly —
+   an accept-only test cannot tell a working closure from one that returns
+   everything. *)
+let test_transitive_cap_union_matches_module_level () =
+  let src = {|mod Agg do
+    pfn reader(p) do
+      match file_read(p) do
+        Ok(s) -> Ok(s)
+        Err(_) -> Err("x")
+      end
+    end
+    fn a(p) do reader(p) end
+    fn b(m) do print(m) end
+    fn c(x) do x + 1 end
+  end|} in
+  let union =
+    [ "reader"; "a"; "b"; "c" ]
+    |> List.concat_map (transitive_caps_of src)
+    |> List.sort_uniq compare
+  in
+  Alcotest.(check (list string)) "union equals the module's own set"
+    [ "IO.Console"; "IO.FileRead" ] union
+
 (* migrate_state calling file_write with no declared needs -> IO-free error. *)
 let test_migrate_state_file_write_error () =
   let ctx = typecheck {|mod Counter do
@@ -12260,6 +12393,14 @@ let compiler_suites =
           Alcotest.test_case "migrate_state as extern fn: error"          `Quick test_migrate_state_extern_error;
           Alcotest.test_case "pure migrate_state + module needs: clean"   `Quick test_migrate_state_pure_with_module_needs_clean;
           Alcotest.test_case "pure migrate_state, no needs: clean"        `Quick test_migrate_state_pure_no_needs_clean;
+        ] );
+      ( "cap-closure", [
+          Alcotest.test_case "a cap reached only via a private helper propagates up" `Quick test_transitive_cap_via_private_helper;
+          Alcotest.test_case "a pure sibling does not inherit the module's caps"     `Quick test_transitive_cap_pure_sibling_unaffected;
+          Alcotest.test_case "a cap propagates through a function passed as a value" `Quick test_transitive_cap_through_value_reference;
+          Alcotest.test_case "mutually recursive functions reach a fixpoint"         `Quick test_transitive_cap_mutual_recursion_fixpoint;
+          Alcotest.test_case "a dotted nested-module reference resolves"             `Quick test_transitive_cap_nested_module_dotted_refs;
+          Alcotest.test_case "union over a module's functions matches module level"  `Quick test_transitive_cap_union_matches_module_level;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;

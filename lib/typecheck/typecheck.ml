@@ -782,6 +782,18 @@ type env = {
       [needs IO.Console] for its *handlers* must not be falsely flagged just
       because the module-wide merge would attribute that cap to it too.
       Read via [fn_own_capability_closures]. *)
+  fn_refs : (string, string list) Hashtbl.t;
+  (** Per-function REFERENCE edges: fully-qualified function name ("Mod.fn",
+      or the BARE name for a top-level function of the entry module — the same
+      key convention as [cap_closures]) -> every name its body references.
+
+      Collected with [free_vars_expr], NOT with [March_ast.Calls]: a function
+      passed as a VALUE ([map(xs, helper)]) is a real capability edge and a
+      calls-only walk misses it entirely, which is fail-open. Mutated in place
+      like [cap_closures], so it survives the per-declaration env folds.
+
+      Recorded at exactly the [record_fn_caps] call sites, so a key here is a
+      key there. Consumed only by [fn_transitive_capability_closures]. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -858,6 +870,7 @@ let make_env errors type_map = {
   deterministic_mod = false;
   cap_closures = Hashtbl.create 64;
   own_cap_closures = Hashtbl.create 64;
+  fn_refs = Hashtbl.create 64;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
@@ -8131,6 +8144,28 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let merged_own = March_caps.Cap_lattice.normalize (own_caps @ prior_own) in
     Hashtbl.replace env.own_cap_closures fn_qname merged_own
   in
+  (* Reference edges for the per-function TRANSITIVE capability closure
+     ([fn_transitive_capability_closures]). Purely additive bookkeeping — no
+     Check 1/1b/1c/2/3/4/5/6 diagnostic reads [env.fn_refs].
+
+     [free_vars_expr] rather than [March_ast.Calls]: the call-walker collects
+     only [EApp] callees, so a function passed as a VALUE — [apply(xs, noisy)]
+     — would contribute no edge and its capabilities would silently vanish
+     from the caller's closure. That is the fail-open direction. The
+     free-variable walk collects every [EVar], bare and dotted, and respects
+     shadowing, so an inner binding that happens to share a top-level
+     function's name does not manufacture a spurious edge.
+
+     [bound] starts empty (parameters are not pre-bound): a parameter name
+     that shadows nothing simply fails to resolve to any function key and
+     contributes nothing, whereas pre-binding it would be free to do but is
+     not needed for correctness. Merged with any prior entry, matching
+     [record_fn_caps]'s accumulate-across-call-sites behavior. *)
+  let record_fn_refs (fn_qname : string) (bodies : Ast.expr list) =
+    let refs = List.concat_map (free_vars_expr []) bodies in
+    let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
+    Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior))
+  in
   let used_caps : (string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
       let param_tys = List.filter_map (fun p ->
@@ -8177,7 +8212,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           let body_caps = List.filter_map (fun (call_name, _) ->
               List.assoc_opt call_name builtin_cap_table
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
-          record_fn_caps fn_qname body_caps
+          record_fn_caps fn_qname body_caps;
+          record_fn_refs fn_qname [ h.Ast.ah_body ]
         ) actor.actor_handlers;
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
@@ -8303,6 +8339,12 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         ) def.fn_clauses in
         let qname = cap_qname def.fn_name.txt in
         record_fn_caps qname (List.concat_map (List.map fst) per_clause);
+        (* Guards are part of the function too: a guard calling an impure
+           helper is as much a reference as the body is. *)
+        record_fn_refs qname
+          (List.concat_map (fun (c : Ast.fn_clause) ->
+               c.Ast.fc_body :: Option.to_list c.Ast.fc_guard)
+             def.fn_clauses);
         List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
@@ -8800,6 +8842,94 @@ let declared_cap_scopes (env : env) : (string * string option) list =
 let fn_own_capability_closures (env : env) : (string * string list) list =
   (* Sort by key for the same determinism reason as [fn_capability_closures]. *)
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []
+  |> List.sort (fun (a, _) (b, _) -> compare a b)
+
+(** [fn_transitive_capability_closures env] is each function's capability set
+    including everything it reaches through the reference graph:
+
+      caps(f) = own(f) ∪ ⋃ { caps(g) | g ∈ refs(f) }
+
+    computed to fixpoint. Sets only grow and the capability lattice is finite,
+    so this terminates; mutual recursion is handled by ITERATING rather than by
+    descending, so no cycle detection is needed.
+
+    Built on [own_cap_closures] and NOT [cap_closures], deliberately: the
+    latter folds in [module_wide_caps], which itself contains
+    module-granularly-propagated import caps, so deriving this from it would be
+    circular — and would reintroduce exactly the over-approximation this exists
+    to remove (importing [List] to call [map] would inherit [pmap]'s
+    [IO.Spawn]).
+
+    Edges come from [free_vars_expr] (see [env.fn_refs]), never from a
+    calls-only walk. A reference that does not resolve to a known function — a
+    local binding, a parameter, a constructor, an unloaded module's member —
+    contributes nothing: it has no entry, so the lookup yields [].
+
+    Coverage caveat, inherited from [record_fn_caps] and NOT introduced here:
+    [DLet] bodies, interface methods and impl methods get no [own(...)] entry,
+    so an edge pointing at one contributes nothing. That is fail-open, and must
+    be closed before this table is made load-bearing for enforcement.
+
+    Sorted by key for determinism, like [fn_capability_closures]. *)
+let fn_transitive_capability_closures (env : env) : (string * string list) list =
+  let current : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  Hashtbl.iter (fun k v -> Hashtbl.replace current k v) env.own_cap_closures;
+  (* Resolve a reference name to a function key.
+
+     Observed key shapes (verified against the existing cap-closure tests and
+     [bin/main.ml]'s [own_caps_of_this_module]): a top-level function of the
+     ENTRY module is keyed BARE ("public_reader") because [check_module_core]
+     passes ~cap_qname_prefix:"" for it, mirroring TIR's unwrapping of the
+     entry module; a nested [DMod]'s function is keyed by its dotted path
+     relative to the entry ("Lib.Sub.f").
+
+     Reference names arrive already DESUGARED: desugar's [qualify_module_refs]
+     rewrites a bare intra-module reference inside a nested [DMod] to the
+     dotted form ("Lib.touch"), and its [EField] arm flattens `A.B.c` into a
+     single dotted [EVar] — while the entry module's own top-level bodies keep
+     bare names. So both spellings occur, and both must resolve: try the
+     owner-module-prefixed form first (bare reference from a nested module),
+     then the raw name (an already-dotted reference, or an entry-level bare
+     one). *)
+  let resolve (owner : string) (r : string) : string option =
+    let qualified =
+      match String.rindex_opt owner '.' with
+      | Some i -> String.sub owner 0 i ^ "." ^ r
+      | None -> r
+    in
+    if Hashtbl.mem current qualified then Some qualified
+    else if Hashtbl.mem current r then Some r
+    else None
+  in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    Hashtbl.iter (fun fn_qname refs ->
+        let own = Option.value ~default:[] (Hashtbl.find_opt current fn_qname) in
+        let from_refs =
+          List.concat_map (fun r ->
+              match resolve fn_qname r with
+              | None -> []
+              | Some key -> Option.value ~default:[] (Hashtbl.find_opt current key))
+            refs
+        in
+        (* [List.sort_uniq] BEFORE normalize is load-bearing, not tidiness:
+           [Cap_lattice.normalize] drops caps SUBSUMED by another, but its
+           filter skips the [other <> c] case, so it does NOT drop an exact
+           DUPLICATE. Without the dedup, [own @ from_refs] grows by one copy of
+           each already-held cap on every sweep, the value never compares equal
+           to the previous one, and the fixpoint spins forever. Observed as a
+           hang on the very first test case before this was added. *)
+        let merged =
+          March_caps.Cap_lattice.normalize (List.sort_uniq compare (own @ from_refs))
+        in
+        if List.sort compare merged <> List.sort compare own then begin
+          Hashtbl.replace current fn_qname merged;
+          changed := true
+        end)
+      env.fn_refs
+  done;
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) current []
   |> List.sort (fun (a, _) (b, _) -> compare a b)
 
 (* =================================================================
