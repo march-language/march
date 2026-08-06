@@ -312,6 +312,10 @@ let build_defs ~root (m : A.module_) : (string, RC.fn_sig option) Hashtbl.t =
 
 let suggest ?(root = Sys.getcwd ()) ?(budget = default_budget)
     ~(is_user : A.span -> bool) ~(target : string) (m : A.module_) : t list =
+  (* [Ob.with_scratch]: the probes below reset and refill the ledger AND the
+     per-call-site index from a hypothesis module; leaving that behind
+     corrupts any later consumer.  See [Obligation.with_scratch]. *)
+  Ob.with_scratch @@ fun () ->
   let defs = build_defs ~root m in
   let all = PI.enum_fns [] m.A.mod_decls in
   let self = m.A.mod_name.A.txt ^ "." in
@@ -344,6 +348,8 @@ let suggest ?(root = Sys.getcwd ()) ?(budget = default_budget)
 (** Sweep every user function, reporting only those with a proposal. *)
 let suggest_all ?(root = Sys.getcwd ()) ?(budget = default_budget)
     ~(is_user : A.span -> bool) (m : A.module_) : t list =
+  (* Scratch ledger+index for the whole sweep — see [suggest] above. *)
+  Ob.with_scratch @@ fun () ->
   let defs = build_defs ~root m in
   PI.enum_fns [] m.A.mod_decls
   |> List.filter (fun (_, (fd : A.fn_def)) -> is_user fd.A.fn_name.A.span)

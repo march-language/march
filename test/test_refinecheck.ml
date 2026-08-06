@@ -8579,6 +8579,96 @@ let no_panic_errors (src : string) : string list =
 let has_no_panic_error src = no_panic_errors src <> []
 let has_no_panic_error_count src = List.length (no_panic_errors src)
 
+(* ── The suggestion probes must not move the verdict ───────────────────────
+   [no_panic_errors] with the `--refine-suggest*` probes interleaved BETWEEN
+   [Refine_check] (which populates [Obligation.by_span]) and
+   [Panic_surface_by_proof] (which reads it) — the position bin/main.ml's
+   `compile` actually ran them in when this was found.
+
+   Each probe [Obligation.reset]s and then refills the ledger AND the
+   per-call-site index by re-walking a HYPOTHESIS module: the user's program
+   with a speculative contract spliced into one signature.  With the index left
+   in that state, [Panic_surface_by_proof] read a hypothesis's verdicts as the
+   program's, and `cap no_panic` flipped in BOTH directions on a
+   diagnostic-only flag:
+
+     - fail-OPEN: an unguarded `List.tail` compiled clean, because a probe had
+       hypothesised `{List(Int) | len(_) > 0}` on the parameter and recorded
+       `Proved` at that very span.  A capability that promises no panics,
+       silently voided by passing `--refine-suggest-all` (or by `forge refine`,
+       which shells out to `--check --refine-suggest-json`).
+     - fail-CLOSED: a correctly-guarded call ERRORED, because the last
+       hypothesis probed left no `Proved` at that span.
+
+   Both directions are asserted below, and they must stay that way: a fix that
+   closed only the fail-open one (say, by making an absent verdict louder) would
+   pass a one-sided test while breaking every correct program under the flag.
+
+   Deliberately runs the probes in the OLD, hazardous position rather than the
+   fixed one.  bin/main.ml now runs the two consumer passes BEFORE the printers,
+   but ordering is an invariant no reader of [by_span] can see; the probes are
+   also non-destructive now ([Obligation.with_scratch]), and this harness is
+   what pins THAT.  Ordering the harness the safe way would make it pass with
+   the real defect still in place.
+
+   The budget is small on purpose: the unsound fixture's polluting candidate is
+   the very first one tried, so a large budget only buys solver time. *)
+let no_panic_errors_under_suggestion_probes (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  (* The fixture is parsed from a string, so its spans carry the empty
+     filename; the prepended stdlib decls carry real paths.  Same split
+     [no_panic_errors] uses to filter diagnostics. *)
+  let is_user (sp : March_ast.Ast.span) =
+    sp.March_ast.Ast.file = "" || sp.March_ast.Ast.file = "<unknown>"
+  in
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        (* The printer, in its old position.  Results discarded — the subject
+           is the side effect on the verdict index, not the advice.
+
+           [Precond_infer] only, matching plain `--refine-suggest-all`, and NOT
+           chased with a [Postcond_infer] sweep: a postcondition probe's last
+           walk is over a tree whose PRECONDITIONS are unmodified, so it tends
+           to refill the index with something close to the truth and mask the
+           very corruption under test.  That is not a fix — which sweep runs
+           last is a user's choice of flag — but it does neuter the assertion,
+           and an earlier draft of this test passed against the unfixed
+           compiler for exactly that reason. *)
+        ignore
+          (March_refinecheck.Precond_infer.suggest_all ~budget:20 ~is_user m
+            : March_refinecheck.Precond_infer.t list);
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+let has_no_panic_error_probed src =
+  no_panic_errors_under_suggestion_probes src <> []
+
 (* Same as [no_panic_errors], with `random.march` prepended alongside
    `list.march` and prelude, for Task 5's `Random.choice_weighted` fixtures
    (whose contract is `{List((a, Float)) | len(_) > 0}` — the first name in
@@ -8695,8 +8785,54 @@ let only_unverified_is (pred : string) (src : string) : bool =
   hints <> []
   && List.for_all (fun h -> contains h ("precondition `" ^ pred ^ "`")) hints
 
+(* Fixtures for the probe-interference pair.  Kept next to each other and
+   deliberately minimal: the ONLY difference is the parameter's refinement, so
+   the pair isolates the verdict rather than any other property of the code. *)
+let probe_unguarded_src =
+  "mod PSUnguarded do\n\
+  \  cap no_panic\n\
+  \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+   end\n"
+
+(* TWO guarded functions, not one, and that is load-bearing.  The fail-CLOSED
+   direction needs the sweep to move ON from the function under assertion:
+   [Precond_infer.prune] rebuilds a tree holding only the CURRENT target, so
+   after `g`'s probe the index holds nothing at all for `f`'s call site — and
+   "no verdict recorded here" is (correctly, fail-closed) an error.  With a
+   single-function fixture the last walk is that same function's, the index
+   happens to end up right, and the assertion passes against the unfixed
+   compiler.  It did; that is why there are two. *)
+let probe_guarded_src =
+  "mod PSGuarded do\n\
+  \  cap no_panic\n\
+  \  fn f(xs : {List(Int) | len(_) > 0}) : List(Int) do List.tail(xs) end\n\
+  \  fn g(ys : {List(Int) | len(_) > 0}) : List(Int) do List.tail(ys) end\n\
+   end\n"
+
 let no_panic_proof_suite =
-  [ (* THE POINT OF THIS TASK.  Inverted from test_compiler.ml's
+  [ (* ── Regression: `--refine-suggest*` must not move the verdict ──────────
+       See [no_panic_errors_under_suggestion_probes].  Four assertions, not
+       two: each fixture is checked WITHOUT the probes as well, so a harness
+       that stopped exercising the pipeline at all (or a fixture that stopped
+       compiling the way it reads) fails loudly instead of agreeing with
+       itself. *)
+    gated "cap no_panic: unguarded List.tail errors with AND without probes"
+      (fun () ->
+        Alcotest.(check bool)
+          "errors without probes" true (has_no_panic_error probe_unguarded_src);
+        Alcotest.(check bool)
+          "errors with --refine-suggest probes interleaved" true
+          (has_no_panic_error_probed probe_unguarded_src))
+
+  ; gated "cap no_panic: guarded List.tail is clean with AND without probes"
+      (fun () ->
+        Alcotest.(check bool)
+          "clean without probes" false (has_no_panic_error probe_guarded_src);
+        Alcotest.(check bool)
+          "clean with --refine-suggest probes interleaved" false
+          (has_no_panic_error_probed probe_guarded_src))
+
+  ; (* THE POINT OF THIS TASK.  Inverted from test_compiler.ml's
        [test_cap_no_panic_list_tail_guarded_still_error], which Task 1 pinned
        with the docstring "blunt until Task 3" — the two together document the
        before/after. *)

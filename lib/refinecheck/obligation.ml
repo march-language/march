@@ -99,6 +99,40 @@ let by_span : (March_ast.Ast.span, t list) Hashtbl.t = Hashtbl.create 64
    established for it, which is strictly worse than reading nothing. *)
 let reset () = log := []; Hashtbl.reset by_span
 
+(* Run [f] against a SCRATCH ledger+index, then put the real ones back.
+
+   The suggestion probes ([Precond_infer]/[Postcond_infer]) work by calling
+   [reset] and re-walking a HYPOTHESIS module — the user's program with a
+   speculative contract spliced in — and reading the resulting counts back.
+   That is fine for the ledger, which they only ever consult through
+   [count_debt].  It was NOT fine for [by_span]: the printers run in the middle
+   of the pipeline, so anything downstream that keys on a call site read the
+   last hypothesis's verdicts as if they were the real program's.  That was
+   live: `--refine-suggest-all` flipped `cap no_panic` in BOTH directions — a
+   provably-unguarded `List.tail` compiled clean, and a correctly-guarded one
+   errored.
+
+   The pipeline order was fixed too (the consumers now run before the
+   printers), but ordering alone is a rule nobody can see: the next consumer of
+   [by_span] added after the printers would silently inherit the same bug.
+   This makes the probes non-destructive instead, so the invariant is enforced
+   where it is violated rather than by remote convention.
+
+   [Hashtbl.copy] is a shallow copy, which is exactly right — the values are
+   immutable [t list]s, and [record] replaces bindings rather than mutating
+   them. *)
+let with_scratch (f : unit -> 'a) : 'a =
+  let saved_log = !log in
+  let saved_index = Hashtbl.copy by_span in
+  let restore () =
+    log := saved_log;
+    Hashtbl.reset by_span;
+    Hashtbl.iter (fun k v -> Hashtbl.replace by_span k v) saved_index
+  in
+  match f () with
+  | v -> restore (); v
+  | exception e -> restore (); raise e
+
 let record (o : t) : unit =
   log := o :: !log;
   Hashtbl.replace by_span o.span (o :: Option.value ~default:[] (Hashtbl.find_opt by_span o.span))

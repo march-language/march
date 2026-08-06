@@ -7815,7 +7815,18 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
 (** Walk an expression and collect all direct function call names.
     Returns [(fn_name, span)] for every EApp where the callee is a bare
     variable or a qualified module-path field access.  Used by the
-    body-scanning pass to detect builtin capability uses. *)
+    body-scanning pass to detect builtin capability uses.
+
+    KEEP IN SYNC with [March_refinecheck.Panic_surface_by_proof.calls_in_expr],
+    which is a structural copy of this walk (it carries a second span per site,
+    so it cannot simply call this one; [march_refinecheck] also depends on
+    [march_typecheck], not the reverse, so the sharing would have to go the
+    other way).  That copy is what enforces `cap no_panic` for every name in
+    [panic_surface_contracted] — those names were REMOVED from this module's
+    syntactic ban rather than double-checked, so the drift is fail-OPEN: a new
+    [Ast.expr] form added here and not there makes a call that can panic
+    compile clean inside a capability that promised it cannot. Add new
+    expression forms to BOTH. *)
 let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     : (string * Ast.span) list =
   match e with

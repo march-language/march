@@ -63,6 +63,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--refine-suggest*` silently changed `cap no_panic`'s verdict, in both
+  directions.** The refinement *suggestion* printers work by re-checking your
+  program with a speculative contract spliced into one signature, and they ran
+  in between the pass that records each call site's verdict and the pass that
+  reads it — so `cap no_panic` was judged against a hypothesis rather than
+  against your code. Adding `--refine-suggest-all` (or `--refine-suggest`,
+  `--refine-suggest-post`, `--refine-suggest-post-all`, or running
+  `forge refine`, which shells out to `march --check --refine-suggest-json`)
+  could make an unguarded `List.tail` inside a `cap no_panic` module compile
+  clean — a capability that promises no panics, voided by a diagnostic-only
+  flag — and could equally make a correctly guarded call fail. `march test`
+  was unaffected, so the two pipelines disagreed. The consumer passes now run
+  before the printers, and the suggestion probes no longer disturb the verdict
+  index at all, so a `--refine-suggest*` run reports exactly what the same
+  command without the flag reports.
+
 - **A `@[measure]` that silently proved nothing now says so.** A measure whose
   value is a constructor field read (`PVec(n,_,_,_) -> n` — how a
   count-carrying container like `Array` writes `length`) is accepted, passes
