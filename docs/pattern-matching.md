@@ -105,7 +105,7 @@ end
 match pair do
   (0, _) -> "starts with zero"
   (_, 0) -> "ends with zero"
-  (a, b) -> int_to_string(a + b)
+  (a, b) -> String.from_int(a + b)
 end
 ```
 
@@ -134,8 +134,8 @@ type Point = { x : Float, y : Float }
 fn describe_point(p : Point) : String do
   match p do
     { x: 0.0, y: 0.0 } -> "origin"
-    { x: x, y: 0.0 }   -> "on x-axis at " ++ float_to_string(x)
-    { x: x, y: y }     -> "at " ++ float_to_string(x) ++ ", " ++ float_to_string(y)
+    { x: x, y: 0.0 }   -> "on x-axis at " ++ String.from_float(x)
+    { x: x, y: y }     -> "at " ++ String.from_float(x) ++ ", " ++ String.from_float(y)
   end
 end
 ```
@@ -187,7 +187,7 @@ type Route  = { origin : Origin, secure : Bool }
 
 fn where_to(r : Route) : String do
   match r do
-    { origin: { host: "localhost", port: p } } -> "local:" ++ int_to_string(p)
+    { origin: { host: "localhost", port: p } } -> "local:" ++ String.from_int(p)
     { origin: { host: h } }                    -> "remote:" ++ h
   end
 end
@@ -202,7 +202,7 @@ type Reply = { status : Int, body : String }
 fn handle(r : Option(Reply)) : String do
   match r do
     Some({ status: 200, body: b }) -> "ok " ++ b
-    Some({ status: s })            -> "http " ++ int_to_string(s)
+    Some({ status: s })            -> "http " ++ String.from_int(s)
     None                           -> "no response"
   end
 end
@@ -242,7 +242,7 @@ And inside a tuple, which is how you dispatch on two values at once:
 match (reply, retries) do
   ({ status: 200 }, _) -> "done"
   (_, 0)               -> "giving up"
-  (_, n)               -> "retrying, " ++ int_to_string(n) ++ " left"
+  (_, n)               -> "retrying, " ++ String.from_int(n) ++ " left"
 end
 ```
 
@@ -330,19 +330,11 @@ fn describe_json(x : Json.JResult) : String do
 end
 ```
 
-> **Known compiler bug, compiled backend only:** the qualified form
-> is only reliably safe here because both colliding `Ok`/`Err` constructors
-> above carry a `String` payload (same runtime representation). If the two
-> colliding types' same-named constructor carries payloads with a *different*
-> representation (e.g. one module's `Ok(Int)` vs another's `Ok(String)`), the
-> compiled backend nondeterministically crashes (`march: out of memory`) or
-> returns garbage data even though every reference is correctly
-> module-qualified and the interpreter is always correct. Minimal repro:
-> nest `mod A do type TA = Ok(Int) | Err(String) end` and
-> `mod B do type TB = Ok(String) | Err(String) end` in one file, then compile
-> and run a function that pattern-matches `B.Ok(data) -> data` on a
-> `B.Ok("hi")` value — the same-shape-payload case (both `Ok(Int)`, or both
-> `Ok(String)`, as above) is unaffected.
+The qualified form above is reliably safe because both colliding `Ok`/`Err`
+constructors carry a `String` payload (same runtime representation). When the
+colliding constructors carry payloads of *different* representations, the
+compiled backend has an open bug — see [Known limitations](#known-limitations)
+at the end of this page.
 
 ### Negative Integer Patterns
 
@@ -477,14 +469,6 @@ match n do
 end
 ```
 
-> **Note (resolved):** an earlier version of this document warned that a
-> guard expression using `==`/`!=`/`>=`/`<=`/`&&`/`||`/`++` needed
-> parenthesizing when followed by another guarded arm, due to a parser
-> arm-boundary-lookahead limitation. Verified live: this no longer
-> reproduces — chained guards using any of these operators, with no
-> parens, parse and evaluate correctly. The parens in the example above
-> are harmless but no longer necessary.
-
 Guards on function heads work the same way:
 
 ```march
@@ -610,14 +594,6 @@ match do
 end
 ```
 
-> **Note (resolved):** an earlier version of this document warned that each
-> condition needed parenthesizing when chaining two or more cond arms using
-> a comparison/logical operator (`>=`, `<=`, `==`, `!=`, `&&`, `||`, `++`),
-> citing an arm-boundary-lookahead parser limitation. Verified live: this no
-> longer reproduces for any of these operators, chained or mixed, with or
-> without a trailing wildcard arm. The parens above are harmless but no
-> longer necessary.
-
 This is equivalent to a chain of `if/else` but reads more cleanly.
 
 ---
@@ -637,13 +613,6 @@ else
   Err(AuthTimeout) -> reply(503, "Service unavailable")
 end
 ```
-
-> **Note (resolved):** an earlier version of this document warned that
-> multiple `else` arms had to be crammed onto **one line**, separated by
-> `|`, because splitting them across lines (as above) failed to parse.
-> Verified live: multi-line `else` arms parse and dispatch correctly now —
-> each of the three arms above is independently reachable and gives the
-> right reply for its error case.
 
 Each `<-` binding: if the expression matches the pattern, execution continues with the binding in scope. On mismatch, control passes to the `else` block (or the non-matching value propagates if there's no `else`).
 
@@ -726,10 +695,24 @@ match score do
 end
 ```
 
-> See the note under "Guards" above — parenthesizing `>=`/`<=`/`==`/etc.
-> guards when chaining more than one is no longer required (fixed).
-
 A guard that fails causes the clause to be skipped and the next clause is tried. A function with no matching clause (after guards) panics at runtime — make the last clause unconditional or use a wildcard to ensure exhaustiveness.
+
+---
+
+## Known limitations
+
+**Qualified constructor patterns with differently-shaped payloads (compiled
+backend).** When two modules define a same-named constructor whose payloads have
+*different* runtime representations (e.g. one module's `Ok(Int)` versus another's
+`Ok(String)`), the compiled backend has an open bug: matching the qualified
+constructor nondeterministically crashes (`march: out of memory`) or returns
+garbage data, even though every reference is correctly module-qualified. The
+interpreter is always correct. Minimal repro: nest
+`mod A do type TA = Ok(Int) | Err(String) end` and
+`mod B do type TB = Ok(String) | Err(String) end` in one file, then compile and
+run a function that pattern-matches `B.Ok(data) -> data` on a `B.Ok("hi")` value.
+The same-shape-payload case (both `Ok(Int)`, or both `Ok(String)`) is unaffected,
+so the qualified patterns shown earlier on this page are safe.
 
 ---
 

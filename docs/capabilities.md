@@ -5,9 +5,9 @@ nav_order: 5.6
 permalink: /docs/capabilities/
 ---
 
-# Capabilities
+# Capabilities: March's Effect & Capability System
 
-March makes side effects **visible in your types** — zero runtime overhead, enforced at compile time. This guide explains what capabilities are, when to reach for each kind, when to leave them alone, and how they compose.
+March is a **capability-based language**: side effects are **visible in your types** — zero runtime overhead, enforced at compile time. This guide explains what capabilities are, when to reach for each kind, when to leave them alone, and how they compose.
 
 ---
 
@@ -30,7 +30,7 @@ That invisibility causes three recurring problems:
 
 **Audit blind spots.** Answering "which modules talk to the network?" in a large codebase means grepping and hoping — unless the compiler tracks it.
 
-March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph — with one honesty caveat worth stating up front: the *absence* of a capability declaration is a machine-verified, build-breaking guarantee **wherever `Cap(X)` flows through a signature** (a function/actor/extern parameter, or a transitive `use` of another module that requires one) — that surface is enforced as a hard error. A module that calls an IO builtin directly in a function *body*, without ever threading a `Cap(X)` through any signature, is instead flagged with a warning-level hint: informative, but `--check` still exits 0. See "What the compiler tells you," below, for both sides of that line, live-verified.
+March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph. The *strength* of the guarantee depends on **how** a capability is used — a hard, build-breaking error wherever `Cap(X)` flows through a signature, and an advisory warning for a bare IO-builtin call in a function body. That distinction is stated once, canonically, under ["What the compiler tells you"](#what-the-compiler-tells-you) below; the rest of this page just refers back to it. To *audit* what a dependency or a compiled binary actually holds — rather than what a module declares — see [Capability Audit]({{ site.baseurl }}/docs/capability-audit/).
 
 ```march
 mod Price do
@@ -60,7 +60,7 @@ end
 
 ---
 
-## IO permission caps
+## IO capabilities
 
 Every module that touches external resources declares `needs`:
 
@@ -80,10 +80,8 @@ The compiler enforces this transitively **when the capability flows through a si
 broader ancestor, e.g. `needs IO`), or the build fails with a clear message telling you
 which import requires which cap — e.g. a `Caller` module `use`ing `Server` without
 `needs IO.Network` gets `` module `Caller` imports `Server` which requires
-`Cap(IO.Network)`, but `IO.Network` is not declared in `needs`. ``. This is a hard
-compile error for the signature/`use`/extern surface — see "What the compiler tells
-you," below, for the separate, weaker case where a module reaches for an IO builtin
-directly in a function body without ever putting `Cap(X)` in a signature.
+`Cap(IO.Network)`, but `IO.Network` is not declared in `needs`. `` (This signature/`use`/`extern`
+surface is the hard-error side of the line drawn in ["What the compiler tells you"](#what-the-compiler-tells-you).)
 
 ### Capability hierarchy
 
@@ -98,7 +96,7 @@ IO
 ├── IO.Network
 │   ├── IO.NetConnect   — outbound TCP, WebSocket
 │   │   ├── IO.NetConnect.TLS  — encrypted transport (tls_connect, tls_accept, …)
-│   │   └── IO.Database — database connections (declaration-only; child of NetConnect)
+│   │   └── IO.Database †  — database connections (child of NetConnect)
 │   └── IO.NetListen    — bind + listen on a port
 ├── IO.Process          — env vars, child processes, process exit
 ├── IO.Clock            — wall clock, monotonic time
@@ -106,10 +104,15 @@ IO
 ├── IO.Signal           — OS-signal watchers (Signal.watch/unwatch/raise)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
-├── IO.Telemetry        — telemetry/observability emission (declaration-only)
+├── IO.Telemetry †      — telemetry/observability emission
 └── IO.Foreign          — calling unverified C (extern blocks)
     └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
 ```
+
+**†  declaration-only** — the compiler accepts the `needs` as a surface-contract
+annotation but does not scan for specific builtins behind it (there is no dedicated
+builtin set to attribute to it). It makes the concern visible to callers; it is not
+enforced by a body scan the way the other capabilities are.
 
 A module that declares `needs IO` can pass `Cap(IO)` to any function that requires a narrower cap. Use `cap_narrow` to produce a sub-capability — it's free, compile-time only:
 
@@ -174,11 +177,55 @@ $ echo $?
 0
 ```
 
-Follow the hint either way — it's always correct, and cleaning up the warning keeps a module's `needs` list an accurate account of what it does. But **don't rely on the warning to block a merge or a release**: it won't. If you need "this module absolutely cannot read files" as a hard, CI-enforced guarantee, thread `Cap(IO.FileRead)` through the relevant signatures so the violation lands on the ERROR side of this line, not the WARNING side.
+Follow the hint either way — it's always correct, and cleaning up the warning keeps a module's `needs` list an accurate account of what it does. But **don't rely on the warning to block a merge or a release**: it won't. For a hard, CI-enforced guarantee you have two options: thread `Cap(IO.FileRead)` through the relevant signatures so the violation lands on the ERROR side of this line, or build with `--cap-strict`, below.
 
-### When *not* to use IO caps
+### `--cap-strict` — the declared set as a hard ceiling
+{#cap-strict}
 
-**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee of the ERROR-level kind above **only for the signature/`use`/`extern` surface** — the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import, so this guarantee is strongest when the functions in question actually take `Cap(X)` parameters (or `use` something that does). A module with no `needs` that calls IO builtins purely in function bodies will typecheck (`--check` exits 0) with only advisory warnings, not a rejection — see above.
+`march --cap-strict` turns `needs` from a floor into a ceiling: the build fails
+if **any** module's emitted code uses a capability that module did not declare.
+
+```
+$ march --cap-strict --compile -o app app.march
+-- CAPABILITY CEILING --
+module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`
+
+--cap-strict: 1 capability ceiling violation(s).
+```
+
+Three things make it stronger than the warnings above.
+
+**It covers every route to a capability.** The check runs against the code the
+compiler is about to emit, not the surface syntax, so a direct builtin call, a
+call through a stdlib wrapper like `File.write`, and a builtin handed out as a
+value all collapse into the same rule. Re-routing a call through a helper does
+not evade it.
+
+**It applies per module, including dependencies that never opted in.** March
+dependencies ship as source, so the check runs on your build of their code. A
+dependency declaring only `needs IO.Console` whose helper reads `/etc/passwd`
+builds clean by default and fails under `--cap-strict`. You do not need the
+publisher's cooperation.
+
+**It fails closed.** A capability the compiler cannot attribute to any module —
+reached only through an indirect call — is reported as a violation rather than
+passed, because that is exactly the route an attacker would use.
+
+Because attribution charges a stdlib-mediated call to the *calling* module, the
+standard library's own declarations are not involved: the module that called
+`File.write` is the one required to declare `needs IO.FileWrite`.
+
+It is opt-in, and it is strict — most existing code needs `needs` declarations
+added before it passes, `needs IO.Console` most commonly. `IO.Foreign` is
+excluded: `extern` blocks are already an error when undeclared, and what linked
+C code does is outside the capability model entirely.
+
+To re-check the same ceiling on a binary you did not build, see
+[`forge cap inspect --strict`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary).
+
+### When *not* to use IO capabilities
+
+**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee for the signature/`use`/`extern` surface; a module that only calls IO builtins in function bodies typechecks with advisory warnings rather than a rejection (see ["What the compiler tells you"](#what-the-compiler-tells-you)).
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels "less precise." Accurate beats narrow-but-wrong.
 
@@ -318,11 +365,7 @@ A module with `cap no_panic` must not contain any expression that can panic at r
 
    - **No more transitive blame.** Before, an unprovable `List.tail(xs)` inside a helper produced one error at the helper *and* one at every local caller of it. Now it produces exactly ONE error, at the real call site — matching how division safety has always reported. If you are wondering why an error you used to see on a caller has "moved" to the callee, this is why. `panic`/`panic_`/`todo_`/`unreachable_` and `Array.get`/`Array.set`/`Array.pop` keep their transitive blame unchanged.
    - **One error per call site, not per function.** The old check reported at most one panic-surface error per function, whichever call it happened to find first. The proof-based check decides each call on its own, so a function containing two unprovable `List.tail` calls now reports two errors instead of one. Nothing new is being rejected — the same function was already rejected — you simply see every offending call at once instead of fixing them one round-trip at a time.
-2. **Division safety** — proves every integer divisor is non-zero via the Z3 SMT solver. Both literal divisors (`a / 0` → immediate error) and variable divisors are handled:
-   - Variable with an Int refinement `{v | pred}`: Z3 discharges `pred ⊢ v ≠ 0`; fast syntactic short-circuit for common patterns (`v > 0`, `v >= 1`, `v != 0`, `v < 0`).
-   - Let-bound variable: Z3 discharges `var = rhs ⊢ var ≠ 0` with param assumptions injected.
-   - **Enclosing `if` guards count**, on either branch: `if d != 0 do n / d else 0 end` needs no refinement at all, and neither does the `else` side of `if d == 0 do 0 else n / d end`. Guards are read through `&&`, `||` and `not`, so `if p > 0 && d > 0 do n / d` and `if p <= 0 || d <= 0 do 0 else n / d end` both discharge. A conjunctive fact is discharged by either side; a disjunctive one only when *both* sides prove the divisor non-zero on their own — `if p > 0 || d > 0 do n / d` is still an error, since `d` may be the arm that does not hold.
-   - No refinement or unsupported expression: conservative error.
+2. **Division safety** — proves every integer divisor is non-zero via the Z3 SMT solver. The rule of thumb: a divisor is discharged by a literal, by an enclosing `if`/`when` guard (read through `&&`/`||`/`not`, on either branch), or by an `Int` refinement on the parameter it came from; anything the solver can't settle is a conservative error. The precise guard semantics (how conjunctive and disjunctive facts discharge, let-bound divisors, rebinding) live in [Refinement Types → `cap no_panic`]({{ site.baseurl }}/docs/refinement-types/#cap-no_panic--divisions-that-cant-panic).
 3. **Non-exhaustive `match` ban** — inside a `cap no_panic` module, a `match` that doesn't cover every constructor is an ERROR, not just the ordinary non-blocking exhaustiveness warning every other module gets: an uncaught pattern is a runtime panic ("no matching clause"), and `cap no_panic` exists precisely to rule that class of failure out.
 
 When Z3 is absent, `cap no_panic` is still conservatively enforced — unverifiable divisions are treated as errors.
@@ -435,12 +478,11 @@ hint: this call uses IO.FileRead but mod Config does not declare `needs IO.FileR
 hint: add `needs IO.FileRead` to the module body.
 ```
 
-This is informational, and it is **not necessarily backed by a type error** — do not
-assume one is coming. The type checker enforces `needs` as a hard error only when
-`Cap(X)` reaches a signature, a transitive `use`, or an `extern` block (see "What the
-compiler tells you," above). A hint attached to a plain body call to an IO builtin, with
-no `Cap(X)` in any signature, can appear on a program that otherwise checks clean — the
-hint is the whole story in that case, not a preview of a rejection.
+This is informational and **not necessarily backed by a type error** — a hint on a
+plain body call can appear on a program that otherwise checks clean, so it is the whole
+story in that case, not a preview of a rejection. See ["What the compiler tells
+you"](#what-the-compiler-tells-you) for exactly when a hint is instead backed by a hard
+error.
 
 ---
 
@@ -507,91 +549,7 @@ end
 
 ## Runtime behaviour
 
-All `Cap(X)` values are **runtime-erased**. They compile to `null` in LLVM IR and to `VUnit` in the interpreter. No allocation, no indirection, no overhead. Enforcement of the capability *types* is purely at compile time — but a compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup; see [OS-level enforcement](#os-level-enforcement--sandboxing-the-compiled-binary) below.
-
----
-
-## OS-level enforcement — sandboxing the compiled binary
-
-Capability *types* are checked at compile time and then erased (above). That verifies your March code, but it says nothing about what the process may do once it is running: an `extern` C call, a `dlopen`, or a raw syscall is past the point the compiler can see. This is the [`IO.Foreign`](#ioforeign--calling-unverified-c) boundary, and the gap [`forge audit`]({{ site.baseurl }}/docs/capability-audit/#what-this-does-and-does-not-prove) is explicit about not closing. March can close it at the OS level, turning the declared capability set into an actual confinement.
-
-There are two mechanisms — one imposed on the process from outside, one built into it.
-
-### `forge cap run` — externally imposed (the stronger one)
-
-`forge cap run` launches a binary under a sandbox that *forge* installs before the program gets control:
-
-```
-$ forge cap run ./build/myapp                        # policy from the binary's own claim
-$ forge cap run --allow-only IO.Console ./untrusted   # policy YOU choose
-```
-
-For a binary you do **not** trust, pass `--allow-only`: deriving the policy from the binary's own claim only tells you what it admits to, which is worthless against code trying to hide. Where a capability cannot be enforced by the platform's available primitive, `forge cap run` reports it as **advisory** per capability rather than pretending to enforce it. This is the stronger of the two mechanisms, because the launcher — not the code being confined — chooses the policy.
-
-### `--cap-sandbox` — self-imposed (defense in depth)
-
-Compiling with `--cap-sandbox` embeds a **deny-default** profile, derived from *this program's own* declared capabilities, that the binary installs on itself at startup before any user code runs:
-
-```
-$ march --compile --cap-sandbox -o build/myapp app.march
-```
-
-- **macOS** — a Seatbelt (SBPL) profile via `sandbox_init()`. Deny-default, then each declared capability opens a specific hole: `IO.FileWrite` allows writes (narrowed to the path scopes you declared, otherwise blanket), `IO.Network` allows sockets, `IO.Process` allows fork. `IO.FileRead` is **advisory** here — dyld must map system libraries before any user code exists, so the baseline allows reads unconditionally and a scoped read rule would be decorative.
-- **Linux** — an unprivileged in-process **seccomp-bpf** filter (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). One syscall class is denied per *withheld* capability: no `IO.Network` blocks `socket`/`socketpair`, no `IO.Process` blocks `execve`/`execveat`, no `IO.FileWrite` blocks the write path — denied calls return `EPERM`. `IO.FileRead` is not enforced here either, because seccomp filters syscall *numbers*, not paths; path-scoped reads come from `forge cap run`'s mount namespace instead.
-
-Installation **fails closed**: if the sandbox cannot be installed, the program refuses to run rather than continue unconfined.
-
-`--cap-sandbox` is **opt-in defense-in-depth**, not a guarantee against a hostile *publisher* — whoever builds the binary chooses whether to compile it in, so a malicious author simply omits it. Its purpose is a binary *you* built and trust, deployed somewhere `forge` is not the launcher — under systemd, a supervisor, a container entrypoint — the exact case `forge cap run` cannot reach. When you control the launcher, prefer `forge cap run`.
-
-Because both mechanisms confine the **whole process**, they bound even the code the compiler cannot see — `extern` C, `dlopen`, raw syscalls. They are the enforcement counterpart to [`forge cap inspect`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary): `inspect` *reads* what a binary holds; these *enforce* what it may do.
-
----
-
-## Hot-deploy authorization — node-local admission control
-
-When using `forge deploy hot` to upgrade a running application, the node has a second opportunity to enforce capability discipline at deployment time — after signature verification, before the new code is loaded.
-
-> This section covers the **node-side policy gate**. There is also a **client-side monotonicity gate** — a deploy that widens a function's authority beyond the running version aborts unless you pass `--grant-cap`. Both gates, with a full worked example (a console-only handler that gains `file_write`, and how each gate responds), are in the [Hot Code Reload guide → Capability-safe deploys]({{ site.baseurl }}/docs/hot-code-reload/#capability-safe-deploys).
-
-### How it works
-
-A hot deploy activates only the **functions that changed** (each is sent as a separate signed activation message). For **each activated function**, `forge deploy hot` embeds that function's own inferred IO capabilities — the capabilities its own body actually requires — in the message. Admission is checked per activated function, not over the whole artifact. (This granularity matters: `--hot-reload` links the entire standard library, so a *whole-artifact* capability set would be dominated by the stdlib's footprint and identical for every app — useless for a policy. Gating on the changed function's own caps is what makes the policy discriminating.) The trust boundary is: the **base server binary is trusted** — the operator built and started it, with a policy — and each **hot-patched function** is what the gate governs.
-
-The receiving node, for each activated function:
-
-1. **Recomputes the capability set** — normalizes the function's declared caps and hashes them with BLAKE3, reproducing the digest that was signed during the deploy.
-2. **Tamper-checks** — compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen. The tamper check is **unconditional** even when the function declares no capabilities: a genuinely cap-free function has the fixed digest `blake3("")`, so a stripped capability field on a signed message is detected rather than silently admitted.
-3. **Applies the deployment policy** — if `MARCH_DEPLOY_POLICY` is set (a file path), the node verifies that every capability the activated function declares is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts.
-
-### Configuring the policy
-
-Set the `MARCH_DEPLOY_POLICY` environment variable to a file path:
-
-```bash
-export MARCH_DEPLOY_POLICY=/etc/march/deploy-policy.txt
-```
-
-The policy file is line-delimited. Each non-empty, non-comment line is a permitted capability path:
-
-```
-# /etc/march/deploy-policy.txt
-IO
-IO.FileRead
-IO.NetConnect.TLS
-IO.Clock
-```
-
-An empty policy file or absent `MARCH_DEPLOY_POLICY` ⇒ permissive (all activations admitted). This is the default for backward compatibility. A policy constrains what *hot-patched* functions may do; it does not retroactively constrain the trusted base binary the operator already deployed.
-
-### Threat model and scope
-
-The policy is **authorization on a self-reported manifest** — a defense-in-depth layer, not a sandbox. A party with the signing key can lie about what capabilities the code uses. The node admission gate proves:
-
-- The artifact was signed by the expected entity (Phase 4 ed25519 signature).
-- The declared capability set has not been tampered with in transit (BLAKE3 tamper-check).
-- The declared capabilities are within a static policy envelope (subsumption check).
-
-It does **not** prove that the code actually *uses* only those capabilities — only that the manifest claims it does, and the claim is signed and untampered. Runtime enforcement via `cap no_panic`, `cap no_alloc`, FFI sandboxing, or OS-level confinement can provide stronger guarantees. For most deployments, the combination of compile-time capability verification + signed manifests + policy gates is sufficient.
+All `Cap(X)` values are **runtime-erased**. They compile to `null` in LLVM IR and to `VUnit` in the interpreter. No allocation, no indirection, no overhead. Enforcement of the capability *types* is purely at compile time — but a compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup, and a running node can gate hot deploys against it. Both live on their own page: see [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) (OS-level sandboxing via `forge cap run` / `--cap-sandbox`, and node-local hot-deploy admission control).
 
 ---
 

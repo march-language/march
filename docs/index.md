@@ -13,7 +13,7 @@ permalink: /
 
 **Elixir's concurrency model. ML's type safety. Native performance.**
 
-March is a statically-typed functional language built for concurrent and distributed systems — the kind you'd normally reach for Elixir or Erlang to build, but with a static type system, algebraic data types, and compilation to native binaries via LLVM.
+March is a statically-typed, capability-based functional language built for concurrent and distributed systems — the kind you'd normally reach for Elixir or Erlang to build, but with a static type system, a compile-time effect system, algebraic data types, and compilation to native binaries via LLVM.
 
 Write code that reads like Elixir. Get compile-time guarantees that your message protocols are correct, your resources aren't leaked, and your actor supervision trees handle faults the way you expect. Run at native speed with no garbage collector pauses.
 
@@ -212,12 +212,22 @@ end
 
 ## Documentation
 
+### Start here
+
+New to March? Read these three in order, then branch out.
+
 | Guide | What it covers |
 |-------|---------------|
-| [Try It Out](playground.md) | Interactive REPL — run March in your browser |
-| [Installation](installation.md) | Build from source, prerequisites |
+| [Installation](installation.md) | Prebuilt binaries (recommended); building from source |
 | [Getting Started](getting-started.md) | Hello world, compiling, running the REPL |
 | [Language Tour](tour.md) | Variables, functions, types, pipes — the essentials |
+
+Prefer to poke at it live? [Try It Out](playground.md) runs March in your browser.
+
+### Guides and reference
+
+| Guide | What it covers |
+|-------|---------------|
 | [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
 | [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
 | [Type System](types.md) | ADTs, records, generics, Option, Result |

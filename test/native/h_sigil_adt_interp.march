@@ -1,0 +1,122 @@
+-- Regression: `~H` interpolation of a non-IOList ADT misread the value as an
+-- IOList, producing silent data loss, unescaped output, and a SIGSEGV.
+--
+-- `march_html_auto_escape` (runtime/march_extras.c) ended with "Constructor
+-- with tag >= 0: treat as IOList and flatten verbatim" and delegated to
+-- mh_iolist_size / mh_iolist_copy, which branch on the raw heap tag:
+--   tag 1 -> read field 0 as a march_string*
+--   tag 2 -> walk field 0 as a cons list
+-- Constructor tags are numbered PER TYPE starting at 0, so every user ADT
+-- collides with IOList = Empty | Str(String) | Segments(List(IOList)):
+--   tag 0 (Point)      -> rendered as the empty string
+--   tag 1 (B(String))  -> field 0 emitted RAW AND UNESCAPED  (XSS)
+--   tag 2 (C(_, _))    -> field 0 walked as a cons list      (SIGSEGV)
+-- The interpreter was correct throughout.
+--
+-- Fix: llvm_emit dispatches on the argument's static TIR type instead of
+-- letting the runtime guess from a heap tag.  Types the runtime genuinely
+-- recognises (String, immediates, real IOLists) still take the runtime path;
+-- everything else is stringified with march_value_to_string first, then
+-- escaped as a String.
+--
+-- KNOWN SEPARATE DEFECT — the `#<tag:N>` below is NOT intended output.
+-- Compiled `march_value_to_string` has no constructor-name metadata, so it
+-- renders any user ADT as `#<tag:N>` where the interpreter renders
+-- `Point(1, 2)`.  That gap predates this fix and is independent of `~H`:
+-- `to_string(Point(1, 2))` alone already differs the same way on main.  It is
+-- filed separately; see specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md.
+-- What this test pins is the SECURITY property — the ADT payload is never
+-- emitted raw, and the `<`/`>` that do appear are escaped.  Once ctor names
+-- land, update .expected to the interpreter's rendering.
+
+mod HSigilAdtInterp do
+  type Point = Point(Int, Int)
+  type Multi = A | B(String) | C(String, String)
+  type Box = Bx(List(b))
+
+  -- Reaching the ~H hole through a closure stored in a container: mono cannot
+  -- specialise this, so the hole's TIR type is an unresolved TVar. That is the
+  -- genuinely undecidable case -- an IOList wants flattening, an ADT must not
+  -- be flattened, and nothing at runtime can tell them apart. It resolves to
+  -- "stringify", the failure that is not a vulnerability.
+  pfn apply_first(box, v) do
+    match box do
+    Bx(fs) ->
+      match fs do
+      Cons(f, _) -> f(v)
+      Nil        -> IOList.empty()
+      end
+    end
+  end
+
+  fn main() : Unit do
+    -- tag 0, two fields: was silently empty
+    let p = Point(1, 2)
+    println("tag0=" ++ IOList.to_string(~H"<p>${p}</p>"))
+
+    -- tag 1, String field: was emitted raw and unescaped
+    let b = B("<script>")
+    println("tag1=" ++ IOList.to_string(~H"<p>${b}</p>"))
+
+    -- tag 2: crashed walking field 0 as a cons list
+    let c = C("xx", "yy")
+    println("tag2=" ++ IOList.to_string(~H"<p>${c}</p>"))
+
+    -- tag 2 with non-pointer fields: also crashed
+    let a = A
+    println("nullary=" ++ IOList.to_string(~H"<p>${a}</p>"))
+
+    -- Values that were already correct must stay correct.
+    let s = "<b>x</b>"
+    println("string=" ++ IOList.to_string(~H"<p>${s}</p>"))
+    let nested = ~H"<i>inner</i>"
+    println("iolist=" ++ IOList.to_string(~H"<p>${nested}</p>"))
+    let safe = Html.raw("<b>bold</b>")
+    println("safe=" ++ IOList.to_string(~H"<p>${safe}</p>"))
+
+    -- Option/Result are NOT exempt. Only `Some(x)` is niche-optimised down to
+    -- its payload; `None`, `Ok` and `Err` are ordinary boxed constructors and
+    -- collided with IOList exactly like any user ADT. Measured on main before
+    -- the fix:
+    --   None            -> <p></p>        (empty)
+    --   Ok("<script>")  -> <p></p>        (payload silently dropped)
+    --   Err("<b>")      -> <p><b></p>     (RAW, UNESCAPED -- XSS)
+    -- `Result` is pervasive, so this was the widest instance of the bug.
+    let some : Option(String) = Some("<script>")
+    println("some=" ++ IOList.to_string(~H"<p>${some}</p>"))
+    let none : Option(String) = None
+    println("none=" ++ IOList.to_string(~H"<p>${none}</p>"))
+    let ok : Result(String, String) = Ok("<script>")
+    println("ok=" ++ IOList.to_string(~H"<p>${ok}</p>"))
+    let err : Result(String, String) = Err("<b>")
+    println("err=" ++ IOList.to_string(~H"<p>${err}</p>"))
+
+    -- A bare List is the most realistic instance of all: `Cons` is tag 1 with
+    -- the element in field 0, aliasing `IOList.Str`, so before the fix
+    -- `${some_string_list}` emitted its HEAD ELEMENT raw and unescaped.
+    -- Measured on main: <p><script>alert(1)</script></p>
+    let l = Cons("<script>alert(1)</script>", Nil)
+    println("list=" ++ IOList.to_string(~H"<p>${l}</p>"))
+    let rec = { name: "<script>", age: 3 }
+    println("record=" ++ IOList.to_string(~H"<p>${rec}</p>"))
+    let tup = ("<script>", 7)
+    println("tuple=" ++ IOList.to_string(~H"<p>${tup}</p>"))
+
+    -- Polymorphic (TVar) hole. Before the fix these were NOT covered by
+    -- dispatching on the static type -- an early version of this fix kept the
+    -- runtime path for TVar on the assumption that mono concretises every ADT
+    -- interpolation, and it does not. Measured on main:
+    --   B("<script>") through a closure -> <p><script></p>  RAW, UNESCAPED
+    --   C("xx", "yy")  through a closure -> SIGSEGV
+    let cb = Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))
+    println("poly_tag1=" ++ IOList.to_string(apply_first(cb, B("<script>"))))
+    let cb2 = Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))
+    println("poly_tag2=" ++ IOList.to_string(apply_first(cb2, C("xx", "yy"))))
+    -- The accepted cost of failing safe: a genuine IOList partial reaching a
+    -- polymorphic hole is stringified rather than flattened. Visibly wrong,
+    -- but not a vulnerability. Fixing it needs a runtime type id --
+    -- specs/todos/2026-08-05-boxed-adt-type-id.md.
+    let cb3 = Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))
+    println("poly_iolist=" ++ IOList.to_string(apply_first(cb3, ~H"<i>ok</i>")))
+  end
+end

@@ -1582,6 +1582,39 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     in
     [impl_one "compare" ["a"; "b"] body]
 
+  | "Json" when March_caps.Cap_surface_ty.caps_in_type_def td <> [] ->
+    (* Capability unforgeability (R3).  A capability may be received and
+       narrowed, never constructed; a derived Json codec over a `Cap` position
+       is a construction route, so the derive is refused outright rather than
+       generated with a hole in it.
+
+       Why this is caught HERE and not by the generated code failing to
+       typecheck: `encoder_for_ty` and `decode_value_at` below both fall back
+       to "assume the nested type also derives Json" for any type they do not
+       recognise.  `Cap(X)` is not recognised, so the codec was generated over
+       the capability position without complaint and the decoder ran far
+       enough to return a Json.DecodeError — a runtime failure that looks like
+       bad input rather than a refused operation.
+
+       Rejecting at the `derive` declaration also puts the diagnostic on a
+       real span.  Every declaration this branch generates carries
+       `dummy_span`, so an error raised from inside the generated codec would
+       have nowhere useful to point.
+
+       Both directions are refused together (see the message): a rule that
+       rejected only decoding would leave `derive Json` half-expanded, with a
+       working encoder beside a refused decoder. *)
+    let caps = March_caps.Cap_surface_ty.caps_in_type_def td in
+    let cap = List.hd caps in
+    Err.error errors ~span:iface_span
+      (Printf.sprintf
+         "`Cap(%s)` cannot be deserialized — a capability may only be \
+          received, never constructed, so `%s` cannot derive Json.\n\
+          hint: hold the capability in a separate value and pass it as a \
+          parameter, keeping `%s` free of capability fields."
+         cap type_name.txt type_name.txt);
+    []
+
   | "Json" ->
     (* derive Json: generate standalone to_json and from_json functions.
        to_json(x : T) : JsonValue   — structural encoding to JSON

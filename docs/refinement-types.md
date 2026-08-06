@@ -154,127 +154,15 @@ end
 refinement predicate — you can't call it as an ordinary function. In plain code, like
 the guard above, use `List.length` instead; the solver knows they mean the same thing.)
 
-### The solver really does connect `List.length` to `len`
-
-That last sentence is worth dwelling on, because it hasn't always been true. The
-checker treats the qualified `List.length` as another name for the `len` measure, so a
-guard you'd write anyway — `if List.length(ys) > 0` — establishes exactly the fact the
-contract `{List(Int) | len(_) > 0}` is asking for:
-
-```march
-fn first_or(ys : List(Int), d : Int) : Int do
-  if List.length(ys) > 0 do head(ys) else d end   -- proved
-end
-
-fn broken(ys : List(Int)) : Int do
-  if List.length(ys) == 0 do head(ys) else 0 end  -- compile error
-end
-```
-
-The second one is a compile error because under `len(ys) == 0` the predicate
-`len(ys) > 0` can *never* hold — a definite failure, which is the bar March requires
-before it says anything.
-
-The connection is deliberately narrow, since attaching `len`'s meaning to the wrong
-function is how you'd get a false alarm on correct code. Only the **qualified**
-`List.length` counts (a bare `length` is left alone), and only while it's still the
-standard library's own. If your program defines its own `List.length` — however it
-spells the definition: a `fn`, a module-level `let`, an `extern` block, an interface
-or impl method — or ships a forked `List` via `MARCH_LIB_PATH`, the connection is
-dropped and you're back to the older behaviour: the obligation is skipped, quietly,
-rather than proved.
-
-One shape got more forgiving: a selector-less `use Foo.List` (importing the
-module itself, not a member of it) resolves its target since 2026-07-31,
-rather than assuming the worst from the name alone. `use Analytics.List`
-where `Analytics.List` only has a `size` function leaves `List.length`
-connected to `len` exactly as if the `use` weren't there; a `use` whose
-target really does define `length` withdraws it, same as before. `alias Foo.List
-as List` and a named import (`use Foo.{List}`) are unaffected by this and stay
-unconditional — narrowing them wasn't shown to be worth it.
-
-**"Dropped" means dropped for the whole compilation unit, not just the file you're
-editing.** The check is syntactic and unit-global: it doesn't ask whether the
-competing binding could ever win at your call site, because answering that needs a
-resolver this pass doesn't have. One genuine competitor anywhere in the unit —
-including inside a `MARCH_LIB_PATH` dependency you never opened, and remembering that
-the compiler prepends the entire standard library to every compilation — disables the
-alias program-wide. That's a real cost, and it's the direction the checker errs in on
-purpose: over-withdrawing loses a proof (silence), while under-withdrawing would put a
-wrong fact in the assumption set and flag correct code.
-
-A glob import (`import Foo`, `use Foo.*`) is the one case that got more careful:
-it withdraws the alias only if `Foo` **actually provides** a competing `List`, resolved
-by walking the unit's own module structure. Before that, the bare presence of a glob
-was enough — and since `stdlib/system.march` contains a single `import Process`, and
-the stdlib is prepended to everything, the alias was in fact withdrawn for *every March
-program ever compiled*. The feature was inert in production and nothing noticed,
-because a skipped obligation exits 0 exactly like a proved one. If the glob's target
-can't be resolved, it still withdraws.
-
-A second, independent guard sits alongside it: a `use` or `alias` competes only when
-it is the **program's**, never the standard library's own — the same span exclusion
-the member-definition half has always applied. The two are ANDed, so a glob withdraws
-only when it is your code *and* its target really carries a competitor.
-
-### The same for strings — but only the byte-valued names
-
-`len` measures a `String` too, and the same connection is made for
-`String.byte_size` and the `string_byte_length` builtin:
-
-```march
-fn slug(s : {String | len(_) > 0}) : String do String.slice(s, 0, 1) end
-
-fn label(t : String) : String do
-  if String.byte_size(t) > 0 do slug(t) else "?" end   -- proved
-end
-```
-
-Swap the guard for `String.byte_size(t) == 0` and that call becomes a compile error,
-the same way it does for lists.
-
-The catch is that `len` on a String counts **bytes**, so only byte-valued names get
-this treatment. `String.codepoint_count` counts codepoints — it returns 1 for `"é"`
-where `String.byte_size` returns 2 — and is left alone. So is `string_length`: it
-happens to be a byte length today, but the *name* suggests characters, and a
-connection made on a name that might later be corrected is a bug waiting to happen.
-Reach for `String.byte_size` in a guard; it says what it means.
-
-### A qualified spelling *inside* the predicate itself
-
-Everything above is about a **guard** — ordinary code, outside the `{...}`. Writing
-the qualified name **inside** the braces used to be a different, much easier mistake
-to make — it looked completely reasonable but silently did nothing:
-
-```march
-fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
-fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
-```
-
-As of 2026-08-03 both spellings above enforce the same contract. A refinement
-predicate is still not run through the general expression desugarer the way a
-function body is — no pipe desugaring, no multi-head-fn desugaring — but the one
-transformation that mattered here, flattening a module-path call head
-(`List.length(_)`) into the dotted form the `len` alias keys on, now runs over
-every `TyRefine` predicate (parameter, return, `let`-annotation — top-level
-and block-level alike — and record/variant field types alike). When the
-alias is live — no competing `List.length` in scope —
-the qualified spelling means exactly what `len` means, so `inner([])` above is
-rejected as a genuine precondition violation, the same as if you'd written `len(_)`.
-
-If a unit has [withdrawn the alias](#listlength-is-an-alias-of-the-len-measure) by
-defining its own competing `List.length`, the qualified spelling still enforces
-nothing (correctly — the alias genuinely doesn't hold there), and the checker still
-warns, still recommending the bare `len(_)` spelling:
-
-> `List.length` is a qualified call inside a refinement predicate. This spelling is
-> never reflected here, so the refinement enforces nothing. Use the bare spelling
-> `len` instead.
-
-The same applies to `String.byte_size`. Two shapes remain genuinely unhandled and
-still warn/stay silent as before: a record **field** call (`{Cfg | c.cb(1) > 0}`,
-never treated as a qualified call — see below) and a receiver that is itself a call
-(`f(x).g(y)`, not rendered as a path).
+> **Length guards count.** A guard you'd write anyway — `if List.length(ys) > 0`,
+> or `if String.byte_size(s) > 0` — establishes exactly the fact a `len`-bearing
+> contract like `{List(Int) | len(_) > 0}` asks for: the checker treats the qualified
+> `List.length`, `String.byte_size`, and the `string_byte_length` builtin as spellings
+> of the `len` measure (a bare `length`, `String.codepoint_count`, or `string_length`
+> does **not** count). The same holds for a qualified spelling written *inside* the
+> braces. The connection is narrow and occasionally withdrawn for a whole compilation
+> unit — see [Limitations](#limitations) for the summary and
+> [the appendix](#the-solver-really-does-connect-listlength-to-len) for the exact rules.
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
@@ -314,10 +202,9 @@ fn main() : Int do outer([1]) end
 ```
 
 Both calls are *proved* — `--refine-report` says `2 proved, 0 violated, 0 trusted, 0 skipped`.
-Until 2026-07-29 only the outer one was; `inner(ys)` was silently skipped, so a
-contract couldn't be threaded further than a single hop and you had to re-guard a
-list you'd already promised was non-empty. That's what makes the standard library's
-contracts worth having:
+A contract can be threaded through as many hops as you like without re-guarding a list
+you'd already promised was non-empty. That's what makes the standard library's contracts
+worth having:
 
 ```march
 mod Y do
@@ -383,10 +270,8 @@ let ys : {List(Int) | len(_) > 0} = []
 -- refinement violation: bound expression does not satisfy type annotation `len(_) > 0`
 ```
 
-Before 2026-07-30 that program compiled. The annotation was believed on sight, so
-`inner(ys)` came back **proved** — off a promise nothing had checked — and even
-`cap verified` accepted it. It was the one refined position in the language that
-obliged nobody.
+The annotation is checked, not believed on sight: it earns its fact only when the bound
+expression actually satisfies it.
 
 The usual stance still applies at the other end: an annotation the checker can
 neither prove nor refute is **skipped**, never reported. But it then grants no fact
@@ -562,9 +447,8 @@ inner(Leaf)                  -- error: size(Leaf) is 0
 inner(Node(Leaf, 5, Leaf))   -- fine: size is 1
 ```
 
-Worth flagging because this shape used to be a silent no-op: through 2026-07-29 the
-checker threw away the actual argument here and reasoned about an arbitrary tree
-instead, so `inner(Leaf)` compiled clean. Both directions are now checked.
+Both directions are checked: the checker reasons about the actual argument, so
+`inner(Leaf)` is rejected and `inner(Node(Leaf, 5, Leaf))` passes.
 
 ### The measure soundness gate
 
@@ -800,8 +684,8 @@ less is being checked) and a **floor** on proofs. The floor matters more than it
 sounds — a ceiling on its own is satisfied perfectly by a checker that raises no
 obligations at all, and the floor is read from a small fixture whose one obligation is
 *proved* by a `List.length` guard, so it collapses to zero the instant the measure
-alias stops working. That's precisely the failure that went unnoticed for a while:
-a skip and a proof both exit 0, and only the count can tell them apart.
+alias stops working. This is the failure mode the report exists to expose: a skip and a
+proof both exit 0, and only the count can tell them apart.
 
 Every skip says *why*: the predicate uses vocabulary the checker can't translate
 (`unreflectable-predicate`), the argument's own value didn't translate
@@ -903,25 +787,23 @@ the callee strict, and nested modules don't inherit it (they can't — the stand
 library arrives as sibling modules, and inheriting would turn all of it strict at
 once).
 
-It *does* now reach every declaration form in the module it's written in. The walk
-used to descend only into `fn` and nested `mod` and quietly ignore the rest, so a call
-inside an `impl` method, an `interface` default body, a top-level `let`, an actor
-handler or a `test` raised no obligation and had nothing to escalate. Both that walk
-and `cap no_panic`'s are now exhaustive, so a future declaration form is a compile
-error in the compiler rather than a new silent hole.
+It reaches every declaration form in the module it's written in — a call inside an
+`impl` method, an `interface` default body, a top-level `let`, an actor handler or a
+`test` all raise obligations that get escalated. Both this walk and `cap no_panic`'s are
+exhaustive over the declaration forms, so a future one is a compile error in the compiler
+rather than a new silent hole.
 
-Also covers **postconditions** now: an undischarged return refinement is a
+It also covers **postconditions**: an undischarged return refinement is a
 compile error under `cap verified` too, exactly as a precondition is — see
 [Postconditions](#postconditions) above for the example.
 
 One real limitation, and one escape hatch, worth knowing before you rely on it:
 
 - **A refinement in an `interface`'s own method signature isn't enforced —
-  and the compiler now tells you so.** Write `fn run : a -> {Int | _ > 0} -> Int`
+  and the compiler tells you so.** Write `fn run : a -> {Int | _ > 0} -> Int`
   in the interface and no call site is obliged by it. Nothing assumes it
-  either, so it's a missing check rather than an unsound one, but it used to
-  be a silent one — a contract that read like it worked and did nothing.
-  Since 2026-07-30 writing a refinement there produces a warning:
+  either, so it's a missing check rather than an unsound one. Writing a
+  refinement there produces a warning:
 
   > the interface signature of `run` carries a refinement, which enforces
   > nothing: an interface method signature is never read by the refinement
@@ -931,8 +813,7 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
   > and one on a parameter is enforced when the method name is unambiguous
   > (exactly one `impl` defines it and no top-level `fn` shares the name).
 
-  **Inside a `cap verified` module this is an error, not a warning** (decided
-  2026-08-03; see `specs/progress/2026-08-03-cap-verified-interface-signature-decision.md`).
+  **Inside a `cap verified` module this is an error, not a warning.**
   `cap verified`'s escalation otherwise fires only on undischarged obligations
   in the ledger, and an inert interface signature raises none — but the
   capability's whole promise is "if it compiles, it is proved," and this is
@@ -942,7 +823,7 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
   only a warning.
 
   The same silent-no-op shape exists for a `sig` ascription and an `extern`
-  declaration, and both warn too since 2026-08-01: `sig Store do fn put :
+  declaration, and both warn too: `sig Store do fn put :
   Int -> {Int | _ > 0} end` compiles clean while enforcing nothing, because
   a `sig` is an ascription on what a module exports, not a body a call could
   be checked against — write the refinement on the module's own `fn`
@@ -961,10 +842,10 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
   must never have. When the name is ambiguous the refinement binds
   **nobody** — it's stripped from the body too, so it can't discharge
   anything either. Unenforced means unusable in both directions, never
-  "assumed inside the body but demanded of no caller", which is exactly how
-  `fn run(b, k : {Int | k != 0})` once made `m / k` provable under
-  `cap no_panic` while `run(Box(4), 0)` compiled and then divided by zero.
-- **`@[trusted]` (since 2026-07-30) is a per-function escape hatch.** Annotate a
+  "assumed inside the body but demanded of no caller" — which would otherwise let
+  `fn run(b, k : {Int | k != 0})` make `m / k` provable under `cap no_panic`
+  while `run(Box(4), 0)` compiled and then divided by zero.
+- **`@[trusted]` is a per-function escape hatch.** Annotate a
   single function `@[trusted]` and any obligation inside it that the checker
   could not otherwise discharge is accepted as an assertion instead of an
   error — recorded as its own `Trusted` verdict in `--refine-report`, never
@@ -1018,9 +899,9 @@ nothing (`v * v >= 0`, true of every integer) is still an error, and so is one t
 solver can't settle. And on the `else` side of `if d == 0` the fact in scope is
 `not (d == 0)`, which discharges the division on its own.
 
-**It covers the whole module.** Until recently the division walk saw only `fn` and
-nested `mod` bodies, so this program passed `--check` with exit 0 and then died at run
-time with "division by zero":
+**It covers the whole module.** The division walk descends into every declaration form,
+not just `fn` and nested `mod` bodies — so this program is a compile error rather than a
+runtime "division by zero":
 
 ```march
 mod ImplDiv do
@@ -1046,14 +927,14 @@ mod ImplDiv do
 end
 ```
 
-It's a compile error now. Add the `if n != 0` guard and it's accepted again — the walk
+It's a compile error. Add the `if n != 0` guard and it's accepted — the walk
 reads the body, it doesn't just distrust it. Top-level `let`s, `interface` defaults,
 actor handlers, `app` hooks and `test` bodies are covered the same way.
 
 **A rebound name knows nothing about the old one.** Every fact the divisor check reads
 is keyed by a bare variable name — the path condition, the parameter's refinement, a
-`let`'s value — so rebinding that name has to retire all of them, and it didn't. All
-four of these passed `--check` and then panicked:
+`let`'s value — so rebinding that name retires all of them. Each of these is caught
+rather than silently accepted:
 
 ```march
 if d == 0 do 0 else (let d = 0; 10 / d) end     -- else side
@@ -1065,7 +946,7 @@ if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
 (Compressed onto one line each for comparison — March has no `;`, so the `let` really
 sits on its own line inside the branch.)
 
-A `let`, a local `fn`, a lambda parameter, a `let?` pattern or a `match` binder now
+A `let`, a local `fn`, a lambda parameter, a `let?` pattern or a `match` binder
 drops everything known about the outer variable of that name. Note which way this
 errs: in the ordinary refinement checker, losing a fact means silence, but here it
 means an *error*, so the retirement is deliberately over-eager. If you need the guard
@@ -1195,11 +1076,141 @@ dependent typing. Know the edges:
 
 ---
 
-## Where Refinements Resolve
+## Practical Rules
+
+1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
+   non-positive value is a genuine bug (a chunk size, an unguarded divisor), not
+   to every `Int`. Many March APIs already clamp defensively and have no real
+   precondition.
+2. **Guard, then call.** A precondition you can't satisfy with a literal is
+   discharged by an `if`/`when` guard right before the call.
+3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
+   can't derive, `assert(p)` makes it available — and documents the assumption.
+4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
+   keep if a predicate mentions it; keep them total, exhaustive, and structural
+   so they pass the gate.
+
+---
+
+## Appendix: the `List.length`↔`len` alias, in full
+
+*Skip unless a length guard you expected to work isn't discharging. Referenced from
+[Path Sensitivity](#path-sensitivity--guards-establish-facts) and
+[Limitations](#limitations). This is the exact rule for when a length guard counts as
+the `len` measure.*
+
+### The solver really does connect `List.length` to `len`
+
+The checker treats the qualified `List.length` as another name for the `len` measure, so
+a guard you'd write anyway — `if List.length(ys) > 0` — establishes exactly the fact the
+contract `{List(Int) | len(_) > 0}` is asking for:
+
+```march
+fn first_or(ys : List(Int), d : Int) : Int do
+  if List.length(ys) > 0 do head(ys) else d end   -- proved
+end
+
+fn broken(ys : List(Int)) : Int do
+  if List.length(ys) == 0 do head(ys) else 0 end  -- compile error
+end
+```
+
+The second is a compile error because under `len(ys) == 0` the predicate `len(ys) > 0`
+can *never* hold — a definite failure, which is the bar March requires before it says
+anything.
+
+The connection is deliberately narrow, since attaching `len`'s meaning to the wrong
+function is how you'd get a false alarm on correct code. Only the **qualified**
+`List.length` counts (a bare `length` is left alone), and only while it still resolves to
+the standard library's own. If your program defines its own `List.length` — however it
+spells the definition: a `fn`, a module-level `let`, an `extern` block, an interface or
+impl method — or ships a forked `List` via `MARCH_LIB_PATH`, the connection is dropped
+and you're back to the obligation being skipped, quietly, rather than proved.
+
+**"Dropped" means dropped for the whole compilation unit, not just the file you're
+editing.** The check is syntactic and unit-global: it doesn't ask whether the competing
+binding could ever win at your call site, because answering that needs a resolver this
+pass doesn't have. One genuine competitor anywhere in the unit — including inside a
+`MARCH_LIB_PATH` dependency you never opened, and remembering that the compiler prepends
+the entire standard library to every compilation — disables the alias program-wide.
+That's a real cost, and it's the direction the checker errs in on purpose:
+over-withdrawing loses a proof (silence), while under-withdrawing would put a wrong fact
+in the assumption set and flag correct code.
+
+The withdrawal rules for the specific import forms:
+
+- A selector-less `use Foo.List` (importing the module itself, not a member of it)
+  resolves its target: `use Analytics.List` where `Analytics.List` only has a `size`
+  function leaves `List.length` connected to `len`; a `use` whose target really does
+  define `length` withdraws it.
+- `alias Foo.List as List` and a named import (`use Foo.{List}`) withdraw the alias
+  unconditionally.
+- A glob import (`import Foo`, `use Foo.*`) withdraws the alias only if `Foo`
+  **actually provides** a competing `List`, resolved by walking the unit's own module
+  structure; if the glob's target can't be resolved, it still withdraws.
+- Either half of the guard applies only to the **program's** own bindings, never the
+  standard library's own. The two conditions are ANDed, so a glob withdraws only when it
+  is your code *and* its target really carries a competitor.
+
+### The same for strings — but only the byte-valued names
+
+`len` measures a `String` too, and the same connection is made for `String.byte_size`
+and the `string_byte_length` builtin:
+
+```march
+fn slug(s : {String | len(_) > 0}) : String do String.slice(s, 0, 1) end
+
+fn label(t : String) : String do
+  if String.byte_size(t) > 0 do slug(t) else "?" end   -- proved
+end
+```
+
+Swap the guard for `String.byte_size(t) == 0` and that call becomes a compile error, the
+same way it does for lists.
+
+The catch is that `len` on a String counts **bytes**, so only byte-valued names get this
+treatment. `String.codepoint_count` counts codepoints — it returns 1 for `"é"` where
+`String.byte_size` returns 2 — and is left alone. So is `string_length`: it happens to be
+a byte length today, but the *name* suggests characters, and a connection made on a name
+that might later be corrected is a bug waiting to happen. Reach for `String.byte_size` in
+a guard; it says what it means.
+
+### A qualified spelling *inside* the predicate itself
+
+Everything above is about a **guard** — ordinary code, outside the `{...}`. Writing the
+qualified name **inside** the braces enforces the same contract as the bare `len`:
+
+```march
+fn inner(xs : {List(Int) | List.length(_) > 0}) : Int do 0 end
+fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+```
+
+A refinement predicate is not run through the general expression desugarer the way a
+function body is — no pipe desugaring, no multi-head-fn desugaring — but the one
+transformation that matters here, flattening a module-path call head (`List.length(_)`)
+into the dotted form the `len` alias keys on, runs over every `TyRefine` predicate
+(parameter, return, `let`-annotation — top-level and block-level alike — and
+record/variant field types alike). When the alias is live — no competing `List.length`
+in scope — the qualified spelling means exactly what `len` means, so `inner([])` is
+rejected as a genuine precondition violation.
+
+If a unit has withdrawn the alias by defining its own competing `List.length`, the
+qualified spelling enforces nothing (correctly — the alias genuinely doesn't hold there),
+and the checker warns, still recommending the bare `len(_)` spelling:
+
+> `List.length` is a qualified call inside a refinement predicate. This spelling is
+> never reflected here, so the refinement enforces nothing. Use the bare spelling
+> `len` instead.
+
+The same applies to `String.byte_size`. Two shapes remain genuinely unhandled and still
+warn/stay silent: a record **field** call (`{Cfg | c.cb(1) > 0}`, never treated as a
+qualified call) and a receiver that is itself a call (`f(x).g(y)`, not rendered as a
+path).
+
+## Appendix: Where Refinements Resolve
 
 *This is a plumbing detail about how the checker looks up which function a call refers
-to, not something you need to know to start using refinements — feel free to skip to
-[Practical Rules](#practical-rules).*
+to, not something you need to know to start using refinements.*
 
 Refinement checking follows the same name resolution as the type checker:
 **direct named calls**, across modules, through **`alias`** and **`use`**:
@@ -1237,13 +1248,13 @@ mod Outer do
 end
 ```
 
-Before 2026-08-01 this call was checked against the *enclosing* `App.take_pos`
-instead — a false positive on correct code, since `Inner.go` never actually
-calls it.
+Checking this call against the *enclosing* `App.take_pos` instead would be a false
+positive on correct code, since `Inner.go` never actually calls it — so the checker
+resolves it the way the call really dispatches.
 
 ---
 
-## The `--no-measure-axioms` Flag
+## Appendix: The `--no-measure-axioms` Flag
 
 *Also a niche knob — only relevant if a measure-heavy build feels slow.*
 
@@ -1256,22 +1267,6 @@ only diagnostics, never the compiled artifact. Refinement checking of plain
 ```bash
 march --check --no-measure-axioms app.march
 ```
-
----
-
-## Practical Rules
-
-1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
-   non-positive value is a genuine bug (a chunk size, an unguarded divisor), not
-   to every `Int`. Many March APIs already clamp defensively and have no real
-   precondition.
-2. **Guard, then call.** A precondition you can't satisfy with a literal is
-   discharged by an `if`/`when` guard right before the call.
-3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
-   can't derive, `assert(p)` makes it available — and documents the assumption.
-4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
-   keep if a predicate mentions it; keep them total, exhaustive, and structural
-   so they pass the gate.
 
 ---
 

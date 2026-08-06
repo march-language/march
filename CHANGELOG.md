@@ -122,11 +122,86 @@ git log is authoritative for exact commits.
   (`List.hd`/`List.tl`/`List.min_elt`/`List.max_elt`/`String.nth`/
   `NativeArray.get`/`NativeArray.set`) named functions that don't exist under
   those names anywhere in the stdlib — removed as harmless drift. This is a
-  syntactic-only fix (no new mechanism); a properly *guarded* call to one of
-  the twelve is still rejected today, a known limitation a follow-up proof-
-  based check will lift.
+  syntactic-only fix (no new mechanism). A properly *guarded* call to one of
+  the twelve is accepted, but by the proof-based check described under
+  **Changed** above, not by this list.
+
+- **`~H` misread non-IOList ADTs as IOLists — unescaped output and a SIGSEGV.**
+  `march_html_auto_escape` ended by assuming any constructor with `tag >= 0` was
+  an `IOList` and flattening it verbatim. Constructor tags are numbered per type
+  from 0, so every ADT aliased `IOList`'s `Empty|Str|Segments`: a tag-1
+  constructor had its `String` field emitted **raw and unescaped**, a tag-2
+  constructor crashed walking field 0 as a cons list, and a tag-0 constructor
+  rendered empty. The widest case needed no custom type at all: `Cons` is tag 1
+  with the element in field 0, so interpolating a plain `List(String)` emitted
+  its head element raw and unescaped. `Option`/`Result` were not exempt — only `Some(x)` is
+  niche-optimised, so `Err("<b>")` leaked its payload unescaped and `Ok(...)`
+  was silently dropped. `Html.raw` content was also discarded whenever another
+  module declared a type named `Safe`. The interpreter was correct throughout;
+  this was compiled-only. The escaper now dispatches on the argument's static
+  type in `llvm_emit` rather than guessing from a heap tag. A hole whose type is
+  unresolved (a value reaching it through a closure stored in a container) is
+  stringified rather than flattened, since nothing at runtime can tell an
+  `IOList` from an ADT there; that makes a genuine `IOList` partial at such a
+  hole render `#<tag:N>` instead of its markup, which is a real but narrow
+  regression accepted over leaving an XSS and a crash in place.
+
+  Note one visible consequence: a user ADT interpolated into `~H` now renders as
+  `#<tag:N>` compiled, where the interpreter renders `Point(1, 2)`. That is a
+  pre-existing gap in compiled `to_string` (it has no constructor-name
+  metadata), now reachable from templates; tracked in
+  `specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md`.
 
 ### Added
+
+- **The root capability is granted to `main`, not taken.** `root_cap` can no
+  longer be referenced from ordinary code. Declare `fn main(cap : Cap(IO))` to
+  receive it and thread it to whatever needs it, narrowing with `cap_narrow`
+  along the way.
+
+  `root_cap` was an ordinary global of type `Cap(IO)` in scope in every module,
+  so a module declaring **no `needs` at all** could hold the root capability
+  and narrow it to any descendant — legitimately, because `cap_narrow` demands
+  exactly the parent it now had. That is authority from nothing.
+
+  `main` taking a `Cap(IO)` already worked and is unchanged; only the ambient
+  global is gone. Two contexts keep it, both scoped deliberately: `test` /
+  `describe` / `setup` bodies, which have no `main` to be granted from and
+  would otherwise make capability behaviour untestable, and the REPL. Both are
+  ambient authority in a place that cannot reach production code — a
+  dependency's test blocks do not run in a consumer's build.
+
+- **Capabilities are unforgeable: they can be received and narrowed, never
+  constructed.** `Cap(X)` may no longer appear in the result of `from_json` or
+  `from_json_events`, in the argument of `to_json`, or anywhere in a type that
+  `derive Json` generates a codec for. This is a hard error, not gated on
+  `--cap-strict`.
+
+  Previously `from_json` was typed with no constraint on what it produced, so
+  `let forged : Cap(IO) = from_json("{}")` typechecked — `--cap-strict`
+  included — and fabricated root authority from a string literal. It failed at
+  run time only because `from_json`'s return-type dispatch is unimplemented,
+  which is an open item to build.
+
+  Both directions are refused together: encoding a capability leaks nothing at
+  run time, but it manufactures the wire value a decoder would consume, and
+  `derive Json` generates both directions from one declaration.
+
+  One consequence worth knowing: a single `from_json` application can no longer
+  be used at two different result types. Decoding one string as two unrelated
+  types was already meaningless, since `from_json` dispatches on a single
+  determinable target type.
+
+- **`needs` now covers type declarations and `let` annotations.** A capability
+  named in a record field, a variant argument, or a `let` type annotation
+  counts toward that module's `needs` — including when it is nested inside a
+  container such as `List(Cap(X))`.
+
+  Previously `needs` was checked against function signatures only, so
+  `type Handle = { tok : Cap(IO.FileWrite) }` in a module declaring just
+  `needs IO.Console` typechecked clean. A module could name a
+  capability it never declared. These positions also count as *uses*, so
+  adding the missing declaration does not then report it as unused.
 
 - **`forge cap inspect --strict`** re-checks the capability ceiling on a
   binary you did not build. Binaries now carry each module's *declared* needs

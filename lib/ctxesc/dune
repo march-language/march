@@ -1,0 +1,9 @@
+; Contextual-escaping tables for the ~H sigil.
+;
+; specs/security/html-contexts.tbl is the SOURCE OF TRUTH; this library parses
+; it and (later, via emit_tables) generates both the OCaml and March copies.
+; See specs/security/README.md and
+; specs/plans/2026-08-05-contextual-autoescaping.md.
+(library
+ (name march_ctxesc)
+ (modules context tbl_parse automaton escape))

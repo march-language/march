@@ -350,6 +350,6 @@ march> MyModule.main()
 
 ## Next Steps
 
-- [Getting Started](getting-started.md) — first programs
-- [Standard Library](stdlib.md) — what's available in the REPL
-- [Tooling](tooling.md) — LSP for editor integration
+- [Getting Started]({{ site.baseurl }}/docs/getting-started/) — first programs
+- [Standard Library]({{ site.baseurl }}/docs/stdlib-guide/) — what's available in the REPL
+- [Tooling]({{ site.baseurl }}/docs/tooling/) — LSP for editor integration

@@ -8925,10 +8925,16 @@ let test_proof_cap_implicit_needs () =
 let test_proof_cap_pfn_forge_error () =
   (* A pfn inside the declaring module cannot mint a proof cap from nothing —
      Check 6 fires even though the module is the declaring module.
-     Use cap_narrow(root_cap()) so the body typechecks; the error is Check 6 specifically. *)
+     The Cap(IO) arrives as a PARAMETER so the body typechecks and the only
+     error is Check 6.  This used `cap_narrow(root_cap())` until 2026-08-05,
+     which was doubly wrong: R2 removed `root_cap` from ordinary code, and
+     `root_cap()` (the callable spelling) was ALREADY a typecheck error in its
+     own right — so this assertion passed whether or not Check 6 fired at all.
+     Taking the capability as a parameter makes the test non-vacuous. *)
   let src = {|mod Db do
     proof cap Migrated
-    pfn bad_private_forge() : Cap(Db.Migrated) do cap_narrow(root_cap()) end
+    needs IO
+    pfn bad_private_forge(c : Cap(IO)) : Cap(Db.Migrated) do cap_narrow(c) end
   end|} in
   let ctx = typecheck src in
   Alcotest.(check bool) "proof cap pfn forge: error for private function in declaring module" true (has_errors ctx)
@@ -11715,6 +11721,7 @@ declare i64  @march_io_read_byte()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_string_lit_static(ptr %s, i64 %len, ptr %cell)
 declare ptr  @march_html_auto_escape(ptr %v)
+declare ptr  @march_html_escape_ctx(i64 %id, ptr %v)
 declare i32  @march_record_shape_intern(ptr %desc)
 declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
 declare ptr  @march_record_keys(ptr %rec)

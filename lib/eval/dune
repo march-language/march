@@ -10,7 +10,7 @@
 (library
  (name march_eval)
  (modules (:standard \ discover_compress))
- (libraries march_ast march_modules march_scheduler march_coverage march_doctest unix digestif)
+ (libraries march_ast march_ctxesc march_modules march_scheduler march_coverage march_doctest unix digestif)
  (foreign_stubs
   (language c)
   (names compress_stubs eval_ffi_stubs ffi_marshal)

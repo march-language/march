@@ -1,0 +1,38 @@
+-- Regression: `Html.raw` content was silently dropped whenever some other
+-- module in the program also declared a type named `Safe`.
+--
+-- llvm_emit's verbatim-insertion arm for `Html.Safe` declines to fire on a
+-- short-name collision (TIR carries only `TCon ("Safe", _)`, so it genuinely
+-- cannot tell Html.Safe from Other.Safe). Before the fix that fell through to
+-- march_html_auto_escape's "tag >= 0 -> treat as IOList" guess, which read the
+-- Boxed Safe cell as an empty IOList: `<p></p>`, with the wrapped markup gone.
+--
+-- It now stringifies and escapes instead. That is degraded — you see the
+-- wrapper rather than the markup, because compiled march_value_to_string has
+-- no constructor-name metadata (see
+-- specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md) — but it is
+-- never empty and never raw, which is what this test pins.
+--
+-- Deliberately a separate file from h_sigil_adt_interp.march: declaring
+-- `Other.Safe` anywhere in a program makes EVERY `Safe` in it collide, which
+-- would silently destroy that test's coverage of the good verbatim path.
+--
+-- Asserted as booleans, not exact text: the stringified form embeds a raw
+-- constructor tag number that is stable per build but would break a golden
+-- diff on any unrelated tag renumbering.
+
+mod HSigilSafeCollision do
+  fn main() : Unit do
+    let s = Html.raw("<b>x</b>")
+    let out = IOList.to_string(~H"<p>${s}</p>")
+    -- Was `true` before the fix: the markup vanished entirely.
+    println("dropped=" ++ bool_to_string(string_contains(out, "<p></p>")))
+    -- Must never become `true`: that would mean unescaped verbatim insertion
+    -- of a value we could not prove was Html.Safe.
+    println("raw=" ++ bool_to_string(string_contains(out, "<b>x</b>")))
+  end
+
+  mod Other do
+    type Safe = Safe(Int)
+  end
+end

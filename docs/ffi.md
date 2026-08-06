@@ -12,6 +12,13 @@ March binds to native libraries through a stable C ABI — the same idea as BEAM
 shim against `runtime/march_ffi.h`, and link it through `forge.toml`. Rust crates
 bind through the ergonomic `march` crate, which rides the same C ABI.
 
+The payoff over a hand-written FFI is that ownership crosses the boundary
+*checked*: each heap argument is either `borrow`ed (March keeps it and frees it
+after the call) or `consume`d (ownership transfers into the binding), and the
+compiler threads the reference counts for you — so the common case needs no
+manual `march_dup`/`march_drop` and can't leak or double-free. The marshalling
+mechanics below are what make that ownership contract concrete for each type.
+
 ---
 
 ## Declaring externs

@@ -20,7 +20,7 @@
       --border: #0f2438;
       --text: #cce5f5;
       --text-muted: #5389ac;
-      --text-faint: #1e4060;
+      --text-faint: #3f6f94;
       --accent: oklch(65% 0.12 207);
       --accent-border: oklch(26% 0.09 215);
       --accent-text: #020c18;
@@ -28,7 +28,7 @@
       --syn-tp: oklch(82% 0.12 70);
       --syn-st: oklch(82% 0.11 200);
       --syn-nm: oklch(78% 0.09 265);
-      --syn-cm: oklch(42% 0.07 215);
+      --syn-cm: oklch(56% 0.06 215);
       --syn-op: oklch(57% 0.09 205);
       --syn-id: oklch(95% 0.02 207);
     }
@@ -85,7 +85,7 @@
       display: none; align-items: center; justify-content: center;
       background: none; border: 1px solid var(--border); color: var(--text-muted);
       cursor: pointer; padding: 7px 9px; border-radius: 5px; line-height: 1;
-      touch-action: manipulation;
+      min-width: 44px; min-height: 44px; touch-action: manipulation;
     }
     .m-nav-hamburger:hover { border-color: var(--text-faint); color: var(--text); }
     .m-nav-drawer {
@@ -182,7 +182,11 @@
       letter-spacing: -0.02em; color: var(--text); margin-bottom: 56px; line-height: 1.15;
     }
     .m-feature-grid {
-      display: grid; grid-template-columns: 1fr 1fr;
+      /* minmax(0,1fr), not 1fr: a plain 1fr is minmax(auto,1fr), so a wide
+         min-content in one column (the flip card's hidden benchmark table)
+         inflates that track and makes the columns unequal. minmax(0,…) clamps
+         both to an even half. */
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 1px; background: var(--border); border: 1px solid var(--border);
       border-radius: 8px; overflow: hidden;
     }
@@ -466,6 +470,8 @@
         March is a statically-typed functional language: actors and message passing from the BEAM,
         algebraic data types from ML, compiled to native binaries through LLVM. Perceus reference
         counting with in-place reuse means no garbage collector and no pauses, at Rust-like performance.
+        And side effects live in the type as capabilities — so what any module can touch is visible, and
+        auditable across your dependencies.
       </p>
       <div class="m-ctas">
         <a href="{{ site.baseurl }}/docs/getting-started/" class="m-btn-primary">Read the Docs</a>
@@ -555,6 +561,22 @@
         <h3 class="m-feature-h3">Deterministic memory, no collector.</h3>
         <p class="m-feature-p">Perceus reference counting reclaims memory the instant it's no longer used, at a point the compiler picks. Predictable latency, no collector, no pauses. Linear types guarantee file handles, sockets, and connections can't leak or double-free.</p>
         <pre class="m-feature-pre"><code id="linear-code"></code></pre>
+      </div>
+
+      <!-- REFINEMENT TYPES -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Refinement Types</p>
+        <h3 class="m-feature-h3">Preconditions an SMT solver proves</h3>
+        <p class="m-feature-p">Attach a predicate to a type — a range, a bound, a relationship between two arguments. The checker (Z3) reads your if-guards to prove it holds, so the invariant is guaranteed, not defensively re-checked — and the result carries its own proof back out.</p>
+        <pre class="m-feature-pre"><code id="refine-code"></code></pre>
+      </div>
+
+      <!-- CAPABILITIES -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Capabilities</p>
+        <h3 class="m-feature-h3">Least privilege, scoped to a single file</h3>
+        <p class="m-feature-p">A module declares exactly the effects it needs — here, read access to one file and nothing else. Reach outside that scope and it's a compile error, and forge audit diffs these across dependencies, so widening authority lands in review, not in production.</p>
+        <pre class="m-feature-pre"><code id="cap-code"></code></pre>
       </div>
 
     </div>
@@ -885,6 +907,33 @@ fn write_and_close(
   -- compile error if f used again
 end`;
 
+const REFINE = `fn withdraw(bal : {Int | _ >= 0},
+            amt : {Int | _ > 0 && _ <= bal}) : {Int | _ >= 0} do
+  bal - amt
+end
+
+-- amt arrives at runtime — the if-guard discharges the precondition
+fn on_withdraw(bal : {Int | _ >= 0}, amt : Int) : Int do
+  if amt > 0 && amt <= bal do
+    -- proved by the guard; drop it and it won't compile
+    withdraw(bal, amt)
+  else
+    bal
+  end
+end`;
+
+const CAP = `mod Config do
+  needs IO.FileRead("/etc/app.toml")   -- exactly one file
+
+  fn load() : Settings do
+    File.read("/etc/app.toml") |> parse
+  end
+end
+
+-- read anything else, and it won't compile:
+--   File.read("/var/secrets")
+--   ! outside the declared IO.FileRead scope`;
+
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let dark = true, heroTab = 0;
@@ -915,6 +964,8 @@ function renderFeatures() {
   document.getElementById('actor-code').innerHTML = hl(ACTOR);
   document.getElementById('type-code').innerHTML = hl(TYPES);
   document.getElementById('linear-code').innerHTML = hl(LINEAR);
+  document.getElementById('refine-code').innerHTML = hl(REFINE);
+  document.getElementById('cap-code').innerHTML = hl(CAP);
 }
 
 function renderHeroTabs() {

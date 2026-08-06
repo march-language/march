@@ -1,0 +1,15 @@
+html=&lt;b&gt;&amp;&quot;&#39;
+attr=a&quot; onload=&quot;x
+urlc=a%20b%26c
+urlw_bad=about:invalid#zSoyz
+urlw_case=about:invalid#zSoyz
+urlw_ok=https://example.com/a?b=c
+urlw_rel=/relative/path
+css=expression\28 alert\28 1\29 \29 
+js=\u003c/script\u003e
+none=<b>
+int=42
+iolist_html=<i>x</i>
+iolist_attr=&lt;i&gt;x&lt;/i&gt;
+safe_html=<b>ok</b>
+safe_attr=&lt;b&gt;ok&lt;/b&gt;

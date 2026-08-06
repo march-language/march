@@ -1,0 +1,30 @@
+-- EXPECT-ERROR: `Cap(IO.FileWrite)` used in module `BodyAnnCap` but `IO.FileWrite` is not declared in `needs`
+-- `needs` coverage reaches inside function BODIES (2026-08-05).
+--
+-- Check 1 read function SIGNATURES. A type annotation written inside a body
+-- is not part of any signature, so it escaped `needs` entirely and this
+-- typechecked with exit 0 under `--cap-strict`.
+--
+-- A LAMBDA PARAMETER is the sharpest witness, and deliberately not a `let`
+-- annotation. It needs no capability VALUE at all — naming the type is
+-- enough — so it does not depend on being able to obtain a capability from
+-- somewhere, and it therefore survives R2 (see reject/t152) unchanged.
+--
+-- The `let`-annotation spelling this file originally used relied on the
+-- ambient `root_cap`: a console-only module took the root and narrowed it to
+-- file-write. R2 closed that route, and with it the reachability of the `let`
+-- spelling specifically — a `let` needs a right-hand side, and after R2 every
+-- route to a capability value runs through a signature that Check 1 already
+-- reads. `bind_ty` is still walked (accept/t145 pins the positive case), but
+-- it is defensive now rather than witnessed. This file is what keeps the
+-- body-annotation walk under a real test.
+--
+-- Accept companion: accept/t145.
+mod BodyAnnCap do
+  needs IO.Console
+
+  fn main() do
+    let take = fn (c : Cap(IO.FileWrite)) -> 1
+    println("a lambda parameter names a capability this module never declared")
+  end
+end

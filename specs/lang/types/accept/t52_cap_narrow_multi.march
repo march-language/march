@@ -1,5 +1,5 @@
--- Capabilities widening, Task 3 -- `cap_narrow`/`root_cap` (§2.8.8), a second
--- threading shape: `root_cap` (`typecheck.ml:1457`, `Mono (Cap(IO))`, a VALUE
+-- Capabilities widening, Task 3 -- `cap_narrow`/`cap` (§2.8.8), a second
+-- threading shape: `cap` (`typecheck.ml:1457`, `Mono (Cap(IO))`, a VALUE
 -- not a call) is read directly (no ambient `Cap(IO)` parameter needed --
 -- `main` itself takes no capability parameter), then narrowed via
 -- `cap_narrow` TWICE in the same function to two DIFFERENT sibling
@@ -20,8 +20,8 @@ mod App do
     path
   end
 
-  fn main() : String do
-    let root = root_cap
+  fn main(cap : Cap(IO)) : String do
+    let root = cap
     let console_cap = cap_narrow(root)
     let file_cap = cap_narrow(root)
     let a = log(console_cap, "starting")
