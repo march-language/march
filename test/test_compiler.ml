@@ -9117,12 +9117,16 @@ let test_fallback_does_not_fire_for_locals () =
    `None -> ()` branch exactly. There is no state in which the old code
    required something and the new code requires less.
 
-   Known and PRE-EXISTING, deliberately not asserted here: declaration order
-   decides this, not cyclicity. With `A` declared BEFORE `B`, all four rows are
-   clean — on the base binary too (verified 0/0/0/0 both sides). A module that
-   imports a sibling declared later than itself is simply not reached by Check
-   4, cycle or no cycle. That is a property of the sort, untouched by this
-   change, and pinning it here would pin a bug as correct. *)
+   Known and PRE-EXISTING, deliberately not asserted here: for the BARE
+   `import` form, declaration order decides this, not cyclicity. With `B`
+   declared AFTER `A`, Check 4 does not fire at all — on the base binary too.
+   The qualified `use B` + `B.f` form fires in BOTH orders, because a qualified
+   reference is an ordering edge and a `DUse` plus a bare call is not. That is
+   a property of the module sort, untouched by this change, and pinning it here
+   would pin a bug as correct. Filed separately, with the measured matrix and
+   the reproduction, in
+   specs/todos/2026-08-06-check4-skipped-when-importee-declared-later.md — do
+   not delete this paragraph without checking that file is still accurate. *)
 let test_cyclic_modules_still_enforce () =
   let impure_variant ~cyclic = Printf.sprintf {|mod Root do
   mod B do
