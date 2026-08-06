@@ -8732,7 +8732,57 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          a call whose signature is already walked above. Left uncovered
          deliberately; revisit if a witness appears. *)
       []
-    | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _ | Ast.DImpl _
+    (* An INTERFACE method signature is a signature, and Check 1 treats every
+       other signature — plain [fn], actor handler, [extern] — as a use.  A
+       default method body is a body, and its annotations are uses too.
+
+       These were enumerated under "names no capability position" when this
+       match was made exhaustive on 2026-08-05.  That was an explicit decision
+       and it was wrong; found by the R8 audit (reject/t156).  The enumeration
+       is why it was a reviewable mistake rather than a silent hole. *)
+    | Ast.DInterface (idef, sp) ->
+      let sig_caps =
+        List.concat_map (fun (md : Ast.method_decl) -> cap_paths_in_surface_ty md.md_ty)
+          idef.iface_methods
+      in
+      let body_caps =
+        List.concat_map (fun (md : Ast.method_decl) ->
+            match md.md_default with
+            | None -> []
+            | Some body -> cap_annots_in_expr [] body)
+          idef.iface_methods
+      in
+      List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+
+    (* An IMPL method is a function: its signature and its body annotations are
+       uses, exactly as a top-level [DFn]'s are.  Measured before this arm
+       existed: the IDENTICAL annotation errored in a plain [fn] body and
+       produced NOTHING in an [impl] method body — impl bodies were darker than
+       ordinary functions, which is backwards, since an [impl] is where a
+       dependency's capability use is least visible to a reader
+       (reject/t157). *)
+    | Ast.DImpl (idef, sp) ->
+      let of_fn (fd : Ast.fn_def) =
+        let param_tys =
+          List.filter_map (function
+              | Ast.FPNamed { param_ty = Some t; _ } -> Some t
+              | _ -> None)
+            (List.concat_map (fun c -> c.Ast.fc_params) fd.fn_clauses)
+        in
+        let sig_caps =
+          List.concat_map cap_paths_in_surface_ty (param_tys @ Option.to_list fd.fn_ret_ty)
+        in
+        let body_caps =
+          List.concat_map (fun (c : Ast.fn_clause) -> cap_annots_in_expr [] c.Ast.fc_body)
+            fd.fn_clauses
+        in
+        List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+      in
+      (* [impl_ty] itself can name a capability: `impl Grantor(Cap(IO))`. *)
+      List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty idef.impl_ty)
+      @ List.concat_map (fun (_, fd) -> of_fn fd) idef.impl_methods
+
+    | Ast.DProtocol _ | Ast.DSig _
     | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _
     | Ast.DOpts _ | Ast.DTransitions _ | Ast.DApp _ | Ast.DDeriving _
     | Ast.DSatisfy _ | Ast.DTest _ | Ast.DDescribe _ | Ast.DSetup _

@@ -319,7 +319,32 @@ cheapest first:
 (1) is achievable now and worth doing regardless. (3) is the only one that
 actually closes the gap.
 
-### R8. The runtime escape hatches
+### R8. The runtime escape hatches — **AUDITED 2026-08-06**
+
+Answered with probes rather than reasoning; see
+`specs/2026-08-06-r8-runtime-hatch-audit.md`. Results against the table below:
+
+- **Actors / messages** — a `Cap` CAN travel in a message, and the declaration
+  discipline follows it (Check 1 reads actor handler signatures). No typing
+  rule needed.
+- **Dynamic dispatch** — was NOT covered, for a reason unrelated to rows:
+  interface method signatures and impl method bodies were invisible to Check 1.
+  Fixed 2026-08-06.
+- **Hot code reload** — better than this row assumes. A signed `.hcr_manifest`
+  and an explicit `--grant-cap` gate exist, so a reload is not unchecked
+  authority injection. The real gap is the audit log, which records no
+  capability field, so a granted widening is not reconstructible after the
+  fact.
+- **FFI** — confirmed as designed.
+- **A hatch this table does not list:** `get_cap : Pid(a) -> Option(Cap(a))`
+  has an unconstrained `a`, so `get_cap(self())` yields `Cap(IO)` in a module
+  granted nothing. **This bypasses R2**, and it makes §5's "a capability can
+  only be received" false. Filed as
+  `specs/todos/2026-08-06-get-cap-bypasses-the-root-grant.md`; §5 is
+  deliberately left unedited until the fix is chosen, since the right wording
+  depends on it.
+
+
 
 Each is invisible to any source-level theorem, and each must be either closed
 or explicitly excluded from the claim:

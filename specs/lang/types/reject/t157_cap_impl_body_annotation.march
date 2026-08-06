@@ -1,0 +1,40 @@
+-- EXPECT-ERROR: `Cap(IO.FileWrite)` used in module `ImplBody` but `IO.FileWrite` is not declared in `needs`
+-- R8 AUDIT — an IMPL METHOD BODY is inside the `needs` walk (2026-08-06).
+--
+-- Companion to reject/t156, and a different walk: t156 is a method SIGNATURE
+-- (the decl walk), this is an annotation inside a method BODY
+-- (`cap_annots_in_expr`). A fix wired into only one of them still passes the
+-- other's test.
+--
+-- Measured before this was closed, and the contrast is the sharpest statement
+-- of the gap: the IDENTICAL `Cap(IO.FileWrite)` annotation produces an error
+-- in a plain `fn` body and NOTHING AT ALL in an `impl` method body. Impl
+-- bodies were darker than ordinary functions, which is backwards — an `impl`
+-- is exactly where a dependency's capability use is least visible to a
+-- reader.
+--
+-- A lambda parameter, not a `let`, for the same reason as reject/t151: it
+-- names a capability without needing a value, so the file does not depend on
+-- obtaining one and stays valid under R2.
+mod ImplBody do
+  needs IO.Console
+
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+
+  type Box = Box(Int)
+
+  impl Runner(Box) do
+    fn run(b) do
+      let take = fn (w : Cap(IO.FileWrite)) -> 1
+      match b do
+        Box(n) -> n
+      end
+    end
+  end
+
+  fn main() do
+    println("the only capability here is inside an impl method body")
+  end
+end

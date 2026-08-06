@@ -1,0 +1,42 @@
+-- R8 AUDIT — interface and impl capability positions, COVERED (2026-08-06).
+--
+-- Accept companion to reject/t156 (interface method signature) and
+-- reject/t157 (impl method body). The same three positions the new arms walk
+-- — an interface method signature, an impl method signature, and an
+-- annotation inside an impl method body — under a `needs` that covers them.
+--
+-- The over-breadth guard matters here specifically: `DInterface`/`DImpl` had
+-- been enumerated as "no capability position", so the fix ADDED two walks.
+-- A walk that is too eager would reject ordinary interface and impl code,
+-- which is most of the stdlib. This file is what says the new arms read the
+-- capability and not merely the presence of an `impl`.
+--
+-- `IO.FileSystem` covering `IO.FileWrite` also proves the new positions run
+-- their findings through lattice subsumption, not a string match.
+mod CoveredIfaceImpl do
+  needs IO.Console
+  needs IO.FileSystem
+
+  interface Grantor(a) do
+    fn grant : a -> Cap(IO.FileWrite)
+  end
+
+  type Box = Box(Int)
+
+  impl Grantor(Box) do
+    fn grant(b) do
+      let take = fn (w : Cap(IO.FileWrite)) -> 1
+      match b do
+        Box(_) -> grant_stub()
+      end
+    end
+  end
+
+  pfn grant_stub() : Cap(IO.FileWrite) do
+    grant_stub()
+  end
+
+  fn main() do
+    println("every capability named here is declared")
+  end
+end
