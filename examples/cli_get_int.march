@@ -4,11 +4,11 @@ mod Main do
     match Cli.parse(specs, ["--count", "42"]) do
       Ok(p) ->
         match Cli.get_int(p, "count") do
-          Some(n) -> println(int_to_string(n + 1))
+          Some(n) -> println(String.from_int(n + 1))
           None    -> println("no count")
         end
         match Cli.get_int(p, "missing") do
-          Some(n) -> println(int_to_string(n))
+          Some(n) -> println(String.from_int(n))
           None    -> println("missing absent")
         end
       Err(e) -> println("err: " ++ Cli.error_message(e))

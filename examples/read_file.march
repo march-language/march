@@ -23,7 +23,7 @@ mod ReadFile do
       println("Error: " ++ to_string(e))
     Ok(lines) -> do
       println("=== Line count ===")
-      println(int_to_string(List.length(lines)) ++ " lines")
+      println(String.from_int(List.length(lines)) ++ " lines")
     end
     end
     -- dbg()

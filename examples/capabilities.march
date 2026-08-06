@@ -36,7 +36,7 @@ fn greet(cap : Cap(IO.Console), name : String) : Unit do
 end
 
 fn print_result(cap : Cap(IO.Console), label : String, value : Int) : Unit do
-  println(label ++ ": " ++ int_to_string(value))
+  println(label ++ ": " ++ String.from_int(value))
 end
 
 -- ─── Network IO ───────────────────────────────────────────────────────────
@@ -87,11 +87,11 @@ fn main(cap : Cap(IO)) : Unit do
   -- Pure functions need no capability
   println("--- Pure functions (no capability needed) ---")
   let sum = add(3, 4)
-  println("add(3, 4) = " ++ int_to_string(sum))
+  println("add(3, 4) = " ++ String.from_int(sum))
   let msg = format_greeting("March")
   println("greeting  = " ++ msg)
   let sq  = square(7)
-  println("square(7) = " ++ int_to_string(sq))
+  println("square(7) = " ++ String.from_int(sq))
   println("")
 
   -- Attenuate root cap to sub-capabilities for least-privilege passing

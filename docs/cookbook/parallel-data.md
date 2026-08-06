@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Parallel Data"
 permalink: /docs/cookbook/parallel-data/
+scrollmd: true
 ---
 
 # Parallel Data
@@ -26,6 +27,7 @@ minimal ceremony. This chapter walks through every public function with copy-and
 
 ### Building a Vec
 
+<!-- scroll:skip -->
 ```march
 -- From a list
 let v = RRB.from_list([1, 2, 3, 4, 5])
@@ -181,6 +183,7 @@ end
 
 Apply an expensive per-pixel transform to an image stored as a `Vec` of RGBA tuples.
 
+<!-- scroll:skip -->
 ```march
 type Pixel = Pixel(Int, Int, Int, Int)   -- r g b a
 
@@ -261,6 +264,7 @@ is sequential but cheaper overall.
 Static partitioning (one chunk per worker) leaves fast workers idle while slow ones finish.
 Pass a larger `workers` argument to `preduce_n` / `pmap_n` to create finer chunks:
 
+<!-- scroll:skip -->
 ```march
 -- 4× more chunks than schedulers — reduces worst-case idle time
 Parallel.preduce_n(v, 0, expensive_fn, merge, System.cpu_count() * 4)

@@ -32,21 +32,21 @@ fn demo_construction() do
   Err(e) -> println("error: " ++ e)
   Ok(df) -> do
     println("schema:    " ++ to_string(DataFrame.schema(df)))
-    println("rows:      " ++ int_to_string(DataFrame.row_count(df)))
-    println("cols:      " ++ int_to_string(DataFrame.col_count(df)))
+    println("rows:      " ++ String.from_int(DataFrame.row_count(df)))
+    println("cols:      " ++ String.from_int(DataFrame.col_count(df)))
 
     -- head/tail
     let top3 = DataFrame.head(df, 3)
-    println("head(3) rows: " ++ int_to_string(DataFrame.row_count(top3)))
+    println("head(3) rows: " ++ String.from_int(DataFrame.row_count(top3)))
 
     let last2 = DataFrame.tail(df, 2)
-    println("tail(2) rows: " ++ int_to_string(DataFrame.row_count(last2)))
+    println("tail(2) rows: " ++ String.from_int(DataFrame.row_count(last2)))
 
     -- Bridge a column into Stats
     match DataFrame.float_list(df, "salary") do
     Err(e) -> println("error: " ++ e)
     Ok(sals) ->
-      println("mean salary: " ++ float_to_string(Stats.mean(sals)))
+      println("mean salary: " ++ String.from_float(Stats.mean(sals)))
     end
   end
   end
@@ -71,7 +71,7 @@ fn demo_lazy() do
     match high_earners do
     Err(e) -> println("error: " ++ e)
     Ok(he) ->
-      println("salary > 80k: " ++ int_to_string(DataFrame.row_count(he)) ++ " employees")
+      println("salary > 80k: " ++ String.from_int(DataFrame.row_count(he)) ++ " employees")
     end
 
     -- Add a derived column: annual bonus = salary / 10
@@ -88,8 +88,8 @@ fn demo_lazy() do
     match with_bonus do
     Err(e) -> println("error: " ++ e)
     Ok(b)  ->
-      println("with bonus col: " ++ int_to_string(DataFrame.col_count(b)) ++ " cols, "
-              ++ int_to_string(DataFrame.row_count(b)) ++ " rows")
+      println("with bonus col: " ++ String.from_int(DataFrame.col_count(b)) ++ " cols, "
+              ++ String.from_int(DataFrame.row_count(b)) ++ " rows")
     end
 
     -- Filter by string: only Eng department
@@ -101,7 +101,7 @@ fn demo_lazy() do
     match eng_only do
     Err(e) -> println("error: " ++ e)
     Ok(e)  ->
-      println("Eng dept: " ++ int_to_string(DataFrame.row_count(e)) ++ " employees")
+      println("Eng dept: " ++ String.from_int(DataFrame.row_count(e)) ++ " employees")
     end
   end
   end
@@ -120,8 +120,8 @@ fn demo_groupby() do
     match DataFrame.agg(by_dept, [Mean("salary"), Count, Max("salary")]) do
     Err(e) -> println("error: " ++ e)
     Ok(agg) ->
-      println("groups: " ++ int_to_string(DataFrame.row_count(agg))
-              ++ " depts, " ++ int_to_string(DataFrame.col_count(agg)) ++ " agg cols")
+      println("groups: " ++ String.from_int(DataFrame.row_count(agg))
+              ++ " depts, " ++ String.from_int(DataFrame.col_count(agg)) ++ " agg cols")
     end
   end
   end
@@ -153,7 +153,7 @@ fn demo_join() do
   match result do
   Err(e) -> println("error: " ++ e)
   Ok(j)  ->
-    println("inner_join rows: " ++ int_to_string(DataFrame.row_count(j))
+    println("inner_join rows: " ++ String.from_int(DataFrame.row_count(j))
             ++ " cols: " ++ to_string(DataFrame.schema(j)))
   end
 end
@@ -171,7 +171,7 @@ fn demo_stats_integration() do
     let summary = DataFrame.summarize(df)
     println("summarize schema: " ++ to_string(DataFrame.schema(summary)))
     println("summarize rows (one per input col): "
-            ++ int_to_string(DataFrame.row_count(summary)))
+            ++ String.from_int(DataFrame.row_count(summary)))
 
     -- Z-score normalize the rating column
     match DataFrame.get_column(df, "rating") do
@@ -184,7 +184,7 @@ fn demo_stats_integration() do
         FloatCol(_, z_data) -> do
           let zs = native_float_arr_to_list(z_data)
           let rounded = List.map(zs, fn z ->
-            let s = float_to_string(z)
+            let s = String.from_float(z)
             String.slice(s, 0, 6))
           println("rating z-scores: " ++ to_string(rounded))
           end
@@ -195,8 +195,8 @@ fn demo_stats_integration() do
 
     -- train/test split
     let (train, holdout) = DataFrame.train_test_split(df, 0.8)
-    println("train rows: " ++ int_to_string(DataFrame.row_count(train)))
-    println("test rows:  " ++ int_to_string(DataFrame.row_count(holdout)))
+    println("train rows: " ++ String.from_int(DataFrame.row_count(train)))
+    println("test rows:  " ++ String.from_int(DataFrame.row_count(holdout)))
   end
   end
 end

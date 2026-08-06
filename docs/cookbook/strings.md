@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Strings"
 permalink: /docs/cookbook/strings/
+scrollmd: true
 ---
 
 # Strings

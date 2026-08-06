@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: HTML"
 permalink: /docs/cookbook/html/
+scrollmd: true
 ---
 
 # HTML

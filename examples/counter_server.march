@@ -32,7 +32,7 @@ actor Counter do
 end
 
 fn get_count(counter) : String do
-  int_to_string(actor_get_int(counter, 0))
+  String.from_int(actor_get_int(counter, 0))
 end
 
 fn do_increment(counter, n) : String do
