@@ -6981,19 +6981,25 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
    ================================================================= *)
 
 (** Collect all free variable names referenced in [e].
-    Only [EVar] nodes with no dot (non-qualified names) are collected.
+    Every [EVar] node is collected, QUALIFIED (dotted) names included.
     Re-bindings introduced by [ELet]/[EMatch]/[ELam] are accounted for so
     we never report a variable that is shadowed by an inner binding. *)
 let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   match e with
   | Ast.EVar n ->
     (* Keep DOTTED names too (e.g. `App.id`, produced by desugar's
-       [qualify_module_refs] for an intra-nested-module reference).  The only two
-       callers are [dependency_order_dfn_run]'s [deps_of] — which maps a dotted
-       name's suffix to a local fn so a nested-module forward reference is ordered
-       helper-first (closing the qualified-prebind type-erasure forward-ref hole)
-       — and [warn_unused_params], which only compares against bare param names, so
-       a dotted entry is inert there.  A bound name is still dropped. *)
+       [qualify_module_refs] for an intra-nested-module reference).  Do NOT
+       "clean this up" to bare names — dotted entries are LOAD-BEARING for one
+       of the three callers:
+       - [dependency_order_dfn_run]'s [deps_of] maps a dotted name's suffix to a
+         local fn so a nested-module forward reference is ordered helper-first
+         (closing the qualified-prebind type-erasure forward-ref hole);
+       - [warn_unused_params] only compares against bare param names;
+       - [record_fn_refs] feeds the per-function transitive CAPABILITY closure,
+         where a dropped dotted name silently truncates the closure of every
+         nested-module reference (pinned by
+         [test_transitive_cap_nested_module_dotted_refs]).
+       A bound name is still dropped. *)
     if List.mem n.txt bound then [] else [n.txt]
   | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> []
   | Ast.EDbg (Some inner, _) -> free_vars_expr bound inner

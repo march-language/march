@@ -15,7 +15,15 @@ cover:
 
 - module-level `DLet` binding bodies,
 - `DInterface` default methods,
-- `DImpl` methods.
+- `DImpl` methods,
+- **default-argument expressions** — an `FPDefault (p, e)`'s `e`. Both the
+  `own(...)` body scan (`body_cap_uses`, which walks `clause.fc_body`) and
+  `record_fn_refs` (which walks `fc_body :: fc_guard`) skip it, so
+  `fn f(x = noisy())` records neither `noisy`'s capability nor a reference edge
+  to it. Pre-existing — the `own(...)` scan has always skipped it — but the
+  closure is now enforcement-bearing, so it belongs in this fix: a default
+  argument is evaluated at every call site that omits the parameter, which is
+  exactly the "promises something and does not deliver" direction below.
 
 Those names get no entry in `env.own_cap_closures`, so
 `fn_transitive_capability_closures` returns `[]` for them — and, worse, returns
@@ -48,7 +56,9 @@ Give the three forms an `own(...)` entry the same way `DFn` gets one — extend
 the `decls` walks that feed `record_fn_caps` (and `record_fn_refs`, so the
 reference edges are there too) to include `DLet` binding bodies, `DInterface`
 method bodies, and `DImpl` method bodies, keyed consistently with the existing
-`cap_qname_prefix` scheme.
+`cap_qname_prefix` scheme. For default arguments the fix is smaller and local:
+include each `FPDefault (_, e)`'s `e` in the expression lists both scans walk
+(alongside `fc_body` and `fc_guard`), with the clause's params bound.
 
 Watch for: the `march caps` cross-check
 (`test_transitive_cap_union_matches_module_level`) compares the transitive union

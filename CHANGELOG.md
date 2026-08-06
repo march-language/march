@@ -27,6 +27,12 @@ git log is authoritative for exact commits.
   narrowed. A referenced name the compiler has no per-function record for (a
   module-level `let`, an interface or `impl` method) and an import into a
   cyclic module group both fall back conservatively to the old whole-module set.
+  That fallback only catches such a name when you reference it *directly*: if you
+  reference an ordinary function that reaches a capability exclusively through a
+  module-level `let` or an interface/`impl` method, the capability is currently
+  not required of you — a known, narrow gap documented in `docs/capabilities.md`
+  and tracked in
+  `specs/todos/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`.
 
 - **`cap no_panic` now consults a call's actual refinement contract instead of
   banning it by name.** A partial stdlib or prelude function that declares a
