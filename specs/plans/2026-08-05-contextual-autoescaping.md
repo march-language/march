@@ -17,8 +17,8 @@
 | 3–5 — escapers, builtin, desugar fold | **landed** — #202, `a8707c78` |
 | 6 — context-indexed `Html.Trusted` | open |
 | 7 — codegen + drift guard | **mostly obsolete** — see the task |
-| 8 — corpus validation | open — highest remaining value |
-| 9 — `Html.tag` non-sigil path | open — **added 2026-08-06**, newly found |
+| 8 — corpus validation | **done** — PR #204, awaiting CI |
+| 9 — `Html.tag` non-sigil path | open — **planned 2026-08-06**; 3 holes measured, 2 unfixable by escaping |
 
 `~H` escapes by parse context on `main`. Recommended order for what remains:
 **8, then 9, then 6.** Task 8 converts two unverified assumptions into evidence
@@ -991,124 +991,175 @@ That page renders untrusted `user_agent` and `path`. Render it before and after 
 
 ---
 
-## Task 9: Close the non-sigil composition path (`Html.tag`)
+## Task 9: Harden and deprecate `Html.tag`
 
-> **Added 2026-08-06**, after Tasks 3–5 landed. Not in the original plan — found
-> while asking whether any of this still belongs in a March library. It is the
-> characteristic blind spot of a compile-time-only design: the analysis sees
-> `~H` templates and nothing else.
+> **Added 2026-08-06; rewritten the same day after measuring.** The first draft
+> described one hole (attribute values) and proposed fixing it by escaping.
+> Running the code found **three**, and two of them cannot be fixed by escaping
+> at all. The design below is what the measurement supports, not what the sketch
+> assumed.
+
+**Decisions taken** (2026-08-06): deprecate toward `~H` while hardening in
+place — `bastion` is published at 0.2.3, so removal is off the table — and
+**panic** on a name that fails validation.
 
 **Files:**
-- Modify: `stdlib/html.march:113` (`escape_attr`), `:134` (`tag`)
-- Test: `test/native/h_tag_attr_context.march` + `.expected`, `test/dune`
+- Modify: `stdlib/html.march` — `tag`, `escape_attr`, docstrings
+- Create: `runtime/march_attr_class.c` + header, or extend `march_ctx_escape.c`
+- Test: `test/native/h_tag_hardening.march` + `.expected`, `test/dune`,
+  `test/test_ctx_escape.c` (classification conformance)
+- Follow-up in another repo: `bastion/lib/security/csrf.march:96`
 
-### The gap
-
-`Html.tag` composes HTML **outside** the sigil, so it never reaches the context
-automaton. Its attribute escaping is:
-
-```march
-fn escape_attr(s : String) : String do
-  escape(s)     -- HTML entity-encoding, and nothing else
-end
-```
-
-Entity-encoding does not touch a colon, so:
+### Measured behaviour (2026-08-06, `main` @ `a8707c78`)
 
 ```march
+Html.tag("div onload=alert(1)", [], body)          -- element name
+Html.tag("div", [("onerror", "alert(1)")], body)   -- attribute name
 Html.tag("a", [("href", "javascript:alert(1)")], body)
+Html.tag("div", [("class", "a\"b")], body)         -- control
 ```
 
-emits `href="javascript:alert(1)"` — exactly the hole Task 5 closed for `~H`,
-still open on this path.
+produces:
 
-*(Read from the source, not executed. The two functions are short and
-unambiguous, but Step 1 below should confirm it by running.)*
+```
+1 elemname: <div onload=alert(1)>x</div onload=alert(1)>
+2 attrname: <div onerror="alert(1)">x</div>
+3 attrval : <a href="javascript:alert(1)">x</a>
+4 ordinary: <div class="a&quot;b">x</div>
+```
 
-**Not currently live.** The only real call site is
-`bastion/lib/security/csrf.march:96`, `Html.tag("form", [("method", "post")], …)`
-— a constant. But the API's shape invites the bug back, and an API that is safe
-only because nobody has used it yet is not safe.
-
-### Why fix rather than deprecate
-
-`Html.tag` is one call site away from removable, so deprecation is tempting. It
-is the wrong call: the machinery to make it correct now exists, the fix is small,
-and leaving a known-unsafe constructor in the stdlib while shipping "~H is
-contextually safe" invites exactly the wrong conclusion about the rest of the
-module.
-
-- [ ] **Step 1: Write the failing test, and confirm the gap is real**
-
-`test/native/h_tag_attr_context.march`, a compiled/interpreted golden diff like
-`h_escape_ctx_builtin.march`:
+Cause, from `stdlib/html.march`:
 
 ```march
-mod HTagAttrContext do
-  fn main() : Unit do
-    let bad = "javascript:alert(1)"
-    println("href=" ++ IOList.to_string(
-      Html.tag("a", [("href", bad)], IOList.from_string("x"))))
-    println("src=" ++ IOList.to_string(
-      Html.tag("img", [("src", bad)], IOList.empty())))
-    -- an ordinary attribute must keep entity-encoding, unchanged
-    println("class=" ++ IOList.to_string(
-      Html.tag("div", [("class", "a\"b")], IOList.empty())))
-    -- a legitimate URL must survive intact
-    println("ok=" ++ IOList.to_string(
-      Html.tag("a", [("href", "/packages/bastion?tab=readme")], IOList.empty())))
+let open_tag = "<" ++ name ++ attr_str ++ ">"   -- name concatenated RAW
+...
+escape_attr(k) ++ "=\"" ++ escape_attr(v) ++ "\""
+fn escape_attr(s) do escape(s) end              -- entity-encoding, nothing more
+```
+
+**Holes 1 and 2 cannot be closed by escaping.** They sit exactly where the
+context automaton emits a hard error for `~H`, and for the same reason: `onerror`
+contains no character an encoder could touch. Escaping is the wrong tool; the
+only sound move is to validate and refuse. Hole 3 *is* an escaping problem.
+
+**Not live.** The one real call site is
+`bastion/lib/security/csrf.march:96`, `Html.tag("form", [("method", "post")], …)`
+— all literals. But an API is not safe because its current callers happen to be.
+
+### Scope: `tag` is the whole gap
+
+Checked every other function in the module that emits markup:
+
+| function | verdict |
+|---|---|
+| `list`, `join`, `render_collection`, `render_partial` | compose `IOList`s only — no `String`→markup path |
+| `layout` | `escape(title)` into `<title>`, which is RCDATA where entity-encoding is correct |
+| `content_hash`, `safe_to_string` | do not emit markup |
+
+Nothing to do outside `tag`. Record that — a bounded audit is worth as much as
+a fix.
+
+- [ ] **Step 1: Pin the current behaviour as a failing test**
+
+`test/native/h_tag_hardening.march` + `.expected`, a compiled/interpreted golden
+diff in the style of `h_escape_ctx_builtin.march`, covering all four cases above
+plus a legitimate URL (`/packages/bastion?tab=readme`) that must survive intact.
+
+Generate `.expected` from the FIXED behaviour, so the test fails before the fix
+lands. **Put the pre-fix output in the commit message** — it is the evidence the
+holes were real, and a security test without a recorded red state is worth
+little.
+
+- [ ] **Step 2: Validate the element name**
+
+A tag name is `[a-zA-Z][a-zA-Z0-9-]*`. Anything else panics:
+
+```march
+fn check_tag_name(name : String) : String do
+  if Regex.matches("^[a-zA-Z][a-zA-Z0-9-]*$", name) do name
+  else
+    panic("Html.tag: `" ++ name ++ "` is not a valid element name. An element "
+      ++ "name computed from untrusted input cannot be made safe by escaping — "
+      ++ "use ~H with a literal tag instead.")
   end
 end
 ```
 
-Expected BEFORE the fix: `href="javascript:alert(1)"` passes through verbatim.
-**Record that output in the commit message** — it is the evidence the gap was
-real, and the test is worthless without it.
+Panic is deliberate and was chosen explicitly: computing a tag name from
+untrusted data is a *programming* error, not a data condition. With literal
+call sites it can never fire. The cost — a panic in a request handler is a 500 —
+is accepted against the alternative, which is an XSS.
 
-- [ ] **Step 2: Classify the attribute name, then escape by class**
+- [ ] **Step 3: Validate the attribute name, and refuse event handlers**
 
-`escape_attr` currently ignores its key. Give `tag` the same classification the
-table already performs, reusing `[attrs]` from
-`specs/security/html-contexts.tbl` rather than a second hand-written list — a
-duplicate list is precisely the hazard this plan keeps tripping over.
+Attribute names are `[a-zA-Z][a-zA-Z0-9_:.-]*`. Beyond shape, **`on*` is
+refused outright**: an event handler's value is JavaScript, and `Html.tag` has
+no way to know whether its caller intended that. `~H` can tell, because the
+automaton gives it a JS context; `Html.tag` cannot.
 
-The classification lives OCaml-side (`Tbl_parse.classify`), and `Html.tag` is
-March, so the escaping must go through the builtin:
-`html_escape_ctx(<id>, value)` with the id chosen from the attribute's class.
-That needs the class computed at runtime from a `String` key, which the compile
-time analysis cannot do — so this path necessarily pays a small runtime cost the
-sigil path does not. That is acceptable: it is a handful of attributes per tag,
-and correctness beats a saved comparison.
+Panic message must name the attribute and point at `~H`.
 
-Simplest sound implementation: a `Html.attr_escaper_id(name : String) : Int`
-in March mirroring the `[attrs]` rules (`on*` → script, `href`/`src`/… → url,
-`style` → style, else normal), then `html_escape_ctx(id, v)`.
+- [ ] **Step 4: Context-escape the attribute value**
 
-**If that mirroring is written by hand, it is a fourth copy of the attribute
-classification.** Prefer generating it from the `.tbl` — this is the one place a
-`stdlib/ctx_table.march` fragment genuinely earns its keep, and it would revive
-the useful half of Task 7 with a real consumer.
+With `on*` refused, only three classes remain: `url`, `style`, `normal`. Route
+the value through the existing escapers by class:
 
-- [ ] **Step 3: Verify and pin**
+| class | escaper |
+|---|---|
+| `href` `src` `action` `formaction` `poster` `cite` `background` | `MARCH_ESC_URL_WHOLE` |
+| `style` | `MARCH_ESC_CSS_DECL` |
+| everything else | `MARCH_ESC_ATTR` |
 
-`href`/`src` with `javascript:` → `about:invalid#zSoyz`; `class` unchanged from
-today; a legitimate URL intact. Regenerate `.expected` and confirm
-interpreted == compiled.
+`url_whole` rather than `url_component`: an attribute value passed whole to
+`Html.tag` *is* the whole URL, exactly like a hole at the start of an `href`.
 
-- [ ] **Step 4: Sweep the rest of the `Html` module**
+**Where the classification lives.** It must not become a fourth hand-maintained
+copy of `[attrs]` — that duplication is the failure mode this plan has already
+hit twice (`specs/todos/2026-08-05-runtime-source-list-duplication.md`, and the
+golden preamble going stale twice). Options, in order of preference:
 
-`tag` is the one this task fixes, but the same question applies to every function
-that emits markup from untrusted parts: `list`, `join`, `render_partial`,
-`render_collection`, `layout`. Check each for a path that concatenates a
-caller-supplied `String` into markup without going through a context. Record the
-result — a clean sweep is worth writing down, since it bounds the audit.
+1. A C helper next to the escapers — `march_attr_escaper_id(name, len)` — with a
+   **conformance test in `test_ctx_escape.c` asserting it agrees with
+   `Tbl_parse.classify` over every literal in `[attrs]` plus probes**. Drift is
+   then caught by a test rather than prevented by a generator, which is
+   proportionate for an API being deprecated.
+2. Generating a March fragment from the `.tbl`. Cleaner in principle, but
+   generated files under `stdlib/` are awkward: the compiler loads stdlib from a
+   directory, and a `_build`-only artifact is not in the shipped path. Do not
+   take this on without solving that first.
 
-- [ ] **Step 5: Commit**
+Prefer 1. Note honestly in the code that it is a second copy of the rules, kept
+honest by a test rather than by construction.
 
-Include the before/after output from Step 1, and state plainly that `Html.tag`
-was reachable-but-unreached rather than a live vulnerability.
+- [ ] **Step 5: Deprecate in the docstrings**
+
+`Html.tag`'s doc comment states plainly that `~H` is the supported way to build
+markup, that `~H` gets compile-time contextual escaping which `Html.tag` cannot,
+and that `tag` refuses names it cannot prove safe. Same for `escape_attr`, which
+is context-blind by nature and should not be presented as a general-purpose
+attribute escaper.
+
+Do **not** remove either — `bastion` is published at 0.2.3.
+
+- [ ] **Step 6: Verify, and run the full suite properly**
+
+Regenerate `.expected`; confirm interpreted == compiled. Then run **every**
+suite and read each one's summary line — `scripts/run-tests.sh | tail` shows only
+the last suite and has already hidden a real failure once in this plan. Expect
+the known environmental `MARCH_SANITIZE` ASAN timeout and nothing else.
+
+- [ ] **Step 7: Commit, and file the bastion migration**
+
+Commit with the pre-fix output from Step 1. State plainly that the holes were
+reachable-but-unreached rather than a live vulnerability.
+
+`bastion/lib/security/csrf.march:96` is in another repo and cannot move in this
+commit. File it: rewrite `Html.tag("form", [("method", "post")], CSRF.tag(conn))`
+as `~H"<form method=\"post\">${CSRF.tag(conn)}</form>"`, which gets the
+compile-time analysis instead of the runtime checks.
 
 ---
+
 
 ## Follow-up plan — REVISED 2026-08-06: recommend dropping
 
