@@ -8621,8 +8621,12 @@ let no_panic_errors_with_random (src : string) : string list =
 let has_no_panic_error_random src = no_panic_errors_with_random src <> []
 
 (* Same as [no_panic_errors], with `stats.march` prepended alongside
-   `list.march` and prelude, for Task 6's six `Stats` fixtures. *)
-let no_panic_errors_with_stats (src : string) : string list =
+   `list.march` and prelude, for Task 6's six `Stats` fixtures and Task 7's
+   three bivariate ones.  Returns ALL diagnostics so callers can look at the
+   unverified-precondition HINTS as well as the errors — Task 7's two
+   preconditions per function sit on the same call site and produce the same
+   error text, so only the hint distinguishes which one went undischarged. *)
+let stats_diagnostics (src : string) : March_errors.Errors.diagnostic list =
   let m = March_desugar.Desugar.desugar_module (parse src) in
   let listmod, list_path = Lazy.force stdlib_list_mod in
   let statsmod, stats_path = Lazy.force stdlib_stats_mod in
@@ -8645,6 +8649,9 @@ let no_panic_errors_with_stats (src : string) : string list =
         March_refinecheck.Panic_surface_by_proof.check_module errors m;
         errors)
   in
+  errors.March_errors.Errors.diagnostics
+
+let no_panic_errors_with_stats (src : string) : string list =
   List.filter_map
     (fun (d : March_errors.Errors.diagnostic) ->
       let f = d.March_errors.Errors.span.March_ast.Ast.file in
@@ -8654,9 +8661,39 @@ let no_panic_errors_with_stats (src : string) : string list =
         && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
       then Some d.March_errors.Errors.message
       else None)
-    errors.March_errors.Errors.diagnostics
+    (stats_diagnostics src)
 
 let has_no_panic_error_stats src = no_panic_errors_with_stats src <> []
+
+(* The unverified-precondition HINTS for a `Stats` fixture — the text of each
+   `precondition `P` on `F` was NOT verified here.` note.  Task 7 needs this:
+   `covariance`/`correlation`/`linear_regression` each carry TWO preconditions
+   at the same call site, so an assertion that merely says "this errors" would
+   pass whichever of the two went undischarged.  Asserting on the hint is what
+   makes the equal-length test and the short-list test genuinely distinct, and
+   is what a mutation of only the relational comparison flips. *)
+let unverified_preconditions_stats (src : string) : string list =
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      (* Same fixture-only span filter the error path uses: the harness
+         prepends the REAL `list.march`/`stats.march`, whose own bodies raise
+         their own unverified-precondition hints (`List.nth`, `last`). Counting
+         those would make every assertion below pass for the wrong reason. *)
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Hint
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "was NOT verified here"
+      then Some d.March_errors.Errors.message
+      else None)
+    (stats_diagnostics src)
+
+(* Did [src] leave exactly the precondition spelled [pred] undischarged (and
+   not the sibling one)? *)
+let only_unverified_is (pred : string) (src : string) : bool =
+  let hints = unverified_preconditions_stats src in
+  hints <> []
+  && List.for_all (fun h -> contains h ("precondition `" ^ pred ^ "`")) hints
 
 let no_panic_proof_suite =
   [ (* THE POINT OF THIS TASK.  Inverted from test_compiler.ml's
@@ -8925,6 +8962,163 @@ let no_panic_proof_suite =
              "mod SMR do\n\
              \  cap no_panic\n\
              \  fn f(xs : List(Float)) : Float do Stats.mode(xs) end\n\
+              end\n"))
+
+  ; (* ── Task 7: `Stats` bivariate — the RELATIONAL precondition
+       (2026-08-05) ───────────────────────────────────────────────────────
+       `covariance`, `correlation` and `linear_regression` each take two
+       `List(Float)`s and panic on unequal lengths OR on fewer than 2
+       elements. Both are structural, so both are contracted:
+
+         xs : {List(Float) | len(_) >= 2}
+         ys : {List(Float) | len(_) == len(xs)}
+
+       `ys`'s predicate references a SIBLING parameter's measure. That is not
+       new machinery — it is exactly the shape `List.nth`'s already-shipped
+       `n : {Int | _ >= 0 && _ < len(xs)}` uses; the only novelty is `==`
+       rather than `<`.
+
+       Two preconditions on one call site means "this errors" alone is a weak
+       assertion: it would pass whichever of the two went undischarged. The
+       REJECT controls below therefore assert on the unverified-precondition
+       HINT, so the equal-length control and the short-list control are
+       genuinely distinct tests and a mutation of only the relational
+       comparison flips only the former. *)
+    gated
+      "cap no_panic: a PROVABLY safe Stats.covariance (both preconditions guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SCV1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 && List.length(ys) == List.length(xs) do\n\
+             \      Stats.covariance(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: a PROVABLY safe Stats.correlation / Stats.linear_regression compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SCR1 do\n\
+             \  cap no_panic\n\
+             \  fn a(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 && List.length(ys) == List.length(xs) do\n\
+             \      Stats.correlation(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+             \  fn b(xs : List(Float), ys : List(Float)) : (Float, Float) do\n\
+             \    if List.length(xs) >= 2 && List.length(ys) == List.length(xs) do\n\
+             \      Stats.linear_regression(xs, ys)\n\
+             \    else (0.0, 0.0) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT — equal-length violation, one per function. The short-list
+       precondition IS guarded here, so the only thing left undischarged is
+       the relational one. These are the tests a mutation of the equal-length
+       comparison alone must flip. *)
+    gated
+      "cap no_panic: Stats.covariance with only the length>=2 guard errors on the RELATIONAL precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "relational precondition unverified" true
+          (only_unverified_is "len(_) == len(xs)"
+             "mod SCV2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 do Stats.covariance(xs, ys) else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.correlation with only the length>=2 guard errors on the RELATIONAL precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "relational precondition unverified" true
+          (only_unverified_is "len(_) == len(xs)"
+             "mod SCR2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 do Stats.correlation(xs, ys) else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.linear_regression with only the length>=2 guard errors on the RELATIONAL precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "relational precondition unverified" true
+          (only_unverified_is "len(_) == len(xs)"
+             "mod SLR2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : (Float, Float) do\n\
+             \    if List.length(xs) >= 2 do Stats.linear_regression(xs, ys)\n\
+             \    else (0.0, 0.0) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT — short-list violation, one per function. Mirror image: the
+       relational guard IS present, so only `len(_) >= 2` is undischarged. *)
+    gated
+      "cap no_panic: Stats.covariance with only the equal-length guard errors on the SHORT-LIST precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "short-list precondition unverified" true
+          (only_unverified_is "len(_) >= 2"
+             "mod SCV3 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(ys) == List.length(xs) do Stats.covariance(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.correlation with only the equal-length guard errors on the SHORT-LIST precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "short-list precondition unverified" true
+          (only_unverified_is "len(_) >= 2"
+             "mod SCR3 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(ys) == List.length(xs) do Stats.correlation(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.linear_regression with only the equal-length guard errors on the SHORT-LIST precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "short-list precondition unverified" true
+          (only_unverified_is "len(_) >= 2"
+             "mod SLR3 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : (Float, Float) do\n\
+             \    if List.length(ys) == List.length(xs) do\n\
+             \      Stats.linear_regression(xs, ys)\n\
+             \    else (0.0, 0.0) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* Fully unguarded: both preconditions undischarged, and the call errors. *)
+    gated "cap no_panic: an unguarded Stats.covariance still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SCV4 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    Stats.covariance(xs, ys)\n\
+             \  end\n\
               end\n"))
   ]
 

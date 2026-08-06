@@ -446,8 +446,15 @@ mod Stats do
   doc """
   Sample covariance of two equal-length lists.
   Panics if lengths differ or if either list has fewer than 2 elements.
+
+  Both structural preconditions are declared in the signature — `xs` must have
+  at least 2 elements and `ys` must have exactly as many as `xs` — so a call the
+  compiler can prove violates either is a compile error rather than a runtime
+  panic. Lengths it cannot relate are accepted in silence (March reports only
+  definite failures) and the `panic`s below remain the runtime backstop.
   """
-  fn covariance(xs : List(Float), ys : List(Float)) : Float do
+  fn covariance(xs : {List(Float) | len(_) >= 2},
+                ys : {List(Float) | len(_) == len(xs)}) : Float do
     let nx = List.length(xs)
     let ny = List.length(ys)
     if nx != ny do panic("Stats.covariance: lists must have equal length")
@@ -473,8 +480,15 @@ mod Stats do
   Returns value in [-1, 1].
   Panics if lists have different lengths, fewer than 2 elements,
   or if either list has zero standard deviation.
+
+  The two *structural* preconditions are declared in the signature (`xs` has at
+  least 2 elements; `ys` has exactly as many as `xs`), so a provable violation
+  of either is a compile error. The zero-standard-deviation panic is
+  data-dependent — it turns on the `Float` *values* in the lists, not on their
+  shape — so no measure can express it and it stays a runtime check.
   """
-  fn correlation(xs : List(Float), ys : List(Float)) : Float do
+  fn correlation(xs : {List(Float) | len(_) >= 2},
+                 ys : {List(Float) | len(_) == len(xs)}) : Float do
     let nx = List.length(xs)
     let ny = List.length(ys)
     if nx != ny do panic("Stats.correlation: lists must have equal length")
@@ -505,8 +519,15 @@ mod Stats do
   Returns (slope, intercept).
   Panics if lists have different lengths or fewer than 2 elements,
   or if xs has zero variance (vertical line).
+
+  The two *structural* preconditions are declared in the signature (`xs` has at
+  least 2 points; `ys` has exactly as many as `xs`), so a provable violation of
+  either is a compile error. The zero-variance panic is data-dependent — it
+  turns on the `Float` *values* in `xs`, not on their shape — so no measure can
+  express it and it stays a runtime check.
   """
-  fn linear_regression(xs : List(Float), ys : List(Float)) : (Float, Float) do
+  fn linear_regression(xs : {List(Float) | len(_) >= 2},
+                       ys : {List(Float) | len(_) == len(xs)}) : (Float, Float) do
     let nx = List.length(xs)
     let ny = List.length(ys)
     if nx != ny do panic("Stats.linear_regression: lists must have equal length")

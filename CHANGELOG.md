@@ -21,7 +21,8 @@ git log is authoritative for exact commits.
   `Random.normal`/`exponential`/`bernoulli`/`choice`/`choice_weighted`,
   `DateTime.fixed_zone`/`fixed_zone_hm`,
   `Stats.mean`/`min_val`/`max_val`/`percentile`/`quantile`/`quantiles`/
-  `five_number_summary`/`variance`/`mode` — is
+  `five_number_summary`/`variance`/`mode`/`covariance`/`correlation`/
+  `linear_regression` — is
   no longer rejected on sight inside a `cap no_panic` module. The call is
   checked against its contract, by the same solver and the same verdicts that
   discharge division safety, so a provably safe call compiles clean:
@@ -31,6 +32,15 @@ git log is authoritative for exact commits.
   a guarantee; an `@[trusted]` assertion does not count as a proof here. Names
   with no contract (`panic`, `panic_`, `todo_`, `unreachable_`, `Array.get`,
   `Array.set`, `Array.pop`) are still banned unconditionally.
+- **`Stats.covariance`, `Stats.correlation` and `Stats.linear_regression` now
+  declare their two structural preconditions.** `xs : {List(Float) | len(_) >= 2}`
+  and `ys : {List(Float) | len(_) == len(xs)}` — the second refines one
+  parameter by referencing a *sibling* parameter's measure, the same shape
+  `List.nth`'s `n : {Int | _ >= 0 && _ < len(xs)}` already used. A call whose
+  lengths the compiler can relate is now proved at compile time rather than
+  checked by a runtime `panic`. `Stats.correlation`'s zero-standard-deviation
+  panic and `Stats.linear_regression`'s zero-variance panic depend on the
+  values in the lists rather than their shape and remain runtime-only.
 - **`cap no_panic` no longer reports transitive blame for those
   contract-covered names.** An unprovable `List.tail(xs)` inside a helper used
   to produce one error at the helper *and* one at every local caller of it; it
