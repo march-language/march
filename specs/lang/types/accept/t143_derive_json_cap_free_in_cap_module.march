@@ -1,0 +1,24 @@
+-- Capability unforgeability (R3), the OVER-BREADTH guard for derive (2026-08-05).
+--
+-- Accept companion to reject/t144 and reject/t145. `derive Json` stays legal
+-- for a cap-free type even in a module that handles capabilities. The walk
+-- must inspect the DERIVED TYPE's own declaration — record fields, variant
+-- arguments, alias RHS — and not the surrounding module.
+--
+-- The nested `Inner` field is deliberate: the derive walk must descend
+-- through a nested cap-free type without deciding that "I cannot see inside
+-- this" means "reject", which would make every non-primitive derive fail.
+mod CapFreeDerive do
+  needs IO
+
+  type Inner = { label : String }
+  derive Json for Inner
+
+  type Outer = { id : Int, inner : Inner }
+  derive Json for Outer
+
+  fn main(cap : Cap(IO)) do
+    let console : Cap(IO.Console) = cap_narrow(cap)
+    println("cap-free derive in a cap-using module")
+  end
+end

@@ -1,0 +1,25 @@
+-- R2 — the test-body exemption, deliberate and scoped (2026-08-05).
+--
+-- `test` and `describe` bodies have no `main`, so there is nowhere for a
+-- capability to be granted from. Without an exemption, capability behaviour
+-- would not be testable from March at all.
+--
+-- So `root_cap` stays nameable HERE and nowhere else (reject/t152 is the
+-- counterpart). This is a real remaining hole and is documented as one: it is
+-- ambient authority, scoped to a context that cannot reach production code —
+-- a dependency's `test` blocks do not run in a consumer's build.
+--
+-- The exemption is enforced by checking the enclosing context, not by the
+-- checker simply failing to look. If it were the latter, this file would pass
+-- for the wrong reason and reject/t152 would be the only thing standing
+-- between the language and its old behaviour.
+mod TestBodyCaps do
+  needs IO
+
+  describe "capabilities are reachable from a test body" do
+    test "narrowing the root inside a test" do
+      let console : Cap(IO.Console) = cap_narrow(root_cap)
+      assert(true)
+    end
+  end
+end

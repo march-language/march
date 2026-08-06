@@ -133,10 +133,11 @@ Run 10 times per language per benchmark; median, min, max reported.
 This one needs a compiler-side trick, not just clang: March's closure-call
 ABI heap-boxes every `Float` crossing a call boundary, which blocks
 vectorization outright. For a concrete-`Float`, single-use callback like this
-one, a dedicated pass clones the inlined callback under natural `double`
-params with zero boxing (`Float`-boxing Stage 4, Option B) — without it, this
-number would look like `map2`'s pre-fix numbers below, not like this. March
-is competitive with hand-written OCaml/Rust and within 3x of NumPy.
+one, a dedicated pass inlines the callback and drops the boxing so the loop
+vectorizes — without it, this number would look like `map2`'s pre-fix numbers
+below, not like this (the pass details are in
+[Compiler internals](#compiler-internals)). March is competitive with
+hand-written OCaml/Rust and within 3x of NumPy.
 
 **Source:** [`bench/simd_map.march`](https://github.com/march-language/march/blob/main/bench/simd_map.march) ·
 [`bench/ocaml/simd_map.ml`](https://github.com/march-language/march/blob/main/bench/ocaml/simd_map.ml) ·
@@ -158,11 +159,10 @@ is competitive with hand-written OCaml/Rust and within 3x of NumPy.
 
 `NativeArray.map2_int`/`map2_float` — added to unblock
 `DataFrame.col_add_col` (column-column arithmetic) — now gets the same
-inlining/boxing-elimination treatment `map` does: the same compiler pass
-(`Native_map_inline.ml`) that recognizes a single-array `map` call with a
-fresh, single-use callback was extended to recognize the two-array `map2`
-shape too, cloning a boxing-free variant for a concrete-`Float` callback
-exactly as it does for `map`. Beats OCaml, within 3x of NumPy.
+inlining/boxing-elimination treatment `map` does, so a concrete-`Float`
+callback vectorizes the same way. Beats OCaml, within 3x of NumPy.
+([Compiler internals](#compiler-internals) covers how the pass was extended to
+the two-array shape.)
 
 ### Fix history: map2
 
@@ -180,17 +180,9 @@ Before the fix, every element dispatched through the general closure-call
 path (heap-box each argument, indirect call through the closure's function
 pointer, unbox the result) — 299ms, **slower than naive interpreted
 Python**, and ~47x slower than March's own `map` doing essentially the same
-arithmetic. `Native_map_inline.ml` was extended the same day these numbers
-were first published: same eligibility bar as `map` (fresh, single-use,
-non-capturing-or-single-capture callback), same synthetic-call-name
-mechanism, same `Float`-boxing Stage 4 Option B unboxed clone for a
-concrete-`Float` signature — just matching a 3-argument call shape (two
-arrays + closure) instead of `map`'s 2-argument one. The inlined loop
-bypasses `native_int_arr_map2`/`native_float_arr_map2` entirely, so it also
-needed its own length-mismatch check (`native_arr_map2_check_len`,
-`runtime/march_runtime.c`) to keep panicking on a length mismatch exactly
-like the non-inlined path does — verified with a dedicated regression test,
-not just the happy path.
+arithmetic. The inlining pass was extended to the two-array `map2` shape the
+same day these numbers were first published; [Compiler
+internals](#compiler-internals) covers what that took.
 
 **Source:** [`bench/simd_map2.march`](https://github.com/march-language/march/blob/main/bench/simd_map2.march) ·
 [`bench/ocaml/simd_map2.ml`](https://github.com/march-language/march/blob/main/bench/ocaml/simd_map2.ml) ·
@@ -198,6 +190,28 @@ not just the happy path.
 [`bench/elixir/simd_map2.exs`](https://github.com/march-language/march/blob/main/bench/elixir/simd_map2.exs) ·
 [`bench/python/simd_map2.py`](https://github.com/march-language/march/blob/main/bench/python/simd_map2.py) ·
 [`bench/python/simd_map2_numpy.py`](https://github.com/march-language/march/blob/main/bench/python/simd_map2_numpy.py)
+
+---
+
+## Compiler internals
+
+> For compiler hackers — you don't need any of this to *use* `NativeArray`. It records
+> the machinery behind the boxing-free numeric fast path the benchmarks above exercise.
+
+The inlining and boxing-elimination live in the `Native_map_inline.ml` pass. It
+recognizes a `map`/`map2` call whose callback is fresh, single-use, and either
+non-capturing or single-capture (the same eligibility bar for both shapes), inlines that
+callback into the loop, and — when the callback's signature is concretely all-`Float` —
+clones it under natural `double` parameters and return with zero heap boxing (internally
+"`Float`-boxing Stage 4, Option B"). The two-array `map2` support reuses the identical
+synthetic-call-name mechanism and unboxed-clone path as single-array `map`; it just
+matches a 3-argument call shape (two arrays + closure) instead of `map`'s 2-argument one.
+
+Because the inlined loop bypasses the `native_int_arr_map2` / `native_float_arr_map2`
+runtime helpers entirely, it carries its own length-mismatch guard
+(`native_arr_map2_check_len` in `runtime/march_runtime.c`) so it still panics on a length
+mismatch exactly like the non-inlined path — covered by a dedicated regression test, not
+just the happy path.
 
 ---
 

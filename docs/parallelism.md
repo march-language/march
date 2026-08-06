@@ -139,19 +139,19 @@ end
    4000-element list splitting into 4 chunks at the default threshold of 1024
    (`⌈4000 / 1024⌉ = 4`). Each chunk becomes one `task_spawn`, so the number of tasks
    tracks `length(xs) / t`, not `length(xs)`.
-4. **The tasks are awaited in order, which is what keeps the result order-preserving** —
-   `task_await_unwrap` on chunk 0's task, then chunk 1's, and so on — but all the tasks
-   were already spawned before any awaiting starts, so this doesn't serialize the *work*,
-   only the order results are collected in.
+4. **The tasks are awaited in order, which is what keeps the result order-preserving.**
+   `task_await_unwrap` runs on chunk 0's task, then chunk 1's, and so on. But all the
+   tasks were already spawned before any awaiting starts, so this doesn't serialize the
+   *work* — only the order results are collected in.
 5. **What "spawn" means depends on the backend**, exactly as in [The
-   scheduler](#the-scheduler) above: compiled, `task_spawn` starts a real green thread
-   that the M:N scheduler can run on any OS thread; interpreted, `task_spawn` evaluates
+   scheduler](#the-scheduler) above. Compiled, `task_spawn` starts a real green thread
+   that the M:N scheduler can run on any OS thread. Interpreted, `task_spawn` evaluates
    its function **immediately, synchronously, right there** — so even the "parallel"
-   branch above the threshold ends up running chunk 0 to completion, then chunk 1, then
-   chunk 2, in plain left-to-right order, on one thread. That's *why* the interpreter is
-   guaranteed to produce the same result as the sequential version (it's not a special
-   case — it's the same code, just evaluated by a backend that doesn't have concurrency
-   to offer) and *why* it doesn't get faster no matter how large the list is.
+   branch above the threshold runs chunk 0 to completion, then chunk 1, then chunk 2, in
+   plain left-to-right order, on one thread. That's *why* the interpreter is guaranteed
+   to produce the same result as the sequential version: it isn't a special case, just
+   the same code evaluated by a backend that has no concurrency to offer. And it's *why*
+   the interpreter never gets faster no matter how large the list is.
 
 ### The threshold value itself
 

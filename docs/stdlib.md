@@ -903,63 +903,60 @@ tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
 
 ## Module Quick Reference
 
-| Module | Lines | Purpose |
-|--------|-------|---------|
-| `Prelude` | — | Auto-imported helpers |
-| `List` | 508 | Singly-linked list operations |
-| `String` | 364 | String manipulation |
-| `Map` | — | HAMT-backed key-value map |
-| `Set` | — | HAMT-backed set |
-| `Option` | — | Maybe type helpers |
-| `Result` | — | Either type helpers |
-| `Enum` | 701 | Lazy enumeration |
-| `Sort` | 615 | Timsort, Introsort, specialized small sorts |
-| `Math` | 193 | Arithmetic and transcendental functions |
-| `IO` | 72 | Console I/O |
-| `System` | 155 | OS/runtime info |
-| `File` | 139 | File I/O |
-| `Dir` | 50 | Directory operations |
-| `Path` | 91 | Path manipulation |
-| `Crypto` | 302 | SHA, HMAC, PBKDF2, random |
-| `UUID` | 266 | UUID v4/v5 |
-| `JSON` | — | JSON encode/decode |
-| `Base64` | 143 | Base64 encode/decode |
-| `URI` | 360 | URI parsing/construction |
-| `Duration` | 208 | Time-span arithmetic |
-| `Logger` | — | Structured logging |
-| `Vault` | — | Process-local KV store |
-| `Http` | — | HTTP client |
-| `HttpServer` | — | HTTP/WebSocket server |
-| `Task` | — | Structured concurrency |
-| `Seq` | 251 | Lazy sequences |
-| `IOList` | 221 | Lazy string builder |
-| `Random` | — | Random number generation |
-| `Regex` | — | Regular expressions |
-| `BigInt` | — | Arbitrary-precision integers |
-| `Decimal` | — | Exact decimal arithmetic |
-| `CSV` | 100 | CSV parsing |
-| `Datetime` | — | Date and time |
-
-| `Js.Dom` | — | Browser DOM bindings (JS only, auto-loaded for `--target js`) |
-| `Js.Canvas` | — | 2D canvas drawing bindings (JS only, auto-loaded for `--target js`) |
-
-| `NodeIdentity` | — | Cluster node identity (name, node\_id, incarnation) |
-| `NetFrame` | — | Length-prefixed TCP framing |
-| `ClusterAuth` | — | HMAC shared-secret challenge/response |
-| `Handshake` | — | Pure authenticated handshake protocol |
-| `PeerRegistry` | — | One-connection-per-peer table |
-| `NetKernel` | — | TCP framing + handshake transport |
-| `ClusterConn` | — | Dial/accept + handshake + register lifecycle |
-
-| `Gen` | — | Property test generators (Hedgehog-style) |
-| `Check` | — | Property test runner with shrinking |
-| `Test` | — | Test assertion helpers |
+| Module | Purpose |
+|--------|---------|
+| `Prelude` | Auto-imported helpers |
+| `List` | Singly-linked list operations |
+| `String` | String manipulation |
+| `Map` | HAMT-backed key-value map |
+| `Set` | HAMT-backed set |
+| `Option` | Maybe type helpers |
+| `Result` | Either type helpers |
+| `Enum` | Lazy enumeration |
+| `Sort` | Timsort, Introsort, specialized small sorts |
+| `Math` | Arithmetic and transcendental functions |
+| `IO` | Console I/O |
+| `System` | OS/runtime info |
+| `File` | File I/O |
+| `Dir` | Directory operations |
+| `Path` | Path manipulation |
+| `Crypto` | SHA, HMAC, PBKDF2, random |
+| `UUID` | UUID v4/v5 |
+| `Json` | JSON encode/decode |
+| `Base64` | Base64 encode/decode |
+| `Uri` | URI parsing/construction |
+| `Duration` | Time-span arithmetic |
+| `Logger` | Structured logging |
+| `Vault` | Process-local KV store |
+| `Http` | HTTP client |
+| `HttpServer` | HTTP/WebSocket server |
+| `Task` | Structured concurrency |
+| `Seq` | Lazy sequences |
+| `IOList` | Lazy string builder |
+| `Random` | Random number generation |
+| `Regex` | Regular expressions |
+| `BigInt` | Arbitrary-precision integers |
+| `Decimal` | Exact decimal arithmetic |
+| `Csv` | CSV parsing |
+| `DateTime` | Date and time |
+| `Js.Dom` | Browser DOM bindings (JS only, auto-loaded for `--target js`) |
+| `Js.Canvas` | 2D canvas drawing bindings (JS only, auto-loaded for `--target js`) |
+| `NodeIdentity` | Cluster node identity (name, node\_id, incarnation) |
+| `NetFrame` | Length-prefixed TCP framing |
+| `ClusterAuth` | HMAC shared-secret challenge/response |
+| `Handshake` | Pure authenticated handshake protocol |
+| `PeerRegistry` | One-connection-per-peer table |
+| `NetKernel` | TCP framing + handshake transport |
+| `ClusterConn` | Dial/accept + handshake + register lifecycle |
+| `Gen` | Property test generators (Hedgehog-style) |
+| `Check` | Property test runner with shrinking |
+| `Test` | Test assertion helpers |
 
 ---
 
 ## Next Steps
 
-- [Property Testing](property-testing.md) — write property-based tests with `Gen` and `Check`
-- [REPL](repl.md) — explore the stdlib interactively
-- [Interfaces](interfaces.md) — how stdlib types implement interfaces
-- [Tooling](tooling.md) — `forge search` to find functions by type or name
+- [Property Testing]({{ site.baseurl }}/docs/property-testing/) — write property-based tests with `Gen` and `Check`
+- [REPL]({{ site.baseurl }}/docs/repl/) — explore the stdlib interactively
+- [Interfaces]({{ site.baseurl }}/docs/interfaces/) — how stdlib types implement interfaces
+- [Tooling]({{ site.baseurl }}/docs/tooling/) — `forge search` to find functions by type or name

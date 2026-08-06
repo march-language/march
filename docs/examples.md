@@ -12,8 +12,10 @@ Runnable programs in `examples/` that showcase March language features and commo
 To run any example:
 
 ```sh
-dune exec march -- examples/<name>.march
+march examples/<name>.march
 ```
+
+(Building March from source? Use `dune exec march -- examples/<name>.march` instead.)
 
 ---
 
@@ -442,3 +444,11 @@ HTML templating with `~H` sigils and `IOList` composition. Covers layout wrappin
 ### debugger.march
 
 Seven debugging workflows in one file: `dbg(expr)` logging, conditional breakpoints, `:find` search, `:watch` expressions, time-travel with `:tsave`/`:tload`, and actor message history replay.
+
+---
+
+## Next Steps
+
+- [Language Tour](tour.md) — the syntax and concepts behind these examples
+- [Build a CLI Tool](build-a-cli.md) — a start-to-finish tutorial: scaffold, args, files, test, build
+- [Cookbook](cookbook/) — goal-oriented recipes for CLI, HTTP, JSON, files, and config

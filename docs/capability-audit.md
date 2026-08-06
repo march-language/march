@@ -244,7 +244,7 @@ undeclared builtin call) are a limit of *reading a declaration or a symbol
 table*, not a limit of what March can enforce. To turn the declared set into an
 actual OS-level confinement — one that bounds even `extern` C and raw syscalls
 because it confines the whole process — see [OS-level
-enforcement]({{ site.baseurl }}/docs/capabilities/#os-level-enforcement--sandboxing-the-compiled-binary):
+enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement--sandboxing-the-compiled-binary):
 `forge cap run` (a sandbox forge installs around the binary) and `--cap-sandbox`
 (a deny-default profile the binary installs on itself at startup).
 
@@ -253,9 +253,11 @@ enforcement]({{ site.baseurl }}/docs/capabilities/#os-level-enforcement--sandbox
 ## See also
 
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/) — the language feature
-  these tools report on, including
-  [OS-level enforcement]({{ site.baseurl }}/docs/capabilities/#os-level-enforcement--sandboxing-the-compiled-binary)
-  (`forge cap run`, `--cap-sandbox`) that turns a declared set into a real sandbox
+  these tools report on
+- [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) —
+  [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement--sandboxing-the-compiled-binary)
+  (`forge cap run`, `--cap-sandbox`) that turns a declared set into a real sandbox,
+  and node-local hot-deploy admission control
 - [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/) —
   how capabilities sit alongside the other safety axes
 - [FFI]({{ site.baseurl }}/docs/ffi/) — the `extern` boundary, and why analysis

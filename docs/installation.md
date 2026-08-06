@@ -33,6 +33,14 @@ forge toolchain list           # show installed versions
 
 See the [README](https://github.com/march-language/march#install-a-prebuilt-binary) for the manual-download alternative and details.
 
+> **Just want to try it?** With a prebuilt binary installed you're done — head straight to [Getting Started](getting-started.md) and write your first program. Everything below is for contributors building the compiler from source, and can be skipped.
+
+---
+
+# Building from source (contributors)
+
+The rest of this page walks through building March's compiler, standard library, and tooling from source with OCaml 5.3.0 + dune. You only need this if you're hacking on March itself.
+
 ---
 
 ## Prerequisites
@@ -186,7 +194,7 @@ end
 Run it:
 
 ```sh
-forge run hello.march
+march hello.march
 # Hello, March!
 ```
 
@@ -215,3 +223,5 @@ sudo apt-get install libffi-dev
 - [Getting Started](getting-started.md) — write your first real program
 - [Language Tour](tour.md) — a guided introduction to the language
 - [Tooling](tooling.md) — forge, LSP, and the debugger
+
+Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).

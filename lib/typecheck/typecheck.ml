@@ -629,6 +629,28 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  root_cap_allowed : bool;
+  (** True where naming [root_cap] is still permitted (R2, 2026-08-05).
+
+      [root_cap] used to be an ordinary global of type [Cap(IO)] in scope in
+      every module, which is no-authority-from-nothing violated at the source:
+      a module declaring no [needs] at all could hold the root and narrow it to
+      any descendant, legitimately, because [cap_narrow] demands exactly the
+      parent it now had.  The root is now granted to [main] instead (see
+      [Desugar.check_main_signature]; the runtime already passed it).
+
+      Two contexts keep it, both deliberate and both scoped by ENCLOSING
+      CONTEXT rather than by the checker declining to look — the distinction
+      matters, because "we never checked here" and "we decided not to check
+      here" are indistinguishable from the passing test:
+
+      - [test]/[describe]/[setup] bodies, which have no [main] to be granted
+        from.  Without this, capability behaviour would not be testable from
+        March at all.  It is ambient authority, in a context that cannot reach
+        production code: a dependency's test blocks do not run in a consumer's
+        build.
+      - the REPL, which likewise has no entry point.  Carried by
+        [check_module_with_env], whose only caller is [lib/jit/repl_jit.ml]. *)
   cur_fn_public : bool;
   (** True while checking the body of a PUBLIC (fn, not pfn) function — read by
       the proof-cap mint gate. Lambdas inherit it; nested named fns/modules reset
@@ -702,6 +724,34 @@ type env = {
       pinned result is [Cap(P)] with [P] a proof cap whose declaring module is
       [current_module] AND [cur_fn_public]; a proof cap from another module, a
       private fn, or a non-proof (IO) target is rejected. *)
+  json_cap_sites : (Ast.span * ty * string) list ref;
+  (** Every [to_json] / [from_json] / [from_json_events] application site,
+      recorded as (span, the INSTANTIATED arrow type of the builtin, builtin
+      name).  Swept after checking by [check_json_cap_sites], which rejects a
+      capability in the encoded argument or the decoded result — capability
+      unforgeability, R3.
+
+      These three are the only builtins typed [poly2 (fun a b -> TArrow (a,
+      b))] (see the binding block below), i.e. the only ones whose type places
+      no constraint whatsoever on what they produce.  Nothing in [from_json]'s
+      signature stops it returning [Cap(IO)].
+
+      Why the arrow and not just the result: [to_json] is checked on its
+      ARGUMENT (encoding a capability manufactures the wire value a decoder
+      would consume) while the [from_json] family is checked on its RESULT.
+      Recording the instantiated arrow captures both in one value, and its two
+      vars are unified in place by [infer_app], so the arrow read at sweep
+      time carries the solved argument and result.
+
+      Why a deferred sweep rather than an inline check — this is the whole
+      reason the mechanism exists: the result var is routinely NOT pinned at
+      the application site.  In [let x = from_json(s)] followed by
+      [cap_narrow(x)], it is the LATER [cap_narrow] that unifies [x] with
+      [Cap(IO)].  An inline check reads an unsolved [TVar], reports nothing,
+      and still passes every test that writes the annotation inline.  Same
+      trap as [mint_cap_sites] above; see
+      [specs/lang/types/reject/t143_cap_from_json_deferred_zonk.march], which
+      exists specifically to fail if this is ever made eager. *)
   pure_mod : bool;
   (** True when the module currently being checked has `cap pure`.
       Set by [check_decl] on [DOpts ["pure"]]; read by [check_pure_module]. *)
@@ -792,6 +842,7 @@ let make_env errors type_map = {
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  root_cap_allowed = false;
   cur_fn_public = false;
   cap_qual_prefix = "";
   enclosing_package = "";
@@ -801,6 +852,7 @@ let make_env errors type_map = {
   cap_producer_ivars = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
   mint_cap_sites = ref [];
+  json_cap_sites = ref [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
@@ -1863,23 +1915,22 @@ let same_package_namespace (a : string) (b : string) : bool =
 let cap_path_of_names names =
   String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
 
-(** [cap_paths_in_surface_ty ty] returns all Cap(X) paths referenced in [ty]. *)
-let rec cap_paths_in_surface_ty (ty : Ast.ty) : string list =
-  match ty with
-  | Ast.TyCon (con, [arg]) when con.txt = "Cap" ->
-    (match arg with
-     | Ast.TyCon (name, []) -> [name.txt]
-     | _ -> [])
-  (* Tagged(X, T) is not a Cap — skip its args to avoid false capability extraction *)
-  | Ast.TyCon (con, _) when con.txt = "Tagged" -> []
-  | Ast.TyCon (_, args) -> List.concat_map cap_paths_in_surface_ty args
-  | Ast.TyArrow (a, b) ->
-    cap_paths_in_surface_ty a @ cap_paths_in_surface_ty b
-  | Ast.TyTuple ts -> List.concat_map cap_paths_in_surface_ty ts
-  | Ast.TyRecord fields ->
-    List.concat_map (fun (_, t) -> cap_paths_in_surface_ty t) fields
-  | Ast.TyLinear (_, t) -> cap_paths_in_surface_ty t
-  | _ -> []
+(** [cap_paths_in_surface_ty ty] returns all Cap(X) paths referenced in [ty].
+
+    Delegates to [Cap_surface_ty.caps_in_ty], which the desugarer's [derive
+    Json] rejection uses too.  This was a private copy here until 2026-08-05;
+    it now shares one exhaustive implementation, because a capability walk
+    maintained in two places drifts, and a drifted capability walk is a silent
+    hole rather than a visible bug.
+
+    One behaviour change came with the move: the old copy skipped
+    [Tagged(_, _)]'s arguments outright, to avoid mistaking the marker
+    argument for a capability.  The shared walk recurses instead.  The marker
+    is a nullary constructor whose name is not "Cap", so it still extracts
+    nothing — while [Tagged(R, Cap(IO))], which the old copy could not see at
+    all, is now found. *)
+let cap_paths_in_surface_ty (ty : Ast.ty) : string list =
+  March_caps.Cap_surface_ty.caps_in_ty ty
 
 (* =================================================================
    §9b  Standard interfaces — Eq, Ord, Show, Hash
@@ -4919,6 +4970,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── Variables ────────────────────────────────────────────────── *)
     | Ast.EVar name ->
       record_use name.txt name.span env;
+      (* R2: the root capability is granted at the boundary, not taken.  The
+         name stays BOUND (so this reports a capability error rather than
+         "I cannot find `root_cap`", and so the inferred type below stays
+         [Cap(IO)] and no cascade of unification failures follows a single
+         mistake) — only naming it is refused. *)
+      if name.txt = "root_cap" && not env.root_cap_allowed then
+        Err.error env.errors ~span:name.span
+          (render_parts [
+            MPCode "root_cap";
+            MPText " cannot be referenced — the root capability is granted to ";
+            MPCode "main"; MPText ", not taken.";
+            MPBreak;
+            MPText "help: declare "; MPCode "fn main(cap : Cap(IO))";
+            MPText " and pass the capability down to whatever needs it, narrowing with ";
+            MPCode "cap_narrow"; MPText " along the way." ]);
       (match lookup_var name.txt env with
        | Some sch ->
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
@@ -5556,6 +5622,34 @@ let rec infer_expr env (e : Ast.expr) : ty =
       demote_to_monomorphic rty;
       env.mint_cap_sites :=
         (sp, rty, env.cur_fn_public, env.current_module) :: !(env.mint_cap_sites);
+      rty
+
+    (* Capability unforgeability (R3): record the three unconstrained JSON
+       builtins for the post-checking sweep.  [f_ty] is the FRESHLY
+       INSTANTIATED [a -> b]; [infer_app] unifies [a] with the argument and
+       [b] with the result in place, so the arrow recorded here reads back
+       solved at sweep time.  No [demote_to_monomorphic] here — see
+       [check_json_cap_sites] for why an unsolved var is handled by the sweep
+       rather than forced at the call site. *)
+    | Ast.EApp ((Ast.EVar { txt = ("to_json" | "from_json" | "from_json_events"); _ }) as fv,
+                [arg], sp) ->
+      let jname = (match fv with Ast.EVar n -> n.txt | _ -> assert false) in
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [arg] 0 in
+      (* Value restriction, for exactly the reason spelled out at
+         [demote_to_monomorphic]: without it, [let x = from_json(s)]
+         generalizes [x] to [∀b. b], every use instantiates a FRESH var pinned
+         to that use's type, and the single node recorded here stays an
+         unbound quantified var forever.  The sweep then reads [TVar], reports
+         nothing, and the forge is reopened in precisely the let-flow position
+         reject/t143 exercises.
+         Consequence, and it is a real one: a single [from_json] application
+         can no longer be used at two DIFFERENT result types. Decoding one
+         string as two unrelated types is already meaningless at run time —
+         [from_json] dispatches on a single determinable target type — so this
+         costs nothing that worked. *)
+      demote_to_monomorphic f_ty;
+      env.json_cap_sites := (sp, f_ty, jname) :: !(env.json_cap_sites);
       rty
 
     | Ast.EApp (f, args, sp) ->
@@ -7838,7 +7932,18 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
 (** Walk an expression and collect all direct function call names.
     Returns [(fn_name, span)] for every EApp where the callee is a bare
     variable or a qualified module-path field access.  Used by the
-    body-scanning pass to detect builtin capability uses. *)
+    body-scanning pass to detect builtin capability uses.
+
+    KEEP IN SYNC with [March_refinecheck.Panic_surface_by_proof.calls_in_expr],
+    which is a structural copy of this walk (it carries a second span per site,
+    so it cannot simply call this one; [march_refinecheck] also depends on
+    [march_typecheck], not the reverse, so the sharing would have to go the
+    other way).  That copy is what enforces `cap no_panic` for every name in
+    [panic_surface_contracted] — those names were REMOVED from this module's
+    syntactic ban rather than double-checked, so the drift is fail-OPEN: a new
+    [Ast.expr] form added here and not there makes a call that can panic
+    compile clean inside a capability that promised it cannot. Add new
+    expression forms to BOTH. *)
 let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     : (string * Ast.span) list =
   match e with
@@ -7889,6 +7994,79 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.EAssert (e, _) -> calls_in_expr acc e
   | Ast.ESigil (_, content, _) -> calls_in_expr acc content
   | Ast.ELit _ | Ast.EVar _ -> acc
+
+(** [cap_annots_in_expr acc e] collects every capability named by a type
+    ANNOTATION inside an expression: a [let] binding's [bind_ty], a lambda or
+    local-function parameter type, a local function's return type, and
+    [EAnnot].
+
+    Check 1 historically read function SIGNATURES only, so a capability named
+    inside a body escaped [needs] entirely.  That is reachable: [root_cap] is
+    ambient, so a module declaring only [IO.Console] could narrow the root to
+    [Cap(IO.FileWrite)] and bind it without ever putting a capability in a
+    signature.  See [specs/lang/types/reject/t151_cap_let_annotation_undeclared.march].
+
+    On [EAnnot]: the parser never produces one — desugar synthesizes the only
+    instance, a hardcoded [SupervisorSpec] on an [app] block's spec field — so
+    no source program can route a capability through it and there is no
+    reject-witness for it in the corpus.  It is walked anyway because it costs
+    one line and because the next construct desugared into an [EAnnot] should
+    inherit the coverage rather than quietly reopen the gap.
+
+    Exhaustive over [Ast.expr] with no wildcard arm, mirroring
+    [calls_in_expr] above; a new expression form must break this build. *)
+let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
+  : (string * Ast.span) list =
+  let of_ty acc (sp : Ast.span) (t : Ast.ty) =
+    List.fold_left (fun a cap -> (cap, sp) :: a) acc (cap_paths_in_surface_ty t)
+  in
+  let of_ty_opt acc sp = function None -> acc | Some t -> of_ty acc sp t in
+  let of_params acc sp ps =
+    List.fold_left (fun a (p : Ast.param) -> of_ty_opt a sp p.param_ty) acc ps
+  in
+  match e with
+  | Ast.ELet (b, sp) ->
+    let acc = of_ty_opt acc sp b.Ast.bind_ty in
+    cap_annots_in_expr acc b.Ast.bind_expr
+  | Ast.EAnnot (ex, t, sp) -> cap_annots_in_expr (of_ty acc sp t) ex
+  | Ast.ELam (ps, body, sp) -> cap_annots_in_expr (of_params acc sp ps) body
+  | Ast.ELetFn (_, ps, ret, body, sp) ->
+    let acc = of_ty_opt (of_params acc sp ps) sp ret in
+    cap_annots_in_expr acc body
+  | Ast.ELetQ (_, rhs, body, _) ->
+    cap_annots_in_expr (cap_annots_in_expr acc rhs) body
+  | Ast.EApp (f, args, _) ->
+    List.fold_left cap_annots_in_expr (cap_annots_in_expr acc f) args
+  | Ast.ECon (_, args, _) -> List.fold_left cap_annots_in_expr acc args
+  | Ast.EBlock (es, _) -> List.fold_left cap_annots_in_expr acc es
+  | Ast.EMatch (scrut, arms, _) ->
+    let acc = cap_annots_in_expr acc scrut in
+    List.fold_left (fun a arm ->
+        let a = Option.fold ~none:a ~some:(cap_annots_in_expr a) arm.Ast.branch_guard in
+        cap_annots_in_expr a arm.Ast.branch_body) acc arms
+  | Ast.ETuple (es, _) -> List.fold_left cap_annots_in_expr acc es
+  | Ast.ERecord (fields, _) ->
+    List.fold_left (fun a (_, ex) -> cap_annots_in_expr a ex) acc fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    let acc = cap_annots_in_expr acc base in
+    List.fold_left (fun a (_, ex) -> cap_annots_in_expr a ex) acc fields
+  | Ast.EField (inner, _, _) -> cap_annots_in_expr acc inner
+  | Ast.EIf (cond, then_, else_, _) ->
+    cap_annots_in_expr (cap_annots_in_expr (cap_annots_in_expr acc cond) then_) else_
+  | Ast.ECond (arms, _) ->
+    List.fold_left (fun a (ce, be) ->
+        cap_annots_in_expr (cap_annots_in_expr a ce) be) acc arms
+  | Ast.EPipe (a, b, _) -> cap_annots_in_expr (cap_annots_in_expr acc a) b
+  | Ast.EAtom (_, args, _) -> List.fold_left cap_annots_in_expr acc args
+  | Ast.ESend (a, b, _) -> cap_annots_in_expr (cap_annots_in_expr acc a) b
+  | Ast.ESpawn (ex, _) -> cap_annots_in_expr acc ex
+  | Ast.EDbg (Some inner, _) -> cap_annots_in_expr acc inner
+  | Ast.EAssert (ex, _) -> cap_annots_in_expr acc ex
+  | Ast.ESigil (_, content, _) -> cap_annots_in_expr acc content
+  | Ast.EDbg (None, _) -> acc
+  | Ast.EHole _ -> acc
+  | Ast.EResultRef _ -> acc
+  | Ast.ELit _ | Ast.EVar _ -> acc   (* carry no type annotation *)
 
 (** True if [fn_name] ends in the bare "_migrate_state" suffix, regardless of
     which actor it belongs to — the hot-reload state-migration naming
@@ -8044,7 +8222,20 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
       let qname = cap_qname def.fn_name.txt in
       record_fn_caps qname sig_caps;
-      List.map (fun cap -> (cap, sp)) sig_caps
+      (* Annotations INSIDE the body are uses too, and were invisible here
+         until 2026-08-05 — see [cap_annots_in_expr].
+
+         Deliberately NOT passed to [record_fn_caps]: signature caps propagate
+         to callers because they are the function's interface, while a local
+         annotation is not, and folding it into the propagated closure would
+         widen every caller's ceiling on the strength of a binding they cannot
+         see.  So a body annotation is reported against this module's [needs]
+         and stops there. *)
+      let body_annot_caps =
+        List.concat_map (fun (c : Ast.fn_clause) -> cap_annots_in_expr [] c.Ast.fc_body)
+          def.fn_clauses
+      in
+      List.map (fun cap -> (cap, sp)) sig_caps @ body_annot_caps
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
@@ -8079,7 +8270,47 @@ let check_module_needs (env : env) (mod_name : Ast.name)
        trigger the "declared but not used" warning. *)
     | Ast.DExtern (edef, sp) ->
       List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty edef.ext_cap_ty)
-    | _ -> []
+
+    (* A capability named in a TYPE DECLARATION — a record field, a variant
+       constructor argument, or an alias right-hand side — is a use of that
+       capability.  Declaring the field does not let the module OBTAIN the
+       capability, but it lets it hold one and pass one, which is exactly what
+       the ceiling exists to make visible, and it is already how the identical
+       capability is treated in a function signature.
+
+       These arms were covered by the `| _ -> []` wildcard that used to end
+       this match, so `type Handle = { tok : Cap(IO.FileWrite) }` under
+       `needs IO.Console` typechecked clean with `--cap-strict`.  See
+       reject/t148-t150. *)
+    | Ast.DType (_, _, _, td, sp)
+    | Ast.DAlwaysLinearType (_, _, _, td, sp) ->
+      List.map (fun cap -> (cap, sp)) (March_caps.Cap_surface_ty.caps_in_type_def td)
+
+    (* ── Everything below names no capability position ──────────────────
+       Enumerated rather than wildcarded, deliberately.  Five separate bugs in
+       this codebase have come from a capability walk ending in `| _ -> ()`
+       that was inert until a declaration form grew a type position; the point
+       of naming every constructor is that adding a 25th one breaks this build
+       instead of silently opening a hole.  Do NOT collapse these back into a
+       wildcard. *)
+    | Ast.DMod _ ->
+      (* Nested modules are checked by their own [check_module_needs] pass,
+         which attributes diagnostics to the INNER module — verified: a `Cap`
+         in a nested module's signature reports against the inner name.
+         Recursing here would double-report against the outer module and
+         against the wrong `needs`. *)
+      []
+    | Ast.DLet _ ->
+      (* A top-level binding's annotation is a type position, but the value
+         restriction means a top-level cap binding cannot be produced without
+         a call whose signature is already walked above. Left uncovered
+         deliberately; revisit if a witness appears. *)
+      []
+    | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _ | Ast.DImpl _
+    | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _
+    | Ast.DOpts _ | Ast.DTransitions _ | Ast.DApp _ | Ast.DDeriving _
+    | Ast.DSatisfy _ | Ast.DTest _ | Ast.DDescribe _ | Ast.DSetup _
+    | Ast.DSetupAll _ -> []
   ) decls in
   (* Body-scan: collect builtin calls that imply a cap need.
      Deduplicated to one warning per cap (first call-site span). *)
@@ -8484,6 +8715,75 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       ) edef.ext_fns
     | _ -> ()
   ) decls
+
+(** [cap_in_solved_ty t] returns the rendered capability path of the first
+    [Cap(X)] found anywhere in the SOLVED type [t], or [None].
+
+    Companion to [Cap_surface_ty.caps_in_ty], which walks the surface syntax a
+    programmer wrote.  This one walks the internal, post-unification [ty] and
+    so must [repr] through every node: a capability that arrives by
+    unification rather than by annotation is precisely the case Check A exists
+    to catch, and it is invisible without the deref.
+
+    Exhaustive over [ty]'s constructors with no wildcard arm, for the reason
+    given at the top of [Cap_surface_ty]. *)
+let rec cap_in_solved_ty (t : ty) : string option =
+  let first = List.fold_left
+      (fun acc x -> match acc with Some _ -> acc | None -> cap_in_solved_ty x) None in
+  match repr t with
+  | TCon ("Cap", [inner]) ->
+    (* Render the argument for the diagnostic.  An unsolved or structured
+       argument renders as `_`: the position is still a capability position
+       and still rejected — an un-pinned capability is not a safe capability —
+       we simply cannot name it. *)
+    Some (match repr inner with TCon (p, []) -> p | _ -> "_")
+  | TCon (_, args) -> first args
+  | TArrow (a, b) -> first [a; b]
+  | TTuple ts -> first ts
+  | TRecord flds -> first (List.map snd flds)
+  | TLin (_, t) -> cap_in_solved_ty t
+  | TNatOp (_, a, b) -> first [a; b]
+  | TRefine (base, _, _) -> cap_in_solved_ty base
+  | TVar _ -> None      (* unsolved: nothing to name, nothing to report *)
+  | TNat _ -> None      (* type-level natural *)
+  | TChan _ -> None     (* session_ty carries no capability *)
+  | TError -> None      (* already-reported error sentinel; stay quiet *)
+
+(** Capability unforgeability (R3), the call-site half.  [to_json] is checked
+    on its argument, the [from_json] family on its result; see
+    [env.json_cap_sites] for why this runs deferred and why it inspects the
+    instantiated arrow.
+
+    An application whose relevant position never got pinned leaves a [TVar],
+    which [cap_in_solved_ty] reports as [None] — silence.  That is deliberate:
+    an unpinned result is a program that never used the decoded value as a
+    capability, and rejecting it would break ordinary polymorphic JSON code.
+    The forge only becomes a forge once something pins the type, and pinning
+    is exactly what this sweep waits for. *)
+let check_json_cap_sites (env : env) : unit =
+  List.iter (fun (sp, f_ty, jname) ->
+      let encoding = (jname = "to_json") in
+      let inspected =
+        match repr f_ty with
+        | TArrow (a, b) -> if encoding then a else b
+        (* Not an arrow: the builtin was referenced in a shape this recording
+           did not anticipate.  Inspect the whole thing rather than skip it —
+           silently ignoring an unrecognised shape is how a capability walk
+           becomes a hole. *)
+        | other -> other
+      in
+      match cap_in_solved_ty inspected with
+      | None -> ()
+      | Some cap_path ->
+        let verb = if encoding then "serialized" else "deserialized" in
+        Err.error env.errors ~span:sp
+          (render_parts [
+            MPCode ("Cap(" ^ cap_path ^ ")");
+            MPText (" cannot be " ^ verb ^ " — a capability may only be received, never constructed.");
+            MPBreak;
+            MPText "hint: "; MPCode jname;
+            MPText " places no constraint on the type it produces, so it would fabricate authority from data. Receive the capability as a parameter and pass it through instead." ])
+    ) !(env.json_cap_sites)
 
 (** Post-checking sweep (Part 2): enforce the [mint_cap] gate for every recorded
     site, now that its result type is pinned by later unification.  [mint_cap(x)]
@@ -9294,19 +9594,91 @@ let panic_surface_direct : StringSet.t = StringSet.of_list [
   "panic"; "panic_"; "todo_"; "unreachable_";
 ]
 
-let panic_surface_prelude : StringSet.t = StringSet.of_list [
-  "unwrap"; "expect"; "head"; "tail"; "last";
+(* EMPTY since 2026-08-05 (Task 3, specs/progress/2026-08-05-no-panic-proof-based-ban.md).
+   Every prelude name that used to live here — `unwrap`, `expect`, `head`,
+   `tail`, `last` — carries a real refinement precondition, so it is no longer
+   banned by NAME: [Panic_surface_by_proof] (lib/refinecheck) checks each call
+   site against its actual verdict instead, admitting the ones that are
+   provably safe.  The binding stays (rather than being deleted along with
+   [panic_surface_all_direct]) because it is the seam where a future prelude
+   name with NO possible contract would go. *)
+let panic_surface_prelude : StringSet.t = StringSet.empty
+
+(* What remains SYNTACTICALLY banned among qualified stdlib names: only the
+   ones with no refinement contract to consult.  `Array.get`/`Array.set`/
+   `Array.pop` are Group B — they panic (out of bounds, and on an empty vector
+   respectively) and no contract exists for them, so an unconditional ban is
+   still the only sound answer.
+
+   And it is the only answer AVAILABLE for them, not merely the one nobody got
+   to yet: the 2026-08-05 feasibility gate established that a contract on these
+   three cannot currently be discharged at all.  `Array.length` is a scalar
+   CONSTRUCTOR FIELD read (`PVec(n,_,_,_) -> n`), and call-site reflection
+   erases every non-datatype constructor field to a fresh unconstrained
+   constant, so the measure is inert — see
+   `specs/todos/2026-08-05-measure-over-scalar-ctor-field.md`.  Do not move
+   these into [panic_surface_contracted] until that todo is closed: the
+   proof-based pass is fail-closed on `Skipped`, so an inert contract would
+   reject every call while advertising the name as proof-checked.
+
+   Everything else that used to be here now carries a refinement contract and
+   lives in [panic_surface_contracted] below.  Ban-list audit 2026-08-05
+   (specs/progress/2026-08-05-no-panic-ban-list-audit.md) is what established
+   which names carry a real contract. *)
+let panic_surface_stdlib : StringSet.t = StringSet.of_list [
+  "Array.get"; "Array.set"; "Array.pop";
 ]
 
-let panic_surface_stdlib : StringSet.t = StringSet.of_list [
-  "List.nth"; "List.hd"; "List.tl"; "List.head"; "List.last";
-  "List.min_elt"; "List.max_elt";
+(* ── The CONTRACTED panic surface ─────────────────────────────────────────
+   Names that panic exactly when a declared refinement precondition fails, so
+   a call to one CAN be proved safe.  This is the single source of truth for
+   the set: [Panic_surface_by_proof.covered] (lib/refinecheck) aliases this
+   binding rather than repeating it, which is what makes "disjoint from the
+   syntactic ban lists" a structural property instead of a hand-checked one.
+
+   Whether these are banned by NAME here depends on
+   [proof_based_panic_surface] below. *)
+let panic_surface_contracted : StringSet.t = StringSet.of_list [
+  (* prelude spellings (prelude is unwrapped into global scope) *)
+  "head"; "tail"; "last"; "unwrap"; "expect";
+  (* qualified stdlib spellings *)
+  "List.nth"; "List.head"; "List.last"; "List.tail";
+  "List.maximum_int"; "List.minimum_int";
   "Option.unwrap"; "Option.expect";
   "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
-  "Array.get"; "Array.set";
-  "String.slice_bytes"; "String.nth";
-  "NativeArray.get"; "NativeArray.set";
+  "Random.normal"; "Random.exponential"; "Random.bernoulli"; "Random.choice";
+  "Random.choice_weighted";
+  "DateTime.fixed_zone"; "DateTime.fixed_zone_hm";
+  "Stats.mean"; "Stats.min_val"; "Stats.max_val";
+  "Stats.percentile"; "Stats.quantile"; "Stats.quantiles";
+  "Stats.five_number_summary"; "Stats.variance"; "Stats.mode";
+  "Stats.covariance"; "Stats.correlation"; "Stats.linear_regression";
 ]
+
+(** Set by a pipeline that ALSO runs [Panic_surface_by_proof] (lib/refinecheck)
+    after [Refine_check.check_module].  When true, this syntactic check leaves
+    [panic_surface_contracted] alone and the proof-based pass decides those
+    call sites from their actual verdicts.
+
+    Default FALSE, and the default is the whole point.  March has three
+    separate check pipelines and only two of them run refinecheck at all:
+
+      - `bin/main.ml`'s compile/`--check` path and its `run_test_cmd` copy DO
+        (they set this to true);
+      - `bin/main.ml`'s [run_check_cmd] (`march check`, `march caps`) does NOT
+        — it is a package-level, typecheck-only path seeded from a cached
+        stdlib env, deliberately skipping the solver;
+      - the LSP (`lsp/lib`) does NOT — it does not even link march_refinecheck.
+
+    Without a verdict index there is nothing to consult, and `cap no_panic` is
+    a guarantee, so "cannot prove" must mean "reject".  Leaving the flag false
+    in those two pipelines therefore keeps the OLD unconditional ban (including
+    its transitive fixpoint) exactly as it was before 2026-08-05 — conservative,
+    no regression, just no proof-based widening there.  Getting this default
+    backwards would silently let genuinely panicky code pass `march check` and
+    make editor squiggles disappear, which is the failure direction the plan's
+    Global Constraints call as serious as a false positive. *)
+let proof_based_panic_surface : bool ref = ref false
 
 let panic_surface_all_direct : StringSet.t =
   StringSet.union panic_surface_direct panic_surface_prelude
@@ -9314,20 +9686,34 @@ let panic_surface_all_direct : StringSet.t =
 let panic_surface_suggestion : string -> string = function
   | "List.nth" ->
     "\n\nUse `List.nth_opt` to return `Option(a)` instead of panicking on out-of-bounds."
-  | "List.hd" | "List.head" | "head" ->
+  | "List.head" | "head" ->
     "\n\nUse `List.head_opt` (or match on `Cons`/`Nil` directly) to avoid panicking on empty."
-  | "List.tl" | "List.tail" | "tail" ->
+  | "List.tail" | "tail" ->
     "\n\nUse `List.tail_opt` or match on `Nil` to avoid panicking on empty."
+  | "List.maximum_int" | "List.minimum_int" ->
+    "\n\nCheck `List.length(xs) > 0` before calling, or use a `List.length` guard \
+     followed by a total fold instead."
   | "unwrap" | "Option.unwrap" ->
     "\n\nUse `unwrap_or(opt, default)` or `match opt do Some(x) -> ... | None -> ... end`."
   | "expect" | "Option.expect" ->
     "\n\nUse `unwrap_or` or an explicit match to handle the `None` case."
   | "Result.unwrap" | "Result.expect" ->
     "\n\nUse `Result.unwrap_or` or match on `Ok`/`Err` to handle the error case."
-  | "Array.get" | "Array.set" | "NativeArray.get" | "NativeArray.set" ->
+  | "Array.get" | "Array.set" ->
     "\n\nBounds-check the index before access, or use a bounds-checked variant."
-  | "String.slice_bytes" | "String.nth" ->
-    "\n\nBounds-check the index/range before access."
+  | "Array.pop" ->
+    "\n\nCheck `Array.length(v) > 0` before calling."
+  | "Random.normal" | "Random.exponential" | "Random.bernoulli" ->
+    "\n\nGuard the parameter before the call (e.g. clamp `sigma`/`lambda`/`p` to its \
+     valid range) so the refinement precondition provably holds."
+  | "Random.choice" ->
+    "\n\nCheck `List.length(xs) > 0` before calling."
+  | "DateTime.fixed_zone" ->
+    "\n\nGuard `offset_seconds` to the range `-50400..=50400` before calling."
+  | "DateTime.fixed_zone_hm" ->
+    "\n\nGuard `minutes` to the range `0..<60` before calling."
+  | "Stats.mean" | "Stats.min_val" | "Stats.max_val" ->
+    "\n\nCheck `List.length(xs) > 0` before calling."
   | "panic" | "panic_" ->
     "\n\nReturn an error value (`Result`, `Option`) instead of calling `panic`."
   | "todo_" ->
@@ -9415,14 +9801,37 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
       | _ -> None
     ) decls
   in
+  (* Which local functions can carry TRANSITIVE blame to their callers.
+     A [panic_surface_contracted] name is excluded, and that exclusion is
+     load-bearing rather than cosmetic: `bin/main.ml` unwraps prelude into the
+     ENTRY module's own decl list, so prelude's `fn tail`/`head`/`last`/
+     `unwrap`/`expect` are literally `DFn`s of the `cap no_panic` module being
+     checked.  Their bodies call `panic`, so the fixpoint seeded them and then
+     blamed every caller "transitively calls `tail`" — which reintroduced the
+     chain-blaming this task removed, and (worse) rejected a call the proof
+     pass had just PROVED safe, since a transitive verdict never consults one.
+     A guarded bare `tail(xs)` was still an error for exactly this reason.
+
+     Excluding them is sound in both pipeline modes: when
+     [proof_based_panic_surface] is false these names are back in
+     [is_direct_panic_site] below, so a caller is rejected DIRECTLY and never
+     needs the transitive path; when it is true, the proof pass owns the
+     decision. A user-defined function that happens to be named `tail` is
+     likewise decided by the proof pass, which fail-closes when it carries no
+     contract. *)
   let local_fns =
-    List.fold_left (fun s (name, _, _) -> StringSet.add name s)
+    List.fold_left (fun s (name, _, _) ->
+      if StringSet.mem name panic_surface_contracted then s
+      else StringSet.add name s)
       StringSet.empty fn_entries
   in
   let _no_panic_mod_names = StringSet.of_list env.no_panic_modules in
   let is_direct_panic_site name =
     StringSet.mem name panic_surface_all_direct
     || StringSet.mem name panic_surface_stdlib
+    (* Only when no proof-based pass will run — see [proof_based_panic_surface]. *)
+    || ((not !proof_based_panic_surface)
+        && StringSet.mem name panic_surface_contracted)
   in
   let seed =
     List.fold_left (fun (panicky, site_map) (fn_name, calls, _span) ->
@@ -10643,6 +11052,9 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DTest (tdef, sp) ->
     (* Typecheck the test body; it must be Unit. No enclosing function — see
        [with_no_caller]. *)
+    (* R2 exemption: a test body has no [main] to be granted the root from, so
+       [root_cap] stays nameable here (see [env.root_cap_allowed]). *)
+    let env = { env with root_cap_allowed = true } in
     with_no_caller env (fun () ->
       check_expr env tdef.test_body t_unit
         ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name))));
@@ -10656,6 +11068,8 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DSetup (body, sp) ->
     (* No enclosing function — see [with_no_caller]. *)
+    (* R2 exemption, same rationale as [DTest]. *)
+    let env = { env with root_cap_allowed = true } in
     with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit")));
     Hashtbl.replace env.type_map sp t_unit;
@@ -10663,6 +11077,8 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DSetupAll (body, sp) ->
     (* No enclosing function — see [with_no_caller]. *)
+    (* R2 exemption, same rationale as [DTest]. *)
+    let env = { env with root_cap_allowed = true } in
     with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit")));
     Hashtbl.replace env.type_map sp t_unit;
@@ -11628,6 +12044,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      enclosing fn/module context captured at record time). Shared ref → one sweep
      at the entry module covers every nested module's sites. *)
   check_mint_cap_sites final_env;
+  check_json_cap_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:
      TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]
@@ -11681,6 +12098,11 @@ let check_module_with_refs ?errors (m : Ast.module_)
 let last_with_env_final : env ref = ref (make_env (Err.create ()) (Hashtbl.create 0))
 
 let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+  (* R2: the REPL has no entry point to be granted the root capability from, so
+     [root_cap] stays nameable there.  This entry point is the REPL's — its
+     only caller is [lib/jit/repl_jit.ml] — which is what makes it the right
+     place to carry the exemption rather than a flag threaded from the CLI. *)
+  let env = { env with root_cap_allowed = true } in
   let errors = env.errors in
   let type_map = env.type_map in
   let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =

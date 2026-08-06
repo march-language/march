@@ -188,10 +188,10 @@ interface Show(a) do
 end
 
 impl Show(Int) do
-  fn show(x) do int_to_string(x) end
+  fn show(x) do String.from_int(x) end
 end
 
-fn print_it[a: Show](x : a) : () do
+fn print_it(x : a) : () when Show(a) do
   println(show(x))
 end
 ```

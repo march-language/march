@@ -133,9 +133,16 @@ are the ones that satisfy every axis at once.
 
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/) — the `needs` / `Cap(X)`
   system and typestate handles in full.
+- [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) —
+  turning a declared capability set into an OS-level sandbox and a hot-deploy
+  admission gate.
 - [Linear Types]({{ site.baseurl }}/docs/linear-types/) — `linear` / `affine`
   ownership and why `always_linear` handles can't be dropped.
+- [Session Types]({{ site.baseurl }}/docs/session-types/) — the linearity
+  discipline applied to two-party communication protocols.
 - [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) — value
   predicates, the SMT checker, and its definite-failure semantics.
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/) — how the same ownership
+  facts drive in-place reuse (FBIP) with no garbage collector.
 - [Type System]({{ site.baseurl }}/docs/types/) — the "which safety tool for
   which job" table that indexes all of these.

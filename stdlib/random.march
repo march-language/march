@@ -268,7 +268,9 @@ mod Random do
   doc """
   Weighted random selection from a list of `(item, weight)` pairs.
 
-  Weights must be non-negative and at least one must be positive.
+  `items` must be non-empty. Weights must be non-negative and at least one
+  must be positive (both data-dependent conditions the type system cannot
+  express; still checked at runtime and panic if violated).
   Returns `(chosen_item, new_rng)`.  Linear in the number of items.
 
   Example:
@@ -276,7 +278,7 @@ mod Random do
     let (pet, rng2) = Random.choice_weighted(rng, items)
     -- pet is one of :cat, :dog, :fish with probability ~0.28, 0.57, 0.14
   """
-  fn choice_weighted(rng : Rng, items : List((a, Float))) : (a, Rng) do
+  fn choice_weighted(rng : Rng, items : {List((a, Float)) | len(_) > 0}) : (a, Rng) do
     match items do
     Nil -> panic("Random.choice_weighted: empty item list")
     _ -> do

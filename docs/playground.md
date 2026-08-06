@@ -1,7 +1,7 @@
 ---
 layout: docs
 title: Try It Out
-nav_order: 2
+nav_order: 2.3
 permalink: /docs/playground/
 description: "Interactive March REPL — try March expressions in your browser, no install needed."
 ---

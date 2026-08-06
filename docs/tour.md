@@ -7,7 +7,7 @@ permalink: /docs/tour/
 
 # Language Tour
 
-A fast walkthrough of March syntax and core concepts. Every snippet here runs as-is.
+A fast walkthrough of March syntax and core concepts. Every snippet is valid March.
 
 ---
 
@@ -61,7 +61,7 @@ end
 fn main() do
   let x = 42
   let y = x + 1
-  println(int_to_string(y))   -- 43
+  println(String.from_int(y))   -- 43
 end
 ```
 
@@ -166,7 +166,14 @@ let html = """
 """
 ```
 
-Useful builtins: `int_to_string`, `float_to_string`, `bool_to_string`, `to_string`.
+Useful conversions live on the `String` module: `String.from_int`,
+`String.from_float`, and `to_string` (the generic `Show` renderer for any type).
+
+> The prelude also exposes bare aliases for the common conversions —
+> `int_to_string`, `float_to_string`, `string_to_int`, `string_length` — which are
+> the same functions as `String.from_int`, `String.from_float`, `String.to_int`,
+> and `String.byte_size`. This guide uses the `String.*` module forms throughout;
+> the bare names are interchangeable if you prefer them.
 
 ---
 
@@ -194,7 +201,7 @@ Functions can have multiple expressions in the body; the last one is the return 
 fn summarize(xs : List(Int)) : String do
   let n   = List.length(xs)
   let sum = List.fold_left(xs, 0, fn (acc, x) -> acc + x)
-  "count=" ++ int_to_string(n) ++ " sum=" ++ int_to_string(sum)
+  "count=" ++ String.from_int(n) ++ " sum=" ++ String.from_int(sum)
 end
 ```
 
@@ -549,7 +556,7 @@ end
 
 Run with:
 ```sh
-dune exec forge -- test
+forge test
 ```
 
 ---
