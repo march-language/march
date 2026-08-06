@@ -78,6 +78,29 @@ end
 
 The compiler enforces this transitively **when the capability flows through a signature** — Check 4: `Server.listen` takes `Cap(IO.Network)` as a parameter, so any module that `use`s `Server` and calls `listen` must itself declare `needs IO.Network` (directly or via a broader ancestor, e.g. `needs IO`), or the build fails with a clear message telling you which import requires which cap (verified live: a `Caller` module `use`ing `Server` without `needs IO.Network` gets `` module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`. ``, exit 1). This ERROR-level guarantee is the signature/`use`/extern surface (Checks 1, 4, and 5) — see "What the compiler tells you," below, for the separate, weaker case where a module reaches for an IO builtin directly in a function body without ever putting `Cap(X)` in a signature.
 
+**Check 4 is demand-driven: an importer inherits only what it actually references.**
+Importing a module costs the capabilities of the *functions the importer references
+from it*, not the imported module's whole set — so importing `List` to call `map`
+costs nothing even though `List.pmap` spawns tasks, and you owe `needs IO.Spawn`
+only if you actually reference `pmap`. The demand set comes from the import
+tracker's per-reference record (`ie_used_names`, populated by `record_use` as it
+resolves each `EVar`), resolved against the per-function transitive capability
+closure `caps(f) = own(f) ∪ ⋃ { caps(g) | g ∈ refs(f) }`. Reference edges are
+free-variable edges, so a function passed as a *value* counts, and a capability
+reached only through a private helper still counts. It is computed per import site:
+two modules importing the same library can owe different capabilities.
+
+The result is always a **subset** of what the older module-granular rule required,
+by construction — the demand set filters the imported module's declared `needs`, it
+never adds to it. So this rule can only ever require less, and no module that
+compiles today can start failing because of it. Two conservative carve-overs remain,
+both erring toward requiring more: a referenced name with no per-function record
+(a module-level `let`, an interface or `impl` method — `record_fn_caps` covers
+`DFn`s, actor handlers and externs only) falls back to the imported module's whole
+declared set, and so does an import whose target has not been analyzed yet because
+the two modules import each other cyclically (the module topological sort tolerates
+cycles rather than rejecting them).
+
 ### Capability hierarchy
 
 `Cap(IO)` is the root. Sub-capabilities narrow what is allowed:
@@ -146,7 +169,7 @@ Use the **narrowest capability that accurately describes what the code actually 
 
 There are two severities, and which one you get depends on *where* the uncovered capability shows up — this honest distinction matters, so it's stated explicitly rather than glossed over.
 
-**Signature, transitive `use`, or `extern` — a build-breaking ERROR (`--check` exits 1).** If `Cap(X)` appears in a function/actor/extern parameter, or you `use` a module that itself needs a capability you haven't declared, there is no way to ship without fixing it:
+**Signature, transitive `use`, or `extern` — a build-breaking ERROR (`--check` exits 1).** If `Cap(X)` appears in a function/actor/extern parameter, or you `use` a module and reference a function from it that needs a capability you haven't declared, there is no way to ship without fixing it (the scope is the functions you *reference*, not the imported module as a whole — see "Check 4 is demand-driven," above):
 
 ```
 $ march --check caller.march   # `use`s a module needing Cap(IO.Network), no `needs IO.Network` of its own

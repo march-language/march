@@ -2,15 +2,24 @@
 -- Capabilities widening, Task 2 -- Check 4 (transitive `use`), the REJECT
 -- side. Companion to accept/t49 with the `needs IO.Mut` line removed.
 -- `Vault` (`stdlib/vault.march:26`) declares `needs IO.Mut`; `Main` `use`s
--- `Vault` but declares no `needs` of its own, so `declared_needs = []` covers
--- nothing and Check 4 (`typecheck.ml:5661-5681`) raises an ERROR (not a
--- warning -- contrast Check 1b/1c, which are warning-only for direct
--- body/extern uses; Check 4 is a true error just like Check 1 and Check 5).
--- See core-march-types.md §2.8.6.
+-- `Vault` AND REFERENCES `Vault.new`, which requires `IO.Mut`, but declares no
+-- `needs` of its own, so `declared_needs = []` covers nothing and Check 4
+-- raises an ERROR (not a warning -- contrast Check 1b/1c, which are
+-- warning-only for direct body/extern uses; Check 4 is a true error just like
+-- Check 1 and Check 5).  See core-march-types.md 2.8.6.
+--
+-- The reference is load-bearing as of 2026-08-06: Check 4 propagation is
+-- DEMAND-DRIVEN, so an importer inherits only the capabilities of the
+-- functions it actually references.  This fixture's body used to be a bare
+-- `()` with no reference at all, which now (correctly) costs nothing --
+-- importing a module for one pure function must not drag in its impure
+-- siblings' capabilities.  Without the reference this file would silently
+-- stop testing Check 4 at all.
 mod Main do
   use Vault
 
   fn main() do
+    let _ = Vault.new("t")
     ()
   end
 end

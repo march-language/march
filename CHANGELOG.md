@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Importing a module no longer requires declaring capabilities used only by
+  functions you don't reference.** `import M` / `use M` used to force *every*
+  capability `M` declares onto the importer, so importing a library for one pure
+  function cost you its impure siblings' capabilities — importing `List` to call
+  `map` would have owed `needs IO.Spawn` on account of `List.pmap`. Propagation
+  is now demand-driven: you inherit the capabilities of the functions you
+  actually reference, computed per import site over the transitive reference
+  graph (a function passed as a *value* counts, and a capability reached only
+  through a private helper counts). The result is always a subset of what was
+  required before, so nothing that compiles today can start failing; the error
+  message and its caret are unchanged, only the set of required capabilities
+  narrowed. A referenced name the compiler has no per-function record for (a
+  module-level `let`, an interface or `impl` method) and an import into a
+  cyclic module group both fall back conservatively to the old whole-module set.
+
 - **`cap no_panic` now consults a call's actual refinement contract instead of
   banning it by name.** A partial stdlib or prelude function that declares a
   refinement precondition — `unwrap`, `expect`, `head`, `tail`, `last`,

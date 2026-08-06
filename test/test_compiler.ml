@@ -8991,6 +8991,144 @@ let test_transitive_cap_union_matches_module_level () =
   Alcotest.(check (list string)) "and that set is non-trivial"
     [ "IO.Console"; "IO.FileRead" ] module_level
 
+(* ── Demand-driven import propagation (Check 4) ──────────────────────────
+   Today `import M` forces EVERY capability M needs onto the importer. After
+   this change the importer inherits only the capabilities of the functions it
+   actually REFERENCES — so importing a module for one pure function costs
+   nothing. The change is strictly loosening: it can only ever require less.
+
+   [has_cap_needs_error] matches on the Check-4 message text ("which
+   requires") rather than on [has_errors], so an unrelated type error in a
+   fixture can neither manufacture a pass nor a failure. It reuses the file's
+   existing [typecheck] + [has_message_containing] helpers rather than
+   inventing a new error-inspection route. *)
+let has_cap_needs_error (src : string) : bool =
+  has_message_containing (typecheck src) "which requires"
+
+(* Shared fixture body: Provider needs IO.Console for ONE impure function and
+   also exports a pure one and a public [let]. *)
+let cap_provider_src = {|mod Provider do
+    needs IO.Console
+    let tag = "p"
+    fn pure_double(x : Int) : Int do x * 2 end
+    fn noisy(m : String) : Unit do print(m) end
+  end|}
+
+let cap_two_module_src consumer =
+  Printf.sprintf "mod Root do\n  %s\n  %s\nend" cap_provider_src consumer
+
+(* The point of the change: importing for the PURE function must not drag in
+   the impure sibling's capability. *)
+let test_import_for_pure_fn_does_not_inherit () =
+  Alcotest.(check bool) "no Check-4 error" false
+    (has_cap_needs_error (cap_two_module_src {|mod Consumer do
+    import Provider
+    fn f(x : Int) : Int do pure_double(x) end
+  end|}))
+
+(* REJECT control: referencing the IMPURE one still requires the cap. Without
+   this, a change that simply stopped propagating anything would pass the
+   case above. *)
+let test_import_for_impure_fn_still_requires () =
+  Alcotest.(check bool) "Check-4 error" true
+    (has_cap_needs_error (cap_two_module_src {|mod Consumer do
+    import Provider
+    fn f(m : String) : Unit do noisy(m) end
+  end|}))
+
+(* The qualified route: `use Provider` keeps references as `Provider.pure_double`,
+   which resolves through the PREFIX index rather than the exact-name index.
+   It must behave the same. *)
+let test_qualified_use_of_pure_fn_does_not_inherit () =
+  Alcotest.(check bool) "no Check-4 error" false
+    (has_cap_needs_error (cap_two_module_src {|mod Consumer do
+    use Provider
+    fn f(x : Int) : Int do Provider.pure_double(x) end
+  end|}))
+
+(* REJECT control for the qualified route. *)
+let test_qualified_use_of_impure_fn_still_requires () =
+  Alcotest.(check bool) "Check-4 error" true
+    (has_cap_needs_error (cap_two_module_src {|mod Consumer do
+    use Provider
+    fn f(m : String) : Unit do Provider.noisy(m) end
+  end|}))
+
+(* Ruling 1 — the fail-open fallback. [record_fn_caps] covers [DFn], actor
+   handlers and externs, but NOT module-level [DLet] bindings, interface
+   methods or impl methods: those get no own(...) entry, so their transitive
+   closure is EMPTY. Treating "no entry" as "no capabilities" would silently
+   drop enforcement that exists today. For a name known to come from the
+   import, a missing closure entry must fall back to the imported module's
+   module-level set — i.e. exactly today's behavior.
+
+   [tag] is a public module-level [let], so it has no closure entry; the
+   importer must still be required to declare IO.Console. *)
+let test_import_of_entryless_name_falls_back_to_module_caps () =
+  Alcotest.(check bool) "Check-4 error via the fallback" true
+    (has_cap_needs_error (cap_two_module_src {|mod Consumer do
+    import Provider
+    fn f() : String do tag end
+  end|}))
+
+(* Companion: the fallback must be scoped to names that came from the IMPORT.
+   If it fired for every unresolved reference — parameters, locals — every
+   importer would degenerate to today's module-granular behavior and the
+   whole change would be a no-op. Here the consumer references only its own
+   parameter and local binding besides the pure imported fn. *)
+let test_fallback_does_not_fire_for_locals () =
+  Alcotest.(check bool) "no Check-4 error" false
+    (has_cap_needs_error (cap_two_module_src {|mod Consumer do
+    import Provider
+    fn f(x : Int) : Int do
+      let y = x + 1
+      pure_double(y)
+    end
+  end|}))
+
+(* Ruling 2 — cyclic modules. The module topological sort TOLERATES cycles,
+   so one of a mutually-referencing pair is checked before the other's caps
+   are known. That must not silently drop enforcement: whichever way the sort
+   lands, importing a module for its impure function still errors. *)
+let test_cyclic_modules_still_enforce () =
+  let src = {|mod Root do
+  mod A do
+    needs IO.Console
+    import B
+    fn a_pure(x : Int) : Int do x + 1 end
+    fn a_noisy(m : String) : Unit do print(m) end
+    fn a_uses_b(x : Int) : Int do b_pure(x) end
+  end
+  mod B do
+    needs IO.Console
+    import A
+    fn b_pure(x : Int) : Int do x * 2 end
+    fn b_calls_a_noisy(m : String) : Unit do a_noisy(m) end
+  end
+end|} in
+  (* Both modules DO declare needs IO.Console, so no Check-4 error is expected;
+     what this pins is that the analysis terminates and does not crash on a
+     cycle. The enforcement half is pinned by the variant below. *)
+  Alcotest.(check bool) "cyclic pair with declared needs: no error" false
+    (has_cap_needs_error src);
+  let undeclared = {|mod Root do
+  mod A do
+    needs IO.Console
+    import B
+    fn a_pure(x : Int) : Int do x + 1 end
+    fn a_noisy(m : String) : Unit do print(m) end
+    fn a_uses_b(x : Int) : Int do b_pure(x) end
+  end
+  mod B do
+    import A
+    fn b_pure(x : Int) : Int do x * 2 end
+    fn b_calls_a_noisy(m : String) : Unit do a_noisy(m) end
+  end
+end|} in
+  Alcotest.(check bool)
+    "cyclic pair, B references A's impure fn without declaring: still errors"
+    true (has_cap_needs_error undeclared)
+
 (* migrate_state calling file_write with no declared needs -> IO-free error. *)
 let test_migrate_state_file_write_error () =
   let ctx = typecheck {|mod Counter do
@@ -12476,6 +12614,13 @@ let compiler_suites =
           Alcotest.test_case "a dotted nested-module reference resolves"             `Quick test_transitive_cap_nested_module_dotted_refs;
           Alcotest.test_case "a param shadowing a sibling fn fabricates no edge"     `Quick test_transitive_cap_param_shadowing_sibling_fn;
           Alcotest.test_case "union over a module's functions matches module level"  `Quick test_transitive_cap_union_matches_module_level;
+          Alcotest.test_case "importing for a pure fn does not inherit impure caps"  `Quick test_import_for_pure_fn_does_not_inherit;
+          Alcotest.test_case "importing for an impure fn still requires the cap"     `Quick test_import_for_impure_fn_still_requires;
+          Alcotest.test_case "qualified use of a pure fn does not inherit"           `Quick test_qualified_use_of_pure_fn_does_not_inherit;
+          Alcotest.test_case "qualified use of an impure fn still requires"          `Quick test_qualified_use_of_impure_fn_still_requires;
+          Alcotest.test_case "a name with no closure entry falls back to module caps" `Quick test_import_of_entryless_name_falls_back_to_module_caps;
+          Alcotest.test_case "the fallback does not fire for locals/params"          `Quick test_fallback_does_not_fire_for_locals;
+          Alcotest.test_case "cyclic modules still enforce"                          `Quick test_cyclic_modules_still_enforce;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;

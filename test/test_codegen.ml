@@ -8710,10 +8710,28 @@ let test_cap_transitive_missing_error () =
     end
     mod Test do
       use Lib.*
+      fn run(cap) do connect(cap) end
+    end
+  end|} in
+  Alcotest.(check bool) "transitive import without needs is an error" true (has_errors ctx);
+  (* Propagation is demand-driven: the same import that REFERENCES NOTHING from
+     `Lib` costs nothing. This fixture used to be `fn run(x) do x end` and
+     asserted an error, pinning the old module-granular over-approximation —
+     importing a module for one pure function used to cost you its impure
+     siblings' capabilities. The reference above is what makes the assertion
+     above about propagation rather than about the mere presence of a `use`. *)
+  let unreferenced = typecheck {|mod Outer do
+    mod Lib do
+      needs IO.Network
+      fn connect(cap : Cap(IO.Network)) do cap end
+    end
+    mod Test do
+      use Lib.*
       fn run(x) do x end
     end
   end|} in
-  Alcotest.(check bool) "transitive import without needs is an error" true (has_errors ctx)
+  Alcotest.(check bool) "an import that references nothing costs nothing" false
+    (has_errors unreferenced)
 
 (* Module declares parent cap (IO) which covers imported module's child (IO.Network) *)
 let test_cap_transitive_supertype_ok () =
@@ -8744,9 +8762,11 @@ let test_cap_transitive_chain_error () =
     end
     mod C do
       use B.*
-      fn run(x) do x end
+      fn run(cap) do do_read(cap) end
     end
   end|} in
+  (* `fn run(x) do x end` here until 2026-08-06: propagation is demand-driven,
+     so C only owes B's capabilities for the functions C actually references. *)
   Alcotest.(check bool) "chain: C must declare needs covered by B" true (has_errors ctx)
 
 (* extern with capability declared in needs — ok *)
