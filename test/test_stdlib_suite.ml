@@ -11662,6 +11662,68 @@ let test_concat_chain_values () =
    is current, which fails with EINVAL on our buffer and CHECK-aborts.  Fix:
    under ASAN the runtime keeps ASAN's own altstack (march_scheduler.c).
    Guard: a sanitized hello-world must print its output AND exit 0. *)
+(* ── Html.tag refuses names it cannot make safe (Task 9) ──────────────────
+   Element and attribute NAMES cannot be closed by escaping: `onerror` has no
+   character an encoder could touch, and a tag name is not a string context at
+   all. These are exactly where the ~H desugar emits a compile error; Html.tag
+   takes them as String, so it can only refuse at runtime.
+
+   These live here rather than in test/native/h_tag_hardening.march because a
+   panic ends the program -- a golden stdout diff cannot express them. *)
+
+let expect_html_tag_panic label src needle =
+  let env = eval_with_html src in
+  let raised = ref None in
+  (try ignore (call_fn env "f" [])
+   with March_eval.Eval.Eval_error msg -> raised := Some msg);
+  match !raised with
+  | None -> Alcotest.failf "%s: expected a panic, got none" label
+  | Some msg ->
+    let contains s sub =
+      let n = String.length s and m = String.length sub in
+      let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+      m = 0 || go 0
+    in
+    Alcotest.(check bool)
+      (Printf.sprintf "%s: message explains the refusal (%s)" label needle)
+      true (contains msg needle)
+
+let test_html_tag_refuses_bad_element_name () =
+  expect_html_tag_panic "element name"
+    {|mod T do
+      fn f() do
+        IOList.to_string(Html.tag("div onload=alert(1)", [], IOList.from_string("x")))
+      end
+    end|}
+    "not a valid element name"
+
+let test_html_tag_refuses_event_handler_attr () =
+  expect_html_tag_panic "event handler"
+    {|mod T do
+      fn f() do
+        IOList.to_string(Html.tag("div", [("onerror", "alert(1)")], IOList.from_string("x")))
+      end
+    end|}
+    "event-handler attribute"
+
+let test_html_tag_refuses_bad_attr_name () =
+  expect_html_tag_panic "attribute name"
+    {|mod T do
+      fn f() do
+        IOList.to_string(Html.tag("div", [("a b", "x")], IOList.from_string("x")))
+      end
+    end|}
+    "not a valid attribute name"
+
+let test_html_tag_refuses_empty_element_name () =
+  expect_html_tag_panic "empty name"
+    {|mod T do
+      fn f() do
+        IOList.to_string(Html.tag("", [], IOList.from_string("x")))
+      end
+    end|}
+    "not a valid element name"
+
 let test_compiled_sanitize_clean_exit () =
   let main_exe = find_main_exe () in
   let tmp = Filename.temp_file "march_sanexit" "" in
@@ -13493,5 +13555,15 @@ let stdlib_suites =
           test_interp_http_server_idle_client_does_not_block_others;
         Alcotest.test_case "interp http_server_listen: idle upgraded WebSocket does not block other connections (WS fiber fix)" `Slow
           test_interp_http_server_idle_websocket_does_not_block_others;
+      ]);
+      ( "html_tag_hardening", [
+        Alcotest.test_case "refuses an invalid element name" `Quick
+          test_html_tag_refuses_bad_element_name;
+        Alcotest.test_case "refuses an event-handler attribute" `Quick
+          test_html_tag_refuses_event_handler_attr;
+        Alcotest.test_case "refuses an invalid attribute name" `Quick
+          test_html_tag_refuses_bad_attr_name;
+        Alcotest.test_case "refuses an empty element name" `Quick
+          test_html_tag_refuses_empty_element_name;
       ]);
     ]

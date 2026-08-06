@@ -4277,3 +4277,61 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/h_escape_ctx_builtin.expected native_h_escape_ctx_builtin.out)))
+
+; ── Html.tag hardening: compiled/interpreted parity (Task 9) ──────────────
+; Html.tag composes markup outside the ~H sigil, so it never reaches the
+; context automaton. It had three injection holes; two of them (element name,
+; attribute name) cannot be closed by escaping and are refused at runtime
+; instead. The panic cases cannot live in a golden diff -- a panic ends the
+; program -- so they are covered in test_stdlib_suite.ml.
+(rule
+ (targets native_h_tag_hardening native_h_tag_hardening.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c)
+       (file ../runtime/march_ctx_escape.h) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/h_tag_hardening.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_h_tag_hardening
+        native/h_tag_hardening.march)
+   (with-stdout-to native_h_tag_hardening.out
+        (system "./native_h_tag_hardening")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_tag_hardening.expected native_h_tag_hardening.out)))
+
+; ── Context-indexed trust: compiled/interpreted parity (Task 6) ───────────
+; The compiled backend resolves trust STATICALLY (llvm_emit matches the type
+; against the folded escaper id) and the interpreter resolves it at runtime, by
+; separate code paths. Parity here is a real cross-check, not a formality.
+(rule
+ (targets native_h_trusted_context native_h_trusted_context.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c)
+       (file ../runtime/march_ctx_escape.h) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/h_trusted_context.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_h_trusted_context
+        native/h_trusted_context.march)
+   (with-stdout-to native_h_trusted_context.out
+        (system "./native_h_trusted_context")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/h_trusted_context.expected native_h_trusted_context.out)))

@@ -1,0 +1,55 @@
+-- Context-indexed trust (Task 6 of specs/plans/2026-08-05-contextual-autoescaping.md).
+--
+-- `Html.Safe` says a string is trusted, but not trusted WHERE — so once a value
+-- is trusted anywhere it is trusted everywhere. That is the same category error
+-- the whole feature exists to fix: safety is a property of a value IN A
+-- POSITION, not of a value.
+--
+-- The Trusted* types name the context their trust applies to. The load-bearing
+-- property is the SECOND line of each pair below: trust does not travel.
+--
+-- Resolved entirely at compile time — lib/tir/llvm_emit.ml matches the static
+-- type against the escaper id the ~H desugar already folded, so a mismatch
+-- costs nothing at runtime, it simply takes the escaping path.
+--
+-- Compiled/interpreted golden diff: the compiled backend decides this
+-- statically and the interpreter at runtime, by separate code paths, so parity
+-- here is a real cross-check rather than a formality.
+mod HTrustedContext do
+  fn main() : Unit do
+    -- HTML trust: verbatim in element content, escaped in an href.
+    let h = Html.trust_html("<b>hi</b>")
+    println("html_in_html: " ++ IOList.to_string(~H"<p>${h}</p>"))
+    println("html_in_href: " ++ IOList.to_string(~H"<a href=\"${h}\">x</a>"))
+
+    -- URL trust: verbatim in an href — even a scheme the allowlist would
+    -- reject, which is exactly what trusting it means — but escaped as text.
+    let u = Html.trust_url("javascript:trusted()")
+    println("url_in_href : " ++ IOList.to_string(~H"<a href=\"${u}\">x</a>"))
+    println("url_in_html : " ++ IOList.to_string(~H"<p>${u}</p>"))
+
+    -- CSS trust: verbatim in a style attribute, escaped in element content.
+    let c = Html.trust_css("color:red;background:url(x)")
+    println("css_in_style: " ++ IOList.to_string(~H"<div style=\"${c}\">y</div>"))
+    println("css_in_html : " ++ IOList.to_string(~H"<p>${c}</p>"))
+
+    -- JS trust: verbatim inside <script>, escaped in element content.
+    let j = Html.trust_js("var x = 1 < 2;")
+    println("js_in_script: " ++ IOList.to_string(~H"<script>${j}</script>"))
+    println("js_in_html  : " ++ IOList.to_string(~H"<p>${j}</p>"))
+
+    -- Attribute trust.
+    let a = Html.trust_attr("a`b")
+    println("attr_in_attr: " ++ IOList.to_string(~H"<div class=\"${a}\">z</div>"))
+    println("attr_in_html: " ++ IOList.to_string(~H"<p>${a}</p>"))
+
+    -- Legacy Html.Safe keeps working, and is treated as HTML trust.
+    let s = Html.raw("<i>legacy</i>")
+    println("safe_in_html: " ++ IOList.to_string(~H"<p>${s}</p>"))
+    println("safe_in_href: " ++ IOList.to_string(~H"<a href=\"${s}\">x</a>"))
+
+    -- An untrusted string is escaped everywhere, unchanged by any of this.
+    let raw = "<b>&"
+    println("plain_html  : " ++ IOList.to_string(~H"<p>${raw}</p>"))
+  end
+end

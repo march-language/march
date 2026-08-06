@@ -1,0 +1,9 @@
+class   : <div class="a&quot;b">x</div>
+href_bad: <a href="about:invalid#zSoyz">x</a>
+href_ok : <a href="/packages/bastion?tab=readme">x</a>
+src_bad : <img src="about:invalid#zSoyz"></img>
+style   : <div style="color:var(--text-muted);display:flex">x</div>
+style_x : <div style="background:url\28 javascript:alert\28 1\29 \29 ">x</div>
+dashed  : <my-element data-id="7">x</my-element>
+multi   : <a href="/x" class="b">x</a>
+noattrs : <br></br>

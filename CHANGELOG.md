@@ -11,6 +11,64 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Context-indexed trust for `~H`: `Html.TrustedHtml` / `TrustedAttr` /
+  `TrustedUrl` / `TrustedCss` / `TrustedJs`.** `Html.Safe` says a string is
+  trusted but not trusted *where*, so a value trusted anywhere was trusted
+  everywhere. These types name the context the trust applies to, and trust does
+  not travel between them:
+
+  ```march
+  let h = Html.trust_html("<b>hi</b>")
+  ~H"<p>${h}</p>"                -- <p><b>hi</b></p>        verbatim
+  ~H"<a href=\"${h}\">x</a>"      -- &lt;b&gt;hi&lt;/b&gt;   escaped
+  ```
+
+  Constructors `Html.trust_html` / `trust_attr` / `trust_url` / `trust_css` /
+  `trust_js`, with matching `untrust_*`. Prefer `~H` itself, which needs no
+  trust at all — reach for these only when a string genuinely is markup, a URL,
+  CSS or JS from a source you control.
+
+  Resolved **entirely at compile time**: the emitter matches the static type
+  against the escaper id the `~H` desugar already folded, so a mismatch costs
+  nothing at runtime — it simply escapes. That is why these are separate types
+  rather than one type carrying a context tag; a tag would be runtime data and
+  could not be resolved statically.
+
+  `Html.Safe` and `Html.raw` are unchanged and keep working — they are treated
+  as HTML trust — but are now documented as deprecated in favour of the
+  context-indexed types.
+
+
+### Fixed
+
+- **`Html.tag` had three injection holes; it now validates names and escapes
+  values by context.** `Html.tag` composes markup outside the `~H` sigil, so it
+  never reached the contextual analysis added for `~H`. Measured before the fix:
+
+  | call | emitted |
+  |---|---|
+  | `Html.tag("div onload=alert(1)", …)` | `<div onload=alert(1)>` — element name concatenated raw |
+  | `Html.tag("div", [("onerror", "alert(1)")], …)` | `<div onerror="alert(1)">` — entity-encoding does nothing to `onerror` |
+  | `Html.tag("a", [("href", "javascript:alert(1)")], …)` | the URL verbatim |
+
+  Attribute **values** are now escaped for the context their name implies — url
+  attributes get the scheme allowlist, `style` gets CSS declaration escaping,
+  everything else attribute escaping. Element and attribute **names** are
+  validated and an invalid one **panics**: escaping cannot help there, since
+  `onerror` has no character to escape, so a name built from untrusted input is
+  a programming error rather than a data condition. Event-handler attributes
+  (`on*`) are refused outright — their value is JavaScript, and `Html.tag` has
+  no way to know whether the caller meant that.
+
+  Reachable but unreached: the only call site in the ecosystem passes literals.
+
+  `Html.tag` and `Html.escape_attr` are now documented as **deprecated** in
+  favour of `~H`, which gets the same analysis at compile time and needs no
+  runtime checks. Neither is removed — `bastion` is published at 0.2.3.
+
+
 ### Changed
 
 - **`~H` now escapes by HTML parse context, not with one escaper everywhere.**
