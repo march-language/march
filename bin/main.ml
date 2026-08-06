@@ -851,9 +851,7 @@ let do_check       = ref false   (* --check: typecheck only, no codegen or eval 
     two therefore CAN disagree, and since 2026-08-06 they demonstrably do for a
     module whose only IO lives in a module-level [let].  Tracked in
     specs/todos/2026-08-06-cap-sandbox-belongs-filter-misses-non-dfn-keys.md;
-    do not restore the sharing claim without actually sharing the predicate. *)
-    Shared by `march caps` and --cap-sandbox so the reported set and the
-    embedded sandbox profile cannot disagree.
+    do not restore the sharing claim without actually sharing the predicate.
 
     [stdlib_files] must list the files whose declarations are the standard
     library's (see [stdlib_span_files]).  The callers pass [desugared] AFTER
