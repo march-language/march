@@ -18,7 +18,7 @@ mod StrategyDemo do
 
     on Work() do
       let n = state.count + 1
-      println("[Worker] work #" ++ int_to_string(n))
+      println("[Worker] work #" ++ String.from_int(n))
       { count: n }
     end
   end
@@ -85,19 +85,19 @@ mod StrategyDemo do
     let sup = spawn(OneForOneSup)
     let wa1 = child_int(sup, "wa")
     let wb1 = child_int(sup, "wb")
-    println("wa=" ++ int_to_string(wa1) ++ "  wb=" ++ int_to_string(wb1))
+    println("wa=" ++ String.from_int(wa1) ++ "  wb=" ++ String.from_int(wb1))
 
     send(pid_of_int(wa1), Work())
     send(pid_of_int(wb1), Work())
     run_until_idle()
 
-    println("Crashing wa (pid " ++ int_to_string(wa1) ++ ")...")
+    println("Crashing wa (pid " ++ String.from_int(wa1) ++ ")...")
     kill(pid_of_int(wa1))
 
     let wa2 = child_int(sup, "wa")
     let wb2 = child_int(sup, "wb")
 
-    println("wa restarted with new pid: " ++ bool_to_string(wa2 != wa1) ++ " (" ++ int_to_string(wa2) ++ ")")
+    println("wa restarted with new pid: " ++ bool_to_string(wa2 != wa1) ++ " (" ++ String.from_int(wa2) ++ ")")
     println("wb unchanged (same pid):   " ++ bool_to_string(wb2 == wb1))
     println("wa alive: " ++ bool_to_string(is_alive(pid_of_int(wa2))))
     println("wb alive: " ++ bool_to_string(is_alive(pid_of_int(wb2))))
@@ -108,21 +108,21 @@ mod StrategyDemo do
     let sup = spawn(OneForAllSup)
     let wa1 = child_int(sup, "wa")
     let wb1 = child_int(sup, "wb")
-    println("wa=" ++ int_to_string(wa1) ++ "  wb=" ++ int_to_string(wb1))
+    println("wa=" ++ String.from_int(wa1) ++ "  wb=" ++ String.from_int(wb1))
 
     send(pid_of_int(wa1), Work())
     send(pid_of_int(wa1), Work())
     send(pid_of_int(wb1), Work())
     run_until_idle()
 
-    println("Crashing wa (pid " ++ int_to_string(wa1) ++ ")...")
+    println("Crashing wa (pid " ++ String.from_int(wa1) ++ ")...")
     kill(pid_of_int(wa1))
 
     let wa2 = child_int(sup, "wa")
     let wb2 = child_int(sup, "wb")
 
-    println("wa restarted: " ++ bool_to_string(wa2 != wa1) ++ " (new pid=" ++ int_to_string(wa2) ++ ")")
-    println("wb restarted: " ++ bool_to_string(wb2 != wb1) ++ " (new pid=" ++ int_to_string(wb2) ++ ")")
+    println("wa restarted: " ++ bool_to_string(wa2 != wa1) ++ " (new pid=" ++ String.from_int(wa2) ++ ")")
+    println("wb restarted: " ++ bool_to_string(wb2 != wb1) ++ " (new pid=" ++ String.from_int(wb2) ++ ")")
     println("wa alive: " ++ bool_to_string(is_alive(pid_of_int(wa2))))
     println("wb alive: " ++ bool_to_string(is_alive(pid_of_int(wb2))))
   end
@@ -133,23 +133,23 @@ mod StrategyDemo do
     let r1  = child_int(sup, "reader")
     let p1  = child_int(sup, "parser")
     let w1  = child_int(sup, "writer")
-    println("reader=" ++ int_to_string(r1) ++ "  parser=" ++ int_to_string(p1) ++ "  writer=" ++ int_to_string(w1))
+    println("reader=" ++ String.from_int(r1) ++ "  parser=" ++ String.from_int(p1) ++ "  writer=" ++ String.from_int(w1))
 
     send(pid_of_int(r1), Work())
     send(pid_of_int(p1), Work())
     send(pid_of_int(w1), Work())
     run_until_idle()
 
-    println("Crashing parser (pid " ++ int_to_string(p1) ++ ")...")
+    println("Crashing parser (pid " ++ String.from_int(p1) ++ ")...")
     kill(pid_of_int(p1))
 
     let r2 = child_int(sup, "reader")
     let p2 = child_int(sup, "parser")
     let w2 = child_int(sup, "writer")
 
-    println("reader unchanged: " ++ bool_to_string(r2 == r1) ++ " (pid=" ++ int_to_string(r2) ++ ")")
-    println("parser restarted: " ++ bool_to_string(p2 != p1) ++ " (new pid=" ++ int_to_string(p2) ++ ")")
-    println("writer restarted: " ++ bool_to_string(w2 != w1) ++ " (new pid=" ++ int_to_string(w2) ++ ")")
+    println("reader unchanged: " ++ bool_to_string(r2 == r1) ++ " (pid=" ++ String.from_int(r2) ++ ")")
+    println("parser restarted: " ++ bool_to_string(p2 != p1) ++ " (new pid=" ++ String.from_int(p2) ++ ")")
+    println("writer restarted: " ++ bool_to_string(w2 != w1) ++ " (new pid=" ++ String.from_int(w2) ++ ")")
     println("reader alive: " ++ bool_to_string(is_alive(pid_of_int(r2))))
     println("parser alive: " ++ bool_to_string(is_alive(pid_of_int(p2))))
     println("writer alive: " ++ bool_to_string(is_alive(pid_of_int(w2))))

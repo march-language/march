@@ -17,7 +17,7 @@ mod PatternMatching do
     match n do
       0 -> "zero"
       1 -> "one"
-      _ -> "other: " ++ int_to_string(n)
+      _ -> "other: " ++ String.from_int(n)
     end
   end
 
@@ -52,7 +52,7 @@ mod PatternMatching do
 
   fn show_option(label : String, v : Option(Int)) do
     match v do
-      Some(n) -> println(label ++ " = " ++ int_to_string(n))
+      Some(n) -> println(label ++ " = " ++ String.from_int(n))
       None    -> println(label ++ " = (none)")
     end
   end
@@ -108,33 +108,33 @@ mod PatternMatching do
     -- 2. ADTs
     let shapes = [Circle(5), Rect(4, 4), Rect(3, 7), Triangle(6, 4)]
     List.each(shapes, fn s ->
-      println(describe_shape(s) ++ " area=" ++ int_to_string(area(s))))
+      println(describe_shape(s) ++ " area=" ++ String.from_int(area(s))))
 
     -- 3. Option / Result
     show_option("10/2", safe_divide(10, 2))
     show_option("10/0", safe_divide(10, 0))
 
     match parse_positive("7") do
-      Ok(n)  -> println("parsed: " ++ int_to_string(n))
+      Ok(n)  -> println("parsed: " ++ String.from_int(n))
       Err(e) -> println("error: " ++ e)
     end
 
     match parse_positive("bad") do
-      Ok(n)  -> println("parsed: " ++ int_to_string(n))
+      Ok(n)  -> println("parsed: " ++ String.from_int(n))
       Err(e) -> println("error: " ++ e)
     end
 
     -- 4. Nested
     -- (1 + 2) * (3 + 4) = 21
     let expr = EMul(EAdd(ENum(1), ENum(2)), EAdd(ENum(3), ENum(4)))
-    println("(1+2)*(3+4)=" ++ int_to_string(eval_expr(expr)))
-    println("nested Some(Some(99))=" ++ int_to_string(unwrap_nested(Some(Some(99)))))
-    println("nested Some(None)=" ++ int_to_string(unwrap_nested(Some(None))))
+    println("(1+2)*(3+4)=" ++ String.from_int(eval_expr(expr)))
+    println("nested Some(Some(99))=" ++ String.from_int(unwrap_nested(Some(Some(99)))))
+    println("nested Some(None)=" ++ String.from_int(unwrap_nested(Some(None))))
 
     -- 5. Multi-head
-    println("fib(10)=" ++ int_to_string(fib(10)))
+    println("fib(10)=" ++ String.from_int(fib(10)))
     let xs = Cons(1, Cons(2, Cons(3, Nil)))
-    println("list_sum=[1,2,3]=" ++ int_to_string(list_sum(xs)))
+    println("list_sum=[1,2,3]=" ++ String.from_int(list_sum(xs)))
   end
 
 end

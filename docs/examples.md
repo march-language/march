@@ -120,7 +120,7 @@ actor Counter do
   on Increment(n : Int) do { state with value: state.value + n } end
   on Reset()            do { state with value: 0 } end
   on Probe(label : String) do
-    println("[Counter] " ++ label ++ " = " ++ int_to_string(state.value))
+    println("[Counter] " ++ label ++ " = " ++ String.from_int(state.value))
     state
   end
 end
@@ -265,13 +265,13 @@ Three streaming patterns: print chunks as they arrive, byte counting without buf
 
 ```march
 fn print_chunk(chunk) do
-  print("[chunk " ++ int_to_string(string_length(chunk)) ++ " bytes]")
+  print("[chunk " ++ String.from_int(String.byte_size(chunk)) ++ " bytes]")
   print(chunk)
 end
 
 fn stream_demo(client) do
   match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) do
-  Ok((status, _, _)) -> print("Status: " ++ int_to_string(status))
+  Ok((status, _, _)) -> print("Status: " ++ String.from_int(status))
   Err(_)             -> print("Error!")
   end
 end
@@ -326,11 +326,11 @@ fn stats_demo() do
   -- Weekly temperatures
   let temps = [18.5, 21.0, 19.8, 23.4, 22.1, 17.6, 20.3]
 
-  println("mean:    " ++ float_to_string(Stats.mean(temps)))
-  println("median:  " ++ float_to_string(Stats.median(temps)))
-  println("std_dev: " ++ float_to_string(Stats.std_dev(temps)))
-  println("p25:     " ++ float_to_string(Stats.percentile(temps, 25.0)))
-  println("p75:     " ++ float_to_string(Stats.percentile(temps, 75.0)))
+  println("mean:    " ++ String.from_float(Stats.mean(temps)))
+  println("median:  " ++ String.from_float(Stats.median(temps)))
+  println("std_dev: " ++ String.from_float(Stats.std_dev(temps)))
+  println("p25:     " ++ String.from_float(Stats.percentile(temps, 25.0)))
+  println("p75:     " ++ String.from_float(Stats.percentile(temps, 75.0)))
 
   -- Linear regression: hours studied → exam score
   let hours  = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]

@@ -27,7 +27,7 @@ mod Hello do
     println(greet("March"))
 
     let result = factorial(6)
-    println("6! = " ++ int_to_string(result))
+    println("6! = " ++ String.from_int(result))
 
     let nums = [1, 2, 3, 4, 5, 6]
     let evens_doubled = double_evens(nums)
