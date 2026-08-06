@@ -676,127 +676,127 @@ Uri.decode_query("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 
 ---
 
-## Dom (JS only)
+## Js.Dom (JS only)
 
 `dom.march` — Browser DOM bindings for `--target js` builds. Auto-loaded; no import needed.
 
 ```march
 -- Query
-Dom.find("my-id")              -- Option(Dom.Node)
-Dom.select("#nav")             -- Option(Dom.Node)
-Dom.select_all(".item")        -- List(Dom.Node)
-Dom.body()                     -- Dom.Node
+Js.Dom.find("my-id")              -- Option(Js.Dom.Node)
+Js.Dom.select("#nav")             -- Option(Js.Dom.Node)
+Js.Dom.select_all(".item")        -- List(Js.Dom.Node)
+Js.Dom.body()                     -- Js.Dom.Node
 
 -- Construction
-Dom.create("div")              -- Dom.Node
-Dom.text_node("hello")         -- Dom.Node
+Js.Dom.create("div")              -- Js.Dom.Node
+Js.Dom.text_node("hello")         -- Js.Dom.Node
 
 -- Tree
-Dom.append(parent, child)
-Dom.prepend(parent, child)
-Dom.remove(el)
-Dom.remove_child(parent, child)
+Js.Dom.append(parent, child)
+Js.Dom.prepend(parent, child)
+Js.Dom.remove(el)
+Js.Dom.remove_child(parent, child)
 
 -- Content
-Dom.set_text(el, "hello")
-Dom.set_html(el, "<b>bold</b>")
-Dom.get_text(el)               -- String
-Dom.get_html(el)               -- String
+Js.Dom.set_text(el, "hello")
+Js.Dom.set_html(el, "<b>bold</b>")
+Js.Dom.get_text(el)               -- String
+Js.Dom.get_html(el)               -- String
 
 -- Attributes and style
-Dom.set_attr(el, "data-x", "1")
-Dom.get_attr(el, "data-x")    -- Option(String)
-Dom.remove_attr(el, "data-x")
-Dom.add_class(el, "active")
-Dom.remove_class(el, "active")
-Dom.toggle_class(el, "open")
-Dom.set_style(el, "color", "red")
+Js.Dom.set_attr(el, "data-x", "1")
+Js.Dom.get_attr(el, "data-x")    -- Option(String)
+Js.Dom.remove_attr(el, "data-x")
+Js.Dom.add_class(el, "active")
+Js.Dom.remove_class(el, "active")
+Js.Dom.toggle_class(el, "open")
+Js.Dom.set_style(el, "color", "red")
 
--- Events (Dom.listen, not Dom.on — there is no on_keydown/dispatch wrapper;
+-- Events (Js.Dom.listen, not Js.Dom.on — there is no on_keydown/dispatch wrapper;
 -- listen for "keydown" directly)
-Dom.listen(el, "click", fn ev -> ...)
-Dom.listen(el, "keydown", fn ev -> ...)
-Dom.prevent_default(ev)
-Dom.stop_propagation(ev)
-Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll per frame)
-Dom.key_presses()              -- List(String) — drain buffered keydown keys (poll per frame)
-Dom.store_get("save")          -- Option(String) — localStorage read
-Dom.store_set("save", data)    -- localStorage write
-Dom.pointer_pos(el)            -- (Int, Int) — live cursor position over el
-Dom.window_size()              -- (Int, Int) — window.innerWidth/innerHeight
+Js.Dom.listen(el, "click", fn ev -> ...)
+Js.Dom.listen(el, "keydown", fn ev -> ...)
+Js.Dom.prevent_default(ev)
+Js.Dom.stop_propagation(ev)
+Js.Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll per frame)
+Js.Dom.key_presses()              -- List(String) — drain buffered keydown keys (poll per frame)
+Js.Dom.store_get("save")          -- Option(String) — localStorage read
+Js.Dom.store_set("save", data)    -- localStorage write
+Js.Dom.pointer_pos(el)            -- (Int, Int) — live cursor position over el
+Js.Dom.window_size()              -- (Int, Int) — window.innerWidth/innerHeight
 ```
 
-`Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.
+`Js.Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.
 
 ---
 
-## Canvas (JS only)
+## Js.Canvas (JS only)
 
 `canvas.march` — 2D drawing bindings for `--target js` builds, wrapping the browser's `CanvasRenderingContext2D`. Auto-loaded; no import needed.
 
 ```march
 -- Setup
-Dom.find("my-canvas")                          -- Option(Node), from Dom
-Canvas.get_context(node)                       -- Option(Context)
+Js.Dom.find("my-canvas")                          -- Option(Node), from Js.Dom
+Js.Canvas.get_context(node)                       -- Option(Context)
 
 -- State stack
-Canvas.save(ctx)
-Canvas.restore(ctx)
-Canvas.translate(ctx, 10.0, 10.0)
-Canvas.rotate(ctx, 0.5)
-Canvas.scale(ctx, 2.0, 2.0)
+Js.Canvas.save(ctx)
+Js.Canvas.restore(ctx)
+Js.Canvas.translate(ctx, 10.0, 10.0)
+Js.Canvas.rotate(ctx, 0.5)
+Js.Canvas.scale(ctx, 2.0, 2.0)
 
 -- Style
-Canvas.set_fill_style(ctx, "#e74c3c")
-Canvas.set_stroke_style(ctx, "#3498db")
-Canvas.set_line_width(ctx, 2.0)
-Canvas.set_global_alpha(ctx, 0.8)
-Canvas.set_font(ctx, "16px sans-serif")
+Js.Canvas.set_fill_style(ctx, "#e74c3c")
+Js.Canvas.set_stroke_style(ctx, "#3498db")
+Js.Canvas.set_line_width(ctx, 2.0)
+Js.Canvas.set_global_alpha(ctx, 0.8)
+Js.Canvas.set_font(ctx, "16px sans-serif")
 
 -- Rects
-Canvas.clear_rect(ctx, 0.0, 0.0, 480.0, 360.0)
-Canvas.fill_rect(ctx, 10.0, 10.0, 80.0, 40.0)
-Canvas.stroke_rect(ctx, 10.0, 10.0, 80.0, 40.0)
+Js.Canvas.clear_rect(ctx, 0.0, 0.0, 480.0, 360.0)
+Js.Canvas.fill_rect(ctx, 10.0, 10.0, 80.0, 40.0)
+Js.Canvas.stroke_rect(ctx, 10.0, 10.0, 80.0, 40.0)
 
 -- Paths
-Canvas.begin_path(ctx)
-Canvas.move_to(ctx, 0.0, 0.0)
-Canvas.line_to(ctx, 100.0, 100.0)
-Canvas.arc(ctx, 50.0, 50.0, 20.0, 0.0, 6.283185307179586)
-Canvas.quadratic_curve_to(ctx, 60.0, 0.0, 120.0, 40.0)
-Canvas.bezier_curve_to(ctx, 20.0, 0.0, 80.0, 0.0, 100.0, 40.0)
-Canvas.fill(ctx)
-Canvas.stroke(ctx)
+Js.Canvas.begin_path(ctx)
+Js.Canvas.move_to(ctx, 0.0, 0.0)
+Js.Canvas.line_to(ctx, 100.0, 100.0)
+Js.Canvas.arc(ctx, 50.0, 50.0, 20.0, 0.0, 6.283185307179586)
+Js.Canvas.quadratic_curve_to(ctx, 60.0, 0.0, 120.0, 40.0)
+Js.Canvas.bezier_curve_to(ctx, 20.0, 0.0, 80.0, 0.0, 100.0, 40.0)
+Js.Canvas.fill(ctx)
+Js.Canvas.stroke(ctx)
 
 -- Text
-Canvas.fill_text(ctx, "score: 0", 10.0, 20.0)
-Canvas.stroke_text(ctx, "score: 0", 10.0, 20.0)
-Canvas.set_text_align(ctx, "center")
+Js.Canvas.fill_text(ctx, "score: 0", 10.0, 20.0)
+Js.Canvas.stroke_text(ctx, "score: 0", 10.0, 20.0)
+Js.Canvas.set_text_align(ctx, "center")
 
 -- Images
-Canvas.load_image("sprite.png")                -- Result(Image, String)
-Canvas.draw_image(ctx, img, 0.0, 0.0)
-Canvas.draw_image_scaled(ctx, img, 0.0, 0.0, 64.0, 64.0)
+Js.Canvas.load_image("sprite.png")                -- Result(Image, String)
+Js.Canvas.draw_image(ctx, img, 0.0, 0.0)
+Js.Canvas.draw_image_scaled(ctx, img, 0.0, 0.0, 64.0, 64.0)
 ```
 
-`Canvas` requires `needs Ffi` because drawing calls are implemented as JS externs. It is only valid in `--target js` builds. Pair with `Dom.event_x`/`Dom.event_y` for canvas-relative pointer coordinates from a `"pointerdown"`/`"click"` listener.
+`Js.Canvas` requires `needs Ffi` because drawing calls are implemented as JS externs. It is only valid in `--target js` builds. Pair with `Js.Dom.event_x`/`Js.Dom.event_y` for canvas-relative pointer coordinates from a `"pointerdown"`/`"click"` listener.
 
 ---
 
-## Audio (JS only)
+## Js.Audio (JS only)
 
 `audio.march` — procedural sound-effect synthesis for `--target js` builds, wrapping the browser's Web Audio API. Sounds are synthesized on the fly (tones, sweeps, filtered noise) rather than loaded from files — no assets, no licensing. Auto-loaded; no import needed.
 
 ```march
-Audio.create()                                 -- Ctx
-Audio.resume(actx)                             -- unlock output; call from a user-gesture handler
-Audio.beep(actx, 440.0, 0.1, "sine")            -- flat tone: "sine"/"square"/"sawtooth"/"triangle"
-Audio.sweep(actx, 200.0, 800.0, 0.2, "square")  -- frequency ramp (chirps, risers, fall-offs)
-Audio.noise_burst(actx, 0.15, 600.0)            -- filtered white noise (impacts, explosions)
-Audio.set_volume(actx, 0.5)                     -- master gain 0.0 (mute) to 1.0
+Js.Audio.create()                                 -- Ctx
+Js.Audio.resume(actx)                             -- unlock output; call from a user-gesture handler
+Js.Audio.beep(actx, 440.0, 0.1, "sine")            -- flat tone: "sine"/"square"/"sawtooth"/"triangle"
+Js.Audio.sweep(actx, 200.0, 800.0, 0.2, "square")  -- frequency ramp (chirps, risers, fall-offs)
+Js.Audio.noise_burst(actx, 0.15, 600.0)            -- filtered white noise (impacts, explosions)
+Js.Audio.set_volume(actx, 0.5)                     -- master gain 0.0 (mute) to 1.0
 ```
 
-`Audio` requires `needs Ffi` and is only valid in `--target js` builds. Browsers block audio output until a user gesture occurs on the page — call `resume` from inside your first tap/click handler (game loops that already gate their first frame on a tap, like a "tap to start" screen, get this for free).
+`Js.Audio` requires `needs Ffi` and is only valid in `--target js` builds. Browsers block audio output until a user gesture occurs on the page — call `resume` from inside your first tap/click handler (game loops that already gate their first frame on a tap, like a "tap to start" screen, get this for free).
 
 ---
 
@@ -939,8 +939,8 @@ tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
 | `Decimal` | Exact decimal arithmetic |
 | `Csv` | CSV parsing |
 | `DateTime` | Date and time |
-| `Dom` | Browser DOM bindings (JS only, auto-loaded for `--target js`) |
-| `Canvas` | 2D canvas drawing bindings (JS only, auto-loaded for `--target js`) |
+| `Js.Dom` | Browser DOM bindings (JS only, auto-loaded for `--target js`) |
+| `Js.Canvas` | 2D canvas drawing bindings (JS only, auto-loaded for `--target js`) |
 | `NodeIdentity` | Cluster node identity (name, node\_id, incarnation) |
 | `NetFrame` | Length-prefixed TCP framing |
 | `ClusterAuth` | HMAC shared-secret challenge/response |

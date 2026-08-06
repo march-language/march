@@ -1,27 +1,27 @@
 -- Regression: Dom module must be auto-loaded for --target js builds.
 -- dom.march is JS-only and excluded from native/JIT stdlib precompile.
--- This typechecks Dom.body() usage without calling it at runtime.
+-- This typechecks Js.Dom.body() usage without calling it at runtime.
 mod JsDomAvailable do
   fn dom_smoke() : Unit do
-    let _ = Dom.body()
+    let _ = Js.Dom.body()
     ()
   end
 
   fn event_smoke(ev: Event) : Unit do
-    let _ = Dom.event_x(ev)
-    let _ = Dom.event_y(ev)
+    let _ = Js.Dom.event_x(ev)
+    let _ = Js.Dom.event_y(ev)
     ()
   end
 
   fn taps_smoke(el: Node) : Unit do
-    let _ = Dom.taps(el)
+    let _ = Js.Dom.taps(el)
     ()
   end
 
   fn input_storage_smoke() : Unit do
-    let _ = Dom.key_presses()
-    let _ = Dom.store_get("k")
-    Dom.store_set("k", "v")
+    let _ = Js.Dom.key_presses()
+    let _ = Js.Dom.store_get("k")
+    Js.Dom.store_set("k", "v")
   end
 
   fn main() : Unit do

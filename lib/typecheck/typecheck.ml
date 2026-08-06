@@ -1220,9 +1220,22 @@ let edit_distance (a : string) (b : string) : int =
   end
 
 (** Split a qualified name "Mod.member" into (module, member).
-    Returns None if the name contains no dot. *)
+    Returns None if the name contains no dot.
+
+    Splits at the LAST dot, not the first: [member] is always a single
+    trailing identifier (a function/type/ctor name, never itself dotted), so
+    everything before it is the module path — correct for both flat stdlib
+    names ("List.map") and dotted ones ("Js.Canvas.draw_node", where the
+    module is "Js.Canvas" and rindex is needed to avoid mis-splitting into
+    module "Js" + member "Canvas.draw_node", which no stdlib file can ever
+    satisfy). App-local multi-component paths like "Conduit.Storage.foo"
+    (interface methods registered under a shorter suffix) are unaffected:
+    [Module_registry.ensure_loaded] on "Conduit.Storage" misses exactly as
+    it did on "Conduit" before, since neither is a real stdlib module, so
+    every caller's existing miss-and-fall-through behavior is unchanged —
+    this only adds resolution for module paths that genuinely exist. *)
 let split_qualified (name : string) : (string * string) option =
-  match String.index_opt name '.' with
+  match String.rindex_opt name '.' with
   | None -> None
   | Some i ->
     Some (String.sub name 0 i, String.sub name (i + 1) (String.length name - i - 1))
@@ -3335,9 +3348,11 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        of the same arity in scope. *)
     let canon_name =
       (* The bare suffix is the component after the LAST '.' (the type's own
-         name); everything before is the module path.  Using rindex rather than
-         [split_qualified] (which splits at the FIRST dot for module-load
-         purposes) also canonicalizes arbitrarily-nested refs like `A.B.Type`.
+         name); everything before is the module path.  Uses its own rindex
+         here rather than calling [split_qualified] (same rindex convention
+         as of this writing, but this call's purpose — extracting the bare
+         type-name suffix — is independent of module-load resolution, so it
+         stays deliberately decoupled from that function's behavior.
          Look up the bare suffix in [env_loaded] (not the pre-resolution
          [env]): when [name.txt] needed [resolve_qualified_type] to lazily
          load its module, [load_module_into_env]'s [ExType]/[ExRecord] arms
@@ -10886,8 +10901,11 @@ let rec check_decl env (d : Ast.decl) : env =
             "name = mod_str" clause -- an EVar referencing the module path
             literally); the module's first path segment is the prefix-index
             key a qualified reference (e.g. "Depot.Gate.foo") hashes to (see
-            [record_use] -- it looks up by first-dot-split, matching
-            [split_qualified]'s convention elsewhere in this file). *)
+            [record_use] -- it looks up by its own first-dot split, which is
+            independent of [split_qualified]'s rindex/module-load convention
+            elsewhere in this file: unused-import tracking only ever needs
+            the declared import's own root segment, never a full module-load
+            resolution). *)
          List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
          import_index_add_exact env.import_idx mod_str entry;
          let prefix_root = match String.index_opt mod_str '.' with

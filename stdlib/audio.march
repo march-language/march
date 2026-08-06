@@ -9,14 +9,14 @@
 -- call `resume` from inside your first tap/click handler.
 --
 -- Usage:
---   let actx = Audio.create()
---   Audio.resume(actx)                              -- call on first user gesture
---   Audio.beep(actx, 900.0, 0.05, "square")          -- laser-ish blip
---   Audio.sweep(actx, 400.0, 900.0, 0.12, "sine")    -- rising chime
---   Audio.noise_burst(actx, 0.2, 900.0)              -- explosion-ish thud
---   Audio.set_volume(actx, 0.0)                      -- mute
+--   let actx = Js.Audio.create()
+--   Js.Audio.resume(actx)                              -- call on first user gesture
+--   Js.Audio.beep(actx, 900.0, 0.05, "square")          -- laser-ish blip
+--   Js.Audio.sweep(actx, 400.0, 900.0, 0.12, "sine")    -- rising chime
+--   Js.Audio.noise_burst(actx, 0.2, 900.0)              -- explosion-ish thud
+--   Js.Audio.set_volume(actx, 0.0)                      -- mute
 
-mod Audio do
+mod Js.Audio do
   needs Ffi
 
   -- Opaque handle to a Web Audio context.

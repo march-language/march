@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Breaking: the three JS-only stdlib modules are now namespaced under `Js.`.**
+  `mod Audio`, `mod Canvas`, `mod Dom` are `mod Js.Audio`, `mod Js.Canvas`,
+  `mod Js.Dom` — these are the only stdlib modules that panic at runtime when
+  called from a native build, and the shared prefix puts that constraint at
+  every call site instead of only in a doc comment. Filenames
+  (`stdlib/{audio,canvas,dom}.march`) are unchanged. No back-compat aliasing
+  exists for module names, so every caller (`Audio.beep(...)` →
+  `Js.Audio.beep(...)`, etc.) must update in lockstep. See
+  `specs/progress/2026-08-05-js-namespace-audio-canvas-dom.md`.
 - **`cap no_panic` now consults a call's actual refinement contract instead of
   banning it by name.** A partial stdlib or prelude function that declares a
   refinement precondition — `unwrap`, `expect`, `head`, `tail`, `last`,
@@ -60,6 +69,15 @@ git log is authoritative for exact commits.
   still reported by `march check`. This is the pre-existing behavior preserved;
   nothing that passed `march check` before fails it now. Use `march --check` for
   the proof-based answer.
+
+### Removed
+
+- **`demo_app/perihelion`, `demo_app/dom_demo`, and `demo_app/canvas_demo`.**
+  Along with the live `docs/perihelion.html` page, its checked-in compiled
+  assets (`docs/assets/perihelion/`), the CI workflow that regenerated them
+  (`gen-perihelion-assets.yml`), and the now-dead `build-dom-demo` slash
+  command. `demo_app/tetris` and `demo_app/tetris_logic` are unaffected and
+  updated for the `Js.*` rename above.
 
 ### Fixed
 
