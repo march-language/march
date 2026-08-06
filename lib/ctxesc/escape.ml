@@ -122,21 +122,67 @@ let js_string s =
   done;
   Buffer.contents b
 
-(* Allowlist: CSS has too many routes to a URL or an expression for a denylist
-   to be credible. Anything outside the safe set becomes `\XX `, which CSS reads
-   as a literal character and which can never re-open a construct. *)
-let css s =
-  let b = Buffer.create (String.length s) in
-  String.iter
-    (fun c ->
-       if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-          || (c >= '0' && c <= '9')
-          || c = '-' || c = '_' || c = '#' || c = '%' || c = '.'
-          || c = ',' || c = ' '
-       then Buffer.add_char b c
-       else (Buffer.add_char b '\\'; buf_add_hex2 b c; Buffer.add_char b ' '))
-    s;
-  Buffer.contents b
+(* CSS -- two positions, two escapers; mirrors runtime/march_ctx_escape.c.
+   Both allow calls to an ALLOWLISTED set of functions. Escaping every `(` is
+   safe but broke real templates: `var(--text-muted)` became
+   `var\28 --text-muted\29 `, and a declaration list interpolated after a `;`
+   was destroyed. A denylist of `expression(`/`url(` is not credible, so a
+   function call survives only if its name is on the list. *)
+let css_fn_allow =
+  [ "var"; "calc"; "min"; "max"; "clamp";
+    "rgb"; "rgba"; "hsl"; "hsla";
+    "translate"; "translatex"; "translatey"; "translate3d";
+    "scale"; "scalex"; "scaley"; "rotate"; "rotatex"; "rotatey"; "rotatez";
+    "skew"; "skewx"; "skewy"; "matrix"; "matrix3d"; "perspective";
+    "cubic-bezier"; "steps";
+    "linear-gradient"; "radial-gradient"; "conic-gradient";
+    "repeating-linear-gradient"; "repeating-radial-gradient" ]
+
+let css_ident_char c =
+  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+  || c = '-' || c = '_'
+
+let css_plain ~decl c =
+  css_ident_char c
+  || c = '#' || c = '%' || c = '.' || c = ',' || c = ' '
+  || (decl && (c = ':' || c = ';'))
+
+(* One pass: is the whole string safe-shaped? Every `(` preceded by an
+   allowlisted function name, parens balanced, everything else plain. If not,
+   escape EVERYTHING strictly -- a partially escaped CSS string is far harder to
+   reason about than a wholly escaped one, and strict is always safe. *)
+let css_is_safe_shaped ~decl s =
+  let n = String.length s in
+  let rec go i depth =
+    if i >= n then depth = 0
+    else
+      let c = s.[i] in
+      if css_ident_char c then begin
+        let j = ref i in
+        while !j < n && css_ident_char s.[!j] do incr j done;
+        if !j < n && s.[!j] = '(' then
+          let name = String.lowercase_ascii (String.sub s i (!j - i)) in
+          if List.mem name css_fn_allow then go (!j + 1) (depth + 1) else false
+        else go !j depth
+      end
+      else if c = ')' then (if depth = 0 then false else go (i + 1) (depth - 1))
+      else if c = '(' then false
+      else if not (css_plain ~decl c) then false
+      else go (i + 1) depth
+  in
+  go 0 0
+
+let css ~decl s =
+  if css_is_safe_shaped ~decl s then s
+  else begin
+    let b = Buffer.create (String.length s) in
+    String.iter
+      (fun c ->
+         if css_plain ~decl c then Buffer.add_char b c
+         else (Buffer.add_char b '\\'; buf_add_hex2 b c; Buffer.add_char b ' '))
+      s;
+    Buffer.contents b
+  end
 
 let apply (e : C.escaper) s =
   match e with
@@ -144,14 +190,15 @@ let apply (e : C.escaper) s =
   | C.EscAttr -> html_like ~attr:true s
   | C.EscUrlComponent -> url_component s
   | C.EscUrlWhole -> url_whole s
-  | C.EscCss -> css s
+  | C.EscCssValue -> css ~decl:false s
+  | C.EscCssDecl -> css ~decl:true s
   | C.EscJsString -> js_string s
   | C.EscNone -> s
 
 let apply_id id s =
   match List.find_opt (fun e -> C.escaper_id e = id)
           [ C.EscHtml; C.EscAttr; C.EscUrlComponent; C.EscUrlWhole;
-            C.EscCss; C.EscJsString; C.EscNone ] with
+            C.EscCssValue; C.EscJsString; C.EscNone; C.EscCssDecl ] with
   | Some e -> apply e s
   | None ->
     invalid_arg

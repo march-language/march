@@ -11,7 +11,171 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **`~H` now escapes by HTML parse context, not with one escaper everywhere.**
+  Previously every interpolation was HTML entity-encoded regardless of where it
+  landed, which is correct in element content and wrong everywhere else. The
+  desugarer now walks a template's literal chunks through a context automaton at
+  compile time and gives each hole the escaper its position calls for.
+
+  **This changes rendered output.** Measured across bastion and forgepm — 121
+  templates, 253 interpolations — 40 holes change:
+
+  | context | before | now |
+  |---|---|---|
+  | element content (213 holes) | entity-encoded | unchanged |
+  | attribute value (17) | entity-encoded | + backtick |
+  | URL component (14) | entity-encoded | percent-encoded |
+  | `style` attribute (7) | entity-encoded | CSS declaration/value escape |
+  | start of `href`/`src` (2) | entity-encoded | **URL scheme allowlist** |
+
+  The last row closes a real hole: `~H"<a href=\"${url}\">"` accepted
+  `javascript:alert(1)`, since entity-encoding does not touch a scheme. Such
+  URLs now render as `about:invalid#zSoyz`.
+
+  An **unquoted attribute value** receiving an interpolation is now quoted
+  automatically — `<div class=${x}>` emits `<div class="…">` — so a value
+  containing a space can no longer start a new attribute.
+
+  Interpolations that no escaping can make safe are now **compile errors**
+  rather than silently-wrong output: an attribute name, an element name, the
+  interior of a comment, and a template that ends mid-tag or mid-attribute.
+  Nothing in bastion or forgepm hits any of these.
+
+  Escaping tables live in `specs/security/html-contexts.tbl` and are documented
+  in `specs/security/README.md`.
+
+- **Breaking: the three JS-only stdlib modules are now namespaced under `Js.`.**
+  `mod Audio`, `mod Canvas`, `mod Dom` are `mod Js.Audio`, `mod Js.Canvas`,
+  `mod Js.Dom` — these are the only stdlib modules that panic at runtime when
+  called from a native build, and the shared prefix puts that constraint at
+  every call site instead of only in a doc comment. Filenames
+  (`stdlib/{audio,canvas,dom}.march`) are unchanged. No back-compat aliasing
+  exists for module names, so every caller (`Audio.beep(...)` →
+  `Js.Audio.beep(...)`, etc.) must update in lockstep. See
+  `specs/progress/2026-08-05-js-namespace-audio-canvas-dom.md`.
+- **`cap no_panic` now consults a call's actual refinement contract instead of
+  banning it by name.** A partial stdlib or prelude function that declares a
+  refinement precondition — `unwrap`, `expect`, `head`, `tail`, `last`,
+  `List.nth`/`head`/`last`/`tail`/`maximum_int`/`minimum_int`,
+  `Option.unwrap`/`expect`, `Result.unwrap`/`expect`/`unwrap_err`,
+  `Random.normal`/`exponential`/`bernoulli`/`choice`/`choice_weighted`,
+  `DateTime.fixed_zone`/`fixed_zone_hm`,
+  `Stats.mean`/`min_val`/`max_val`/`percentile`/`quantile`/`quantiles`/
+  `five_number_summary`/`variance`/`mode`/`covariance`/`correlation`/
+  `linear_regression` — is
+  no longer rejected on sight inside a `cap no_panic` module. The call is
+  checked against its contract, by the same solver and the same verdicts that
+  discharge division safety, so a provably safe call compiles clean:
+  `if List.length(xs) > 0 do List.tail(xs) else xs end` is now accepted where
+  it used to be an error. Anything short of a proof — refuted, undecided, or
+  no obligation recorded at all — is still an error, because `cap no_panic` is
+  a guarantee; an `@[trusted]` assertion does not count as a proof here. Names
+  with no contract (`panic`, `panic_`, `todo_`, `unreachable_`, `Array.get`,
+  `Array.set`, `Array.pop`) are still banned unconditionally.
+- **`Stats.covariance`, `Stats.correlation` and `Stats.linear_regression` now
+  declare their two structural preconditions.** `xs : {List(Float) | len(_) >= 2}`
+  and `ys : {List(Float) | len(_) == len(xs)}` — the second refines one
+  parameter by referencing a *sibling* parameter's measure, the same shape
+  `List.nth`'s `n : {Int | _ >= 0 && _ < len(xs)}` already used. A call whose
+  lengths the compiler can relate is now proved at compile time rather than
+  checked by a runtime `panic`. `Stats.correlation`'s zero-standard-deviation
+  panic and `Stats.linear_regression`'s zero-variance panic depend on the
+  values in the lists rather than their shape and remain runtime-only.
+- **`cap no_panic` no longer reports transitive blame for those
+  contract-covered names.** An unprovable `List.tail(xs)` inside a helper used
+  to produce one error at the helper *and* one at every local caller of it; it
+  now produces exactly one error, at the real call site. If an error looks like
+  it "moved" from a caller to the callee, this is why. `panic`/`panic_`/
+  `todo_`/`unreachable_` and `Array.get`/`Array.set`/`Array.pop` keep their
+  transitive blame unchanged.
+- **`cap no_panic` now reports one error per offending call site, not one per
+  function.** A function containing two unprovable `List.tail` calls reports
+  two errors where it used to report one. Nothing new is rejected — the same
+  function already failed — but you now see every offending call at once.
+- **`march check` and `march caps` stay conservative for the contracted
+  names.** Proving a call safe needs the refinement checker, and those two
+  commands are a package-level typecheck-only pass that does not run it (nor
+  does the LSP). They keep banning the contracted names by name, transitive
+  blame included, so a guarded `List.tail` that `march --check` accepts is
+  still reported by `march check`. This is the pre-existing behavior preserved;
+  nothing that passed `march check` before fails it now. Use `march --check` for
+  the proof-based answer.
+
+### Removed
+
+- **`demo_app/perihelion`, `demo_app/dom_demo`, and `demo_app/canvas_demo`.**
+  Along with the live `docs/perihelion.html` page, its checked-in compiled
+  assets (`docs/assets/perihelion/`), the CI workflow that regenerated them
+  (`gen-perihelion-assets.yml`), and the now-dead `build-dom-demo` slash
+  command. `demo_app/tetris` and `demo_app/tetris_logic` are unaffected and
+  updated for the `Js.*` rename above.
+
 ### Fixed
+
+- **`--refine-suggest*` silently changed `cap no_panic`'s verdict, in both
+  directions.** The refinement *suggestion* printers work by re-checking your
+  program with a speculative contract spliced into one signature, and they ran
+  in between the pass that records each call site's verdict and the pass that
+  reads it — so `cap no_panic` was judged against a hypothesis rather than
+  against your code. Adding `--refine-suggest-all` (or `--refine-suggest`,
+  `--refine-suggest-post`, `--refine-suggest-post-all`, or running
+  `forge refine`, which shells out to `march --check --refine-suggest-json`)
+  could make an unguarded `List.tail` inside a `cap no_panic` module compile
+  clean — a capability that promises no panics, voided by a diagnostic-only
+  flag — and could equally make a correctly guarded call fail. `march test`
+  was unaffected, so the two pipelines disagreed. The consumer passes now run
+  before the printers, and the suggestion probes no longer disturb the verdict
+  index at all, so a `--refine-suggest*` run reports exactly what the same
+  command without the flag reports.
+
+- **A `@[measure]` that silently proved nothing now says so.** A measure whose
+  value is a constructor field read (`PVec(n,_,_,_) -> n` — how a
+  count-carrying container like `Array` writes `length`) is accepted, passes
+  the soundness gate, and generates a correct axiom, yet can never discharge
+  anything: the refinement checker erases non-datatype constructor fields at
+  call sites, so the measure applied to a literal evaluates to an unknown.
+  Every symptom of a working measure was present and contracts using it simply
+  never fired. This is now a warning at the measure's definition. It is
+  advisory only — no verdict, error, or accepted program changes — and it
+  deliberately under-reports rather than risk a false positive: only a bare
+  field read is flagged, so `-> n + 0` (equally inert) stays silent.
+
+- **`cap no_panic` compiled clean for `Array.pop`, which can genuinely panic.**
+  `Array.pop` panics on an empty vector (`Array.pop: empty vector`), but it was
+  on neither `cap no_panic`'s syntactic ban list nor its contract-covered set,
+  so a module declaring `cap no_panic` could call it and pass — the capability
+  promising no panics while admitting a call that can panic. It is now banned
+  by name, with a suggestion to check `Array.length(v) > 0` first, joining
+  `Array.get` and `Array.set`. If you were calling `Array.pop` inside a
+  `cap no_panic` module, that module now fails to compile; guard the call and
+  use the length check, or drop the capability. Found while gating a bounds
+  contract for the `Array` accessors — that contract is NOT shipped, because
+  `Array.length` is a scalar constructor-field read and the refinement
+  checker's call-site reflection erases such fields, leaving the measure unable
+  to prove anything (`specs/todos/2026-08-05-measure-over-scalar-ctor-field.md`).
+
+- **`cap no_panic`'s syntactic ban list had drifted from the real stdlib.**
+  An audit found three problems in `panic_surface_stdlib`
+  (`lib/typecheck/typecheck.ml`), the name list `cap no_panic` uses to reject
+  calls to functions that can panic. Most seriously: **twelve public stdlib
+  functions that carry a real refinement precondition and panic when it's
+  violated — `List.tail`, `List.maximum_int`, `List.minimum_int`,
+  `Random.normal`, `Random.exponential`, `Random.bernoulli`, `Random.choice`,
+  `DateTime.fixed_zone`, `DateTime.fixed_zone_hm`, `Stats.mean`,
+  `Stats.min_val`, `Stats.max_val` — were absent from the list under any
+  spelling, so a `cap no_panic` module could call one of them unguarded and
+  compile clean today (`exit 0`, only a silent hint). All twelve are now
+  banned. Also fixed: `String.slice_bytes` was banned despite its own
+  docstring stating it never panics (`start`/`len` are clamped) — removed, so
+  a `cap no_panic` module can now call it. And seven entries
+  (`List.hd`/`List.tl`/`List.min_elt`/`List.max_elt`/`String.nth`/
+  `NativeArray.get`/`NativeArray.set`) named functions that don't exist under
+  those names anywhere in the stdlib — removed as harmless drift. This is a
+  syntactic-only fix (no new mechanism). A properly *guarded* call to one of
+  the twelve is accepted, but by the proof-based check described under
+  **Changed** above, not by this list.
 
 - **`--cap-strict` rejected programs that use no capability at all.** `mod M do
   fn main() do () end end` failed with `` `IO.Console` is used but cannot be
@@ -66,6 +230,55 @@ git log is authoritative for exact commits.
   `specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md`.
 
 ### Added
+
+- **The root capability is granted to `main`, not taken.** `root_cap` can no
+  longer be referenced from ordinary code. Declare `fn main(cap : Cap(IO))` to
+  receive it and thread it to whatever needs it, narrowing with `cap_narrow`
+  along the way.
+
+  `root_cap` was an ordinary global of type `Cap(IO)` in scope in every module,
+  so a module declaring **no `needs` at all** could hold the root capability
+  and narrow it to any descendant — legitimately, because `cap_narrow` demands
+  exactly the parent it now had. That is authority from nothing.
+
+  `main` taking a `Cap(IO)` already worked and is unchanged; only the ambient
+  global is gone. Two contexts keep it, both scoped deliberately: `test` /
+  `describe` / `setup` bodies, which have no `main` to be granted from and
+  would otherwise make capability behaviour untestable, and the REPL. Both are
+  ambient authority in a place that cannot reach production code — a
+  dependency's test blocks do not run in a consumer's build.
+
+- **Capabilities are unforgeable: they can be received and narrowed, never
+  constructed.** `Cap(X)` may no longer appear in the result of `from_json` or
+  `from_json_events`, in the argument of `to_json`, or anywhere in a type that
+  `derive Json` generates a codec for. This is a hard error, not gated on
+  `--cap-strict`.
+
+  Previously `from_json` was typed with no constraint on what it produced, so
+  `let forged : Cap(IO) = from_json("{}")` typechecked — `--cap-strict`
+  included — and fabricated root authority from a string literal. It failed at
+  run time only because `from_json`'s return-type dispatch is unimplemented,
+  which is an open item to build.
+
+  Both directions are refused together: encoding a capability leaks nothing at
+  run time, but it manufactures the wire value a decoder would consume, and
+  `derive Json` generates both directions from one declaration.
+
+  One consequence worth knowing: a single `from_json` application can no longer
+  be used at two different result types. Decoding one string as two unrelated
+  types was already meaningless, since `from_json` dispatches on a single
+  determinable target type.
+
+- **`needs` now covers type declarations and `let` annotations.** A capability
+  named in a record field, a variant argument, or a `let` type annotation
+  counts toward that module's `needs` — including when it is nested inside a
+  container such as `List(Cap(X))`.
+
+  Previously `needs` was checked against function signatures only, so
+  `type Handle = { tok : Cap(IO.FileWrite) }` in a module declaring just
+  `needs IO.Console` typechecked clean. A module could name a
+  capability it never declared. These positions also count as *uses*, so
+  adding the missing declaration does not then report it as unused.
 
 - **`forge cap inspect --strict`** re-checks the capability ceiling on a
   binary you did not build. Binaries now carry each module's *declared* needs

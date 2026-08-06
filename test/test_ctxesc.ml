@@ -229,7 +229,7 @@ let test_script_body_is_js () =
   Alcotest.check escaper "js escaper" C.EscJsString (esc_after "<script>var x = ")
 
 let test_style_body_is_css () =
-  Alcotest.check escaper "css escaper" C.EscCss (esc_after "<style>a{color:")
+  Alcotest.check escaper "css escaper" C.EscCssDecl (esc_after "<style>a{color:")
 
 let test_textarea_body_is_html () =
   Alcotest.check escaper "html in textarea" C.EscHtml (esc_after "<textarea>")
@@ -251,7 +251,17 @@ let test_event_handler_attr_is_js () =
   Alcotest.check escaper "onclick is js" C.EscJsString (esc_after "<a onclick=\"")
 
 let test_style_attr_is_css () =
-  Alcotest.check escaper "style attr is css" C.EscCss (esc_after "<div style=\"")
+  (* A style attribute alternates between two positions and the escapers differ:
+     at the start (or after a `;`) a hole is a DECLARATION list; after a `:` it
+     is a VALUE. Both shapes occur in forgepm, which is what forced the split --
+     an escaper that rejected `var()` and destroyed `a:b;c:d` broke real
+     templates. *)
+  Alcotest.check escaper "start of style attr is a declaration list"
+    C.EscCssDecl (esc_after "<div style=\"");
+  Alcotest.check escaper "after a colon is a value"
+    C.EscCssValue (esc_after "<div style=\"color:");
+  Alcotest.check escaper "after a semicolon is a declaration list again"
+    C.EscCssDecl (esc_after "<div style=\"color:red;")
 
 let test_plain_attr_is_attr_escaper () =
   Alcotest.check escaper "class is attr" C.EscAttr (esc_after "<div class=\"")

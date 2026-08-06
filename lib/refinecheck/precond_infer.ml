@@ -533,6 +533,11 @@ let default_budget = 200
     gates) are what every probe here reflects against. *)
 let suggest ?(root = Sys.getcwd ()) ?(budget = default_budget)
     ~(is_user : A.span -> bool) ~(target : string) (m : A.module_) : t list =
+  (* [Ob.with_scratch]: every probe below [Ob.reset]s and refills the ledger
+     AND the per-call-site index from a hypothesis module.  Leaving that
+     behind corrupts any later consumer of [Ob.by_span] — see the note on
+     [Obligation.with_scratch]. *)
+  Ob.with_scratch @@ fun () ->
   let defs = RC.collect_all_defs m.A.mod_decls in
   let all = enum_fns [] m.A.mod_decls in
   (* The ENTRY file's own `mod Name do … end` contributes its decls at the top
@@ -576,6 +581,8 @@ let suggest ?(root = Sys.getcwd ()) ?(budget = default_budget)
     a project-wide listing of "no debt" lines would bury the signal. *)
 let suggest_all ?(root = Sys.getcwd ()) ?(budget = default_budget)
     ~(is_user : A.span -> bool) (m : A.module_) : t list =
+  (* Scratch ledger+index for the whole sweep — see [suggest] above. *)
+  Ob.with_scratch @@ fun () ->
   let defs = RC.collect_all_defs m.A.mod_decls in
   enum_fns [] m.A.mod_decls
   |> List.filter (fun (_, (fd : A.fn_def)) -> is_user fd.A.fn_name.A.span)

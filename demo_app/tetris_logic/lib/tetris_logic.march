@@ -1,4 +1,4 @@
--- TetrisLogic: pure game rules, no Dom. Board is 10x20, flat Array(Int) of
+-- TetrisLogic: pure game rules, no Js.Dom. Board is 10x20, flat Array(Int) of
 -- 200 cells (row-major, y*10+x), 0 = empty, 1..7 = locked piece color index.
 -- Pieces spawn in a 4x4 bounding box; rotate_cells applies one 90-degree
 -- clockwise turn via (x, y) -> (3 - y, x), which is correct for all 7

@@ -61,9 +61,10 @@ int main(void) {
         { MARCH_ESC_ATTR,          "attr" },
         { MARCH_ESC_URL_COMPONENT, "url_component" },
         { MARCH_ESC_URL_WHOLE,     "url_whole" },
-        { MARCH_ESC_CSS,           "css" },
+        { MARCH_ESC_CSS_VALUE,     "css_value" },
         { MARCH_ESC_JS_STRING,     "js_string" },
         { MARCH_ESC_NONE,          "none" },
+        { MARCH_ESC_CSS_DECL,      "css_decl" },
     };
     for (int i = 0; i < MARCH_ESC__COUNT; i++) {
         checks++;
@@ -147,14 +148,58 @@ int main(void) {
     expect(MARCH_ESC_JS_STRING, "\xe2\x80\xa8", "\\u2028", "js escapes U+2028");
     expect(MARCH_ESC_JS_STRING, "\xe2\x80\xa9", "\\u2029", "js escapes U+2029");
 
-    /* ── CSS ─────────────────────────────────────────────────────────────── */
-    expect(MARCH_ESC_CSS, "red", "red", "css passes an identifier");
-    expect(MARCH_ESC_CSS, "#fff", "#fff", "css passes a hex colour");
-    expect_absent(MARCH_ESC_CSS, "expression(alert(1))", "(",
+    /* ── CSS ─────────────────────────────────────────────────────────────
+       Two positions. A VALUE (after `:`) may not contain `:` or `;` -- either
+       would let it start a new declaration. A DECLARATION list (start of the
+       attribute, or after `;`) may.
+
+       Both allow an allowlisted set of functions. An earlier version escaped
+       every `(`, which was safe but broke real forgepm templates -- the two
+       cases marked "regression" below are verbatim from
+       forgepm/lib/forgepm/web/pages.march. */
+    expect(MARCH_ESC_CSS_VALUE, "red", "red", "css value passes an identifier");
+    expect(MARCH_ESC_CSS_VALUE, "#fff", "#fff", "css value passes a hex colour");
+    expect(MARCH_ESC_CSS_VALUE, "transparent", "transparent",
+           "css value passes a keyword");
+
+    /* regression: pages.march:336 -- `color = "var(--text-muted)"` */
+    expect(MARCH_ESC_CSS_VALUE, "var(--text-muted)", "var(--text-muted)",
+           "css value passes an allowlisted var()");
+    expect(MARCH_ESC_CSS_VALUE, "rgba(34,211,238,0.35)", "rgba(34,211,238,0.35)",
+           "css value passes rgba()");
+    expect(MARCH_ESC_CSS_VALUE, "calc(100% - 4px)", "calc(100% - 4px)",
+           "css value passes calc()");
+
+    /* regression: pages.march:714 -- a whole declaration list after a `;` */
+    expect(MARCH_ESC_CSS_DECL,
+           "border:1px solid rgba(34,211,238,0.35);background:transparent",
+           "border:1px solid rgba(34,211,238,0.35);background:transparent",
+           "css decl passes a declaration list");
+
+    /* A value must NOT be able to start a new declaration. */
+    expect_absent(MARCH_ESC_CSS_VALUE, "red;background:url(x)", ";",
+                  "css value escapes a semicolon");
+    expect_absent(MARCH_ESC_CSS_VALUE, "red;background:url(x)", ":",
+                  "css value escapes a colon");
+
+    /* The allowlist is what keeps the parens safe -- these are not on it. */
+    expect_absent(MARCH_ESC_CSS_VALUE, "expression(alert(1))", "(",
                   "css neutralises expression()");
-    expect_absent(MARCH_ESC_CSS, "a;color:red", ";", "css escapes a semicolon");
-    expect_absent(MARCH_ESC_CSS, "url(javascript:x)", "(", "css escapes url(");
-    expect_absent(MARCH_ESC_CSS, "a\"b", "\"", "css escapes a quote");
+    expect_absent(MARCH_ESC_CSS_DECL, "background:url(javascript:x)", "(",
+                  "css decl escapes url()");
+    expect_absent(MARCH_ESC_CSS_VALUE, "image-set(x)", "(",
+                  "css escapes image-set()");
+    expect_absent(MARCH_ESC_CSS_VALUE, "attr(href)", "(", "css escapes attr()");
+    expect_absent(MARCH_ESC_CSS_VALUE, "element(#x)", "(", "css escapes element()");
+    /* A known-good name must not smuggle an unknown one alongside it. */
+    expect_absent(MARCH_ESC_CSS_VALUE, "var(--a) expression(1)", "expression(",
+                  "one bad function poisons the whole value");
+    /* Unbalanced parens fall back to the strict form. */
+    expect_absent(MARCH_ESC_CSS_VALUE, "var(--a", "(",
+                  "css escapes unbalanced parens");
+    expect_absent(MARCH_ESC_CSS_VALUE, "a\"b", "\"", "css escapes a quote");
+    expect_absent(MARCH_ESC_CSS_VALUE, "a/*x*/b", "/", "css escapes a comment");
+    expect_absent(MARCH_ESC_CSS_DECL, "@import url(x)", "@", "css escapes @import");
 
     /* ── None ────────────────────────────────────────────────────────────── */
     expect(MARCH_ESC_NONE, "<b>&", "<b>&", "none passes through verbatim");

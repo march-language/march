@@ -673,6 +673,23 @@ let known_predicate_fn (m : string) : bool =
 let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
 let is_axiom_measure m = Hashtbl.mem axiom_measures m
 
+(* Axiomatised measures whose VALUE depends on a scalar (non-datatype)
+   constructor field, e.g. `PVec(n,_,_,_) -> n`.  Such a measure is axiomatised
+   correctly and is nonetheless INERT at every call site: [reflect_field] below
+   replaces every non-datatype constructor field with a fresh unconstrained
+   constant (a sound choice for a structurally recursive measure, whose value
+   depends only on tags and sub-measures), so the measure applied to a literal
+   constructor evaluates to an unknown and neither the predicate nor its
+   negation is provable.
+
+   Populated purely to WARN.  It feeds no axiom, no VC and no verdict — adding
+   a name here cannot change what any existing contract proves.  It exists
+   because the failure it names is silent: the measure compiles clean, the
+   soundness gate passes, the preamble is correct, obligations are raised, and
+   nothing ever discharges.  See
+   specs/todos/2026-08-05-measure-over-scalar-ctor-field.md. *)
+let measure_scalar_field_dep : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (* Base-case ground values for axiom measures: name -> [(ctor_name, int_value)].
    Populated for arms whose body is a concrete integer (no recursion).
    Used to evaluate measures over concrete SMT terms without quantifier axioms,
@@ -807,6 +824,21 @@ let measure_param_adt (fd : A.fn_def) : (string * string) option =
 let rec unblock = function
   | A.EBlock (es, sp) -> (match List.rev es with last :: _ -> unblock last | [] -> A.EBlock (es, sp))
   | e -> e
+
+(* Is [e] EXACTLY one of [vars] — an arm body that is a bare field read?
+
+   Deliberately this narrow, and not "mentions one of [vars] anywhere".  The
+   broader test has a real false positive: `Zleaf(n) -> 0 * n` mentions the
+   erased field `n` but its value does not depend on it, so the measure still
+   evaluates fine and warning about it would be wrong.  (That exact fixture is
+   a LOAD-BEARING case in test_refinecheck.ml's measure-base-case-axiom group,
+   and it caught this while the broader version was in tree.)  This subsystem
+   treats a false positive as its cardinal sin, so the warning under-covers on
+   purpose: `Node(n, m) -> n + 0` is equally inert and draws nothing.  What it
+   does catch is the exact shape that motivated it — a measure that IS a field
+   read, which is how a count-carrying container like `Array` writes it. *)
+let body_is_bare_field_read (vars : string list) (e : A.expr) : bool =
+  match unblock e with A.EVar { A.txt; _ } -> List.mem txt vars | _ -> false
 
 (* Extract `match param do Ctor(vars) -> body … end` arms (None if not that shape). *)
 let measure_arms (param : string) (body : A.expr) : (string * string list * A.expr) list option =
@@ -971,6 +1003,32 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
   let allowed m = List.mem m !candidates in
   let axiomatized = List.filter (fun (n, _, _) -> allowed n) shaped in
   List.iter (fun (name, adt, _) -> Hashtbl.replace axiom_measures name adt) axiomatized;
+  (* Diagnostic-only (see [measure_scalar_field_dep]): flag an axiomatised
+     measure whose value reads a field that call-site reflection erases.  Runs
+     over [axiomatized] only, so a measure that was never axiomatised in the
+     first place keeps its existing symbolic-fallback behaviour and draws
+     nothing new. *)
+  Hashtbl.reset measure_scalar_field_dep;
+  List.iter
+    (fun (name, _, arms) ->
+      let arm_reads_erased_field (ctor, vars, body) =
+        let sorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
+        if List.length vars <> List.length sorts then false
+        else
+          (* "Erased" is exactly [reflect_field]'s own condition, inverted: it
+             RECURSES into a datatype field other than the opaque `Elem`, and
+             mints a fresh constant for everything else. *)
+          let erased =
+            List.filter_map
+              (fun (v, s) ->
+                match s with Smt.SData sub when sub <> "Elem" -> None | _ -> Some v)
+              (List.combine vars sorts)
+          in
+          body_is_bare_field_read erased body
+      in
+      if List.exists arm_reads_erased_field arms then
+        Hashtbl.replace measure_scalar_field_dep name ())
+    axiomatized;
   Hashtbl.reset measure_base_cases;
   List.iter
     (fun (name, _, arms) ->
@@ -6462,6 +6520,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear ctor_field_names;
   Hashtbl.clear axiom_measures;
   Hashtbl.clear measure_base_cases;
+  Hashtbl.clear measure_scalar_field_dep;
   Hashtbl.clear measure_preamble_sorts;
   registered_measures := [];
   measure_nonneg := [];
@@ -7215,6 +7274,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_names;
   Hashtbl.reset axiom_measures;
   Hashtbl.reset measure_base_cases;
+  Hashtbl.reset measure_scalar_field_dep;
   Hashtbl.reset measure_preamble_sorts;
   measure_preamble := "";
   type_preamble := "";
@@ -7246,6 +7306,26 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
             Err.error errctx ~span:fd.A.fn_name.A.span
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
           (measure_gate_errors fd))
+      mfns;
+    (* Silent-inertness warning.  A measure reading a scalar constructor field
+       is axiomatised correctly and still proves nothing, because call-site
+       reflection erased the field (see [measure_scalar_field_dep]).  Every
+       symptom of a working measure is present, so without this the author's
+       only signal is that contracts using it never fire — which is how this
+       cost a full investigation to find on `Array.length`.
+
+       A WARNING, not an error: the measure is sound and its predicates remain
+       legal vocabulary, so nothing that compiles today stops compiling.  It
+       changes no verdict. *)
+    List.iter
+      (fun (name, fd) ->
+        if Hashtbl.mem measure_scalar_field_dep name then
+          Err.warning errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf
+               "@[measure] `%s` reads a constructor field that is not itself a \
+                data type, so its value cannot be computed at a call site and \
+                refinements using it will never be proved or refuted."
+               name))
       mfns
   end;
   let defs = collect_all_defs m.A.mod_decls in

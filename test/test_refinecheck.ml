@@ -7619,6 +7619,135 @@ end|}));
    leaves MA1/MA2 (and the whole 437/437 suite at the time this was found)
    green, so it needs its own witness: a user `@[measure]` over a user ADT,
    which has no built-in special case to fall back on. *)
+(* ── The silent-inert measure warning (2026-08-05) ─────────────────────────
+   A `@[measure]` whose value reads a SCALAR constructor field — the shape
+   `Array.length` has (`PVec(n,_,_,_) -> n`) — is axiomatised correctly and is
+   nonetheless completely inert: [reflect_field] erases every non-datatype
+   constructor field to a fresh unconstrained constant, so the measure applied
+   to a literal constructor is unknown and neither the predicate nor its
+   negation is provable.
+
+   Every symptom of a working measure is present (no error, correct preamble,
+   obligations raised), which is why this cost a full investigation to find.
+   The warning is the signal that was missing.  See
+   specs/todos/2026-08-05-measure-over-scalar-ctor-field.md.
+
+   These cases are NOT [gated]: the warning is computed from the AST at
+   preamble-build time and needs no solver, so gating it would disable it
+   exactly where a developer without z3 would still benefit. *)
+let measure_scalar_field_warn src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  ( List.exists
+      (fun (d : March_errors.Errors.diagnostic) ->
+        d.March_errors.Errors.severity = March_errors.Errors.Warning
+        && contains d.March_errors.Errors.message "reads a constructor field")
+      (March_errors.Errors.sorted ctx)
+  , March_errors.Errors.has_errors ctx )
+
+let measure_scalar_field_suite =
+  [ Alcotest.test_case "a measure reading a scalar ctor field warns" `Quick
+      (fun () ->
+        (* The real `Array.length` shape, transcribed from stdlib/array.march. *)
+        let warned, errored =
+          measure_scalar_field_warn {|
+mod AW do
+  type TrieNode(a) = TrieEmpty | TrieLeaf(List(a))
+  type PVec(a) = PVec(Int, Int, TrieNode(a), List(a))
+  @[measure]
+  fn length(v : PVec(a)) : Int do
+    match v do
+    PVec(n, _, _, _) -> n
+    end
+  end
+  fn aget(v : PVec(a), idx : {Int | _ >= 0 && _ < length(v)}) : a do aget(v, idx) end
+end
+|}
+        in
+        Alcotest.(check bool) "warns" true warned;
+        (* A warning, not an error: the measure is sound and its predicates stay
+           legal vocabulary, so nothing that compiled before stops compiling. *)
+        Alcotest.(check bool) "no error" false errored)
+
+  ; Alcotest.test_case "a structurally recursive measure does NOT warn" `Quick
+      (fun () ->
+        (* The control.  Without it, a warning that fired on EVERY measure
+           would pass the case above — and would bury the real signal under
+           noise on every working contract in the tree, `List.nth` included. *)
+        let warned, errored =
+          measure_scalar_field_warn {|
+mod SW do
+  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+  @[measure]
+  fn size(t : Tree(a)) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, x, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn tget(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do tget(t, i) end
+end
+|}
+        in
+        Alcotest.(check bool) "no warning" false warned;
+        Alcotest.(check bool) "no error" false errored)
+
+  ; Alcotest.test_case "a ctor with a scalar field NOT read does NOT warn" `Quick
+      (fun () ->
+        (* Sharper control: the constructor HAS an erased `Int` field, but the
+           measure's value does not depend on it, so the erasure is harmless
+           and the measure proves fine (this is the `probeH` shape, measured as
+           `1 proved`).  Warning here would be a false positive. *)
+        let warned, _ =
+          measure_scalar_field_warn {|
+mod NW do
+  type T3 = L3 | N3(Int, T3)
+  @[measure]
+  fn size3(t : T3) : Int do
+    match t do
+    L3 -> 0
+    N3(k, rest) -> 1 + size3(rest)
+    end
+  end
+  fn tget3(t : T3, i : {Int | _ >= 0 && _ < size3(t)}) : Int do tget3(t, i) end
+end
+|}
+        in
+        Alcotest.(check bool) "no warning" false warned)
+
+  ; Alcotest.test_case "REGRESSION: a body that MENTIONS an erased field but \
+                        does not depend on it does NOT warn" `Quick
+      (fun () ->
+        (* The first version of this warning asked "does the arm body mention
+           an erased field anywhere", and this shape is why that was wrong:
+           `0 * n` mentions `n`, but its value is 0 regardless, so the measure
+           still evaluates and warning would be a false positive.  It was
+           caught by the LOAD-BEARING case in [measure_base_case_axiom_suite],
+           which uses this exact fixture for an unrelated reason — pinned here
+           too so the connection is explicit rather than incidental.
+
+           The narrowed predicate ("the body IS a bare field read") therefore
+           under-covers on purpose: `Node(n, m) -> n + 0` is equally inert and
+           draws nothing.  Under-warning is the safe direction. *)
+        let warned, _ =
+          measure_scalar_field_warn {|
+mod ZW do
+  type Zt = Zleaf(Int) | Znode(Zt, Zt)
+  @[measure]
+  fn zsize(t : Zt) : Int do
+    match t do
+      Zleaf(n) -> 0 * n
+      Znode(l, r) -> 1 + zsize(l) + zsize(r)
+    end
+  end
+  fn needs_pos(t : {Zt | zsize(_) > 0}) : Int do 1 end
+end
+|}
+        in
+        Alcotest.(check bool) "no warning" false warned)
+  ]
+
 let measure_base_case_axiom_suite =
   [ gated "a user measure's nullary-arm exclusion reaches the base-case axiom"
       (fun () ->
@@ -8162,6 +8291,1172 @@ let stdlib_nth_contract_suite =
         Alcotest.(check bool) "skipped" true (skipped >= 1))
   ]
 
+(* ── Per-call-site verdict INDEX ───────────────────────────────────────────
+   [Obligation.summary] answers "how many proved" for a whole module; nothing
+   answered "what did THIS call site prove", which is what a consumer wanting
+   to admit a provably-safe call (rather than banning it by name) needs.
+
+   The span keyed on is the one [Refine_check] itself passes as [~span] to
+   [check_call] from its [A.EApp (A.EVar f, args, sp)] case — the CALL
+   EXPRESSION's own span, not the callee name's span.  [call_span_of] below
+   re-derives it from the AST rather than reading it back off the ledger: a
+   test that queried with a span it got from [Obligation.all ()] would pass
+   for any keying whatsoever, including one no later pass could reproduce. *)
+let call_span_of (src : string) (fname : string) : March_ast.Ast.span =
+  let open March_ast.Ast in
+  let found = ref None in
+  let take sp = if !found = None then found := Some sp in
+  let rec ex (e : expr) =
+    match e with
+    | EApp (EVar n, args, sp) ->
+      if n.txt = fname then take sp;
+      List.iter ex args
+    | EApp (f, args, _) -> ex f; List.iter ex args
+    | EBlock (es, _) -> List.iter ex es
+    | ECon (_, args, _) | EAtom (_, args, _) | ETuple (args, _) -> List.iter ex args
+    | EIf (c, t, f, _) -> ex c; ex t; ex f
+    | EAnnot (e, _, _) | EField (e, _, _) | ELam (_, e, _) -> ex e
+    | ELet (b, _) -> ex b.bind_expr
+    | EMatch (s, brs, _) -> ex s; List.iter (fun b -> ex b.branch_body) brs
+    | _ -> ()
+  in
+  List.iter
+    (fun d ->
+      match d with
+      | DFn (fd, _) -> List.iter (fun c -> ex c.fc_body) fd.fn_clauses
+      | _ -> ())
+    (parse src).mod_decls;
+  match !found with
+  | Some sp -> sp
+  (* Loud, not silent: the walker above has a catch-all, so a fixture shape it
+     does not descend into must fail the test rather than quietly hand back a
+     dummy span that the index would legitimately miss. *)
+  | None -> Alcotest.failf "no call to `%s` found in fixture" fname
+
+let verdict_query_suite =
+  [ gated "a proved call's verdict is queryable by its call span" (fun () ->
+        let src =
+          "mod VQ do\n\
+          \  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end\n\
+          \  fn go() : Int do head([1]) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check (option string))
+          "proved at the call span" (Some "proved")
+          (Option.map March_refinecheck.Obligation.verdict_name
+             (March_refinecheck.Obligation.verdict_at (call_span_of src "head"))))
+
+  ; gated "REJECT CONTROL: a violated call reports Violated, not just `some verdict`"
+      (fun () ->
+        let src =
+          "mod VQBad do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn go() : Int do takepos(0 - 5) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check (option string))
+          "violated at the call span" (Some "violated")
+          (Option.map March_refinecheck.Obligation.verdict_name
+             (March_refinecheck.Obligation.verdict_at (call_span_of src "takepos"))))
+
+  ; gated "a skipped call reports the skip, never `proved`" (fun () ->
+        let src =
+          "mod VQSkip do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn go(n : Int) : Int do takepos(n) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check (option string))
+          "skipped at the call span" (Some "skipped")
+          (Option.map March_refinecheck.Obligation.verdict_name
+             (March_refinecheck.Obligation.verdict_at (call_span_of src "takepos"))))
+
+  ; (* A call with no refined parameter raises no obligation at all, so the
+       query must answer "nothing known" and NOT be conflated with `proved` —
+       a consumer that admits a call on `verdict_at <> None` would otherwise
+       admit every unrefined call in the language. *)
+    gated "an unrefined call is absent from the index" (fun () ->
+        let src =
+          "mod VQNone do\n\
+          \  fn plain(k : Int) : Int do k end\n\
+          \  fn go() : Int do plain(5) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        Alcotest.(check bool) "absent" true
+          (March_refinecheck.Obligation.verdict_at (call_span_of src "plain") = None))
+
+  ; (* Lifecycle: the index is per-module state cleared by the same [reset]
+       [Refine_check.check_module] already calls at its top.  A verdict that
+       outlived its module would let a later module read a `proved` that was
+       never established for it — the worst failure this index can have. *)
+    Alcotest.test_case "reset clears the index" `Quick (fun () ->
+        let src =
+          "mod VQReset do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn go() : Int do takepos(1) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        let sp = call_span_of src "takepos" in
+        Alcotest.(check bool) "recorded before reset" true
+          (March_refinecheck.Obligation.verdict_at sp <> None);
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "gone after reset" true
+          (March_refinecheck.Obligation.verdict_at sp = None))
+
+  ; (* The index must agree with the ledger `--refine-report` prints, entry
+       for entry — they are the same records seen two ways, and a divergence
+       between them is exactly the drift this mechanism exists to avoid. *)
+    gated "every ledger entry is reachable through the index" (fun () ->
+        let src =
+          "mod VQAgree do\n\
+          \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+          \  fn nonzero(d : {Int | _ != 0}) : Int do d end\n\
+          \  fn go() : Int do takepos(1) + nonzero(2) end\n\
+           end\n"
+        in
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error src);
+        let all = March_refinecheck.Obligation.all () in
+        Alcotest.(check bool) "ledger non-empty" true (all <> []);
+        List.iter
+          (fun (o : March_refinecheck.Obligation.t) ->
+            Alcotest.(check bool) "indexed" true
+              (List.exists
+                 (fun (o' : March_refinecheck.Obligation.t) -> o' == o)
+                 (March_refinecheck.Obligation.obligations_at o.March_refinecheck.Obligation.span)))
+          all)
+  ]
+
+(* ── `cap no_panic` by proof (Task 3) ──────────────────────────────────────
+   Before this task, every name on the panic-surface ban list was rejected
+   inside a `cap no_panic` module by a purely syntactic name match, plus a
+   transitive fixpoint that blamed every caller up the chain.  For the names
+   that carry a REAL refinement contract, the ban is now a question about the
+   call's own verdict: `Proved` (and only `Proved`) is silent.
+
+   These fixtures run the production pipeline — typecheck (which still owns the
+   syntactic ban for the uncontracted names), then [Refine_check] (which
+   populates the per-call-site verdict index), then [Division_safety], then
+   [Panic_surface_by_proof] — over the REAL `stdlib/list.march`.  The real
+   file, not an inline stand-in: the claim under test is that `List.tail`'s
+   SHIPPED contract is what admits a guarded call, and an inline copy would
+   keep passing after the shipped contract changed. *)
+
+let load_stdlib_march (name : string) : March_ast.Ast.module_ * string =
+  let candidates =
+    [ "stdlib/" ^ name; "../../../stdlib/" ^ name; "../../stdlib/" ^ name ]
+  in
+  match List.find_opt Sys.file_exists candidates with
+  | None ->
+    Alcotest.failf "cannot find stdlib/%s (searched: %s)" name
+      (String.concat ", " candidates)
+  | Some path ->
+    let src =
+      let ic = open_in_bin path in
+      let n = in_channel_length ic in
+      let buf = Bytes.create n in
+      really_input ic buf 0 n;
+      close_in ic;
+      Bytes.to_string buf
+    in
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <-
+      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+    let m =
+      March_parser.Parser.module_
+        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+    in
+    (March_desugar.Desugar.desugar_module m, path)
+
+(* `list.march` as a sibling `DMod` and `prelude.march` UNWRAPPED into the
+   entry module's own decl list — the two shapes bin/main.ml's [load_stdlib]
+   actually produces.  The unwrapping is not incidental: it is why prelude's
+   `fn tail` is a `DFn` of the `cap no_panic` module under check, which is what
+   made the bare spellings resolve for `Refine_check` AND made the syntactic
+   fixpoint blame their callers transitively.  A harness that wrapped prelude
+   in a `DMod` would exercise neither. *)
+let stdlib_list_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "list.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
+let stdlib_prelude_decls : (March_ast.Ast.decl list * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "prelude.march" in
+     (m.March_ast.Ast.mod_decls, path))
+
+(* Same shape as [stdlib_list_mod], for Task 5's `Random.choice_weighted`
+   fixtures: the real `stdlib/random.march`, as a sibling `DMod`. Loaded
+   alongside `list.march` (its body calls `List.fold_left`/`List.length`) and
+   prelude, mirroring bin/main.ml's actual stdlib prepend. *)
+let stdlib_random_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "random.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
+(* Same shape again, for Task 6's six `Stats` functions: the real
+   `stdlib/stats.march`. `Stats` calls `List.fold_left`/`List.length`/
+   `List.sort_by`/`List.nth`/`List.map`, so it is loaded alongside
+   `list.march` and prelude, same as `Random.choice_weighted` above. *)
+let stdlib_stats_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "stats.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
+(* Every `cap no_panic` diagnostic [src] produces, from EITHER pass.  Filtered
+   on the shared "(declared `cap no_panic`)" phrasing rather than counting all
+   errors, so unrelated type noise from checking a lone stdlib file in
+   isolation cannot make one of these assertions pass or fail for the wrong
+   reason. *)
+let no_panic_errors (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  (* Mirror bin/main.ml: a pipeline that runs [Panic_surface_by_proof] tells the
+     typechecker to leave the contracted names alone.  Set here rather than
+     globally so the [no-panic-syntactic-fallback] group below can exercise the
+     OTHER mode (`march check` / the LSP) in the same process. *)
+  (* [Fun.protect]: the flag is process-global and defaults to FALSE for safety.
+     An exception escaping any of these passes with a bare reset would leak
+     `true` into every later case in this binary — including the
+     [no-panic-syntactic-fallback] group below, whose entire subject is that
+     default.  That would WEAKEN those assertions rather than fail them, which
+     is the worst failure shape a fail-closed default can have. *)
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  (* Only diagnostics pointing at the FIXTURE, mirroring bin/main.ml's
+     [is_user_file].  Prelude is unwrapped into this module, so its own
+     `fn tail`/`head`/`last`/`unwrap`/`expect` are decls under check and report
+     against themselves; the compiler never shows those to a user, and counting
+     them here would make every count assertion below meaningless.  A
+     string-parsed fixture's spans carry the empty filename. *)
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+let has_no_panic_error src = no_panic_errors src <> []
+let has_no_panic_error_count src = List.length (no_panic_errors src)
+
+(* ── The suggestion probes must not move the verdict ───────────────────────
+   [no_panic_errors] with the `--refine-suggest*` probes interleaved BETWEEN
+   [Refine_check] (which populates [Obligation.by_span]) and
+   [Panic_surface_by_proof] (which reads it) — the position bin/main.ml's
+   `compile` actually ran them in when this was found.
+
+   Each probe [Obligation.reset]s and then refills the ledger AND the
+   per-call-site index by re-walking a HYPOTHESIS module: the user's program
+   with a speculative contract spliced into one signature.  With the index left
+   in that state, [Panic_surface_by_proof] read a hypothesis's verdicts as the
+   program's, and `cap no_panic` flipped in BOTH directions on a
+   diagnostic-only flag:
+
+     - fail-OPEN: an unguarded `List.tail` compiled clean, because a probe had
+       hypothesised `{List(Int) | len(_) > 0}` on the parameter and recorded
+       `Proved` at that very span.  A capability that promises no panics,
+       silently voided by passing `--refine-suggest-all` (or by `forge refine`,
+       which shells out to `--check --refine-suggest-json`).
+     - fail-CLOSED: a correctly-guarded call ERRORED, because the last
+       hypothesis probed left no `Proved` at that span.
+
+   Both directions are asserted below, and they must stay that way: a fix that
+   closed only the fail-open one (say, by making an absent verdict louder) would
+   pass a one-sided test while breaking every correct program under the flag.
+
+   Deliberately runs the probes in the OLD, hazardous position rather than the
+   fixed one.  bin/main.ml now runs the two consumer passes BEFORE the printers,
+   but ordering is an invariant no reader of [by_span] can see; the probes are
+   also non-destructive now ([Obligation.with_scratch]), and this harness is
+   what pins THAT.  Ordering the harness the safe way would make it pass with
+   the real defect still in place.
+
+   The budget is small on purpose: the unsound fixture's polluting candidate is
+   the very first one tried, so a large budget only buys solver time. *)
+let no_panic_errors_under_suggestion_probes (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  (* The fixture is parsed from a string, so its spans carry the empty
+     filename; the prepended stdlib decls carry real paths.  Same split
+     [no_panic_errors] uses to filter diagnostics. *)
+  let is_user (sp : March_ast.Ast.span) =
+    sp.March_ast.Ast.file = "" || sp.March_ast.Ast.file = "<unknown>"
+  in
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        (* The printer, in its old position.  Results discarded — the subject
+           is the side effect on the verdict index, not the advice.
+
+           [Precond_infer] only, matching plain `--refine-suggest-all`, and NOT
+           chased with a [Postcond_infer] sweep: a postcondition probe's last
+           walk is over a tree whose PRECONDITIONS are unmodified, so it tends
+           to refill the index with something close to the truth and mask the
+           very corruption under test.  That is not a fix — which sweep runs
+           last is a user's choice of flag — but it does neuter the assertion,
+           and an earlier draft of this test passed against the unfixed
+           compiler for exactly that reason. *)
+        ignore
+          (March_refinecheck.Precond_infer.suggest_all ~budget:20 ~is_user m
+            : March_refinecheck.Precond_infer.t list);
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+let has_no_panic_error_probed src =
+  no_panic_errors_under_suggestion_probes src <> []
+
+(* Same as [no_panic_errors], with `random.march` prepended alongside
+   `list.march` and prelude, for Task 5's `Random.choice_weighted` fixtures
+   (whose contract is `{List((a, Float)) | len(_) > 0}` — the first name in
+   this plan whose refined parameter is a list of TUPLES rather than a plain
+   list). *)
+let no_panic_errors_with_random (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let randmod, rand_path = Lazy.force stdlib_random_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: randmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; rand_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+let has_no_panic_error_random src = no_panic_errors_with_random src <> []
+
+(* Same as [no_panic_errors], with `stats.march` prepended alongside
+   `list.march` and prelude, for Task 6's six `Stats` fixtures and Task 7's
+   three bivariate ones.  Returns ALL diagnostics so callers can look at the
+   unverified-precondition HINTS as well as the errors — Task 7's two
+   preconditions per function sit on the same call site and produce the same
+   error text, so only the hint distinguishes which one went undischarged. *)
+let stats_diagnostics (src : string) : March_errors.Errors.diagnostic list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let statsmod, stats_path = Lazy.force stdlib_stats_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: statsmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; stats_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  errors.March_errors.Errors.diagnostics
+
+let no_panic_errors_with_stats (src : string) : string list =
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Error
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+      then Some d.March_errors.Errors.message
+      else None)
+    (stats_diagnostics src)
+
+let has_no_panic_error_stats src = no_panic_errors_with_stats src <> []
+
+(* The unverified-precondition HINTS for a `Stats` fixture — the text of each
+   `precondition `P` on `F` was NOT verified here.` note.  Task 7 needs this:
+   `covariance`/`correlation`/`linear_regression` each carry TWO preconditions
+   at the same call site, so an assertion that merely says "this errors" would
+   pass whichever of the two went undischarged.  Asserting on the hint is what
+   makes the equal-length test and the short-list test genuinely distinct, and
+   is what a mutation of only the relational comparison flips. *)
+let unverified_preconditions_stats (src : string) : string list =
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      (* Same fixture-only span filter the error path uses: the harness
+         prepends the REAL `list.march`/`stats.march`, whose own bodies raise
+         their own unverified-precondition hints (`List.nth`, `last`). Counting
+         those would make every assertion below pass for the wrong reason. *)
+      let f = d.March_errors.Errors.span.March_ast.Ast.file in
+      if
+        d.March_errors.Errors.severity = March_errors.Errors.Hint
+        && (f = "" || f = "<unknown>")
+        && contains d.March_errors.Errors.message "was NOT verified here"
+      then Some d.March_errors.Errors.message
+      else None)
+    (stats_diagnostics src)
+
+(* Did [src] leave exactly the precondition spelled [pred] undischarged (and
+   not the sibling one)? *)
+let only_unverified_is (pred : string) (src : string) : bool =
+  let hints = unverified_preconditions_stats src in
+  hints <> []
+  && List.for_all (fun h -> contains h ("precondition `" ^ pred ^ "`")) hints
+
+(* Fixtures for the probe-interference pair.  Kept next to each other and
+   deliberately minimal: the ONLY difference is the parameter's refinement, so
+   the pair isolates the verdict rather than any other property of the code. *)
+let probe_unguarded_src =
+  "mod PSUnguarded do\n\
+  \  cap no_panic\n\
+  \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+   end\n"
+
+(* TWO guarded functions, not one, and that is load-bearing.  The fail-CLOSED
+   direction needs the sweep to move ON from the function under assertion:
+   [Precond_infer.prune] rebuilds a tree holding only the CURRENT target, so
+   after `g`'s probe the index holds nothing at all for `f`'s call site — and
+   "no verdict recorded here" is (correctly, fail-closed) an error.  With a
+   single-function fixture the last walk is that same function's, the index
+   happens to end up right, and the assertion passes against the unfixed
+   compiler.  It did; that is why there are two. *)
+let probe_guarded_src =
+  "mod PSGuarded do\n\
+  \  cap no_panic\n\
+  \  fn f(xs : {List(Int) | len(_) > 0}) : List(Int) do List.tail(xs) end\n\
+  \  fn g(ys : {List(Int) | len(_) > 0}) : List(Int) do List.tail(ys) end\n\
+   end\n"
+
+let no_panic_proof_suite =
+  [ (* ── Regression: `--refine-suggest*` must not move the verdict ──────────
+       See [no_panic_errors_under_suggestion_probes].  Four assertions, not
+       two: each fixture is checked WITHOUT the probes as well, so a harness
+       that stopped exercising the pipeline at all (or a fixture that stopped
+       compiling the way it reads) fails loudly instead of agreeing with
+       itself. *)
+    gated "cap no_panic: unguarded List.tail errors with AND without probes"
+      (fun () ->
+        Alcotest.(check bool)
+          "errors without probes" true (has_no_panic_error probe_unguarded_src);
+        Alcotest.(check bool)
+          "errors with --refine-suggest probes interleaved" true
+          (has_no_panic_error_probed probe_unguarded_src))
+
+  ; gated "cap no_panic: guarded List.tail is clean with AND without probes"
+      (fun () ->
+        Alcotest.(check bool)
+          "clean without probes" false (has_no_panic_error probe_guarded_src);
+        Alcotest.(check bool)
+          "clean with --refine-suggest probes interleaved" false
+          (has_no_panic_error_probed probe_guarded_src))
+
+  ; (* THE POINT OF THIS TASK.  Inverted from test_compiler.ml's
+       [test_cap_no_panic_list_tail_guarded_still_error], which Task 1 pinned
+       with the docstring "blunt until Task 3" — the two together document the
+       before/after. *)
+    gated "cap no_panic: a PROVABLY safe List.tail compiles clean" (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error
+             "mod PT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do\n\
+             \    if List.length(xs) > 0 do List.tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT control: the definite-failure floor must hold. *)
+    gated "cap no_panic: an unguarded List.tail still errors after Task 3"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error
+             "mod UT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+              end\n"))
+
+  ; (* Fail-closed: not provably safe, not provably unsafe — still an error,
+       matching `cap no_panic`'s conservative stance for division.  Getting
+       this direction backwards silently reopens every coverage hole Task 1
+       closed. *)
+    gated "cap no_panic: an UNDECIDABLE List.tail call still errors (fail-closed)"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error
+             "mod XT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int), flag : Bool) : List(Int) do\n\
+             \    if flag do List.tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* Dropped transitivity: ONE error at the real site, not one per caller.
+       Before this task the fixpoint reported three. *)
+    gated "cap no_panic: transitive blame is gone for proof-covered names"
+      (fun () ->
+        let n =
+          has_no_panic_error_count
+            "mod TB do\n\
+            \  cap no_panic\n\
+            \  fn helper(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+            \  fn caller1(xs : List(Int)) : List(Int) do helper(xs) end\n\
+            \  fn caller2(xs : List(Int)) : List(Int) do helper(xs) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "exactly one error, not three" 1 n)
+
+  ; (* The five BARE prelude spellings, which the qualified fixtures above do
+       not exercise at all.  They matter because they reach the checker by a
+       different route: prelude is UNWRAPPED into the entry module, so
+       `tail(xs)` resolves against a `DFn` sitting in this module's own decl
+       list rather than against a `DMod` member.
+
+       Measured while fixing this: bare calls DO resolve — `--refine-report`
+       showed `1 proved` for the guarded form — and yet the call was still
+       rejected, with a *transitive* message, because that same unwrapping put
+       prelude's `fn tail` into the syntactic fixpoint's `local_fns` and its
+       body calls `panic`. A proof-based verdict is never consulted on the
+       transitive path, so the feature was inert for 5 of its 25 names and the
+       unguarded form reported TWICE. Hence the count assertion here, not a
+       bool: a bool would have called the double-report a pass. *)
+    gated "cap no_panic: a PROVABLY safe BARE prelude tail compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error
+             "mod BT do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do\n\
+             \    if List.length(xs) > 0 do tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded BARE prelude tail errors exactly ONCE"
+      (fun () ->
+        Alcotest.(check int)
+          "one error, not one direct plus one transitive" 1
+          (has_no_panic_error_count
+             "mod BTU do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do tail(xs) end\n\
+              end\n"))
+
+  ; (* REGRESSION: `panic` keeps BOTH its syntactic ban and its transitive
+       fixpoint.  Same shape as the case above, opposite expectation — three
+       errors, because no contract exists or could exist for `panic`. *)
+    Alcotest.test_case "cap no_panic: panic keeps its transitive blame" `Quick
+      (fun () ->
+        let n =
+          has_no_panic_error_count
+            "mod TP do\n\
+            \  cap no_panic\n\
+            \  fn helper(x : Int) : Int do panic(\"boom\") end\n\
+            \  fn caller1(x : Int) : Int do helper(x) end\n\
+            \  fn caller2(x : Int) : Int do helper(x) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "direct site plus two transitive callers" 3 n)
+
+  ; (* ── Task 5: `Random.choice_weighted` (2026-08-05) ───────────────────
+       Same shape as the `List.tail` trio above, over the real
+       `stdlib/random.march`. The contract is `{List((a, Float)) | len(_) >
+       0}` — a tuple-ELEMENT list, the first this plan's proof machinery has
+       had to discharge `len` over. A guarded call must be PROVED, not merely
+       accepted for some unrelated reason (e.g. a solver-undecided call being
+       silently let through) — this is the positive-discharge control that
+       distinguishes a working contract from one that checks nothing. *)
+    gated
+      "cap no_panic: a PROVABLY safe Random.choice_weighted (guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_random
+             "mod RW1 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float))) : (Int, Random.Rng) do\n\
+             \    if List.length(items) > 0 do Random.choice_weighted(rng, items)\n\
+             \    else (0, rng) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT control: the definite-failure floor must hold — an unguarded
+       call still errors after the contract is wired into the covered set. *)
+    gated "cap no_panic: an unguarded Random.choice_weighted still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_random
+             "mod RW2 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float))) : (Int, Random.Rng) do\n\
+             \    Random.choice_weighted(rng, items)\n\
+             \  end\n\
+              end\n"))
+
+  ; (* Fail-closed: an undecidable guard (a Bool flag, not a length check)
+       must still error — matching the `List.tail` undecidable case above. *)
+    gated
+      "cap no_panic: an UNDECIDABLE Random.choice_weighted call still errors (fail-closed)"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_random
+             "mod RW3 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float)), flag : Bool)\n\
+             \      : (Int, Random.Rng) do\n\
+             \    if flag do Random.choice_weighted(rng, items) else (0, rng) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* ── Task 6: `Stats` — six functions needing only the length
+       precondition (2026-08-05) ──────────────────────────────────────────
+       `percentile`, `quantile`, `quantiles`, `five_number_summary`,
+       `variance`, `mode` all panic on `Nil` with their own "empty list"
+       message and none carried `{List(Float) | len(_) > 0}` before this
+       task (unlike `Stats.mean`/`min_val`/`max_val`, contracted earlier).
+       Six REJECT controls below, one per function — each is a call into
+       that function's own real body in `stdlib/stats.march`, so each
+       exercises its own panic message and precondition wiring, not just a
+       shared shape. Only two ACCEPT cases are written (the shared shape is
+       proven once), but one of them — `percentile` — is the two-refined-
+       parameter case: it must discharge BOTH the `xs` length precondition
+       added here AND the pre-existing `p ∈ [0, 100]` precondition
+       together, confirming the two coexist. *)
+    gated
+      "cap no_panic: a PROVABLY safe Stats.percentile (both preconditions guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SP1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), p : Float) : Float do\n\
+             \    if List.length(xs) > 0 && p >= 0.0 && p <= 100.0 do Stats.percentile(xs, p)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: a PROVABLY safe Stats.variance (guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SV1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : Float do\n\
+             \    if List.length(xs) > 0 do Stats.variance(xs) else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.percentile still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SPR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), p : Float) : Float do Stats.percentile(xs, p) end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.quantile still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SQR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), q : Float) : Float do\n\
+             \    Stats.quantile(xs, q, Stats.Linear)\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.quantiles still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SQSR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), qs : List(Float)) : List(Float) do\n\
+             \    Stats.quantiles(xs, qs, Stats.Linear)\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.five_number_summary still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SFR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : (Float, Float, Float, Float, Float) do\n\
+             \    Stats.five_number_summary(xs, Stats.Linear)\n\
+             \  end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.variance still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SVR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : Float do Stats.variance(xs) end\n\
+              end\n"))
+
+  ; gated "cap no_panic: an unguarded Stats.mode still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SMR do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float)) : Float do Stats.mode(xs) end\n\
+              end\n"))
+
+  ; (* ── Task 7: `Stats` bivariate — the RELATIONAL precondition
+       (2026-08-05) ───────────────────────────────────────────────────────
+       `covariance`, `correlation` and `linear_regression` each take two
+       `List(Float)`s and panic on unequal lengths OR on fewer than 2
+       elements. Both are structural, so both are contracted:
+
+         xs : {List(Float) | len(_) >= 2}
+         ys : {List(Float) | len(_) == len(xs)}
+
+       `ys`'s predicate references a SIBLING parameter's measure. That is not
+       new machinery — it is exactly the shape `List.nth`'s already-shipped
+       `n : {Int | _ >= 0 && _ < len(xs)}` uses; the only novelty is `==`
+       rather than `<`.
+
+       Two preconditions on one call site means "this errors" alone is a weak
+       assertion: it would pass whichever of the two went undischarged. The
+       REJECT controls below therefore assert on the unverified-precondition
+       HINT, so the equal-length control and the short-list control are
+       genuinely distinct tests and a mutation of only the relational
+       comparison flips only the former. *)
+    gated
+      "cap no_panic: a PROVABLY safe Stats.covariance (both preconditions guarded) compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SCV1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 && List.length(ys) == List.length(xs) do\n\
+             \      Stats.covariance(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: a PROVABLY safe Stats.correlation / Stats.linear_regression compiles clean"
+      (fun () ->
+        Alcotest.(check bool)
+          "no error" false
+          (has_no_panic_error_stats
+             "mod SCR1 do\n\
+             \  cap no_panic\n\
+             \  fn a(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 && List.length(ys) == List.length(xs) do\n\
+             \      Stats.correlation(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+             \  fn b(xs : List(Float), ys : List(Float)) : (Float, Float) do\n\
+             \    if List.length(xs) >= 2 && List.length(ys) == List.length(xs) do\n\
+             \      Stats.linear_regression(xs, ys)\n\
+             \    else (0.0, 0.0) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT — equal-length violation, one per function. The short-list
+       precondition IS guarded here, so the only thing left undischarged is
+       the relational one. These are the tests a mutation of the equal-length
+       comparison alone must flip. *)
+    gated
+      "cap no_panic: Stats.covariance with only the length>=2 guard errors on the RELATIONAL precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "relational precondition unverified" true
+          (only_unverified_is "len(_) == len(xs)"
+             "mod SCV2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 do Stats.covariance(xs, ys) else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.correlation with only the length>=2 guard errors on the RELATIONAL precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "relational precondition unverified" true
+          (only_unverified_is "len(_) == len(xs)"
+             "mod SCR2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(xs) >= 2 do Stats.correlation(xs, ys) else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.linear_regression with only the length>=2 guard errors on the RELATIONAL precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "relational precondition unverified" true
+          (only_unverified_is "len(_) == len(xs)"
+             "mod SLR2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : (Float, Float) do\n\
+             \    if List.length(xs) >= 2 do Stats.linear_regression(xs, ys)\n\
+             \    else (0.0, 0.0) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* REJECT — short-list violation, one per function. Mirror image: the
+       relational guard IS present, so only `len(_) >= 2` is undischarged. *)
+    gated
+      "cap no_panic: Stats.covariance with only the equal-length guard errors on the SHORT-LIST precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "short-list precondition unverified" true
+          (only_unverified_is "len(_) >= 2"
+             "mod SCV3 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(ys) == List.length(xs) do Stats.covariance(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.correlation with only the equal-length guard errors on the SHORT-LIST precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "short-list precondition unverified" true
+          (only_unverified_is "len(_) >= 2"
+             "mod SCR3 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    if List.length(ys) == List.length(xs) do Stats.correlation(xs, ys)\n\
+             \    else 0.0 end\n\
+             \  end\n\
+              end\n"))
+
+  ; gated
+      "cap no_panic: Stats.linear_regression with only the equal-length guard errors on the SHORT-LIST precondition"
+      (fun () ->
+        Alcotest.(check bool)
+          "short-list precondition unverified" true
+          (only_unverified_is "len(_) >= 2"
+             "mod SLR3 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : (Float, Float) do\n\
+             \    if List.length(ys) == List.length(xs) do\n\
+             \      Stats.linear_regression(xs, ys)\n\
+             \    else (0.0, 0.0) end\n\
+             \  end\n\
+              end\n"))
+
+  ; (* Fully unguarded: both preconditions undischarged, and the call errors. *)
+    gated "cap no_panic: an unguarded Stats.covariance still errors"
+      (fun () ->
+        Alcotest.(check bool)
+          "error" true
+          (has_no_panic_error_stats
+             "mod SCV4 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Float), ys : List(Float)) : Float do\n\
+             \    Stats.covariance(xs, ys)\n\
+             \  end\n\
+              end\n"))
+  ]
+
+(* ── The typecheck-only FALLBACK (`march check`, `march caps`, the LSP) ────
+   March has three check pipelines and only two run refinecheck.
+   [run_check_cmd] (`march check` / `march caps`) is package-level and
+   typecheck-only, seeded from a cached stdlib env and deliberately skipping
+   the solver; the LSP does not even link march_refinecheck.  With no verdict
+   index there is nothing to consult, and `cap no_panic` is a guarantee, so
+   "cannot prove" has to mean "reject".
+
+   [Typecheck.proof_based_panic_surface] therefore defaults to FALSE and the
+   contracted names stay unconditionally banned — including their transitive
+   fixpoint — exactly as before 2026-08-05.  Between the first draft of this
+   task and now, that default was the difference between `march check` exiting
+   1 and exiting 0 on provably panicky code.
+
+   These cases run the typechecker ALONE with the flag at its default, which is
+   what those two pipelines do. *)
+let syntactic_no_panic_errors (src : string) : int =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  (* Default, not set: a pipeline that forgets to opt in must get the
+     conservative answer, so the absence of an assignment is the assertion. *)
+  let errors, _ = March_typecheck.Typecheck.check_module m in
+  List.length
+    (List.filter
+       (fun (d : March_errors.Errors.diagnostic) ->
+         d.March_errors.Errors.severity = March_errors.Errors.Error
+         && contains d.March_errors.Errors.message "(declared `cap no_panic`)")
+       errors.March_errors.Errors.diagnostics)
+
+let syntactic_fallback_suite =
+  [ Alcotest.test_case "an unguarded contracted call is still banned" `Quick
+      (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF1 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+              end\n"))
+
+  ; (* Deliberately MORE conservative than the full pipeline, which admits this
+       exact fixture. Documented as a divergence in both capability docs; the
+       alternative — staying silent — would let genuinely panicky code pass
+       `march check`. *)
+    Alcotest.test_case "a GUARDED contracted call is also banned (no prover here)"
+      `Quick (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF2 do\n\
+             \  cap no_panic\n\
+             \  fn f(xs : List(Int)) : List(Int) do\n\
+             \    if List.length(xs) > 0 do List.tail(xs) else xs end\n\
+             \  end\n\
+              end\n"))
+
+  ; Alcotest.test_case "the bare prelude spelling is banned here too" `Quick
+      (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF3 do\n\
+             \  cap no_panic\n\
+             \  fn f(o : Option(Int)) : Int do unwrap(o) end\n\
+              end\n"))
+
+  ; (* And the OLD transitive blame is intact in this mode — three errors, the
+       pre-2026-08-05 behaviour, byte-for-byte what `march check` printed
+       before this task. *)
+    Alcotest.test_case "transitive blame is intact in the fallback" `Quick
+      (fun () ->
+        Alcotest.(check int) "direct site plus two callers" 3
+          (syntactic_no_panic_errors
+             "mod SF4 do\n\
+             \  cap no_panic\n\
+             \  fn helper(xs : List(Int)) : List(Int) do List.tail(xs) end\n\
+             \  fn caller1(xs : List(Int)) : List(Int) do helper(xs) end\n\
+             \  fn caller2(xs : List(Int)) : List(Int) do helper(xs) end\n\
+              end\n"))
+
+  ; (* REJECT control: the fallback must not have become a blanket rejector. *)
+    Alcotest.test_case "a safe cap no_panic module is silent in the fallback"
+      `Quick (fun () ->
+        Alcotest.(check int) "no error" 0
+          (syntactic_no_panic_errors
+             "mod SF5 do\n\
+             \  cap no_panic\n\
+             \  fn f(a : Int) : Int do a + 1 end\n\
+              end\n"))
+
+  ; (* Task 5: even a length-guarded Random.choice_weighted call is banned in
+       this mode — same divergence as List.tail's SF2 case above, since this
+       mode never builds a verdict index to consult. *)
+    Alcotest.test_case
+      "a GUARDED Random.choice_weighted is also banned (no prover here)" `Quick
+      (fun () ->
+        Alcotest.(check int) "one error" 1
+          (syntactic_no_panic_errors
+             "mod SF6 do\n\
+             \  cap no_panic\n\
+             \  fn f(rng : Random.Rng, items : List((Int, Float)))\n\
+             \      : (Int, Random.Rng) do\n\
+             \    if List.length(items) > 0 do Random.choice_weighted(rng, items)\n\
+             \    else (0, rng) end\n\
+             \  end\n\
+              end\n"))
+  ]
+
+(* ── The verdict FILTER, unit-tested directly ──────────────────────────────
+   [Obligation.verdict_at] folds EVERY obligation kind at a span down to the
+   weakest verdict.  For this consumer that is actively wrong: a call site
+   whose precondition is `Proved` but which happens to share a span with an
+   unrelated `Division` or a different callee's obligation would fold to the
+   weaker verdict, and a provably-safe call would be REJECTED — a false
+   positive, this subsystem's cardinal sin.
+
+   So [Panic_surface_by_proof.verdict_for] filters to [Precondition]
+   obligations for the callee in question and folds weakest-wins over only
+   those.  Constructing the collision through real March source is not
+   currently possible (a postcondition keys on a clause span, a division on the
+   `/` node's own span), so the filter is exercised where it actually lives, by
+   recording obligations at a shared span by hand.  A test that could only
+   observe the filter through source would silently stop testing it the day
+   those spans stopped colliding. *)
+let vf_span : March_ast.Ast.span =
+  { March_ast.Ast.file = "filter.march"; start_line = 1; start_col = 1;
+    end_line = 1; end_col = 9 }
+
+let record_at ~callee ~kind ~verdict =
+  March_refinecheck.Obligation.record
+    { March_refinecheck.Obligation.span = vf_span; callee;
+      predicate = "len(_) > 0"; verdict; kind }
+
+let vname = Option.map March_refinecheck.Obligation.verdict_name
+
+let verdict_filter_suite =
+  [ Alcotest.test_case "a Proved precondition survives an unrelated Division skip"
+      `Quick (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        record_at ~callee:"d" ~kind:March_refinecheck.Obligation.Division
+          ~verdict:(March_refinecheck.Obligation.Skipped
+                      March_refinecheck.Obligation.Solver_undecided);
+        (* What bare [verdict_at] would have said — the false positive this
+           filter exists to avoid.  Asserted so the test still means something
+           if the fold order ever changes. *)
+        Alcotest.(check (option string))
+          "unfiltered fold is the WEAK verdict" (Some "skipped")
+          (vname (March_refinecheck.Obligation.verdict_at vf_span));
+        Alcotest.(check (option string))
+          "filtered fold is proved" (Some "proved")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail")))
+
+  ; Alcotest.test_case "a DIFFERENT callee's skip at the same span does not veto"
+      `Quick (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        record_at ~callee:"List.head" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:(March_refinecheck.Obligation.Skipped
+                      March_refinecheck.Obligation.Solver_undecided);
+        Alcotest.(check (option string))
+          "proved" (Some "proved")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail")))
+
+  ; Alcotest.test_case "weakest-wins WITHIN the filtered set" `Quick (fun () ->
+        (* One refined parameter proved and another skipped is NOT a proof.
+           The fold must stay pessimistic inside the set it does consider. *)
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:(March_refinecheck.Obligation.Skipped
+                      March_refinecheck.Obligation.Solver_undecided);
+        Alcotest.(check (option string))
+          "skipped" (Some "skipped")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail")))
+
+  ; Alcotest.test_case "no obligation for this callee reads as absent, never proved"
+      `Quick (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.head" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Proved;
+        Alcotest.(check bool) "absent" true
+          (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail" = None))
+
+  ; (* `@[trusted]` is an UNCHECKED user assertion.  Honouring it inside a
+       capability whose entire purpose is to GUARANTEE no panics would hollow
+       out the guarantee, so only [Proved] is silent here — even though
+       `cap verified` does accept [Trusted]. *)
+    Alcotest.test_case "Trusted is not a proof under cap no_panic" `Quick
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        record_at ~callee:"List.tail" ~kind:March_refinecheck.Obligation.Precondition
+          ~verdict:March_refinecheck.Obligation.Trusted;
+        Alcotest.(check (option string))
+          "trusted, and therefore not admitted" (Some "trusted")
+          (vname (March_refinecheck.Panic_surface_by_proof.verdict_for vf_span "List.tail"));
+        Alcotest.(check bool) "not admitted" false
+          (March_refinecheck.Panic_surface_by_proof.is_proved vf_span "List.tail"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -8220,6 +9515,11 @@ let () =
       ("caller-promise", caller_promise_suite);
       ("arm-exclusion", arm_exclusion_suite);
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
+      ("measure-scalar-field-warn", measure_scalar_field_suite);
       ("post-compose-closed", post_compose_closed_suite);
       ("post-compose-relational", post_compose_relational_suite);
-      ("stdlib-nth-contract", stdlib_nth_contract_suite) ]
+      ("stdlib-nth-contract", stdlib_nth_contract_suite);
+      ("verdict-query", verdict_query_suite);
+      ("no-panic-by-proof", no_panic_proof_suite);
+      ("no-panic-verdict-filter", verdict_filter_suite);
+      ("no-panic-syntactic-fallback", syntactic_fallback_suite) ]

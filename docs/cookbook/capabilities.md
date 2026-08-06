@@ -92,8 +92,8 @@ mod PluginDemo do
     needs IO
     needs Plugin.PluginCap
 
-    fn main() do
-      let cap = Plugin.grant(root_cap)
+    fn main(root : Cap(IO)) do
+      let cap = Plugin.grant(root)
       -- `cap` must be threaded explicitly into `run` below — capabilities
       -- are ordinary values passed as arguments, not ambient state; there is
       -- no way to manufacture one without going through `Plugin.grant`

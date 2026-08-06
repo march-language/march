@@ -1,0 +1,27 @@
+-- R2 — the grant path: `main` receives the root, and it threads (2026-08-05).
+--
+-- The replacement for the ambient `root_cap` of reject/t152, and the shape
+-- every capability-using program now takes. `main` may be zero-arity or take
+-- exactly one `Cap(IO)` (enforced by `check_main_signature` in
+-- lib/desugar/desugar.ml); the runtime grants the erased root to the latter.
+--
+-- This half predates R2 and already worked — it is pinned here because R2's
+-- whole argument is that the ambient global was removable WITHOUT removing
+-- the ability to obtain a capability. If this file ever stops typechecking,
+-- reject/t152 has stopped being a fix and started being a removal.
+--
+-- Threading through a private helper is the point: authority flows down by
+-- parameter, which is what makes "received, never taken" true of the value.
+mod GrantedRoot do
+  needs IO
+
+  pfn write_report(w : Cap(IO.FileWrite), body : String) : Bool do
+    true
+  end
+
+  fn main(cap : Cap(IO)) do
+    let w : Cap(IO.FileWrite) = cap_narrow(cap)
+    let ok = write_report(w, "report")
+    println("root received at the boundary and threaded down")
+  end
+end

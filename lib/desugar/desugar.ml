@@ -437,6 +437,33 @@ let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
   in
   go parts
 
+(** Diagnostic sink for expression-level desugar errors.
+
+    [desugar_expr] is public API called without an error context by the
+    REPL and other tools, so [desugar_module ~errors] communicates its
+    context via this ref for the duration of the module pass.  When a
+    caller-supplied context is installed, errors are reported through the
+    standard [Errors] diagnostic machinery (positioned span, rendered by
+    the drivers that check [has_errors]).  When no context was supplied,
+    we raise the same positioned [ParseError] exception the parse path
+    uses — loud failure, never silently-wrong desugared code. *)
+let expr_err_ctx : Err.ctx option ref = ref None
+
+let desugar_expr_error ~(sp : span) ?hint msg : unit =
+  match !expr_err_ctx with
+  | Some ctx ->
+    Err.report ctx
+      { severity = Err.Error; span = sp; message = msg; labels = [];
+        notes = (match hint with Some h -> [h] | None -> []);
+        code = None; fix = None }
+  | None ->
+    let pos = { Lexing.pos_fname = sp.file;
+                pos_lnum = sp.start_line;
+                pos_bol  = 0;
+                pos_cnum = sp.start_col } in
+    raise (March_errors.Errors.ParseError (msg, hint, pos))
+
+
 (** Build an IOList directly from the parts of an ~H sigil interpolation.
 
     Static string literals are kept as-is.  Dynamic parts (to_string calls)
@@ -463,22 +490,80 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
      templates must never see an injected unbound `conn`). *)
   let parts =
     if !csrf_conn_in_scope then inject_csrf_tokens parts sp else parts in
-  (* Third pass: escape dynamic interpolations.
-     Use html_auto_escape(x) instead of Html.escape(to_string(x)) so that:
-     - Html.Safe values are inserted verbatim (no double-escaping)
-     - IOList values (partials) are flattened as-is (already HTML)
-     - Plain strings and other values are HTML-escaped normally *)
-  let parts = List.map (fun part ->
+  (* Third pass: walk the FIXED chunks through the HTML context automaton and
+     give each hole the escaper its parse context calls for.
+
+     This is the whole point of the analysis, and it is entirely compile-time.
+     Per Samuel et al. (arXiv:2605.16561v1) an interpolation is a single
+     transition whose successor depends only on the predecessor context, never
+     on the interpolated value; and ~H has no in-template control flow, so
+     there are no join points and no fixed point. The context trajectory is
+     therefore fully determined by the literal chunks, which are constants
+     sitting right here. Nothing survives to runtime but a direct escaper call.
+
+     Three things fall out of the walk:
+     - the escaper id per hole (html in element content, a URL scheme
+       allowlist at the start of an href, JS inside <script>, and so on);
+     - SUBSTITUTIONS — an unquoted attribute value receiving a hole gets a
+       quote inserted, and the automaton closes it on the way out, so
+       `<div class=${x}>` emits `<div class="..."`>;
+     - DIAGNOSTICS for holes no escaper can make safe (an attribute name, an
+       element name, a comment interior). Those are hard errors: there is no
+       encoding that makes an attacker-chosen attribute name safe. *)
+  let tbl = Lazy.force March_ctxesc.Automaton.default in
+  let ctx = ref March_ctxesc.Context.initial in
+  let lit s psp = ELit (LitString s, psp) in
+  let parts = List.concat_map (fun part ->
     match part with
-    | EApp (EVar { txt = "to_string"; _ }, [inner_expr], psp) ->
-      (* Dynamic part: use html_auto_escape(x) — handles Safe/IOList/String *)
-      EApp (EVar { txt = "html_auto_escape"; span = psp }, [inner_expr], psp)
+    | ELit (LitString s, psp) ->
+      (match March_ctxesc.Automaton.consume_literal tbl !ctx s with
+       | Ok o -> ctx := o.March_ctxesc.Automaton.ctx; [lit o.March_ctxesc.Automaton.emit psp]
+       | Error (msg, _off) ->
+         desugar_expr_error ~sp:psp msg;
+         [part])
     | EApp (EVar { txt = "to_string"; _ }, args, psp) ->
-      (* Fallback for unusual arity — shouldn't happen in practice *)
-      let inner = EApp (EVar { txt = "to_string"; span = psp }, args, psp) in
-      EApp (EVar { txt = "html_auto_escape"; span = psp }, [inner], psp)
-    | _ -> part  (* String literals and island_ssr calls — leave as-is *)
+      let inner =
+        match args with
+        | [one] -> one
+        | _ ->
+          (* Unusual arity — keep the to_string call and escape its result. *)
+          EApp (EVar { txt = "to_string"; span = psp }, args, psp)
+      in
+      (match March_ctxesc.Automaton.consume_interp tbl !ctx with
+       | Ok (esc, subst, ctx') ->
+         ctx := ctx';
+         let id = March_ctxesc.Context.escaper_id esc in
+         let call =
+           EApp (EVar { txt = "html_escape_ctx"; span = psp },
+                 [ELit (LitInt id, psp); inner], psp) in
+         if subst = "" then [call] else [lit subst psp; call]
+       | Error diag ->
+         desugar_expr_error ~sp:psp
+           ~hint:(Printf.sprintf
+                    "This interpolation is %s. Move the dynamic part into a \
+                     value position instead."
+                    (March_ctxesc.Context.describe !ctx))
+           diag;
+         [part])
+    | _ ->
+      (* island_ssr / CSRF injections: markup that is only valid in element
+         content. If the walk says we are anywhere else, the template is
+         malformed in a way that would splice into a tag. *)
+      (if (!ctx).March_ctxesc.Context.state <> March_ctxesc.Context.Pcdata then
+         desugar_expr_error ~sp
+           "A template fragment can only be inserted in element content, not \
+            inside a tag or attribute.");
+      [part]
   ) parts in
+  (* A template must not end mid-tag, mid-attribute or mid-comment: whatever
+     the caller concatenates next would splice into it, which is exactly the
+     composition hazard this analysis exists to stop. *)
+  if not (March_ctxesc.Automaton.is_valid_terminal !ctx) then
+    desugar_expr_error ~sp
+      (Printf.sprintf
+         "This ~H template does not end in a well-formed state — it ends %s. \
+          Anything concatenated after it would be spliced into that position."
+         (March_ctxesc.Context.describe !ctx));
   (* Build the cons-list of parts.
      CRITICAL: every generated node must carry a DISTINCT span.  The
      typechecker records each expression's inferred type in a type_map keyed
@@ -504,32 +589,6 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
   EApp (EVar { txt = "IOList.from_strings"; span = sp }, [list_expr], sp)
 
 (* ---- Pipe desugaring ---- *)
-
-(** Diagnostic sink for expression-level desugar errors.
-
-    [desugar_expr] is public API called without an error context by the
-    REPL and other tools, so [desugar_module ~errors] communicates its
-    context via this ref for the duration of the module pass.  When a
-    caller-supplied context is installed, errors are reported through the
-    standard [Errors] diagnostic machinery (positioned span, rendered by
-    the drivers that check [has_errors]).  When no context was supplied,
-    we raise the same positioned [ParseError] exception the parse path
-    uses — loud failure, never silently-wrong desugared code. *)
-let expr_err_ctx : Err.ctx option ref = ref None
-
-let desugar_expr_error ~(sp : span) ?hint msg : unit =
-  match !expr_err_ctx with
-  | Some ctx ->
-    Err.report ctx
-      { severity = Err.Error; span = sp; message = msg; labels = [];
-        notes = (match hint with Some h -> [h] | None -> []);
-        code = None; fix = None }
-  | None ->
-    let pos = { Lexing.pos_fname = sp.file;
-                pos_lnum = sp.start_line;
-                pos_bol  = 0;
-                pos_cnum = sp.start_col } in
-    raise (March_errors.Errors.ParseError (msg, hint, pos))
 
 (* ---- Predicate qualified-spelling flattening (Task 8 prototype) ────────
 
@@ -1581,6 +1640,39 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         EApp (EVar (mk_name "compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
     in
     [impl_one "compare" ["a"; "b"] body]
+
+  | "Json" when March_caps.Cap_surface_ty.caps_in_type_def td <> [] ->
+    (* Capability unforgeability (R3).  A capability may be received and
+       narrowed, never constructed; a derived Json codec over a `Cap` position
+       is a construction route, so the derive is refused outright rather than
+       generated with a hole in it.
+
+       Why this is caught HERE and not by the generated code failing to
+       typecheck: `encoder_for_ty` and `decode_value_at` below both fall back
+       to "assume the nested type also derives Json" for any type they do not
+       recognise.  `Cap(X)` is not recognised, so the codec was generated over
+       the capability position without complaint and the decoder ran far
+       enough to return a Json.DecodeError — a runtime failure that looks like
+       bad input rather than a refused operation.
+
+       Rejecting at the `derive` declaration also puts the diagnostic on a
+       real span.  Every declaration this branch generates carries
+       `dummy_span`, so an error raised from inside the generated codec would
+       have nowhere useful to point.
+
+       Both directions are refused together (see the message): a rule that
+       rejected only decoding would leave `derive Json` half-expanded, with a
+       working encoder beside a refused decoder. *)
+    let caps = March_caps.Cap_surface_ty.caps_in_type_def td in
+    let cap = List.hd caps in
+    Err.error errors ~span:iface_span
+      (Printf.sprintf
+         "`Cap(%s)` cannot be deserialized — a capability may only be \
+          received, never constructed, so `%s` cannot derive Json.\n\
+          hint: hold the capability in a separate value and pass it as a \
+          parameter, keeping `%s` free of capability fields."
+         cap type_name.txt type_name.txt);
+    []
 
   | "Json" ->
     (* derive Json: generate standalone to_json and from_json functions.

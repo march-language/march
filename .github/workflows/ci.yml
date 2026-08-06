@@ -145,7 +145,25 @@ jobs:
           #   CEILING (skips must not rise) — read from the whole-program
           #   (`user + stdlib`) slice of stdlib/list.march. Measured
           #   2026-07-29: 8 proved, 0 violated, 28 skipped (unreflectable-
-          #   predicate 1, solver-undecided 27). Lower is better — this bound
+          #   predicate 1, solver-undecided 27).
+          #
+          #   RAISED 2026-08-06, 28 -> 34, deliberately. Adding a refinement
+          #   to a stdlib function RAISES an obligation at every stdlib-
+          #   internal call site of it, and the ones that are not guarded
+          #   land as skips — so contracting more of the stdlib pushes this
+          #   number UP even though the checker is strictly checking more.
+          #   The proof-based `cap no_panic` branch contracted 13 new
+          #   parameters across stdlib/stats.march and stdlib/random.march
+          #   (Stats percentile/quantile/quantiles/five_number_summary/
+          #   variance/mode/covariance/correlation/linear_regression,
+          #   Random.choice_weighted). Attributed, not assumed: reverting
+          #   ONLY those two files on the merged branch and re-measuring
+          #   reproduces main's exact 15 proved / 24 skipped, so the whole
+          #   +1 proved / +10 skipped delta is those contracts and nothing
+          #   else regressed. Note the 24 here vs the 28 recorded above:
+          #   main had already travelled down to 24 since 2026-07-29.
+          #
+          #   Lower is better — this bound
           #   may only ever be revised DOWN. This is the check that is
           #   actually sensitive to the pass checking less than it used to:
           #   if the walk still descends into the file but proves fewer of
@@ -164,7 +182,7 @@ jobs:
           #   guard_discharges.march, whose `user code` slice is 1 proved /
           #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
           #   — this bound may only ever be revised UP.
-          baseline=28
+          baseline=34
           proved_floor=1
           floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe

@@ -50,10 +50,10 @@ fn simulate_fetch(cap : Cap(IO.Network), url : String) : String do
 end
 
 -- ─── Capability narrowing ─────────────────────────────────────────────────
--- cap_narrow(root_cap) attenuates Cap(IO) down to a sub-capability.
+-- cap_narrow(cap) attenuates Cap(IO) down to a sub-capability.
 -- This is the standard way to hand a restricted token to a sub-module.
 
--- cap_narrow(root_cap) downcasts Cap(IO) to any sub-capability.
+-- cap_narrow(cap) downcasts Cap(IO) to any sub-capability.
 -- Note: demo_narrowing itself takes Cap(IO) intentionally to show narrowing.
 -- The hint below (if any) is the compiler suggesting least-privilege — correct
 -- behaviour for a function that explicitly demonstrates attenuation.
@@ -76,10 +76,10 @@ end
 
 -- ─── Main — receives the root capability from the runtime ─────────────────
 
-fn main() : Unit do
-  -- root_cap is the ambient IO capability provided by the runtime.
+fn main(cap : Cap(IO)) : Unit do
+  -- cap is the ambient IO capability provided by the runtime.
   -- In production code this would be passed as a parameter to main().
-  let cap = root_cap
+  let cap = cap
 
   println("=== Capability Security Demo ===")
   println("")
