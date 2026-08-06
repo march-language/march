@@ -89,11 +89,40 @@ the two were then **separated**, which is the decisive measurement:
   1 skipped`, hint: ``precondition `len(_) >= 2` on `Stats.covariance` was NOT
   verified here.``
 
-The second bullet is the positive discharge of the relational predicate
-specifically: the *only* obligation proved in that run is `len(_) == len(xs)`.
-`len(ys) == len(xs)` discharges. `correlation` and `linear_regression` were
-confirmed the same way in one fixture: `4 proved, 0 violated, 0 skipped`,
-exit 0.
+`correlation` and `linear_regression` were confirmed the same way in one
+fixture: `4 proved, 0 violated, 0 skipped`, exit 0.
+
+### Why the relational predicate is attributably proved — the sound argument
+
+The hint texts above are *suggestive* but they are **not** decisive on their
+own, and an earlier draft of this note leaned on them as if they were.
+`refine_check.ml:3483-3486` fires the unverified-precondition hint **at most
+once per declaration list** (`unverified_hinted`). So in a run where BOTH
+obligations were `Skipped`, only the first by parameter order would be hinted
+anyway — "guard only the equality, observe `len(_) >= 2` named as the survivor"
+is consistent with the relational obligation being silently skipped too. The
+hint tells you which precondition was *named*, not that the other one was
+proved.
+
+The sound chain is the OCaml test pair, and it needs both halves:
+
+- **`SCV2`** (guard `len >= 2` only) shows the relational obligation is
+  *recorded* and comes back `Skipped` — the call errors, so a `Skipped`
+  precondition obligation exists at that site. This rules out the Task 4 failure
+  mode, where a contract is accepted by the machinery and produces no obligation
+  at all in either direction.
+- **`SCV1`** (guard both) passes, i.e. the call is accepted. Acceptance requires
+  the weakest-wins fold over **all** recorded precondition obligations at that
+  site to come back `Proved`. Since `SCV2` established that the relational
+  obligation is one of the recorded ones, `SCV1`'s acceptance forces
+  `len(_) == len(xs)` itself to be `Proved` — it cannot be carried by its
+  sibling.
+
+Together those two force the conclusion: `len(ys) == len(xs)` is genuinely
+recorded, genuinely discharged when provable, and genuinely fails closed when
+not. The `--refine-report` counts (`2 proved` fully guarded, `1 proved /
+1 skipped` half-guarded) are consistent with this and are useful corroboration,
+but the test pair is the argument.
 
 ## TDD cycle
 
@@ -178,9 +207,22 @@ file-copy swap (never `git stash` — shared stash stack). Result:
 | #18 `covariance` fully guarded (ACCEPT) | OK | OK |
 | #26 `covariance` unguarded (REJECT) | OK | OK |
 
-Exactly one, distinct test caught it — the short-list test, the ACCEPT and the
-unguarded control were all blind to it, which is precisely the confusion this
-mutation exists to rule out. Contract restored and re-verified byte-identical.
+Exactly one, distinct test caught it: **#20, the RELATIONAL case** — the
+SHORT-LIST case (#23), the ACCEPT (#18) and the unguarded control (#26) were all
+blind to it, which is precisely the confusion this mutation exists to rule out.
+(An earlier draft of this paragraph named #23 as the catcher, contradicting the
+table directly above it. The table is the measurement; #20 is the test that
+flipped.) Contract restored and re-verified byte-identical.
+
+**The short-list REJECT trio is coverage, not relational evidence.** `SCV3` /
+`SCR3` / `SLR3` guard the equality and assert the survivor is `len(_) >= 2`.
+They would pass **unchanged if the relational contract were deleted outright**:
+with `ys` unrefined there is still exactly one recorded obligation,
+`len(_) >= 2`, still `Skipped`, still hinted. So they say nothing about whether
+`len(_) == len(xs)` exists or works — the whole relational load is carried by
+the `SCV1` + `SCV2` pair described in the section above. Keep them (they are
+real coverage of the short-list precondition), but do not cite them as
+relational evidence.
 
 ## Deliberately unrefined: zero-variance and zero-standard-deviation
 
@@ -208,7 +250,20 @@ Task 5), and it is called out by name in the plan's Global Constraints.
 
 **Consequence, stated in both doc copies:** a `cap no_panic` module that calls
 `Stats.correlation` with two lists proven equal-length and proven ≥ 2 elements
-compiles clean and can still panic at runtime on zero standard deviation. The
+compiles clean and can still panic at runtime on zero standard deviation.
+
+**This is not a regression, and the question was checked rather than assumed.**
+The obvious worry is that moving a *partially* contracted name into the
+proof-based covered set takes it from "always rejected" to "accepted while still
+able to panic". Reviewed at the branch base (`38434ee1`): `panic_surface_stdlib`
+and `panic_surface_prelude` contained **no** `Stats.*`, `Random.*` or
+`DateTime.*` names at all, so a `cap no_panic` module could already call
+`Stats.correlation` freely with zero checking of either structural condition.
+This branch therefore moves these names from *no coverage* to *structural
+coverage* — strictly more checking, not less. The thirteen names that WERE
+previously banned were enumerated and each confirmed *fully* covered (its
+contract matches that function's sole panic condition), so no previously
+guaranteed name was weakened either. The
 capability's guarantee covers the two structural conditions only. This is
 partial coverage of a covered name, the same shape `Random.choice_weighted`
 already documents.
@@ -217,10 +272,32 @@ already documents.
 
 `grep -rn` for `covariance` / `correlation(` / `linear_regression` across
 `stdlib/`, `test/`, `bench/`, and the `conduit` / `test_conduit_app` ecosystem
-checkouts: **no production call site anywhere**. The only hits are
-`stdlib/stats.march` itself, this task's own new cases in
-`test/test_refinecheck.ml`, and a generated JS artifact
-(`test/whole_program/zoo.mjs`). Nothing to regress.
+checkouts.
+
+**Correction to an earlier draft of this note**, which claimed "no production
+call site anywhere". That was wrong, and the misreading was mine: the sweep's
+own output contained real March call sites and the summary line dropped them.
+The actual results are:
+
+- **`test/stdlib/test_stats.march:194, 200, 208, 214, 222, 229, 237` — seven
+  real March call sites** (two `Stats.covariance`, two `Stats.correlation`,
+  three `Stats.linear_regression`), the shipped behavioral tests for these
+  functions. Every one passes list literals of 3–5 elements with `xs` and `ys`
+  the same length, so all seven satisfy both new preconditions by construction.
+  The file declares no `cap no_panic` (`grep`: no match), so none of them is
+  even subject to the proof-based check. This file is exactly what `test_stdlib_march.exe` runs, and it passed
+  (56 tests, exit 0) — so this is a *measured* result for these call sites, not
+  an inspection.
+- `stdlib/stats.march` itself (the definitions).
+- This task's own new cases in `test/test_refinecheck.ml`.
+- `test/whole_program/zoo.mjs`, a generated JS artifact (not a source call site).
+- **No call site in `stdlib/` outside `stats.march`, in `bench/`, or in the
+  `conduit` / `test_conduit_app` ecosystem checkouts.** `stdlib/dataframe.march`
+  calls other `Stats` functions (`mean`, `median`, `percentile`, `min_val`,
+  `max_val`, `std_dev`) but none of the three bivariate ones.
+
+So there IS a production-shaped consumer, it is covered by a suite that ran
+green, and nothing regressed.
 
 The plan requires a positive control, because a byte-identical sweep result
 proves nothing on its own — and it specifically rules out the prescribed
@@ -266,6 +343,18 @@ Foreground, redirected, judged by `$?`:
 - `./_build/default/test/run_eval.exe -e` — exit **0**, 256 tests.
 - `scripts/check-docs.sh` — exit **0**, doc-lint passed.
 
+## Published stdlib HTML regenerated (branch-close task)
+
+`docs/docs/stdlib/*.html` is pre-generated, committed, and served directly by
+GitHub Pages; nothing in CI regenerates it and `scripts/check-docs.sh` does not
+lint it, so it had gone stale for this whole branch — `Stats.html` still
+rendered `covariance(xs : List(Float), ys : List(Float))`, and Task 5's
+`Random.choice_weighted` and Task 6's `percentile` `xs` were equally stale.
+Regenerated with `scripts/gen-stdlib-docs.sh` (dune + the `march_doc` generator;
+no Ruby/Jekyll needed for this step), exit 0, 112 module pages. The diff is
+exactly the three tasks' contracts and nothing else: `Random.html` (Task 5),
+`Stats.html` (Tasks 6 and 7), `search-index.json`. No hand-editing.
+
 ## Files changed
 
 - `stdlib/stats.march` — the two preconditions on all three bivariate
@@ -284,4 +373,13 @@ Foreground, redirected, judged by `$?`:
   the `List.nth` precedent for the relational shape.
 - `CHANGELOG.md` — three names added to the existing `### Changed` bullet's
   list; a new bullet for the relational precondition and its carve-out.
+- `docs/docs/stdlib/Stats.html`, `docs/docs/stdlib/Random.html`,
+  `docs/docs/stdlib/search-index.json` — regenerated published API reference,
+  catching up Tasks 5, 6 and 7 (see above).
 - This file.
+
+## Known gap, deliberately deferred
+
+`panic_surface_suggestion` has no case for the three new names, so the
+"use X instead" hint is generic for them. Cosmetic, and consistent with Task 6,
+which left the same gap for its six. Not fixed here.
