@@ -1,14 +1,15 @@
 # Toward a provable sandbox
 
-Status: **mostly design. R3 and R4 are built (2026-08-05); R1, R2, R5–R9 are
-not.** This page exists to say precisely what the claim "provably sandboxed by
+Status: **mostly design. R2, R3 and R4 are built (2026-08-05); R1 and R5–R9
+are not.** This page exists to say precisely what the claim "provably sandboxed by
 the type system" would require, what March already has, and which of it is
 worth building.
 
 Stage 1 of §3 — "capabilities cannot be fabricated, only received and
-narrowed" — is earned. Nothing above it is. In particular **built-in IO is
-still ambient** (§1, R1), which is the load-bearing gap and is untouched by
-what shipped.
+narrowed" — is earned, and with R2 it is earned in the strong sense: there is
+no ambient capability to pick up either. Nothing above it is. In particular
+**built-in IO is still ambient** (§1, R1), which is the load-bearing gap and is
+untouched by what shipped — a module still performs IO holding nothing.
 
 Companion to `specs/2026-08-03-forge-cap-audit-design.md` (artifact channel),
 `specs/2026-08-04-path-scoped-capabilities-design.md`,
@@ -98,13 +99,27 @@ The migration cost is real and should not be understated: this is a breaking
 change to the type of every stdlib function that touches IO. It is
 plausibly a major-version event.
 
-### R2. A single root, minted at the boundary
+### R2. A single root, minted at the boundary — **SHIPPED 2026-08-05**
 
 `main : Cap(IO) -> ()`, runtime as sole minter. Today's minting surface —
 *any* declaring module's public functions — is right for user-defined proof
 caps and wrong for IO: it would let any module mint what it needs. For IO the
 minting surface must be exactly one place, and that place must not be
 expressible in March.
+
+**Built 2026-08-05** — `specs/progress/2026-08-05-cap-root-granted-not-taken.md`.
+`root_cap` can no longer be referenced from ordinary code; the root is granted
+to `main`'s parameter. Two scoped exemptions remain and are documented there:
+`test`/`describe`/`setup` bodies and the REPL, neither of which has an entry
+point to be granted from, and neither of which can reach production code.
+
+It turned out much smaller than this section implies, because **the boundary
+already existed**: `main` could already take a `Cap(IO)`, `check_main_signature`
+already enforced the shape, and the runtime already passed the erased root.
+There was no minting machinery to build — capabilities are erased, so the whole
+gate is compile-time. R2 reduced to making one name unavailable.
+
+What follows was the finding that prompted it.
 
 **Measured 2026-08-05, and it is worse than "the minting surface is too
 wide": there is no minting step to gate.** `root_cap` is an ordinary global of
@@ -119,15 +134,14 @@ Two consequences worth being explicit about:
 - **This bounds what R3 earned.** Stage 1's claim has to be stated as "a
   capability cannot be fabricated from data", not "a capability can only be
   received" — see §5. Nothing was received here.
-- **R2 is now the cheapest item that materially strengthens the claim**, and
-  unlike R1b it is not a language-wide signature change. It is roughly: make
-  `root_cap` not nameable from user code, thread `Cap(IO)` in through `main`'s
-  parameter instead, and decide what happens to the ambient-IO builtins that
-  currently need no token at all (which is R1, and is where the cost lives —
-  R2 without R1 moves the root but leaves `file_read(p)` working regardless).
+- **R2 was the cheapest item that materially strengthened the claim**, and
+  unlike R1b it was not a language-wide signature change.
 
-That last parenthesis is the real sequencing question, and it is why R2 and R1
-may not be separable in practice even though this page lists them apart.
+R2 shipped; R1 did not. So the caveat stands and is now the live one: **R2
+moved the root but left `file_read(p)` working regardless.** A program can
+still do everything it could before without ever holding a capability. R2 and
+R1 may not be separable in practice even though this page lists them apart —
+that is the real sequencing question for whoever takes R1.
 
 ### R3. Unforgeability, checked — **SHIPPED 2026-08-05**
 
@@ -162,7 +176,7 @@ this section says above, each found by implementing it:
 - **There was a second hole this section does not mention.** `needs` was
   reconciled against function SIGNATURES only, so a capability named in a type
   declaration (`type Handle = { tok : Cap(IO.FileWrite) }`) or a `let`
-  annotation escaped it entirely, `--cap-strict` included. Unlike the
+  annotation escaped it entirely. Unlike the
   deserialization hole it needed no unimplemented feature to reach — `root_cap`
   is ambient (cf. R2), so a console-only module could take the root, narrow it,
   and bind the result without ever putting a capability in a signature.
@@ -205,6 +219,38 @@ Shipped 2026-08-05 in `test/test_cap_unforgeable.ml` (alongside R3) rather
 than in `test_cap_scope.ml`, because that file tests the pure `Cap_scope`
 functions and these need real programs typechecked. No production change was
 required, exactly as this section predicted.
+
+### R4a. Attenuation does not CHAIN — a prerequisite nobody had noticed
+
+Measured 2026-08-05, and it is a gap in the ocap story rather than in the
+lattice. `cap_narrow` is typed `Cap(IO) -> Cap(a)`: its argument is *literally
+the root*. So a holder of anything narrower cannot attenuate further —
+
+```march
+pfn attenuate(fs : Cap(IO.FileSystem)) : Cap(IO.FileRead) do
+  cap_narrow(fs)                    -- expected `IO` but got `IO.FileSystem`
+end
+```
+
+R4 says attenuation is monotone, and it is. What it does not say is that
+attenuation is only available **to whoever holds the root**. Delegation with
+attenuation at each hop — hand a subsystem `Cap(IO.FileSystem)`, let it hand a
+helper `Cap(IO.FileRead)` — is the core object-capability discipline and is
+*not expressible in March today*. Every narrowing must be performed up at
+`main` and the already-narrowed values threaded down.
+
+The same applies to `mint_cap : Cap(IO) -> Cap(a)`: minting even a *proof* cap
+consumes the root, so a module that mints must be handed root authority.
+
+This matters for sequencing, not for correctness of what shipped: R2 makes
+`main` the sole source, and R1 would make every IO call need a token — and the
+two together make "least privilege threaded down" the normal way to write
+March. That idiom is exactly the one this typing prevents. **Fixing
+`cap_narrow` to accept any ancestor rather than only the root is a
+prerequisite for R1 being usable**, and it is small next to R1 itself: the
+argument type wants to be "some `Cap(P)` where `P` subsumes the result", which
+the lattice already knows how to answer (`Cap_lattice.cap_subsumes`) but
+unification alone cannot express.
 
 ### R5. Effect polymorphism that survives higher-order code
 
@@ -424,29 +470,21 @@ Defensible today:
 
 Newly defensible as of 2026-08-05 (stage 1, R3/R4):
 
-> A capability in March cannot be deserialized, derived, or cast into
-> existence.
+> A capability in March can only be received. It cannot be deserialized,
+> derived, or cast into existence, and there is no ambient one to pick up —
+> the root is granted to `main` and threaded from there.
 
-State it on its own rather than folding it into the sentence above, and resist
-the shorter phrasing "capabilities can only be received, never constructed" —
-that one is not yet true, for two separate reasons:
+R3 closed the fabrication-from-data route; R2 closed the ambient-root route.
+With both shipped, "can only be received" is now literally true **of the
+capability value**, which is what makes this sentence sayable at all — before
+R2 it was not, because the root was a global in scope everywhere.
 
-- **built-in IO is ambient** (R1), so a module performs IO with no capability
-  at all; `file_read(p)` compiles with no token in scope;
-- **the root capability is ambient too** (R2). Measured 2026-08-05: a module
-  declaring *no* `needs` whatsoever can write `let x = root_cap` and hold
-  `Cap(IO)`, with no diagnostic naming it. So "received" is doing more work
-  than it looks — the root is received from a global that is in scope
-  everywhere, which is no-authority-from-nothing violated at the source rather
-  than at the construction site.
-
-What R3 closed is the *fabrication-from-data* route: a capability cannot be
-conjured out of a JSON string, a derive, or a cast. That is worth stating and
-is genuinely new. It is not the same as "you must be given authority to have
-it", and a reader will hear the second unless the sentence is kept narrow.
-
-**R2 is therefore the item that most directly strengthens this claim**, and it
-is cheap next to R1b.
+One qualifier still has to travel with it, and it is the one a reader will
+otherwise supply wrongly: this says a module cannot obtain a capability it was
+not given. It does **not** say a module needs one to perform IO. Built-in IO
+is still ambient (R1), so `file_read(p)` compiles with no capability in scope.
+"Capabilities are unforgeable" and "authority is required to act" are different
+claims, and March currently has the first.
 
 Paired, wherever the word "sandbox" appears, with the exclusion that is easiest
 to forget and most likely to bite:

@@ -18,8 +18,8 @@
 mod OrdinaryDecode do
   needs IO
 
-  fn main() do
-    let console : Cap(IO.Console) = cap_narrow(root_cap)
+  fn main(cap : Cap(IO)) do
+    let console : Cap(IO.Console) = cap_narrow(cap)
     let n : Int = from_json("1")
     println(int_to_string(n))
   end

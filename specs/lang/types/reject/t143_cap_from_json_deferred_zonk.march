@@ -4,7 +4,10 @@
 -- `from_json` is typed `poly2 (fun a b -> TArrow (a, b))` — fully
 -- unconstrained — so nothing in its type stops it from producing a `Cap`.
 -- Before this check existed the program below typechecked with exit 0,
--- `--cap-strict` included, fabricating root authority from a string literal.
+-- fabricating root authority from a string literal. (Passing `--cap-strict`
+-- changed nothing, but not for the reassuring reason: the ceiling check runs
+-- on the COMPILE path only, so the flag is inert under `--check`. Measured
+-- 2026-08-05.)
 --
 -- What makes THIS file the one that matters: `from_json`'s result type is a
 -- bare `TVar` at the application site on line 1 of `main`. It is pinned to

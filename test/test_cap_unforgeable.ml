@@ -51,22 +51,31 @@ end|} in
     "capability in a type declaration is a use, so no unused-needs warning"
     0 (List.length (warnings_mentioning ctx "IO.FileWrite"))
 
-(* Same requirement for the `let`-annotation position (reject/t151's shape),
+(* Same requirement for an annotation inside a BODY (reject/t151's shape),
    which is a different walk (cap_annots_in_expr, over expressions) from the
-   type-declaration one. *)
-let test_let_annotation_position_counts_as_a_use () =
+   type-declaration one.
+
+   A lambda parameter, not a `let` annotation, and the choice is forced. R2
+   (2026-08-05) removed the ambient `root_cap`, so obtaining a
+   Cap(IO.FileWrite) VALUE now requires narrowing from Cap(IO) — which means
+   declaring `needs IO`, which subsumes IO.FileWrite and makes a separate
+   IO.FileWrite declaration redundant, destroying the very thing this test
+   measures. A lambda parameter names the capability without needing a value,
+   so IO.FileWrite is declared, used exactly once, and used only in a body
+   annotation. *)
+let test_body_annotation_position_counts_as_a_use () =
   let ctx = typecheck {|mod AnnUse do
   needs IO.Console
   needs IO.FileWrite
 
   fn main() do
-    let w : Cap(IO.FileWrite) = cap_narrow(root_cap)
+    let take = fn (w : Cap(IO.FileWrite)) -> 1
     println("declared and used")
   end
 end|} in
   Alcotest.(check bool) "covering needs: no error" false (has_errors ctx);
   Alcotest.(check int)
-    "capability in a let annotation is a use, so no unused-needs warning"
+    "capability in a body annotation is a use, so no unused-needs warning"
     0 (List.length (warnings_mentioning ctx "IO.FileWrite"))
 
 (* ── Check A: derive rejection is a DESUGAR-time error ────────────────── *)
@@ -115,8 +124,8 @@ let test_attenuation_narrowing_is_accepted () =
   let ctx = typecheck {|mod Narrowing do
   needs IO
 
-  fn main() do
-    let w : Cap(IO.FileWrite) = cap_narrow(root_cap)
+  fn main(cap : Cap(IO)) do
+    let w : Cap(IO.FileWrite) = cap_narrow(cap)
     println("root narrows to a descendant")
   end
 end|} in
@@ -142,8 +151,8 @@ end|} in
 let tests =
   [ Alcotest.test_case "type-decl capability counts as a use" `Quick
       test_type_decl_position_counts_as_a_use;
-    Alcotest.test_case "let-annotation capability counts as a use" `Quick
-      test_let_annotation_position_counts_as_a_use;
+    Alcotest.test_case "body-annotation capability counts as a use" `Quick
+      test_body_annotation_position_counts_as_a_use;
     Alcotest.test_case "derive Json over Cap is a desugar error" `Quick
       test_derive_json_over_cap_is_a_desugar_error;
     Alcotest.test_case "attenuation: narrowing accepted" `Quick

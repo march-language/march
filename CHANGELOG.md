@@ -41,6 +41,23 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **The root capability is granted to `main`, not taken.** `root_cap` can no
+  longer be referenced from ordinary code. Declare `fn main(cap : Cap(IO))` to
+  receive it and thread it to whatever needs it, narrowing with `cap_narrow`
+  along the way.
+
+  `root_cap` was an ordinary global of type `Cap(IO)` in scope in every module,
+  so a module declaring **no `needs` at all** could hold the root capability
+  and narrow it to any descendant — legitimately, because `cap_narrow` demands
+  exactly the parent it now had. That is authority from nothing.
+
+  `main` taking a `Cap(IO)` already worked and is unchanged; only the ambient
+  global is gone. Two contexts keep it, both scoped deliberately: `test` /
+  `describe` / `setup` bodies, which have no `main` to be granted from and
+  would otherwise make capability behaviour untestable, and the REPL. Both are
+  ambient authority in a place that cannot reach production code — a
+  dependency's test blocks do not run in a consumer's build.
+
 - **Capabilities are unforgeable: they can be received and narrowed, never
   constructed.** `Cap(X)` may no longer appear in the result of `from_json` or
   `from_json_events`, in the argument of `to_json`, or anywhere in a type that
@@ -69,7 +86,7 @@ git log is authoritative for exact commits.
 
   Previously `needs` was checked against function signatures only, so
   `type Handle = { tok : Cap(IO.FileWrite) }` in a module declaring just
-  `needs IO.Console` passed with `--cap-strict`. A module could name a
+  `needs IO.Console` typechecked clean. A module could name a
   capability it never declared. These positions also count as *uses*, so
   adding the missing declaration does not then report it as unused.
 

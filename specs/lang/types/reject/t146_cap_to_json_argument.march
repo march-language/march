@@ -16,7 +16,7 @@
 mod EncodeCap do
   needs IO
 
-  fn main() do
-    println(to_json(root_cap))
+  fn main(cap : Cap(IO)) do
+    println(to_json(cap))
   end
 end

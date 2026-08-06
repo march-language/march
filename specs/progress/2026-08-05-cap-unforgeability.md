@@ -25,7 +25,7 @@ So R3 was two checks, not four.
 
 **The deserialization hole.** `to_json`, `from_json` and `from_json_events` are
 the only three builtins typed `poly2 (fun a b -> TArrow (a, b))` — fully
-unconstrained. This typechecked clean with `--cap-strict`, fabricating root
+unconstrained. This typechecked clean, fabricating root
 authority from a string literal:
 
 ```march
@@ -42,7 +42,7 @@ position and the decoder ran as far as a `Json.DecodeError`.
 
 **The `needs` coverage gap (not in R3, found while checking it).** Check 1's
 decl walk ended in `| _ -> []`, and so did `cap_paths_in_surface_ty`. Both of
-these were accepted under `needs IO.Console` with `--cap-strict`:
+these were accepted under `needs IO.Console`:
 
 ```march
 let forged : Cap(IO) = ...                -- let annotation: uncovered

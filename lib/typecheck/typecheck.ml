@@ -629,6 +629,28 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  root_cap_allowed : bool;
+  (** True where naming [root_cap] is still permitted (R2, 2026-08-05).
+
+      [root_cap] used to be an ordinary global of type [Cap(IO)] in scope in
+      every module, which is no-authority-from-nothing violated at the source:
+      a module declaring no [needs] at all could hold the root and narrow it to
+      any descendant, legitimately, because [cap_narrow] demands exactly the
+      parent it now had.  The root is now granted to [main] instead (see
+      [Desugar.check_main_signature]; the runtime already passed it).
+
+      Two contexts keep it, both deliberate and both scoped by ENCLOSING
+      CONTEXT rather than by the checker declining to look — the distinction
+      matters, because "we never checked here" and "we decided not to check
+      here" are indistinguishable from the passing test:
+
+      - [test]/[describe]/[setup] bodies, which have no [main] to be granted
+        from.  Without this, capability behaviour would not be testable from
+        March at all.  It is ambient authority, in a context that cannot reach
+        production code: a dependency's test blocks do not run in a consumer's
+        build.
+      - the REPL, which likewise has no entry point.  Carried by
+        [check_module_with_env], whose only caller is [lib/jit/repl_jit.ml]. *)
   cur_fn_public : bool;
   (** True while checking the body of a PUBLIC (fn, not pfn) function — read by
       the proof-cap mint gate. Lambdas inherit it; nested named fns/modules reset
@@ -820,6 +842,7 @@ let make_env errors type_map = {
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  root_cap_allowed = false;
   cur_fn_public = false;
   cap_qual_prefix = "";
   enclosing_package = "";
@@ -4932,6 +4955,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── Variables ────────────────────────────────────────────────── *)
     | Ast.EVar name ->
       record_use name.txt name.span env;
+      (* R2: the root capability is granted at the boundary, not taken.  The
+         name stays BOUND (so this reports a capability error rather than
+         "I cannot find `root_cap`", and so the inferred type below stays
+         [Cap(IO)] and no cascade of unification failures follows a single
+         mistake) — only naming it is refused. *)
+      if name.txt = "root_cap" && not env.root_cap_allowed then
+        Err.error env.errors ~span:name.span
+          (render_parts [
+            MPCode "root_cap";
+            MPText " cannot be referenced — the root capability is granted to ";
+            MPCode "main"; MPText ", not taken.";
+            MPBreak;
+            MPText "help: declare "; MPCode "fn main(cap : Cap(IO))";
+            MPText " and pass the capability down to whatever needs it, narrowing with ";
+            MPCode "cap_narrow"; MPText " along the way." ]);
       (match lookup_var name.txt env with
        | Some sch ->
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
@@ -10876,6 +10914,9 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DTest (tdef, sp) ->
     (* Typecheck the test body; it must be Unit. No enclosing function — see
        [with_no_caller]. *)
+    (* R2 exemption: a test body has no [main] to be granted the root from, so
+       [root_cap] stays nameable here (see [env.root_cap_allowed]). *)
+    let env = { env with root_cap_allowed = true } in
     with_no_caller env (fun () ->
       check_expr env tdef.test_body t_unit
         ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name))));
@@ -10889,6 +10930,8 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DSetup (body, sp) ->
     (* No enclosing function — see [with_no_caller]. *)
+    (* R2 exemption, same rationale as [DTest]. *)
+    let env = { env with root_cap_allowed = true } in
     with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit")));
     Hashtbl.replace env.type_map sp t_unit;
@@ -10896,6 +10939,8 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DSetupAll (body, sp) ->
     (* No enclosing function — see [with_no_caller]. *)
+    (* R2 exemption, same rationale as [DTest]. *)
+    let env = { env with root_cap_allowed = true } in
     with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit")));
     Hashtbl.replace env.type_map sp t_unit;
@@ -11915,6 +11960,11 @@ let check_module_with_refs ?errors (m : Ast.module_)
 let last_with_env_final : env ref = ref (make_env (Err.create ()) (Hashtbl.create 0))
 
 let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+  (* R2: the REPL has no entry point to be granted the root capability from, so
+     [root_cap] stays nameable there.  This entry point is the REPL's — its
+     only caller is [lib/jit/repl_jit.ml] — which is what makes it the right
+     place to carry the exemption rather than a flag threaded from the CLI. *)
+  let env = { env with root_cap_allowed = true } in
   let errors = env.errors in
   let type_map = env.type_map in
   let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =

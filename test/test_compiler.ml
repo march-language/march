@@ -756,12 +756,20 @@ let test_tc_root_cap_call_rejected () =
   Alcotest.(check bool) "root_cap() error names root_cap and explains it's not a function"
     true has_clear_message
 
-let test_tc_root_cap_bare_ok () =
-  (* Body returns `c`, not `()` — a bare value reference immediately
-     followed by a paren-led expression on the next line parses as a call
-     on that value (see specs/lang parser note on `let x = V` glomming into
-     `V(...)`), which would spuriously exercise the same diagnostic this
-     test is trying to prove does NOT fire for a genuinely bare reference. *)
+(* INVERTED 2026-08-05 by R2 (specs/2026-08-04-provable-sandbox-design.md).
+   This asserted that a bare `root_cap` reference was FINE, which was true and
+   was the problem: `root_cap` was an ordinary global of type Cap(IO) in scope
+   in every module, so a module declaring no `needs` at all could hold the root
+   and narrow it to any descendant — legitimately, since cap_narrow demands
+   exactly the parent it now had. The root is now granted to `main` instead.
+
+   Body still returns `c`, not `()` — a bare value reference immediately
+   followed by a paren-led expression on the next line parses as a call on that
+   value (see specs/lang parser note on `let x = V` glomming into `V(...)`),
+   which would exercise the callable-spelling diagnostic instead of the bare
+   one this test is about. That hazard is why the shape is preserved rather
+   than simplified along with the assertion. *)
+let test_tc_root_cap_bare_rejected () =
   let ctx = typecheck {|mod Test do
     needs IO
     fn f() : Cap(IO) do
@@ -769,7 +777,17 @@ let test_tc_root_cap_bare_ok () =
       c
     end
   end|} in
-  Alcotest.(check bool) "bare `root_cap` reference: no errors" false (has_errors ctx)
+  Alcotest.(check bool) "bare `root_cap` reference is rejected" true (has_errors ctx);
+  let names_main = List.exists (fun d ->
+      contains "root_cap" d.March_errors.Errors.message &&
+      contains "main" d.March_errors.Errors.message
+    ) ctx.diagnostics in
+  (* The diagnostic has to point somewhere. A bare "unbound variable" would be
+     a worse experience than the ambient global was, so the name stays bound
+     and the message names the replacement. *)
+  Alcotest.(check bool)
+    "the error names root_cap and points at main as the grant site"
+    true names_main
 
 (* Builtins that, unlike root_cap, genuinely ARE invoked with `()` — the
    root_cap denylist must not overreach into these. *)
@@ -11490,7 +11508,7 @@ let compiler_suites =
           Alcotest.test_case "arity: correct call is ok"           `Quick test_tc_arity_correct_ok;
           Alcotest.test_case "arity: fn returning fn is ok"        `Quick test_tc_arity_fn_returning_fn_ok;
           Alcotest.test_case "root_cap() is rejected"              `Quick test_tc_root_cap_call_rejected;
-          Alcotest.test_case "bare root_cap is ok"                 `Quick test_tc_root_cap_bare_ok;
+          Alcotest.test_case "bare root_cap is rejected (R2)"       `Quick test_tc_root_cap_bare_rejected;
           Alcotest.test_case "legit zero-arg builtins still callable" `Quick test_tc_zero_arg_builtins_still_callable;
           Alcotest.test_case "zero-arg user fn still callable"     `Quick test_tc_zero_arg_user_fn_still_callable;
           Alcotest.test_case "non-fn local value call is rejected" `Quick test_tc_nonfunction_local_value_call_fixed;

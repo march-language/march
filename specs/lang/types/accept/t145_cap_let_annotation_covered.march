@@ -10,8 +10,8 @@
 mod CoveredLetAnn do
   needs IO
 
-  fn main() do
-    let w : Cap(IO.FileWrite) = cap_narrow(root_cap)
+  fn main(cap : Cap(IO)) do
+    let w : Cap(IO.FileWrite) = cap_narrow(cap)
     println("narrowed within a declared ceiling")
   end
 end

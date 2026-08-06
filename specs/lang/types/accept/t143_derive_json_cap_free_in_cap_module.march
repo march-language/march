@@ -17,8 +17,8 @@ mod CapFreeDerive do
   type Outer = { id : Int, inner : Inner }
   derive Json for Outer
 
-  fn main() do
-    let console : Cap(IO.Console) = cap_narrow(root_cap)
+  fn main(cap : Cap(IO)) do
+    let console : Cap(IO.Console) = cap_narrow(cap)
     println("cap-free derive in a cap-using module")
   end
 end
