@@ -93,27 +93,43 @@ two modules importing the same library can owe different capabilities.
 The result is always a **subset** of what the older module-granular rule required,
 by construction — the demand set filters the imported module's declared `needs`, it
 never adds to it. So this rule can only ever require less, and no module that
-compiles today can start failing because of it. Two conservative carve-overs err
-toward requiring more: a referenced name with no per-function record
-(a module-level `let`, an interface or `impl` method — `record_fn_caps` covers
-`DFn`s, actor handlers and externs only) falls back to the imported module's whole
-declared set, and so does an import whose target has not been analyzed yet because
-the two modules import each other cyclically (the module topological sort tolerates
-cycles rather than rejecting them).
+compiles today can start failing because of it. One conservative carve-over errs
+toward requiring more: an import whose target has not been analyzed yet, because
+the two modules import each other cyclically, falls back to the imported module's
+whole declared set (the module topological sort tolerates cycles rather than
+rejecting them).
 
-**Known incompleteness — the transitive case is NOT covered.** The fallback above
-fires only for a name referenced **directly** with no `own(...)` entry. A
-referenced `DFn` that merely *reaches* a `DLet` body, interface method or `impl`
-method does have an entry, so `caps_of_name` returns that entry's silently
-truncated closure and the fallback never fires. A capability the pre-2026-08-06
-Check 4 required can therefore be dropped along that path — the fail-open
-direction, which the design's constraints treat as no less serious than a false
-positive. It is bounded (the referenced function must reach the capability
-*exclusively* through an uncovered form; any path through an ordinary `DFn` or a
-builtin call is still counted) but real. Closing it means giving those three
-forms an `own(...)` entry in `record_fn_caps`, which is **not** in the
-strictly-loosening class and needs its own corpus sweep. Tracked in
-`specs/todos/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`.
+**Coverage of `own(...)`.** `record_fn_caps` records an entry for every
+declaration form that can hold an expression: `DFn` signatures, bodies and
+guards, default-argument expressions, actor handlers, `DExtern`s, module-level
+`DLet` bodies, `DInterface` default-method bodies and `DImpl` method bodies. The
+last four were added 2026-08-06 (see
+`specs/progress/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`); before
+that they had no entry, so a `DFn` that reached a capability *exclusively*
+through one of them carried a silently truncated closure and Check 4 could drop
+a capability it required before demand-driven propagation landed.
+
+Keying, which is load-bearing:
+
+- a `DLet` is keyed like a `DFn` of the same name, for each name its pattern
+  binds, so an ordinary reference to it resolves;
+- a `DInterface` default body is keyed by the bare method name — that name is
+  the dispatch node callers reference;
+- a `DImpl` method is keyed by TIR's `Iface$Ty.method` mangling, which cannot
+  collide with a `DFn` (an ordinary qualified name never contains `$`) nor with
+  another impl of the same method for a different type. The bare method name
+  additionally becomes a *dispatch node* carrying an edge to each impl — the
+  union over impls, the sound reading of a name whose target is chosen by type —
+  emitted only when the module declares no `DFn` of that name, so a plain
+  function's identity can never be absorbed;
+- a default argument is walked directly when the module is undesugared, and via
+  an alias from desugar's arity-mangled `f$N` declarations onto the base name
+  `f` on the production path (`expand_defaults_decl` moves the default into
+  `f$0`'s body but leaves call sites saying `f`).
+
+Because the demand set is *filtered* against the imported module's declared
+`needs`, no addition to `own(...)` can make Check 4 stricter than the
+pre-demand-driven module-granular rule.
 
 ### Capability hierarchy
 

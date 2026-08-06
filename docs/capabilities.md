@@ -95,25 +95,21 @@ helper still counts — and it is computed per import site, so two modules impor
 the same library can owe different capabilities.
 
 This rule only ever requires **less** than the older module-granular one, so no
-module that compiles today can start failing because of it. Two conservative
-carve-overs err toward requiring more: a referenced name the compiler has no
-per-function record for (a module-level `let`, an interface or `impl` method)
-falls back to the imported module's whole declared set, and so does an import
-whose target has not been analyzed yet because the two modules import each other
-cyclically.
+module that compiles today can start failing because of it. One conservative
+carve-over errs toward requiring more: an import whose target has not been
+analyzed yet, because the two modules import each other cyclically, falls back
+to the imported module's whole declared set.
 
-**A known gap, stated plainly.** The compiler records per-function capabilities
-for `fn`s, actor handlers and `extern` blocks, but not for module-level `let`
-bindings, interface methods, or `impl` methods. The carve-over above catches
-those only when you reference one *directly*. If you reference an ordinary
-function that reaches a capability **exclusively** through one of them — say a
-`fn` whose only impure act is to evaluate a module-level `let` that prints — the
-compiler currently will not ask you to declare that capability, where before
-2026-08-06 importing the module would have. Any path through an ordinary
-function or a builtin call is still counted, so this is narrow, but it is a real
-hole: do not read a clean `--check` as proof that an imported module's `let`
-bindings are pure. Tracked in
-`specs/todos/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`.
+**What counts as a capability's source.** Every declaration form that can hold
+an expression is recorded, not just `fn` bodies: `fn` signatures and bodies,
+guards, default-argument expressions, actor handlers, `extern` blocks,
+module-level `let` bindings, interface default methods, and `impl` methods. So a
+function whose only impure act is to read a module-level `let` that prints does
+owe `IO.Console`, and so does anything that imports it for that function. Any
+path through an ordinary function or a builtin call is counted as well. (Before
+2026-08-06 the last four forms had no per-function record, which could silently
+drop a capability along a transitive path; see
+`specs/progress/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`.)
 
 ### Capability hierarchy
 

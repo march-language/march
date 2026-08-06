@@ -9054,21 +9054,41 @@ let test_qualified_use_of_impure_fn_still_requires () =
     fn f(m : String) : Unit do Provider.noisy(m) end
   end|}))
 
-(* Ruling 1 — the fail-open fallback. [record_fn_caps] covers [DFn], actor
-   handlers and externs, but NOT module-level [DLet] bindings, interface
-   methods or impl methods: those get no own(...) entry, so their transitive
-   closure is EMPTY. Treating "no entry" as "no capabilities" would silently
-   drop enforcement that exists today. For a name known to come from the
-   import, a missing closure entry must fall back to the imported module's
-   module-level set — i.e. exactly today's behavior.
+(* Ruling 1 — a module-level [DLet] reference is now PRECISE, not a fallback.
+   REWRITTEN 2026-08-06 when the [record_fn_caps] coverage gap was closed; the
+   change of expectation is deliberate and is recorded here rather than
+   silently absorbed.
 
-   [tag] is a public module-level [let], so it has no closure entry; the
-   importer must still be required to declare IO.Console. *)
-let test_import_of_entryless_name_falls_back_to_module_caps () =
-  Alcotest.(check bool) "Check-4 error via the fallback" true
+   This test used to assert that referencing the public [let tag = "p"] forced
+   the WHOLE of Provider's declared needs onto the importer, because a [DLet]
+   had no own(...) entry and the "no entry -> imported module's module-level
+   set" fallback caught it. A [DLet] now gets a real entry, so the fallback is
+   no longer the mechanism, and the correct expectation flips: [tag] is PURE,
+   so referencing it must cost nothing — while a let that genuinely reaches a
+   capability must still be required, which is what
+   [test_import_through_module_let_still_requires] pins.
+
+   Measured, not assumed: with the `| None -> mod_caps` branch instrumented,
+   it fires ZERO times across the whole run_compiler suite and across a
+   --check sweep of stdlib/*.march + test/native/*.march + bench/*.march.
+   Every value name an importer can reference now has an entry. The branch is
+   retained as a defensive backstop for a key-shape miss, not as a routinely
+   exercised path — so do not read its survival as coverage. The remaining
+   live guard for an un-analyzed importee is the `[] -> mod_caps` early exit,
+   pinned by [test_cyclic_modules_still_enforce]. *)
+let test_import_of_pure_module_let_costs_nothing () =
+  Alcotest.(check bool) "a pure module-level let propagates nothing" false
     (has_cap_needs_error (cap_two_module_src {|mod Consumer do
     import Provider
     fn f() : String do tag end
+  end|}));
+  (* Control for the control: the same importer referencing the impure sibling
+     still errors, so the "false" above is about [tag] being pure and not
+     about Check 4 having stopped firing for this fixture shape. *)
+  Alcotest.(check bool) "the impure sibling still errors" true
+    (has_cap_needs_error (cap_two_module_src {|mod Consumer do
+    import Provider
+    fn f(m : String) : Unit do noisy(m) end
   end|}))
 
 (* Companion: the fallback must be scoped to names that came from the IMPORT.
@@ -9164,6 +9184,155 @@ end|} (if cyclic then "import A" else "")
     false (has_cap_needs_error (pure_variant ~cyclic:false));
   Alcotest.(check bool) "CYCLIC: pure reference costs nothing"
     false (has_cap_needs_error (pure_variant ~cyclic:true))
+
+(* ── Closing the [record_fn_caps] coverage gap (2026-08-06) ──────────────
+   Until this fix [record_fn_caps] recorded an own(...) entry for [DFn]s,
+   actor handlers and [DExtern]s only.  Module-level [DLet] bodies, interface
+   default-method bodies, impl-method bodies and default-argument expressions
+   got no entry, so an edge pointing at one contributed nothing and the
+   closure of anything that REACHED one came back silently truncated —
+   dropping a capability Check 4 required before the demand-driven
+   propagation landed.
+
+   Each form below gets an ACCEPT case (the capability propagates to a
+   function that reaches it only through that form) and a REJECT control (a
+   pure sibling of the same shape stays EMPTY).  The REJECT halves are not
+   ceremony: an implementation that simply attributed the module's whole
+   capability set to every name would pass every ACCEPT case on its own. *)
+
+(* Form 1 — a module-level [DLet] body.  [peek] calls no capability builtin
+   itself; the only route to IO.FileRead is the binding it reads. *)
+let test_transitive_cap_via_module_let () =
+  let src = {|mod LetProbe do
+    let cached = file_exists("x")
+    fn peek() do cached end
+    fn pure_peek(a) do a + 1 end
+  end|} in
+  Alcotest.(check (list string)) "IO.FileRead reached through a module-level let"
+    [ "IO.FileRead" ] (transitive_caps_of src "peek");
+  Alcotest.(check (list string)) "a sibling that never reads the let stays empty"
+    [] (transitive_caps_of src "pure_peek")
+
+(* Form 2 — an interface DEFAULT method body.  [shout] reaches IO.Console
+   only through the default implementation of [greet_loud]. *)
+let test_transitive_cap_via_interface_default_method () =
+  let src = {|mod IfaceProbe do
+    interface Greeter(a) do
+      fn greet : a -> Unit
+      fn greet_loud : a -> Unit do
+        fn (x) -> print("loud")
+      end
+    end
+    fn shout(x) do greet_loud(x) end
+    fn quiet(a) do a + 1 end
+  end|} in
+  Alcotest.(check (list string)) "IO.Console reached through an interface default body"
+    [ "IO.Console" ] (transitive_caps_of src "shout");
+  Alcotest.(check (list string)) "a sibling that never calls the method stays empty"
+    [] (transitive_caps_of src "quiet")
+
+(* Form 3 — an impl method body.  The impl method itself is keyed by TIR's
+   [Iface$Ty.method] mangling so it can never collide with a [DFn] of the same
+   name; the bare method name is a separate DISPATCH node whose only content
+   is edges to the impls, which is what lets [draw]'s reference to [render]
+   resolve. *)
+let test_transitive_cap_via_impl_method () =
+  let src = {|mod ImplProbe do
+    type Widget = MkWidget
+    interface Render(a) do
+      fn render : a -> Unit
+    end
+    impl Render(Widget) do
+      fn render(_w) do print("w") end
+    end
+    fn draw(w : Widget) : Unit do render(w) end
+    fn pure_calc(a) do a * 2 end
+  end|} in
+  Alcotest.(check (list string)) "IO.Console reached through an impl method"
+    [ "IO.Console" ] (transitive_caps_of src "draw");
+  Alcotest.(check (list string)) "a sibling that never dispatches stays empty"
+    [] (transitive_caps_of src "pure_calc");
+  (* The impl method's OWN entry is keyed by the mangled name, so a [DFn]
+     called [render] elsewhere could never absorb it. *)
+  Alcotest.(check (list string)) "impl method keyed by the Iface$Ty.method mangling"
+    [ "IO.Console" ] (transitive_caps_of src "Render$Widget.render")
+
+(* Form 3, REJECT control for the dispatch node: a module that declares a
+   plain [DFn] of the method's name must NOT have that function's identity
+   merged with the impl's.  [helper] here is an ordinary pure function that
+   happens to share the impl method's name; it must stay empty. *)
+let test_impl_dispatch_node_does_not_capture_a_same_named_fn () =
+  let src = {|mod ClashProbe do
+    type Widget = MkWidget
+    fn render(x : Int) : Int do x + 1 end
+    fn pure_use(x : Int) : Int do render(x) end
+  end|} in
+  Alcotest.(check (list string)) "a plain fn named like a method stays empty"
+    [] (transitive_caps_of src "render");
+  Alcotest.(check (list string)) "and so does its caller"
+    [] (transitive_caps_of src "pure_use")
+
+(* Form 4 — a DEFAULT ARGUMENT expression.  Traced rather than assumed:
+   desugar's [expand_defaults_decl] runs BEFORE the typechecker (both in
+   bin/main.ml and in [parse_and_desugar]), and it rewrites
+   [fn withdef(x \\ noisy())] into arity-mangled [withdef$0] / [withdef$1]
+   declarations with the default expression moved into [withdef$0]'s body.
+   Call sites are NOT rewritten — they still say [withdef] — so the base name
+   had no closure entry at all and every caller's closure was truncated.
+   The fix records each [f$N] variant's caps under the base name [f] too. *)
+let test_transitive_cap_via_default_argument () =
+  let src = {|mod DefaultProbe do
+    pfn noisy() do print("hi") end
+    fn withdef(x \\ noisy()) do x end
+    fn caller() do withdef() end
+    fn pure_other(a) do a + 1 end
+  end|} in
+  Alcotest.(check (list string)) "the base name carries the default's capability"
+    [ "IO.Console" ] (transitive_caps_of src "withdef");
+  Alcotest.(check (list string)) "and a caller reaching it only that way inherits it"
+    [ "IO.Console" ] (transitive_caps_of src "caller");
+  Alcotest.(check (list string)) "a sibling that never calls it stays empty"
+    [] (transitive_caps_of src "pure_other")
+
+(* THE primary regression: the exact program measured base-vs-head for this
+   gap.  Base (9d9a18e8) reported one Check-4 error; head (11f9acdf) reported
+   none, because [ConsumerQ7] reaches IO.FileRead only through [peek], which
+   reaches it only through the module-level [let].
+
+   Both sides also emit "Module 'ProviderQ7' not found" — a separate,
+   pre-existing issue (specs/todos/2026-08-06-check4-skipped-when-importee-declared-later.md),
+   identical on both sides.  [has_cap_needs_error] matches the Check-4 message
+   text, so that unrelated diagnostic can neither manufacture a pass nor a
+   failure. *)
+let test_import_through_module_let_still_requires () =
+  Alcotest.(check bool) "Check-4 error restored" true
+    (has_cap_needs_error {|mod GapOuter do
+  mod ProviderQ7 do
+    needs IO.FileRead
+    let cached = file_exists("x")
+    fn peek() : Bool do cached end
+  end
+  mod ConsumerQ7 do
+    import ProviderQ7
+    fn f() : Bool do peek() end
+  end
+end|});
+  (* REJECT control: the same shape with a PURE let must stay clean, so the
+     assertion above is about the capability and not about any reference to a
+     module-level binding costing the whole module's needs. *)
+  Alcotest.(check bool) "a pure let propagates nothing" false
+    (has_cap_needs_error {|mod GapOuter do
+  mod ProviderQ8 do
+    needs IO.FileRead
+    let cached = "x"
+    fn peek() : String do cached end
+    fn reader() : Bool do file_exists("y") end
+  end
+  mod ConsumerQ8 do
+    import ProviderQ8
+    fn f() : String do peek() end
+  end
+end|})
 
 (* migrate_state calling file_write with no declared needs -> IO-free error. *)
 let test_migrate_state_file_write_error () =
@@ -12654,9 +12823,15 @@ let compiler_suites =
           Alcotest.test_case "importing for an impure fn still requires the cap"     `Quick test_import_for_impure_fn_still_requires;
           Alcotest.test_case "qualified use of a pure fn does not inherit"           `Quick test_qualified_use_of_pure_fn_does_not_inherit;
           Alcotest.test_case "qualified use of an impure fn still requires"          `Quick test_qualified_use_of_impure_fn_still_requires;
-          Alcotest.test_case "a name with no closure entry falls back to module caps" `Quick test_import_of_entryless_name_falls_back_to_module_caps;
+          Alcotest.test_case "a pure module-level let costs the importer nothing" `Quick test_import_of_pure_module_let_costs_nothing;
           Alcotest.test_case "the fallback does not fire for locals/params"          `Quick test_fallback_does_not_fire_for_locals;
           Alcotest.test_case "cyclic modules still enforce"                          `Quick test_cyclic_modules_still_enforce;
+          Alcotest.test_case "a cap reached only via a module-level let propagates"  `Quick test_transitive_cap_via_module_let;
+          Alcotest.test_case "a cap reached only via an interface default method"    `Quick test_transitive_cap_via_interface_default_method;
+          Alcotest.test_case "a cap reached only via an impl method"                 `Quick test_transitive_cap_via_impl_method;
+          Alcotest.test_case "the impl dispatch node does not capture a same-named fn" `Quick test_impl_dispatch_node_does_not_capture_a_same_named_fn;
+          Alcotest.test_case "a cap reached only via a default argument"             `Quick test_transitive_cap_via_default_argument;
+          Alcotest.test_case "an import reaching a cap through a module let requires it" `Quick test_import_through_module_let_still_requires;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;

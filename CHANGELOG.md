@@ -13,6 +13,22 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A capability reached through a module-level `let`, an interface or `impl`
+  method, or a default argument is now attributed to the function that reaches
+  it.** The per-function capability record covered `fn` signatures/bodies, actor
+  handlers and `extern` blocks only, so a function whose sole impure act was to
+  read a module-level `let` that prints carried an empty capability set — and an
+  importer that referenced only that function was not asked to declare the
+  capability, where the older module-granular rule would have. All four forms
+  are now recorded, including default-argument expressions (evaluated at every
+  call site that omits the parameter) on both the desugared and undesugared
+  paths. This can newly require a `needs` declaration on code that
+  under-declares today; measured over `stdlib/*.march`, `test/native/*.march`
+  and `bench/*.march` (277 files), diagnostics are byte-identical, and `march
+  caps`, `--cap-sandbox` and the hot-deploy manifest are unchanged on that
+  corpus. An `impl` method is keyed by its `Iface$Ty.method` mangling so it can
+  never be merged with a plain function of the same name.
+
 - **Importing a module no longer requires declaring capabilities used only by
   functions you don't reference.** `import M` / `use M` used to force *every*
   capability `M` declares onto the importer, so importing a library for one pure
@@ -24,15 +40,8 @@ git log is authoritative for exact commits.
   through a private helper counts). The result is always a subset of what was
   required before, so nothing that compiles today can start failing; the error
   message and its caret are unchanged, only the set of required capabilities
-  narrowed. A referenced name the compiler has no per-function record for (a
-  module-level `let`, an interface or `impl` method) and an import into a
-  cyclic module group both fall back conservatively to the old whole-module set.
-  That fallback only catches such a name when you reference it *directly*: if you
-  reference an ordinary function that reaches a capability exclusively through a
-  module-level `let` or an interface/`impl` method, the capability is currently
-  not required of you — a known, narrow gap documented in `docs/capabilities.md`
-  and tracked in
-  `specs/todos/2026-08-06-record-fn-caps-misses-dlet-and-methods.md`.
+  narrowed. An import into a cyclic module group falls back conservatively to
+  the old whole-module set.
 
 - **`cap no_panic` now consults a call's actual refinement contract instead of
   banning it by name.** A partial stdlib or prelude function that declares a

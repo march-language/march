@@ -77,3 +77,66 @@ possibility of genuinely new errors on code that under-declares today.
   `fn_transitive_capability_closures_tbl`'s docstring in
   `lib/typecheck/typecheck.ml`, and the user-facing statement is in
   `docs/capabilities.md` + `specs/lang/capabilities.md`.
+
+---
+
+## Resolved 2026-08-06
+
+Closed in `lib/typecheck/typecheck.ml`'s `check_module_needs`. All four forms now
+get an `own(...)` entry and reference edges:
+
+| Form | Key |
+|---|---|
+| module-level `DLet` body | `cap_qname n` for every `n` the pattern binds — keyed exactly like a `DFn` of that name, so an ordinary reference resolves |
+| `DInterface` default method body | `cap_qname md_name` — the bare method name IS the dispatch node callers reference |
+| `DImpl` method body | `cap_qname (Iface ^ "$" ^ TyKey ^ "." ^ method)`, mirroring TIR's `Iface$Ty.method` mangling |
+| default argument | walked directly (undesugared path) **and** via an alias from desugar's arity-mangled `f$N` onto the base name `f` (production path) |
+
+**`DImpl` keying, stated because a colliding key would silently merge two
+functions' capabilities.** An ordinary qualified name never contains `$` (see
+`Tir_names.is_iface_mangled`), so the mangled key cannot collide with a `DFn` of
+the same short name, and two impls of the same method for different types get
+distinct keys. Because a reference site says the *bare* method name, the bare
+name additionally becomes a **dispatch node** carrying one edge per impl — the
+union over impls, which is the sound reading of a name whose target is chosen by
+type. It is emitted only when the module declares no `DFn` of that name, so a
+plain function's identity can never be absorbed
+(`test_impl_dispatch_node_does_not_capture_a_same_named_fn`).
+
+**Default arguments, traced rather than assumed.** Desugar's
+`expand_defaults_decl` runs *before* the typechecker and rewrites
+`fn f(x \\ d)` into `f$0`/`f$1` with `d` moved into `f$0`'s body — but it does
+not rewrite call sites and emits no dispatcher `DFn`, so the base name `f` had
+no entry at all. The alias is what makes a caller's reference to `f` resolve.
+
+**Why this cannot make Check 4 stricter than the pre-demand-driven rule.**
+`import_required_caps` *filters* the imported module's declared `needs` by the
+demand set rather than returning the demand set. The result is a subset of
+`mod_caps` by construction, so no addition to `own_cap_closures` can require
+more than the old module-granular answer.
+
+**Blast radius, measured.** `--check` over `stdlib/*.march`,
+`test/native/*.march` and `bench/*.march` (277 files) against a compiler built
+from `11f9acdf`: **byte-identical output on every file**, so zero newly-erroring
+files and no false positives. `march caps` over the same corpus: identical on
+all 277 (252 produce a report, 183 non-empty). Non-vacuousness is carried by the
+positive controls instead — the `ProviderQ7`/`ConsumerQ7` program goes 0 → 1
+Check-4 errors, six new tests were RED before the change, and each of the four
+walks is individually load-bearing under mutation.
+
+**One expectation deliberately flipped.** `test_import_of_entryless_name_falls_
+back_to_module_caps` used a *pure* module-level `let` to exercise the "no entry
+→ whole module set" fallback. That let now has an entry, so the correct
+expectation becomes "a pure let costs the importer nothing"; the test was
+rewritten as `test_import_of_pure_module_let_costs_nothing`, with the impure
+sibling as its control. Instrumenting the `| None -> mod_caps` branch showed it
+now fires **zero** times across the whole `run_compiler` suite and the corpus
+sweep — it is a defensive backstop for a key-shape miss, not a covered path.
+
+**Observed, not fixed — filed separately.** `own_caps_of_this_module`
+(`bin/main.ml`, feeding `--cap-sandbox` and `--cap-strict`) builds its
+`user_fn_names` set from `DFn` declarations only, so a bare or `Iface$Ty.`-
+prefixed key never `belongs` and the new entries are invisible to it. `march
+caps` uses a *different* `belongs` (module-name prefix, `run_check_cmd`) and does
+see them. The two surfaces therefore do not share a filter, contrary to
+`own_caps_of_this_module`'s docstring.
