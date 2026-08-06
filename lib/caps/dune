@@ -1,6 +1,7 @@
 (library
  (name march_caps)
- (modules cap_lattice cap_symbols cap_scope cap_ceiling))
+ (libraries march_ast)
+ (modules cap_lattice cap_symbols cap_scope cap_ceiling cap_surface_ty))
 
 ; Emitter: regenerates runtime/march_cap_lattice.{h,c} from the OCaml
 ; Cap_lattice.hierarchy source of truth.  See emit_c_table.ml for the

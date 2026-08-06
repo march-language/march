@@ -1,0 +1,17 @@
+-- `needs` coverage, LET ANNOTATION, COVERED (2026-08-05).
+--
+-- Accept companion to reject/t151. The identical narrowing under a `needs`
+-- that covers it must typecheck.
+--
+-- `needs IO` against an annotation naming `Cap(IO.FileWrite)` is the point:
+-- the new body walk must run its findings through the SAME lattice
+-- subsumption that signature caps get, not a string comparison. A module
+-- declaring the root capability may narrow to any descendant.
+mod CoveredLetAnn do
+  needs IO
+
+  fn main(cap : Cap(IO)) do
+    let w : Cap(IO.FileWrite) = cap_narrow(cap)
+    println("narrowed within a declared ceiling")
+  end
+end

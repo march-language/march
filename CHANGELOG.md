@@ -41,6 +41,55 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **The root capability is granted to `main`, not taken.** `root_cap` can no
+  longer be referenced from ordinary code. Declare `fn main(cap : Cap(IO))` to
+  receive it and thread it to whatever needs it, narrowing with `cap_narrow`
+  along the way.
+
+  `root_cap` was an ordinary global of type `Cap(IO)` in scope in every module,
+  so a module declaring **no `needs` at all** could hold the root capability
+  and narrow it to any descendant — legitimately, because `cap_narrow` demands
+  exactly the parent it now had. That is authority from nothing.
+
+  `main` taking a `Cap(IO)` already worked and is unchanged; only the ambient
+  global is gone. Two contexts keep it, both scoped deliberately: `test` /
+  `describe` / `setup` bodies, which have no `main` to be granted from and
+  would otherwise make capability behaviour untestable, and the REPL. Both are
+  ambient authority in a place that cannot reach production code — a
+  dependency's test blocks do not run in a consumer's build.
+
+- **Capabilities are unforgeable: they can be received and narrowed, never
+  constructed.** `Cap(X)` may no longer appear in the result of `from_json` or
+  `from_json_events`, in the argument of `to_json`, or anywhere in a type that
+  `derive Json` generates a codec for. This is a hard error, not gated on
+  `--cap-strict`.
+
+  Previously `from_json` was typed with no constraint on what it produced, so
+  `let forged : Cap(IO) = from_json("{}")` typechecked — `--cap-strict`
+  included — and fabricated root authority from a string literal. It failed at
+  run time only because `from_json`'s return-type dispatch is unimplemented,
+  which is an open item to build.
+
+  Both directions are refused together: encoding a capability leaks nothing at
+  run time, but it manufactures the wire value a decoder would consume, and
+  `derive Json` generates both directions from one declaration.
+
+  One consequence worth knowing: a single `from_json` application can no longer
+  be used at two different result types. Decoding one string as two unrelated
+  types was already meaningless, since `from_json` dispatches on a single
+  determinable target type.
+
+- **`needs` now covers type declarations and `let` annotations.** A capability
+  named in a record field, a variant argument, or a `let` type annotation
+  counts toward that module's `needs` — including when it is nested inside a
+  container such as `List(Cap(X))`.
+
+  Previously `needs` was checked against function signatures only, so
+  `type Handle = { tok : Cap(IO.FileWrite) }` in a module declaring just
+  `needs IO.Console` typechecked clean. A module could name a
+  capability it never declared. These positions also count as *uses*, so
+  adding the missing declaration does not then report it as unused.
+
 - **`forge cap inspect --strict`** re-checks the capability ceiling on a
   binary you did not build. Binaries now carry each module's *declared* needs
   alongside its measured use, so the two can be compared without the source.

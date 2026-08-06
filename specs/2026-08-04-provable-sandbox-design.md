@@ -1,12 +1,21 @@
 # Toward a provable sandbox
 
-Status: **design, not implemented.** Nothing in this document is built. It
-exists to say precisely what the claim "provably sandboxed by the type system"
-would require, what March already has, and which of it is worth building.
+Status: **mostly design. R2, R3 and R4 are built (2026-08-05); R1 and R5–R9
+are not.** This page exists to say precisely what the claim "provably sandboxed by
+the type system" would require, what March already has, and which of it is
+worth building.
+
+Stage 1 of §3 — "capabilities cannot be fabricated, only received and
+narrowed" — is earned, and with R2 it is earned in the strong sense: there is
+no ambient capability to pick up either. Nothing above it is. In particular
+**built-in IO is still ambient** (§1, R1), which is the load-bearing gap and is
+untouched by what shipped — a module still performs IO holding nothing.
 
 Companion to `specs/2026-08-03-forge-cap-audit-design.md` (artifact channel),
-`specs/2026-08-04-path-scoped-capabilities-design.md`, and
-`specs/progress/2026-08-04-cap-ceiling-strict.md` (the ceiling).
+`specs/2026-08-04-path-scoped-capabilities-design.md`,
+`specs/progress/2026-08-04-cap-ceiling-strict.md` (the ceiling), and
+`specs/2026-08-05-cap-unforgeability-design.md` + `specs/progress/2026-08-05-cap-unforgeability.md`
+(R3/R4 as built).
 
 ---
 
@@ -78,13 +87,19 @@ where the row is inferred and written only at boundaries. `main` is the sole
 place a row is discharged against a granted capability set.
 
 **Recommendation: R1b.** R1a is unadoptable for a language with a 112-module
-stdlib. `lib/effects/` is where this lives.
+stdlib.
+
+**There is no substrate for this today, and the directory name is misleading.**
+`lib/effects/effects.ml` is 22 lines: a call-site hook that delegates to
+`Typecheck.check_module` so capability enforcement runs on both the eval and
+compile paths. It contains no effect representation, no rows, and no
+inference. R1b starts from zero regardless of where it eventually lives.
 
 The migration cost is real and should not be understated: this is a breaking
 change to the type of every stdlib function that touches IO. It is
 plausibly a major-version event.
 
-### R2. A single root, minted at the boundary
+### R2. A single root, minted at the boundary — **SHIPPED 2026-08-05**
 
 `main : Cap(IO) -> ()`, runtime as sole minter. Today's minting surface —
 *any* declaring module's public functions — is right for user-defined proof
@@ -92,7 +107,43 @@ caps and wrong for IO: it would let any module mint what it needs. For IO the
 minting surface must be exactly one place, and that place must not be
 expressible in March.
 
-### R3. Unforgeability, checked
+**Built 2026-08-05** — `specs/progress/2026-08-05-cap-root-granted-not-taken.md`.
+`root_cap` can no longer be referenced from ordinary code; the root is granted
+to `main`'s parameter. Two scoped exemptions remain and are documented there:
+`test`/`describe`/`setup` bodies and the REPL, neither of which has an entry
+point to be granted from, and neither of which can reach production code.
+
+It turned out much smaller than this section implies, because **the boundary
+already existed**: `main` could already take a `Cap(IO)`, `check_main_signature`
+already enforced the shape, and the runtime already passed the erased root.
+There was no minting machinery to build — capabilities are erased, so the whole
+gate is compile-time. R2 reduced to making one name unavailable.
+
+What follows was the finding that prompted it.
+
+**Measured 2026-08-05, and it is worse than "the minting surface is too
+wide": there is no minting step to gate.** `root_cap` is an ordinary global of
+type `Cap(IO)`, in scope in every module. A module declaring **no `needs` at
+all** can write `let x = root_cap` and hold the root capability; the only
+diagnostic such a program gets is about its `println`. Narrowing from there to
+any descendant is then free and legitimate, since `cap_narrow` demands exactly
+the parent it now has.
+
+Two consequences worth being explicit about:
+
+- **This bounds what R3 earned.** Stage 1's claim has to be stated as "a
+  capability cannot be fabricated from data", not "a capability can only be
+  received" — see §5. Nothing was received here.
+- **R2 was the cheapest item that materially strengthened the claim**, and
+  unlike R1b it was not a language-wide signature change.
+
+R2 shipped; R1 did not. So the caveat stands and is now the live one: **R2
+moved the root but left `file_read(p)` working regardless.** A program can
+still do everything it could before without ever holding a capability. R2 and
+R1 may not be separable in practice even though this page lists them apart —
+that is the real sequencing question for whoever takes R1.
+
+### R3. Unforgeability, checked — **SHIPPED 2026-08-05**
 
 A capability must not be constructible except by receipt. Concretely, `Cap(X)`
 must be excluded from:
@@ -102,17 +153,104 @@ must be excluded from:
 - default-value construction and zero-initialization,
 - record/variant field positions reachable by a `from_json`-shaped function.
 
-This is a real check, not a proof obligation — a walk over type declarations
-and derive lists. It is cheap and should be built *before* the proof work,
-because it is where a practical break would come from.
+This is a real check, not a proof obligation. It is cheap and should be built
+*before* the proof work, because it is where a practical break would come from.
 
-### R4. Monotone attenuation
+**Built 2026-08-05** — `specs/2026-08-05-cap-unforgeability-design.md` and
+`specs/progress/2026-08-05-cap-unforgeability.md`. Three corrections to what
+this section says above, each found by implementing it:
 
-`cap_narrow` must only move down the lattice. Provable from `Cap_lattice`, but
-it must be *stated and pinned*: the subsumption direction was written
-backwards twice during the sandbox work, and the second time it shipped. A
-property test over the lattice (`∀ a b. narrow a b ⟹ subsumes a b`) belongs
-next to the existing `test_cap_scope.ml` subsumption tests.
+- **It was two vectors, not four.** March has no `unsafe_cast`/`transmute`/
+  coercion builtin and no default-value construction, so the first and third
+  bullets had nothing to close. The live hole was
+  `to_json`/`from_json`/`from_json_events` — the only three builtins typed
+  `poly2 (fun a b -> TArrow (a, b))`, i.e. fully unconstrained — plus
+  `derive Json` over a cap-bearing type.
+- **"A walk over type declarations and derive lists" is right for the derive
+  half and wrong for the other.** The call-site half cannot be a walk at all:
+  `from_json`'s result type is a bare unification variable at the application
+  site, pinned only by later unification, so the check must be a *deferred
+  end-of-module sweep* plus a value restriction. Implemented as a walk it
+  compiles, runs, reports nothing, and passes every test that annotates the
+  type inline.
+- **There was a second hole this section does not mention.** `needs` was
+  reconciled against function SIGNATURES only, so a capability named in a type
+  declaration (`type Handle = { tok : Cap(IO.FileWrite) }`) or a `let`
+  annotation escaped it entirely. Unlike the
+  deserialization hole it needed no unimplemented feature to reach — `root_cap`
+  is ambient (cf. R2), so a console-only module could take the root, narrow it,
+  and bind the result without ever putting a capability in a signature.
+
+Stage 1 of §3 is therefore earned. R4 was pinned alongside it.
+
+### R4. Monotone attenuation — already sound, **PINNED 2026-08-05**
+
+Measured 2026-08-05, both directions:
+
+| | result |
+|---|---|
+| `Cap(IO.Console)` → `Cap(IO.FileWrite)` (widen) | **rejected**: ``expected `IO` but got `IO.Console` `` |
+| `Cap(IO)` → `Cap(IO.FileWrite)` (narrow) | accepted, rc=0 |
+
+So attenuation is monotone today. This item is "pin existing behaviour", not
+"fix a hole" — but it is still worth doing, because the subsumption direction
+was written backwards twice during the sandbox work and shipped once.
+
+Correcting where the enforcement lives, since it is not where you would guess:
+
+- **Compile time is the whole story.** `cap_narrow` is typed such that
+  narrowing to `Cap(IO.FileWrite)` demands the *parent* `Cap(IO)` at the
+  argument, which is what produces the error above. The lattice is enforced
+  structurally through unification, not by a separate lattice call.
+- **The runtime is deliberate erasure, not a gap.** `march_cap_narrow` in
+  `runtime/march_runtime.c` is literally `return cap;`, and `eval.ml` documents
+  why: capabilities are opaque unit sentinels and `mint_cap` is "a no-op alias
+  of cap_narrow" at runtime because the gating is a compile-time check. Do not
+  "fix" the identity function.
+- **The gating that does exist** is `check_mint_cap_sites` in
+  `lib/typecheck/typecheck.ml`, plus `cap_narrow_factory_fns` and
+  `mint_cap_sites` in the env. It enforces that `mint_cap` appears only in a
+  public function of the proof cap's declaring module, and that `mint_cap` is
+  refused for IO caps ("that's `cap_narrow`'s job").
+
+The test was therefore an accept/reject pair over `cap_narrow` in both lattice
+directions — not a property test over a runtime function that does nothing.
+Shipped 2026-08-05 in `test/test_cap_unforgeable.ml` (alongside R3) rather
+than in `test_cap_scope.ml`, because that file tests the pure `Cap_scope`
+functions and these need real programs typechecked. No production change was
+required, exactly as this section predicted.
+
+### R4a. Attenuation does not CHAIN — a prerequisite nobody had noticed
+
+Measured 2026-08-05, and it is a gap in the ocap story rather than in the
+lattice. `cap_narrow` is typed `Cap(IO) -> Cap(a)`: its argument is *literally
+the root*. So a holder of anything narrower cannot attenuate further —
+
+```march
+pfn attenuate(fs : Cap(IO.FileSystem)) : Cap(IO.FileRead) do
+  cap_narrow(fs)                    -- expected `IO` but got `IO.FileSystem`
+end
+```
+
+R4 says attenuation is monotone, and it is. What it does not say is that
+attenuation is only available **to whoever holds the root**. Delegation with
+attenuation at each hop — hand a subsystem `Cap(IO.FileSystem)`, let it hand a
+helper `Cap(IO.FileRead)` — is the core object-capability discipline and is
+*not expressible in March today*. Every narrowing must be performed up at
+`main` and the already-narrowed values threaded down.
+
+The same applies to `mint_cap : Cap(IO) -> Cap(a)`: minting even a *proof* cap
+consumes the root, so a module that mints must be handed root authority.
+
+This matters for sequencing, not for correctness of what shipped: R2 makes
+`main` the sole source, and R1 would make every IO call need a token — and the
+two together make "least privilege threaded down" the normal way to write
+March. That idiom is exactly the one this typing prevents. **Fixing
+`cap_narrow` to accept any ancestor rather than only the root is a
+prerequisite for R1 being usable**, and it is small next to R1 itself: the
+argument type wants to be "some `Cap(P)` where `P` subsumes the result", which
+the lattice already knows how to answer (`Cap_lattice.cap_subsumes`) but
+unification alone cannot express.
 
 ### R5. Effect polymorphism that survives higher-order code
 
@@ -144,7 +282,8 @@ The theorem is about a paper language; the checker is OCaml. Bridging options,
 cheapest first:
 
 1. a conformance corpus pinning every typing rule (March has the machinery —
-   `test/conformance/types/` with accept/reject pairs);
+   `specs/lang/types/{accept,reject}/`, driven by the CI-only `@types-check`
+   alias, which asserts diagnostic *text* and not merely accept/reject);
 2. a differential oracle against a reference implementation of the calculus;
 3. extraction of the checker from the mechanized development.
 
@@ -258,14 +397,14 @@ shippable increment.
 
 | stage | requirements | claim |
 |---|---|---|
-| **0 — today** | shipped | "`needs` is a ceiling on every module, including dependencies that never opted in, verified against emitted code and re-checkable from the artifact" |
-| **1 — unforgeable** | R3, R4 | "capabilities cannot be fabricated, only received and narrowed" |
+| **0** | **shipped** | "`needs` is a ceiling on every module, including dependencies that never opted in, verified against emitted code and re-checkable from the artifact" |
+| **1 — unforgeable** | R3, R4 — **shipped 2026-08-05** | "capabilities cannot be fabricated, only received and narrowed" |
 | **2 — no ambient IO** | R1b, R2 | "a module can only perform IO with authority it was given" |
 | **3 — compositional** | R5 | "…and that holds for higher-order and library code, checked per-definition rather than per-program" |
 | **4 — proved** | R6, R7 | "provably capability-safe for the core language, modulo FFI, compiler correctness, and console egress" |
 | **5 — unqualified** | R9 | not reachable |
 
-Note stage 1 is **independent of everything else** and cheap. It is the only
+Stage 1 was **independent of everything else** and cheap. It is the only
 one that closes a practical attack (fabricate a `Cap` via `from_json`) rather
 than strengthening a claim.
 
@@ -277,19 +416,34 @@ No stage closes console egress (R8a). Every row above should be read as
 
 ## 4. Recommended sequencing
 
-**Now — R3 + R4.** A type-declaration walk excluding `Cap(X)` from derive,
-deserialization, and default-construction positions, plus a lattice property
-test for attenuation monotonicity. Days, not weeks. Closes a real hole and
-needs no language change. **Do this first regardless of whether the rest ever
-happens.**
+**~~Now~~ DONE 2026-08-05 — R3, plus R4 as a regression pin.** R3 was the only
+item on this page that closed a live hole. It cost days, not weeks, and no
+language change, as estimated. R4 rode along and needed no fix — attenuation
+was already monotone (measured — see R4), so it took an accept/reject pair
+pinning both lattice directions.
+
+Both were self-contained: neither depended on R1b, and neither is wasted if the
+effect-row work never happens.
+
+Two things the estimate got wrong, worth carrying into the next item:
+
+- the scope was **half** what this page described (two of R3's four bullets had
+  no vector in the language) but the *mechanism* was harder — a deferred sweep
+  with a value restriction, not the walk this page assumed;
+- auditing R3 turned up an unrelated second hole (signature-only `needs`
+  coverage) that was cheaper to exploit than the one being closed. Expect the
+  same when R8 is audited: **the finding is often adjacent to the thing you
+  went looking at, not inside it.**
 
 **Next — R8 audit.** Answer, with tests rather than reasoning: can a `Cap`
 travel in an actor message? Does hot reload bypass the ceiling? These are
 questions about the system as it exists, and the answers change what today's
 claim may say. Cheap, and the results could invalidate stage-0 wording.
 
-**Then — decide on R1b.** This is the fork. Effect rows over IO are a major
-version and a stdlib-wide signature change. The honest framing for that
+**Then — decide on R1b.** This is the fork, and it is a from-scratch build:
+`lib/effects/` is a 22-line delegation shim, not a foundation. Effect rows
+over IO are a major version and a stdlib-wide signature change. The honest
+framing for that
 decision is: it converts a *whole-program build gate* into a *per-definition
 property*, which is what lets library authors ship a capability-clean library
 without seeing the application. That is the real user-facing win — bigger than
@@ -313,6 +467,24 @@ Defensible today:
 > module, checked against the code the compiler actually emits, enforced as a
 > hard ceiling on every dependency — including ones that never opted in — and
 > readable back off the compiled binary.
+
+Newly defensible as of 2026-08-05 (stage 1, R3/R4):
+
+> A capability in March can only be received. It cannot be deserialized,
+> derived, or cast into existence, and there is no ambient one to pick up —
+> the root is granted to `main` and threaded from there.
+
+R3 closed the fabrication-from-data route; R2 closed the ambient-root route.
+With both shipped, "can only be received" is now literally true **of the
+capability value**, which is what makes this sentence sayable at all — before
+R2 it was not, because the root was a global in scope everywhere.
+
+One qualifier still has to travel with it, and it is the one a reader will
+otherwise supply wrongly: this says a module cannot obtain a capability it was
+not given. It does **not** say a module needs one to perform IO. Built-in IO
+is still ambient (R1), so `file_read(p)` compiles with no capability in scope.
+"Capabilities are unforgeable" and "authority is required to act" are different
+claims, and March currently has the first.
 
 Paired, wherever the word "sandbox" appears, with the exclusion that is easiest
 to forget and most likely to bite:

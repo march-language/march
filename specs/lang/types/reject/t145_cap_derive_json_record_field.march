@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: `Cap(IO.FileWrite)` cannot be deserialized
+-- Capability unforgeability (R3), derive over a record field (2026-08-05).
+--
+-- The record spelling of reject/t144. Kept as a separate file because the
+-- derived record decoder and the derived variant decoder are built by
+-- different branches of `expand_derive` (TDRecord vs TDVariant), so a check
+-- wired into only one of them would still pass the other's test.
+--
+-- The narrower `IO.FileWrite` here rather than `IO` is deliberate: it proves
+-- the rejection is about `Cap` appearing at all, not about the root
+-- capability specifically.
+mod DeriveRecordForge do
+  needs IO
+
+  type Handle = { id : Int, tok : Cap(IO.FileWrite) }
+  derive Json for Handle
+
+  fn main() do
+    println("codec generated over a capability field")
+  end
+end
