@@ -669,7 +669,8 @@ let setup_jit_runtime () =
        the symbols these tests need. *)
     let extra_src_list = List.filter_map opt_path [
       "march_scheduler.c"; "march_message.c"; "march_heap.c";
-      "march_gc.c"; "sha1.c"; "march_extras.c"; "base64.c"; "march_ffi.c";
+      "march_gc.c"; "sha1.c"; "march_extras.c"; "march_ctx_escape.c";
+      "base64.c"; "march_ffi.c";
       "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
       "march_monitor_registry.c";
     ] in

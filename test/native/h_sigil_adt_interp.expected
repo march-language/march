@@ -1,0 +1,17 @@
+tag0=<p>#&lt;tag:0&gt;</p>
+tag1=<p>#&lt;tag:1&gt;</p>
+tag2=<p>#&lt;tag:2&gt;</p>
+nullary=<p>#&lt;tag:0&gt;</p>
+string=<p>&lt;b&gt;x&lt;/b&gt;</p>
+iolist=<p><i>inner</i></p>
+safe=<p><b>bold</b></p>
+some=<p>&lt;script&gt;</p>
+none=<p>nil</p>
+ok=<p>#&lt;tag:0&gt;</p>
+err=<p>#&lt;tag:1&gt;</p>
+list=<p>#&lt;tag:1&gt;</p>
+record=<p>#&lt;tag:0&gt;</p>
+tuple=<p>#&lt;tag:0&gt;</p>
+poly_tag1=<p>#&lt;tag:1&gt;</p>
+poly_tag2=<p>#&lt;tag:2&gt;</p>
+poly_iolist=<p>#&lt;tag:2&gt;</p>

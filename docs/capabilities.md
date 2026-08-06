@@ -5,9 +5,9 @@ nav_order: 5.6
 permalink: /docs/capabilities/
 ---
 
-# Capabilities
+# Capabilities: March's Effect & Capability System
 
-March makes side effects **visible in your types** — zero runtime overhead, enforced at compile time. This guide explains what capabilities are, when to reach for each kind, when to leave them alone, and how they compose.
+March is a **capability-based language**: side effects are **visible in your types** — zero runtime overhead, enforced at compile time. This guide explains what capabilities are, when to reach for each kind, when to leave them alone, and how they compose.
 
 ---
 

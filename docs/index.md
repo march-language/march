@@ -13,7 +13,7 @@ permalink: /
 
 **Elixir's concurrency model. ML's type safety. Native performance.**
 
-March is a statically-typed functional language built for concurrent and distributed systems — the kind you'd normally reach for Elixir or Erlang to build, but with a static type system, algebraic data types, and compilation to native binaries via LLVM.
+March is a statically-typed, capability-based functional language built for concurrent and distributed systems — the kind you'd normally reach for Elixir or Erlang to build, but with a static type system, a compile-time effect system, algebraic data types, and compilation to native binaries via LLVM.
 
 Write code that reads like Elixir. Get compile-time guarantees that your message protocols are correct, your resources aren't leaked, and your actor supervision trees handle faults the way you expect. Run at native speed with no garbage collector pauses.
 
