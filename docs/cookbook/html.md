@@ -7,7 +7,7 @@ scrollmd: true
 
 # HTML
 
-March's `~H` sigil generates safe HTML. String interpolations inside `~H` are auto-escaped — user input can't inject markup. `Html.raw` opts out for trusted content you've already sanitized.
+March's `~H` sigil generates HTML with **contextual auto-escaping**: every `${...}` is escaped for the exact place it lands — element content, an attribute, a URL, CSS, or JavaScript — worked out at compile time. You never pick an escaper. The `Html.trust_*` functions opt out for content you produced yourself. See [Sigils & Templating]({{ site.baseurl }}/docs/sigils/) for the full picture.
 
 ---
 
@@ -34,16 +34,43 @@ end
 
 ---
 
-## Trusted HTML
+## Escaping follows the position
 
-`Html.raw` marks a string as already safe — `~H` won't escape it:
+The same value is treated differently depending on where you put it:
 
 ```march
-let icon = Html.raw("<svg>...</svg>")
+let u = "javascript:alert(1)"
+~H"<a href=\"${u}\">x</a>"        -- <a href="about:invalid#zSoyz">x</a>
+
+let q = "a b&c"
+~H"<a href=\"/s?q=${q}\">x</a>"   -- <a href="/s?q=a%20b%26c">x</a>
+
+let col = "var(--accent)"
+~H"<div style=\"color:${col}\">"  -- <div style="color:var(--accent)">
+```
+
+A URL that fails the scheme allowlist becomes `about:invalid#zSoyz`. Positions no
+escaping can make safe — an attribute name, an element name, inside a comment — are
+compile errors.
+
+## Trusted HTML
+
+`Html.trust_html` marks a string as real markup, so `~H` inserts it verbatim:
+
+```march
+let icon = Html.trust_html("<svg>...</svg>")
 let html = ~H"<button>${icon} Click me</button>"
 ```
 
-Use `Html.raw` only for content you've verified or generated yourself, never for user input.
+**Trust names a context and does not travel out of it.** The same value in an `href` is
+still escaped, because trusting something as HTML says nothing about it being a safe
+URL. Use `Html.trust_url`, `trust_css`, `trust_js` or `trust_attr` when the target is
+one of those.
+
+Use these only for content you verified or generated yourself, never for user input.
+
+> `Html.raw` still works and behaves as HTML trust, but it is deprecated: being
+> context-free, it cannot say *where* the content is trusted. Prefer `Html.trust_html`.
 
 ---
 
@@ -55,7 +82,7 @@ fn layout(title : String, body : IOList) : IOList do
   <!DOCTYPE html>
   <html>
     <head><title>${title}</title></head>
-    <body>${Html.raw(IOList.to_string(body))}</body>
+    <body>${body}</body>
   </html>
   """
 end

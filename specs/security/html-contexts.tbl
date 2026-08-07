@@ -111,6 +111,17 @@ attrvalue,*,*,unquoted    | cls+:[ \t\r\n] |  | beforeattrname,=,normal,none |
 attrvalue,*,url,*         | interp         |  | =,=,=,=                  |
 attrvalue,*,url,*         | any            |  | =,=,urlmid,=             |
 
+# -- CSS url() gets its own context --
+# A hole inside url(...) is a URL, not a CSS value. Escaping it as CSS mangles
+# the slashes and breaks the reference; escaping it as a plain URL would leave
+# `)` free to close the construct. `ilit` because `URL(` is valid CSS.
+# These MUST precede the generic style/stylevalue rows below.
+attrvalue,*,style,*       | ilit:"url("    |  | =,=,cssurl,=             |
+attrvalue,*,stylevalue,*  | ilit:"url("    |  | =,=,cssurl,=             |
+attrvalue,*,cssurl,*      | lit:")"        |  | =,=,stylevalue,=         |
+attrvalue,*,cssurl,*      | interp         |  | =,=,=,=                  |
+attrvalue,*,cssurl,*      | any            |  | =,=,=,=                  |
+
 # -- CSS position tracking --
 # A style attribute alternates between DECLARATION and VALUE positions, and the
 # two need different escapers: a declaration list may contain `:` and `;`, a
@@ -130,6 +141,12 @@ attrvalue,*,*,*           | any            |  | =,=,=,=                  |
 # ── RCDATA / RAW TEXT (script, style, textarea, title bodies) ────────────
 # Exit only on the MATCHING close tag, case-insensitively -- `</b>` inside a
 # script string must not be mistaken for the end of the script.
+# A url() inside a <style> body needs the same context as one in a style
+# attribute -- the language nesting is identical, only the outer wrapper differs.
+rcdata,style,*,*      | ilit:"url("       |  | =,=,cssurl,=            |
+rcdata,style,cssurl,* | lit:")"           |  | =,=,normal,=            |
+rcdata,style,cssurl,* | interp            |  | =,=,=,=                 |
+
 rcdata,script,*,*     | ilit:"</script"   |  | closetagname,normal,=,= |
 rcdata,style,*,*      | ilit:"</style"    |  | closetagname,normal,=,= |
 rcdata,textarea,*,*   | ilit:"</textarea" |  | closetagname,normal,=,= |

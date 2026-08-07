@@ -1,0 +1,47 @@
+-- A CSS url(...) gets its own parse context (Task: close the subsidiary-automata
+-- gap recorded in specs/todos/2026-08-06-ctxesc-no-subsidiary-automata.md).
+--
+-- A hole inside url() must be safe in the INTERSECTION of three languages: a
+-- URL (the scheme allowlist applies), a CSS url-token (it must not close the
+-- paren), and -- when the CSS is in a style attribute -- an HTML attribute
+-- value. Neither existing escaper worked:
+--
+--   esc_css   mangled the slashes, so url(/img/logo.png) came out as
+--             url(\2F img\2F logo.png) and the image never loaded
+--   esc_url_*  left `)` alone, so a value could close the url() and write CSS
+--
+-- Percent-encoding is the right tool because the URL layer decodes it AFTER
+-- CSS and HTML have finished parsing, so the escape survives meaning what it
+-- said.
+--
+-- Compiled/interpreted golden diff.
+mod CssUrl do
+  fn main() : Unit do
+    -- legitimate URLs must survive intact
+    let a = "/img/logo.png"
+    println("rel-attr : " ++ IOList.to_string(~H"<div style=\"background:url(${a})\">x</div>"))
+    let b = "https://cdn.example/a/b.png?v=2&x=1"
+    println("abs-query: " ++ IOList.to_string(~H"<div style=\"background:url(${b})\">x</div>"))
+    let c = "/img/logo.png"
+    println("rel-body : " ++ IOList.to_string(~H"<style>a{background:url(${c})}</style>"))
+    -- hostile schemes rejected
+    let d = "javascript:alert(1)"
+    println("js-attr  : " ++ IOList.to_string(~H"<div style=\"background:url(${d})\">x</div>"))
+    println("js-body  : " ++ IOList.to_string(~H"<style>a{background:url(${d})}</style>"))
+    -- must not CLOSE the url() and write new CSS
+    let e = ") ;background:red;a:url("
+    println("breakout : " ++ IOList.to_string(~H"<div style=\"background:url(${e})\">x</div>"))
+    -- must not close the HTML attribute
+    let f = "\" onload=\"alert(1)"
+    println("attr-out : " ++ IOList.to_string(~H"<div style=\"background:url(${f})\">x</div>"))
+    -- must not close a <style> element
+    let g = "x</style><script>alert(1)</script>"
+    println("style-out: " ++ IOList.to_string(~H"<style>a{background:url(${g})}</style>"))
+    -- a plain CSS value is unaffected by the new context
+    let h = "var(--text-muted)"
+    println("plain-css: " ++ IOList.to_string(~H"<div style=\"color:${h}\">x</div>"))
+    -- uppercase URL( must enter the same context
+    let i = "javascript:alert(1)"
+    println("upper    : " ++ IOList.to_string(~H"<div style=\"background:URL(${i})\">x</div>"))
+  end
+end

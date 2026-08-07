@@ -184,6 +184,37 @@ let css ~decl s =
     Buffer.contents b
   end
 
+(* CSS url(...) — safe in the intersection of URL, CSS url-token and (when the
+   CSS is in a style attribute) HTML attribute value. Mirrors esc_css_url in
+   runtime/march_ctx_escape.c.
+
+   Neither existing escaper works: the CSS one mangles slashes, so a good
+   url(/img/logo.png) broke; the URL one leaves `)` free to close the construct.
+   Percent-encoding is right because the URL layer decodes it AFTER CSS and HTML
+   have parsed, so the escape survives meaning what it said. *)
+let css_url_safe c =
+  is_unreserved c
+  || (match c with
+      | '/' | ':' | '?' | '#' | '@' | '[' | ']'
+      | '!' | '$' | '&' | '*' | '+' | ',' | ';' | '=' | '%' -> true
+      (* NOT safe, each for a reason: parens close or nest the url-token;
+         quote and apostrophe close the CSS string or the HTML attribute;
+         angle brackets are defensive; backslash starts a CSS escape; and
+         space or control bytes terminate a url-token. *)
+      | _ -> false)
+
+let css_url s =
+  if not (url_scheme_is_allowed s) then "about:invalid#zSoyz"
+  else begin
+    let b = Buffer.create (String.length s) in
+    String.iter
+      (fun c ->
+         if css_url_safe c then Buffer.add_char b c
+         else (Buffer.add_char b '%'; buf_add_hex2 b c))
+      s;
+    Buffer.contents b
+  end
+
 let apply (e : C.escaper) s =
   match e with
   | C.EscHtml -> html_like ~attr:false s
@@ -192,13 +223,15 @@ let apply (e : C.escaper) s =
   | C.EscUrlWhole -> url_whole s
   | C.EscCssValue -> css ~decl:false s
   | C.EscCssDecl -> css ~decl:true s
+  | C.EscCssUrl -> css_url s
   | C.EscJsString -> js_string s
   | C.EscNone -> s
 
 let apply_id id s =
   match List.find_opt (fun e -> C.escaper_id e = id)
           [ C.EscHtml; C.EscAttr; C.EscUrlComponent; C.EscUrlWhole;
-            C.EscCssValue; C.EscJsString; C.EscNone; C.EscCssDecl ] with
+            C.EscCssValue; C.EscJsString; C.EscNone; C.EscCssDecl;
+            C.EscCssUrl ] with
   | Some e -> apply e s
   | None ->
     invalid_arg

@@ -47,7 +47,7 @@ Four fields, exactly as the paper describes:
 |---|---|
 | `state` | `pcdata` `rcdata` `tagname` `closetagname` `beforeattrname` `afterattrname` `beforeattrvalue` `attrvalue` `comment` |
 | `element` | `normal` `script` `style` `textarea` `title` |
-| `attr` | `normal` `url` `urlmid` `style` `stylevalue` `script` |
+| `attr` | `normal` `url` `urlmid` `style` `stylevalue` `cssurl` `script` |
 | `delim` | `none` `single` `double` `unquoted` `doublesubst` |
 
 `element` tracks which element's content we are inside, because `<script>` and
@@ -145,6 +145,7 @@ row — one less thing to get out of sync:
 | `attrvalue` with `attr = urlmid` | percent-encode |
 | `attrvalue` with `attr = style`, or `rcdata` in `style` | CSS **declaration** escape |
 | `attrvalue` with `attr = stylevalue` | CSS **value** escape |
+| `attr = cssurl`, or `rcdata` in `style` inside `url(` | CSS **url** escape |
 | `attrvalue` with `attr = script`, or `rcdata` in `script` | JS string escape |
 
 ## Escaper implementations
@@ -168,6 +169,22 @@ might first appear:
   (`style="${'color: red'}"`) will not work: the colon is escaped. This is
   intended. CSS has too many routes to a URL or an expression for a denylist to
   be credible, and a hole should be a *value*, not a declaration.
+
+`cssurl` is the one place three languages nest at once. A hole inside
+`url(...)` must be safe as a URL (so the scheme allowlist applies), as a CSS
+url-token (so it must not close the paren or the quoting), and — when the CSS
+sits in a `style` attribute — as an HTML attribute value. Neither the CSS nor
+the URL escaper alone works: CSS escaping mangles the slashes and breaks a
+perfectly good `url(/img/logo.png)`, while URL escaping leaves `)` free to close
+the construct and start writing CSS. The `css_url` escaper runs the scheme
+allowlist and then percent-encodes only what is structural in CSS or HTML —
+percent-encoding being the right tool because the URL layer decodes it *after*
+CSS and HTML have parsed.
+
+This is the nearest thing here to the paper's subsidiary automata. It is still a
+flat context rather than a nested automaton with codecs; see
+`specs/todos/2026-08-06-ctxesc-no-subsidiary-automata.md` for what that would
+buy and why it was not needed for this case.
 
 **The `MARCH_ESC_*` ids in `march_ctx_escape.h` must match `Context.escaper_id`
 in `lib/ctxesc/context.ml`.** That pairing is the one cross-language contract
