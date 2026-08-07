@@ -12120,8 +12120,174 @@ let test_or_pattern_binding_type_mismatch_rejected () =
   Alcotest.(check bool) "same binder at differing types: rejected" true
     (has_errors ctx)
 
+(* ── Parsed sigils refuse interpolation ───────────────────────────────────
+   ~xml / ~toml / ~yaml hand their handler a single already-concatenated string
+   which the handler then PARSES, so an interpolated value is spliced into the
+   source text before parsing and can change the parsed STRUCTURE. Measured
+   before this was refused:
+
+     ~xml"<user><name>${v}</name></user>" with v = "</name><admin>true</admin><name>"
+       -> <user><name/><admin>true</admin><name/></user>     3 children, not 1
+     ~toml"name = \"${v}\""  -> injected a whole new key
+     ~yaml"name: ${v}"      -> injected a whole new key
+
+   ~H is different: it must emit TEXT, so it escapes per parse context. These
+   produce a STRUCTURE, where the sound fix is supplying values as data rather
+   than as source text. Until a handler offers that, the hole is refused. *)
+
+(* The refusal is raised in the DESUGAR pass, so drive it the way the
+   satisfy/derive desugar-error tests do. *)
+let sigil_interp_errors src =
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+       if d.March_errors.Errors.severity = March_errors.Errors.Error
+       then Some d.March_errors.Errors.message else None)
+    errors.March_errors.Errors.diagnostics
+
+let sigil_contains_sub s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+  m = 0 || go 0
+
+let test_xml_sigil_refuses_interpolation () =
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~xml"<a>${v}</a>" end end|} in
+  Alcotest.(check bool) "an error is reported" true (msgs <> []);
+  Alcotest.(check bool) "it names the sigil" true
+    (List.exists (fun m -> sigil_contains_sub m "~xml sigil") msgs)
+
+let test_toml_sigil_refuses_interpolation () =
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~toml"k = ${v}" end end|} in
+  Alcotest.(check bool) "it names the sigil" true
+    (List.exists (fun m -> sigil_contains_sub m "~toml sigil") msgs)
+
+let test_yaml_sigil_refuses_interpolation () =
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~yaml"k: ${v}" end end|} in
+  Alcotest.(check bool) "it names the sigil" true
+    (List.exists (fun m -> sigil_contains_sub m "~yaml sigil") msgs)
+
+let test_parsed_sigils_without_holes_still_work () =
+  let msgs = sigil_interp_errors {|mod T do fn f() do ~xml"<a>b</a>" end end|} in
+  Alcotest.(check bool) "no error for a literal document" true (msgs = [])
+
+let test_h_sigil_still_allows_interpolation () =
+  (* ~H must keep working -- it escapes per context rather than refusing. *)
+  let msgs =
+    sigil_interp_errors
+      {|mod T do fn f(v : String) do ~H"<p>${v}</p>" end end|} in
+  Alcotest.(check bool) "~H is unaffected" true
+    (not (List.exists (fun m -> sigil_contains_sub m "Cannot interpolate into a ~") msgs))
+
+let sigil_interp_suite =
+  ( "parsed_sigil_interpolation", [
+      Alcotest.test_case "~xml refuses a hole" `Quick
+        test_xml_sigil_refuses_interpolation;
+      Alcotest.test_case "~toml refuses a hole" `Quick
+        test_toml_sigil_refuses_interpolation;
+      Alcotest.test_case "~yaml refuses a hole" `Quick
+        test_yaml_sigil_refuses_interpolation;
+      Alcotest.test_case "a literal document is still fine" `Quick
+        test_parsed_sigils_without_holes_still_work;
+      Alcotest.test_case "~H is unaffected" `Quick
+        test_h_sigil_still_allows_interpolation;
+    ] )
+
+(* ── ~H CSRF auto-injection vs an explicit token ──────────────────────────
+   The desugar injects a hidden CSRF input after a mutating <form> whenever a
+   `conn` binding is in scope. If the author ALSO interpolates a token, both
+   were emitted -- silently when the explicit call returns IOList, and as
+   visibly escaped markup when it returns String.
+
+   Detection is scoped PER FORM, and the two-form case below is why: a
+   template-wide check would drop injection for EVERY form as soon as one had
+   an explicit token, turning a cosmetic duplicate into an UNPROTECTED form. *)
+
+let csrf_src body =
+  Printf.sprintf
+    {|mod T do
+      mod CSRF do
+        fn tag_string(conn) : String do "[TOK]" end
+        fn tag(conn) : IOList do IOList.from_string("[TOK]") end
+      end
+      fn render(conn) do IOList.to_string(%s) end
+    end|} body
+
+let csrf_tokens_in body =
+  let env = eval_with_html (csrf_src body) in
+  let out = match call_fn env "render" [March_eval.Eval.VString "c"] with
+    | March_eval.Eval.VString s -> s
+    | _ -> Alcotest.fail "render did not return a String" in
+  (* count occurrences of the token marker *)
+  let n = String.length out and m = String.length "[TOK]" in
+  let rec count i acc =
+    if i + m > n then acc
+    else count (i + 1) (if String.sub out i m = "[TOK]" then acc + 1 else acc)
+  in
+  (out, count 0 0)
+
+let test_csrf_auto_injects_one () =
+  let (_, n) = csrf_tokens_in {|~H"<form method=\"post\">a</form>"|} in
+  Alcotest.(check int) "auto-injection emits exactly one token" 1 n
+
+let test_csrf_explicit_iolist_not_duplicated () =
+  let (_, n) = csrf_tokens_in {|~H"<form method=\"post\">${CSRF.tag(conn)}</form>"|} in
+  Alcotest.(check int) "explicit IOList token is not duplicated" 1 n
+
+let test_csrf_explicit_string_not_duplicated () =
+  let (out, n) =
+    csrf_tokens_in {|~H"<form method=\"post\">${CSRF.tag_string(conn)}</form>"|} in
+  Alcotest.(check int) "explicit String token is not duplicated" 1 n;
+  (* the String form used to render visibly escaped markup onto the page *)
+  Alcotest.(check bool) "no escaped markup leaks into the output" false
+    (let n' = String.length out in
+     let rec has i = i + 4 <= n' && (String.sub out i 4 = "&lt;" || has (i + 1)) in
+     has 0)
+
+let test_csrf_two_forms_only_one_explicit () =
+  (* THE case: form 1 has an explicit token, form 2 has none. Form 2 must STILL
+     be injected -- otherwise this "fix" would create an unprotected form. *)
+  let (_, n) =
+    csrf_tokens_in
+      {|~H"<form method=\"post\">${CSRF.tag(conn)}</form><form method=\"post\">b</form>"|} in
+  Alcotest.(check int) "one token per form, both forms covered" 2 n
+
+let test_csrf_two_forms_explicit_second () =
+  let (_, n) =
+    csrf_tokens_in
+      {|~H"<form method=\"post\">a</form><form method=\"post\">${CSRF.tag(conn)}</form>"|} in
+  Alcotest.(check int) "order does not matter" 2 n
+
+let test_csrf_get_form_never_injected () =
+  let (_, n) = csrf_tokens_in {|~H"<form method=\"get\">a</form>"|} in
+  Alcotest.(check int) "a GET form is never injected" 0 n
+
+let csrf_suite =
+  ( "h_csrf_explicit_token", [
+      Alcotest.test_case "auto-injection emits one" `Quick
+        test_csrf_auto_injects_one;
+      Alcotest.test_case "explicit IOList token not duplicated" `Quick
+        test_csrf_explicit_iolist_not_duplicated;
+      Alcotest.test_case "explicit String token not duplicated, no escaped leak" `Quick
+        test_csrf_explicit_string_not_duplicated;
+      Alcotest.test_case "two forms, one explicit: both still covered" `Quick
+        test_csrf_two_forms_only_one_explicit;
+      Alcotest.test_case "two forms, explicit second: both still covered" `Quick
+        test_csrf_two_forms_explicit_second;
+      Alcotest.test_case "GET form never injected" `Quick
+        test_csrf_get_form_never_injected;
+    ] )
+
 let compiler_suites =
   [
+      sigil_interp_suite;
+      csrf_suite;
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
       ("cap_markers", Test_cap_markers.tests);
