@@ -296,6 +296,115 @@ these nodes until Phase 3, so nothing has executed a hole-fill. That is Phase
 
 Full suite green: compiler 797, eval 256, codegen 555, stdlib 833.
 
+## Phase 3 prototype (2026-08-07) — measured, then set aside. NOT in the tree.
+
+A working destination-passing rewrite was built and benchmarked to answer "is
+this actually an improvement?" **It is not, yet**, so it was deliberately NOT
+landed — the code is not in this repo. The measurements below are the reason
+phases 4A/4B exist and are worth keeping even though the prototype is gone.
+
+`Trmc.transform_module` built `f$dps(params, dst)` from an `Eligible` function
+with exactly one modulo-cons site; v1 refused intervening lets between the call
+and the `EAlloc`, which removes the effect-reordering hazard entirely.
+
+Output is **correct** on both benchmarks. Measured against the same 20k/2000
+workload:
+
+| variant | time | peak RSS |
+|---|---:|---:|
+| natural, TRMC **off** | ~0.29s | 4.37 MB |
+| natural, TRMC **on** | ~1.00s | **3.44 MB** |
+| accumulator + `reverse` | ~0.17s | 3.41 MB |
+
+**The memory prediction held**: peak RSS drops to accumulator levels, because
+the retained reuse tokens are gone. **The time is 3.5x WORSE.** Two causes, both
+visible in the post-Perceus TIR and both squarely Phase 4 work:
+
+### A. FBIP reuse is destroyed
+
+Before: `reuse xs as List.Cons($t28941, $t28942)` — zero allocations on a
+unique list. After:
+
+```
+dec_rc xs;
+let $trmc52 : List.Cons = alloc_hole List.Cons($t28941, _) in
+```
+
+`Perceus_fbip.same_arity` only pairs a scrutinee drop with an `EAlloc`, never an
+`EAllocHole`, so every iteration now allocates. That is n allocations per
+traversal where there were 0 — the dominant cost.
+
+This is the paper's "TRMC interacts well with reuse analysis" claim, and it does
+**not** come for free: the reuse analysis has to learn to produce a
+reuse-with-hole (`reuse xs as Cons(h, _)`). That is the single highest-value
+next step.
+
+### B. A post-call drop breaks the tail call
+
+```
+$dst.1 <- $trmc52;
+nmap$dps(t, $trmc52);
+dec_rc $trmc52          <-- should not exist
+```
+
+The cell was moved into `$dst`, then passed as the recursive call's destination.
+Perceus's `ESetField` case correctly declines to treat the STORE as a last use,
+but the subsequent use-as-argument is still the last one, so a post-call drop
+lands anyway. Consequences:
+
+1. The recursive call is no longer in tail position, so `Llvm_tco` cannot make
+   it a loop — **the O(n) stack is still there**. TRMC's whole point is missed.
+2. It is a drop of a cell the parent now owns through its field.
+
+Fix direction: `$dst`-role parameters must be borrowed at the call site, and a
+value moved by `ESetField` must be excluded from post-call drops for the rest of
+its scope — not just at the store.
+
+### What is NOT established
+
+Cause B is read off the TIR, not demonstrated as a crash. **ASAN is unusable
+here**: `MARCH_SANITIZE=1` hangs on this program with TRMC *off* as well, so the
+hang is a pre-existing property of that build in this environment and proves
+nothing about TRMC. Any future memory-safety claim about this transformation
+needs a working sanitizer path first.
+
+### Verdict
+
+The structural transformation is sound and the memory result confirms the
+model; the time result is gated on (A) and (B), both Phase 4 work. The
+prototype was reverted rather than landed gated — see below for what replaced
+it as coverage.
+
+### What the prototype DID establish about Phase 2
+
+Phase 2's own tests go straight from hand-built TIR to `emit_module`, skipping
+every intermediate pass — so the `EAllocHole`/`ESetField` arms in ~20 files
+(mono, defun, perceus, escape, dce, cprop, inline, ...) were written but
+unexercised. The prototype was the first thing to push hole-bearing TIR through
+the whole pipeline at `--opt 2`, and it produced correct programs. That is real
+validation of those arms.
+
+Since the prototype is not in the tree, that coverage is now provided directly
+by `test/test_trmc.ml`'s `trmc-pipeline` group, which runs a hole-bearing module
+through `mono -> defun -> perceus -> escape` and asserts:
+
+- both nodes survive intact;
+- the resulting IR still passes the LLVM verifier;
+- **no drop is emitted for the value moved into the hole** — pinning the
+  ownership-move rule that Phase 4B depends on. Verified non-vacuous: the
+  stored variable is still present under its own name post-pipeline, and the
+  pass chain demonstrably ran (Perceus inserted RC ops into an RC-free fixture).
+
+### One open question for the IR surface
+
+Fixing (A) means expressing "reuse this cell, write field 0, leave field 1 a
+hole". That cannot be built from the current nodes: `EReuse (a, ty, args)`
+demands every field, and unlike a fresh `calloc`'d cell a REUSED cell's hole
+slot holds a stale live pointer, so it must be explicitly cleared rather than
+left alone. The likely shape is `EReuse` gaining a hole index, mirroring
+`EAllocHole` — a small amendment to the IR surface that will land after this
+one.
+
 ### Verdict on phases 2–5
 
 19 functions, all one constructor shape, plus one partial. That is a real but

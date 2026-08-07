@@ -236,6 +236,119 @@ let test_hole_slot_is_written_once () =
   Alcotest.(check int) "the hole's slot is stored exactly once (the fill)"
     1 (count 24)
 
+(* ── Phase 2: the nodes must SURVIVE the pass pipeline ───────────────────────
+   The two tests above go straight from hand-built TIR to [emit_module], which
+   skips every intermediate pass.  That leaves the EAllocHole/ESetField arms in
+   ~20 files (mono, defun, perceus, escape, dce, cprop, inline, ...) written but
+   unexercised — a pass that silently dropped or mangled a hole would not be
+   caught anywhere.
+
+   This pushes a hole-bearing module through the same sequence the real driver
+   uses (mono -> defun -> perceus -> escape) and checks the nodes come out the
+   other side intact, with IR that still verifies.
+
+   It also pins the ownership rule Phase 4 depends on: ESetField MOVES the
+   stored value into the object, so Perceus must NOT treat the store as that
+   value's last use and drop it there.  Getting this wrong is a double-free of
+   a cell the parent now owns through its field. *)
+
+let count_nodes (m : Tir.tir_module) : int * int =
+  let holes = ref 0 and sets = ref 0 in
+  let rec go e =
+    match e with
+    | Tir.EAllocHole _ -> incr holes
+    | Tir.ESetField _ -> incr sets
+    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> go a; go b
+    | Tir.ELetRec (fns, b) -> List.iter (fun fd -> go fd.Tir.fn_body) fns; go b
+    | Tir.ECase (_, brs, def) ->
+      List.iter (fun br -> go br.Tir.br_body) brs;
+      Option.iter go def
+    | _ -> ()
+  in
+  List.iter (fun (fd : Tir.fn_def) -> go fd.Tir.fn_body) m.Tir.tm_fns;
+  (!holes, !sets)
+
+(* Every EDecRC naming [name], anywhere in the module. *)
+let decrc_count (m : Tir.tir_module) (name : string) : int =
+  let n = ref 0 in
+  let hit a = match a with
+    | Tir.AVar v -> String.equal v.Tir.v_name name
+    | _ -> false
+  in
+  let rec go e =
+    match e with
+    | Tir.EDecRC a | Tir.EAtomicDecRC a | Tir.EFree a -> if hit a then incr n
+    | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> go a; go b
+    | Tir.ELetRec (fns, b) -> List.iter (fun fd -> go fd.Tir.fn_body) fns; go b
+    | Tir.ECase (_, brs, def) ->
+      List.iter (fun br -> go br.Tir.br_body) brs;
+      Option.iter go def
+    | _ -> ()
+  in
+  List.iter (fun (fd : Tir.fn_def) -> go fd.Tir.fn_body) m.Tir.tm_fns;
+  !n
+
+let run_pipeline (m : Tir.tir_module) : Tir.tir_module =
+  m
+  |> March_tir.Mono.monomorphize
+  |> March_tir.Defun.defunctionalize
+  |> March_tir.Perceus.perceus
+  |> March_tir.Escape.escape_analysis
+
+let rec rc_ops (e : Tir.expr) : int =
+  match e with
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EFree _ -> 1
+  | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> rc_ops a + rc_ops b
+  | Tir.ELetRec (fns, b) ->
+    List.fold_left (fun n fd -> n + rc_ops fd.Tir.fn_body) (rc_ops b) fns
+  | Tir.ECase (_, brs, def) ->
+    List.fold_left (fun n br -> n + rc_ops br.Tir.br_body)
+      (Option.fold ~none:0 ~some:rc_ops def) brs
+  | _ -> 0
+
+let module_rc_ops (m : Tir.tir_module) : int =
+  List.fold_left (fun n (fd : Tir.fn_def) -> n + rc_ops fd.Tir.fn_body) 0
+    m.Tir.tm_fns
+
+let test_nodes_survive_pass_pipeline () =
+  let before = trmc_hole_module () in
+  Alcotest.(check (pair int int)) "fixture starts with one of each"
+    (1, 1) (count_nodes before);
+  let after = run_pipeline before in
+  (* Non-vacuousness: a survival test is worthless if the passes never touched
+     the module.  Perceus starts from RC-free TIR, so a nonzero RC-op count
+     afterwards proves the pipeline actually ran over this fixture. *)
+  Alcotest.(check int) "fixture starts RC-free" 0 (module_rc_ops before);
+  Alcotest.(check bool) "the pipeline actually ran (Perceus inserted RC ops)"
+    true (module_rc_ops after > 0);
+  Alcotest.(check (pair int int))
+    "EAllocHole and ESetField survive mono -> defun -> perceus -> escape"
+    (1, 1) (count_nodes after)
+
+let test_pipeline_output_still_verifies () =
+  let after = run_pipeline (trmc_hole_module ()) in
+  let ir = March_tir.Llvm_emit.emit_module after in
+  let path = Filename.temp_file "march_trmc_pipeline" ".ll" in
+  let oc = open_out path in
+  output_string oc ir; close_out oc;
+  let result = Test_helpers.verify_llvm_ir_file path in
+  Sys.remove path;
+  match result with
+  | `Ok | `NoTool -> ()
+  | `Invalid out ->
+    Alcotest.failf "post-pipeline IR failed the LLVM verifier:\n%s" out
+
+(* Ownership: `n` is stored into `c` by ESetField and never read again.  If
+   Perceus treated the store as `n`'s last use it would drop it there, leaving
+   `c`'s field pointing at freed memory.  The store is a MOVE — `c`'s own
+   lifetime releases the value — so no drop of `n` may be emitted at all. *)
+let test_setfield_is_an_ownership_move () =
+  let after = run_pipeline (trmc_hole_module ()) in
+  Alcotest.(check int)
+    "no drop is emitted for the value moved into the hole"
+    0 (decrc_count after "n")
+
 let suites = [
   "trmc", [
     Alcotest.test_case "modulo-cons is eligible"        `Quick test_modulo_cons_eligible;
@@ -249,5 +362,10 @@ let suites = [
   "trmc-ir", [
     Alcotest.test_case "alloc-hole emits verifiable IR"  `Quick test_alloc_hole_emits_verifiable_ir;
     Alcotest.test_case "hole slot written once by fill"  `Quick test_hole_slot_is_written_once;
+  ];
+  "trmc-pipeline", [
+    Alcotest.test_case "nodes survive the pass pipeline"  `Quick test_nodes_survive_pass_pipeline;
+    Alcotest.test_case "post-pipeline IR verifies"        `Quick test_pipeline_output_still_verifies;
+    Alcotest.test_case "ESetField is an ownership move"   `Quick test_setfield_is_an_ownership_move;
   ]
 ]
