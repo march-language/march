@@ -77,6 +77,18 @@ let rec string_of_expr = function
     "(" ^ String.concat ", " (List.map string_of_atom args) ^ ")"
   | ESeq (e1, e2) ->
     string_of_expr e1 ^ ";\n" ^ string_of_expr e2
+  (* TRMC: the hole is printed as `_` at its field position so the arity and
+     the hole's index are both readable straight off the dump. *)
+  | EAllocHole (ty, args, hole) ->
+    let strs = List.map string_of_atom args in
+    let rec insert i acc = function
+      | rest when i = hole -> List.rev_append acc ("_" :: rest)
+      | [] -> List.rev ("_" :: acc)
+      | x :: rest -> insert (i + 1) (x :: acc) rest
+    in
+    "alloc_hole " ^ string_of_ty ty ^ "(" ^ String.concat ", " (insert 0 [] strs) ^ ")"
+  | ESetField (o, i, v) ->
+    string_of_atom o ^ "." ^ string_of_int i ^ " <- " ^ string_of_atom v
 
 let string_of_fn_def fn =
   "fn " ^ fn.fn_name ^ "(" ^

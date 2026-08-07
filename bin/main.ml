@@ -2435,6 +2435,12 @@ let compile filename =
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
     stamp "lower";
+    (* TRMC eligibility analysis (Phase 1 — analysis only, gated on
+       MARCH_TRMC_REPORT).  Must run here: by tir-perceus the stdlib's nested
+       `go` helpers are closures invoked via ECallPtr, so self-recursion is no
+       longer syntactically visible.  See
+       specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
+    March_tir.Trmc.report tir;
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
        by lower_actor for every actor definition. Only collected when both
@@ -3626,6 +3632,8 @@ let compile filename =
             | EReuse (a, _, args) ->
               scan_atom caller a;
               List.iter (scan_atom caller) args
+            | EAllocHole (_, args, _) -> List.iter (scan_atom caller) args
+            | ESetField (o, _, v) -> scan_atom caller o; scan_atom caller v
           and scan_atom _caller _a = ()
           in
           (* Scan every boundary function's body in pre-opt TIR. *)

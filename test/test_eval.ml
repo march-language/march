@@ -2701,7 +2701,7 @@ let test_perceus_elide_preserves_mixed_atomicity () =
     | EIncRC _ | EDecRC _ | EAtomicIncRC _ | EAtomicDecRC _ -> 1
     | EAtom _ | EApp _ | ECallPtr _ | ETuple _ | ERecord _
     | EField _ | EUpdate _ | EAlloc _ | EStackAlloc _ | EFree _
-    | EReuse _ -> 0
+    | EReuse _ | EAllocHole _ | ESetField _ -> 0
     | ELet (_, e1, e2) -> count_rc_ops e1 + count_rc_ops e2
     | ELetRec (fns, body) ->
       count_rc_ops body

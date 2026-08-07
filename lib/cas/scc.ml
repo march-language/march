@@ -51,6 +51,8 @@ let rec refs_in_expr (known : string list) (e : expr) : string list =
   | EAtomicIncRC a | EAtomicDecRC a -> refs_in_atom known a
   | EReuse (a, _, args)       ->
     refs_in_atom known a @ List.concat_map (refs_in_atom known) args
+  | EAllocHole (_, args, _)   -> List.concat_map (refs_in_atom known) args
+  | ESetField (o, _, v)       -> refs_in_atom known o @ refs_in_atom known v
   | ESeq (e1, e2)             -> refs_in_expr known e1 @ refs_in_expr known e2
 
 and refs_in_atom known = function

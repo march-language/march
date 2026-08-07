@@ -70,6 +70,11 @@ let rec is_pure_ext (impure_fns : StringSet.t) : Tir.expr -> bool = function
   | Tir.EField _               -> true
   | Tir.EAlloc _               -> true   (* allocation is pure, side-effect-free *)
   | Tir.EStackAlloc _          -> true
+  | Tir.EAllocHole _           -> true   (* allocation, hole left zeroed *)
+  (* ESetField MUTATES an already-constructed cell.  Treating it as pure
+     would let the optimizer duplicate, sink or drop the hole-fill, which is
+     the one write that makes a TRMC loop produce its result. *)
+  | Tir.ESetField _            -> false
   | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ | Tir.EReuse _
   | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ -> false
   | Tir.EApp (f, _)            ->

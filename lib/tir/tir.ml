@@ -57,6 +57,28 @@ type expr =
   | EAtomicDecRC of atom                          (* atomic RC decrement — actor-shared values *)
   | EReuse   of atom * ty * atom list             (* FBIP reuse — inserted by Perceus *)
   | ESeq     of expr * expr                       (* sequence, first result discarded *)
+  (* ── TRMC (tail-recursion-modulo-cons) — see lib/tir/trmc.ml ───────────────
+     [EAllocHole (ty, filled, hole)] allocates constructor [ty] leaving field
+     [hole] UNINITIALIZED; [filled] carries the other fields in order, so the
+     constructor's arity is [List.length filled + 1] and [hole] indexes the
+     full field list.  The hole reads as 0 until written: [march_alloc] is a
+     [calloc], and [IS_HEAP_PTR(0)] is false, so an RC op that reaches an
+     unfilled hole is a no-op rather than a wild pointer dereference.  That
+     property is what makes it safe for a cell to be dropped (or deep-dropped)
+     between allocation and hole-fill.
+
+     [ESetField (obj, i, v)] writes [v] into field [i] of [obj] in place and
+     evaluates to unit.  Ownership MOVES into the object: no incref is emitted
+     for [v], and Perceus must not also drop it.
+
+     v1 deliberately has no interior-pointer ("destination") value.  The TRMC
+     helper passes the OBJECT and bakes the field index into the specialized
+     helper, which is sound because every iteration of a single-constructor
+     TRMC loop writes the same field of a freshly allocated cell.  That keeps
+     raw interior pointers out of the IR entirely, so [Rc_types.needs_rc] and
+     [Escape] need no new notion of an unowned pointer. *)
+  | EAllocHole of ty * atom list * int
+  | ESetField  of atom * int * atom
 
 (* A case branch: constructor tag + bound variables → body. *)
 and branch = {
@@ -221,6 +243,11 @@ let rec show_expr = function
     Printf.sprintf "EReuse(%s,%s,[%s])" (show_atom a) (show_ty t)
       (String.concat "," (List.map show_atom args))
   | ESeq (e1, e2) -> Printf.sprintf "ESeq(%s,%s)" (show_expr e1) (show_expr e2)
+  | EAllocHole (t, args, hole) ->
+    Printf.sprintf "EAllocHole(%s,[%s],%d)" (show_ty t)
+      (String.concat "," (List.map show_atom args)) hole
+  | ESetField (o, i, v) ->
+    Printf.sprintf "ESetField(%s,%d,%s)" (show_atom o) i (show_atom v)
 
 and show_branch br =
   Printf.sprintf "Br(%s,[%s],%s)" br.br_tag

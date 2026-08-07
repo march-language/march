@@ -3485,6 +3485,83 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ) args;
     ("ptr", ptr)
 
+  (* ── TRMC hole allocation / hole fill ──────────────────────────────── *)
+  (* [EAllocHole (ty, filled, hole)] is [EAlloc] with field [hole] left
+     UNWRITTEN.  [march_alloc] is a calloc, so the hole reads as 0 until
+     [ESetField] fills it, and IS_HEAP_PTR(0) is false — an RC op or deep-drop
+     that reaches an unfilled hole is a no-op rather than a wild dereference.
+     That is the property the whole TRMC scheme leans on for the window between
+     allocation and fill. *)
+  | Tir.EAllocHole (Tir.TCon (ctor, _), args, hole) ->
+    (* Same repr guard as EStackAlloc: this arm builds a BOXED cell
+       unconditionally, so a Newtype-/Niche-repr type would be constructed
+       boxed and decoded erased.  TRMC must never select such a type. *)
+    let ah_type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (ah_type_name, [])) with
+     | Repr.Newtype _ | Repr.Niche _ ->
+       failwith (Printf.sprintf
+         "LLVM emit: EAllocHole of erased-repr type %s (ctor %s) — a hole needs \
+          a real heap cell; TRMC must not select an erased-repr constructor"
+         ah_type_name ctor)
+     | Repr.Boxed ->
+       if Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs ah_type_name then
+         failwith (Printf.sprintf
+           "LLVM emit: EAllocHole of niche-shaped type %s (ctor %s) — same \
+            erased-vs-boxed split as Newtype"
+           ah_type_name ctor));
+    let arity = List.length args + 1 in
+    if hole < 0 || hole >= arity then
+      failwith (Printf.sprintf
+        "LLVM emit: EAllocHole of %s has hole index %d outside arity %d"
+        ctor hole arity);
+    let entry = ctor_entry ctx ctor arity in
+    let ptr = emit_heap_alloc ctx entry.ce_tag arity in
+    (* [args] carries only the FILLED fields, in order, with the hole's slot
+       skipped — so walk the full field list and consume [args] around it. *)
+    let rest = ref args in
+    for i = 0 to arity - 1 do
+      if i <> hole then begin
+        match !rest with
+        | atom :: tl ->
+          rest := tl;
+          let field_ty = match List.nth_opt entry.ce_fields i with
+            | Some t -> llvm_ty t | None -> "ptr" in
+          let (v_ty, v_val) = emit_atom ctx atom in
+          emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
+        | [] ->
+          failwith (Printf.sprintf
+            "LLVM emit: EAllocHole of %s supplies %d filled field(s) for arity %d"
+            ctor (List.length args) arity)
+      end
+    done;
+    ("ptr", ptr)
+
+  (* TRMC only ever selects a data constructor, so a non-TCon hole allocation
+     is a bug in the transformation rather than a shape to support. *)
+  | Tir.EAllocHole (ty, _, _) ->
+    failwith (Printf.sprintf
+      "LLVM emit: EAllocHole of non-constructor type %s — TRMC selects data \
+       constructors only" (Tir.show_ty ty))
+
+  (* Hole fill.  Ownership MOVES into the object: no incref here, and Perceus
+     does not drop the stored value afterwards (see its ESetField case).
+
+     v1 stores through a "ptr" slot.  That is correct because the hole is by
+     construction the RECURSIVE field of the constructor being built, which is
+     the ADT's own Boxed representation — always pointer-typed.  Phase 3 must
+     not select a hole whose field type is an unboxed Int/Float slot without
+     revisiting this store. *)
+  | Tir.ESetField (obj, i, value) ->
+    let (o_ty, o_val) = emit_atom ctx obj in
+    let op = coerce ctx o_ty o_val "ptr" in
+    let (v_ty, v_val) = emit_atom ctx value in
+    let vp = coerce ctx v_ty v_val "ptr" in
+    emit_store_field ctx op i "ptr" vp;
+    ("ptr", "null")
+
   (* ── Stack allocation ──────────────────────────────────────────────── *)
   | Tir.EStackAlloc (Tir.TCon (ctor, _), args) ->
     (* Repr guard (slice-7 L7): this arm builds a BOXED stack cell

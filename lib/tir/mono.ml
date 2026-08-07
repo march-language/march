@@ -121,6 +121,10 @@ let rec subst_expr (s : ty_subst) : Tir.expr -> Tir.expr = function
   | Tir.EAtomicDecRC a    -> Tir.EAtomicDecRC (subst_atom s a)
   | Tir.EReuse (a, ty, args) ->
     Tir.EReuse (subst_atom s a, subst_ty s ty, List.map (subst_atom s) args)
+  | Tir.EAllocHole (ty, args, hole) ->
+    Tir.EAllocHole (subst_ty s ty, List.map (subst_atom s) args, hole)
+  | Tir.ESetField (o, i, v) ->
+    Tir.ESetField (subst_atom s o, i, subst_atom s v)
   | Tir.ESeq (e1, e2)     -> Tir.ESeq (subst_expr s e1, subst_expr s e2)
 
 and subst_branch (s : ty_subst) (br : Tir.branch) : Tir.branch =
@@ -345,6 +349,8 @@ let retype_known_vars (vars : Tir.var list) (body : Tir.expr) : Tir.expr =
     | Tir.EAtomicIncRC atom -> Tir.EAtomicIncRC (ra env atom)
     | Tir.EAtomicDecRC atom -> Tir.EAtomicDecRC (ra env atom)
     | Tir.EReuse (atom, ty, args) -> Tir.EReuse (ra env atom, ty, ral env args)
+    | Tir.EAllocHole (ty, args, hole) -> Tir.EAllocHole (ty, ral env args, hole)
+    | Tir.ESetField (o, i, v) -> Tir.ESetField (ra env o, i, ra env v)
     | Tir.ESeq (e1, e2) -> Tir.ESeq (go env e1, go env e2)
   in
   let body' = go initial body in
@@ -374,7 +380,7 @@ let rec find_first_call (fn_name : string) (expr : Tir.expr)
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
   | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _
   | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
-  | Tir.EReuse _ -> None
+  | Tir.EReuse _ | Tir.EAllocHole _ | Tir.ESetField _ -> None
   | Tir.ELet (_, e1, e2) ->
     (match find_first_call fn_name e1 with
      | Some _ as r -> r
@@ -1088,6 +1094,8 @@ let refine_field_types (body : Tir.expr) : Tir.expr =
     | Tir.EAtomicIncRC a       -> Tir.EAtomicIncRC (ra a)
     | Tir.EAtomicDecRC a       -> Tir.EAtomicDecRC (ra a)
     | Tir.EReuse (a, t, args)  -> Tir.EReuse (ra a, t, ral args)
+    | Tir.EAllocHole (t, args, hole) -> Tir.EAllocHole (t, ral args, hole)
+    | Tir.ESetField (o, i, v)  -> Tir.ESetField (ra o, i, ra v)
     | Tir.ESeq (e1, e2)        -> Tir.ESeq (go e1, go e2)
   in
   go body

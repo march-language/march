@@ -58,6 +58,9 @@ let rec all_atom_vars (e : Tir.expr) : StringSet.t =
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> vars_of_atom a
   | Tir.EReuse (a, _, args) ->
     StringSet.union (vars_of_atom a) (vars_of_atoms args)
+  | Tir.EAllocHole (_, args, _) -> vars_of_atoms args
+  | Tir.ESetField (o, _, v) ->
+    StringSet.union (vars_of_atom o) (vars_of_atom v)
 
 (* ── Phase 1: Collect EAlloc candidates ──────────────────────────────────── *)
 
@@ -222,6 +225,14 @@ let rec escaping_vars (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
   | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ ->
     StringSet.empty
 
+  (* TRMC.  Both are ESCAPING positions: EAllocHole stores its operands into
+     a heap cell, and ESetField stores into one whose lifetime this analysis
+     cannot see.  A stack-promoted value written through either would dangle
+     once the frame returns, so nothing here may be stack-allocated. *)
+  | Tir.EAllocHole (_, args, _) -> candidate_atoms args
+  | Tir.ESetField (o, _, v) ->
+    StringSet.union (candidate_atoms [o]) (candidate_atoms [v])
+
 (** Returns the subset of [candidates] for which EIncRC appears anywhere in [e].
     Such variables have multiple live references — not safe to stack-promote. *)
 let rec has_incrc_for (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
@@ -305,7 +316,8 @@ let rec promote_expr (e : Tir.expr) (promotable : StringSet.t) : Tir.expr =
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
   | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _
-  | Tir.EDecRC _ | Tir.EReuse _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ ->
+  | Tir.EDecRC _ | Tir.EReuse _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EAllocHole _ | Tir.ESetField _ ->
     e
 
 (* ── Per-function entry ───────────────────────────────────────────────────── *)

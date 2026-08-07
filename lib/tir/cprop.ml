@@ -291,6 +291,15 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
   | Tir.EStackAlloc (ty, args) ->
     Tir.EStackAlloc (ty, subst_atoms ~changed env avar args)
 
+  | Tir.EAllocHole (ty, args, hole) ->
+    Tir.EAllocHole (ty, subst_atoms ~changed env avar args, hole)
+
+  (* The stored VALUE may be substituted like any other operand.  The target
+     object may NOT: ESetField mutates it in place, so replacing it with an
+     alias or a literal would write through the wrong cell. *)
+  | Tir.ESetField (o, i, v) ->
+    Tir.ESetField (o, i, subst_atom ~changed env avar v)
+
   | Tir.EReuse (token, ty, args) ->
     Tir.EReuse (subst_atom ~changed env avar token, ty, subst_atoms ~changed env avar args)
 

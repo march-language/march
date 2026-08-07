@@ -503,6 +503,25 @@ let emit_tagged_alloc ctx ty args =
     else emit_atom ctx a) args;
   emit ctx " }"
 
+(* TRMC hole allocation.  Same tagged object as [emit_tagged_alloc], with the
+   hole field written as [null]: JS is garbage-collected, so a hole simply
+   holds null until [ESetField] fills it and there is no uninitialized-memory
+   hazard to mirror.  [args] carries only the FILLED fields, so the full arity
+   is [List.length args + 1] and [hole] indexes the complete field list. *)
+let emit_tagged_alloc_hole ctx ty args hole =
+  let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
+  let arity = List.length args + 1 in
+  emit ctx (Printf.sprintf "{ $: %S" tag);
+  let rest = ref args in
+  for i = 0 to arity - 1 do
+    emit ctx (Printf.sprintf ", _%d: " i);
+    if i = hole then emit ctx "null"
+    else match !rest with
+      | a :: tl -> rest := tl; emit_atom ctx a
+      | [] -> emit ctx "null"
+  done;
+  emit ctx " }"
+
 (* ── Forward declarations ────────────────────────────────────────── *)
 
 let rec emit_val  ctx expr = emit_val_impl  ctx expr
@@ -710,6 +729,15 @@ and emit_val_impl ctx expr =
 
   (* EReuse(old, ty, args): Perceus reuses old's memory — in GC'd JS just alloc fresh *)
   | Tir.EReuse (_, ty, args) -> emit_tagged_alloc ctx ty args
+
+  | Tir.EAllocHole (ty, args, hole) -> emit_tagged_alloc_hole ctx ty args hole
+
+  (* TRMC hole fill: an in-place property write, sequenced with [undefined] so
+     the expression's value is unit rather than the assigned value. *)
+  | Tir.ESetField (o, i, v) ->
+    emit ctx "("; emit_atom ctx o;
+    emit ctx (Printf.sprintf "._%d = " i);
+    emit_atom ctx v; emit ctx ", undefined)"
 
   (* EIncRC returns its atom; other RC ops are pure side-effects → undefined *)
   | Tir.EIncRC a | Tir.EAtomicIncRC a -> emit_atom ctx a

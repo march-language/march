@@ -1283,6 +1283,28 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     in
     (e', lb)
 
+  (* TRMC.  EAllocHole stores its operands into a fresh cell exactly as
+     EAlloc does, so it takes the same ownership treatment: an operand still
+     live afterwards needs an IncRC. *)
+  | Tir.EAllocHole (ty, atoms, hole) ->
+    let inc_vars = find_inc_vars env atoms live_after in
+    let e' = wrap_incrcs env inc_vars (Tir.EAllocHole (ty, atoms, hole)) in
+    (e', StringSet.union live_after (vars_of_atoms atoms))
+
+  (* ESetField MOVES [v] into [o]: the object takes over the reference, so no
+     IncRC is emitted for [v] and no drop may be emitted for it afterwards.
+     [o] is only mutated, never consumed.  Adding [v] to the live-before set
+     (rather than treating this as its last use) is what keeps Phase 2's
+     ownership-transfer hazard from becoming a double-free: the value is
+     reachable from [o] from here on, and [o]'s own lifetime releases it. *)
+  | Tir.ESetField (o, i, v) ->
+    let lb =
+      live_after
+      |> StringSet.union (vars_of_atom o)
+      |> StringSet.union (vars_of_atom v)
+    in
+    (Tir.ESetField (o, i, v), lb)
+
 (* Insert RC ops into a function definition.
    [borrowed] names are treated as still-live at the function's exit,
    preventing Perceus from treating their last use as an ownership transfer.
@@ -1368,6 +1390,10 @@ let rename_borrowed_shadows (borrowed : StringSet.t) (body : Tir.expr) : Tir.exp
     | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (atom subst a)
     | Tir.EReuse (a, ty, args) ->
       Tir.EReuse (atom subst a, ty, List.map (atom subst) args)
+    | Tir.EAllocHole (ty, args, hole) ->
+      Tir.EAllocHole (ty, List.map (atom subst) args, hole)
+    | Tir.ESetField (o, i, v) ->
+      Tir.ESetField (atom subst o, i, atom subst v)
   in
   go StringMap.empty body
 
