@@ -263,6 +263,54 @@ static void esc_css(sink *s, const char *src, size_t len, int decl) {
     }
 }
 
+/* CSS url(...) -- the one place three languages nest at once.
+ *
+ * A hole here must be safe as ALL of:
+ *   a URL          -> the scheme allowlist applies; javascript:/data: are out
+ *   a CSS url-token-> it must not close the paren or the quoting
+ *   an HTML attr   -> when the CSS lives in style="...", it must not close that
+ *
+ * Neither existing escaper is right. esc_css mangles the slashes, so a
+ * perfectly good url(/img/logo.png) came out as url(\2F img\2F logo.png) and
+ * broke. esc_url_whole leaves `)` alone, so a value could close the url() and
+ * start writing CSS.
+ *
+ * So: run the same scheme allowlist, then percent-encode only the characters
+ * that are structural in CSS or HTML, and let the rest of the URL through
+ * intact. Percent-encoding is the right tool because the URL layer decodes it
+ * AFTER CSS and HTML have finished parsing, so the escape survives to mean what
+ * it said. */
+static int css_url_safe(unsigned char c) {
+    if (is_unreserved(c)) return 1;
+    /* URL structure that must survive verbatim or the reference breaks */
+    switch (c) {
+    case '/': case ':': case '?': case '#': case '@': case '[': case ']':
+    case '!': case '$': case '&': case '*': case '+': case ',': case ';':
+    case '=': case '%':
+        return 1;
+    default:
+        return 0;
+    }
+    /* Deliberately NOT safe, and each for a specific reason:
+         ( )   would close or nest the url()
+         " '   would close the CSS string, or the HTML attribute
+         < >   defensive: keeps the value inert if it ever lands in markup
+         \     starts a CSS escape
+         space and control bytes terminate a CSS url-token */
+}
+
+static void esc_css_url(sink *s, const char *src, size_t len) {
+    if (!url_scheme_is_allowed(src, len)) {
+        put_str(s, MARCH_URL_UNSAFE_REPLACEMENT);
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (css_url_safe(c)) put1(s, (char)c);
+        else { put1(s, '%'); put_hex2(s, c); }
+    }
+}
+
 size_t march_ctx_escape(int escaper_id, const char *src, size_t len, char *out) {
     sink s = { out, 0 };
     switch (escaper_id) {
@@ -272,6 +320,7 @@ size_t march_ctx_escape(int escaper_id, const char *src, size_t len, char *out) 
     case MARCH_ESC_URL_WHOLE:     esc_url_whole(&s, src, len); break;
     case MARCH_ESC_CSS_VALUE:     esc_css(&s, src, len, 0); break;
     case MARCH_ESC_CSS_DECL:      esc_css(&s, src, len, 1); break;
+    case MARCH_ESC_CSS_URL:       esc_css_url(&s, src, len); break;
     case MARCH_ESC_JS_STRING:     esc_js_string(&s, src, len); break;
     case MARCH_ESC_NONE:          put(&s, src, len); break;
     default:

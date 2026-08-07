@@ -1,0 +1,10 @@
+rel-attr : <div style="background:url(/img/logo.png)">x</div>
+abs-query: <div style="background:url(https://cdn.example/a/b.png?v=2&x=1)">x</div>
+rel-body : <style>a{background:url(/img/logo.png)}</style>
+js-attr  : <div style="background:url(about:invalid#zSoyz)">x</div>
+js-body  : <style>a{background:url(about:invalid#zSoyz)}</style>
+breakout : <div style="background:url(%29%20;background:red;a:url%28)">x</div>
+attr-out : <div style="background:url(%22%20onload=%22alert%281%29)">x</div>
+style-out: <style>a{background:url(x%3C/style%3E%3Cscript%3Ealert%281%29%3C/script%3E)}</style>
+plain-css: <div style="color:var(--text-muted)">x</div>
+upper    : <div style="background:URL(about:invalid#zSoyz)">x</div>

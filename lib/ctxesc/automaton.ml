@@ -150,7 +150,9 @@ let escaper_for (c : C.t) =
   | C.Rcdata ->
     (match c.C.element with
      | C.ElScript -> C.EscJsString
-     | C.ElStyle -> C.EscCssDecl
+     | C.ElStyle ->
+       (* a url() inside a <style> body is a URL, not a CSS value *)
+       if c.C.attr = C.AtCssUrl then C.EscCssUrl else C.EscCssDecl
      | _ -> C.EscHtml)
   | C.Attrvalue ->
     (match c.C.attr with
@@ -158,6 +160,7 @@ let escaper_for (c : C.t) =
      | C.AtUrlMid -> C.EscUrlComponent
      | C.AtStyle -> C.EscCssDecl
      | C.AtStyleValue -> C.EscCssValue
+     | C.AtCssUrl -> C.EscCssUrl
      | C.AtScript -> C.EscJsString
      | C.AtNormal -> C.EscAttr)
   | _ -> C.EscAttr  (* unreachable: every other state rejects holes *)
