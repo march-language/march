@@ -85,8 +85,10 @@ send(counter, Reset())
 
 The message is the constructor applied to its arguments. The actor handles it according to its `on` clause.
 
-**A message payload may not carry a mutable-buffer type** (`RingBuf`, and any other type
-registered in `non_sendable_types`, `lib/typecheck/typecheck.ml`) — these types are
+**A message payload may not carry a mutable-buffer type** (`RingBuf`, `NativeIntArr`,
+`NativeFloatArr` — the latter two are `NativeArray`'s real backing types, a stdlib
+function namespace rather than a type of its own — and any other type registered in
+`non_sendable_types`, `lib/typecheck/typecheck.ml`) — these types are
 single-actor-owned by design, so sharing one across an actor boundary would let two
 actors alias the same mutable state. The check runs once, at the moment the message
 constructor is *applied* (`Increment(rb)`), not at whichever builtin later moves the
