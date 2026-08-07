@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Actor messages can no longer carry a `NativeIntArr`/`NativeFloatArr` (the types
+  backing the `NativeArray` stdlib module)** — the same "must be owned by a single
+  actor" restriction `RingBuf` already had.
+
+- **Actor messages can no longer carry a `RingBuf` (or other single-owner mutable-buffer
+  type) — this restriction was previously a no-op.** The check was invoked on a
+  constructor application's overall type, which never varies by payload for an actor
+  message; it now runs on the payload's own instantiated type at the moment the message
+  is constructed, so it correctly applies through `send`, `send_checked`, `Actor.cast`,
+  and `Actor.call` alike.
+
 - **`~H` no longer emits two CSRF tokens when a form already interpolates one.**
   The desugar injects a hidden `_csrf_token` input after a mutating `<form>`
   whenever a `conn` binding is in scope. If the author also wrote

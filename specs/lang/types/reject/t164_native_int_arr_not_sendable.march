@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: cannot be sent in actor messages
+mod Main do
+  -- NativeArray's real backing types are the opaque 0-arity constructors
+  -- NativeIntArr/NativeFloatArr (lib/typecheck/typecheck.ml, around
+  -- native_int_arr_make/native_float_arr_make's registration) -- the
+  -- NativeArray stdlib module (stdlib/native_array.march) is just the
+  -- function namespace wrapping them, not a distinct type. Structurally
+  -- identical mutable-buffer risk to RingBuf (same "must be owned by a
+  -- single actor" rationale in check_sendable's doc comment), but was
+  -- missing from non_sendable_types until now.
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on MsgArr(arr : NativeIntArr) do
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let arr = NativeArray.make_int(4, 0)
+    send(w, MsgArr(arr))
+  end
+end

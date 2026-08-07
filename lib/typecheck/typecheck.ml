@@ -435,6 +435,22 @@ type ctor_info = {
       does not hit this exact double-collision shape.  First metadata slice of
       the module-qualified ctor identity in
       specs/plans/2026-07-17-fqn-type-ctor-identity.md (Stage 4). *)
+  ci_is_actor_msg : bool;
+  (** True iff this constructor is an actor message handler's auto-registered
+      ctor (an `on Msg(...)` arm), i.e. [ci_type] is some `<Actor>_Msg`.  Set
+      at the three DActor registration sites; [false] everywhere else INCLUDING
+      the actor's own zero-arg name ctor (used by `spawn`, not a message).
+      The [ECon] typing arm reads this to decide whether to run
+      [check_sendable] over the constructor's instantiated argument types —
+      message payloads may not carry a mutable-buffer type (RingBuf,
+      NativeIntArr, NativeFloatArr); ordinary user ADTs are unrestricted.
+      Exactly one site (the cross-module [ExCtor] reconstruction, which only
+      has an exported name+arity to work from, not the original record) can't
+      set this from a known-true/false fact and instead derives it from the
+      same "_Msg" suffix [Tir_names.is_actor_msg_name] uses post-lowering —
+      justified there and ONLY there, because the export bridge is the one
+      place this record is rebuilt from strictly less information than it
+      started with. *)
 }
 
 (** One entry in the import tracker — records an imported name or alias and
@@ -1390,6 +1406,16 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
           ci_arg_tys = arg_tys;
           ci_module = mod_name;
           ci_vis = if entry.ex_public then Ast.Public else Ast.Private;
+          (* Only a name + arity crosses the export bridge, not the original
+             ctor_info record — this is the one place ci_is_actor_msg can't be
+             read off a known fact, so it's derived the same way
+             Tir_names.is_actor_msg_name does post-lowering (see that
+             function's doc comment for why the "_Msg"-suffix collision risk
+             is accepted there); see this field's own doc comment above. *)
+          ci_is_actor_msg =
+            (let sfx = "_Msg" in
+             let nl = String.length parent_type and sl = String.length sfx in
+             nl > sl && String.sub parent_type (nl - sl) sl = sfx);
         } in
         { env with ctors = add_ctor qname ci env.ctors }
       end
@@ -2857,6 +2883,8 @@ let builtin_types : (string * int) list =
     ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
     ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
     ("IO.WebSocket",  0);
+    (* RingBuf — mutable fixed-capacity circular buffer (non-sendable) *)
+    ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
     ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
 
@@ -2867,13 +2895,13 @@ let builtin_types : (string * int) list =
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
   let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
-  let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public } in
-  let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public } in
-  let ok_ci    = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public } in
-  let err_ci   = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_module = ""; ci_vis = Ast.Public } in
-  let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public } in
+  let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let ok_ci    = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let err_ci   = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   let cons_ci  = { ci_type = "List";   ci_params = ["a"];
-                   ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_module = ""; ci_vis = Ast.Public } in
+                   ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   [ ("Some",        some_ci);  ("Option.Some", some_ci);
     ("None",        none_ci);  ("Option.None", none_ci);
     ("Ok",          ok_ci);    ("Result.Ok",   ok_ci);
@@ -5021,11 +5049,20 @@ let offer_unrefined_error env span (r : session_ty ref) op =
   end else false
 
 (** Type constructor names that cannot appear in actor message payloads.
-    These types carry mutable state that must remain owned by a single actor. *)
-let non_sendable_types = ["RingBuf"]
+    These types carry mutable state that must remain owned by a single actor.
+    NativeIntArr/NativeFloatArr are NativeArray's real backing types -- the
+    NativeArray stdlib module (stdlib/native_array.march) is a function
+    namespace over these two opaque 0-arity constructors, not a type of its
+    own, so "NativeArray" itself would be a silent no-op entry here (see
+    where native_int_arr_make/native_float_arr_make are registered, this
+    file, around the NativeArray builtins section). *)
+let non_sendable_types = ["RingBuf"; "NativeIntArr"; "NativeFloatArr"]
 
 (** [check_sendable errors span ty] walks [ty] and emits an error for every
-    non-sendable type constructor it finds. Call at every [send()] callsite. *)
+    non-sendable type constructor it finds. Called from the [ECon] arm on
+    an actor message constructor's instantiated argument types (guarded by
+    [ci_is_actor_msg]) -- at message-CONSTRUCTION time, not at each place a
+    message value is later sent. *)
 let rec check_sendable errors span ty =
   match repr ty with
   | TCon (name, args) ->
@@ -5955,6 +5992,20 @@ let rec infer_expr env (e : Ast.expr) : ty =
                  ~reason:(Some (RBuiltin
                    (Printf.sprintf "Argument to constructor `%s`." name.txt)))
              ) args arg_tys;
+           (* Message-payload sendability. The overall constructor RESULT
+              type (e.g. TCon("Worker_Msg", [])) can never carry this
+              information -- actor message sum types are registered with
+              ci_params = [] (see ci_is_actor_msg's doc comment), so their
+              type never varies with payload. The instantiated ARGUMENT
+              types (arg_tys, already solved by the check_expr loop above)
+              are the only place a RingBuf/NativeIntArr/NativeFloatArr
+              hidden in a message payload is actually visible. Runs once,
+              here, at message-construction time -- covers every current
+              and future way to move the resulting value (send,
+              send_checked, Actor.cast, Actor.call, or just storing it in a
+              variable first), not just the builtin used at THIS callsite. *)
+           if ci.ci_is_actor_msg then
+             List.iter (check_sendable env.errors sp) arg_tys;
            result_ty
          end)
 
@@ -6219,10 +6270,16 @@ let rec infer_expr env (e : Ast.expr) : ty =
       t_atom
 
     (* ── Actor messaging ──────────────────────────────────────────── *)
-    | Ast.ESend (cap, msg, sp) ->
+    | Ast.ESend (cap, msg, _sp) ->
       ignore (infer_expr env cap);
-      let msg_ty = infer_expr env msg in
-      check_sendable env.errors sp msg_ty;
+      (* Message-payload sendability (RingBuf/NativeIntArr/NativeFloatArr)
+         is checked once, at message-CONSTRUCTION time, in the ECon arm
+         (guarded by ci_is_actor_msg) -- not here. The overall type of `msg`
+         (a bare TCon("<Actor>_Msg", []), since actor message sum types are
+         registered with ci_params = []) never varies with payload and so
+         could never see a mutable-buffer type nested in it; checking it
+         here was a no-op regardless of what check_sendable's argument was. *)
+      let _msg_ty = infer_expr env msg in
       (* send() returns Option(Unit): Some(()) when the message was enqueued,
          None when the target actor is dead/unknown (fire-and-forget drop).
          This is the ACTUAL contract of both backends — the interpreter's ESend
@@ -10695,7 +10752,8 @@ let rec check_decl env (d : Ast.decl) : env =
                     ; ci_params  = param_names
                     ; ci_arg_tys = v.var_args
                     ; ci_module  = env.current_module
-                    ; ci_vis     = v.var_vis } in
+                    ; ci_vis     = v.var_vis
+                    ; ci_is_actor_msg = false } in
            (* Register both bare "CtorName" and qualified "TypeName.CtorName"
               so users can write either form for disambiguation. *)
            let qual_key = name.txt ^ "." ^ v.var_name.txt in
@@ -10759,7 +10817,8 @@ let rec check_decl env (d : Ast.decl) : env =
        instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
        when the handler omits a type annotation. *)
     let env_with_actor_ctor = { env with ctors =
-      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = env.current_module; ci_vis = Ast.Public }
+      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = env.current_module; ci_vis = Ast.Public;
+                          ci_is_actor_msg = false }
         env.ctors } in
     let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
         let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -10772,7 +10831,8 @@ let rec check_decl env (d : Ast.decl) : env =
                           span = p.param_name.span }
           ) h.ah_params in
         let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                   ci_arg_tys = arg_tys; ci_module = env.current_module; ci_vis = Ast.Public } in
+                   ci_arg_tys = arg_tys; ci_module = env.current_module; ci_vis = Ast.Public;
+                   ci_is_actor_msg = true } in
         { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
     (* Check init expression — must return the state record type.  Neither
@@ -12423,7 +12483,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
-                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
+                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
+                            ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
                     for PUBLIC constructors.  A private constructor — notably an
                     `opaque type`'s, whose variants the parser marks Private
@@ -12450,7 +12511,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
-                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
+                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
+                                   ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
                    (* A type exported opaquely by a sibling `sig` keeps its
                       constructors hidden: don't seed the short (bare / bare-type)
@@ -12542,7 +12604,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt
-                        ; ci_vis     = v.var_vis } in
+                        ; ci_vis     = v.var_vis
+                        ; ci_is_actor_msg = false } in
                (* Register the type-qualified key ("TypeName.CtorName") in this
                   forward-reference pass, not just in check_decl: sibling DMods
                   are typechecked before the entry module's own DTypes are
@@ -12563,7 +12626,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
            Same arity fix as in check_decl: include unannotated params as
            unique TyVar placeholders so constructor arity is always correct. *)
         let env1 = { env with ctors =
-          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public }
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
+                              ci_is_actor_msg = false }
             env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -12574,7 +12638,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                               span = p.param_name.span }
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public } in
+                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
+                       ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
@@ -12749,7 +12814,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
-                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
+                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
+                            ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
                     for PUBLIC constructors.  A private constructor — notably an
                     `opaque type`'s, whose variants the parser marks Private
@@ -12776,7 +12842,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
-                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
+                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
+                                   ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
                    (* A type exported opaquely by a sibling `sig` keeps its
                       constructors hidden: don't seed the short (bare / bare-type)
@@ -12853,7 +12920,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt
-                        ; ci_vis     = v.var_vis } in
+                        ; ci_vis     = v.var_vis
+                        ; ci_is_actor_msg = false } in
                (* Register the type-qualified key ("TypeName.CtorName") in this
                   forward-reference pass, not just in check_decl: sibling DMods
                   are typechecked before the entry module's own DTypes are
@@ -12871,7 +12939,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->
         let env1 = { env with ctors =
-          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public }
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
+                              ci_is_actor_msg = false }
             env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -12882,7 +12951,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                               span = p.param_name.span }
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public } in
+                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
+                       ci_is_actor_msg = true } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
