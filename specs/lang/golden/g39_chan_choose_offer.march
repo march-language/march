@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Session-typed channel operational witness (core-march.md §4.11):
   -- `Chan.choose`/`Chan.offer` branch selection. `Chan.choose` IS
   -- `chan_send` of the chosen label atom (eval.ml:5581); `Chan.offer` IS

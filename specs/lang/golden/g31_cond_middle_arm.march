@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- ECond (the scrutinee-less `match do cond -> body end` boolean chain).
   -- The interpreter evaluates each arm's CONDITION top-to-bottom and selects
   -- the body of the FIRST arm whose condition is `VBool true`

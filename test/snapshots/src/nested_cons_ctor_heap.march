@@ -10,6 +10,7 @@
 -- still-live extracted heap field -> `RC underflow (rc was 0)` abort.  Fix keeps
 -- cprop from propagating a case scrutinee out of sync with its arm dec.
 mod Main do
+  needs IO.Console
   type Row = Row(List(Int))
 
   fn main() : () do

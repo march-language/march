@@ -1,4 +1,5 @@
 mod P18ActorHandlerSupervise do
+  needs IO.Console
   actor Worker do
     state { count : Int }
     init { count: 0 }

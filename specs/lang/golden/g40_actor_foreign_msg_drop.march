@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational actor foreign-message-drop witness (core-march.md §4.10, finding
   -- 19 compiled-misroute fix). `send` does NOT gate a message by its target actor
   -- (a deferred type-system gap), so a `Logger` message (`Zlog`) can be sent to a

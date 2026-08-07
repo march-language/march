@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- The all-false path of ECond. When NO specific arm's condition holds, the
   -- interpreter's `go` loop keeps recursing on `VBool false` (eval.ml:7103)
   -- until it either finds a `VBool true` arm or runs off the end of the list —

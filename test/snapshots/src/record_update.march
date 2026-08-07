@@ -1,5 +1,6 @@
 -- Record functional update: pins EUpdate's field-list shape ({ x with f: v }).
 mod RecordUpdate do
+  needs IO.Console
   type Point = { x : Int, y : Int }
 
   fn move_right(p : Point) : Point do

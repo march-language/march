@@ -9,6 +9,7 @@
 -- behavior is covered by llvm_emit-level tests in test/test_codegen.ml
 -- instead.
 mod MutualTco do
+  needs IO.Console
   fn is_even(n : Int) : Bool do
     if n == 0 do
       true

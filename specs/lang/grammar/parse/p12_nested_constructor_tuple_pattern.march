@@ -1,4 +1,5 @@
 mod P12NestedConstructorTuplePattern do
+  needs IO.Console
   type Shape = Pair(Int, (Int, Int)) | Solo(Int)
 
   fn main() do

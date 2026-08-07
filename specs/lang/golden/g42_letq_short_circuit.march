@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- `let?` Result-propagation operational witness (core-march.md §4.13, widening
   -- slice 8). A two-step `let?` chain: `chain(5)` succeeds through both steps
   -- (Ok path, E-LetQ-Ok twice) and prints `ok 70`; `chain(-1)` fails the FIRST

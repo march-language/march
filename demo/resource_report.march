@@ -2,6 +2,7 @@
 -- Cross-compile for linux/amd64 and run on a remote host to confirm the
 -- resource builtins read real values on that platform.
 mod ResourceReport do
+  needs IO.Console
 
   needs IO.Clock
 

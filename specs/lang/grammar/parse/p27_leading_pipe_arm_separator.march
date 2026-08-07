@@ -1,4 +1,5 @@
 mod P27LeadingPipeArmSeparator do
+  needs IO.Console
   -- §3.3/§5.3 arm_sep (NL | PIPE): a leading `|` before each arm, written on
   -- its OWN line, previously failed to parse ("I got stuck here" at the `|`).
   -- token_filter.ml's NL-then-PIPE handling emitted the NL as the arm

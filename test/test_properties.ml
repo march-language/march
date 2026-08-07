@@ -197,7 +197,14 @@ let eval_main ?(with_stdlib = false) m =
 
 (** Wrap an expression body in a minimal module with a [main] function. *)
 let wrap_main body =
-  "mod Main do\n  fn main() do\n    " ^ body ^ "\n  end\nend"
+  (* [needs IO] rather than a narrower capability, deliberately.  Since
+     2026-08-06 an undeclared direct builtin call is an ERROR, and this wrapper
+     has to cover whatever the GENERATORS emit — today mostly `println`, but a
+     new generator adding a file or process builtin must not silently turn every
+     generated program into a typecheck failure that looks like a property
+     violation.  The root capability cannot under-declare.  An unused-capability
+     warning is harmless here: these properties assert on errors. *)
+  "mod Main do\n  needs IO\n  fn main() do\n    " ^ body ^ "\n  end\nend"
 
 
 (** Integer literal in range [-100, 100]. *)
@@ -267,6 +274,7 @@ let gen_fn_module : string Gen.t =
     (fun offset arg1 arg2 ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn add_offset(x) do\n\
          \    x + %s\n\
          \  end\n\
@@ -285,6 +293,7 @@ let gen_match_bool_module : string Gen.t =
     (fun cond t f ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    let b = %s\n\
          \    match b do\n\
@@ -310,6 +319,7 @@ let gen_adt_module : string Gen.t =
                                    else Printf.sprintf "Square(%d)" n1 in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Shape = Circle(Int) | Square(Int)\n\
          \  fn area(s : Shape) : Int do\n\
          \    match s do\n\
@@ -339,6 +349,7 @@ let gen_adt3_module : string Gen.t =
        in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type MyData = Empty | Single(Int) | Pair(Int, Int)\n\
          \  fn sum_data(d : MyData) : Int do\n\
          \    match d do\n\
@@ -365,6 +376,7 @@ let gen_closure_module : string Gen.t =
     (fun base offset arg ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    let base = %d\n\
          \    let adder = fn x -> x + base + %d\n\
@@ -383,6 +395,7 @@ let gen_hof_apply_module : string Gen.t =
     (fun factor arg ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn apply(f : Int -> Int, x : Int) : Int do\n\
          \    f(x)\n\
          \  end\n\
@@ -401,6 +414,7 @@ let gen_hof_compose_module : string Gen.t =
     (fun add_val mul_val arg ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn compose(f : Int -> Int, g : Int -> Int, x : Int) : Int do\n\
          \    f(g(x))\n\
          \  end\n\
@@ -423,6 +437,7 @@ let gen_recursive_module : string Gen.t =
        let n' = abs n mod 10 in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn fact(n : Int) : Int do\n\
          \    if n <= 1 do 1 else n * fact(n - 1) end\n\
          \  end\n\
@@ -439,6 +454,7 @@ let gen_mutual_fns_module : string Gen.t =
     (fun n m ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn double_add(x : Int, y : Int) : Int do\n\
          \    (x * 2) + triple_sub(y, x)\n\
          \  end\n\
@@ -464,6 +480,7 @@ let gen_tuple_module : string Gen.t =
     (fun a b ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn swap(t : (Int, Int)) : (Int, Int) do\n\
          \    let (x, y) = t\n\
          \    let result = (y, x)\n\
@@ -491,6 +508,7 @@ let gen_tuple_return_module : string Gen.t =
                                  else "let (_, y) = r\n    y" in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn make_pair(x : Int, y : Int) : (Int, Int) do\n\
          \    (x + 1, y - 1)\n\
          \  end\n\
@@ -513,6 +531,7 @@ let gen_string_module : string Gen.t =
     (fun a b ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    let s1 = to_string(%d)\n\
          \    let s2 = to_string(%d)\n\
@@ -530,6 +549,7 @@ let gen_string_bool_module : string Gen.t =
     (fun a b ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    let cmp = %d > %d\n\
          \    string_length(bool_to_string(cmp))\n\
@@ -549,6 +569,7 @@ let gen_list_module : string Gen.t =
        (* fold_left (acc, Cons(h, t), f) computing sum *)
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type IntList = Nil | Cons(Int, IntList)\n\
          \  fn sum(lst : IntList) : Int do\n\
          \    match lst do\n\
@@ -583,6 +604,7 @@ let gen_nested_match_module : string Gen.t =
        in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Side = Left(Int) | Right(Int)\n\
          \  type Maybe = Nothing | Just(Side)\n\
          \  fn extract(m : Maybe) : Int do\n\
@@ -646,6 +668,7 @@ let gen_println_int_list_module : string Gen.t =
        let elems = String.concat ", " (List.map string_of_int xs) in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    println([%s])\n\
          \  end\n\
@@ -670,6 +693,7 @@ let gen_println_string_list_module : string Gen.t =
        let elems = String.concat ", " (List.map (Printf.sprintf "%S") words) in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    println([%s])\n\
          \  end\n\
@@ -697,6 +721,7 @@ let gen_println_option_module : string Gen.t =
     (fun n m ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    println(Some(%d))\n\
          \    println(Some(%d))\n\
@@ -726,6 +751,7 @@ let gen_println_nested_list_module : string Gen.t =
        let elems = String.concat ", " inners in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    println([%s])\n\
          \  end\n\
@@ -754,6 +780,7 @@ let gen_println_list_of_options_module : string Gen.t =
        let elems = String.concat ", " rendered in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn main() do\n\
          \    println([%s])\n\
          \  end\n\
@@ -816,6 +843,7 @@ let gen_derived_method_newtype_int_module : string Gen.t =
        let n2' = if same then n1 else n2 in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Eq, Ord, Hash for Wrap\n\
          \  fn main() do\n\
@@ -849,6 +877,7 @@ let gen_derived_method_newtype_string_module : string Gen.t =
        let w2' = if same then w1 else w2 in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type WrapS = WrapS(String)\n\
          \  derive Eq, Ord, Hash for WrapS\n\
          \  fn main() do\n\
@@ -873,6 +902,7 @@ let gen_derived_method_boxed_module : string Gen.t =
        let a2' = if same then a1 else a2 in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Pair = Pair(Int, Int)\n\
          \  derive Eq, Ord, Hash for Pair\n\
          \  fn main() do\n\
@@ -901,6 +931,7 @@ let gen_derived_method_enum_module : string Gen.t =
        in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Shape = Circle(Int) | Square(Int)\n\
          \  derive Eq, Ord, Hash for Shape\n\
          \  fn main() do\n\
@@ -938,6 +969,7 @@ let gen_derived_method_record_module : string Gen.t =
        let p2' = if same then p1 else p2 in
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Point = { x: Int, y: Int }\n\
          \  derive Eq, Ord, Hash for Point\n\
          \  fn main() do\n\
@@ -1016,6 +1048,7 @@ let gen_record_update_module : string Gen.t =
     (fun x y dx ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Point = { x: Int, y: Int }\n\
          \  fn main() do\n\
          \    let p = { x: %d, y: %d }\n\
@@ -1038,6 +1071,7 @@ let gen_dual_position_borrow_module : string Gen.t =
     (fun tag threshold ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn both(a : String, b : String, n : Int) : String do\n\
          \    if String.byte_size(b) > n do\n\
          \      a\n\
@@ -1066,6 +1100,7 @@ let gen_fbip_same_arity_module : string Gen.t =
     (fun seed bump ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  pfn churn(n : Int) : Int do\n\
          \    if n > 100 do n else churn(n + 7) end\n\
          \  end\n\
@@ -1096,6 +1131,7 @@ let gen_erased_flow_module : string Gen.t =
     (fun n delta ->
        Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Box(a) = Box(a)\n\
          \  fn unwrap(b : Box(a)) : a do\n\
          \    match b do\n\
@@ -1964,6 +2000,7 @@ let prop_adt_match_correct =
     (fun (use_a, n) ->
        let src = Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type Tag = TagA | TagB(Int)\n\
          \  fn main() do\n\
          \    let t = %s\n\
@@ -2002,6 +2039,7 @@ let prop_tuple_swap_involution =
     (fun (a, b) ->
        let src = Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn swap(t : (Int, Int)) : (Int, Int) do\n\
          \    let (x, y) = t\n\
          \    let result = (y, x)\n\
@@ -2044,6 +2082,7 @@ let prop_closure_captures_correct_value =
        let expected = base + arg in
        let src = Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  fn make_adder(base : Int) : Int -> Int do\n\
          \    fn x -> x + base\n\
          \  end\n\
@@ -2073,6 +2112,7 @@ let prop_list_sum_correct =
        let expected = a + b + c in
        let src = Printf.sprintf
          "mod Main do\n\
+         \  needs IO\n\
          \  type IntList = Nil | Cons(Int, IntList)\n\
          \  fn sum(lst : IntList) : Int do\n\
          \    match lst do\n\
@@ -2258,6 +2298,7 @@ let prop_oracle_println_arith =
        (fun e1 e2 ->
           Printf.sprintf
             "mod Main do\n\
+            \  needs IO\n\
             \  fn main() do\n\
             \    println(to_string(%s))\n\
             \    println(to_string(%s))\n\
@@ -2282,6 +2323,7 @@ let prop_oracle_println_closure =
        (fun base offset arg ->
           Printf.sprintf
             "mod Main do\n\
+            \  needs IO\n\
             \  fn main() do\n\
             \    let base = %d\n\
             \    let adder = fn x -> x + base + %d\n\
@@ -2316,6 +2358,7 @@ let prop_oracle_println_adt =
                loud skip accounting as `interp-nonzero-exit`).  Fixed so the
                ADT oracle actually exercises programs. *)
             "mod Main do\n\
+            \  needs IO\n\
             \  type Shape = Circle(Int) | Square(Int)\n\
             \  fn area(s : Shape) : Int do\n\
             \    match s do\n\
@@ -2346,6 +2389,7 @@ let prop_oracle_println_hof =
        (fun factor arg ->
           Printf.sprintf
             "mod Main do\n\
+            \  needs IO\n\
             \  fn apply(f : Int -> Int, x : Int) : Int do\n\
             \    f(x)\n\
             \  end\n\
@@ -2372,6 +2416,7 @@ let prop_oracle_println_tuple =
        (fun a b ->
           Printf.sprintf
             "mod Main do\n\
+            \  needs IO\n\
             \  fn main() do\n\
             \    let t = (%d, %d)\n\
             \    let (x, y) = t\n\
@@ -2400,6 +2445,7 @@ let prop_oracle_println_list =
                ADT oracle above.  The old leading-`|` form parse-failed on
                every program, making this list oracle prop 100%% vacuous. *)
             "mod Main do\n\
+            \  needs IO\n\
             \  type IntList = Nil | Cons(Int, IntList)\n\
             \  fn sum(lst : IntList) : Int do\n\
             \    match lst do\n\
@@ -2744,6 +2790,7 @@ let prop_oracle_opt_matrix =
 let test_record_update_missing_field_on_erased_base_converged () =
   let src =
     "mod Main do\n\
+    \  needs IO\n\
     \  fn main() do\n\
     \    let base = record_from_list([(\"a\", 1)])\n\
     \    let updated = { base with z: 99 }\n\
@@ -2900,6 +2947,7 @@ let record_update_converged_unit_tests = [
     llvm-emit) without depending on anything exotic. *)
 let timings_probe_source =
   "mod TimingsProbe do\n\
+  \  needs IO.Console\n\
   \  fn main() do\n\
   \    println(to_string(1 + 1))\n\
   \  end\n\

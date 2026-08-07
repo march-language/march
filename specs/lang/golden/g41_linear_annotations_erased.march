@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational linearity witness (core-march.md §4.12): linear/affine
   -- annotations are COMPILE-TIME-ERASED -- a linearity-correct program runs
   -- byte-identically interpreted and compiled, with no runtime use-accounting

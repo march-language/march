@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   type Opt = Non | Som(Int)
   fn unwrap(o) do
     match o do

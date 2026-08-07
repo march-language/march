@@ -18,6 +18,7 @@
 --   ./_build/default/demo/two_node_rpc.exe
 --
 mod TwoNodeRpc do
+  needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
 

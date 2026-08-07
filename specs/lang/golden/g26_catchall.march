@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   type Color = Red | Green | Blue | Other(Int)
   -- Specific PatCon branches followed by a deliberate PatWild catch-all:
   -- the `_` arm (eval.ml:773, match(PatWild, v) = ∅) selects whenever no

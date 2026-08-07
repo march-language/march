@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- A second recursion shape: a local recursive `fn go` computing sum-to-n,
   -- whose RESULT is bound by a following `let` and used by the rest of the
   -- block — proving the ELetFn binding is visible to the block continuation

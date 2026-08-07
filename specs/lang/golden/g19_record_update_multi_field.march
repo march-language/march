@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn sum3(r) do
     r.a + r.b + r.c
   end

@@ -8,6 +8,7 @@
 -- e.g. node A = local server, node B = droplet via ssh tunnel:
 --   ./load_client 127.0.0.1 29853 127.0.0.1 29852
 mod LoadClient do
+  needs IO.Console
 
   needs IO.Clock
 

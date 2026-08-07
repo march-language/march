@@ -1,4 +1,5 @@
 mod P13RichTypeAnnotation do
+  needs IO.Console
   type Pair(a, b) = MkPair(a, b)
 
   fn swap(p: Pair(a, b)) do

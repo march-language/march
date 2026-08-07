@@ -1,4 +1,5 @@
 mod P21TransitionsStateMachine do
+  needs IO.Console
   type Handle(s) = Handle(Int)
   tag Open
   tag Closed

@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational actor lifecycle witness (core-march.md §4.10.6): spawn -> kill ->
   -- is_alive. A single Counter actor is spawned (ai_alive = true), so is_alive
   -- returns true; kill(pid) runs crash_actor (eval.ml:1766) which sets

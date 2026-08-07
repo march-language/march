@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational actor witness (core-march.md §4.10): receive()-mediated
   -- follow-up. The Inbox actor's `on Start()` handler calls receive() ONCE to
   -- pop the next already-queued message (a Follow(n)) from its own mailbox and

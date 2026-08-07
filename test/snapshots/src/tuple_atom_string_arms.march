@@ -2,6 +2,7 @@
 -- literal-arm class (tuple destructure, atom equality, string equality)
 -- lowers side by side in the same ECase chain.
 mod TupleAtomStringArms do
+  needs IO.Console
   fn describe(pair : (Int, Int)) : String do
     match pair do
       (0, 0) -> "origin"
