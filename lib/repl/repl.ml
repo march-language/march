@@ -105,7 +105,8 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
         let env1 = { env with types = StrMap.add name.txt arity env.types } in
         List.fold_left (fun e (v : variant) ->
           let ci = { ci_type = name.txt; ci_params = param_names;
-                     ci_arg_tys = v.var_args; ci_module = ""; ci_vis = v.var_vis } in
+                     ci_arg_tys = v.var_args; ci_module = ""; ci_vis = v.var_vis;
+                     ci_is_actor_msg = false } in
           { e with ctors = March_typecheck.Typecheck.add_ctor v.var_name.txt ci e.ctors }
         ) env1 variants
       | DType (_, name, params, _, _)

@@ -85,6 +85,16 @@ send(counter, Reset())
 
 The message is the constructor applied to its arguments. The actor handles it according to its `on` clause.
 
+**A message payload may not carry a mutable-buffer type** (`RingBuf`, and any other type
+registered in `non_sendable_types`, `lib/typecheck/typecheck.ml`) — these types are
+single-actor-owned by design, so sharing one across an actor boundary would let two
+actors alias the same mutable state. The check runs once, at the moment the message
+constructor is *applied* (`Increment(rb)`), not at whichever builtin later moves the
+resulting value — so it covers `send`, `send_checked`, `Actor.cast`, `Actor.call`, and
+storing the message in a variable before sending it, uniformly, with one rule (fixed
+2026-08-07; see the `ci_is_actor_msg` field in `typecheck.ml`'s `ctor_info` for how a
+message constructor is distinguished from an ordinary one).
+
 **Message names share one flat global constructor namespace.** A handler `on Msg(…)`
 registers `Msg` as an ordinary constructor — there is no per-actor message namespace,
 exactly analogous to the [no-per-module-type-namespace design point](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md)
@@ -96,7 +106,8 @@ collide (e.g. `Increment`, `Poke`), or qualify. Two consequences of this design 
 compiled wrong-actor-`send` misroute and the payload-typing rule — are documented in the
 [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.4.
 
-`send` returns `Some(())` if the actor is alive, or `None` if the actor is dead:
+`send` returns `Some(())` if the actor is alive, or `None` if the actor is dead — on
+both backends alike (fixed 2026-07-18; see the compiled-actor status note above):
 
 ```march
 match send(counter, Increment(1)) do
@@ -105,10 +116,7 @@ match send(counter, Increment(1)) do
 end
 ```
 
-> **Interp-vs-compiled note.** The dead-actor drop (`None`) is the *interpreter's*
-> behavior; the compiled backend returns `Some` for a `send` to a dead pid (a filed
-> divergence — [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6). A `send` to a *live* actor
-> agrees on both backends. See §4.10.2 for the async-enqueue operational rule.
+See §4.10.2 in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) for the async-enqueue operational rule.
 
 ---
 
@@ -171,8 +179,8 @@ println("alive: " ++ bool_to_string(alive))
 kill(counter)
 ```
 
-After `kill`, `is_alive(counter)` returns `false` and further `send`s return `None`
-(interpreted — see the dead-`send` note above). `is_alive` is a pure registry lookup and
+After `kill`, `is_alive(counter)` returns `false` and further `send`s return `None`, on
+both backends. `is_alive` is a pure registry lookup and
 is the one lifecycle observation that is **byte-identical interpreted vs compiled** (the
 golden witness `g37_actor_lifecycle` pins `spawn → is_alive true → kill → is_alive false`).
 The operational rules for `kill`/`is_alive` are in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
@@ -191,22 +199,21 @@ match get_cap(pid) do
     -- send_checked validates the epoch before delivering
     match send_checked(cap, Increment(1)) do
       :ok    -> println("delivered")
-      _      -> println("actor dead or cap stale")   -- :error or, compiled, a garbage atom
+      :error -> println("actor dead or cap stale")
     end
 end
 ```
 
 Use capabilities when you hold a reference across an actor restart boundary and need to know whether the message was delivered to the *current* incarnation of the actor. Under a supervisor, a restarted actor gets a fresh epoch, invalidating caps from before the restart.
 
-> **Interpreter-only.** The epoch-`Cap` validation plane described here is the
-> **interpreter's** semantics. Compiled, `send_checked` performs *no* epoch validation and
-> returns an uninterned garbage atom for every cap — matching neither `:ok` nor `:error`
-> (hence the `_` catch-all above rather than a `:error` arm) — and `get_cap` does not gate
-> on liveness. The entire capability mechanism is therefore non-functional in compiled
-> binaries today; it is a filed open finding ([`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6, and
-> `specs/todos/`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
-> additionally not registered in the typechecker, so they are not surface-callable at all.
-> Use plain `send`/`is_alive` if you need behavior that agrees on both backends.
+The epoch-`Cap` validation plane is byte-identical on both backends as of 2026-07-18:
+compiled `get_cap` gates on liveness (niche `None` for a dead/unknown pid) and compiled
+`send_checked` returns the same `:ok`/`:error` atoms as the interpreter after checking
+revocation, epoch match, and liveness (`march_send_checked`/`march_get_cap`,
+`runtime/march_runtime.c`) — pinned by `test/native/cap_epoch_plane`. `revoke_cap` and
+`is_cap_valid` are registered in the typechecker (`typecheck.ml:2342-2343`) and
+surface-callable on both backends. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6 for the full
+epoch-invalidation model.
 
 ---
 
@@ -246,8 +253,7 @@ fn main() do
 end
 ```
 
-This program prints `count = 1` interpreted (compiled, it currently prints a wrong value — see
-the note below). `Actor.call(pid, sentinel, timeout_ms)`
+This program prints `count = 1` on both backends. `Actor.call(pid, sentinel, timeout_ms)`
 reads the tag from the zero-arg `sentinel`, builds an augmented message (same tag,
 with the caller in field 0), and routes it to the handler at that tag. That handler
 receives the caller as its first argument and must call `Actor.reply(reply_to, result)`
@@ -276,19 +282,21 @@ There is no `Call` wrapper constructor, and the call handler takes exactly one a
 > handler at the same ctor index and binds the caller as the handler's single argument
 > (`lib/eval/eval.ml` `actor_call`). The historical interp-only `on Call(ref, msg)`
 > two-argument form is retired. Both behaviors are pinned by the
-> `test/native/actor_counter` and `test/native/actor_call_timeout` goldens, which are
-> intended to pass on both backends.
+> `test/native/actor_counter` and `test/native/actor_call_timeout` goldens, which pass on
+> both backends.
 >
-> **Newly observed compiled-only regression (found verifying this chapter, 2026-07-22):**
-> the pinned `test/native/actor_counter` golden itself currently fails compiled — it
-> prints `value=11` where `test/native/actor_counter.expected` pins `value=5` (interpreted
-> still prints `value=5` correctly). The wrong value is consistently `2n + 1` for the true
-> `Int` result `n` (e.g. an actor state of `0` reports as `1`, `5` reports as `11`), which
-> looks like the compiled `Actor.call`/`Actor.reply` return path handing back a raw tagged
-> fixnum instead of untagging it before use. This is a compiler/runtime bug, not a docs
-> issue — filed for follow-up investigation rather than fixed here.
+> **Historical regression, fixed 2026-07-22:** `Actor.call`'s reply value was briefly
+> corrupted compiled — a scalar reply (e.g. `value=5`) came back as its raw tagged bit
+> pattern (`value=11`) instead of the untagged integer. Root cause: `int_to_string`/
+> `bool_to_string`/`float_to_string` had no dedicated argument-coercion arm in
+> `lib/tir/llvm_emit.ml`'s `EApp` emission, so a generically-extracted `Result`
+> payload flowed into the C call still tagged. Fixed by adding the missing coercion
+> arms (mirroring the existing `int_not`/bitwise-op pattern); `test/native/actor_counter`
+> now matches its golden (`value=5`) on both backends.
 
 `Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
+Both `Actor.cast` and `Actor.call`'s message payloads are checked for non-sendable types
+identically to `send` — see the note under [Sending Messages](#sending-messages).
 
 ---
 
@@ -488,15 +496,15 @@ mod MyService do
 end
 ```
 
-The `app` declaration integrates with the supervision system. See [Supervision](supervision.md) for the tutorial, and [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.7 for the operational rules of `one_for_one` restart and epoch invalidation.
+The `app` declaration integrates with the supervision system. See [Supervision](supervision.md) for the tutorial, and [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.7 for the operational rules of restart and epoch invalidation.
 
-> **Supervision observation is interp-only compiled today.** The `one_for_one` restart
-> semantics are correct interpreted, but the only surface way to reach a supervised child
-> — reading its pid out of the supervisor state via `get_actor_field(sup, …)` +
-> `pid_of_int(…)` — **SIGSEGVs compiled** (`examples/supervision_strategies.march` exits
-> 139), and the compiled supervisor does not even run its children's `init` at
-> `spawn(Sup)`. Both are filed open findings (`specs/todos/`). Supervised-actor programs
-> run correctly under the interpreter; treat compiled supervision as not-yet-observable.
+Supervision observation is byte-identical on both backends as of 2026-07-08: the compiled
+supervisor runs each declared child's `init` at `spawn(Sup)`, and `get_actor_field(sup, …)`
++ `pid_of_int(…)` — the surface way to read a supervised child's pid out of the supervisor
+state — resolve correctly compiled (a real shape-registry lookup and a safe dead-actor
+fallback, respectively, in `runtime/march_extras.c`/`runtime/march_runtime.c`; no longer
+stubs). `examples/supervision_strategies.march` runs clean (exit 0) compiled, exercising
+all three restart strategies (`one_for_one`/`one_for_all`/`rest_for_one`).
 
 ---
 
@@ -531,22 +539,25 @@ Rules of thumb:
 
 ## Builtins Reference
 
-Backends: **both** = byte-identical interpreted vs compiled (the live-message plane);
-**interp-only** = correct interpreted, but diverges or crashes compiled (a filed finding).
+Backends: **both** = byte-identical interpreted vs compiled. As of 2026-07-18 this covers
+every builtin below, including the capability and supervision-observation plane that used
+to diverge or crash compiled (see the compiled-actor status note at the top of this page).
 
 | Builtin | Signature | Backends | Description |
 |---------|-----------|----------|-------------|
 | `spawn(Actor)` | `→ Pid` | both | Start a new actor (literal actor name only) |
-| `send(pid, msg)` | `→ Option(())` | both (live) | Send a message; `None` if actor is dead **interpreted** — compiled returns `Some` for a dead pid (§4.10.6 finding) |
+| `send(pid, msg)` | `→ Option(())` | both | Send a message; `None` if actor is dead |
 | `receive()` | `→ Msg` | both | Pop the next mailbox message (only the first `receive()` per handler may block) |
 | `kill(pid)` | `→ ()` | both | Stop an actor |
-| `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup, safe compiled) |
+| `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup) |
 | `self()` | `→ Pid` | both | Current actor's Pid |
 | `run_until_idle()` | `→ ()` | both | Drain the scheduler to a fixed point (interpreter / tests) |
-| `get_cap(pid)` | `→ Option(Cap(Msg))` | interp-only | Obtain an epoch-tagged capability (compiled `get_cap` does not gate on liveness) |
-| `send_checked(cap, msg)` | `→ :ok \| :error` | interp-only | Epoch-validated send; **non-functional compiled** — returns a garbage atom for every cap (§4.10.6 finding) |
-| `pid_of_int(n)` | `→ Pid` | interp-only | Convert Int to Pid — **SIGSEGVs compiled** (unsafe int→ptr cast, §4.10.7 finding) |
-| `get_actor_field(pid, name)` | `→ Option(a)` | interp-only | Read an actor's state field — **crashes compiled** (hard stub returns `None`, then a deref SIGSEGVs, §4.10.7 finding) |
+| `get_cap(pid)` | `→ Option(Cap(Msg))` | both | Obtain an epoch-tagged capability; `None` for a dead/unknown pid |
+| `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send; checks revocation, epoch match, and liveness (payload is checked for non-sendable types at construction, same rule as `send`) |
+| `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
+| `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
+| `pid_of_int(n)` | `→ Pid` | both | Convert Int to Pid (an unknown index resolves to a safe already-dead sentinel) |
+| `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
 

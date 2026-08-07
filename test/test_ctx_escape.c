@@ -65,6 +65,7 @@ int main(void) {
         { MARCH_ESC_JS_STRING,     "js_string" },
         { MARCH_ESC_NONE,          "none" },
         { MARCH_ESC_CSS_DECL,      "css_decl" },
+        { MARCH_ESC_CSS_URL,       "css_url" },
     };
     for (int i = 0; i < MARCH_ESC__COUNT; i++) {
         checks++;
@@ -200,6 +201,29 @@ int main(void) {
     expect_absent(MARCH_ESC_CSS_VALUE, "a\"b", "\"", "css escapes a quote");
     expect_absent(MARCH_ESC_CSS_VALUE, "a/*x*/b", "/", "css escapes a comment");
     expect_absent(MARCH_ESC_CSS_DECL, "@import url(x)", "@", "css escapes @import");
+
+    /* ── CSS url() ───────────────────────────────────────────────────────
+       Safe in the intersection of URL, CSS url-token and HTML attribute. The
+       first case is the regression: esc_css mangled the slashes and broke a
+       perfectly good relative URL. */
+    expect(MARCH_ESC_CSS_URL, "/img/logo.png", "/img/logo.png",
+           "css url keeps a relative path intact");
+    expect(MARCH_ESC_CSS_URL, "https://cdn.example/a.png?v=2&x=1",
+           "https://cdn.example/a.png?v=2&x=1",
+           "css url keeps a query string intact");
+    expect(MARCH_ESC_CSS_URL, "javascript:alert(1)", MARCH_URL_UNSAFE_REPLACEMENT,
+           "css url rejects javascript:");
+    expect(MARCH_ESC_CSS_URL, "  JaVaScRiPt:alert(1)", MARCH_URL_UNSAFE_REPLACEMENT,
+           "css url rejects an obfuscated javascript:");
+    /* must not close the url(), the CSS string, the HTML attribute, or a
+       <style> element */
+    expect_absent(MARCH_ESC_CSS_URL, "a)b", ")", "css url escapes a close paren");
+    expect_absent(MARCH_ESC_CSS_URL, "a(b", "(", "css url escapes an open paren");
+    expect_absent(MARCH_ESC_CSS_URL, "a\"b", "\"", "css url escapes a quote");
+    expect_absent(MARCH_ESC_CSS_URL, "a'b", "'", "css url escapes an apostrophe");
+    expect_absent(MARCH_ESC_CSS_URL, "a</style>b", "<", "css url escapes a tag open");
+    expect_absent(MARCH_ESC_CSS_URL, "a\\b", "\\", "css url escapes a backslash");
+    expect_absent(MARCH_ESC_CSS_URL, "a b", " ", "css url escapes a space");
 
     /* ── None ────────────────────────────────────────────────────────────── */
     expect(MARCH_ESC_NONE, "<b>&", "<b>&", "none passes through verbatim");

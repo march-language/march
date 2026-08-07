@@ -38,6 +38,13 @@ type attr =
       (** a `style` attribute at a VALUE position — after a `:`. A hole here is
           a single value (`#fff`, `var(--x)`), so `:` and `;` are NOT allowed:
           either would let the value start a new declaration. *)
+  | AtCssUrl
+      (** inside a CSS `url(...)`, whether in a `style` attribute or a `<style>`
+          body. A hole here is a URL, not a CSS value: escaping it as CSS
+          mangles the slashes and breaks the reference, while escaping it as a
+          plain URL would not stop it closing the `url(`. This is the one place
+          the paper's subsidiary automata genuinely earn their keep — see
+          [EscCssUrl]. *)
   | AtScript
 
 type delim =
@@ -62,7 +69,8 @@ let all_states =
     Beforeattrvalue; Attrvalue; Comment ]
 
 let all_elements = [ ElNormal; ElScript; ElStyle; ElTextarea; ElTitle ]
-let all_attrs = [ AtNormal; AtUrl; AtUrlMid; AtStyle; AtStyleValue; AtScript ]
+let all_attrs =
+  [ AtNormal; AtUrl; AtUrlMid; AtStyle; AtStyleValue; AtCssUrl; AtScript ]
 let all_delims = [ DlNone; DlSingle; DlDouble; DlUnquoted; DlDoubleSubst ]
 
 let state_name = function
@@ -89,6 +97,7 @@ let attr_name = function
   | AtUrlMid -> "urlmid"
   | AtStyle -> "style"
   | AtStyleValue -> "stylevalue"
+  | AtCssUrl -> "cssurl"
   | AtScript -> "script"
 
 let delim_name = function
@@ -119,6 +128,7 @@ let describe c =
   | Attrvalue, AtUrlMid, _ -> "inside a URL attribute value"
   | Attrvalue, AtStyle, _ -> "at a declaration position in a style attribute"
   | Attrvalue, AtStyleValue, _ -> "at a value position in a style attribute"
+  | Attrvalue, AtCssUrl, _ -> "inside a CSS url() in a style attribute"
   | Attrvalue, AtScript, _ -> "in an event-handler attribute value"
   | Attrvalue, _, DlUnquoted -> "in an unquoted attribute value"
   | Attrvalue, _, _ -> "in an attribute value"
@@ -144,6 +154,14 @@ type escaper =
           carry `color:red;background:blue`. Appended rather than inserted so
           the existing ids stay stable -- they are shared verbatim with the C
           runtime's MARCH_ESC_* defines. *)
+  | EscCssUrl
+      (** a URL inside a CSS `url(...)`. Must be safe in the INTERSECTION of
+          three languages at once: a URL (so the scheme allowlist applies), a
+          CSS url-token (so it must not close the paren or the quoting), and —
+          when the CSS is in a `style` attribute — an HTML attribute value.
+          Neither the CSS nor the URL escaper alone is right: CSS escaping
+          mangles the slashes, and URL escaping leaves `)` free to close the
+          construct. *)
 
 let escaper_id = function
   | EscHtml -> 0
@@ -154,6 +172,7 @@ let escaper_id = function
   | EscJsString -> 5
   | EscNone -> 6
   | EscCssDecl -> 7
+  | EscCssUrl -> 8
 
 let escaper_name = function
   | EscHtml -> "html"
@@ -164,3 +183,4 @@ let escaper_name = function
   | EscJsString -> "js_string"
   | EscNone -> "none"
   | EscCssDecl -> "css_decl"
+  | EscCssUrl -> "css_url"
