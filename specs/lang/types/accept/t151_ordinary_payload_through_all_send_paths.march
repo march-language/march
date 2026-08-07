@@ -1,5 +1,5 @@
 mod Main do
-  -- Companion to reject/t153-t157: an ORDINARY Int payload must still
+  -- Companion to reject/t159-t163: an ORDINARY Int payload must still
   -- typecheck through send_checked, Actor.cast, actor_cast, Actor.call, and
   -- actor_call once check_sendable is wired into all four -- the fix must
   -- not reject anything it didn't already accept via plain send().
