@@ -2,6 +2,7 @@
 -- Covers: arithmetic, closures, pattern matching, variants, strings, Perceus RC.
 
 mod WasmTier1 do
+  needs IO.Console
 
 -- Arithmetic
 fn add(a, b) do a + b end

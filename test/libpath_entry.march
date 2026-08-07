@@ -10,6 +10,7 @@
 -- comment must NOT spell the ill-typed module's declared name, or the token
 -- scan would treat it as referenced and keep it in the build.
 mod LibpathEntry do
+  needs IO.Console
 
   fn main() do
     println("ok: unrelated ill-typed lib module is pruned, not built")

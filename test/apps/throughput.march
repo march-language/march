@@ -20,6 +20,7 @@
 -- so an n-level chain needs n closing `end` tokens stacked at the bottom.
 
 mod Throughput do
+  needs IO.Console
 
   -- ── CPU kernel ────────────────────────────────────────────────────────
   -- Wheel-2-3 trial division: only test candidates of the form 6k±1.

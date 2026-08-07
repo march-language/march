@@ -16,6 +16,7 @@
 -- regardless of the file-walk order, exactly as speak_collision_native does for
 -- the distinct-ctor case.
 mod DcEntry do
+  needs IO.Console
 
 import DcLibA
 import DcLibB

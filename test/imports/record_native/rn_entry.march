@@ -9,6 +9,7 @@
 -- (B5): the erased-shape fallback routes through march_record_update_dyn
 -- instead of writing at a hardcoded offset into a header-only allocation.
 mod RnEntry do
+  needs IO.Console
 
 fn check(name, cond) do
   if cond do

@@ -12,6 +12,7 @@
 --   GET /static/**     static files from priv/static/
 
 mod DemoApp do
+  needs IO.Console
 
 -- ---------------------------------------------------------------------------
 -- Pre-populate DevStats for the dashboard demo

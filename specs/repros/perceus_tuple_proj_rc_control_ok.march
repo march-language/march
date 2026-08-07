@@ -1,4 +1,5 @@
 mod T do
+  needs IO.Console
 
 type Conn = { ct : String }
 

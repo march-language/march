@@ -6,6 +6,7 @@
 -- reached in pass 2 — failed to resolve `TqShape.TqDot` with
 -- "I don't know a constructor called `TqShape.TqDot`".
 mod TqCtorEntry do
+  needs IO.Console
 
 type TqShape = TqDot(Int) | TqLine(Int, Int)
 
