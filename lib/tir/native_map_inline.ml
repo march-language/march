@@ -158,7 +158,9 @@ let rec count_uses (name : string) (e : Tir.expr) : int =
   | Tir.ERecord fields -> List.fold_left (fun acc (_, a) -> acc + ca a) 0 fields
   | Tir.EField (a, _) -> ca a
   | Tir.EUpdate (a, fields) -> ca a + List.fold_left (fun acc (_, a) -> acc + ca a) 0 fields
-  | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) -> cas args
+  | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args)
+  | Tir.EAllocHole (_, args, _) -> cas args
+  | Tir.ESetField (o, _, v) -> ca o + ca v
   | Tir.EFree a -> ca a
   | Tir.EIncRC a | Tir.EAtomicIncRC a -> ca a
   | Tir.EDecRC a | Tir.EAtomicDecRC a -> ca a

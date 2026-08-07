@@ -31,7 +31,8 @@ let rec node_count : Tir.expr -> int = function
   | Tir.EAtom _ | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _
   | Tir.EUpdate _ | Tir.EAlloc _ | Tir.EStackAlloc _
   | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ | Tir.EReuse _
-  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ -> 1
+  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EAllocHole _ | Tir.ESetField _ -> 1
   | Tir.EApp (_, args)     -> 1 + List.length args
   | Tir.ECallPtr (_, args) -> 1 + List.length args
   | Tir.ELet (_, rhs, body) -> 1 + node_count rhs + node_count body
@@ -207,6 +208,8 @@ let rec add_expr_names names = function
     add_atom_name names atom
   | Tir.EReuse (reuse, _, args) ->
     add_atom_names (add_atom_name names reuse) args
+  | Tir.EAllocHole (_, args, _) -> add_atom_names names args
+  | Tir.ESetField (o, _, v) -> add_atom_name (add_atom_name names o) v
   | Tir.ESeq (first, second) ->
     add_expr_names (add_expr_names names first) second
 
@@ -314,6 +317,10 @@ let alpha_rename (params : Tir.var list) (body : Tir.expr)
     | Tir.EReuse (a, ty, args) ->
       Tir.EReuse
         (subst_atom env a, ty, List.map (subst_atom env) args)
+    | Tir.EAllocHole (ty, args, hole) ->
+      Tir.EAllocHole (ty, List.map (subst_atom env) args, hole)
+    | Tir.ESetField (o, i, v) ->
+      Tir.ESetField (subst_atom env o, i, subst_atom env v)
     | Tir.ESeq (e1, e2)      ->
       let e1 = subst_expr env e1 in
       let e2 = subst_expr env e2 in

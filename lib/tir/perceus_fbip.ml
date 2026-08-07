@@ -146,7 +146,8 @@ let rec fbip_expr (e : Tir.expr) : Tir.expr =
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
   | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
-  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ | Tir.EReuse _ ->
+  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ | Tir.EReuse _
+  | Tir.EAllocHole _ | Tir.ESetField _ ->
     e
 
 (** Apply FBIP reuse to a function definition. *)

@@ -118,7 +118,10 @@ let rec expr_mentions_any (names : string list) (e : Tir.expr) : bool =
   | Tir.EUpdate (a, fs) ->
     atom_mentions_any names a
     || List.exists (fun (_, av) -> atom_mentions_any names av) fs
-  | Tir.EAlloc (_, xs) | Tir.EStackAlloc (_, xs) -> atoms_mention_any names xs
+  | Tir.EAlloc (_, xs) | Tir.EStackAlloc (_, xs)
+  | Tir.EAllocHole (_, xs, _) -> atoms_mention_any names xs
+  | Tir.ESetField (o, _, v) ->
+    atom_mentions_any names o || atom_mentions_any names v
   | Tir.ESeq (e1, e2) ->
     expr_mentions_any names e1 || expr_mentions_any names e2
   | Tir.EIncRC a | Tir.EDecRC a
@@ -186,6 +189,8 @@ let rec rename_expr (from_name : string) (to_name : string) (e : Tir.expr)
   | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (ra a)
   | Tir.EFree a -> Tir.EFree (ra a)
   | Tir.EReuse (a, t, xs) -> Tir.EReuse (ra a, t, List.map ra xs)
+  | Tir.EAllocHole (t, xs, hole) -> Tir.EAllocHole (t, List.map ra xs, hole)
+  | Tir.ESetField (o, i, v) -> Tir.ESetField (ra o, i, ra v)
 
 (* ── Core transform ─────────────────────────────────────────────────────── *)
 
@@ -340,7 +345,8 @@ let rec float_expr ?(rename = false) (changed : bool ref) (e : Tir.expr)
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _ | Tir.ETuple _ | Tir.ERecord _
   | Tir.EField _ | Tir.EUpdate _ | Tir.EAlloc _ | Tir.EStackAlloc _
   | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _
-  | Tir.EAtomicDecRC _ | Tir.EReuse _ ->
+  | Tir.EAtomicDecRC _ | Tir.EReuse _
+  | Tir.EAllocHole _ | Tir.ESetField _ ->
     e
 
 let float_fn ?(rename = false) (changed : bool ref) (fn : Tir.fn_def)

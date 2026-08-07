@@ -75,6 +75,9 @@ let rec add_tycons_of_expr acc (e : expr) : string list =
   | EReuse (a, ty, args) ->
     List.fold_left add_tycons_of_atom (add_tycons_of_ty (add_tycons_of_atom acc a) ty) args
   | EFree a | EIncRC a | EDecRC a | EAtomicIncRC a | EAtomicDecRC a -> add_tycons_of_atom acc a
+  | EAllocHole (ty, args, _) ->
+    List.fold_left add_tycons_of_atom (add_tycons_of_ty acc ty) args
+  | ESetField (o, _, v) -> add_tycons_of_atom (add_tycons_of_atom acc o) v
   | ESeq (e1, e2)      -> add_tycons_of_expr (add_tycons_of_expr acc e1) e2
 
 and add_tycons_of_fn acc (fd : fn_def) : string list =

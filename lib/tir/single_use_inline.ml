@@ -342,6 +342,11 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
     | Tir.EReuse (reuse, _, args) ->
       scan_atom ~caller ~bound NonDirect reuse;
       List.iter (scan_atom ~caller ~bound NonDirect) args
+    | Tir.EAllocHole (_, args, _) ->
+      List.iter (scan_atom ~caller ~bound NonDirect) args
+    | Tir.ESetField (o, _, v) ->
+      scan_atom ~caller ~bound NonDirect o;
+      scan_atom ~caller ~bound NonDirect v
     | Tir.ESeq (first, second) ->
       scan_expr ~caller ~bound first;
       scan_expr ~caller ~bound second

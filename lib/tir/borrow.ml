@@ -496,6 +496,14 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
   | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ ->
     false
 
+  (* TRMC.  EAllocHole STORES its operands into a fresh cell, exactly like
+     EAlloc — an owning use.  ESetField likewise moves the stored value into
+     the object; the TARGET is only mutated, which is not an owning use of
+     the target itself. *)
+  | Tir.EAllocHole (_, args, _) ->
+    List.exists (fun a -> atom_is name a) args
+  | Tir.ESetField (_, _, v) -> atom_is name v
+
 (* ── Fixpoint inference ───────────────────────────────────────────────────── *)
 
 (** Infer the borrow map for all functions in [m].

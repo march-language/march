@@ -68,6 +68,8 @@
       ESeq          0x50
       EAtomicIncRC  0x51
       EAtomicDecRC  0x52
+      EAllocHole    0x53
+      ESetField     0x54
 
     Linearity tags:
       Lin  0x60
@@ -297,6 +299,20 @@ let rec write_expr buf (next : int ref) (scope : (string * int) list) (e : expr)
   | EAtomicDecRC a ->
     buf_u8 buf 0x52;
     write_atom buf scope a
+  (* TRMC.  The hole INDEX is part of the fingerprint: two otherwise identical
+     allocations that leave different fields unwritten are different programs,
+     so omitting it would let the CAS serve one for the other. *)
+  | EAllocHole (ty, args, hole) ->
+    buf_u8 buf 0x53;
+    write_ty buf ty;
+    buf_u32_le buf hole;
+    buf_u32_le buf (List.length args);
+    List.iter (write_atom buf scope) args
+  | ESetField (o, i, v) ->
+    buf_u8 buf 0x54;
+    write_atom buf scope o;
+    buf_u32_le buf i;
+    write_atom buf scope v
 
 and write_branch buf next scope (br : branch) =
   buf_string buf br.br_tag;
