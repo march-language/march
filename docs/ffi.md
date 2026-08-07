@@ -28,6 +28,7 @@ foreign functions with their March types and C symbol names:
 
 ```march
 mod Demo do
+  needs IO.Console
   needs IO.Foreign                       -- using an extern implies this capability
   needs Ffi                              -- the extern block's own Cap(Ffi) requirement
 

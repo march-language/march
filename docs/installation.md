@@ -185,6 +185,7 @@ Create `hello.march`:
 
 ```march
 mod Hello do
+  needs IO.Console
   fn main() do
     println("Hello, March!")
   end

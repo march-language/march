@@ -25,6 +25,7 @@ loads the whole file into memory, so it's the right tool for large files.
 
 ```march
 mod Print do
+  needs IO.Console
 
   fn dump(path : String) do
     Csv.each_row_with_header(path, ",", :rfc4180, fn (header, row) ->

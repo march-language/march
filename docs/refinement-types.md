@@ -875,6 +875,7 @@ parameter it came from. Both sides of a guard count:
 
 ```march
 mod NonlinearDivisor do
+  needs IO.Console
   cap no_panic
 
   fn scale(d : {v : Int | v * v > 0}) : Int do
@@ -905,6 +906,7 @@ runtime "division by zero":
 
 ```march
 mod ImplDiv do
+  needs IO.Console
   cap no_panic
 
   type Box = Box(Int)

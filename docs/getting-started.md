@@ -20,6 +20,7 @@ Every March file starts with a module declaration. Create `hello.march`:
 
 ```march
 mod Hello do
+  needs IO.Console
 
   fn main() do
     println("Hello, March!")
@@ -50,6 +51,7 @@ Hello, March!
 
 ```march
 mod Greet do
+  needs IO.Console
 
   fn greet(name : String) : String do
     "Hello, " ++ name ++ "!"
@@ -189,6 +191,7 @@ A typical March program has:
 
 ```march
 mod MyApp do
+  needs IO.Console
 
   -- Type definitions
   type Color = Red | Green | Blue

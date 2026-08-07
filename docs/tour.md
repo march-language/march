@@ -46,6 +46,7 @@ Modules can be nested:
 ```march
 mod Outer do
   mod Inner do
+  needs IO.Console
     fn greet() do println("from Inner") end
   end
 end

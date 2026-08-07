@@ -135,6 +135,7 @@ verified directly against the compiler.)
 
 ```march
 mod BasicSupervision do
+  needs IO.Console
 
   actor Counter do
     state { count : Int }
@@ -342,6 +343,7 @@ Start with a single actor that processes jobs. On a bad job it just crashes; we'
 
 ```march
 mod JobProcessorV1 do
+  needs IO.Console
 
   actor Worker do
     state { done : Int }
@@ -374,6 +376,7 @@ Wrap the worker in a `one_for_one` supervisor. Now a crash is *recovered from*: 
 
 ```march
 mod JobProcessorV2 do
+  needs IO.Console
 
   actor Worker do
     state { done : Int }

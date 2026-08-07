@@ -72,6 +72,7 @@ A CLI needs its arguments. `System.argv()` returns the full argument vector as a
 <!-- scroll:skip -->
 ```march
 mod Mcount do
+  needs IO.Console
   fn main() do
     match System.argv() do
       [_exe, path] -> println("counting " ++ path)
@@ -150,6 +151,7 @@ Putting it together — replace `lib/mcount.march` with:
 
 ```march
 mod Mcount do
+  needs IO.Console
 
   -- Count lines, words, and bytes in a string.
   fn count(text : String) : (Int, Int, Int) do
@@ -199,6 +201,7 @@ a standalone version that ranks the top 3 words in a string:
 
 ```march
 mod TopWords do
+  needs IO.Console
 
   fn tally(words : List(String)) : Map(String, Int) do
     List.fold_left(words, Map.empty(), fn (counts, word) ->
@@ -258,6 +261,7 @@ functions that return `Bool`, and a `main` that runs them and reports. Replace
 
 ```march
 mod McountTest do
+  needs IO.Console
 
   fn count(text : String) : (Int, Int, Int) do
     let lines = String.split(text, "\n")
