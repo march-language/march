@@ -17,6 +17,7 @@
 --   curl http://localhost:8080/count
 
 mod CounterServer do
+  needs IO.Console
 
 actor Counter do
   state { count : Int }

@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: Each condition in `match do` must be Bool.
 mod M do
+  needs IO.Console
   fn describe(n : Int) : String do
     match do
       n -> "positive"

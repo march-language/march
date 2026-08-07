@@ -3,6 +3,7 @@
 -- Usage: march --compile bench/fib.march -o bench/fib && bench/fib 40
 
 mod Fib do
+  needs IO.Console
 
 pfn fib(n : Int) : Int do
   if n < 2 do n

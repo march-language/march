@@ -25,6 +25,7 @@
 -- unboxed clone's signature (`define double @...$mapfast$...(ptr
 -- %$clo.arg, double %x.arg)`) uses natural double params/return, not ptr.
 mod Main do
+  needs IO.Console
   fn main() : () do
     let arr = NativeArray.from_list_float(Cons(-3.5, Cons(-1.0, Cons(0.0, Cons(1.0, Cons(3.5, Nil))))))
 

@@ -9,6 +9,7 @@
 -- exists). Fixed by adding all five to defun.builtin_names. Deterministic:
 -- both tasks return immediately, so the winner is the first.
 mod Main do
+  needs IO.Console
   needs IO.Spawn
   fn main() : () do
     let a = Task.async(fn () -> 1)

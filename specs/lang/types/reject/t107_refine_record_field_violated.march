@@ -5,6 +5,7 @@
 -- Z3 model; `0 >= 1` is refuted without ambiguity. Accept companion:
 -- accept/t95 (`serve({ port: 8080 })`).
 mod M do
+  needs IO.Console
   type Cfg = { port : Int }
   fn serve(c : {v : Cfg | v.port >= 1}) : Int do c.port end
   fn main() do

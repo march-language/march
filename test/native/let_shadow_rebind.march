@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Regression: js_emit.ml did not alpha-rename shadowed same-block `let`
   -- bindings. `let x = ...; let x = f(x)` compiled under --target js to
   -- `const x = (() => { ...; return f(x); })();` — the IIFE's reference to

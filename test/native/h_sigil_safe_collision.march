@@ -22,6 +22,7 @@
 -- diff on any unrelated tag renumbering.
 
 mod HSigilSafeCollision do
+  needs IO.Console
   fn main() : Unit do
     let s = Html.raw("<b>x</b>")
     let out = IOList.to_string(~H"<p>${s}</p>")

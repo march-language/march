@@ -27,6 +27,7 @@
 -- fall back to the general closure-call path, since it's used more than
 -- once) to confirm the eligibility guard still excludes it correctly.
 mod Main do
+  needs IO.Console
   fn main() : () do
     -- Int, non-capturing.
     let a = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))

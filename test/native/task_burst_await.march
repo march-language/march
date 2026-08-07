@@ -19,6 +19,7 @@
 --   MARCH_SANITIZE=thread march --compile -o /tmp/tba task_burst_await.march
 --   for i in $(seq 1 100); do /tmp/tba; done   # expect "3202800", no TSan report
 mod TaskBurstAwait do
+  needs IO.Console
   needs IO.Spawn
 
   pfn work(n : Int) : Int do

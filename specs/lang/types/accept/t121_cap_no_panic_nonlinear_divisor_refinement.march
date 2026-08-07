@@ -18,6 +18,7 @@
 -- gives this file its content: `v * v >= 0` is just as non-linear, just as
 -- reflectable, and true of EVERY integer, so it must still be rejected.
 mod NonlinearDivisor do
+  needs IO.Console
   cap no_panic
 
   fn scale(d : {v : Int | v * v > 0}) : Int do

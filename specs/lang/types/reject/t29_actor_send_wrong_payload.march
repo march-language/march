@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: expected `Int` but got `String`
 mod Main do
+  needs IO.Console
   -- Widening actors slice, Task 3 -- MESSAGE PAYLOAD TYPING (the reject path).
   -- A message payload of the WRONG type is rejected by ordinary constructor
   -- typing. The `ESend` arm (`typecheck.ml:4177`) types the message via

@@ -8,6 +8,7 @@
 -- in from_list.  Exercises: native->list->box-into-ADT->unbox, and the
 -- list->native->list round-trip + sum.
 mod Main do
+  needs IO.Console
   type V = IV(Int) | FV(Float)
 
   fn cmp(a : V, b : V) : Int do

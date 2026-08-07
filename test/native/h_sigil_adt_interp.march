@@ -30,6 +30,7 @@
 -- land, update .expected to the interpreter's rendering.
 
 mod HSigilAdtInterp do
+  needs IO.Console
   type Point = Point(Int, Int)
   type Multi = A | B(String) | C(String, String)
   type Box = Bx(List(b))

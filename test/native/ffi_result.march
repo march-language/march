@@ -1,6 +1,7 @@
 -- FFI error protocol: a fallible binding declared `: Result(T, E)` returns
 -- Ok/Err built on the C side via march_ok / march_err. Both arms round-trip.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   extern "rt" : Cap(Ffi) do

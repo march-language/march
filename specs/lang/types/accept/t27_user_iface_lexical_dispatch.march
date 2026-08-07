@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- Operational dispatch witness (core-march.md §4.2.2): a user-defined
   -- interface's method call resolves through ORDINARY LEXICAL `env` binding,
   -- not a runtime type-directed table. `speak(Dog(...))` finds `speak` bound

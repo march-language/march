@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Exhaustiveness, local-shadow of an `always_linear` stdlib name — the ctor
   -- half of the L4 fix (2026-07-17). A module declaring its OWN `type Handle`
   -- with its own constructor `H` must match exhaustively on `H(_)` alone. Before

@@ -4,6 +4,7 @@
 --        bench/binary_trees 15
 
 mod BinaryTrees do
+  needs IO.Console
 
 ptype Tree = Leaf | Node(Tree, Tree)
 

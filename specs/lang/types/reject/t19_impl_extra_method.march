@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: Interface `Speak` does not declare a method `bark`.
 mod M do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end

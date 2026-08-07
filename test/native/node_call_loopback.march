@@ -12,6 +12,7 @@
 -- Targets is created fresh per iteration to avoid Perceus RC shared-path
 -- on function-pointer fields (each targets is uniquely owned when used).
 mod NodeCallLoopback do
+  needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
 

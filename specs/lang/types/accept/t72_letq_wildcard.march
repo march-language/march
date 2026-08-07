@@ -2,6 +2,7 @@
 -- propagates Err but discards the Ok payload — the sequencing-for-effect /
 -- must-succeed idiom. Still requires a Result body after it.
 mod Main do
+  needs IO.Console
   fn f() : Result(Int, String) do Ok(1) end
   fn run() : Result(Int, String) do
     let? _ = f()

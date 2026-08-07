@@ -17,6 +17,7 @@
 -- so nothing here is unsafe -- just unverified. NOT a bug; do not "fix" by
 -- making this reject without reading §2.14's scope note first.
 mod M do
+  needs IO.Console
   fn take_n(n : {Int | _ >= 0}) : Int do n end
   fn apply(f : Int -> Int, x : Int) : Int do f(x) end
   fn main() do

@@ -4,6 +4,7 @@
 -- Run: march examples/list_lib.march
 
 mod ListLib do
+  needs IO.Console
 
 -- Define a custom integer list type (separate from the stdlib)
 type IntList = INil | ICons(Int, IntList)

@@ -4,6 +4,7 @@
 -- not raw march_value. make() builds a Box in C; classify() decodes one built in
 -- March. ffi_optres.c is the filled-in `forge ffi gen-c` artifact.
 mod Test do
+  needs IO.Console
   needs Ffi
   type Box = { tag : Int, maybe : Option(Int), name : Option(String), res : Result(Int, String) }
   extern "c" : Cap(Ffi) do

@@ -3,6 +3,7 @@
 -- `finish(consume a)` reads the total and drops the resource itself; March must
 -- NOT also drop it (that was a double-free / RC underflow before `consume`).
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   resource Acc

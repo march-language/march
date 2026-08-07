@@ -5,6 +5,7 @@
 -- :post have FNV hashes with bit63 != bit62, so they used to come back as
 -- garbage (broke Router method matching).  atom_hash now forces bit63 == bit62.
 mod AtomCtorField do
+  needs IO.Console
   type Box = Box(Int, Atom, Int)
 
   fn mk(a : Atom) : Box do Box(0, a, 1) end

@@ -12,6 +12,7 @@
 -- guarantee the author opted into, so every outcome short of Verified is an
 -- error.
 mod NonlinearDivisorUnproven do
+  needs IO.Console
   cap no_panic
 
   fn scale(d : {v : Int | v * v >= 0}) : Int do

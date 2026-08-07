@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   type GetReq = GetReq
   actor Counter do
     state { count : Int }

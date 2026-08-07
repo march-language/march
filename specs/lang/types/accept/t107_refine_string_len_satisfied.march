@@ -5,6 +5,7 @@
 -- cached Z3 String theory) and discharges `len(_) > 0` without ambiguity.
 -- Reject companion: reject/t85 (`nonempty("")`).
 mod M do
+  needs IO.Console
   fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
   fn main() do
     println(int_to_string(nonempty("abc")))

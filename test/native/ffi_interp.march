@@ -2,6 +2,7 @@
 -- tree-walking interpreter (no --compile) via dlopen + a fixed-arity
 -- trampoline. ffi_test_dbl lives in runtime/march_ffi.c.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   extern "m" : Cap(Ffi) do

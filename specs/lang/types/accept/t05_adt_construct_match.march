@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   type Hue = Rood | Bloo
 
   fn name(c : Hue) : String do

@@ -1,6 +1,7 @@
 -- Test Option niche: None=0, Some(x)=x
 -- Covers: Option(Int), Option(String), None arm, cross-function return.
 mod OptionNiche do
+  needs IO.Console
 
 fn safe_div(a : Int, b : Int) : Option(Int) do
   if b == 0 do

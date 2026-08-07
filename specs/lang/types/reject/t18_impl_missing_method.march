@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: Missing method `greet` in `impl Speak(Dog)`.
 mod M do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
     fn greet : a -> String

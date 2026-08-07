@@ -16,6 +16,7 @@
 -- Usage: march --compile --opt 2 bench/string_scan.march -o /tmp/string_scan
 
 mod StringScan do
+  needs IO.Console
 
 -- Size knob: 10 bytes per unit.  100_000 -> 1MB (CI); raise for profiling.
 pfn buffer_units() : Int do 100000 end

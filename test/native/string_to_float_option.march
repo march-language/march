@@ -11,6 +11,7 @@
 -- directly and stdlib's String.to_float wrapper (which follows the exact
 -- same string_to_float -> match Some/None -> Ok/Err shape).
 mod Main do
+  needs IO.Console
   fn main() do
     match string_to_float("3.14") do
       Some(f) -> println(float_to_string(f))

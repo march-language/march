@@ -5,6 +5,7 @@
 -- against the bit-precise encoding and discharges it without ambiguity.
 -- Reject companion: reject/t91 (`sqrtish(0.0 -. 1.0)`).
 mod M do
+  needs IO.Console
   fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end
   fn main() do
     println(float_to_string(sqrtish(4.0)))

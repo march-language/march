@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- Two DIFFERENT-named nullary atoms returned from the two arms of one `if`:
   -- this only typechecks because EAtom's inferred type is the bare, name-erased
   -- `Atom` for EVERY tag — :red and :blue share the exact same type.

@@ -27,6 +27,7 @@
 --      march_sched_preempt_start(), so MARCH_NUM_SCHEDULERS=1 had no timer
 --      preemption at all and relied entirely on the reduction counter.
 mod PreemptStarvation do
+  needs IO.Console
   needs IO.Spawn
 
   @[no_warn_recursion]

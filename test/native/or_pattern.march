@@ -1,4 +1,5 @@
 mod OrPattern do
+  needs IO.Console
 type Either = Left(Int) | Right(Int) | Neither
 
 type Color = Red | Green | Blue

@@ -6,6 +6,7 @@
 -- used to silently drop the wrapped string in compiled output (fine
 -- interpreted). See llvm_emit.ml's html_auto_escape EApp case.
 mod HtmlSafeRaw do
+  needs IO.Console
   fn body_partial() : IOList do
     ~H"<h1>Welcome</h1>"
   end

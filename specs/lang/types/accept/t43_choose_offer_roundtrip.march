@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Session-types widening, Task 3 -- choose/offer full round-trip (accept).
   -- Complements t41 (plain send/recv/close). `Decision`'s two branches carry
   -- DIFFERENT payload types (Int vs String) so the MPST merge rule (F4,

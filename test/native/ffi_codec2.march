@@ -3,6 +3,7 @@
 -- values; March passes them through without inspecting internal structure, so no
 -- assumption about how March stores List(Int) element slots is needed.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   type Sample = { avg : Option(Float), flag : Option(Unit), data : List(Int) }

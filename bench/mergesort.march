@@ -2,6 +2,7 @@
 -- Expected output: 1423
 
 mod BenchMergesort do
+  needs IO.Console
 
 pfn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   if n == 0 do acc

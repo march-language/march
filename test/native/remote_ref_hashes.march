@@ -3,6 +3,7 @@
 -- rather than empty or placeholder strings.
 -- fib is recursive so the inliner cannot eliminate it; CAS hashes it.
 mod TestRRH do
+  needs IO.Console
 
   fn fib(n : Int) : Int do
     if n <= 1 do n

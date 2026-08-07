@@ -4,6 +4,7 @@
 -- variant-1 Int at the wrong offset (garbage).  Both arms here are qualified;
 -- the second (B, variant 1) is the one that regressed.
 mod QualCtorPat do
+  needs IO.Console
   type T = A(Int) | B(Int)
 
   fn extract(t : T) : Int do

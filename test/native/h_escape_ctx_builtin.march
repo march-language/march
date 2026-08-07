@@ -20,6 +20,7 @@
 --                IOList (it renders `#<tag:2>`), so the emitter routes a known
 --                IOList through march_html_auto_escape instead.
 mod HEscapeCtxBuiltin do
+  needs IO.Console
   fn main() : Unit do
     println("html=" ++ html_escape_ctx(0, "<b>&\"'"))
     println("attr=" ++ html_escape_ctx(1, "a\" onload=\"x"))

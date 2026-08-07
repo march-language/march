@@ -15,6 +15,7 @@
 -- (both as the map callback and called directly), which must NOT take the
 -- inline path since it's used more than once.
 mod Main do
+  needs IO.Console
   pfn go(arr, i, acc, scale) do
     if i >= 3 do
       acc

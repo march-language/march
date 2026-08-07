@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- `satisfy` (core-march-types.md §2.3 / desugar.ml's `expand_satisfy`,
   -- ~:1673-1716): wires an EXISTING top-level `fn name` to `interface
   -- Named(a)`'s `name` method purely by NAME MATCH -- no `impl` block

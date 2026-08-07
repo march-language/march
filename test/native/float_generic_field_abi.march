@@ -32,6 +32,7 @@
 -- IS_HEAP_PTR threshold, and Int arguments already flow through the
 -- uniform "ptr" convention on both ends of a call).
 mod Main do
+  needs IO.Console
   -- Bug 2 (and, via Array.get's internal length-count loop, bug 1): building
   -- and reading back a Float array/vector through the generic push/get path.
   fn arr_case() do

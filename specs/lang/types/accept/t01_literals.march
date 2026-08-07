@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn main() do
     let n = 42
     let b = true

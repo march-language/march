@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn classify(n : Int) : String do
     if n > 0 do "pos" else "nonpos" end
   end

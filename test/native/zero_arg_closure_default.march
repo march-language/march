@@ -13,6 +13,7 @@
 --
 -- Native output must match the interpreter: "/login|post||tok=SECRET|INNER".
 mod ZeroArgClosureDefault do
+  needs IO.Console
 
   type Conn = Conn(String, List((String, String)))
 

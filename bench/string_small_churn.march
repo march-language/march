@@ -19,6 +19,7 @@
 -- Usage: march --compile --opt 2 bench/string_small_churn.march -o /tmp/string_small_churn
 
 mod StringSmallChurn do
+  needs IO.Console
 
 pfn pairs() : Int do 2000000 end
 

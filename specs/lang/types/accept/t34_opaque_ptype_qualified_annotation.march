@@ -14,6 +14,7 @@
 -- module's own public `new`/`add` API (never via a bare/direct constructor
 -- call) and prints `1`.
 mod Main do
+  needs IO.Console
   fn ring_arity(_ring : ConsistentHash.HashRing(String)) : Int do 1 end
 
   fn main() do

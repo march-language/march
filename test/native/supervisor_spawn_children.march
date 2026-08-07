@@ -1,4 +1,5 @@
 mod SupervisorSpawnChildren do
+  needs IO.Console
 
   actor Worker do
     state { count : Int }

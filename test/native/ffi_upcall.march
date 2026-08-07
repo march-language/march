@@ -4,6 +4,7 @@
 -- [1..n] — proving closures cross the boundary as march_values whose
 -- apply-fn lives at field 0.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   extern "rt" : Cap(Ffi) do

@@ -7,6 +7,7 @@
 -- See test/native/tco_fresh_arg_decrc.march for the underlying TCO bug.
 -- Compile natively, run, diff stdout.
 mod TomlGetInt do
+  needs IO.Console
   fn get_int_or(src : String, key : String) : String do
     match Toml.parse(src) do
     Err(_) -> "parse error"

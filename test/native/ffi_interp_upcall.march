@@ -4,6 +4,7 @@
 -- rather than dereferencing a compiled closure's C function pointer.
 -- Uses the same ffi_apply1 / ffi_count_matching symbols as the compiled test.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
 

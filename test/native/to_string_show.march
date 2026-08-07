@@ -7,6 +7,7 @@
 -- Covers containers, ADTs, primitives (unchanged fast path), and string
 -- interpolation (which desugars to `to_string`). specs/todos.md item 347.
 mod Main do
+  needs IO.Console
   fn main() : () do
     let r : Result(Int, String) = Ok(7)
     println(to_string([1, 2, 3]))

@@ -3,6 +3,7 @@
 -- stdlib functions (ClusterLoad/List/Msgpack), so its impl_hash must still
 -- match the caller-side compilation (rpc_hash_elim).  Prints only the hash.
 mod RpcHashLive do
+  needs IO.Console
 
   needs IO.Clock
 

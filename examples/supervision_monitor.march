@@ -13,6 +13,7 @@
 -- Run: march examples/supervision_monitor.march
 
 mod MonitorDemo do
+  needs IO.Console
 
   -- A simple actor that does some counting work.
   actor Worker do

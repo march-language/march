@@ -8,6 +8,7 @@
 -- handles the dispatch via the compiler-registered add__rpc_stub entry.
 -- Port 29851.
 mod RpcAutoEnroll do
+  needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
 

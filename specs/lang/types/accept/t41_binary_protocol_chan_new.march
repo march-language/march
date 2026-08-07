@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Session-types widening, Task 2 -- BINARY protocol declaration + projection
   -- + duality + `Chan(Role, Proto)` typing (core-march-types.md §2.7).
   -- `protocol Echo` has exactly 2 roles (`Client`/`Server`), each declared as

@@ -16,6 +16,7 @@
 -- Usage: march --compile --opt 2 bench/string_split_large.march -o /tmp/string_split_large
 
 mod StringSplitLarge do
+  needs IO.Console
 
 -- 16 bytes per row -> 50_000 rows = 800KB.  Keep identical to slice_walk.
 pfn rows() : Int do 50000 end

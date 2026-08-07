@@ -3,6 +3,7 @@
 -- Run: dune exec march -- examples/read_file.march
 
 mod ReadFile do
+  needs IO.Console
 
   fn main() do
     let path = "examples/read_file.march"

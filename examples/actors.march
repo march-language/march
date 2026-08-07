@@ -3,6 +3,7 @@
 -- Run: march examples/actors.march
 
 mod ActorDemo do
+  needs IO.Console
 
 -- ─── Counter actor ──────────────────────────────────────────────────────────
 -- Holds an integer value.  Supports Increment, Decrement, Reset, and Probe.

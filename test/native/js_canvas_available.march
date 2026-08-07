@@ -3,6 +3,7 @@
 -- This typechecks Js.Canvas.* usage without calling it at runtime (no real
 -- <canvas>/CanvasRenderingContext2D/Image exists under plain node).
 mod JsCanvasAvailable do
+  needs IO.Console
   fn canvas_smoke(node: Node) : Unit do
     match Js.Canvas.get_context(node) do
       None -> ()

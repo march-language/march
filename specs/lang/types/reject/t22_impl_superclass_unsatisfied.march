@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: required superclass `Speak(Dog)` is not satisfied
 mod M do
+  needs IO.Console
   -- Superclass/`requires` bounds ARE enforced: `impl Greet(Dog)` requires
   -- `Speak(Dog)` (interface Greet(a) requires Speak(a)) but no
   -- `impl Speak(Dog)` exists anywhere in scope, so the DImpl arm's

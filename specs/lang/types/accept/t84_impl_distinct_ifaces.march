@@ -1,6 +1,7 @@
 -- Coherence accept: `impl Speak(Dog)` + `impl Walk(Dog)` are the SAME type but
 -- DIFFERENT interfaces — no overlap (coherence is per (interface, type) pair).
 mod M do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end

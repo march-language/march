@@ -3,6 +3,7 @@
 -- args/returns from the tree-walking interpreter (no --compile).
 -- All C shims live in runtime/march_ffi.c.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
 

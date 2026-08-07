@@ -32,6 +32,7 @@
 --   /tmp/march_deque
 
 mod DequeOps do
+  needs IO.Console
 
 -- One push step: push n to front and n+10000 to back.
 pfn push_step(d, n : Int) do

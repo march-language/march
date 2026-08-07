@@ -14,6 +14,7 @@
 -- Value-witnessed: prints `Site` (the record's `title` field, read back
 -- through a cross-module qualified annotation `s : Cfg.Site`).
 mod Main do
+  needs IO.Console
   mod Cfg do
     type Site = { title : String, url : String }
     fn default() : Site do { title: "Site", url: "" } end

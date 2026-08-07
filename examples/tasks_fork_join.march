@@ -8,6 +8,8 @@
 -- Run compiled:  march --compile examples/tasks_fork_join.march -o /tmp/fj && /tmp/fj
 
 mod ForkJoin do
+  needs IO.Console
+  needs IO.Spawn
 
 -- Sequential helper: sum integers from lo to hi using an accumulator.
 fn sum_range_acc(lo : Int, hi : Int, acc : Int) : Int do

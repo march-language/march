@@ -10,6 +10,7 @@
 -- Run: dune exec march -- examples/http_test.march
 
 mod HttpTest do
+  needs IO.Console
 
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do

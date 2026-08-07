@@ -8,6 +8,7 @@
 -- section comment below.
 
 mod DebuggerDemo do
+  needs IO.Console
 
 -- ─── 1. Basic numeric trace ──────────────────────────────────────────────────
 -- A simple iterative accumulator.  Each step leaves a trace frame.

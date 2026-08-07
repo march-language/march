@@ -11,6 +11,7 @@
 -- companion: `reject/t50` (drop the unguarded `Some(v)` -> guardless-non-
 -- exhaustive -> rejected). See core-march-types.md §2.8.11.
 mod GuardOk do
+  needs IO.Console
   cap no_panic
 
   fn classify(opt : Option(Int)) : Int do

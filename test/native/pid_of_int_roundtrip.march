@@ -1,4 +1,5 @@
 mod PidRoundtrip do
+  needs IO.Console
 
   actor Echo do
     state { n : Int }

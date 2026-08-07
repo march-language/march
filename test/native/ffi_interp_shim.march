@@ -2,6 +2,7 @@
 -- The C functions live in test/native/ffi_shim.c (not in the runtime).
 -- The dune rule compiles ffi_shim.c to a .so and passes it via --ffi-so.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
 

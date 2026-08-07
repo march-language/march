@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn use_twice() do
     fn id_rec(x) do
       x

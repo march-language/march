@@ -9,6 +9,7 @@
 --   - a CAPTURING lambda (must NOT take the inline path — falls back to the
 --     general closure-call path, which must still be correct)
 mod Main do
+  needs IO.Console
   fn main() : () do
     let ints = NativeArray.from_list_int(Cons(-3, Cons(-1, Cons(0, Cons(1, Cons(3, Nil))))))
     let ints2 = NativeArray.map_int(ints, fn x -> x * x * 3 + x * 7 - 5)

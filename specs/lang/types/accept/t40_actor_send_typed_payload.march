@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Widening actors slice, Task 3 -- MESSAGE PAYLOAD TYPING (the accept path).
   -- A message constructor's payload IS type-checked, via the ORDINARY
   -- constructor-typing path. In the `ESend` arm (`typecheck.ml:4177`) the

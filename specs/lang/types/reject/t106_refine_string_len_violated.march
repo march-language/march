@@ -4,6 +4,7 @@
 -- literal -- `len("")` is `0`, refuting `len(_) > 0` outright. Accept
 -- companion: accept/t94 (`nonempty("abc")`).
 mod M do
+  needs IO.Console
   fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
   fn main() do
     println(int_to_string(nonempty("")))

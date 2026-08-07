@@ -1,4 +1,5 @@
 mod RecordPatternPartial do
+  needs IO.Console
 fn classify(r : { code : Int, msg : String }) : String do
   match r do
     { code: 404 } -> "gone"

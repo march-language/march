@@ -1,4 +1,5 @@
 mod GetActorFieldDirect do
+  needs IO.Console
 
   actor Holder do
     state { wa : Int, wb : Int }

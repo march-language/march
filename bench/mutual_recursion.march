@@ -12,6 +12,7 @@
 --        bench/mutual_recursion
 
 mod MutualRecursion do
+  needs IO.Console
 
 -- ── 1. Even / Odd ──────────────────────────────────────────────────────
 -- Classic mutual tail recursion: 2 functions, N = 10_000_000.

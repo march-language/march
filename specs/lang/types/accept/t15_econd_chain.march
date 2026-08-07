@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn describe(n : Int) : String do
     match do
       n > 0 -> "positive"

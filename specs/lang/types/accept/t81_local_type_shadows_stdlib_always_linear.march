@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Linearity (T-LinMark), local-shadow of an `always_linear` stdlib name
   -- (L4 fix, 2026-07-17): a module declaring its OWN plain `type Handle`
   -- must NOT inherit the linearity of the unrelated stdlib `always_linear

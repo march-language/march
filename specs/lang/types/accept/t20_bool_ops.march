@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn describe(n : Int) do
     let is_small = n > 0 && n < 10
     let is_edge = n <= 0 || n >= 10

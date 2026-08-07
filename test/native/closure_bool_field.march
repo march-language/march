@@ -14,6 +14,7 @@
 -- read the result as ptr and untag.  All three predicate kinds must now agree.
 
 mod ClosureBoolField do
+  needs IO.Console
   type Box = Bx(List(b))
 
   fn count_keep(rows : List(a), pred, n : Int) : Int do

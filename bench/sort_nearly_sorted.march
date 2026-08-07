@@ -8,6 +8,7 @@
 -- Expected output: 0 (timsort), 0 (mergesort)
 
 mod BenchNearlySorted do
+  needs IO.Console
 
 -- Build [0,1,2,3,...,2n-1] as consecutive (even,odd) pairs.
 pfn build_pairs(n : Int, acc : List(Int)) : List(Int) do

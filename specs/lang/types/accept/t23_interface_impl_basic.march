@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- (T-Impl) baseline: a user-declared interface with one method, and an
   -- impl for a concrete type providing exactly that method. `speak(Dog(...))`
   -- resolves through the bare-name scheme `DInterface` bound in env.vars.

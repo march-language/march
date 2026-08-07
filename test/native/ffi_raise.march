@@ -11,6 +11,7 @@
 -- `ffi_result` "bad int" flake. Distinct names (cf. ffi_interp2.march's
 -- test_parse/raise_parse) keep the binding unambiguous.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   extern "rt" : Cap(Ffi) do

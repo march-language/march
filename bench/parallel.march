@@ -21,6 +21,8 @@
 --   bench/parallel
 
 mod Parallel do
+  needs IO.Console
+  needs IO.Spawn
 
 ptype Tree = Leaf(Int) | Node(Tree, Tree)
 

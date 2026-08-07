@@ -15,6 +15,7 @@
 --   websocat ws://127.0.0.1:9877/ws
 
 mod WsEcho do
+  needs IO.Console
 
 -- Recursive message loop: handles frames until the connection closes.
 pfn ws_loop(socket) do

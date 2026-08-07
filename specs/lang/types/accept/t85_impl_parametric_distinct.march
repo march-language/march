@@ -2,6 +2,7 @@
 -- DIFFERENT head constructors (Box vs Bag), so they do NOT unify — no overlap.
 -- Guards that `types_overlap` requires the head ctor to match.
 mod M do
+  needs IO.Console
   interface Descr(a) do
     fn descr : a -> String
   end

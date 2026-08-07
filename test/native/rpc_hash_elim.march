@@ -4,6 +4,7 @@
 -- impl_hash than the server.  The padding functions perturb the temp counter to
 -- prove name-independence.  Its printed hash must equal rpc_hash_live's.
 mod RpcHashElim do
+  needs IO.Console
 
   needs IO.Clock
 

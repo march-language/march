@@ -9,6 +9,7 @@
 --        bench/string_build
 
 mod StringBuild do
+  needs IO.Console
 
 -- Tail-recursive: build ["1","2",...,"n"] in reverse as a list accumulator,
 -- then join once with empty separator.

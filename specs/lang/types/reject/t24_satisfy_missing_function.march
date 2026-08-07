@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: satisfy Named for Person: no function `name` found in scope.
 mod M do
+  needs IO.Console
   -- `satisfy Iface for Type` requires an EXISTING same-named top-level `fn`
   -- for every one of the interface's methods (desugar.ml's `expand_satisfy`).
   -- Here `interface Named(a)` declares `name`, but no top-level `fn name` is

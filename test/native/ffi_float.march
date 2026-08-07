@@ -3,6 +3,7 @@
 -- with march_some_boxed (the niche form can't represent a 0-bit payload).
 -- Uses exact-representable float equality to avoid float formatting.
 mod Test do
+  needs IO.Console
   needs Ffi
   extern "rt" : Cap(Ffi) do
     raises fn fdiv(a: Float, b: Float): Result(Float, String) = "ffi_raise_fdiv"

@@ -31,6 +31,7 @@
 -- moment it happens. Do not "fix" this file by editing `shady` to make its
 -- postcondition provable -- that would defeat the point of the test.
 mod M do
+  needs IO.Console
   fn opaque_id(n : Int) : Int do n end
   fn shady(n : Int) : {Int | _ < n} do opaque_id(n) end
   fn takepos(k : {Int | _ >= 0}) : Int do k end

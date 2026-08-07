@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: `Hue` does not implement interface `Ord`
 mod M do
+  needs IO.Console
   type Hue = Rood | Bloo
 
   fn main() do

@@ -23,6 +23,7 @@
 -- The panic cases cannot live in this file: a panic ends the program. They are
 -- covered in test/test_stdlib_suite.ml instead.
 mod HTagHardening do
+  needs IO.Console
   fn main() : Unit do
     let body = IOList.from_string("x")
 

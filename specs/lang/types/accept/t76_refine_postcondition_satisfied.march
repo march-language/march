@@ -6,6 +6,7 @@
 -- passes (`-3`) -- this is a property of the FUNCTION, not the call site.
 -- Reject companion: reject/t72 (an unguarded branch that can return < 0).
 mod M do
+  needs IO.Console
   fn good(n : Int) : {Int | _ >= 0} do
     if n >= 0 do n else 0 end
   end

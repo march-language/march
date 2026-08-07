@@ -8,6 +8,7 @@
 -- exercises that check specifically, not the non-inlined runtime
 -- function's own (separate) length check.
 mod Main do
+  needs IO.Console
   fn main() : () do
     let a = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
     let short = NativeArray.from_list_int(Cons(1, Cons(2, Nil)))

@@ -10,6 +10,7 @@
 -- Run: dune exec march -- examples/stats_basic.march
 
 mod StatsBasic do
+  needs IO.Console
 
 pfn f(x : Float) : String do String.from_float(x) end
 

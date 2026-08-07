@@ -8,6 +8,7 @@
 -- (timing line varies).
 
 mod JsonStreamBench do
+  needs IO.Console
 
 pfn build_records(n, acc) do
   if n <= 0 do acc

@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: expected `Int` but got `String`
 mod M do
+  needs IO.Console
   fn describe(n : Int) do
     fn go(k) : Int do
       match k do

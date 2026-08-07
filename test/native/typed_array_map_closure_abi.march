@@ -11,6 +11,7 @@
 -- DataFrame-style boolean-column negation pattern
 -- (`typed_array_map(data, fn b -> !b)`).
 mod Main do
+  needs IO.Console
   fn main() : () do
     let arr = typed_array_create(4, false)
     let negated = typed_array_map(arr, fn b -> !b)

@@ -8,6 +8,7 @@
 -- annotation. Accept companion: the `Some(v) ->` arm of the twin file
 -- (see test/test_refinecheck.ml "unwrap(o) inside a `Some(_) ->` arm passes").
 mod M do
+  needs IO.Console
   fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
   fn f(x : Option(Int)) : Int do
     match x do

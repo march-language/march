@@ -5,6 +5,8 @@
 -- Run compiled:     march --compile examples/tasks_basic.march -o /tmp/tasks_basic && /tmp/tasks_basic
 
 mod TasksBasic do
+  needs IO.Console
+  needs IO.Spawn
 
 -- A pure, expensive function: count Collatz steps.
 fn collatz(n : Int, steps : Int) : Int do

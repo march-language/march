@@ -9,6 +9,7 @@
 -- first in the interface-method table, so both lines printed the same
 -- string instead of dispatching each value to its own module's impl.
 mod Top do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end

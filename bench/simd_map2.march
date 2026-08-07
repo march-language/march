@@ -10,6 +10,7 @@
 -- Data generation is NOT part of the timed region -- see bench/simd_sum.march
 -- for why (building the source Lists dominates otherwise-small ops).
 mod SimdMap2 do
+  needs IO.Console
 
 needs IO.Clock
 

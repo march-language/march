@@ -19,6 +19,7 @@
 -- compiled while the interpreter (which never runs the Perceus/TCO TIR
 -- pipeline) got 9000 right. Compile natively, run, diff stdout.
 mod TcoFreshArgDecrc do
+  needs IO.Console
   fn digit_val(c : String) : Int do
     match c do
     "0" -> 0

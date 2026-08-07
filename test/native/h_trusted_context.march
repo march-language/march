@@ -16,6 +16,7 @@
 -- statically and the interpreter at runtime, by separate code paths, so parity
 -- here is a real cross-check rather than a formality.
 mod HTrustedContext do
+  needs IO.Console
   fn main() : Unit do
     -- HTML trust: verbatim in element content, escaped in an href.
     let h = Html.trust_html("<b>hi</b>")

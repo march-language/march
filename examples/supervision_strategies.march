@@ -10,6 +10,7 @@
 -- Run: march examples/supervision_strategies.march
 
 mod StrategyDemo do
+  needs IO.Console
 
   -- Generic worker actor used across all demos.
   actor Worker do

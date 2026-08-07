@@ -10,6 +10,7 @@
 -- already describes `cap no_panic`'s exhaustiveness plane; §2.14 covers this
 -- refinement-discharge plane.
 mod SafeDiv do
+  needs IO.Console
   cap no_panic
   fn safe_div(a : Int, d : {Int | _ >= 0}) : Int do a / d end
   fn main() do

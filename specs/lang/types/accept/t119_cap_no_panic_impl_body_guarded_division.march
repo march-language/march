@@ -12,6 +12,7 @@
 -- says: the walk now enters `impl` method bodies, and entering them does not
 -- false-positive on correct code.
 mod ImplDivOk do
+  needs IO.Console
   cap no_panic
 
   type Box = Box(Int)

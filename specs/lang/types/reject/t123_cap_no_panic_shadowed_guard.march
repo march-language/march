@@ -22,6 +22,7 @@
 -- is the nearest thing — the same `if` guard, with the name NOT rebound, which
 -- must keep exiting 0 so the retirement is not simply "distrust every guard".
 mod ShadowedGuard do
+  needs IO.Console
   cap no_panic
 
   fn f(d : Int) : Int do

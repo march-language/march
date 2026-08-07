@@ -5,6 +5,7 @@
 -- bodies (interp `impl_tbl` last-write-wins vs the monomorphizer's list order)
 -- — a silent cross-backend divergence. Now rejected at declaration.
 mod M do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end

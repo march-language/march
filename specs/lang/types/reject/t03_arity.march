@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: expects 1 argument, but got 2
 mod M do
+  needs IO.Console
   fn f(x : Int) : Int do x end
   fn main() do println(int_to_string(f(1, 2))) end
 end

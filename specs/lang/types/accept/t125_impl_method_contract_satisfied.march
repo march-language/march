@@ -10,6 +10,7 @@
 -- Read the pair together -- t124 says the obligation is raised, this file says
 -- it is raised against the right contract and discharged when it holds.
 mod ImplContractOk do
+  needs IO.Console
 
   type Box = Box(Int)
 
