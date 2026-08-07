@@ -13,6 +13,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Actor messages can no longer carry a `NativeIntArr`/`NativeFloatArr` (the types
+  backing the `NativeArray` stdlib module)** — the same "must be owned by a single
+  actor" restriction `RingBuf` already had.
+
 - **Actor messages can no longer carry a `RingBuf` (or other single-owner mutable-buffer
   type) — this restriction was previously a no-op.** The check was invoked on a
   constructor application's overall type, which never varies by payload for an actor

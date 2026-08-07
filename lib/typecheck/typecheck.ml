@@ -5049,11 +5049,20 @@ let offer_unrefined_error env span (r : session_ty ref) op =
   end else false
 
 (** Type constructor names that cannot appear in actor message payloads.
-    These types carry mutable state that must remain owned by a single actor. *)
-let non_sendable_types = ["RingBuf"]
+    These types carry mutable state that must remain owned by a single actor.
+    NativeIntArr/NativeFloatArr are NativeArray's real backing types -- the
+    NativeArray stdlib module (stdlib/native_array.march) is a function
+    namespace over these two opaque 0-arity constructors, not a type of its
+    own, so "NativeArray" itself would be a silent no-op entry here (see
+    where native_int_arr_make/native_float_arr_make are registered, this
+    file, around the NativeArray builtins section). *)
+let non_sendable_types = ["RingBuf"; "NativeIntArr"; "NativeFloatArr"]
 
 (** [check_sendable errors span ty] walks [ty] and emits an error for every
-    non-sendable type constructor it finds. Call at every [send()] callsite. *)
+    non-sendable type constructor it finds. Called from the [ECon] arm on
+    an actor message constructor's instantiated argument types (guarded by
+    [ci_is_actor_msg]) -- at message-CONSTRUCTION time, not at each place a
+    message value is later sent. *)
 let rec check_sendable errors span ty =
   match repr ty with
   | TCon (name, args) ->
