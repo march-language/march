@@ -1,0 +1,30 @@
+-- EXPECT-ERROR: cannot be sent in actor messages
+mod Main do
+  -- Message-sendability bypass, send_checked path. `check_sendable`
+  -- (typecheck.ml, wired to the ESend case) rejects a RingBuf payload sent
+  -- via plain `send`, but `send_checked` is a separate polymorphic builtin
+  -- (typecheck.ml:2341) that never routed through the same check. This
+  -- witness proves the bypass is closed.
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on RBJob(rb : RingBuf(Int)) do
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let rb = RingBuf.make(4)
+    RingBuf.push(rb, 1)
+    match get_cap(w) do
+      None -> ()
+      Some(cap) ->
+        match send_checked(cap, RBJob(rb)) do
+          :ok    -> ()
+          :error -> ()
+        end
+    end
+  end
+end

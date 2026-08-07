@@ -1,0 +1,41 @@
+mod Main do
+  -- Companion to reject/t153-t157: an ORDINARY Int payload must still
+  -- typecheck through send_checked, Actor.cast, actor_cast, Actor.call, and
+  -- actor_call once check_sendable is wired into all four -- the fix must
+  -- not reject anything it didn't already accept via plain send().
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+
+    on MsgInc(x : Int) do
+      { n: state.n + x }
+    end
+
+    on MsgGetN() do
+      state
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    Actor.cast(w, MsgInc(1))
+    actor_cast(w, MsgInc(1))
+    match get_cap(w) do
+      None -> ()
+      Some(cap) ->
+        match send_checked(cap, MsgInc(1)) do
+          :ok    -> ()
+          :error -> ()
+        end
+    end
+    match Actor.call(w, MsgGetN(), 1000) do
+      Ok(_)  -> ()
+      Err(_) -> ()
+    end
+    match actor_call(w, MsgGetN(), 1000) do
+      Ok(_)  -> ()
+      Err(_) -> ()
+    end
+  end
+end

@@ -2857,6 +2857,8 @@ let builtin_types : (string * int) list =
     ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
     ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
     ("IO.WebSocket",  0);
+    (* RingBuf — mutable fixed-capacity circular buffer (non-sendable) *)
+    ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
     ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
 
@@ -5685,6 +5687,43 @@ let rec infer_expr env (e : Ast.expr) : ty =
          links to) is unified with a nominal proof cap, [unify] rejects it —
          position- and flow-independent, and it fires ONLY for proof caps so
          IO narrowing (including through a polymorphic fn) is never touched. *)
+    (* Actor-messaging sendability, closing three bypasses. send_checked,
+       Actor.cast/actor_cast, and Actor.call/actor_call each route their
+       message argument through their own polymorphic builtin scheme rather
+       than the dedicated ESend AST node that check_sendable was originally
+       wired to (:6178) -- so a RingBuf/NativeIntArr/NativeFloatArr payload
+       could reach any of these three unchecked even though plain send()
+       already rejected it. Each arm below lets infer_app perform the real
+       (arity-checked, unifying) inference exactly as the generic EApp
+       fallback would, then reads the now-solved message-argument type back
+       out of the instantiated f_ty and runs it through the same
+       check_sendable plain send() uses. *)
+    | Ast.EApp (Ast.EVar { txt = "send_checked"; _ } as fv, [cap_arg; msg_arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [cap_arg; msg_arg] 0 in
+      (match repr f_ty with
+       | TArrow (_, TArrow (msg_ty, _)) -> check_sendable env.errors sp msg_ty
+       | _ -> ());
+      rty
+
+    | Ast.EApp (Ast.EVar { txt = ("actor_cast" | "Actor.cast"); _ } as fv,
+                [pid_arg; msg_arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [pid_arg; msg_arg] 0 in
+      (match repr f_ty with
+       | TArrow (_, TArrow (msg_ty, _)) -> check_sendable env.errors sp msg_ty
+       | _ -> ());
+      rty
+
+    | Ast.EApp (Ast.EVar { txt = ("actor_call" | "Actor.call"); _ } as fv,
+                [pid_arg; msg_arg; timeout_arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [pid_arg; msg_arg; timeout_arg] 0 in
+      (match repr f_ty with
+       | TArrow (_, TArrow (msg_ty, TArrow (_, _))) -> check_sendable env.errors sp msg_ty
+       | _ -> ());
+      rty
+
     | Ast.EApp (Ast.EVar { txt = "cap_narrow"; _ } as fv, [arg], sp) ->
       let f_ty = infer_expr env fv in
       let rty = infer_app env sp f_ty [arg] 0 in
