@@ -85,6 +85,16 @@ send(counter, Reset())
 
 The message is the constructor applied to its arguments. The actor handles it according to its `on` clause.
 
+**A message payload may not carry a mutable-buffer type** (`RingBuf`, and any other type
+registered in `non_sendable_types`, `lib/typecheck/typecheck.ml`) — these types are
+single-actor-owned by design, so sharing one across an actor boundary would let two
+actors alias the same mutable state. The check runs once, at the moment the message
+constructor is *applied* (`Increment(rb)`), not at whichever builtin later moves the
+resulting value — so it covers `send`, `send_checked`, `Actor.cast`, `Actor.call`, and
+storing the message in a variable before sending it, uniformly, with one rule (fixed
+2026-08-07; see the `ci_is_actor_msg` field in `typecheck.ml`'s `ctor_info` for how a
+message constructor is distinguished from an ordinary one).
+
 **Message names share one flat global constructor namespace.** A handler `on Msg(…)`
 registers `Msg` as an ordinary constructor — there is no per-actor message namespace,
 exactly analogous to the [no-per-module-type-namespace design point](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md)
@@ -285,6 +295,8 @@ There is no `Call` wrapper constructor, and the call handler takes exactly one a
 > now matches its golden (`value=5`) on both backends.
 
 `Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
+Both `Actor.cast` and `Actor.call`'s message payloads are checked for non-sendable types
+identically to `send` — see the note under [Sending Messages](#sending-messages).
 
 ---
 
@@ -541,7 +553,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `self()` | `→ Pid` | both | Current actor's Pid |
 | `run_until_idle()` | `→ ()` | both | Drain the scheduler to a fixed point (interpreter / tests) |
 | `get_cap(pid)` | `→ Option(Cap(Msg))` | both | Obtain an epoch-tagged capability; `None` for a dead/unknown pid |
-| `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send; checks revocation, epoch match, and liveness |
+| `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send; checks revocation, epoch match, and liveness (payload is checked for non-sendable types at construction, same rule as `send`) |
 | `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
 | `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
 | `pid_of_int(n)` | `→ Pid` | both | Convert Int to Pid (an unknown index resolves to a safe already-dead sentinel) |

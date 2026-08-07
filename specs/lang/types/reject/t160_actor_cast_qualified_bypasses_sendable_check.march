@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: cannot be sent in actor messages
+mod Main do
+  -- Message-sendability bypass, Actor.cast (qualified stdlib wrapper) path.
+  -- Actor.cast forwards to the actor_cast builtin (stdlib/actor.march); the
+  -- forward itself can't be checked from inside Actor.cast's own polymorphic
+  -- body (msg is an unconstrained type variable there) -- the check must run
+  -- at THIS call site, where msg's concrete type is known.
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on RBJob(rb : RingBuf(Int)) do
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let rb = RingBuf.make(4)
+    RingBuf.push(rb, 1)
+    Actor.cast(w, RBJob(rb))
+  end
+end

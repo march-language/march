@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: cannot be sent in actor messages
+mod Main do
+  -- Message-sendability bypass, bare actor_call builtin path.
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on RBJob(rb : RingBuf(Int)) do
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let rb = RingBuf.make(4)
+    RingBuf.push(rb, 1)
+    match actor_call(w, RBJob(rb), 1000) do
+      Ok(_)  -> ()
+      Err(_) -> ()
+    end
+  end
+end
