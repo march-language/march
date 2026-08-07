@@ -308,8 +308,31 @@ let process_island_tags (parts : expr list) (sp : span) : expr list =
    (function/lambda parameter, `let`/`let?` binding earlier in the block, or
    a match-branch pattern). Templates without `conn` render verbatim and
    never see an unbound-`conn` error; templates following the Bastion
-   convention keep automatic CSRF protection. An explicit
-   `${CSRF.tag_string(conn)}` interpolation still works either way. *)
+   convention keep automatic CSRF protection.
+
+   DO NOT ALSO INTERPOLATE A TOKEN YOURSELF. An earlier version of this comment
+   claimed an explicit `${CSRF.tag_string(conn)}` "still works either way". It
+   does not — injection is unconditional once `conn` is in scope, so an explicit
+   token is emitted IN ADDITION to the injected one. Measured:
+
+     ~H"<form method=\"post\"></form>"
+       -> <form method="post"><input _csrf ...></form>          correct
+
+     ~H"<form method=\"post\">${CSRF.tag(conn)}</form>"
+       -> <form ...><input _csrf ...><input _csrf ...></form>   DUPLICATE
+
+     ~H"<form method=\"post\">${CSRF.tag_string(conn)}</form>"
+       -> <form ...><input _csrf ...>&lt;input name=&quot;...   ESCAPED GARBAGE
+
+   The `tag_string` case is the worse-looking one — it returns `String`, so the
+   contextual escaper treats it as untrusted text and renders a visible chunk of
+   escaped markup on the page. The `tag` case returns `IOList`, which passes
+   through unescaped and duplicates SILENTLY, which is the more dangerous of the
+   two.
+
+   Inside a ~H template with `conn` in scope, write the bare form tag and let
+   the injection do it. Explicit token helpers are for markup built OUTSIDE ~H
+   (see bastion's Form.render, which concatenates strings and is correct). *)
 
 (** Is a `conn` binding lexically in scope at the expression currently being
     desugared?  Maintained imperatively (like [expr_err_ctx]) because
@@ -405,38 +428,6 @@ let csrf_form_close_pos (s : string) : int option =
   in
   scan 0
 
-(** Inject CSRF hidden-input string expressions into a ~H parts list.
-
-    For each [ELit (LitString s, _)] that contains a [<form method="post/...">]
-    opening tag, split the literal at the closing [>] and insert an
-    [EApp(CSRF.tag_string, [EVar "conn"])] call between the two halves.
-
-    The injected call returns [String] (not IOList), so it is valid as an
-    element in the [List(String)] passed to [IOList.from_strings].
-
-    Only called when [csrf_conn_in_scope] holds — the caller guarantees a
-    [conn] variable is lexically in scope (the standard Bastion convention
-    for request-handler functions that use ~H templates). *)
-let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
-  let v s = EVar { txt = s; span = sp } in
-  let csrf_call = EApp (v "CSRF.tag_string", [v "conn"], sp) in
-  let rec go = function
-    | [] -> []
-    | ELit (LitString s, lsp) :: rest ->
-      (match csrf_form_close_pos s with
-       | None -> ELit (LitString s, lsp) :: go rest
-       | Some close_pos ->
-         let before = String.sub s 0 close_pos in
-         let after  = String.sub s close_pos (String.length s - close_pos) in
-         (* Recurse on the remainder to handle multiple forms in one literal *)
-         ELit (LitString before, lsp)
-         :: csrf_call
-         :: go (ELit (LitString after, lsp) :: rest))
-    | part :: rest ->
-      part :: go rest
-  in
-  go parts
-
 (** Diagnostic sink for expression-level desugar errors.
 
     [desugar_expr] is public API called without an error context by the
@@ -462,6 +453,118 @@ let desugar_expr_error ~(sp : span) ?hint msg : unit =
                 pos_bol  = 0;
                 pos_cnum = sp.start_col } in
     raise (March_errors.Errors.ParseError (msg, hint, pos))
+
+(* Same sink, Warning severity. Unlike the error path this does NOT raise when
+   no context is installed: a warning that aborts the REPL would be worse than
+   the thing it warns about. *)
+let desugar_expr_warning ~(sp : span) ?hint msg : unit =
+  match !expr_err_ctx with
+  | Some ctx ->
+    Err.report ctx
+      { severity = Err.Warning; span = sp; message = msg; labels = [];
+        notes = (match hint with Some h -> [h] | None -> []);
+        code = Some "redundant_csrf_token"; fix = None }
+  | None -> ()
+
+(** Inject CSRF hidden-input string expressions into a ~H parts list.
+
+    For each [ELit (LitString s, _)] that contains a [<form method="post/...">]
+    opening tag, split the literal at the closing [>] and insert an
+    [EApp(CSRF.tag_string, [EVar "conn"])] call between the two halves.
+
+    The injected call returns [String] (not IOList), so it is valid as an
+    element in the [List(String)] passed to [IOList.from_strings].
+
+    Only called when [csrf_conn_in_scope] holds — the caller guarantees a
+    [conn] variable is lexically in scope (the standard Bastion convention
+    for request-handler functions that use ~H templates). *)
+(* Is this part an explicit CSRF token interpolation -- `${CSRF.tag(conn)}` or
+   `${CSRF.tag_string(conn)}`? At this point in the pipeline a hole is still
+   `to_string(inner)`; the contextual escaper is applied later.
+
+   Matched EXACTLY (or as a dotted suffix of a module path), never as a loose
+   substring. The asymmetry matters: a false negative leaves a duplicate token,
+   which is ugly. A FALSE POSITIVE suppresses injection and leaves the form
+   unprotected. So this errs towards not matching. *)
+let is_explicit_csrf_token (e : expr) : bool =
+  let is_token_name n =
+    n = "CSRF.tag" || n = "CSRF.tag_string"
+    || (let suffix s = String.length n > String.length s
+                       && String.sub n (String.length n - String.length s)
+                            (String.length s) = s in
+        suffix ".CSRF.tag" || suffix ".CSRF.tag_string")
+  in
+  match e with
+  | EApp (EVar { txt = "to_string"; _ }, [inner], _) ->
+    (match inner with
+     | EApp (EVar { txt; _ }, _, _) -> is_token_name txt
+     | _ -> false)
+  | EApp (EVar { txt; _ }, _, _) -> is_token_name txt
+  | _ -> false
+
+(* Does an explicit token appear inside THIS form -- after its opening tag and
+   before the form ends?
+
+   Scoped PER FORM on purpose. A template-wide check would be actively harmful:
+   a template with two forms, only one carrying an explicit token, would lose
+   injection on BOTH, turning a cosmetic duplicate into an unprotected form.
+   Scanning stops at `</form` or at the next `<form`, so each form is judged on
+   its own contents. *)
+let explicit_token_in_this_form (after : string) (rest : expr list) : bool =
+  let lower s = String.lowercase_ascii s in
+  let ends_scope s =
+    let l = lower s in
+    let contains sub =
+      let n = String.length l and m = String.length sub in
+      let rec go i = i + m <= n && (String.sub l i m = sub || go (i + 1)) in
+      m = 0 || go 0
+    in
+    contains "</form" || contains "<form"
+  in
+  if ends_scope after then false
+  else
+    let rec scan = function
+      | [] -> false
+      | ELit (LitString s, _) :: tl -> if ends_scope s then false else scan tl
+      | p :: tl -> if is_explicit_csrf_token p then true else scan tl
+    in
+    scan rest
+
+let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
+  let v s = EVar { txt = s; span = sp } in
+  let csrf_call = EApp (v "CSRF.tag_string", [v "conn"], sp) in
+  let rec go = function
+    | [] -> []
+    | ELit (LitString s, lsp) :: rest ->
+      (match csrf_form_close_pos s with
+       | None -> ELit (LitString s, lsp) :: go rest
+       | Some close_pos ->
+         let before = String.sub s 0 close_pos in
+         let after  = String.sub s close_pos (String.length s - close_pos) in
+         if explicit_token_in_this_form after rest then begin
+           (* The author wrote their own token in this form. Injecting as well
+              would emit TWO hidden inputs -- silently, when the explicit call
+              returns IOList. Skip, and say so: the explicit call is now
+              redundant, and silence would leave the author believing it is
+              load-bearing. *)
+           desugar_expr_warning ~sp
+             ~hint:("Remove the explicit token — ~H injects one automatically \
+                     for a mutating <form> whenever `conn` is in scope.")
+             "This <form> already interpolates a CSRF token, so ~H did not \
+              inject one. Emitting both would put two hidden _csrf_token \
+              inputs in the form.";
+           ELit (LitString before, lsp)
+           :: go (ELit (LitString after, lsp) :: rest)
+         end else
+           (* Recurse on the remainder to handle multiple forms in one literal *)
+           ELit (LitString before, lsp)
+           :: csrf_call
+           :: go (ELit (LitString after, lsp) :: rest))
+    | part :: rest ->
+      part :: go rest
+  in
+  go parts
+
 
 
 (** Build an IOList directly from the parts of an ~H sigil interpolation.

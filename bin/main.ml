@@ -2,6 +2,17 @@
 
 (* Decode URL-safe base64 (with or without padding) to bytes.
  * Returns Some bytes_string on success, None on invalid input. *)
+(* Label a desugar diagnostic by its ACTUAL severity. Both desugar printers
+   hardcoded "error:", which was harmless only while desugar emitted nothing but
+   errors. It now also emits a warning (the redundant-CSRF-token one), and a
+   warning printed as "error:" misleads people and any tooling that greps the
+   output. The exit decision is unchanged -- it still keys off has_errors. *)
+let severity_word (sev : March_errors.Errors.severity) : string =
+  match sev with
+  | March_errors.Errors.Error -> "error"
+  | March_errors.Errors.Warning -> "warning"
+  | March_errors.Errors.Hint -> "hint"
+
 let b64_decode_pubkey b64 =
   let tbl = Array.make 256 (-1) in
   let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" in
@@ -1380,9 +1391,9 @@ let run_test_cmd args =
     let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
     if March_errors.Errors.has_errors desugar_errors then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
-          Printf.eprintf "%s:%d:%d: error: %s\n"
+          Printf.eprintf "%s:%d:%d: %s: %s\n"
             d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-            d.span.March_ast.Ast.start_col d.message
+            d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
         ) (March_errors.Errors.sorted desugar_errors);
       exit 1
     end;
@@ -1971,9 +1982,9 @@ let compile filename =
   let desugar_errors = March_errors.Errors.create () in
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      Printf.eprintf "%s:%d:%d: error: %s\n"
+      Printf.eprintf "%s:%d:%d: %s: %s\n"
         d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-        d.span.March_ast.Ast.start_col d.message
+        d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
   stamp "desugar";

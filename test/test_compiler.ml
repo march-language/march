@@ -12199,9 +12199,95 @@ let sigil_interp_suite =
         test_h_sigil_still_allows_interpolation;
     ] )
 
+(* ── ~H CSRF auto-injection vs an explicit token ──────────────────────────
+   The desugar injects a hidden CSRF input after a mutating <form> whenever a
+   `conn` binding is in scope. If the author ALSO interpolates a token, both
+   were emitted -- silently when the explicit call returns IOList, and as
+   visibly escaped markup when it returns String.
+
+   Detection is scoped PER FORM, and the two-form case below is why: a
+   template-wide check would drop injection for EVERY form as soon as one had
+   an explicit token, turning a cosmetic duplicate into an UNPROTECTED form. *)
+
+let csrf_src body =
+  Printf.sprintf
+    {|mod T do
+      mod CSRF do
+        fn tag_string(conn) : String do "[TOK]" end
+        fn tag(conn) : IOList do IOList.from_string("[TOK]") end
+      end
+      fn render(conn) do IOList.to_string(%s) end
+    end|} body
+
+let csrf_tokens_in body =
+  let env = eval_with_html (csrf_src body) in
+  let out = match call_fn env "render" [March_eval.Eval.VString "c"] with
+    | March_eval.Eval.VString s -> s
+    | _ -> Alcotest.fail "render did not return a String" in
+  (* count occurrences of the token marker *)
+  let n = String.length out and m = String.length "[TOK]" in
+  let rec count i acc =
+    if i + m > n then acc
+    else count (i + 1) (if String.sub out i m = "[TOK]" then acc + 1 else acc)
+  in
+  (out, count 0 0)
+
+let test_csrf_auto_injects_one () =
+  let (_, n) = csrf_tokens_in {|~H"<form method=\"post\">a</form>"|} in
+  Alcotest.(check int) "auto-injection emits exactly one token" 1 n
+
+let test_csrf_explicit_iolist_not_duplicated () =
+  let (_, n) = csrf_tokens_in {|~H"<form method=\"post\">${CSRF.tag(conn)}</form>"|} in
+  Alcotest.(check int) "explicit IOList token is not duplicated" 1 n
+
+let test_csrf_explicit_string_not_duplicated () =
+  let (out, n) =
+    csrf_tokens_in {|~H"<form method=\"post\">${CSRF.tag_string(conn)}</form>"|} in
+  Alcotest.(check int) "explicit String token is not duplicated" 1 n;
+  (* the String form used to render visibly escaped markup onto the page *)
+  Alcotest.(check bool) "no escaped markup leaks into the output" false
+    (let n' = String.length out in
+     let rec has i = i + 4 <= n' && (String.sub out i 4 = "&lt;" || has (i + 1)) in
+     has 0)
+
+let test_csrf_two_forms_only_one_explicit () =
+  (* THE case: form 1 has an explicit token, form 2 has none. Form 2 must STILL
+     be injected -- otherwise this "fix" would create an unprotected form. *)
+  let (_, n) =
+    csrf_tokens_in
+      {|~H"<form method=\"post\">${CSRF.tag(conn)}</form><form method=\"post\">b</form>"|} in
+  Alcotest.(check int) "one token per form, both forms covered" 2 n
+
+let test_csrf_two_forms_explicit_second () =
+  let (_, n) =
+    csrf_tokens_in
+      {|~H"<form method=\"post\">a</form><form method=\"post\">${CSRF.tag(conn)}</form>"|} in
+  Alcotest.(check int) "order does not matter" 2 n
+
+let test_csrf_get_form_never_injected () =
+  let (_, n) = csrf_tokens_in {|~H"<form method=\"get\">a</form>"|} in
+  Alcotest.(check int) "a GET form is never injected" 0 n
+
+let csrf_suite =
+  ( "h_csrf_explicit_token", [
+      Alcotest.test_case "auto-injection emits one" `Quick
+        test_csrf_auto_injects_one;
+      Alcotest.test_case "explicit IOList token not duplicated" `Quick
+        test_csrf_explicit_iolist_not_duplicated;
+      Alcotest.test_case "explicit String token not duplicated, no escaped leak" `Quick
+        test_csrf_explicit_string_not_duplicated;
+      Alcotest.test_case "two forms, one explicit: both still covered" `Quick
+        test_csrf_two_forms_only_one_explicit;
+      Alcotest.test_case "two forms, explicit second: both still covered" `Quick
+        test_csrf_two_forms_explicit_second;
+      Alcotest.test_case "GET form never injected" `Quick
+        test_csrf_get_form_never_injected;
+    ] )
+
 let compiler_suites =
   [
       sigil_interp_suite;
+      csrf_suite;
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
       ("cap_markers", Test_cap_markers.tests);
