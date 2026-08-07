@@ -16,6 +16,7 @@
 --
 -- Compiled/interpreted golden diff.
 mod CssUrl do
+  needs IO.Console
   fn main() : Unit do
     -- legitimate URLs must survive intact
     let a = "/img/logo.png"
