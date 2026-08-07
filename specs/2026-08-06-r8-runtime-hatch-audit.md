@@ -5,8 +5,12 @@ asked for these "with tests rather than reasoning". Every row below was probed
 against the compiler at `40191c2a` (R4a). Findings are marked **measured**,
 and the probes are reproducible from the snippets.
 
-Two gaps were closed in the same change that produced this document; two are
-findings that need a decision rather than a patch.
+Three gaps were closed in the changes that produced this document; one
+(hot-reload audit logging) is an existing todo this audit re-prioritises.
+
+One finding in the first pass was **wrong and is corrected in place** (§2): I
+measured `--check` exit codes through a pipe, which reports the pipe's status
+rather than the compiler's, and initially named two routes that do not work.
 
 ---
 
@@ -15,7 +19,7 @@ findings that need a decision rather than a patch.
 | hatch | R8's expectation | what is actually true |
 |---|---|---|
 | **Actors / messages** | "can a `Cap` travel in a message?" | Declaration side is **covered** — Check 1 reads actor handler signatures |
-| **`get_cap` / Pid** | not in the table | **BYPASSES R2.** Two lines, no grant, yields `Cap(IO)` |
+| **`get_cap` / Pid** | not in the table | Yielded `Cap(IO)` via `pid_of_int`'s free type var. **Fixed here** by splitting `Cap`/`ActorCap` |
 | **Dynamic dispatch** | "covered if rows are on method signatures" | Was **not** covered — interface signatures and impl bodies were invisible. **Fixed here** |
 | **Hot code reload** | "scope the claim to non-HCR builds, or re-check at load" | Better than assumed: a `--grant-cap` gate and a signed manifest exist. The **audit log** does not record capabilities |
 | **FFI (`extern`)** | exclude; `IO.Foreign` marks it | Confirmed as designed |
@@ -42,16 +46,16 @@ this cost a previous attempt an inconclusive result.)
 
 ---
 
-## 2. `get_cap` bypasses R2 — the significant finding
+## 2. `get_cap` yielded IO authority — the significant finding
 
 **Measured, and it is not in the R8 table at all.**
 
 ```march
-mod PidRoot do
+mod PidOfInt do
   needs IO
   pfn wants_root(r : Cap(IO)) : Int do 1 end
-  fn main() do                          -- NOTE: no parameter. No grant.
-    match get_cap(self()) do
+  fn main() do                            -- NOTE: no parameter. No grant.
+    match get_cap(pid_of_int(1)) do
       Some(c) -> println(int_to_string(wants_root(c)))
       None    -> println("none")
     end
@@ -59,29 +63,52 @@ mod PidRoot do
 end
 ```
 
-`--check` exit 0. No actor need be declared; `self()` suffices.
+`--check` exit 0 before the fix. A module granted nothing obtains `Cap(IO)`
+from an integer literal.
 
-R2's entire content is that the root capability is *granted to `main`, not
-taken*. Here it is taken, from a process id the module already has.
+**Correction — the first version of this section named the wrong route, and
+the way it went wrong is worth recording.** I originally reported
+`get_cap(self())` and `get_cap(spawn(W))` as the vectors. Both are wrong:
 
-**Mechanism.** `get_cap : Pid(a) -> Option(Cap(a))` — `a` is unconstrained, so
-it unifies with `IO` at the use site and `Cap(a)` becomes `Cap(IO)`. This is
-the same shape as `from_json`'s free result variable that R3 closed: a
-capability-producing builtin whose result type nothing pins.
+- `spawn` returns `Pid[state]`, which **pins** `a` to the actor's state record,
+  so the ordinary actor path was already safe — it fails with
+  ``expected `IO` but got `{ n : Int }` ``.
+- `self()` is not a `Pid` at all; it returns `Int`, so that probe never
+  typechecked for an unrelated reason.
 
-**Not caused by R4a.** The probe never calls `cap_narrow`, and a pre-R4a
-control accepted the equivalent program.
+I believed otherwise because I measured `--check`'s exit code **through a
+pipe** (`$M --check f.march | head; echo $?` reports `head`'s status, not the
+compiler's). Every probe in the first pass read as exit 0. The finding
+survived re-measurement only because a third route exists.
 
-**Why this is worse than it looks.** It defeats R2 without needing `root_cap`,
-so the R2 work bought less than its progress note claims. Any statement of the
-form "a capability can only be received" is currently false, and §5 of the
-sandbox design says exactly that.
+**The real vector** is `pid_of_int : Int -> Pid(a)`, whose `a` is free — it
+exists so a supervisor can rebuild a `Pid` from a state field, and is
+documented as unsafe. Free `a` plus a constructor shared with IO capabilities
+is what turns an integer into root authority.
 
-**Not fixed here** — it needs a decision, not a patch. `get_cap`'s legitimate
-purpose is process-capability retrieval (`Cap(state)`), and the options differ in
-how much they break: constrain `a` to non-IO capabilities; gate `get_cap`
-behind the same sweep machinery as `mint_cap`; or remove it. Filed as
-`specs/todos/2026-08-06-get-cap-bypasses-the-root-grant.md`.
+**Mechanism.** `Cap` named two unrelated things that therefore unified:
+
+| | IO capability | process capability |
+|---|---|---|
+| runtime value | `VUnit`, fully erased | `VCap(pid, epoch)`, epoch-validated |
+| obtained from | `main`'s grant, narrowed | `get_cap(pid)` |
+| consumed by | nothing — compile-time only | `send_checked`, `revoke_cap`, `is_cap_valid` |
+| governed by | `needs`, the lattice, R2/R3/R4 | actor liveness + revocation table |
+
+**Not caused by R4a** — the probe never calls `cap_narrow`, and a pre-R4a
+control accepts the equivalent program.
+
+**Fixed 2026-08-06** by splitting the constructor: process capabilities are now
+`ActorCap(a)`. A sweep over `get_cap`'s sites would have patched one symptom
+and left the conflation to produce the next one for any future builtin
+returning `Cap(a)`. Witnesses: `reject/t158`, `accept/t150`.
+
+R3's unforgeability check was extended to `ActorCap` in the same change:
+forging a `VCap(pid, epoch)` from JSON fabricates a send-capable reference to
+an arbitrary actor at an arbitrary epoch, which the IO lattice does not cover.
+
+`needs` now correctly ignores `ActorCap` — a process capability is not IO
+authority and never should have required a declaration.
 
 ---
 
@@ -169,13 +196,11 @@ closes it.
 
 ## What this changes about the claim
 
-Nothing in §5 needs weakening for actors, dynamic dispatch, FFI or HCR.
+Nothing in §5 needs weakening. Actors, dynamic dispatch, FFI and HCR are all
+either covered or honestly excluded, and the one hole that did contradict §5 —
+`get_cap` yielding IO authority — is closed rather than outstanding.
 
-**One sentence does need weakening, and it is the one R2 earned.** With
-`get_cap` reachable, "a capability can only be received" is false: a module
-with no grant can obtain `Cap(IO)` in two lines. Until that is decided, the
-honest form is the pre-R2 one — a capability cannot be fabricated *from data* —
-plus a note that process-capability retrieval is an open hole.
-
-I have not edited §5 here, because the right wording depends on which fix
-`get_cap` gets.
+The `pid_of_int` route is worth remembering as a shape rather than a bug:
+**a builtin with a free type variable in a capability position is a forge.**
+That is now the third instance (`from_json`'s result in R3, `cap_narrow`'s
+unpinned argument in R4a, `get_cap`'s `a` here). A fourth will look the same.

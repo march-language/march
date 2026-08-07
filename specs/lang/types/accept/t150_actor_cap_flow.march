@@ -1,0 +1,35 @@
+-- R8/R2 — the legitimate process-capability flow still works (2026-08-06).
+--
+-- Accept companion to reject/t158. Splitting `Cap` into IO capabilities and
+-- `ActorCap` must not cost the feature it was protecting: `get_cap` yields a
+-- revocable, epoch-checked reference to a live actor, and `send_checked` /
+-- `revoke_cap` / `is_cap_valid` consume it.
+--
+-- This is a real object-capability mechanism with runtime machinery behind it
+-- (a revocation table and epoch validation in the interpreter, and
+-- `march_get_cap` / `march_send_checked` in the C runtime) — the fix was to
+-- stop it sharing a type with IO authority, not to remove it.
+--
+-- Note this module declares NO `needs`: a process capability is not an IO
+-- capability and never should have required a declaration. Under the old
+-- shared constructor that was an accident of `caps_in_ty` not extracting a
+-- non-nullary argument; it is now true by construction.
+mod ActorCapFlow do
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+
+  fn check() : Bool do
+    let p = spawn(Counter)
+    match get_cap(p) do
+      Some(cap) ->
+        let _ = revoke_cap(cap)
+        is_cap_valid(cap)
+      None -> false
+    end
+  end
+end

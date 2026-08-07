@@ -2355,15 +2355,35 @@ let builtin_bindings : (string * scheme) list =
     (* Phase 6b: Register a linear value with an actor; Drop impl resolved at runtime *)
     ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
     (* Phase 3: Epoch-based capability builtins *)
-    ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
-    (* Cap's parameter is the actor's STATE type (it flows from
-       get_cap : Pid(a) -> Option(Cap(a)) and, since spawn returns Pid[state],
-       is the concrete state record); the MESSAGE argument is an unrelated
-       constructor type — a distinct variable.  Tying both to `a` only ever
-       typechecked while spawn yielded Pid[<fresh>]. *)
-    ("send_checked", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), TArrow (b, t_atom))));
-    ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_atom)));
-    ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_bool)));
+    (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
+       a revocable, epoch-checked reference to a live actor, represented at run
+       time as [VCap (pid, epoch)] and consumed by [send_checked] /
+       [revoke_cap] / [is_cap_valid].  An IO capability is a different thing
+       entirely: [VUnit], fully erased, governed by [needs] and the lattice.
+
+       They shared the [Cap] constructor until 2026-08-06 and therefore
+       UNIFIED, which meant [get_cap]'s unconstrained [a] could bind to [IO]
+       and hand a module the root capability it was never granted — defeating
+       R2 in two lines with no actor declared.  See the R8 audit
+       (specs/2026-08-06-r8-runtime-hatch-audit.md) and reject/t158.
+
+       Splitting the constructor rather than sweeping [get_cap]'s sites is
+       deliberate: a sweep patches one symptom, while the conflation would keep
+       producing them for every future builtin returning [Cap(a)].
+
+       A consequence worth naming: [ActorCap] is invisible to [needs], because
+       [Cap_surface_ty.caps_in_ty] matches [Cap].  That is correct — a process
+       capability is not IO authority and never should have required a
+       declaration. *)
+    ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("ActorCap", [a])]))));
+    (* [ActorCap]'s parameter is the actor's STATE type (it flows from
+       get_cap : Pid(a) -> Option(ActorCap(a)) and, since spawn returns
+       Pid[state], is the concrete state record); the MESSAGE argument is an
+       unrelated constructor type — a distinct variable.  Tying both to `a`
+       only ever typechecked while spawn yielded Pid[<fresh>]. *)
+    ("send_checked", poly2 (fun a b -> TArrow (TCon ("ActorCap", [a]), TArrow (b, t_atom))));
+    ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("ActorCap", [a]), t_atom)));
+    ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("ActorCap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
@@ -2819,6 +2839,7 @@ let builtin_types : (string * int) list =
     ("TypedArray", 1);
     ("Result", 2); ("Map",    2);
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
+    ("ActorCap", 1);
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
     ("ChildSpec", 0); ("SupervisorSpec", 0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2);
@@ -9229,8 +9250,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | _ -> ()
   ) decls
 
-(** [cap_in_solved_ty t] returns the rendered capability path of the first
-    [Cap(X)] found anywhere in the SOLVED type [t], or [None].
+(** [cap_in_solved_ty t] returns the RENDERED capability type — ["Cap(IO)"],
+    ["ActorCap(_)"] — of the first capability found anywhere in the SOLVED
+    type [t], or [None].  Callers print it verbatim; it is a whole type, not a
+    bare path, because two constructors can appear here.
 
     Companion to [Cap_surface_ty.caps_in_ty], which walks the surface syntax a
     programmer wrote.  This one walks the internal, post-unification [ty] and
@@ -9244,12 +9267,16 @@ let rec cap_in_solved_ty (t : ty) : string option =
   let first = List.fold_left
       (fun acc x -> match acc with Some _ -> acc | None -> cap_in_solved_ty x) None in
   match repr t with
-  | TCon ("Cap", [inner]) ->
+  (* [ActorCap] is here as well as [Cap] (2026-08-06).  Forging a
+     [VCap (pid, epoch)] out of JSON fabricates a live, send-capable reference
+     to an ARBITRARY actor at an arbitrary epoch — the same class of hole as
+     forging [Cap(IO)], and not covered by the IO lattice. *)
+  | TCon (("Cap" | "ActorCap") as con, [inner]) ->
     (* Render the argument for the diagnostic.  An unsolved or structured
        argument renders as `_`: the position is still a capability position
        and still rejected — an un-pinned capability is not a safe capability —
        we simply cannot name it. *)
-    Some (match repr inner with TCon (p, []) -> p | _ -> "_")
+    Some (con ^ "(" ^ (match repr inner with TCon (p, []) -> p | _ -> "_") ^ ")")
   | TCon (_, args) -> first args
   | TArrow (a, b) -> first [a; b]
   | TTuple ts -> first ts
@@ -9338,11 +9365,13 @@ let check_json_cap_sites (env : env) : unit =
       in
       match cap_in_solved_ty inspected with
       | None -> ()
-      | Some cap_path ->
+      | Some cap_rendered ->
         let verb = if encoding then "serialized" else "deserialized" in
         Err.error env.errors ~span:sp
           (render_parts [
-            MPCode ("Cap(" ^ cap_path ^ ")");
+            (* Already rendered as `Cap(X)` or `ActorCap(X)` by
+               [cap_in_solved_ty] — do not wrap it again. *)
+            MPCode cap_rendered;
             MPText (" cannot be " ^ verb ^ " — a capability may only be received, never constructed.");
             MPBreak;
             MPText "hint: "; MPCode jname;

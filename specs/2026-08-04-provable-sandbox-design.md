@@ -336,13 +336,13 @@ Answered with probes rather than reasoning; see
   capability field, so a granted widening is not reconstructible after the
   fact.
 - **FFI** — confirmed as designed.
-- **A hatch this table does not list:** `get_cap : Pid(a) -> Option(Cap(a))`
-  has an unconstrained `a`, so `get_cap(self())` yields `Cap(IO)` in a module
-  granted nothing. **This bypasses R2**, and it makes §5's "a capability can
-  only be received" false. Filed as
-  `specs/todos/2026-08-06-get-cap-bypasses-the-root-grant.md`; §5 is
-  deliberately left unedited until the fix is chosen, since the right wording
-  depends on it.
+- **A hatch this table does not list, now closed:** `get_cap` returned
+  `Option(Cap(a))`, sharing the `Cap` constructor with IO capabilities, so a
+  FREE `a` unified with `IO` and handed root authority to a module granted
+  nothing. The reachable route is `pid_of_int : Int -> Pid(a)` (`spawn` pins
+  `a` to the actor's state type, so the ordinary actor path was already safe).
+  Fixed by splitting the constructor — process capabilities are `ActorCap(a)`.
+  §5 stands unchanged as a result.
 
 
 
