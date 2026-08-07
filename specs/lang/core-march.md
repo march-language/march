@@ -2193,33 +2193,25 @@ on a stale/dead cap returns the `:error` atom (below) rather than `None`. Both
 were verified live in the interpreter (`send(dead) = None`,
 `send_checked(dead) = :error`).
 
-> **Finding (compiled-runtime fidelity gap — the capability/dead-send plane is
-> NOT byte-identical).** The dead-actor and capability paths **diverge** between
-> the interpreter and the compiled backend, and are therefore excluded from the
-> golden corpus (a divergent program cannot be a `MATCH`). Verified live on both
-> backends:
+> **Fixed 2026-07-18 — the capability/dead-send plane is now byte-identical.**
+> The dead-actor and capability paths used to diverge between the interpreter
+> and the compiled backend; both are now aligned and pinned by
+> `test/native/cap_epoch_plane`:
 >
 > | Probe (single actor) | interpreted | compiled |
 > |---|---|---|
-> | `send(dead_pid, Msg)` | `None` | `Some` |
-> | `send_checked(live_cap, Msg)` | `:ok` | a non-`:ok`, non-`:error` uninterned atom |
-> | `send_checked(dead_cap, Msg)` | `:error` | a non-`:ok`, non-`:error` uninterned atom |
-> | `get_cap(dead_pid)` | `None` | `Some` |
+> | `send(dead_pid, Msg)` | `None` | `None` |
+> | `send_checked(live_cap, Msg)` | `:ok` | `:ok` |
+> | `send_checked(dead_cap, Msg)` | `:error` | `:error` |
+> | `get_cap(dead_pid)` | `None` | `None` |
 > | `get_cap(live_pid)` / `send(live_pid, Msg)` / `is_alive` | `Some` / `Some` / bool | `Some` / `Some` / bool (agree) |
 >
-> The compiled backend does not implement the dead-actor drop for plain `send`
-> (returns `Some` unconditionally); its `get_cap` does not gate on liveness; and
-> its `send_checked` performs no epoch validation at all — it returns an
-> **uninterned/garbage atom** (which compares equal to neither `:ok` nor
-> `:error`, and `show`s as `:<atom>`) regardless of whether the cap is live,
-> dead, or stale. So the entire epoch-`Cap` validation plane is non-functional
-> compiled — not merely "rejects valid caps," but yields an unspecified atom for
-> every `send_checked`. The **live-actor** message plane (`spawn`/`send`/`receive`/
-> `run_until_idle`/`is_alive`) agrees — which is why the §4.10.5 witnesses and
-> `g37` (all on the live/`is_alive` path) are clean `MATCH`es while a cap /
-> dead-send witness is not. The epoch-`Cap` rules below are the **interpreter's**
-> semantics; they are documented for reference-completeness and are NOT claimed
-> byte-identical compiled.
+> `march_send_checked` (`runtime/march_runtime.c`) now checks the revocation
+> table, then the actor's current epoch against the cap's stamped epoch, then
+> liveness, before enqueuing — returning `march_atom_of_name("ok"/"error")` to
+> match the interpreter exactly, rather than an uninterned atom. `march_get_cap`
+> gates on liveness (niche `None` for a dead/unknown pid). The epoch-`Cap` rules
+> below apply to both backends.
 
 **Epoch-stamped capabilities (`Cap`) — the interpreter's model.** A capability
 is `VCap of int * int = (pid, epoch)` (`eval.ml:48`): a send-permit stamped with
@@ -2242,20 +2234,18 @@ revocation table OR the actor's current `ai_epoch` differs from the cap's epoch*
   message arg, not a `(Cap, msg)` pair).
 - **`revoke_cap(cap)` (`eval.ml:3164`)** — adds `(pid, epoch)` to the revocation
   table and returns `:ok` (idempotent). **`is_cap_valid(cap)` (`eval.ml:3172`)**
-  — the boolean form of the invariant above. *Neither `revoke_cap` nor
-  `is_cap_valid` is registered in the typechecker's builtin table*
-  (`typecheck.ml` has `get_cap`/`send_checked` at `:1473–1474` but no
-  `revoke_cap`/`is_cap_valid`), so a surface program calling them is rejected
-  with `I cannot find \`revoke_cap\``. They exist as `eval.ml` builtins reachable
-  only from OCaml/internal paths — a typecheck-visibility gap noted as a finding.
+  — the boolean form of the invariant above. Both are registered in the
+  typechecker's builtin table (`typecheck.ml:2342–2343`) and are ordinary
+  surface-callable builtins on both backends; the compiled runtime implements
+  the matching pair `march_revoke_cap`/`march_is_cap_valid`
+  (`runtime/march_runtime.c`).
 
 **Two invalidation paths.**
 
 1. **Explicit revoke.** `revoke_cap(cap)` records `(pid, epoch)` in the
    revocation table; a subsequent `send_checked(cap, …)` matches the
-   `Hashtbl.mem revocation_table` arm and returns `:error`. Deterministic, no
-   supervisor needed — but, per the typecheck-visibility gap above, not
-   expressible in a pure surface program today.
+   revocation-table arm and returns `:error`. Deterministic, no supervisor
+   needed, and expressible in a pure surface program on either backend.
 2. **Restart (epoch staleness).** A supervised restart replaces the crashed
    instance with a fresh one whose epoch is `old.ai_epoch + 1`
    (`spawn_child_actor`, `eval.ml:1512–1518`; `increment_epoch` at
@@ -2275,10 +2265,10 @@ revocation table OR the actor's current `ai_epoch` differs from the cap's epoch*
 actor's epoch — to this subsection. Supervision is how a crashed child is
 automatically respawned; a restart is the concrete producer of the "epoch
 staleness" invalidation §4.10.6 described in the abstract. As with the rest of
-§4.10, this is stated operationally against `eval.ml`, and — because the whole
-child-observation surface diverges or crashes compiled (below) — it is the
-**interpreter's** semantics, documented for reference-completeness and NOT
-claimed byte-identical compiled.
+§4.10, this is stated operationally against `eval.ml`; the child-observation
+surface (`get_actor_field`/`pid_of_int`, and the supervisor's spawn-time child
+`init`) is byte-identical on both backends as of 2026-07-08 (below), so this
+subsection's semantics apply equally to compiled binaries.
 
 **Supervisor declaration (static form).** An actor becomes a supervisor by
 carrying a `supervise` block in its definition, which the parser stores as
@@ -2365,47 +2355,40 @@ against the child **before** its crash carries the pre-restart epoch; after the
 restart the live instance's `ai_epoch` differs, so a `send_checked` on that
 stale `Cap` hits the `inst.ai_epoch <> cap_epoch` arm (`eval.ml:3147`) and
 returns `:error` — the capability is auto-invalidated across the restart with no
-explicit `revoke_cap` (§4.10.6's "Restart (epoch staleness)" path). **This is
-INTERPRETER-only on two counts:** (a) §4.10.6's filed finding that the compiled
-`send_checked`/epoch-`Cap` plane is entirely non-functional (it returns an
-uninterned garbage atom for every cap regardless of liveness/staleness — see the
-§4.10.6 divergence table), so the stale-cap rejection cannot be observed
-compiled at all; and (b) the only surface way to *hold* a pre-restart child cap
-is to read the child pid out of the supervisor state via `get_actor_field` +
-`pid_of_int`, which crash compiled (below). The epoch-invalidation rule is
-therefore documented as the interpreter's semantics only.
+explicit `revoke_cap` (§4.10.6's "Restart (epoch staleness)" path). This is
+observable on **both backends**: the compiled `send_checked`/epoch-`Cap` plane
+is byte-identical to the interpreter (§4.10.6, fixed 2026-07-18), and the
+surface way to *hold* a pre-restart child cap — reading the child pid out of
+the supervisor state via `get_actor_field` + `pid_of_int` — resolves correctly
+compiled (below, fixed 2026-07-08). The epoch-invalidation rule therefore
+applies to compiled binaries as much as to the interpreter.
 
-**Why the restart witness is PROSE-ONLY (not golden-testable compiled).** A
-golden program must produce byte-identical output interpreted and compiled
-(§5). Every way to observe a supervised child from surface March routes through
-a path that diverges or crashes compiled, so no deterministic restart witness
-survives the compiled-parity gate — verified live on both backends this task:
+**Restart observation is byte-identical on both backends (fixed 2026-07-08).**
+Every surface way to observe a supervised child — the supervisor's spawn-time
+child `init`, `get_actor_field`, `pid_of_int` — used to diverge or crash
+compiled; all three now agree:
 
 | Observation path | interpreted | compiled |
 |---|---|---|
-| `spawn(Sup)` runs each child's `init` body (a `println` in `init`) | fires once per child (deterministic) | does **not** run the children's `init` at spawn → 0 prints (DIVERGES) |
-| `get_actor_field(sup, "wa")` (read a child pid out of supervisor state) | returns `Some(pid)` | hard stub returns `None` unconditionally (`runtime/march_runtime.c:3329`) |
-| `pid_of_int(n)` (turn that int back into a `Pid` to `send`/`kill`/`is_alive`) | valid `Pid` | unsafe untagged int→pointer cast (`:3324`) → subsequent deref **SIGSEGV** |
-| whole `examples/supervision_strategies.march` compiled | exit 0, restarts observed | **exit 139 / SIGSEGV** (garbage pids, then crash) |
+| `spawn(Sup)` runs each child's `init` body (a `println` in `init`) | fires once per child (deterministic) | fires once per child (deterministic) |
+| `get_actor_field(sup, "wa")` (read a child pid out of supervisor state) | returns `Some(pid)` | returns `Some(pid)` — a real shape-registry lookup (`march_get_actor_field`, `runtime/march_extras.c`) |
+| `pid_of_int(n)` (turn that int back into a `Pid` to `send`/`kill`/`is_alive`) | valid `Pid` | valid `Pid` — a registry lookup by spawn index, with a safe already-dead sentinel for an unknown index (`march_pid_of_int`, `runtime/march_runtime.c`) |
+| whole `examples/supervision_strategies.march` compiled | exit 0, restarts observed | exit 0, restarts observed |
 
-The last row was confirmed live: `examples/supervision_strategies.march`
-interprets cleanly (exit 0, showing the `one_for_one`/`one_for_all`/
-`rest_for_one` restarts) but the compiled binary prints a garbage pid
-(`wa=2599429144`, from `get_actor_field` returning `None` and `pid_of_int`
-casting it) and then **exits 139**. Even the mildest witness — "a supervisor
-spawns its declared children," observed purely through a printing `init` body
-with NO `get_actor_field`/`pid_of_int` — **diverges** (interp fires the child
-`init`s, compiled runs none). A directly-spawned actor's printing `init` *does*
-run byte-identically on both backends (that path is not supervisor-mediated), so
-the divergence is specifically the supervisor-child-spawn plane, not `init`
-bodies in general. The `get_actor_field`/`pid_of_int` compiled crash is filed as an open finding
-in `specs/todos/` (the `Actor.call` timeout gap encountered nearby was fixed
-2026-07-13 — the compiled runtime now enforces `timeout_ms`, see
-`specs/lang/actors.md`). Consequently the supervision restart semantics are documented
-here in prose + `eval.ml` citations, and **no `one_for_one` restart golden was
-added** — the same class of "the observation surface diverges/crashes compiled,
-so it cannot be a `MATCH`" as the §4.10.6 capability/dead-`send` plane and the
-out-of-scope scheduler races.
+Confirmed live: `examples/supervision_strategies.march` runs clean (exit 0)
+compiled, exercising all three restart strategies
+(`one_for_one`/`one_for_all`/`rest_for_one`) with correctly-resolved child pids.
+`march_get_actor_field` resolves a named field through the same runtime shape
+registry `march_record_field_dyn` uses (a shape id stamped into the actor
+struct at spawn time), rather than the historical stub; `march_pid_of_int`
+looks an index up in the actor table and falls back to a static "already dead"
+sentinel actor for an unrecognized index, so every caller's existing
+dead-actor early-return path (`march_send`/`march_kill`/`march_is_alive`)
+handles it safely instead of dereferencing garbage. Consequently the
+supervision restart semantics documented here in prose + `eval.ml` citations
+apply to both backends, and the `Actor.call` timeout gap encountered nearby was
+separately fixed 2026-07-13 (the compiled runtime now enforces `timeout_ms`,
+see `specs/lang/actors.md`).
 
 ### 4.11 Session-typed channels: the runtime model (operational)
 
