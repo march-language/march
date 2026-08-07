@@ -63,6 +63,37 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Process capabilities have their own type: `ActorCap(a)`.** `get_cap`,
+  `send_checked`, `revoke_cap` and `is_cap_valid` now take and return
+  `ActorCap` rather than `Cap`.
+
+  They are different things that happened to share a type constructor. An IO
+  capability is erased at runtime and governed by `needs` and the capability
+  lattice; a process capability is a real, epoch-validated reference to a live
+  actor, governed by actor liveness and revocation. Because they shared `Cap`,
+  they unified — and `get_cap` applied to a `Pid` whose type parameter was not
+  pinned (via `pid_of_int`) produced `Cap(IO)`, handing the root capability to
+  a module that was granted nothing.
+
+  If you use these builtins, change the annotation to `ActorCap`; nothing else
+  changes. `ActorCap` is deliberately invisible to `needs` — a process
+  capability is not IO authority and never required a declaration.
+
+- **Capabilities can now be attenuated at any level, not just from the root.**
+  `cap_narrow` was typed `Cap(IO) -> Cap(a)`, so its argument was literally the
+  root capability — a holder of `Cap(IO.FileSystem)` could not narrow to
+  `Cap(IO.FileRead)`, and every attenuation had to happen in `main` with the
+  narrowed values threaded down.
+
+  It is now `Cap(a) -> Cap(b)`, and the compiler checks that the source
+  capability subsumes the target. Widening (`IO.Console` → `IO.FileWrite`) and
+  lateral moves between siblings (`IO.FileRead` → `IO.FileWrite`) are still
+  errors — the message names both capabilities and says which is not below the
+  other.
+
+  This makes delegation-with-attenuation writable: hand a subsystem
+  `Cap(IO.FileSystem)`, let it hand a helper `Cap(IO.FileRead)`.
+
 - **Context-indexed trust for `~H`: `Html.TrustedHtml` / `TrustedAttr` /
   `TrustedUrl` / `TrustedCss` / `TrustedJs`.** `Html.Safe` says a string is
   trusted but not trusted *where*, so a value trusted anywhere was trusted

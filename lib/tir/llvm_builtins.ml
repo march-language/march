@@ -694,7 +694,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_run_until_idle()" };
   { march_name = "register_resource"; c_name = Some "march_register_resource"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)" };
-  { march_name = "get_cap"; c_name = Some "march_get_cap"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("Cap", [Tir.TVar "a"])]));
+  { march_name = "get_cap"; c_name = Some "march_get_cap"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("ActorCap", [Tir.TVar "a"])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_cap(ptr %pid)" };
   { march_name = "send_checked"; c_name = Some "march_send_checked"; ret_ty = Some (Tir.TCon ("Atom", []));
     in_is_builtin = true; declare_sig = Some "declare i64  @march_send_checked(ptr %cap, ptr %msg)" };

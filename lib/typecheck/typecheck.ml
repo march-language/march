@@ -741,6 +741,17 @@ type env = {
       pinned result is [Cap(P)] with [P] a proof cap whose declaring module is
       [current_module] AND [cur_fn_public]; a proof cap from another module, a
       private fn, or a non-proof (IO) target is rejected. *)
+  cap_narrow_sites : (Ast.span * ty) list ref;
+  (** Every [cap_narrow] application site, as (span, the INSTANTIATED arrow).
+      Swept by [check_cap_narrow_sites] to enforce that the source capability
+      SUBSUMES the target — R4a's replacement for the monotonicity the old
+      [Cap(IO) -> Cap(a)] argument type enforced through unification.
+
+      Deferred for the same reason as [mint_cap_sites] and [json_cap_sites]:
+      the result type is a bare var at the application site and is pinned by
+      LATER unification.  See
+      [specs/lang/types/reject/t155_cap_narrow_widen_deferred.march], which
+      exists to fail if this is ever made eager. *)
   json_cap_sites : (Ast.span * ty * string) list ref;
   (** Every [to_json] / [from_json] / [from_json_events] application site,
       recorded as (span, the INSTANTIATED arrow type of the builtin, builtin
@@ -881,6 +892,7 @@ let make_env errors type_map = {
   cap_producer_ivars = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
   mint_cap_sites = ref [];
+  cap_narrow_sites = ref [];
   json_cap_sites = ref [];
   pure_mod = false;
   no_extern_mod = false;
@@ -2311,7 +2323,18 @@ let builtin_bindings : (string * scheme) list =
     (* Capability builtins.  root_cap is a bare value (use `root_cap`, never
        `root_cap()`) — see [noncallable_builtin_values]. *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
-    ("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+    (* R4a (2026-08-06): source is [Cap(a)], not [Cap(IO)], so attenuation can
+       CHAIN — a holder of [Cap(IO.FileSystem)] can hand out
+       [Cap(IO.FileRead)].  Before this, the argument was literally the root,
+       so only [main] could attenuate and least-privilege threading was
+       unwritable past the first hop.
+       The monotonicity that the old argument type enforced structurally (a
+       widen simply failed to unify) now lives in [check_cap_narrow_sites].
+       That is weaker IN KIND — an application site the sweep does not record
+       is a silently permitted widen — which is why every site is recorded at
+       one place below and why reject/t153-t155 are the load-bearing witnesses
+       rather than decorative ones. *)
+    ("cap_narrow", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), TCon ("Cap", [b]))));
     (* mint_cap: the gated proof-cap mint. Same scheme as cap_narrow
        (Cap(IO) -> Cap(a)); the GATE (declaring-module + public fn, proof-cap
        target only) is enforced in the EApp special-case, not the scheme.
@@ -2332,15 +2355,35 @@ let builtin_bindings : (string * scheme) list =
     (* Phase 6b: Register a linear value with an actor; Drop impl resolved at runtime *)
     ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
     (* Phase 3: Epoch-based capability builtins *)
-    ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
-    (* Cap's parameter is the actor's STATE type (it flows from
-       get_cap : Pid(a) -> Option(Cap(a)) and, since spawn returns Pid[state],
-       is the concrete state record); the MESSAGE argument is an unrelated
-       constructor type — a distinct variable.  Tying both to `a` only ever
-       typechecked while spawn yielded Pid[<fresh>]. *)
-    ("send_checked", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), TArrow (b, t_atom))));
-    ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_atom)));
-    ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_bool)));
+    (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
+       a revocable, epoch-checked reference to a live actor, represented at run
+       time as [VCap (pid, epoch)] and consumed by [send_checked] /
+       [revoke_cap] / [is_cap_valid].  An IO capability is a different thing
+       entirely: [VUnit], fully erased, governed by [needs] and the lattice.
+
+       They shared the [Cap] constructor until 2026-08-06 and therefore
+       UNIFIED, which meant [get_cap]'s unconstrained [a] could bind to [IO]
+       and hand a module the root capability it was never granted — defeating
+       R2 in two lines with no actor declared.  See the R8 audit
+       (specs/2026-08-06-r8-runtime-hatch-audit.md) and reject/t158.
+
+       Splitting the constructor rather than sweeping [get_cap]'s sites is
+       deliberate: a sweep patches one symptom, while the conflation would keep
+       producing them for every future builtin returning [Cap(a)].
+
+       A consequence worth naming: [ActorCap] is invisible to [needs], because
+       [Cap_surface_ty.caps_in_ty] matches [Cap].  That is correct — a process
+       capability is not IO authority and never should have required a
+       declaration. *)
+    ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("ActorCap", [a])]))));
+    (* [ActorCap]'s parameter is the actor's STATE type (it flows from
+       get_cap : Pid(a) -> Option(ActorCap(a)) and, since spawn returns
+       Pid[state], is the concrete state record); the MESSAGE argument is an
+       unrelated constructor type — a distinct variable.  Tying both to `a`
+       only ever typechecked while spawn yielded Pid[<fresh>]. *)
+    ("send_checked", poly2 (fun a b -> TArrow (TCon ("ActorCap", [a]), TArrow (b, t_atom))));
+    ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("ActorCap", [a]), t_atom)));
+    ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("ActorCap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
@@ -2796,6 +2839,7 @@ let builtin_types : (string * int) list =
     ("TypedArray", 1);
     ("Result", 2); ("Map",    2);
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
+    ("ActorCap", 1);
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
     ("ChildSpec", 0); ("SupervisorSpec", 0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2);
@@ -5646,6 +5690,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let rty = infer_app env sp f_ty [arg] 0 in
       demote_to_monomorphic rty;
       tag_cap_producer_result env rty sp;
+      (* R4a: record the INSTANTIATED arrow so the sweep can read BOTH the
+         source and the target once unification has pinned them. *)
+      env.cap_narrow_sites := (sp, f_ty) :: !(env.cap_narrow_sites);
       rty
 
     (* mint_cap (Part 2): the GATED proof-cap mint.  Same Cap(IO) -> Cap(a)
@@ -8706,7 +8753,57 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          a call whose signature is already walked above. Left uncovered
          deliberately; revisit if a witness appears. *)
       []
-    | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _ | Ast.DImpl _
+    (* An INTERFACE method signature is a signature, and Check 1 treats every
+       other signature — plain [fn], actor handler, [extern] — as a use.  A
+       default method body is a body, and its annotations are uses too.
+
+       These were enumerated under "names no capability position" when this
+       match was made exhaustive on 2026-08-05.  That was an explicit decision
+       and it was wrong; found by the R8 audit (reject/t156).  The enumeration
+       is why it was a reviewable mistake rather than a silent hole. *)
+    | Ast.DInterface (idef, sp) ->
+      let sig_caps =
+        List.concat_map (fun (md : Ast.method_decl) -> cap_paths_in_surface_ty md.md_ty)
+          idef.iface_methods
+      in
+      let body_caps =
+        List.concat_map (fun (md : Ast.method_decl) ->
+            match md.md_default with
+            | None -> []
+            | Some body -> cap_annots_in_expr [] body)
+          idef.iface_methods
+      in
+      List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+
+    (* An IMPL method is a function: its signature and its body annotations are
+       uses, exactly as a top-level [DFn]'s are.  Measured before this arm
+       existed: the IDENTICAL annotation errored in a plain [fn] body and
+       produced NOTHING in an [impl] method body — impl bodies were darker than
+       ordinary functions, which is backwards, since an [impl] is where a
+       dependency's capability use is least visible to a reader
+       (reject/t157). *)
+    | Ast.DImpl (idef, sp) ->
+      let of_fn (fd : Ast.fn_def) =
+        let param_tys =
+          List.filter_map (function
+              | Ast.FPNamed { param_ty = Some t; _ } -> Some t
+              | _ -> None)
+            (List.concat_map (fun c -> c.Ast.fc_params) fd.fn_clauses)
+        in
+        let sig_caps =
+          List.concat_map cap_paths_in_surface_ty (param_tys @ Option.to_list fd.fn_ret_ty)
+        in
+        let body_caps =
+          List.concat_map (fun (c : Ast.fn_clause) -> cap_annots_in_expr [] c.Ast.fc_body)
+            fd.fn_clauses
+        in
+        List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+      in
+      (* [impl_ty] itself can name a capability: `impl Grantor(Cap(IO))`. *)
+      List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty idef.impl_ty)
+      @ List.concat_map (fun (_, fd) -> of_fn fd) idef.impl_methods
+
+    | Ast.DProtocol _ | Ast.DSig _
     | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _
     | Ast.DOpts _ | Ast.DTransitions _ | Ast.DApp _ | Ast.DDeriving _
     | Ast.DSatisfy _ | Ast.DTest _ | Ast.DDescribe _ | Ast.DSetup _
@@ -9153,8 +9250,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | _ -> ()
   ) decls
 
-(** [cap_in_solved_ty t] returns the rendered capability path of the first
-    [Cap(X)] found anywhere in the SOLVED type [t], or [None].
+(** [cap_in_solved_ty t] returns the RENDERED capability type — ["Cap(IO)"],
+    ["ActorCap(_)"] — of the first capability found anywhere in the SOLVED
+    type [t], or [None].  Callers print it verbatim; it is a whole type, not a
+    bare path, because two constructors can appear here.
 
     Companion to [Cap_surface_ty.caps_in_ty], which walks the surface syntax a
     programmer wrote.  This one walks the internal, post-unification [ty] and
@@ -9168,12 +9267,16 @@ let rec cap_in_solved_ty (t : ty) : string option =
   let first = List.fold_left
       (fun acc x -> match acc with Some _ -> acc | None -> cap_in_solved_ty x) None in
   match repr t with
-  | TCon ("Cap", [inner]) ->
+  (* [ActorCap] is here as well as [Cap] (2026-08-06).  Forging a
+     [VCap (pid, epoch)] out of JSON fabricates a live, send-capable reference
+     to an ARBITRARY actor at an arbitrary epoch — the same class of hole as
+     forging [Cap(IO)], and not covered by the IO lattice. *)
+  | TCon (("Cap" | "ActorCap") as con, [inner]) ->
     (* Render the argument for the diagnostic.  An unsolved or structured
        argument renders as `_`: the position is still a capability position
        and still rejected — an un-pinned capability is not a safe capability —
        we simply cannot name it. *)
-    Some (match repr inner with TCon (p, []) -> p | _ -> "_")
+    Some (con ^ "(" ^ (match repr inner with TCon (p, []) -> p | _ -> "_") ^ ")")
   | TCon (_, args) -> first args
   | TArrow (a, b) -> first [a; b]
   | TTuple ts -> first ts
@@ -9185,6 +9288,57 @@ let rec cap_in_solved_ty (t : ty) : string option =
   | TNat _ -> None      (* type-level natural *)
   | TChan _ -> None     (* session_ty carries no capability *)
   | TError -> None      (* already-reported error sentinel; stay quiet *)
+
+(** R4a: attenuation must move DOWN the lattice, or stay level.
+
+    This is what stops [cap_narrow] widening now that its argument type is
+    [Cap(a)] rather than [Cap(IO)].  Before R4a the argument type did the work
+    through unification and there was nothing to bypass; this sweep is weaker
+    in kind, so its coverage is the whole guarantee.
+
+    Deferred, not eager, for the same reason as every other capability sweep
+    here: the result var is pinned by LATER unification (reject/t155).
+
+    Enforced only when BOTH sides resolve to concrete IO-lattice capabilities:
+
+    - A PROOF cap on either side is left alone.  Proof capabilities are not in
+      the IO lattice, and they have their own discipline ([mint_cap]'s gate and
+      Check 6).  [cap_narrow(root) : Cap(Db.Migrated)] typechecks today and is
+      governed by Check 6 on the way out; making subsumption reject it here
+      would silently change proof-cap semantics under cover of an IO change.
+    - An UNPINNED side is silent.  A [cap_narrow] whose result never gets
+      pinned to a concrete capability is a result never USED as one, so no
+      authority is exercised and there is nothing to widen into.  (I proposed
+      failing closed here and was wrong: the R3 argument for silence on an
+      unresolved [from_json] result applies unchanged, and failing closed would
+      reject ordinary code that narrows into a polymorphic position.) *)
+let check_cap_narrow_sites (env : env) : unit =
+  let concrete t = match repr t with
+    | TCon ("Cap", [inner]) ->
+      (match repr inner with TCon (p, []) -> Some p | _ -> None)
+    | _ -> None
+  in
+  let is_proof p = List.mem_assoc p env.proof_caps in
+  List.iter (fun (sp, f_ty) ->
+      match repr f_ty with
+      | TArrow (src_ty, dst_ty) ->
+        (match concrete src_ty, concrete dst_ty with
+         | Some src, Some dst
+           when not (is_proof src) && not (is_proof dst)
+             && not (March_caps.Cap_lattice.cap_subsumes src dst) ->
+           Err.error env.errors ~span:sp
+             (render_parts [
+               MPCode ("Cap(" ^ src ^ ")");
+               MPText " cannot be widened to "; MPCode ("Cap(" ^ dst ^ ")");
+               MPText " — "; MPCode "cap_narrow";
+               MPText " only attenuates, so the source capability must subsume the target.";
+               MPBreak;
+               MPText "help: "; MPCode ("Cap(" ^ dst ^ ")");
+               MPText " is not below "; MPCode ("Cap(" ^ src ^ ")");
+               MPText " in the capability lattice. Receive it from a caller that holds an ancestor of it." ])
+         | _ -> ())
+      | _ -> ()
+    ) !(env.cap_narrow_sites)
 
 (** Capability unforgeability (R3), the call-site half.  [to_json] is checked
     on its argument, the [from_json] family on its result; see
@@ -9211,11 +9365,13 @@ let check_json_cap_sites (env : env) : unit =
       in
       match cap_in_solved_ty inspected with
       | None -> ()
-      | Some cap_path ->
+      | Some cap_rendered ->
         let verb = if encoding then "serialized" else "deserialized" in
         Err.error env.errors ~span:sp
           (render_parts [
-            MPCode ("Cap(" ^ cap_path ^ ")");
+            (* Already rendered as `Cap(X)` or `ActorCap(X)` by
+               [cap_in_solved_ty] — do not wrap it again. *)
+            MPCode cap_rendered;
             MPText (" cannot be " ^ verb ^ " — a capability may only be received, never constructed.");
             MPBreak;
             MPText "hint: "; MPCode jname;
@@ -12479,6 +12635,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      at the entry module covers every nested module's sites. *)
   check_mint_cap_sites final_env;
   check_json_cap_sites final_env;
+  check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:
      TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]

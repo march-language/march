@@ -1,0 +1,37 @@
+-- EXPECT-ERROR: cannot be widened
+-- R4a — THE DECISIVE CASE: a widen pinned by LATER unification (2026-08-06).
+--
+-- The mirror of reject/t143 (R3's deferred-zonk case), and here for the same
+-- structural reason. `cap_narrow`'s result type is a bare `TVar` at the
+-- application site; nothing fixes it until something downstream does.
+--
+-- Below, `narrowed` is unconstrained at the `cap_narrow(c)` call. It is pinned
+-- to `Cap(IO.FileWrite)` only by the LATER call to `wants_write`. An EAGER
+-- subsumption check reads an unsolved variable at the application site, has no
+-- target to compare against, and either reports nothing or (if written to fail
+-- closed on unknowns) fires on every legitimate narrowing instead.
+--
+-- So this file forces the check to be a deferred end-of-module sweep over
+-- recorded application sites, zonking both sides then — exactly the mechanism
+-- R3 needed, for exactly the same reason. It also pins the fail-CLOSED
+-- decision: an unpinned side is not silence here. In R3 an unresolved
+-- `from_json` result meant the program never used it as a capability, so
+-- silence was right; a narrowing whose direction cannot be determined is the
+-- forge itself, so it is refused.
+--
+-- If this file passes while reject/t153 fails, the sweep is eager and the
+-- deferred route is open.
+mod DeferredWiden do
+  needs IO
+
+  pfn wants_write(w : Cap(IO.FileWrite)) : Int do 1 end
+
+  pfn launder(c : Cap(IO.Console)) : Int do
+    let narrowed = cap_narrow(c)
+    wants_write(narrowed)
+  end
+
+  fn main(cap : Cap(IO)) do
+    println("the widen is only visible after later unification")
+  end
+end

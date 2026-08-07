@@ -1,4 +1,4 @@
--- EXPECT-ERROR: `Cap(IO)` cannot be deserialized
+-- EXPECT-ERROR: cannot be deserialized
 -- Capability unforgeability (R3), THE DECISIVE CASE (2026-08-05).
 --
 -- `from_json` is typed `poly2 (fun a b -> TArrow (a, b))` — fully
@@ -11,8 +11,19 @@
 --
 -- What makes THIS file the one that matters: `from_json`'s result type is a
 -- bare `TVar` at the application site on line 1 of `main`. It is pinned to
--- `Cap(IO)` only by the LATER `cap_narrow(x)` on the next line, because
--- `cap_narrow : Cap(IO) -> Cap(a)` unifies its argument with `Cap(IO)`.
+-- a capability only by the LATER `cap_narrow(x)` on the next line.
+--
+-- The reported capability is `Cap(_)`, not `Cap(IO)`, and that changed with
+-- R4a (2026-08-06). `cap_narrow` used to be typed `Cap(IO) -> Cap(a)`, so it
+-- pinned its argument to the ROOT and this file could name the capability.
+-- R4a loosened it to `Cap(a) -> Cap(b)` so attenuation can chain, which means
+-- nothing here determines WHICH capability is being forged — only that one is.
+--
+-- The rejection still fires, and that is not luck: `cap_in_solved_ty` reports
+-- an unpinned capability argument as `_` rather than skipping it, precisely
+-- because an un-pinned capability position is not a safe position. Had it
+-- skipped, R4a would have silently reopened R3's hole for exactly this
+-- program, and the corpus would have gone green while doing it.
 --
 -- An eager check at the `from_json` call site therefore sees an unsolved
 -- variable and passes — it would report nothing here while still passing
