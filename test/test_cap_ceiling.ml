@@ -135,6 +135,33 @@ let rejects name src =
        | exception Not_found -> false)
   then Alcotest.failf "%s failed, but not for the ceiling reason:\n%s" name out
 
+(* ── Severity flip, 2026-08-06 ────────────────────────────────────────────
+   A DIRECT builtin call in a module body is now a typecheck ERROR, so
+   compilation stops before --cap-strict's ceiling pass ever runs.  Those
+   routes are therefore caught EARLIER than they used to be, and the ceiling
+   never sees them.
+
+   The tests below are re-pointed rather than deleted.  They still assert the
+   property that matters — the program is rejected — and they now record WHERE.
+   Deleting them would have removed the only regression guard on routes that
+   used to be the ceiling's job.
+
+   The ceiling remains load-bearing for the route typecheck CANNOT see: a
+   stdlib-mediated call (`File.write(...)` rather than `file_write(...)`),
+   which is [test_stdlib_route_was_completely_silent] below and which still
+   passes through [rejects] unchanged.  That asymmetry is the point — measured
+   2026-08-06, a stdlib-mediated call is still silent under plain `--check`. *)
+let rejects_at_typecheck name ~expect src =
+  let rc, out = compile_strict src in
+  if rc = 0 then
+    Alcotest.failf "%s should have been rejected but compiled" name;
+  match Str.search_forward (Str.regexp_string expect) out 0 with
+  | _ -> ()
+  | exception Not_found ->
+    Alcotest.failf
+      "%s: rejected, but not with the expected typecheck reason %S:\n%s"
+      name expect out
+
 let accepts name src =
   let rc, out = compile_strict src in
   if rc <> 0 then Alcotest.failf "%s should compile but did not:\n%s" name out
@@ -154,7 +181,8 @@ let rejects_naming name ~expect src =
 
 (* Route 1: a direct builtin call.  Warning-only without --cap-strict. *)
 let test_direct_builtin_route () =
-  rejects "direct builtin call"
+  rejects_at_typecheck "direct builtin call"
+    ~expect:"does not declare `needs IO.FileWrite`"
     {|
 mod CeilDirect do
   needs IO.Console
@@ -208,7 +236,8 @@ end
    per-module: the whole-program union cannot see it, and the dependency never
    opted in to anything. *)
 let test_dependency_exceeding_its_own_ceiling () =
-  rejects "dependency exceeds its declared needs"
+  rejects_at_typecheck "dependency exceeds its declared needs"
+    ~expect:"does not declare `needs IO.FileRead`"
     {|
 mod CeilApp do
   needs IO.Console
@@ -293,9 +322,8 @@ end
    under the qualified name, so the fix above did not buy silence by simply
    dropping deep modules from the ceiling. *)
 let test_doubly_nested_module_without_needs_is_still_caught () =
-  rejects_naming "doubly-nested module missing needs"
-    ~expect:
-      "module `Innocent.DeeplyNested` uses `IO.FileWrite` but does not declare"
+  rejects_at_typecheck "doubly-nested module missing needs"
+    ~expect:"does not declare `needs IO.FileWrite`"
     {|
 mod CeilDeepBad do
   needs IO.Console
@@ -338,9 +366,8 @@ end
    user's own call, so it is attributed to `CeilConsoleUndeclared` and must be
    reported against its (absent) `needs`. *)
 let test_console_use_without_needs_is_still_caught () =
-  rejects_naming "undeclared console use"
-    ~expect:
-      "module `CeilConsoleUndeclared` uses `IO.Console` but does not declare"
+  rejects_at_typecheck "undeclared console use"
+    ~expect:"does not declare `needs IO.Console`"
     {|
 mod CeilConsoleUndeclared do
   fn main() : () do

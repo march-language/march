@@ -70,6 +70,10 @@ let warning_with_code ctx ~span ~code message =
   report ctx
     { severity = Warning; span; message; labels = []; notes = []; code = Some code; fix = None }
 
+let error_with_fix ctx ~span ~fix message =
+  report ctx
+    { severity = Error; span; message; labels = []; notes = []; code = None; fix = Some fix }
+
 let warning_with_fix ctx ~span ~fix message =
   report ctx
     { severity = Warning; span; message; labels = []; notes = []; code = None; fix = Some fix }

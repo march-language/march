@@ -1476,6 +1476,7 @@ let test_supervision_revoke_without_kill () =
     crash the calling actor. The result should be retrievable. *)
 let test_supervision_task_spawn_link_completes () =
   let env = eval_module {|mod Test do
+  needs IO.Spawn
     actor Worker do
       state { x : Int }
       init { x: 0 }
@@ -1670,6 +1671,7 @@ let test_own_drop_full_march_source () =
 let test_file_builtin_exists_false () =
   (* If file_exists builtin is missing, this will raise an eval error *)
   let env = eval_with_stdlib [] {|mod T do
+  needs IO.FileRead
     fn f() do file_exists("/nonexistent_march_test_xyz") end
   end|} in
   Alcotest.(check bool) "file_exists returns false" false
@@ -5479,6 +5481,7 @@ let test_compiled_pmap_matches_map () =
   let oc = open_out src in
   output_string oc
     "mod PmapParity do\n\
+    \  needs IO.Process\n\
     \  fn main() : Unit do\n\
     \    let xs = List.range(0, 2000)\n\
     \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
@@ -7097,6 +7100,7 @@ let test_crypto_hmac_sha256_bytes_typecheck () =
      its result feeds base64_encode(Bytes) directly, and its params are
      inferred as Bytes from the builtin signature. *)
   let src = {|mod Test do
+  needs IO.Random
     fn go() do
       base64_encode(hmac_sha256_bytes(random_bytes(4), random_bytes(8)))
     end
@@ -8218,6 +8222,7 @@ let test_crypto_secure_compare () =
 
 let test_crypto_stdlib_base64_roundtrip () =
   let env = eval_with_crypto {|mod Test do
+  needs IO.Random
     fn f() do
       let b = random_bytes(12)
       let enc = Crypto.base64_encode(b)
@@ -10223,6 +10228,7 @@ let test_compile_succeeds_from_other_cwd () =
   let oc = open_out src in
   output_string oc
     "mod OtherCwd do\n\
+    \  needs IO.Console\n\
     \  fn main() do\n\
     \    println(\"hi\")\n\
     \  end\n\
@@ -10358,6 +10364,7 @@ let test_compiled_p12_type_preserving_alias () =
   let oc = open_out src in
   output_string oc
     "mod P12Regress do\n\
+    \  needs IO.Process\n\
     \  fn main() : Unit do\n\
     \    if List.length(List.range(0, 5)) == 5 do () else process_exit(1) end\n\
     \  end\n\
@@ -10387,6 +10394,7 @@ let test_compiled_sortby_heap_capturing_comparator () =
   let oc = open_out src in
   output_string oc
     "mod SortByRegress do\n\
+    \  needs IO.Process\n\
     \  fn main() : Unit do\n\
     \    let xs = List.range(0, 98)\n\
     \    let data = List.range(0, 5)\n\
@@ -10439,6 +10447,7 @@ let test_compiled_dual_position_owned_borrowed () =
   let oc = open_out src in
   output_string oc
     "mod DualPosRegress do\n\
+    \  needs IO.Console\n\
     \  fn both(a : String, b : String, n : Int) : String do\n\
     \    if String.byte_size(b) > n do\n\
     \      a\n\
@@ -10486,6 +10495,7 @@ let test_compiled_fbip_arity_no_overflow () =
   let oc = open_out src in
   output_string oc
     "mod FbipArityRegress do\n\
+    \  needs IO.Console\n\
     \  type Holder(a, b, c, d, e) = Small(a) | Big(a, b, c, d, e)\n\
     \  pfn churn(n : Int) : Int do\n\
     \    if n > 100 do n else churn(n + 7) end\n\
@@ -10543,6 +10553,7 @@ let test_compiled_actor_niche_msg_run_until_idle_kill () =
   let oc = open_out src in
   output_string oc
     "mod ActorNicheMsg do\n\
+    \  needs IO.Console\n\
     \  actor Counter do\n\
     \    state { count : Int }\n\
     \    init { count: 0 }\n\
@@ -10602,6 +10613,7 @@ let test_compiled_actor_program_exits_without_kill () =
   let oc = open_out src in
   output_string oc
     "mod ActorExitNoKill do\n\
+    \  needs IO.Console\n\
     \  actor Counter do\n\
     \    state { count : Int }\n\
     \    init { count: 0 }\n\
@@ -10677,6 +10689,7 @@ let test_compiled_toml_section_4keys () =
   let oc = open_out src in
   output_string oc
     "mod Toml4Regress do\n\
+    \  needs IO.Process\n\
     \  pfn check(opt, want) : Unit do\n\
     \    match opt do\n\
     \      Some(s) -> if s == want do () else process_exit(1) end\n\
@@ -10733,6 +10746,7 @@ let test_compiled_record_field_poly_mono () =
   let oc = open_out src in
   output_string oc
     "mod FieldPolyMono do\n\
+    \  needs IO.Process\n\
     \  type Conn = { hdrs : List((String, String)) }\n\
     \  pfn lookup(pairs, key) do\n\
     \    match pairs do\n\
@@ -10787,6 +10801,7 @@ let test_compiled_record_put_large_even_int () =
     let oc = open_out src in
     output_string oc
       "mod RecPutLargeInt do\n\
+    \  needs IO.Process\n\
       \  fn get_i(r, k) do\n\
       \    match record_get(r, k) do\n\
       \      Some(v) -> v\n\
@@ -10852,6 +10867,7 @@ let test_compiled_hot_reload_dispatch () =
   let oc = open_out src in
   output_string oc
     "mod App do\n\
+    \  needs IO.Console\n\
     \  mod Core do\n\
     \    fn b(n : Int) : Int do if n <= 0 do 0 else b(n - 1) + 1 end end\n\
     \    fn a(n : Int) : Int do b(n) end\n\
@@ -10949,6 +10965,7 @@ let test_compiled_hot_reload_dispatch () =
    prefix in the emitted manifest). *)
 let hcr_manifest_caps_fixture_src =
   "mod App do\n\
+  \  needs IO.Console\n\
   \  mod Core do\n\
   \    needs IO.Console\n\
   \    fn logger(x : String) : Unit do println(x) end\n\
@@ -11291,6 +11308,7 @@ let test_string_stats_histogram_exact () =
     ~env_prefix:"MARCH_STRING_STATS=1 "
     ~src_text:
       "mod StrStats do\n\
+    \  needs IO.Console\n\
       \  pfn small(i : Int, n : Int, acc : Int) : Int do\n\
       \    if i >= n do acc\n\
       \    else\n\
@@ -11330,6 +11348,7 @@ let test_string_stats_copy_bytes () =
     ~env_prefix:"MARCH_STRING_STATS=1 "
     ~src_text:
       "mod StrCopy do\n\
+    \  needs IO.Console\n\
       \  pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
       \    if i >= n do acc\n\
       \    else\n\
@@ -11362,6 +11381,7 @@ let test_string_stats_copy_bytes_byte_loops () =
     ~env_prefix:"MARCH_STRING_STATS=1 "
     ~src_text:
       "mod StrCase do\n\
+    \  needs IO.Console\n\
       \  pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
       \    if i >= n do acc\n\
       \    else\n\
@@ -11388,7 +11408,7 @@ let test_string_stats_copy_bytes_byte_loops () =
 let test_string_stats_off_by_default () =
   with_compiled_program ~tag:"march_strstats_off" ~env_prefix:""
     ~src_text:
-      "mod Off do\n  fn main() do println(String.repeat(\"x\", 3)) end\nend\n"
+      "mod Off do\n  needs IO.Console\n  fn main() do println(String.repeat(\"x\", 3)) end\nend\n"
     (fun err_file ->
        let contents = read_file_contents err_file in
        Alcotest.(check bool) "no stats emitted without the env var" false
@@ -11420,6 +11440,7 @@ let index_of_from_probe_src =
      the probe silently reaches the builtin instead and the match fails on a
      bare Int. *)
   "mod IdxFrom do\n\
+    \  needs IO.Console\n\
   \  fn render(o : Option(Int)) : String do\n\
   \    match o do\n\
   \    Some(k) -> to_string(k)\n\
@@ -11483,6 +11504,7 @@ let test_string_index_of_from () =
    spells them. *)
 let char_from_int_probe_src =
   "mod CharFromIntParity do\n\
+    \  needs IO.Console\n\
   \  pfn rt(n : Int, acc : Int) : Int do\n\
   \    if n > 255 do\n\
   \      acc\n\
@@ -11545,6 +11567,7 @@ let test_char_from_int_byte_parity () =
    ordinary data. *)
 let search_edge_probe_src =
   "mod Search do\n\
+    \  needs IO.Console\n\
   \  fn render(o : Option(Int)) : String do\n\
   \    match o do\n\
   \    Some(k) -> to_string(k)\n\
@@ -11597,6 +11620,7 @@ let test_concat_chain_single_allocation () =
     ~env_prefix:"MARCH_STRING_STATS=1 "
     ~src_text:
       "mod CatN do\n\
+    \  needs IO.Console\n\
       \  pfn go(a : String, b : String, i : Int, n : Int, acc : Int) : Int do\n\
       \    if i >= n do acc\n\
       \    else\n\
@@ -11630,6 +11654,7 @@ let test_concat_chain_single_allocation () =
 let test_concat_chain_values () =
   let src =
     "mod CatVal do\n\
+    \  needs IO.Console\n\
     \  fn main() do\n\
     \    let a = \"a\"\n\
     \    let e = \"\"\n\
@@ -11767,6 +11792,7 @@ let test_compiled_sanitize_clean_exit () =
   let oc = open_out src in
   output_string oc
     "mod SanExit do\n\
+    \  needs IO.Console\n\
     \  fn main() do println(\"sanitize ok\") end\n\
      end\n";
   close_out oc;
@@ -11843,6 +11869,7 @@ let test_compiled_io_read_byte () =
     let oc = open_out src in
     output_string oc
       "mod App do\n\
+    \  needs IO.Console\n\
       \  fn main() do\n\
       \    let a = IO.read_byte()\n\
       \    let b = IO.read_byte()\n\
@@ -11889,6 +11916,7 @@ let test_compiled_helper_name_collision () =
   let oc = open_out src in
   output_string oc
     "mod NameCollide do\n\
+    \  needs IO.Process\n\
     \  fn go(i : Int, n : Int) : Int do\n\
     \    if i >= n do 0\n\
     \    else do\n\
@@ -11932,6 +11960,7 @@ let test_compiled_builtin_first_class_value () =
   let oc = open_out src in
   output_string oc
     "mod BuiltinFirstClass do\n\
+    \  needs IO.Process\n\
     \  fn apply1(f : (String) -> Int, s : String) : Int do\n\
     \    f(s)\n\
     \  end\n\
@@ -11969,6 +11998,7 @@ let test_compiled_vault_scalar_roundtrip () =
   let oc = open_out src in
   output_string oc
     "mod VaultScalar do\n\
+    \  needs IO.Process\n\
     \  fn main() : Unit do\n\
     \    let t = Vault.new(\"vs_test\")\n\
     \    Vault.set(t, \"b\", true)\n\
@@ -12016,6 +12046,7 @@ let test_compiled_vault_scalar_roundtrip () =
    stand in for it. *)
 let vault_update_src =
   "mod VaultUpdate do\n\
+    \  needs IO.Process\n\
   \  fn inc(n) do\n\
   \    n + 1\n\
   \  end\n\
@@ -12080,6 +12111,7 @@ let test_compiled_string_to_int_overflow_is_none () =
   let oc = open_out src in
   output_string oc
     "mod StoiOverflow do\n\
+    \  needs IO.Process\n\
     \  fn is_none(s : String) : Bool do\n\
     \    match string_to_int(s) do\n\
     \      Some(_) -> false\n\
@@ -12135,6 +12167,7 @@ let test_compiled_aliased_arg_no_double_free () =
   let oc = open_out src in
   output_string oc
     "mod AliasDup do\n\
+    \  needs IO.Process\n\
     \  fn main() : Unit do\n\
     \    let a = BigInt.from_int(7)\n\
     \    let sq = BigInt.mul(a, a)          -- f(x, x): a consumed twice\n\

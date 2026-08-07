@@ -498,6 +498,7 @@ let test_fnfused_absent_when_not_fused () =
 
 let test_nested_bool_lit_pattern_no_tag_switch () =
   let ir = emit_actor_ir {|mod Test do
+  needs IO.Console
     fn classify(r : Result(Bool, String)) : String do
       match r do
         Ok(true) -> "T"
@@ -522,6 +523,7 @@ let test_nested_bool_lit_pattern_no_tag_switch () =
     tagged bits with (n<<1)|1 labels — Ok(1) → label 3, Ok(2) → label 5. *)
 let test_nested_int_lit_pattern_tagged_switch () =
   let ir = emit_actor_ir {|mod Test do
+  needs IO.Console
     fn classify(r : Result(Int, String)) : String do
       match r do
         Ok(1) -> "one"
@@ -544,6 +546,7 @@ let test_nested_int_lit_pattern_tagged_switch () =
 (** Nested Atom literal patterns: same shape — no second ctor-tag switch. *)
 let test_nested_atom_lit_pattern_no_tag_switch () =
   let ir = emit_actor_ir {|mod Test do
+  needs IO.Console
     fn classify(r : Result(Atom, String)) : String do
       match r do
         Ok(:red) -> "R"
@@ -647,6 +650,7 @@ let test_actor_struct_ereuse_unconditional () =
     `..._Actor`-named type's EReuse still takes the RC-conditional path. *)
 let test_actor_suffix_named_user_type_not_treated_as_actor () =
   let ir = emit_actor_ir {|mod Test do
+  needs IO.Console
     type Tree_Actor = TLeaf(Int) | TNode(Tree_Actor, Tree_Actor)
     fn bump(t : Tree_Actor) : Tree_Actor do
       match t do
@@ -683,6 +687,7 @@ let test_actor_suffix_named_user_type_not_treated_as_actor () =
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
 let test_tco_factorial_has_loop () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn factorial(n : Int, acc : Int) : Int do
       if n == 0 do acc
@@ -699,6 +704,7 @@ let test_tco_factorial_has_loop () =
 (** Tail-recursive list fold: should be transformed into a loop. *)
 let test_tco_fold_has_loop () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     type L = Nil | Cons(Int, L)
     @[no_warn_recursion]
     fn fold(xs : L, acc : Int) : Int do
@@ -717,6 +723,7 @@ let test_tco_fold_has_loop () =
 (** Non-tail-recursive fib must NOT get a TCO loop (it is not tail recursive). *)
 let test_tco_nontail_fib_no_loop () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn fib(n : Int) : Int do
       if n < 2 do n
@@ -732,6 +739,7 @@ let test_tco_nontail_fib_no_loop () =
 (** Single-param tail-recursive countdown: loop emitted with back-edge. *)
 let test_tco_countdown_has_loop () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn count(n : Int) : Int do
       if n == 0 do 0
@@ -748,6 +756,7 @@ let test_tco_countdown_has_loop () =
 
 let test_mutual_tco_even_odd_loop_emitted () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn even(n : Int) : Bool do
       if n == 0 do true else odd(n - 1) end
@@ -773,6 +782,7 @@ let test_mutual_tco_even_odd_loop_emitted () =
     All three must end up inside the same combined dispatch function. *)
 let test_mutual_tco_three_way () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn fa(n : Int) : Int do
       if n == 0 do 0 else fb(n - 1) end
@@ -797,6 +807,7 @@ let test_mutual_tco_three_way () =
 (** A/B state-machine with mutual tail calls. *)
 let test_mutual_tco_state_machine () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn state_a(n : Int) : Int do
       if n <= 0 do 1 else state_b(n - 1) end
@@ -816,6 +827,7 @@ let test_mutual_tco_state_machine () =
     f calls g in non-tail position (result used in arithmetic). *)
 let test_mutual_tco_non_tail_no_loop () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn count_f(n : Int) : Int do
       if n == 0 do 1 else count_g(n - 1) + 1 end
@@ -834,6 +846,7 @@ let test_mutual_tco_non_tail_no_loop () =
     get its tco_loop transformation. *)
 let test_mutual_tco_self_tco_unaffected () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
@@ -861,6 +874,7 @@ let test_mutual_tco_self_tco_unaffected () =
     unreachable continuation block after it. *)
 let test_mutual_tco_borrowed_arg_decref_on_live_path () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     fn build_loop(seed, n) do
       let prefix = String.repeat("a", 1)
       if n == 0 do
@@ -936,6 +950,7 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
     no IncRC to balance, so it must keep emitting neither op.) *)
 let test_tco_self_dup_arg_decref_on_live_path () =
   let ir = emit_tco_opt_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn walk(xs : List(String), acc : Int) : Int do
       match xs do
@@ -1001,6 +1016,7 @@ let test_tco_self_dup_arg_decref_on_live_path () =
     the surviving reference) and quadratic. *)
 let test_deep_drop_of_borrowed_container () =
   let ir = emit_tco_opt_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn consume(xs : List(String)) : Int do 0 end
     fn go(buf : String, i : Int, n : Int, acc : Int) : Int do
@@ -1055,6 +1071,7 @@ let test_deep_drop_of_borrowed_container () =
     correctly via ordinary (non-TCO) calls. *)
 let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     fn build_loop(seed, n) do
       let prefix = String.repeat("a", 1)
       if n == 0 do
@@ -1091,6 +1108,7 @@ let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
     @march_yield_from_compiled call) that self-TCO loops get. *)
 let test_mutual_tco_has_reduction_check () =
   let ir = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn is_even(n : Int) : Bool do
       if n == 0 do true else is_odd(n - 1) end
@@ -1128,6 +1146,7 @@ let test_mutual_tco_has_reduction_check () =
 (** Non-leaf, non-TCO function: reduction check IR must appear. *)
 let test_phase4_nonleaf_has_reduction_check () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     fn fib(n : Int) : Int do
       if n <= 1 do n
       else fib(n - 1) + fib(n - 2) end
@@ -1156,6 +1175,7 @@ let test_phase4_nonleaf_has_reduction_check () =
     Neither function should emit the icmp/br reduction check. *)
 let test_phase4_leaf_fn_no_reduction_check () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     fn square(n : Int) : Int do n * n end
     fn main() : Unit do println(int_to_string(42)) end
   end|} in
@@ -1168,6 +1188,7 @@ let test_phase4_leaf_fn_no_reduction_check () =
 (** TCO function: reduction check must be inside the tco_loop block. *)
 let test_phase4_tco_fn_reduction_in_loop () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
@@ -1185,6 +1206,7 @@ let test_phase4_tco_fn_reduction_in_loop () =
     so it must get a reduction check even though it has no loop. *)
 let test_phase4_nonrecursive_caller_has_check () =
   let ir = emit_tco_ir {|mod Test do
+  needs IO.Console
     fn double(n : Int) : Int do n + n end
     fn apply_double(n : Int) : Int do double(n) end
     fn main() : Unit do println(int_to_string(apply_double(3))) end
@@ -6263,6 +6285,7 @@ end
 let test_colliding_ctor_construction_gets_qualified_key () =
   let src = {|
 mod Top do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end
@@ -6346,6 +6369,7 @@ end
 let test_ambiguous_iface_call_stays_unresolved_at_lower_time () =
   let src = {|
 mod Top do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end
@@ -6420,6 +6444,7 @@ end
 let test_colliding_ctor_construction_inside_impl_method_gets_qualified_key () =
   let src = {|
 mod Top do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
     fn again : a -> a
@@ -6513,6 +6538,7 @@ end
 let test_colliding_pattern_match_impl_less_stays_bare () =
   let src = {|
 mod Top do
+  needs IO.Console
   mod DcA do
     type Thing = Shared | OnlyA
     fn describe(t: Thing) do
@@ -6571,6 +6597,7 @@ end
 let test_colliding_pattern_match_impl_method_gets_qualified_tag () =
   let src = {|
 mod Top do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end
@@ -6763,6 +6790,7 @@ end
 let test_colliding_general_iface_runtime_dispatch () =
   let src = {|
 mod Top do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end
@@ -6814,6 +6842,7 @@ end
 let test_noncolliding_no_dispatch_fn () =
   let src = {|
 mod M do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end
@@ -6894,6 +6923,7 @@ let dispatch_row_symbol (ir : string) (lbl : string) : string =
 let test_colliding_multi_ctor_shares_one_impl () =
   let src = {|
 mod Top do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end
@@ -8042,6 +8072,7 @@ let test_eval_no_yield_when_disabled () =
 
 let test_eval_task_spawn_await () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let t = task_spawn(fn x -> 42)
       task_await_unwrap(t)
@@ -8053,6 +8084,7 @@ let test_eval_task_spawn_await () =
 
 let test_eval_task_await_unwrap () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let t = task_spawn(fn x -> 99)
       task_await_unwrap(t)
@@ -8064,6 +8096,7 @@ let test_eval_task_await_unwrap () =
 
 let test_eval_task_multiple () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let t1 = task_spawn(fn x -> 10)
       let t2 = task_spawn(fn x -> 20)
@@ -8078,6 +8111,7 @@ let test_eval_task_multiple () =
 
 let test_eval_task_captures_env () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let x = 5
       let t = task_spawn(fn u -> x * x)
@@ -8090,6 +8124,7 @@ let test_eval_task_captures_env () =
 
 let test_eval_spawn_steal_requires_pool () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       task_spawn_steal(42, fn x -> 1)
     end
@@ -8102,6 +8137,7 @@ let test_eval_spawn_steal_requires_pool () =
 
 let test_eval_spawn_steal_with_pool () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn run(pool) do
       let t = task_spawn_steal(pool, fn x -> 77)
       task_await_unwrap(t)
@@ -8113,6 +8149,7 @@ let test_eval_spawn_steal_with_pool () =
 
 let test_eval_workpool_threading () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn helper(pool) do
       let t = task_spawn_steal(pool, fn x -> 55)
       task_await_unwrap(t)
@@ -8128,6 +8165,7 @@ let test_eval_workpool_threading () =
 
 let test_eval_task_sends_to_actor () =
   let src = {|mod Test do
+  needs IO.Spawn
     actor Counter do
       state { count : Int }
       init { count: 0 }
@@ -8157,6 +8195,7 @@ let test_eval_task_sends_to_actor () =
     Perceus treats task_spawn as consuming (no DecRC on caller side). *)
 let test_compile_task_spawn_heap_alloc_no_rc_underflow () =
   let ir = emit_actor_ir {|mod T do
+  needs IO.Spawn
     fn go() : String do "hello" end
     fn main() do
       let _ = task_spawn(fn _ -> go())
@@ -8186,6 +8225,7 @@ let test_compile_task_spawn_heap_alloc_no_rc_underflow () =
     heap corruption in the emit_atom builtin arm this mirrors. *)
 let test_compile_local_shadows_builtin_still_gets_rc_ops () =
   let ir = emit_actor_ir {|mod ShadowRc do
+  needs IO.Console
     fn main() do
       let link = String.concat("heap", "-allocated")
       let out = String.concat(link, "!")
@@ -8263,6 +8303,7 @@ let test_compile_task_reductions_reads_tls () =
 (** Phase 5: task_await must emit call to @march_task_await, not inline field load. *)
 let test_compile_task_await_in_ir () =
   let ir = emit_actor_ir {|mod TaskAwaitTest do
+  needs IO.Spawn
     fn main() do
       let t = task_spawn(fn _ -> 42)
       task_await(t)
@@ -8414,6 +8455,7 @@ let test_cancel_tokens_independent () =
 
 let test_spawn_with_cancel_active () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let tok = task_cancel_token_new()
       let t = task_spawn_with_cancel(fn _ -> 42, tok)
@@ -8426,6 +8468,7 @@ let test_spawn_with_cancel_active () =
 
 let test_spawn_with_cancel_precancelled () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let tok = task_cancel_token_new()
       task_cancel(tok)
@@ -8439,6 +8482,7 @@ let test_spawn_with_cancel_precancelled () =
 
 let test_cancel_by_id () =
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let t = task_spawn(fn _ -> 7)
       task_cancel_by_id(t)
@@ -8455,6 +8499,7 @@ let test_task_race_single () =
   let list_decl = load_stdlib_file_for_test "list.march" in
   let task_decl = load_stdlib_file_for_test "task.march" in
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let t = task_spawn(fn _ -> 100)
       Task.race([t])
@@ -8468,6 +8513,7 @@ let test_task_race_cancels_losers () =
   let list_decl = load_stdlib_file_for_test "list.march" in
   let task_decl = load_stdlib_file_for_test "task.march" in
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let t1 = task_spawn(fn _ -> 1)
       let t2 = task_spawn(fn _ -> 2)
@@ -8494,6 +8540,7 @@ let test_task_race_empty () =
 let test_task_all_settled () =
   let list_decl = load_stdlib_file_for_test "list.march" in
   let src = {|mod Test do
+  needs IO.Spawn
     fn main() do
       let t1 = task_spawn(fn _ -> 10)
       let t2 = task_spawn(fn _ -> 20)
@@ -8820,6 +8867,7 @@ let test_cap_extern_missing_needs_error () =
 
 let test_ffi_extern_explicit_symbol_ir () =
   let ir = emit_actor_ir {|mod Test do
+  needs IO.Console
     needs Ffi
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int = "crc32_compute"
@@ -8833,6 +8881,7 @@ let test_ffi_extern_explicit_symbol_ir () =
 
 let test_ffi_extern_default_symbol_ir () =
   let ir = emit_actor_ir {|mod Test do
+  needs IO.Console
     needs Ffi
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int
@@ -9427,6 +9476,7 @@ let test_float_lit_no_wildcard_panics_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat_nowild"
     "mod FloatPatNoWild do\n\
     \  needs IO.Console\n\
+    \  needs IO.Process\n\
     \  fn name(x) do\n\
     \    match x do\n\
     \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\"\n\
@@ -10010,6 +10060,7 @@ let test_native_array_map_reused_capturing_closure_compiled () =
 let test_native_array_set_int_alias_cow_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setalias"
     "mod SetAlias do\n\
+    \  needs IO.Console\n\
     \  fn main() : Unit do\n\
     \    let a = NativeArray.make_int(4, 0)\n\
     \    let b = NativeArray.set_int(a, 0, 99)\n\
@@ -10038,6 +10089,7 @@ let test_native_array_set_int_alias_cow_compiled () =
 let test_native_array_set_int_inplace_churn_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setchurn"
     "mod SetChurn do\n\
+    \  needs IO.Console\n\
     \  fn go(arr, i : Int, n : Int) : Int do\n\
     \    if i >= n do\n\
     \      NativeArray.sum_int(arr)\n\
@@ -10498,6 +10550,7 @@ let test_nonentry_newtype_tuple_destructure_compiled () =
     invisible to Perceus). *)
 let test_erased_update_single_dyn_call_ir () =
   let src = {|mod ErasedUpd do
+  needs IO.Console
     fn get_a(r) do r.a end
     fn main() do
       let built = record_from_list([("a", 1), ("b", 2), ("c", 3)])
@@ -10659,7 +10712,7 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
     links, runs, prints `hi`, and exits 0. It fails (link error) pre-fix. *)
 let test_compiled_no_opt_prunes_unreachable () =
   let src =
-    "mod Main do\n  fn main() do println(\"hi\") end\nend\n" in
+    "mod Main do\n  needs IO.Console\n  fn main() do println(\"hi\") end\nend\n" in
   let (project_root, main_exe, src_path, tmp) =
     write_march_source ~name:"no_opt_prune" src in
   let bin = Filename.concat tmp "no_opt_prune_bin" in
@@ -12686,6 +12739,7 @@ let test_vectorize_check_module_loads () =
     1 (List.length (March_errors.Errors.sorted ctx))
 
 let vectorize_source_inlined_reuse_fail = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn scale(arr, k) do
     let f = fn x -> x *. k
@@ -12708,6 +12762,7 @@ let test_vectorize_catches_violation_even_when_inlined () =
     true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Error)
 
 let vectorize_check_fail_src = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn scale(arr) do
     let f = fn x -> x *. 2.0
@@ -12745,6 +12800,7 @@ let test_vectorize_hard_error_fails_compile () =
     (ir_contains output "`scale` cannot vectorize")
 
 let vectorize_source_ok = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn scale(arr) do
     native_float_arr_map(arr, fn x -> x *. 2.0)
@@ -12800,6 +12856,7 @@ let vectorize_source_warn_ok = {|mod Main do
 end|}
 
 let vectorize_source_ok_int = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn double_all(arr) do
     native_int_arr_map(arr, fn x -> x * 2)
@@ -12812,6 +12869,7 @@ let vectorize_source_ok_int = {|mod Main do
 end|}
 
 let vectorize_source_reuse_fail = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn scale(arr) do
     let f = fn x -> x *. 2.0
@@ -12840,6 +12898,7 @@ let vectorize_source_reuse_warn = {|mod Main do
 end|}
 
 let vectorize_source_ok_map2 = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn combine(a, b) do
     native_float_arr_map2(a, b, fn (x, y) -> x +. y)
@@ -12853,6 +12912,7 @@ let vectorize_source_ok_map2 = {|mod Main do
 end|}
 
 let vectorize_source_reuse_fail_map2 = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn combine(a, b) do
     let f = fn (x, y) -> x +. y
@@ -12868,6 +12928,7 @@ let vectorize_source_reuse_fail_map2 = {|mod Main do
 end|}
 
 let vectorize_source_misuse = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn scale(arr) do
     arr
@@ -12926,6 +12987,7 @@ let test_vectorize_reuse_fail () =
     true (ir_contains d.March_errors.Errors.message "isn't safe to inline")
 
 let vectorize_source_reuse_fail_int = {|mod Main do
+  needs IO.Console
   @[vectorize]
   fn double_all(arr) do
     let f = fn x -> x * 2

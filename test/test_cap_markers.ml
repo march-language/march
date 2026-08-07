@@ -43,6 +43,7 @@ let contains haystack needle =
 let file_src =
   {|
 mod MarkerFileApp do
+  needs IO.Console
   needs IO.FileRead
   fn main() : () do
     match file_read("/etc/hosts") do
@@ -56,6 +57,7 @@ end
 let pure_src =
   {|
 mod MarkerPureApp do
+  needs IO.Console
   fn main() : () do
     println("hi")
   end
@@ -87,6 +89,7 @@ let test_marker_absent_for_unused_cap () =
 let direct_pass_src =
   {|
 mod MarkerDirectPassApp do
+  needs IO.Console
   needs IO.FileRead
 
   fn apply1(f : (String) -> a, p : String) : a do
@@ -127,6 +130,7 @@ let tests =
 let attrib_inlined_src =
   {|
 mod AttribApp do
+  needs IO.Console
   mod Dep do
     needs IO.FileRead
     fn slurp(p : String) : String do
@@ -159,6 +163,7 @@ let test_attributed_to_dep_not_app_despite_inlining () =
 let attrib_stdlib_wrapper_src =
   {|
 mod WrapApp do
+  needs IO.Console
   mod Dep do
     needs IO.FileRead
     fn slurp(p : String) : String do
@@ -189,6 +194,7 @@ let test_stdlib_wrapper_is_seen_through () =
 let attrib_unused_feature_src =
   {|
 mod PartialApp do
+  needs IO.Console
   mod Dep do
     needs IO.FileRead
     fn add(a : Int, b : Int) : Int do

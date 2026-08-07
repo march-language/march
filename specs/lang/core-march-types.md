@@ -3350,8 +3350,12 @@ core enforcement rule this subsection pins:
 > Every `Cap(X)` occurring in a function, actor-handler, or extern
 > **signature** (param or return type) must be covered — via `cap_subsumes`
 > — by at least one of the module's declared `needs` paths. If not, this is
-> an **ERROR** (not a warning; contrast Check 1b/1c for body-scanned/extern
-> uses, which are warning-only and covered by a later task).
+> an **ERROR**.
+>
+> Check 1b (a body-scanned direct builtin call) is **also an ERROR** as of
+> 2026-08-06; it was warning-only before, and the parenthetical here said so.
+> Check 1c (an `extern` block implying `IO.Foreign`) remains warning-only and
+> was deliberately not flipped.
 
 The set of signature-occurring `Cap(X)` paths (`used_caps`,
 `typecheck.ml:5468-5515`) is collected from three declaration shapes:

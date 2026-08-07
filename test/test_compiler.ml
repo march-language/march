@@ -793,6 +793,7 @@ let test_tc_root_cap_bare_rejected () =
    root_cap denylist must not overreach into these. *)
 let test_tc_zero_arg_builtins_still_callable () =
   let ctx = typecheck {|mod Test do
+  needs IO.Spawn
     fn f() : () do
       let _ = pmap_threshold()
       let _ = get_work_pool()
@@ -1400,6 +1401,7 @@ let test_println_polymorphic_typecheck () =
   (* Verify that a user-defined fn println(x) using show can accept any Show type,
      matching the behaviour of the prelude's polymorphic println. *)
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     fn println(x) do
       print(show(x))
       print("\n")
@@ -1485,6 +1487,7 @@ let linear_double_use_labels src =
 
 let test_linear_double_use_points_at_first_use () =
   let src = {|mod Test do
+  needs IO.Console
     fn consume(s : String) : Int do
       String.byte_size(s)
     end
@@ -1503,11 +1506,15 @@ let test_linear_double_use_points_at_first_use () =
   Alcotest.(check bool) "the error labels the earlier consumption site" true
     (List.exists (fun (msg, _) ->
          msg = "`token` was already consumed here") labels);
-  (* The label must point at the FIRST call (line 8), not repeat the second
-     (line 9) — pointing at the reuse twice would look right and help nobody. *)
+  (* The label must point at the FIRST call (line 9), not repeat the second
+     (line 10) — pointing at the reuse twice would look right and help nobody.
+     Line numbers shifted by one on 2026-08-06 when the severity flip made
+     `needs IO.Console` mandatory and it was inserted at the top of the
+     module; the assertion is about WHICH call is labelled, not about the
+     absolute line. *)
   Alcotest.(check bool) "the label points at the first use, not the second" true
     (List.exists (fun (msg, (sp : March_ast.Ast.span)) ->
-         msg = "`token` was already consumed here" && sp.March_ast.Ast.start_line = 8)
+         msg = "`token` was already consumed here" && sp.March_ast.Ast.start_line = 9)
        labels)
 
 (* REGRESSION GUARD for the match-arm snapshot. Arms are mutually exclusive, so
@@ -1518,6 +1525,7 @@ let test_linear_double_use_points_at_first_use () =
    on the same path. *)
 let test_linear_match_arms_each_consume_once_ok () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     fn consume(s : String) : Int do
       String.byte_size(s)
     end
@@ -1541,6 +1549,7 @@ let test_linear_double_use_within_arm_labels_same_arm () =
      line 10 — a line that never executes on the same path as the error. It must
      point at line 11. *)
   let src = {|mod Test do
+  needs IO.Console
     fn consume(s : String) : Int do
       String.byte_size(s)
     end
@@ -1564,7 +1573,9 @@ let test_linear_double_use_within_arm_labels_same_arm () =
     "the label points inside the offending arm, not the sibling arm" true
     (List.for_all (fun ((msg : string), (sp : March_ast.Ast.span)) ->
          msg <> "`token` was already consumed here"
-         || sp.March_ast.Ast.start_line = 11)
+         (* line 12 since 2026-08-06: the mandatory `needs` line shifted the
+            module body down by one. *)
+         || sp.March_ast.Ast.start_line = 12)
        labels)
 
 let test_linear_closure_capture_error () =
@@ -1755,6 +1766,7 @@ let test_session_no_participant_hint () =
     claiming the MPST module doesn't exist. *)
 let test_session_mpst_choose_unsupported_message () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     protocol Tri do
       A -> B : Int
       B -> C : Int
@@ -1773,6 +1785,7 @@ let test_session_mpst_choose_unsupported_message () =
     exactly as it did before the catch-all arm existed. *)
 let test_session_user_mpst_module_not_swallowed () =
   let ctx = typecheck {|mod App do
+  needs IO.Console
     mod MPST do
       fn helper(x) do x + 1 end
     end
@@ -1786,6 +1799,7 @@ let test_session_user_mpst_module_not_swallowed () =
 (** Same non-swallowing property for a user module named `Chan`. *)
 let test_session_user_chan_module_not_swallowed () =
   let ctx = typecheck {|mod App do
+  needs IO.Console
     mod Chan do
       fn helper(x) do x + 1 end
     end
@@ -1805,6 +1819,7 @@ let test_session_user_chan_module_not_swallowed () =
     arm's own advertised "wrong number of arguments" coverage). *)
 let test_session_chan_send_wrong_arity_error () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     protocol Ping do
       Client -> Server : Int
       Server -> Client : Int
@@ -1829,6 +1844,7 @@ let test_session_chan_send_wrong_arity_error () =
     it. *)
 let test_session_user_chan_new_recv_close_shadow_not_swallowed () =
   let ctx = typecheck {|mod App do
+  needs IO.Console
     mod Chan do
       fn new(a, b) do a end
       fn recv(a, b) do a end
@@ -2011,6 +2027,7 @@ let test_session_loop_projection () =
     iteration was rejected with "channel is at `End`". *)
 let test_session_loop_two_iterations_ok () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type Prod = Prod
     type Cons = Cons
     protocol Str do
@@ -2093,6 +2110,7 @@ let test_session_stop_projects_send_terminated () =
     "can never close" behavior this supersedes). *)
 let test_session_loop_stop_two_iterations_close_ok () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type Prod = Prod
     type Cons = Cons
     protocol Stream do
@@ -2290,6 +2308,7 @@ let test_session_chan_new_unknown_proto_error () =
     roles' (non-dual) endpoints.  It must error and point at `MPST.new`. *)
 let test_session_chan_new_multiparty_error () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type A = A
     type B = B
     type C = C
@@ -2405,6 +2424,7 @@ let test_session_offer_at_wrong_state_error () =
     compiled binary read that String pointer as an Int. *)
 let test_session_offer_unrefined_continuation_error () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol D2 do
@@ -2430,6 +2450,7 @@ let test_session_offer_unrefined_continuation_error () =
     exact, so driving the offer without a `match` stays legal. *)
 let test_session_offer_identical_branches_no_match_ok () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol Same do
@@ -2464,6 +2485,7 @@ let test_session_offer_identical_branches_no_match_ok () =
     stale linkage and the channel stays correctly marked unrefined. *)
 let test_session_offer_label_shadow_bypass_error () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol D2 do
@@ -2497,6 +2519,7 @@ let test_session_offer_label_shadow_bypass_error () =
     refines `sc2` correctly inside each arm. *)
 let test_session_offer_label_shadow_no_false_positive () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol D2 do
@@ -2627,6 +2650,7 @@ let test_session_offer_guarded_arm_not_handled () =
     that filter were dropped, this program would wrongly typecheck clean. *)
 let test_session_offer_guarded_catch_all_not_catch_all () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol D6 do
@@ -2663,6 +2687,7 @@ let test_session_offer_guarded_catch_all_not_catch_all () =
     pointer read as an Int.  Corpus witness `reject/t98`. *)
 let test_session_offer_unrefined_laundered_by_annotation () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol D7 do
@@ -2695,6 +2720,7 @@ let test_session_offer_unrefined_laundered_by_annotation () =
     result was the unmarked ref.  Corpus witness `reject/t99`. *)
 let test_session_offer_unrefined_laundered_by_if_join () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol D8 do
@@ -2731,6 +2757,7 @@ let test_session_offer_unrefined_laundered_by_if_join () =
     unification catches it at the call site.  Corpus witness `reject/t100`. *)
 let test_session_offer_unrefined_laundered_by_fn_param () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol D9 do
@@ -2764,6 +2791,7 @@ let test_session_offer_unrefined_laundered_by_fn_param () =
     check unifies, so the same guard covers it. *)
 let test_session_offer_unrefined_laundered_by_record_field () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol DA do
@@ -2804,6 +2832,7 @@ let test_session_offer_unrefined_laundered_by_record_field () =
     Corpus witness: `specs/lang/types/reject/t102`. *)
 let test_session_offer_unrefined_laundered_by_lambda_param () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol DL do
@@ -2836,6 +2865,7 @@ let test_session_offer_unrefined_laundered_by_lambda_param () =
     gap.  Corpus witness: `specs/lang/types/reject/t103`. *)
 let test_session_offer_unrefined_laundered_by_inner_fn_param () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol DM do
@@ -2872,6 +2902,7 @@ let test_session_offer_unrefined_laundered_by_inner_fn_param () =
     `specs/lang/types/accept/t104`. *)
 let test_session_lambda_param_annotation_no_false_positive () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol DN do
@@ -2914,6 +2945,7 @@ let test_session_lambda_param_annotation_no_false_positive () =
     fix — `fn (x : String) -> ...` applied to an `Int` must now be rejected. *)
 let test_lambda_param_annotation_mismatch_rejected () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     fn main() do
       let f = fn (x : String) -> string_length(x)
       println(int_to_string(f(42)))
@@ -2930,6 +2962,7 @@ let test_lambda_param_annotation_mismatch_rejected () =
     error-asserting tests above would not notice. *)
 let test_session_offer_unify_no_false_positive () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol DB do
@@ -2971,6 +3004,7 @@ let test_session_offer_unify_no_false_positive () =
     arm is dead code, not a soundness problem, so it must not break builds. *)
 let test_session_offer_unknown_arm_label_warning () =
   let (ctx, _env) = typecheck_full {|mod Test do
+    needs IO.Console
     type C = C
     type S = S
     protocol DC do
@@ -3017,6 +3051,7 @@ let test_session_offer_unknown_arm_label_warning () =
     now also explains why a catch-all does not count. *)
 let test_session_offer_unrefined_catch_all_message () =
   let ctx = typecheck {|mod Test do
+  needs IO.Console
     type C = C
     type S = S
     protocol DD do
@@ -3293,11 +3328,13 @@ let test_actor_handler_body_io_missing_needs_warns () =
       end
     end
   end|} in
-  Alcotest.(check bool) "no needs declared: no hard error" false (has_errors ctx);
+  (* Severity flip 2026-08-06: an undeclared direct builtin call is now an
+     ERROR. This assertion pinned the old advisory behaviour. *)
+  Alcotest.(check bool) "no needs declared: now a hard error" true (has_errors ctx);
   let diags = March_errors.Errors.sorted ctx in
-  let has_warning =
+  let has_diag =
     List.exists (fun d ->
-      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      d.March_errors.Errors.severity = March_errors.Errors.Error
       && (let m = d.March_errors.Errors.message in
           (try ignore (Str.search_forward (Str.regexp_string "IO.Console") m 0); true
            with Not_found -> false)
@@ -3306,8 +3343,8 @@ let test_actor_handler_body_io_missing_needs_warns () =
     ) diags
   in
   Alcotest.(check bool)
-    "actor handler body IO with no needs: warns to declare needs IO.Console"
-    true has_warning
+    "actor handler body IO with no needs: ERRORS, naming needs IO.Console"
+    true has_diag
 
 (* Counterpart: when the module DOES declare the needed cap, no such warning
    fires — confirms the new body-scan doesn't introduce a false positive. *)
@@ -3358,15 +3395,16 @@ let test_netlisten_body_missing_needs_warns () =
       tcp_listen(8080)
     end
   end|} in
-  Alcotest.(check bool) "no needs: no hard error" false (has_errors ctx);
-  let has_warning =
+  (* Severity flip 2026-08-06 — see the note on the actor-handler case. *)
+  Alcotest.(check bool) "no needs: now a hard error" true (has_errors ctx);
+  let has_diag =
     List.exists (fun d ->
-      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      d.March_errors.Errors.severity = March_errors.Errors.Error
       && netlisten_body_warns d.March_errors.Errors.message)
       (March_errors.Errors.sorted ctx)
   in
   Alcotest.(check bool)
-    "tcp_listen with no needs: warns to declare needs IO.NetListen" true has_warning
+    "tcp_listen with no needs: ERRORS, naming needs IO.NetListen" true has_diag
 
 let test_netlisten_body_with_needs_no_warning () =
   let ctx = typecheck {|mod Srv do
@@ -3396,12 +3434,16 @@ let test_netlisten_not_satisfied_by_netconnect () =
   end|} in
   let has_warning =
     List.exists (fun d ->
-      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      d.March_errors.Errors.severity = March_errors.Errors.Error
       && netlisten_body_warns d.March_errors.Errors.message)
       (March_errors.Errors.sorted ctx)
   in
+  (* Severity flip 2026-08-06: the body-scan diagnostic is an ERROR now, so the
+     "a sibling capability does not satisfy the requirement" case is reported
+     at error severity rather than as a warning.  The POINT of the test is
+     unchanged — NetConnect must not cover a NetListen need. *)
   Alcotest.(check bool)
-    "NetConnect does not satisfy a NetListen requirement: still warns" true has_warning
+    "NetConnect does not satisfy a NetListen requirement: still reported" true has_warning
 
 (* ── spawn requires a plain actor name, not a computed expression ─────────
    Regression: a well-typed `spawn(<computed expr>)` — e.g. an `if` that
@@ -3477,6 +3519,7 @@ let count_errors_matching ctx needle =
    context for the RHS (finding 16). *)
 let test_let_annot_mismatch_rejects () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     fn main() do
       let x : Int = "foo"
       println(int_to_string(x))
@@ -3489,6 +3532,7 @@ let test_let_annot_mismatch_rejects () =
 (* A correct annotation still typechecks. *)
 let test_let_annot_correct_accepts () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     fn main() do
       let x : Int = 5
       println(int_to_string(x))
@@ -3501,6 +3545,7 @@ let test_let_annot_correct_accepts () =
    the RHS's own general type. *)
 let test_let_annot_poly_instance_accepts () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     fn main() do
       let f : (Int) -> Int = fn n -> n
       println(int_to_string(f(5)))
@@ -3517,6 +3562,7 @@ let test_let_annot_poly_instance_accepts () =
    (checking `fn -> body` against it) and call (`cb()`). *)
 let test_zero_arg_lambda_unit_callback_accepts () =
   let ctx = typecheck {|mod Main do
+  needs IO.Console
     fn call_it(cb : Unit -> Unit) : Unit do cb() end
     fn once() : Unit do println("ran") end
     fn main() do call_it(fn -> once()) end
@@ -3528,6 +3574,7 @@ let test_zero_arg_lambda_unit_callback_accepts () =
    arrow — the symmetric call-site half of the fix above. *)
 let test_zero_arg_unit_call_returns_result () =
   let ctx = typecheck {|mod Main do
+  needs IO.Console
     fn main() do
       let n = int_max_value()
       println(int_to_string(n))
@@ -3540,6 +3587,7 @@ let test_zero_arg_unit_call_returns_result () =
    (a 1-arg discard, the shape task_spawn's callback expects) is unaffected. *)
 let test_discard_arg_thunk_still_accepts () =
   let ctx = typecheck {|mod Main do
+  needs IO.Console
     needs IO.Spawn
     fn main() do
       let _t = task_spawn(fn _ -> 42)
@@ -3557,6 +3605,7 @@ let test_discard_arg_thunk_still_accepts () =
    used to rediscover the same conflict through the self-reference). *)
 let test_letfn_ret_annot_mismatch_single_diagnostic () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     fn describe(n : Int) do
       fn go(k) : Int do
         match k do
@@ -3578,6 +3627,7 @@ let test_letfn_ret_annot_mismatch_single_diagnostic () =
    the dedup must not swallow the second, unrelated error. *)
 let test_letfn_two_distinct_errors_both_report () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     fn describe(n : Int) do
       fn go(k) : Int do
         match k do
@@ -3604,6 +3654,7 @@ let test_letfn_two_distinct_errors_both_report () =
    rejected, just as a direct `Rood == Rood` would be. *)
 let test_generic_when_constraint_unsatisfied_rejects () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     type Hue = Rood | Bloo
     fn same(a, b) when Eq(a) do a == b end
     fn main() do
@@ -3620,6 +3671,7 @@ let test_generic_when_constraint_unsatisfied_rejects () =
    must not reject discharged constraints. *)
 let test_generic_when_constraint_satisfied_accepts () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     fn max(a, b) when Ord(a) do if a > b do a else b end end
     fn same(a, b) when Eq(a) do a == b end
     fn main() do
@@ -3634,6 +3686,7 @@ let test_generic_when_constraint_satisfied_accepts () =
 (* Safety valve: an ordinary unconstrained generic function is unaffected. *)
 let test_generic_no_constraint_accepts () =
   let ctx = typecheck {|mod M do
+  needs IO.Console
     fn id(a) do a end
     fn main() do
       println(int_to_string(id(5)))
@@ -5601,6 +5654,7 @@ end
 let test_opaque_ctor_qualified_bypass_rejected () =
   (* Sibling module constructs the private opaque ctor by qualified name. *)
   let bypass_src = {|mod OqBypass do
+  needs IO.Console
   fn main() do
     let t = OqToken.Token("direct-bypass")
     println(OqToken.value(t))
@@ -5644,6 +5698,7 @@ let test_public_ctor_qualified_still_resolves () =
 end
 |} in
   let entry_src = {|mod PubUse do
+  needs IO.Console
   fn main() do
     let c = PubColor.Red
     println(PubColor.name(c))
@@ -5981,7 +6036,7 @@ let test_unrelated_broken_lib_module_is_pruned () =
     (* (1) Entry references only GoodLib: BrokenUnrelated must be pruned. *)
     let entry_ok = Filename.concat dir "entry_ok.march" in
     write_file entry_ok
-      "mod EntryOk do\n  fn main() do println(int_to_string(GoodLib.helper(21))) end\nend\n";
+      "mod EntryOk do\n  needs IO.Console\n  fn main() do println(int_to_string(GoodLib.helper(21))) end\nend\n";
     let m = parse_and_desugar (read_file_contents entry_ok) in
     let (resolve_errors, extra_decls, _uf) =
       March_resolver.Resolver.resolve_imports ~source_file:entry_ok m in
@@ -6960,6 +7015,7 @@ let test_cap_pure_spawn_error () =
 
 let test_cap_pure_println_error () =
   let ctx = typecheck {|mod Pure do
+  needs IO.Console
     cap pure
     fn greet() : Unit do println("hello") end
   end|} in
@@ -6988,6 +7044,7 @@ let test_cap_pure_random_int_error () =
 
 let test_cap_pure_uuid_error () =
   let ctx = typecheck {|mod Pure do
+  needs IO.Random
     cap pure
     fn gen() : String do uuid_v4() end
   end|} in
@@ -7014,6 +7071,7 @@ let test_cap_pure_uuid_error () =
    type mismatch. *)
 let test_cap_pure_file_write_error () =
   let ctx = typecheck {|mod Pure do
+  needs IO.FileWrite
     cap pure
     fn save(path : String, data : String) : Result(Unit, String) do
       file_write(path, data)
@@ -7023,6 +7081,7 @@ let test_cap_pure_file_write_error () =
 
 let test_cap_pure_file_read_error () =
   let ctx = typecheck {|mod Pure do
+  needs IO.FileRead
     cap pure
     fn load(path : String) : Result(String, String) do
       file_read(path)
@@ -7033,6 +7092,7 @@ let test_cap_pure_file_read_error () =
 (* `random_bytes : Int -> Bytes` — total, so `: Bytes` is type-correct. *)
 let test_cap_pure_random_bytes_error () =
   let ctx = typecheck {|mod Pure do
+  needs IO.Random
     cap pure
     fn gen() : Bytes do random_bytes(16) end
   end|} in
@@ -7054,6 +7114,7 @@ let test_cap_deterministic_random_int_error () =
 
 let test_cap_deterministic_uuid_error () =
   let ctx = typecheck {|mod Det do
+  needs IO.Random
     cap deterministic
     fn gen() : String do uuid_v4() end
   end|} in
@@ -7072,6 +7133,7 @@ let test_cap_deterministic_now_ms_error () =
    RED pre-fix (stale list spelled the nonexistent `now_ms`, missed this). *)
 let test_cap_deterministic_unix_time_ms_error () =
   let ctx = typecheck {|mod Det do
+  needs IO.Clock
     cap deterministic
     fn ts() : Int do unix_time_ms(()) end
   end|} in
@@ -7090,6 +7152,7 @@ let test_cap_deterministic_unix_time_ms_error () =
    fail with a genuine (and unrelated to this test) type mismatch. *)
 let test_cap_deterministic_file_read_ok () =
   let ctx = typecheck {|mod Det do
+  needs IO.FileRead
     cap deterministic
     fn load(path : String) do
       file_read(path)
@@ -8286,63 +8349,68 @@ let test_cap_body_needs_ok () =
     needs IO.Console
     fn greet(name) do println("Hello " ++ name) end
   end|} in
-  Alcotest.(check bool) "println with needs IO.Console: no warning" false
-    (has_warning_with ctx "builtin")
+  Alcotest.(check bool) "println with needs IO.Console: no diagnostic" false
+    (has_error_with ctx "builtin")
 
 (* Module without `needs` that calls println — body-scan emits warning. *)
 let test_cap_body_missing_console () =
   let ctx = typecheck {|mod Greeter do
     fn greet(name) do println("Hello " ++ name) end
   end|} in
-  Alcotest.(check bool) "println without needs: body-scan warning" true
-    (has_warning_with ctx "IO.Console")
+  Alcotest.(check bool) "println without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.Console")
 
 (* Module without `needs` that calls file_read — body-scan emits warning. *)
 let test_cap_body_missing_fileread () =
   let ctx = typecheck {|mod Reader do
     fn load(path) do file_read(path) end
   end|} in
-  Alcotest.(check bool) "file_read without needs: body-scan warning" true
-    (has_warning_with ctx "IO.FileRead")
+  Alcotest.(check bool) "file_read without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.FileRead")
 
 (* Module without `needs` that calls file_write — body-scan emits warning. *)
 let test_cap_body_missing_filewrite () =
   let ctx = typecheck {|mod Writer do
     fn save(path, data) do file_write(path, data) end
   end|} in
-  Alcotest.(check bool) "file_write without needs: body-scan warning" true
-    (has_warning_with ctx "IO.FileWrite")
+  Alcotest.(check bool) "file_write without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.FileWrite")
 
 (* Module without `needs` that calls random_bytes — body-scan emits warning. *)
 let test_cap_body_missing_random () =
   let ctx = typecheck {|mod Gen do
     fn token() do random_bytes(16) end
   end|} in
-  Alcotest.(check bool) "random_bytes without needs: body-scan warning" true
-    (has_warning_with ctx "IO.Random")
+  Alcotest.(check bool) "random_bytes without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.Random")
 
 (* Module without `needs` that calls unix_time — body-scan emits warning. *)
 let test_cap_body_missing_clock () =
   let ctx = typecheck {|mod Clk do
     fn now() do unix_time(()) end
   end|} in
-  Alcotest.(check bool) "unix_time without needs: body-scan warning" true
-    (has_warning_with ctx "IO.Clock")
+  Alcotest.(check bool) "unix_time without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.Clock")
 
 (* Module without `needs` that calls process_env — body-scan emits warning. *)
 let test_cap_body_missing_process () =
   let ctx = typecheck {|mod Env do
     fn get_path() do process_env("PATH") end
   end|} in
-  Alcotest.(check bool) "process_env without needs: body-scan warning" true
-    (has_warning_with ctx "IO.Process")
+  Alcotest.(check bool) "process_env without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.Process")
 
-(* Body-scan warning does NOT escalate to an error. *)
+(* INVERTED 2026-08-06 by the severity flip. This existed to pin that the body
+   scan did NOT escalate: `needs` was a hard floor for capability-PASSING code
+   and merely advisory for a direct builtin call — which is the code most
+   likely to abuse it. Per-function transitive closure (#209) made the ceiling
+   precise enough to enforce, so it escalates now. Kept rather than deleted so
+   the flip is visible in the diff. *)
 let test_cap_body_warn_not_error () =
   let ctx = typecheck {|mod Greeter do
     fn greet(name) do println("Hello " ++ name) end
   end|} in
-  Alcotest.(check bool) "body-scan missing cap is only a warning, not an error" false
+  Alcotest.(check bool) "body-scan missing cap is now an ERROR" true
     (has_errors ctx)
 
 (* Declared needs covers body call: no spurious warning. *)
@@ -8352,7 +8420,7 @@ let test_cap_body_no_double_warn () =
     fn greet(name) do println("Hello " ++ name) end
   end|} in
   Alcotest.(check bool) "declared needs suppresses body-scan warning" false
-    (has_warning_with ctx "builtin")
+    (has_error_with ctx "builtin")
 
 (* needs IO.Console satisfies both `print` and `println` body calls. *)
 let test_cap_body_umbrella_parent () =
@@ -8364,7 +8432,7 @@ let test_cap_body_umbrella_parent () =
     end
   end|} in
   Alcotest.(check bool) "needs IO.Console covers print+println calls" false
-    (has_warning_with ctx "IO.Console")
+    (has_error_with ctx "IO.Console")
 
 (* Multiple distinct builtins from different cap trees each get their own warning. *)
 let test_cap_body_two_missing_caps () =
@@ -8374,8 +8442,8 @@ let test_cap_body_two_missing_caps () =
       println("done")
     end
   end|} in
-  Alcotest.(check bool) "file_read warns about IO.FileRead" true
-    (has_warning_with ctx "IO.FileRead")
+  Alcotest.(check bool) "file_read errors about IO.FileRead" true
+    (has_error_with ctx "IO.FileRead")
 
 (* Check 2: a declared needs whose cap is inferred from body doesn't produce
    the "declared but not used" warning. *)
@@ -8392,16 +8460,16 @@ let test_cap_body_let_body () =
   let ctx = typecheck {|mod Top do
     let banner = println("app started")
   end|} in
-  Alcotest.(check bool) "DLet body call triggers body-scan warning" true
-    (has_warning_with ctx "IO.Console")
+  Alcotest.(check bool) "DLet body call triggers body-scan ERROR" true
+    (has_error_with ctx "IO.Console")
 
 (* Pure module with no builtins: no spurious warnings. *)
 let test_cap_body_pure_no_warn () =
   let ctx = typecheck {|mod Pure do
     fn add(a, b) do a + b end
   end|} in
-  Alcotest.(check bool) "pure module has no body-scan warnings" false
-    (has_warning_with ctx "builtin")
+  Alcotest.(check bool) "pure module has no body-scan diagnostics" false
+    (has_error_with ctx "builtin")
 
 (* ── IO.Mut: Vault shared-mutable-state capability ──────────────────────── *)
 
@@ -8412,8 +8480,8 @@ let test_cap_body_missing_mut () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "vault_new without needs: body-scan warning" true
-    (has_warning_with ctx "IO.Mut")
+  Alcotest.(check bool) "vault_new without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.Mut")
 
 let test_cap_body_mut_ok () =
   let ctx = typecheck {|mod Store do
@@ -8423,8 +8491,8 @@ let test_cap_body_mut_ok () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "vault_new with needs IO.Mut: no warning" false
-    (has_warning_with ctx "IO.Mut")
+  Alcotest.(check bool) "vault_new with needs IO.Mut: no diagnostic" false
+    (has_error_with ctx "IO.Mut")
 
 let test_cap_body_mut_parent_ok () =
   let ctx = typecheck {|mod Store do
@@ -8434,8 +8502,8 @@ let test_cap_body_mut_parent_ok () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "needs IO umbrella covers vault_new: no warning" false
-    (has_warning_with ctx "IO.Mut")
+  Alcotest.(check bool) "needs IO umbrella covers vault_new: no diagnostic" false
+    (has_error_with ctx "IO.Mut")
 
 (* ── IO.NetConnect.TLS: encrypted transport capability ──────────────────── *)
 
@@ -8443,24 +8511,24 @@ let test_cap_body_missing_tls () =
   let ctx = typecheck {|mod Secure do
     fn dial(fd, h, host) do tls_connect(fd, h, host) end
   end|} in
-  Alcotest.(check bool) "tls_connect without needs: body-scan warning" true
-    (has_warning_with ctx "IO.NetConnect.TLS")
+  Alcotest.(check bool) "tls_connect without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.NetConnect.TLS")
 
 let test_cap_body_tls_ok () =
   let ctx = typecheck {|mod Secure do
     needs IO.NetConnect.TLS
     fn dial(fd, h, host) do tls_connect(fd, h, host) end
   end|} in
-  Alcotest.(check bool) "tls_connect with needs IO.NetConnect.TLS: no warning" false
-    (has_warning_with ctx "IO.NetConnect.TLS")
+  Alcotest.(check bool) "tls_connect with needs IO.NetConnect.TLS: no diagnostic" false
+    (has_error_with ctx "IO.NetConnect.TLS")
 
 let test_cap_body_tls_parent_ok () =
   let ctx = typecheck {|mod Secure do
     needs IO.NetConnect
     fn dial(fd, h, host) do tls_connect(fd, h, host) end
   end|} in
-  Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_connect: no warning" false
-    (has_warning_with ctx "IO.NetConnect.TLS")
+  Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_connect: no diagnostic" false
+    (has_error_with ctx "IO.NetConnect.TLS")
 
 (* ── IO.WebSocket: least-privilege sub-cap of IO.NetConnect ──────────────── *)
 
@@ -8468,24 +8536,24 @@ let test_cap_body_missing_ws () =
   let ctx = typecheck {|mod Ws do
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "ws_recv without needs: body-scan warning" true
-    (has_warning_with ctx "IO.WebSocket")
+  Alcotest.(check bool) "ws_recv without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.WebSocket")
 
 let test_cap_body_ws_ok () =
   let ctx = typecheck {|mod Ws do
     needs IO.WebSocket
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "ws_recv with needs IO.WebSocket: no warning" false
-    (has_warning_with ctx "IO.WebSocket")
+  Alcotest.(check bool) "ws_recv with needs IO.WebSocket: no diagnostic" false
+    (has_error_with ctx "IO.WebSocket")
 
 let test_cap_body_ws_parent_ok () =
   let ctx = typecheck {|mod Ws do
     needs IO.NetConnect
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "needs IO.NetConnect umbrella covers ws_recv: no warning" false
-    (has_warning_with ctx "IO.WebSocket")
+  Alcotest.(check bool) "needs IO.NetConnect umbrella covers ws_recv: no diagnostic" false
+    (has_error_with ctx "IO.WebSocket")
 
 let test_cap_ws_arg_ok () =
   let ctx = typecheck {|mod Ws do
@@ -8512,8 +8580,8 @@ let test_cap_body_missing_spawn () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "task_spawn without needs: body-scan warning" true
-    (has_warning_with ctx "IO.Spawn")
+  Alcotest.(check bool) "task_spawn without needs: body-scan ERROR" true
+    (has_error_with ctx "IO.Spawn")
 
 (* task_spawn with needs IO.Spawn — no warning. *)
 let test_cap_body_spawn_ok () =
@@ -8524,8 +8592,8 @@ let test_cap_body_spawn_ok () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "task_spawn with needs IO.Spawn: no warning" false
-    (has_warning_with ctx "IO.Spawn")
+  Alcotest.(check bool) "task_spawn with needs IO.Spawn: no diagnostic" false
+    (has_error_with ctx "IO.Spawn")
 
 (* needs IO (parent) satisfies IO.Spawn body call. *)
 let test_cap_body_spawn_parent_ok () =
@@ -8536,8 +8604,8 @@ let test_cap_body_spawn_parent_ok () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "needs IO umbrella covers task_spawn: no warning" false
-    (has_warning_with ctx "IO.Spawn")
+  Alcotest.(check bool) "needs IO umbrella covers task_spawn: no diagnostic" false
+    (has_error_with ctx "IO.Spawn")
 
 (* ── Refinement types (A1a: parse + erase to base) ──────────────────────── *)
 
@@ -8673,6 +8741,7 @@ let test_fn_cap_closure_declared_needs () =
    returns the inferred set from builtin_cap_table for that function. *)
 let test_fn_cap_closure_inferred_builtin () =
   let (_errors, env) = typecheck_full {|mod Reader do
+  needs IO.FileRead
     fn load(path) do file_read(path) end
   end|} in
   let closures = March_typecheck.Typecheck.fn_capability_closures env in
@@ -8846,6 +8915,7 @@ let transitive_and_module_level_unions (src : string) (fns : string list)
    UNDER-report. The transitive closure must say IO.FileRead. *)
 let test_transitive_cap_via_private_helper () =
   let src = {|mod CapProbe do
+  needs IO.FileRead
     pfn helper(p) do
       match file_read(p) do
         Ok(s) -> Ok(s)
@@ -8862,6 +8932,7 @@ let test_transitive_cap_via_private_helper () =
    module's union would pass the accept case above. *)
 let test_transitive_cap_pure_sibling_unaffected () =
   let src = {|mod CapProbe do
+  needs IO.FileRead
     pfn helper(p) do
       match file_read(p) do
         Ok(s) -> Ok(s)
@@ -8879,6 +8950,7 @@ let test_transitive_cap_pure_sibling_unaffected () =
    is mentioned as an argument. *)
 let test_transitive_cap_through_value_reference () =
   let src = {|mod CapValue do
+  needs IO.Console
     pfn noisy(m) do print(m) end
     fn apply_to(f, m) do f(m) end
     fn shout(m) do apply_to(noisy, m) end
@@ -8890,6 +8962,7 @@ let test_transitive_cap_through_value_reference () =
    a grow-only set on a finite lattice, so a cycle terminates. *)
 let test_transitive_cap_mutual_recursion_fixpoint () =
   let src = {|mod Mutual do
+  needs IO.Console
     fn ping(n) do
       if n <= 0 do print("done") else pong(n - 1) end
     end
@@ -8907,6 +8980,7 @@ let test_transitive_cap_mutual_recursion_fixpoint () =
 let test_transitive_cap_nested_module_dotted_refs () =
   let src = {|mod Entry do
     mod Lib do
+  needs IO.FileRead
       pfn touch(p) do file_exists(p) end
       fn probe(p) do touch(p) end
     end
@@ -8926,6 +9000,7 @@ let test_transitive_cap_nested_module_dotted_refs () =
    subsystem treats as its cardinal sin. *)
 let test_transitive_cap_param_shadowing_sibling_fn () =
   let src = {|mod Shadow do
+  needs IO.FileRead
     pfn helper(p) do
       match file_read(p) do
         Ok(s) -> Ok(s)
@@ -8940,6 +9015,7 @@ let test_transitive_cap_param_shadowing_sibling_fn () =
   (* Control for the control: with no shadowing, the edge IS there — so the
      assertion above is about shadowing, not about the fixture being inert. *)
   let unshadowed = {|mod Shadow do
+  needs IO.FileRead
     pfn helper(p) do
       match file_read(p) do
         Ok(s) -> Ok(s)
@@ -8970,6 +9046,8 @@ let test_transitive_cap_param_shadowing_sibling_fn () =
    others. *)
 let test_transitive_cap_union_matches_module_level () =
   let src = {|mod Agg do
+  needs IO.Console
+  needs IO.FileRead
     pfn reader(p) do
       match file_read(p) do
         Ok(s) -> Ok(s)
@@ -9204,6 +9282,7 @@ end|} (if cyclic then "import A" else "")
    itself; the only route to IO.FileRead is the binding it reads. *)
 let test_transitive_cap_via_module_let () =
   let src = {|mod LetProbe do
+  needs IO.FileRead
     let cached = file_exists("x")
     fn peek() do cached end
     fn pure_peek(a) do a + 1 end
@@ -9333,6 +9412,7 @@ let test_impl_dispatch_node_does_not_capture_a_same_named_fn () =
    The fix records each [f$N] variant's caps under the base name [f] too. *)
 let test_transitive_cap_via_default_argument () =
   let src = {|mod DefaultProbe do
+  needs IO.Console
     pfn noisy() do print("hi") end
     fn withdef(x \\ noisy()) do x end
     fn caller() do withdef() end
@@ -9388,6 +9468,7 @@ end|})
 (* migrate_state calling file_write with no declared needs -> IO-free error. *)
 let test_migrate_state_file_write_error () =
   let ctx = typecheck {|mod Counter do
+  needs IO.FileWrite
     fn counter_migrate_state(old) do
       let _ = file_write("x", "y")
       old
@@ -9403,6 +9484,7 @@ let test_migrate_state_file_write_error () =
 (* migrate_state calling println -> IO-free error. *)
 let test_migrate_state_println_error () =
   let ctx = typecheck {|mod Counter do
+  needs IO.Console
     fn counter_migrate_state(old) do
       let _ = println(old)
       old
@@ -9478,7 +9560,7 @@ let test_cap_propagation_no_unused_warn () =
     end
   end|} in
   Alcotest.(check bool) "needs IO.Mut suppressed when required by sibling DMod" false
-    (has_warning_with ctx "unused capability")
+    (has_error_with ctx "unused capability")
 
 (* The suppression is selective: a declared needs that is NEITHER used directly
    NOR required by any sibling still warns. *)
@@ -9495,6 +9577,8 @@ let test_cap_propagation_still_warns_unrelated () =
       needs IO.Console
     end
   end|} in
+  (* "unused capability" is the DECLARED-BUT-UNUSED warning, which the 2026-08-06
+     severity flip did NOT touch — only the undeclared-USE direction escalated. *)
   Alcotest.(check bool) "unrelated needs IO.Console still warns when unused" true
     (has_warning_with ctx "unused capability")
 
@@ -10152,6 +10236,7 @@ let test_nested_inline_match_arm_parses () =
    distinct, reproducing the collision without depending on stdlib loading. *)
 let test_same_name_type_collision_note () =
   let ctx = typecheck {|mod Outer do
+  needs IO.Console
     mod Inner do
       type Thing = { a : Int }
     end
@@ -11145,7 +11230,33 @@ let assert_stdlib_file_typechecks_cleanly name =
     mod_name = { txt = "StdlibSelfCheck"; span = dummy_span };
     mod_decls = [dmod];
   } in
+  (* Register this file as stdlib, exactly as bin/main.ml does before checking
+     the standard library.  Without it, [span_is_stdlib] answers false here and
+     the 2026-08-06 body-scan ERROR fires on the stdlib's own builtin calls —
+     prelude's `print`, say.
+
+     Declaring the capability in the stdlib instead is NOT the alternative: a
+     `needs IO.Console` on Prelude satisfies the console use AT THE PRELUDE, so
+     a user's own `println` stops being attributed to the user's module and
+     --cap-strict stops catching it (measured 2026-08-06; test_cap_ceiling's
+     "undeclared console use" is the guard).
+
+     The point of this test is unaffected — it exists to surface INTERNAL type
+     errors in a stdlib file that bin/main.ml's user-file diagnostic filter
+     hides, and those still surface. *)
+  let saved = !March_typecheck.Typecheck.stdlib_source_files in
+  (* [load_stdlib_file_for_test] wraps the file in a DMod carrying dummy_span,
+     so the real path is only on the INNER decls — it comes from the lexbuf's
+     pos_fname, which the loader sets to whichever candidate path exists.
+     Register all three candidates rather than guessing which one resolved. *)
+  let candidates = [
+    Filename.concat "stdlib" name;
+    Filename.concat "../../../stdlib" name;
+    Filename.concat "../../stdlib" name;
+  ] in
+  March_typecheck.Typecheck.stdlib_source_files := candidates @ saved;
   let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  March_typecheck.Typecheck.stdlib_source_files := saved;
   Alcotest.(check bool)
     (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
     false (has_errors errors)
@@ -12058,6 +12169,7 @@ let test_let_record_destructure_unknown_field_rejected () =
    surplus, not that it is absent. *)
 let test_record_field_mismatch_note_polarity () =
   let ctx = typecheck {|mod T do
+  needs IO.Console
     fn width({ w: w }) : Int do w end
     fn main() : Unit do println(int_to_string(width({ w: 8, h: 9 }))) end
   end|} in
@@ -13004,10 +13116,10 @@ let compiler_suites =
           Alcotest.test_case "vault_new missing needs: warn IO.Mut"        `Quick test_cap_body_missing_mut;
           Alcotest.test_case "vault_new with needs IO.Mut: no warn"        `Quick test_cap_body_mut_ok;
           Alcotest.test_case "needs IO umbrella covers vault_new"          `Quick test_cap_body_mut_parent_ok;
-          Alcotest.test_case "tls_connect missing needs: warn TLS"         `Quick test_cap_body_missing_tls;
+          Alcotest.test_case "tls_connect missing needs: error TLS"         `Quick test_cap_body_missing_tls;
           Alcotest.test_case "tls_connect with needs IO.NetConnect.TLS"    `Quick test_cap_body_tls_ok;
           Alcotest.test_case "needs IO.NetConnect umbrella covers TLS"     `Quick test_cap_body_tls_parent_ok;
-          Alcotest.test_case "ws_recv missing needs: warn WebSocket"       `Quick test_cap_body_missing_ws;
+          Alcotest.test_case "ws_recv missing needs: error WebSocket"       `Quick test_cap_body_missing_ws;
           Alcotest.test_case "ws_recv with needs IO.WebSocket"             `Quick test_cap_body_ws_ok;
           Alcotest.test_case "needs IO.NetConnect umbrella covers WS"      `Quick test_cap_body_ws_parent_ok;
           Alcotest.test_case "Cap(IO.WebSocket) arg: no error"             `Quick test_cap_ws_arg_ok;

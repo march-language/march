@@ -30,7 +30,7 @@ That invisibility causes three recurring problems:
 
 **Audit blind spots.** Answering "which modules talk to the network?" in a large codebase means grepping and hoping — unless the compiler tracks it.
 
-March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph. The *strength* of the guarantee depends on **how** a capability is used — a hard, build-breaking error wherever `Cap(X)` flows through a signature, and an advisory warning for a bare IO-builtin call in a function body. That distinction is stated once, canonically, under ["What the compiler tells you"](#what-the-compiler-tells-you) below; the rest of this page just refers back to it. To *audit* what a dependency or a compiled binary actually holds — rather than what a module declares — see [Capability Audit]({{ site.baseurl }}/docs/capability-audit/).
+March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph. An uncovered capability is a hard, build-breaking error — whether `Cap(X)` flows through a signature or a function body simply calls an IO builtin directly (the latter was advisory until 2026-08-06). What that does and does not guarantee is stated once, canonically, under ["What the compiler tells you"](#what-the-compiler-tells-you) below; the rest of this page just refers back to it. To *audit* what a dependency or a compiled binary actually holds — rather than what a module declares — see [Capability Audit]({{ site.baseurl }}/docs/capability-audit/).
 
 ```march
 mod Price do
@@ -182,9 +182,14 @@ Use the **narrowest capability that accurately describes what the code actually 
 
 ### What the compiler tells you
 
-There are two severities, and which one you get depends on *where* the uncovered capability shows up — this honest distinction matters, so it's stated explicitly rather than glossed over.
+An uncovered capability is a **build-breaking ERROR** (`--check` exits 1). Which
+route it takes to being uncovered no longer changes the severity — that changed
+on 2026-08-06; before then a direct builtin call in a function body was only a
+warning.
 
-**Signature, transitive `use`, or `extern` — a build-breaking ERROR (`--check` exits 1).** If `Cap(X)` appears in a function/actor/extern parameter, or you `use` a module and reference a function from it that needs a capability you haven't declared, there is no way to ship without fixing it. (Note the scope: it is the functions you *reference* that count, not the imported module as a whole — see ["Propagation is demand-driven"](#propagation-is-demand-driven) above.)
+**Signature, transitive `use`, or `extern`.** If `Cap(X)` appears in a
+function/actor/extern parameter, or you `use` a module and reference a function
+from it that needs a capability you haven't declared:
 
 ```
 $ march --check caller.march   # `use`s a module needing Cap(IO.Network), no `needs IO.Network` of its own
@@ -195,17 +200,43 @@ $ echo $?
 1
 ```
 
-**A direct body call to an IO builtin, with no `Cap(X)` anywhere in a signature — a WARNING (`--check` exits 0).** The compiler still tells you exactly what's missing and how to fix it — this is genuinely useful, actionable feedback — but it does not fail the build:
+(Note the scope: it is the functions you *reference* that count, not the
+imported module as a whole — see ["Propagation is demand-driven"](#propagation-is-demand-driven).)
+
+**A direct body call to an IO builtin**, with no `Cap(X)` anywhere in a
+signature, is now the same severity:
 
 ```
-$ march --check reader.march   # fn slurp(path) : Result(String, String) do file_read(path) end — no needs
--- HINT --    call to `file_read` requires `needs IO.FileRead` — add `needs IO.FileRead` to module `Reader`
--- WARNING -- function body calls a builtin that requires `Cap(IO.FileRead)` but `Reader` does not declare `needs IO.FileRead`.
+$ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
+-- ERROR -- function body calls a builtin that requires `Cap(IO.FileRead)` but `Reader` does not declare `needs IO.FileRead`.
+help: add `needs IO.FileRead` to the module body.
 $ echo $?
-0
+1
 ```
 
-Follow the hint either way — it's always correct, and cleaning up the warning keeps a module's `needs` list an accurate account of what it does. But **don't rely on the warning to block a merge or a release**: it won't. For a hard, CI-enforced guarantee you have two options: thread `Cap(IO.FileRead)` through the relevant signatures so the violation lands on the ERROR side of this line, or build with `--cap-strict`, below.
+The error carries a machine-applicable fix, so `forge fix` will insert the
+`needs` line for you.
+
+#### What this does and does not guarantee
+
+Worth being precise about, because the error above invites a stronger reading
+than it earns:
+
+- It catches a **direct** call to a capability builtin — `file_read(p)`.
+- It does **not** catch the same operation routed through a stdlib wrapper —
+  `File.read(p)`. That call is invisible to this check, and `--check` exits 0.
+- The complete check is `--cap-strict`, below, which works on **emitted code**
+  and therefore cannot be evaded by re-routing through a helper. It is opt-in
+  and runs on the compile path, not under `--check`.
+
+So `needs` is a **mandatory, mechanically-verified manifest** of the builtins a
+module calls directly — not, on its own, proof that a module cannot reach a
+capability. For that, build with `--cap-strict`.
+
+It is also worth separating two things the word "capability" covers here: this
+check makes you *declare* what you touch. It does not make anyone *grant* it —
+`needs` is a self-declaration, and any module may write any `needs` line. IO
+builtins take no capability argument.
 
 ### `--cap-strict` — the declared set as a hard ceiling
 {#cap-strict}
@@ -253,7 +284,7 @@ To re-check the same ceiling on a binary you did not build, see
 
 ### When *not* to use IO capabilities
 
-**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee for the signature/`use`/`extern` surface; a module that only calls IO builtins in function bodies typechecks with advisory warnings rather than a rejection (see ["What the compiler tells you"](#what-the-compiler-tells-you)).
+**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. Since 2026-08-06 the absence of `needs` is machine-verified for direct builtin calls as well as the signature/`use`/`extern` surface — a module calling an IO builtin in a body without declaring it is rejected, not warned. The one route still outside that check is a stdlib-mediated call; see ["What the compiler tells you"](#what-the-compiler-tells-you).
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels "less precise." Accurate beats narrow-but-wrong.
 
