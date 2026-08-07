@@ -27,7 +27,6 @@ minimal ceremony. This chapter walks through every public function with copy-and
 
 ### Building a Vec
 
-<!-- scroll:skip -->
 ```march
 -- From a list
 let v = RRB.from_list([1, 2, 3, 4, 5])
@@ -42,7 +41,7 @@ let sq = RRB.tabulate(5, fn i -> i * i)   -- Vec [0, 1, 4, 9, 16]
 let s = RRB.singleton(42)
 
 -- Empty
-let e : Vec(Int) = RRB.empty()
+let e = RRB.empty()
 ```
 
 ### Inspecting a Vec

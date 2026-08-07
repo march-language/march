@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Capabilities"
 permalink: /docs/cookbook/capabilities/
+scrollmd: true
 ---
 
 # Capabilities
@@ -14,6 +15,7 @@ The capability system lets you express resource requirements in function types. 
 
 `needs` lists the capabilities a function requires:
 
+<!-- scroll:skip -->
 ```march
 needs IO
 fn write_log(msg : String) : Result((), String) do
@@ -29,6 +31,7 @@ A caller that doesn't declare `needs IO` will get a compile error if it tries to
 
 `proof cap` declares a capability that can only be *created* inside one module — useful for authority tokens. Minting goes through the gated `mint_cap` builtin, which only typechecks inside a public function of the declaring module and takes the ambient `Cap(IO)` (or a narrower cap) to authorize the mint. Proof-cap types are always referred to by their qualified `Module.Name` form, even from inside the declaring module:
 
+<!-- scroll:skip -->
 ```march
 mod Admin do
   proof cap AdminCap
@@ -53,6 +56,7 @@ Outside `Admin`, no code can manufacture a `Cap(Admin.AdminCap)`. It can only pa
 
 `Tagged(X, Realtime)` marks a computation as realtime-safe. Calling `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)` inside a realtime-tagged function is a compile error:
 
+<!-- scroll:skip -->
 ```march
 fn process_sample(buf : Tagged(Buffer, Realtime)) : Tagged(Buffer, Realtime) do
   -- allocating here would be a compile error
