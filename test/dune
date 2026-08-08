@@ -1016,6 +1016,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ring_buf_ops.expected native_ring_buf_ops.out)))
 
+; ── Regression: nested `derive Json` must dispatch `to_json` natively ──
+; mono.ml's record_to_typename map keyed each record type only on its DECLARED
+; field shape, where a nested record field is a nominal TCon ("Mid").  A record
+; built from a literal reaches the call site fully structural
+; ({ mid : { leaf : { id : Int }, tag : String }, n : Int }), so the two mangle
+; strings never matched, first-arg interface dispatch missed, and the bare
+; `to_json` call reached the linker as an undefined symbol.  Compile the
+; two-level fixture natively, run it, and diff stdout against the interpreter's
+; output.  Needs the real stdlib (Json, and the prelude that carries `to_json`).
+(rule
+ (targets native_nested_derive_json native_nested_derive_json.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/nested_derive_json.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_derive_json
+        native/nested_derive_json.march)
+   (with-stdout-to native_nested_derive_json.out
+        (system "./native_nested_derive_json")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_derive_json.expected native_nested_derive_json.out)))
+
 ; ── Regression: burst-of-task_spawn must not race the Task object ──
 ; march_task_spawn_thunk initialised the Task's proc-handle/result/done-flag
 ; AFTER march_sched_spawn published the proc, so a work-stealing scheduler
@@ -3576,11 +3609,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (with-stdout-to native_node_discovery.sorted.out
    (system "LC_ALL=C sort native_node_discovery.out"))))
 
-; REVIVED 2026-08-08 alongside node_call_loopback (same fix: ephemeral port via
-; tcp_listen(0) + tcp_local_port; the scheduler deadlock it was preemptively
-; quarantined against is fixed). Soaked 10/10 clean (0 hangs) under host load ~10.
+; RE-QUARANTINED 2026-08-08: un-quarantined earlier the same day (ephemeral-port
+; fix), which correctly resolved the fixed-port collision — but exposed a
+; DIFFERENT, pre-existing flake on Linux CI. Unlike node_call_loopback/
+; rpc_auto_enroll (whose client prints from a single green thread), this test has
+; node-a AND node-b println their status lines CONCURRENTLY, and roughly 1-in-2
+; ubuntu runs tears two lines together with a lost newline, e.g.
+; `node-b: handshake ok, peer=node-anode-a: handshake ok, peer=node-b` plus a
+; stray blank line — which the sort-before-diff golden cannot absorb (it tolerates
+; REORDERING, not torn lines). This is the SAME torn-output race as
+; signal_term_suppress (below): the ci-infra investigation determined it is NOT
+; I/O-level write interleaving (march_println already does one atomic writev, and
+; a writev-retry fix measured no benefit and was reverted) but a pre-write
+; allocator/GC race between concurrent green threads on >1 scheduler thread.
+; Un-quarantine only once that scheduler race is fixed. The ephemeral-port and
+; deadlock fixes still stand and keep node_call_loopback/rpc_auto_enroll green.
+; Runnable manually via `dune build @test/node_discovery_quarantined`.
 (rule
- (alias runtest)
+ (alias node_discovery_quarantined)
  (action (diff native/node_discovery.expected native_node_discovery.sorted.out)))
 
 ; ── Compiler-emitted enroll/stub: auto-registration of __rpc_stub functions ──
