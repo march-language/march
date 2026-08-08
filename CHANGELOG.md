@@ -27,6 +27,22 @@ git log is authoritative for exact commits.
   (exit 3) or a raw `_from_json` linker failure; it now reports "ambiguous
   interface-method call", names the candidate implementations, explains that
   the dispatch position is not concrete at the call site, and exits 1.
+- **`try_finally` now has a native implementation, so compiled programs using
+  fd-streaming file I/O link and run.** It was a typecheck+interpreter builtin
+  only; any natively compiled program that reached it — `File.with_lines`,
+  `File.with_chunks`, `Logger`'s context stack, or a direct call — failed at
+  link time with `Undefined symbols: "_try_finally"` (first seen via
+  `examples/read_file.march`). The native version preserves the interpreter's
+  contract: cleanup runs even when the action panics (the panic is re-raised
+  after cleanup; a panic inside cleanup itself is swallowed).
+
+- **`file_read_line` / `file_read_chunk` no longer misread every compiled
+  result.** The C runtime returned `Ok`/`Err` Result cells while the March
+  type is `Option(String)` (niche-encoded: `None` is NULL, `Some`'s payload is
+  the value itself), so a compiled read-to-EOF loop never saw EOF
+  (`File.with_lines` spun forever) and any use of the "line" crashed. Both now
+  return the string directly or NULL, matching the interpreter. This was
+  unreachable before the `try_finally` fix above — nothing fd-based could link.
 
 - **A bare constructor pattern on a value of a known type is no longer reported
   as ambiguous against a same-named stdlib constructor.** Matching `Defs.make(n)`

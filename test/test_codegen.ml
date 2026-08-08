@@ -9991,6 +9991,158 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
         true (Test_helpers.contains "boom" run_out)
     done
 
+(* try_finally — the third member of the try-call family, and the one the
+   stdlib leans on for resource cleanup (File.with_lines / File.with_chunks /
+   Logger's context stack). Unlike __try_call/__try_call_val it was a
+   typecheck+interpreter builtin ONLY: no llvm_builtins row, so compiled
+   call sites fell into the unknown-extern fallback and emitted
+   `declare ptr @try_finally(...)` against a C symbol that never existed —
+   any program whose compiled code reached try_finally failed at LINK time
+   ("Undefined symbols: _try_finally", first seen via
+   examples/read_file.march's File.with_lines call).
+
+   try_finally returns the action's value at the polymorphic type `a`
+   DIRECTLY (not wrapped in a Result field like its siblings), so its
+   llvm_builtins row uses ret_ty = TVar "_" (the record_put precedent): the
+   call site reads a uniform ptr and the consumer coerces. The Int case
+   below is the adversarial witness for exactly that — if the runtime
+   returned a raw untagged value, or the call site skipped the conditional
+   untag, 42 would come back as 85 ((42<<1)|1) compiled-only. *)
+let test_try_finally_value_and_order_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfin"
+    "mod TryFin do\n\
+    \  needs IO.Console\n\
+    \  fn main() : Unit do\n\
+    \    let k = 40\n\
+    \    let n = try_finally(\n\
+    \      fn _ ->\n\
+    \        let _ = println(\"action\")\n\
+    \        k + 2,\n\
+    \      fn _ -> println(\"cleanup\"))\n\
+    \    println(int_to_string(n))\n\
+    \    let s = try_finally(fn _ -> \"he\" ++ \"ap\", fn _ -> ())\n\
+    \    println(s)\n\
+    \  end\n\
+     end\n"
+  in
+  let expected = "action\ncleanup\n42\nheap" in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted try_finally value + cleanup order"
+    expected interp_out;
+  let bin = Filename.concat tmp "tryfinbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string) "compiled matches interpreted" expected run_out
+
+(* The semantic contract that justifies try_finally's existence: cleanup runs
+   even when the action panics, and the panic still propagates afterwards
+   (nonzero exit). Combined stdout+stderr capture can interleave the two
+   streams arbitrarily around process exit, so assert presence of both
+   markers rather than their relative order — cleanup-before-repanic is
+   enforced by construction inside march_try_finally. *)
+let test_try_finally_cleanup_runs_on_panic_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfinpanic"
+    "mod TryFinPanic do\n\
+    \  needs IO.Console\n\
+    \  fn main() : Unit do\n\
+    \    let label = \"kaboom\"\n\
+    \    let _ = try_finally(\n\
+    \      fn _ ->\n\
+    \        let _ = panic(label)\n\
+    \        0,\n\
+    \      fn _ -> println(\"cleanup-ran\"))\n\
+    \    println(\"unreachable\")\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "tryfinpanicbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let out_file = Filename.concat tmp "tryfinpanic.out" in
+    let rc = Sys.command (Printf.sprintf "%s > %s 2>&1"
+                            (Filename.quote bin) (Filename.quote out_file)) in
+    let run_out = read_cmd_output (Printf.sprintf "cat %s" (Filename.quote out_file)) in
+    Alcotest.(check bool) "panicking action still exits nonzero" true (rc <> 0);
+    Alcotest.(check bool) "cleanup ran before the panic propagated" true
+      (Test_helpers.contains "cleanup-ran" run_out);
+    Alcotest.(check bool) "the original panic message propagated" true
+      (Test_helpers.contains "kaboom" run_out);
+    Alcotest.(check bool) "code after try_finally did not run" false
+      (Test_helpers.contains "unreachable" run_out)
+
+(* The fd-streaming builtins' C→March return contract — the SECOND bug the
+   try_finally link failure was masking. file_read_line/file_read_chunk are
+   typed Option(String), which is NICHE-encoded compiled (Some's payload is
+   the value itself, None is raw NULL), but the C runtime returned mk_ok /
+   mk_err RESULT cells: every return — including the EOF Err — read as
+   Some(<Result cell>), so a read-to-EOF fold never terminated (the
+   File.with_lines hang) and using the misread "line" crashed (SIGBUS in a
+   straight-line read). Unreachable before try_finally linked: every
+   fd-streaming stdlib path goes through it, and the interpreter (where
+   stdlib tests run) has its own correct Some/None implementation. This
+   drives File.with_lines end-to-end, compiled vs interpreted. *)
+let test_file_with_lines_streaming_compiled () =
+  (* The input file lives in its own temp path, embedded into the source
+     verbatim, so the test is hermetic and CWD-independent. *)
+  let input_path = Filename.temp_file "march_withlines_input" ".txt" in
+  let oc = open_out input_path in
+  output_string oc "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+  close_out oc;
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_withlines"
+    (Printf.sprintf
+    "mod WithLines do\n\
+    \  needs IO.Console\n\
+    \  fn main() : Unit do\n\
+    \    let path = \"%s\"\n\
+    \    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do\n\
+    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
+    \    Ok(first3) -> do\n\
+    \      println(int_to_string(List.length(first3)))\n\
+    \      println(List.fold_left(first3, \"\", fn(acc, line) -> acc ++ line ++ \"|\"))\n\
+    \    end\n\
+    \    end\n\
+    \    match File.with_lines(path, fn(lines) -> Seq.to_list(lines)) do\n\
+    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
+    \    Ok(all) -> println(int_to_string(List.length(all)))\n\
+    \    end\n\
+    \  end\n\
+     end\n" input_path)
+  in
+  let expected = "3\nalpha|beta|gamma|\n5" in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted File.with_lines streaming"
+    expected interp_out;
+  let bin = Filename.concat tmp "withlinesbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    (* Bounded run: the pre-fix failure mode was an infinite read loop, so a
+       plain Sys.command here would hang the whole suite. *)
+    let out_file = Filename.concat tmp "withlines.out" in
+    (match Test_helpers.run_with_timeout ~timeout_secs:30.0 ~stdout_file:out_file
+             [| bin |] with
+     | `Timeout ->
+       Alcotest.fail
+         "compiled File.with_lines hung (>30s): fd-streaming EOF was never \
+          seen — the file_read_line niche-Option contract is broken again"
+     | `Exited 0 ->
+       let run_out = read_cmd_output (Printf.sprintf "cat %s" (Filename.quote out_file)) in
+       Alcotest.(check string) "compiled matches interpreted" expected run_out
+     | `Exited rc ->
+       Alcotest.failf "compiled File.with_lines exited with rc=%d" rc)
+
 (* NativeArray.map_int/map_float et al. and TypedArray.map/fold — a THIRD
    family of call sites sharing the same double-consumption bug as
    __try_call above, but shaped differently: instead of one call plus an
@@ -11812,6 +11964,7 @@ declare void @march_print(ptr %s)
 declare void @march_panic(ptr %s)
 declare ptr  @march_panic_ext(ptr %s)
 declare ptr  @march_todo_ext(ptr %s)
+declare ptr  @march_try_finally(ptr %action, ptr %cleanup)
 declare void @march_test_init(i32 %argc, ptr %argv)
 declare void @march_test_run(ptr %fn, ptr %name, ptr %setup_or_null)
 declare void @march_test_setup_all(ptr %fn)
@@ -13928,6 +14081,12 @@ let codegen_suites =
             test_try_call_val_single_capture_no_double_free_compiled;
           Alcotest.test_case "single-capture __try_call thunk panics: no double-free (15x)" `Quick
             test_try_call_panic_with_capture_no_double_free_compiled;
+          Alcotest.test_case "try_finally: value untag + cleanup order (compiled vs interpreted)" `Quick
+            test_try_finally_value_and_order_compiled;
+          Alcotest.test_case "try_finally: cleanup runs when the action panics (compiled)" `Quick
+            test_try_finally_cleanup_runs_on_panic_compiled;
+          Alcotest.test_case "File.with_lines streaming: fd Option niche contract (compiled)" `Quick
+            test_file_with_lines_streaming_compiled;
           Alcotest.test_case "NativeArray.map_int: reused capturing closure not freed mid-map (20x)" `Quick
             test_native_array_map_reused_capturing_closure_compiled;
           Alcotest.test_case "NativeArray.set_int: aliased (rc>1) array is copy-on-write, not mutated" `Quick
