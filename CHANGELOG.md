@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A natively compiled program opening a nonexistent file no longer misreads
+  the error value's representation.** `file_open`'s `Err` case is typed
+  `Result(Int, FileError)`, and the interpreter builds a real `FileError` ADT
+  value (`NotFound(path)`, `Permission(path)`, `IoError(msg)`), but the
+  compiled runtime's `march_file_open` returned a bare string pointer instead
+  of a tagged `FileError` cell — compiled code matching or inspecting the
+  `Err` payload would read a string header as if it were an ADT cell. Fixed
+  by building a real, correctly-tagged `FileError` cell in the C runtime.
+
 - **A bare constructor pattern on a value of a known type is no longer reported
   as ambiguous against a same-named stdlib constructor.** Matching `Defs.make(n)`
   (of type `Defs.Thing`) with a bare `Bar(_)` arm errored with "Constructor `Bar`

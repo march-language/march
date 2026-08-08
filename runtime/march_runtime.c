@@ -3582,6 +3582,45 @@ static void *mk_err_errno(void) {
     return mk_err_cstr(strerror(errno));
 }
 
+/* FileError tags (must match stdlib/file.march ptype declaration order):
+   NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4.
+   Build a real FileError ctor cell (not a bare string) so compiled code
+   matching e.g. Err(NotFound(path)) reads a well-formed tagged cell instead
+   of misinterpreting a march_string header as one. */
+#define FILEERR_NOT_FOUND    0
+#define FILEERR_PERMISSION   1
+#define FILEERR_IS_DIRECTORY 2
+#define FILEERR_NOT_EMPTY    3
+#define FILEERR_IO_ERROR     4
+
+static void *mk_file_error(int tag, void *payload_str) {
+    void *cell = march_alloc(24); /* header(16) + 1 field(8) */
+    MARCH_SET_TAG(cell, tag);
+    MARCH_FIELD(cell, 0) = (int64_t)payload_str;
+    return cell;
+}
+
+static void *mk_err_file(int tag, void *payload_str) {
+    return mk_err(mk_file_error(tag, payload_str));
+}
+
+/* Map the current errno to a FileError, mirroring the interpreter's
+   unix_error_to_file_error (lib/eval/eval.ml) for file_open: ENOENT ->
+   NotFound(path), EACCES -> Permission(path), everything else ->
+   IoError(strerror(errno)). */
+static void *mk_err_errno_file(const char *path) {
+    switch (errno) {
+    case ENOENT:
+        return mk_err_file(FILEERR_NOT_FOUND, march_string_lit(path, (int64_t)strlen(path)));
+    case EACCES:
+        return mk_err_file(FILEERR_PERMISSION, march_string_lit(path, (int64_t)strlen(path)));
+    default: {
+        const char *msg = strerror(errno);
+        return mk_err_file(FILEERR_IO_ERROR, march_string_lit(msg, (int64_t)strlen(msg)));
+    }
+    }
+}
+
 /* Build a March List(String) from an array of strings. */
 static void *build_string_list(char **strs, int n) {
     /* Nil = alloc 16 bytes, tag=0 */
@@ -3691,7 +3730,7 @@ void *march_file_stat(void *path_ptr) {
 void *march_file_open(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     FILE *f = fopen(ps->data, "rb");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_errno_file(ps->data);
     void *handle = march_alloc(24);
     MARCH_FIELD(handle, 0) = (int64_t)(uintptr_t)f;
     return mk_ok(handle);

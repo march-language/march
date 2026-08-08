@@ -10477,6 +10477,63 @@ let test_compiled_dual_position_owned_borrowed () =
       "compiled output matches interpreter output (dual-position args)"
       interp_out compiled_out
 
+(* Regression: march_file_open's Err path returned a bare march_string via
+   mk_err_errno(), while the typechecker types file_open as
+   Result(Int, FileError) and the interpreter builds real FileError ctor
+   cells (Err(NotFound(path)), etc). A compiled program matching
+   Err(NotFound(path)) read a march_string header as if it were a FileError
+   cell -- a representation misread (garbage tag/fields), not merely a
+   different message. Guard: open a nonexistent path and match every
+   FileError arm; interpreter and compiled binary must both exit 0 and
+   agree, proving the compiled cell carries a real NotFound(path) tag. *)
+let test_compiled_file_open_err_is_real_fileerror () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_fileopenerr" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "fileopenerr.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod FileOpenErrRegress do\n\
+    \  needs IO.FileRead\n\
+    \  needs IO.Console\n\
+    \  fn main() do\n\
+    \    match file_open(\"/nonexistent/march_fileopenerr_test_xyz/does/not/exist\") do\n\
+    \    Ok(_) -> println(\"unexpected-ok\")\n\
+    \    Err(e) -> println(to_string(e))\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let (interp_rc, interp_out) =
+    run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check int) "interpreter runs file_open-on-missing-path program cleanly" 0 interp_rc;
+  Alcotest.(check string) "interpreter matches Err(NotFound(path)) via Show"
+    "NotFound(\"/nonexistent/march_fileopenerr_test_xyz/does/not/exist\")" interp_out;
+  let bin = Filename.concat tmp "fileopenerrbin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
+    Alcotest.(check int)
+      "compiled file_open on missing path exits 0 (no misread FileError cell)"
+      0 run_rc;
+    (* Pre-fix, march_file_open's Err path built a bare march_string via
+       mk_err_errno(), so compiled to_string(e) printed the raw errno
+       message ("No such file or directory") straight through -- the string
+       misread as if it were the FileError value itself. Post-fix, the
+       runtime builds a real tagged FileError cell (tag 0 = NotFound, per
+       stdlib/file.march's ptype declaration order), so compiled Show
+       either prints the friendly ctor form matching the interpreter, or
+       (a separate, pre-existing gap: compiled Show can't resolve the
+       *name* of the bare/unqualified "FileError" type used by the file_*
+       builtin signatures) falls back to "#<tag:0>" -- still proof the
+       cell's tag is correct, just not its printed name. Either output is
+       acceptable here; the raw errno string is not. *)
+    Alcotest.(check bool)
+      "compiled output reflects a real, correctly-tagged FileError cell (tag 0 = NotFound), not the misread raw errno string"
+      true
+      (compiled_out = interp_out || compiled_out = "#<tag:0>")
+
 (* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a
    TCon's TYPE-PARAMETER count against the new constructor's FIELD count.  A
    dead binding's dec carries its raw declared type, so a dead 1-field
@@ -13586,6 +13643,8 @@ let stdlib_suites =
           test_compiled_sortby_heap_capturing_comparator;
         Alcotest.test_case "dual-position owned+borrowed arg both(s,s,1): no RC underflow, parity (compiled)" `Slow
           test_compiled_dual_position_owned_borrowed;
+        Alcotest.test_case "file_open on missing path: Err carries a real FileError NotFound ctor cell (compiled)" `Slow
+          test_compiled_file_open_err_is_real_fileerror;
         Alcotest.test_case "FBIP same_arity: dead 1-field cell NOT reused for 5-field ctor, parity (compiled)" `Slow
           test_compiled_fbip_arity_no_overflow;
         Alcotest.test_case "actor niche msg + run_until_idle + kill: no SIGSEGV, parity (compiled)" `Slow

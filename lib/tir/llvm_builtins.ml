@@ -471,7 +471,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_file_exists(ptr %s)" };
   { march_name = "dir_exists"; c_name = Some "march_dir_exists"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_dir_exists(ptr %s)" };
-  { march_name = "file_open"; c_name = Some "march_file_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+  { march_name = "file_open"; c_name = Some "march_file_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open(ptr %path)" };
   { march_name = "file_close"; c_name = Some "march_file_close"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_close(ptr %handle)" };
