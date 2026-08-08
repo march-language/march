@@ -4,14 +4,38 @@
 
 module SSet = Set.Make (String)
 
-(* March builtin name → capability, via the same name→C-symbol table codegen
-   uses.  Resolved through [c_symbol_of_march_name], NOT [mangle_extern]:
-   the latter records into the marker accumulator, and an analysis that
-   walks unreachable-at-emit code would mark capabilities the binary never
-   references. *)
+(* March builtin name → capability.
+
+   Consults [Typecheck.builtin_cap_table] (keyed by MARCH NAME) FIRST, then
+   falls back to [Cap_symbols] (keyed by C SYMBOL) via
+   [c_symbol_of_march_name] — NOT [mangle_extern]: the latter records into the
+   marker accumulator, and an analysis that walks unreachable-at-emit code
+   would mark capabilities the binary never references.
+
+   The March-name lookup was added 2026-08-07 because the C-symbol route alone
+   silently missed TEN capability-bearing builtins — every one of IO.Clock's,
+   IO.Signal's and IO.Spawn's. [c_symbol_of_march_name] returns its argument
+   UNCHANGED for a builtin with no [c_name] (a trampoline-lowered one like
+   [task_spawn]), and the bare March name is not a key in [Cap_symbols], so the
+   lookup quietly yielded [None] and attribution learned nothing.
+
+   The symptom did not look like a table mismatch. `--cap-strict` reported
+   "`IO.Spawn` is used but cannot be attributed to any module — it is reached
+   only through indirect calls" on programs that call [task_spawn] directly and
+   declare `needs IO.Spawn`; [Unattributed] simply had no better explanation to
+   offer. Four of a 24-program sample failed that way, all parallel code, none
+   fixable by declaring anything.
+
+   The C-symbol fallback is still required: [Cap_symbols] also keys synthesized
+   post-lowering symbols ([march_task_spawn_thunk]) that never appear as a
+   March name. Both tables are live; [test_cap_attrib_agreement] asserts they
+   agree for every capability-bearing builtin so a third one cannot drift in. *)
 let cap_of_call (name : string) : string option =
-  March_caps.Cap_symbols.cap_of_symbol
-    (Llvm_builtins.c_symbol_of_march_name name)
+  match List.assoc_opt name March_typecheck.Typecheck.builtin_cap_table with
+  | Some cap -> Some cap
+  | None ->
+    March_caps.Cap_symbols.cap_of_symbol
+      (Llvm_builtins.c_symbol_of_march_name name)
 
 (* A builtin can also appear as a VALUE rather than a call — [apply1(file_read,
    p)] passes it as an atom, and only later does defun synthesize the apply

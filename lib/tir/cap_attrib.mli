@@ -55,3 +55,11 @@ val attribute :
     row — the flat marker still reports the capability, it just carries no
     owner. Consumers must therefore treat "flat caps minus attributed caps"
     as unattributed rather than as absent. *)
+
+val cap_of_call : string -> string option
+(** [cap_of_call march_name] is the capability a call to [march_name] implies,
+    as [attribute] resolves it.  Exposed so [test_cap_attrib_agreement] can
+    assert this answers identically to [Typecheck.builtin_cap_table] for every
+    capability-bearing builtin — the two tables are keyed differently (March
+    name vs C symbol) and silently disagreed for the trampoline-lowered spawn
+    builtins, which made `--cap-strict` call them unattributable. *)
