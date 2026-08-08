@@ -2740,7 +2740,7 @@ let prop_oracle_erased_flow =
     single Int sum). *)
 let prop_oracle_opt_matrix =
   Test.make
-    ~name:"oracle (opt-matrix): interp = compiled at --opt 0, --opt 2"
+    ~name:"oracle (opt-matrix): interp = compiled at --opt 0, --opt 2, --no-opt"
     ~count:20 ~print:(fun s -> s)
     gen_record_update_module
     (fun src ->
@@ -2754,19 +2754,24 @@ let prop_oracle_opt_matrix =
              label interp compiled;
            `Diverge
        in
-       (* NOTE: the `--no-opt` (TIR-optimizer-off) axis added by Task 6.2 is
-          currently DISABLED — running a generated program compiled `--no-opt`
-          can hang the property suite: a compiled binary's scheduler worker
-          threads inherit the capture pipe's write end, so `run_capture`'s read
-          never returns even after the 10s run-timeout kills the direct child
-          (the same pipe-holding wedge documented for `march --compile | tail`).
-          The `oracle_check ~tir_opt` plumbing is kept for when `run_capture` is
-          hardened (file-redirect instead of pipe capture) to safely re-enable
-          the `--no-opt` attribution axis. *)
-       let r_o0  = check "--opt 0 (TIR passes on)"    (oracle_check ~opt:(Some 0) src) in
-       let r_o2  = check "--opt 2 (TIR passes on)"    (oracle_check ~opt:(Some 2) src) in
+       (* The `--no-opt` (TIR-optimizer-off) axis (Task 6.2) is now ENABLED.
+          It was historically disabled on a fear that a compiled binary's
+          scheduler worker threads inherit the capture PIPE's write end and
+          wedge `run_capture`'s read — but `run_capture`/`run_capture3` capture
+          via a `Sys.command` temp-FILE redirect (read only after the bounded
+          child is reaped), not a live pipe, so there is no writer-fd to strand.
+          The `--opt 0`/`--opt 2` configs already run compiled binaries under
+          the same scheduler through the same path without wedging; `--no-opt`
+          uses the identical run harness. It buys a real attribution signal: a
+          TIR-optimizer miscompile agrees with the interpreter at `--no-opt`
+          (passes off) and diverges once the passes run, rather than only
+          showing as a flat default-vs-interpreter mismatch. *)
+       let r_o0    = check "--opt 0 (TIR passes on)"  (oracle_check ~opt:(Some 0) src) in
+       let r_o2    = check "--opt 2 (TIR passes on)"  (oracle_check ~opt:(Some 2) src) in
+       let r_noopt = check "--no-opt (TIR passes off)"
+                       (oracle_check ~opt:None ~tir_opt:false src) in
        let ok = function `Ok | `Skip -> true | `Diverge -> false in
-       ok r_o0 && ok r_o2)
+       ok r_o0 && ok r_o2 && ok r_noopt)
 
 (* ── Converged: record-update on a missing field over an ERASED base
    (formerly an OPEN divergence; RESOLVED by Core March spec Task 3,
