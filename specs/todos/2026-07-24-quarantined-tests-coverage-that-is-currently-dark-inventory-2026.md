@@ -2,8 +2,10 @@
 
 
 **Read this before assuming a green CI run means the corresponding behavior works.**
-Five tests have been pulled out of `dune runtest` onto their own aliases. Four of them
-are quarantined on **genuinely unresolved concurrency races, not on test bugs** — the
+As of 2026-08-08, **four** tests remain pulled out of `dune runtest` onto their own
+aliases (`forge/test/build_check` is back on `runtest` — see the struck row below).
+Each remaining one is quarantined on **genuinely unresolved concurrency races, not on
+test bugs** — the
 behavior each one pins is unverified on every commit, and a regression in that behavior
 would not turn CI red. Quarantining was a containment decision (these hung or flaked CI,
 in one case silently consuming the full 6h GitHub Actions job ceiling), explicitly not a
@@ -15,4 +17,4 @@ fix.
 | `test/node_discovery_quarantined` | SWIM node discovery / membership | same port-collision verification blocker |
 | `test/rpc_auto_enroll_quarantined` | RPC auto-enrollment handshake | same (was quarantined preemptively; the deadlock it was quarantined against is now fixed) |
 | `test/signal_term_suppress_quarantined` | a watched `SIGTERM` must NOT kill the process | `Signal.watch` deferred-dispatch race (entry below) |
-| `forge/test/build_check_quarantined` | `forge build` end-to-end check | a CI/local discrepancy **plus** a real 3-way qualified-call constructor-resolution bug |
+| ~~`forge/test/build_check_quarantined`~~ | ~~`forge build` end-to-end check~~ | **RESOLVED 2026-08-08** — made hermetic (tests the just-built compiler via `MARCH_TEST_BIN`) and the constructor-resolution bug fixed; back on `runtest`. See `specs/progress/2026-08-08-forge-check-build-suite-un-quarantined.md`. |

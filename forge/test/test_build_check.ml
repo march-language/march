@@ -11,6 +11,51 @@ open March_forge
 
 (* ------------------------------------------------------------------ helpers *)
 
+(** Point the whole suite at the JUST-BUILT compiler instead of whatever
+    [march] happens to be on the ambient PATH (or, via the [~/.march/current]
+    global toolchain symlink, an installed release). The dune rule sets
+    [MARCH_TEST_BIN] to [%{bin:march}] and guarantees it is built; we symlink
+    it as [march] into a fresh bin/ prepended to PATH, and repoint MARCH_HOME
+    at an empty dir so [Toolchain.path_prefix] resolves no global toolchain and
+    the bare [march] in [Cmd_build.check_all] hits our symlink.
+
+    This makes the suite hermetic and host-independent, which is the exact fix
+    for its CI/local divergence: CI (a fresh checkout with no [.march-version]
+    pin, no [~/.march/current], and no [march] on PATH) resolved to a bare
+    [march] that did not exist, so EVERY subprocess failed identically as
+    "typecheck failed" — success-expecting cases all failed and Error-expecting
+    cases trivially passed. Locally the same suite silently exercised the
+    installed release via the global symlink, not the build under test. *)
+let setup_hermetic_march () =
+  match Sys.getenv_opt "MARCH_TEST_BIN" with
+  | None | Some "" ->
+    prerr_endline
+      "test_build_check: MARCH_TEST_BIN is not set. The dune rule must pass the \
+       built compiler (see forge/test/dune) — refusing to fall back to an \
+       ambient PATH `march`, which would not exercise this build.";
+    exit 2
+  | Some rel ->
+    let abs =
+      if Filename.is_relative rel then Filename.concat (Sys.getcwd ()) rel else rel
+    in
+    if not (Sys.file_exists abs) then begin
+      Printf.eprintf "test_build_check: MARCH_TEST_BIN %s does not exist\n" abs;
+      exit 2
+    end;
+    let bindir = Filename.temp_dir "march_hermetic_bin_" "" in
+    let link = Filename.concat bindir "march" in
+    (try Unix.symlink abs link
+     with Unix.Unix_error _ ->
+       (* Symlinks unavailable — fall back to a copy. *)
+       ignore (Sys.command (Printf.sprintf "cp %s %s && chmod +x %s"
+                              (Filename.quote abs) (Filename.quote link)
+                              (Filename.quote link))));
+    let old_path = match Sys.getenv_opt "PATH" with Some p -> p | None -> "" in
+    Unix.putenv "PATH" (bindir ^ ":" ^ old_path);
+    (* Empty MARCH_HOME → no global toolchain resolves → path_prefix stays empty
+       → the bare `march` in the subprocess commands hits our PATH symlink. *)
+    Unix.putenv "MARCH_HOME" (Filename.temp_dir "march_hermetic_home_" "")
+
 let write_file path content =
   let oc = open_out path in
   output_string oc content;
@@ -507,6 +552,7 @@ let test_project_env_walks_transitive_path_deps () =
 (* -------------------------------------------------------------------- suite *)
 
 let () =
+  setup_hermetic_march ();
   Alcotest.run "build_check" [
     "forge check", [
       Alcotest.test_case "clean lib project passes"          `Quick test_check_clean_lib;
