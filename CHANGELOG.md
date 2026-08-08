@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--cap-strict` no longer rejects correct programs that call `task_spawn`,
+  `unix_time_ms`, `uuid_v7`, or the `Signal` builtins.** These are lowered
+  through a trampoline rather than a named C symbol, and the capability
+  ceiling looked them up by C symbol only — so `IO.Spawn`, `IO.Clock` and
+  `IO.Signal` uses could not be charged to the calling module even when it
+  declared them. The reported reason ("reached only through indirect calls")
+  was itself wrong; the calls were direct. Attribution now consults the same
+  March-name table the typechecker uses.
+
 - **Actor messages can no longer carry a `NativeIntArr`/`NativeFloatArr` (the types
   backing the `NativeArray` stdlib module)** — the same "must be owned by a single
   actor" restriction `RingBuf` already had.
