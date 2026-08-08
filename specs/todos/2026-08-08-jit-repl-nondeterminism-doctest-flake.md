@@ -34,19 +34,33 @@
 >    - **every** `starts_with`/`ends_with` returns `false` (incl the empty-prefix
 >      case, which must be `true`).
 >
-> **Conclusion: a genuine Apple clang `1700.0.13.5` miscompile of the March
-> string-literal runtime path** (short-literal construction via
-> `march_string_lit_static`'s atomic-CAS memoization, plus `starts_with`/
-> `ends_with`). The C source (`march_string_alloc`/`_lit`/`_lit_static`/
-> `_byte_length`/`_starts_with`) is all clean; a newer Apple clang (`1700.6.4.2`)
-> compiles it correctly, which is why 52+ local runs and the `ubuntu` runner all
-> pass. Not reproducible without that exact clang.
+> 4. **Standalone lit_static probe**: compiling `march_string_alloc` +
+>    `march_string_lit_static` (verbatim, incl. its atomic-CAS memoization) +
+>    `byte_length` + `starts_with` STANDALONE with the runner's own clang, then
+>    building `"/"`/`"/etc"` through `lit_static`, returns `len(/)=1`,
+>    `len(/etc)=4`, `sw=1` — **all correct at every -O**. So the runtime C is NOT
+>    miscompiled by this clang either.
 >
-> **Resolution options** (needs a decision): (a) pin/upgrade the macos runner's
-> Xcode to a known-good clang (fastest; masks the bug if it is ultra-subtle
-> March UB rather than an Apple bug); (b) keep bisecting the exact miscompiled
-> construct via more CI cycles, then fix blind + verify on CI (long tail). The
-> doctest gate stays advisory until resolved.
+> **Conclusion: LLVM 17.0.0 (Apple clang `1700.0.13.5`) miscompiles the March
+> *generated* IR for the string-literal path**, not our C. It hits BOTH the
+> clang-AOT fragment path AND the in-process LLJIT (ORC) path — the common factor
+> is the emitted IR — so it is the shared LLVM 17.0.0 codegen. Most likely a false
+> IR attribute the March backend emits (e.g. `nonnull`/`dereferenceable(N)` on a
+> string/arg) that this LLVM exploits, or a genuine LLVM 17.0.0 codegen bug. A
+> newer Apple clang (`1700.6.4.2`) compiles the identical IR correctly, which is
+> why 52+ local runs and the `ubuntu` runner all pass. Not reproducible without
+> that exact toolchain.
+>
+> **Resolution options** (needs a decision): (a) **pin/upgrade the macos runner's
+> Xcode** to a known-good clang (e.g. select the image's newest Xcode in
+> `.github/actions/march-setup`); fastest and robust, and correct if this is an
+> Apple/LLVM 17.0.0 codegen bug — which the evidence favors. (b) **Harden the
+> emitted IR**: dump the REPL fragment/prelude IR for the `"/"` literal + the
+> `march_string_lit_static`/`string_starts_with` call sites and audit the
+> attributes the March backend attaches (`nonnull`, `dereferenceable(N)`,
+> `noalias`, poison flags); if one is over-promising, drop/correct it in
+> `lib/tir/llvm_*` — this fixes it for every toolchain but needs CI cycles to
+> confirm (no local repro). The doctest gate stays advisory until resolved.
 
 ---
 
