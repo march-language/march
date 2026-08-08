@@ -21,6 +21,7 @@
 
 mod RRBBench do
   needs IO.Console
+  needs IO.Spawn
 
   fn main() do
     let n = 1000000

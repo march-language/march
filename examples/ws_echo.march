@@ -16,6 +16,8 @@
 
 mod WsEcho do
   needs IO.Console
+  needs IO.NetListen
+  needs IO.WebSocket
 
 -- Recursive message loop: handles frames until the connection closes.
 pfn ws_loop(socket) do

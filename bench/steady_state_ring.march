@@ -17,6 +17,7 @@ mod SteadyStateRing do
 
   needs IO.Clock
   needs IO.Spawn
+  needs IO.Process
 
   -- ── Hot request-handling kernel (compiler-enforced zero allocation) ─────
   -- cap no_alloc statically rejects the four allocating AST shapes

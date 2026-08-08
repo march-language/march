@@ -5,6 +5,9 @@
 
 mod TestFile do
 
+  needs IO.FileRead
+  needs IO.FileWrite
+
 -- Local mirrors of File private types.
 ptype FileKind = RegularFile | Directory | Symlink | OtherKind
 ptype FileStat = FileStat(Int, FileKind, Int, Int)

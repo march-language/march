@@ -4,6 +4,7 @@
 
 mod ReadFile do
   needs IO.Console
+  needs IO.FileRead
 
   fn main() do
     let path = "examples/read_file.march"

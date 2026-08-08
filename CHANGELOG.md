@@ -11,7 +11,36 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **The capability ceiling is now on by default.** `march --compile` fails the
+  build if any module's emitted code uses a capability that module does not
+  declare in `needs` — including a stdlib-mediated use (`File.read`), which no
+  other check sees, and including dependencies that never opted in.
+  `--no-cap-strict` opts out; `--cap-strict` is still accepted as an explicit
+  spelling of the default. **This is a breaking change** for code written
+  before it: the fix is one `needs` line per named module, and the error names
+  the module and the capability.
+
 ### Fixed
+
+- **A module with no entry point is no longer charged capability violations
+  for the entire standard library.** A file with no `fn main` (a library, or a
+  test-only file) drew up to 17 ceiling violations naming stdlib modules
+  (`Socket` uses `IO.NetConnect`, …) that its code never reached: with no
+  roots, dead-code elimination kept everything, and the ceiling read the
+  unpruned result as "used". The ceiling now roots reachability at the
+  functions the file itself declares. A main-less module that genuinely
+  reaches a capability is still charged for it.
+
+- **A capability appearing only in a type signature no longer trips the
+  ceiling.** `fn main(cap : Cap(IO))` — the documented entry-point shape — was
+  reported as "`IO` is used but cannot be attributed to any module", a
+  violation no `needs` line could fix. Capabilities are erased, so a
+  signature-only capability corresponds to no emitted operation; the ceiling
+  now judges emitted code only. (`--cap-sandbox` still counts signature
+  capabilities when building its profile, where receiving one by parameter
+  rightly widens what the process may do.)
 
 - **`--cap-strict` no longer rejects correct programs that call `task_spawn`,
   `unix_time_ms`, `uuid_v7`, or the `Signal` builtins.** These are lowered

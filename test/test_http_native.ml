@@ -84,6 +84,7 @@ let find_from hay needle from =
 let server_src = {|mod HttpNativeE2e do
 
   needs IO.Process
+  needs IO.NetListen
 
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do

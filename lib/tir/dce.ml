@@ -1,6 +1,7 @@
 (** Dead code elimination pass.
     - Removes pure unused let bindings (converts impure ones to ESeq)
-    - Removes top-level functions not reachable from main (seeds all fns if no main)
+    - Removes top-level functions not reachable from main (with no entry point,
+      seeds the entry module's own functions — see [root_names])
     Precondition: must run after Defun. ECallPtr post-Defun dispatches through
     apply-functions that are themselves reachable via EApp; running before Defun
     could eliminate lambda-lifted functions that ECallPtr would have reached. *)
@@ -70,7 +71,8 @@ let rec called_fns : Tir.expr -> StringSet.t = function
   | _                        -> StringSet.empty
 
 (** Operational entry/root names preserved by top-level DCE. *)
-let root_names (m : Tir.tir_module) : string list =
+let root_names ?(extra_root = fun _ -> false) ?(fail_open = true)
+    (m : Tir.tir_module) : string list =
   let roots = ref StringSet.empty in
   let add name = roots := StringSet.add name !roots in
   let is_main_name name =
@@ -91,20 +93,40 @@ let root_names (m : Tir.tir_module) : string list =
     m.Tir.tm_fns;
   List.iter add m.Tir.tm_exports;
   List.iter (fun (name, _) -> add name) m.Tir.tm_tests;
+  (* Caller-supplied roots, used ONLY when the module has no entry point of
+     its own — see [prune_unreachable].  Applying them unconditionally is
+     wrong: with a `main` present, reachability from `main` is exactly the
+     right notion, and rooting the file's other functions resurrects code the
+     program never runs.  Measured: doing so turned three previously clean
+     programs into ceiling violations, all of them naming a stdlib module
+     reached only from a user function that `main` never calls. *)
   if StringSet.is_empty !roots then
+    List.iter
+      (fun (fn : Tir.fn_def) ->
+         if extra_root fn.Tir.fn_name then add fn.Tir.fn_name)
+      m.Tir.tm_fns;
+  (* Still nothing.  For CODEGEN, fail open and keep every function: emptying
+     a library would be absurd.  For an ANALYSIS, [fail_open:false] says the
+     opposite — a module with no entry point, no exports, no tests and no
+     declarations of its own has no reachable code, so the honest answer is
+     that it reaches nothing.  Failing open there does not make the analysis
+     more conservative, it makes it wrong: the ceiling reported the whole
+     prepended stdlib for a file containing a single `assert true`. *)
+  if StringSet.is_empty !roots && fail_open then
     List.iter (fun (fn : Tir.fn_def) -> add fn.Tir.fn_name) m.Tir.tm_fns;
   StringSet.elements !roots
 
 (** Transitive reachability from entry points.
     Uses [free_vars] (not [called_fns]) so that closure apply-function
     pointers stored in EAlloc args are also treated as references. *)
-let reachable_fns (m : Tir.tir_module) : StringSet.t =
+let reachable_fns ?(extra_root = fun _ -> false) ?(fail_open = true)
+    (m : Tir.tir_module) : StringSet.t =
   let fn_map : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun fd -> Hashtbl.add fn_map fd.Tir.fn_name fd) m.Tir.tm_fns;
   let fn_names = StringSet.of_list (List.map (fun fd -> fd.Tir.fn_name) m.Tir.tm_fns) in
   let visited = ref StringSet.empty in
   let queue = Queue.create () in
-  List.iter (fun name -> Queue.push name queue) (root_names m);
+  List.iter (fun name -> Queue.push name queue) (root_names ~extra_root ~fail_open m);
   while not (Queue.is_empty queue) do
     let name = Queue.pop queue in
     if not (StringSet.mem name !visited) then begin
@@ -163,8 +185,36 @@ let rec dce_expr ~impure_fns ~changed : Tir.expr -> Tir.expr = function
     must therefore run before LLVM emit EVEN when the optimizer is disabled
     (--no-opt).  Idempotent: filtering an already-pruned module is a no-op, so
     it is safe to call both here and (transitively via [run]) inside [Opt.run]. *)
-let prune_unreachable (m : Tir.tir_module) : Tir.tir_module =
-  let reachable = reachable_fns m in
+(* [extra_root] names additional roots, and exists for ANALYSIS consumers that
+   read the pruned module to decide what a program uses.
+
+   When a module has no `main`, no setup/migrate, no exports and no tests, it
+   has no roots, and [root_names] fails OPEN — every function is a root, so
+   nothing is pruned. For codegen that is the only safe answer. For an
+   analysis it is silently wrong, and [Cap_attrib] paid for it: a main-less
+   file using no capability at all drew SEVENTEEN `--cap-strict` ceiling
+   violations, one per stdlib module holding an unreachable capability use
+   (`Check` uses IO.Clock, `Socket` uses IO.NetConnect, `Process` uses
+   IO.Process, …). Attribution found no non-transparent caller for any of
+   them — correctly, since nothing called them — and fell back to naming the
+   stdlib module. Measured 2026-08-07: of 110 programs failing --cap-strict in
+   a 312-program sweep, 86 had no `main`.
+
+   The honest root set for such a module is its own declared functions: its
+   API surface is what a caller can reach. That set cannot be recovered from
+   TIR names — [Lower] strips the entry file-module's prefix from its own
+   declarations, and the PRELUDE's functions (`println`, `panic`, `debug`, …)
+   are unprefixed too, so "no dot in the name" selects both. Verified: rooting
+   every unprefixed function still charged the entry module IO.Console,
+   IO.FileWrite and IO.NetConnect for a file whose only declaration was
+   `fn helper(x) = x + 1`.
+
+   So the caller supplies the predicate. bin/main.ml builds it from the
+   DESUGARED AST, where a declaration's span still says which file it came
+   from — the same stdlib-span filter [own_caps_of_this_module] uses. *)
+let prune_unreachable ?(extra_root = fun _ -> false) ?(fail_open = true)
+    (m : Tir.tir_module) : Tir.tir_module =
+  let reachable = reachable_fns ~extra_root ~fail_open m in
   let fns = List.filter
       (fun fd -> StringSet.mem fd.Tir.fn_name reachable) m.Tir.tm_fns in
   { m with Tir.tm_fns = fns }
