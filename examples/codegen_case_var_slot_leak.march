@@ -22,6 +22,7 @@
 -- Expected output: 1
 
 mod CodegenCaseVarSlotLeak do
+  needs IO.Console
 
 type MyE =
     MyEq(MyE, MyE)

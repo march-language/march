@@ -1,6 +1,7 @@
 -- Float-literal match arms: pins how ALit(LitFloat _) branches lower
 -- (equality-compiled float literals, not a range/guard rewrite).
 mod FloatArms do
+  needs IO.Console
   fn describe(x : Float) : String do
     match x do
       0.0 -> "zero"

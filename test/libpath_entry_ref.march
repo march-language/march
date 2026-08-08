@@ -3,6 +3,7 @@
 -- type error must still surface and --check must exit 1.  Guards the pruning
 -- fix against over-reaching and swallowing a reachable module's diagnostics.
 mod LibpathEntryRef do
+  needs IO.Console
 
   fn main() do
     println(int_to_string(LibpathIllTyped.broken()))

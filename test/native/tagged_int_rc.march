@@ -1,6 +1,7 @@
 -- A generic Int closure that captures its Int arg and is RC-tracked: exercises
 -- march_incrc on a value that MUST be a tagged immediate, never a heap deref.
 mod Main do
+  needs IO.Console
   fn apply_twice(f, x) do
     let a = f(x)
     let b = f(x)

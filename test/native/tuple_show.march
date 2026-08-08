@@ -6,6 +6,7 @@
 -- matching each element's own `show` and the interpreter (whose `show_dispatch`
 -- was taught the same, replacing the repr-form `value_to_string` that quoted).
 mod Main do
+  needs IO.Console
   fn main() : () do
     println((1, 2))
     println((1, "a", true))

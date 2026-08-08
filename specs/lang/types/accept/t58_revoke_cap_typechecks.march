@@ -8,6 +8,7 @@
 -- as in accept/t39) and fed to `get_cap`, whose `ActorCap(a)` payload the two new
 -- builtins then consume. See core-march-types.md §2.8.11.
 mod Main do
+  needs IO.Console
   actor Counter do
     state { count : Int }
     init  { count: 0 }

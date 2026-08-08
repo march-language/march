@@ -1,4 +1,5 @@
 mod SmsEntry do
+  needs IO.Console
   import Other
   fn main() : Unit do
     let r = Widget.use_it(5)

@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   type Shape = Circle(Int) | Square(Int)
 
   fn area(s : Shape) : Int do

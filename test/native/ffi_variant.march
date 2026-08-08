@@ -3,6 +3,7 @@
 -- march_make_record); March pattern-matches the C-built variant and
 -- field-accesses the C-built record — proving aggregates round-trip in.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   type Shape = Circle(Int) | Rect(Int, Int)

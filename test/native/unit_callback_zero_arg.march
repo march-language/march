@@ -9,6 +9,7 @@
 --
 -- Native output must match the interpreter: "a", "a", "b".
 mod UnitCallbackZeroArg do
+  needs IO.Console
 
   fn run_twice(cb : Unit -> Unit) : Unit do
     cb()

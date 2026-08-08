@@ -25,6 +25,7 @@
 --   MARCH_HOT_RELOAD_SOCKET=/tmp/march_hcr_counter.sock ./counter_server
 
 mod MyApp do
+  needs IO.Console
   needs IO.NetListen
 
   actor Counter do

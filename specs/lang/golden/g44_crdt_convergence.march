@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational clustering witness (core-march.md §4.15): the pure
   -- conflict-free replicated data types converge deterministically and run
   -- byte-identically interpreted and compiled. This is the single-process,

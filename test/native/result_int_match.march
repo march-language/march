@@ -6,6 +6,7 @@
 -- source/target types matched and the untag was elided → int_to_string saw the
 -- tagged pointer 15 = 7<<1|1 instead of 7). Compiled-only; interpreter was fine.
 mod ResultIntMatch do
+  needs IO.Console
   fn pick(r: Result(Int, String)): String do
     match r do
       Ok(n) -> int_to_string(n)

@@ -14,6 +14,7 @@
 -- -- also fires alongside, per F1; it does not change the exit code and is
 -- not the substring pinned here.) See core-march-types.md §2.8.11.
 mod LeakyPure do
+  needs IO.Random
   cap pure
 
   fn gen() : Bytes do

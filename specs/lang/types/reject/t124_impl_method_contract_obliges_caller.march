@@ -32,6 +32,7 @@
 -- Note this fires with NO `cap` directive anywhere: a provably violated
 -- obligation is reported regardless of any capability.
 mod ImplContract do
+  needs IO.Console
 
   type Box = Box(Int)
 

@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn status() : Atom do
     :ok
   end

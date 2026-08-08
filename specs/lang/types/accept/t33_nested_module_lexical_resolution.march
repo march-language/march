@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational witness (core-march.md §4.7): the lexical-scoping nuance.
   -- `secret` is a PRIVATE (`pfn`) function declared inside `A`. Privacy only
   -- gates CROSS-module qualified access (a typecheck-time concern, see

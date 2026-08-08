@@ -18,6 +18,7 @@
 -- number.
 
 mod JsonStreamStringsBench do
+  needs IO.Console
 
 pfn build_lines(n, payload, acc) do
   if n <= 0 do acc

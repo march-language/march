@@ -22,6 +22,8 @@
 --   bench/par_map
 
 mod ParMap do
+  needs IO.Console
+  needs IO.Spawn
 
 -- Collatz conjecture step count: a pure, variable-cost function.
 -- Perfect for embarrassingly parallel workloads because each element

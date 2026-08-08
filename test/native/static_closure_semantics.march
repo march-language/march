@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn double(x : Int) : Int do x * 2 end
   fn triple(x : Int) : Int do x * 3 end
   fn add(a : Int, b : Int) : Int do a + b end

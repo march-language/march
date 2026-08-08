@@ -2,6 +2,7 @@
 -- dom.march is JS-only and excluded from native/JIT stdlib precompile.
 -- This typechecks Js.Dom.body() usage without calling it at runtime.
 mod JsDomAvailable do
+  needs IO.Console
   fn dom_smoke() : Unit do
     let _ = Js.Dom.body()
     ()

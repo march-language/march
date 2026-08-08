@@ -21,6 +21,7 @@
 -- runs (not merely `--check`-clean), passing a `B.Foo`-shaped value where an
 -- `A.Foo` annotation was written.
 mod Main do
+  needs IO.Console
   mod A do
     type Foo = MkA(Int)
     fn make() : Foo do MkA(1) end

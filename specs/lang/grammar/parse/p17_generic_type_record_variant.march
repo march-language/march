@@ -1,4 +1,5 @@
 mod P17GenericTypeRecordVariant do
+  needs IO.Console
   type Box(a) = { value: a, label: String }
 
   type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))

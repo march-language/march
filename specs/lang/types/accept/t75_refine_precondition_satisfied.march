@@ -8,6 +8,7 @@
 -- past --check when the predicate is PROVABLY satisfied. `take_n(5)`
 -- satisfies `_ >= 0` trivially. Reject companion: reject/t71 (`take_n(-3)`).
 mod M do
+  needs IO.Console
   fn take_n(n : {Int | _ >= 0}) : Int do n end
   fn main() do
     println(int_to_string(take_n(5)))

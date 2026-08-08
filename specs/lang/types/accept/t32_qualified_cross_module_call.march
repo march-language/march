@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational witness (core-march.md §4.7, E-DMod): a nested module's
   -- declared names are exported into the enclosing scope ONLY under the
   -- qualified "Name.member" key -- never as a bare unqualified name. `A.double`

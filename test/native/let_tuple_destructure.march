@@ -7,6 +7,7 @@
 -- never untagged: `int_to_string(a)` printed (n<<1)|1 (5 -> 11, 0 -> 1).
 -- This broke any `let (idx, _) = Random.range(...)` and Gen.element.
 mod LetTupleDestructure do
+  needs IO.Console
   fn ret_ii(x : Int) : (Int, Int) do
     (x + 0, 99)
   end

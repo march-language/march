@@ -8,6 +8,7 @@
 --        bench/tree_transform   (hard-coded: depth=20, 100 passes)
 
 mod TreeTransform do
+  needs IO.Console
 
 ptype Tree = Leaf(Int) | Node(Tree, Tree)
 

@@ -12,6 +12,7 @@
 -- also greps the emitted LLVM IR for the inline path's `nmap_` block labels
 -- to confirm the fast path actually fires for this shape.
 mod Main do
+  needs IO.Console
   pfn go(arr, i, acc) : Int do
     if i >= NativeArray.length_int(arr) do
       acc

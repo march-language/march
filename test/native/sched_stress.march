@@ -1,4 +1,6 @@
 mod SchedStress do
+  needs IO.Console
+  needs IO.Spawn
   -- Each worker does a small fib to give the scheduler real work to interleave.
   pfn fib(n : Int) : Int do
     if n <= 1 do

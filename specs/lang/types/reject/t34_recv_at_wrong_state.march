@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: Chan.recv: channel is at
 mod Main do
+  needs IO.Console
   -- Session-types widening, Task 3 -- recv-at-wrong-state.
   -- `Chan.recv` (typecheck.ml:3509) requires SRecv(T,S). `cc` (the Client
   -- endpoint of `Echo`) is at Send(Int, Recv(Int, End)) immediately after

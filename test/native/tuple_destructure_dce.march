@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn sum_pair(x : Int, y : Int) : Int do
     let t = (x, y)
     let (a, b) = t

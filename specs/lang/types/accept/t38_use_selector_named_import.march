@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Widening slice 2, Task 4 -- the SELECTOR form: `use List.{append}`
   -- parses to `DUse { use_sel = UseNames [append] }` (`parser.mly`'s
   -- `use_selector` -> `LBRACE; names; RBRACE`, ~parser.mly:671). Typecheck's

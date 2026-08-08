@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: `Hue` does not implement interface `Eq`.
 mod M do
+  needs IO.Console
   type Hue = Rood | Bloo
   -- `a` is an UNANNOTATED generic parameter, so the `when Eq(a)` bound rides
   -- on the parameter's own type variable and must be re-checked at each call

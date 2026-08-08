@@ -7,6 +7,7 @@
 -- VC) and discharges `v.port >= 1` against the concrete field. Reject
 -- companion: reject/t86 (`serve({ port: 0 })`).
 mod M do
+  needs IO.Console
   type Cfg = { port : Int }
   fn serve(c : {v : Cfg | v.port >= 1}) : Int do c.port end
   fn main() do

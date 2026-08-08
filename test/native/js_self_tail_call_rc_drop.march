@@ -19,6 +19,7 @@
 -- (RC-needing) value it never reads in that branch, so Perceus must drop it
 -- with a post-call EDecRC. An Int head (unboxed, no RC) cannot trigger this.
 mod JsSelfTailCallRcDrop do
+  needs IO.Console
   type Item = { v : Int }
 
   -- Skip index `skip`; otherwise walk past every item without reading it

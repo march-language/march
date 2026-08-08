@@ -10,6 +10,7 @@
 -- Expected output: verify with ./iolist_template (byte length of table HTML)
 
 mod IOListTemplate do
+  needs IO.Console
 
 pfn render_row(i : Int) : IOList do
   let iol = IOList.from_string("<tr><td>")

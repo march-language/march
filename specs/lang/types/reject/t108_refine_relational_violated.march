@@ -7,6 +7,7 @@
 -- companion: accept/t96, where `below(10)`'s `_ < 10` does NOT contradict
 -- `_ >= 0`.
 mod M do
+  needs IO.Console
   fn takepos(k : {Int | _ >= 0}) : Int do k end
   fn below(n : Int) : {Int | _ < n} do n - 1 end
   fn main() do

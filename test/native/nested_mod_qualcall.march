@@ -8,6 +8,7 @@
 -- undefined symbols for every PNCounter helper.  Exercise the exact shape:
 -- PNCounter.increment/value calling sibling pfns map_inc/map_sum bare.
 mod NestedModQualcall do
+  needs IO.Console
   fn main() do
     let c = CRDT.PNCounter.new()
     let c1 = CRDT.PNCounter.increment(c, "a")

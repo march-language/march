@@ -2,6 +2,7 @@
 -- Every line exercises a distinct closure-dispatch path that the sort-RC crash
 -- and the two dead-end debug attempts each broke:
 mod Main do
+  needs IO.Console
   fn dbl(x : Int) : Int do x * 2 end                -- named fn (clo_wrap), boundary D
   fn main() do
     -- named-fn closure through a HOF (clo_wrap + call site):

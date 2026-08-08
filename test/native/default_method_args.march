@@ -5,6 +5,7 @@
 -- pointer as the result, so `neqx` yielded the same value for every input in
 -- compiled code (the interpreter applied the closure and stayed correct).
 mod Main do
+  needs IO.Console
   interface Eqx(a) do
     fn eqx : a -> a -> Bool
     fn neqx : a -> a -> Bool do fn (x, y) -> not(eqx(x, y)) end

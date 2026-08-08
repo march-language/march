@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- A generic `when Ord(a)` bound, SATISFIED at the call site (Int implements
   -- Ord), still typechecks — the re-check at call sites (finding 15) accepts a
   -- discharged constraint and only rejects an unsatisfied one.

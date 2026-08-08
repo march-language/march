@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: `spawn` needs a plain actor name written directly, like `spawn(Counter)`.
 mod Main do
+  needs IO.Console
   -- Widening actors slice, Task 1 -- `spawn` REJECTS a COMPUTED actor
   -- expression. Both backends dispatch `spawn` by the actor's *name*, resolved
   -- at COMPILE TIME to a statically generated `<Actor>_spawn` function -- there

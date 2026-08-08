@@ -13,6 +13,7 @@
 -- retain memory under sustained churn in the compiled backend (see the spec).
 -- See specs/2026-08-04-steady-state-tail-latency-demo.md.
 mod SteadyStateRing do
+  needs IO.Console
 
   needs IO.Clock
   needs IO.Spawn

@@ -1,4 +1,5 @@
 mod P10MatchMultiExprArmsThreeWay do
+  needs IO.Console
   type Shape = Circle(Int) | Square(Int) | Triangle(Int, Int)
 
   fn area(s) do

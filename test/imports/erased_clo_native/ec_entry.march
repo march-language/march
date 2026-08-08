@@ -10,6 +10,7 @@
 -- Distilled from Depot.Migration.run: a thunk param wrapped in
 -- `__try_call(fn _ -> thunk())`.
 mod EcEntry do
+  needs IO.Console
 
 fn apply_thunk(thunk) do
   match __try_call(fn _ -> thunk()) do

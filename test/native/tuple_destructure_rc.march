@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn dup_pair(s : String) : String do
     let t = (s, s)
     let (a, b) = t

@@ -2,6 +2,7 @@
 -- The extern block matches what `march::init!` generates; the binding is the
 -- staticlib built from src/lib.rs (#[march] / #[derive] / ResourceArc).
 mod App do
+  needs IO.Console
   needs Ffi
   type Point = { x : Int, y : Int }
   type Shape = Circle(Int) | Rect(Int, Int)

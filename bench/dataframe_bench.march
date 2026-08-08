@@ -8,6 +8,7 @@
 -- Usage: dune exec march -- bench/dataframe_bench.march
 
 mod DataframeBench do
+  needs IO.Console
 
 needs IO.Clock
 

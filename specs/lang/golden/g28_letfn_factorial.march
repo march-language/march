@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- A local, self-referential `fn go` inside a block (an ELetFn statement,
   -- alongside `let`s) computes factorial recursively. `go` calls ITSELF: the
   -- interpreter ties the recursive knot with the env_ref back-patch

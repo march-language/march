@@ -20,6 +20,7 @@
 -- module: entry-module types register bare, so their sub-scrutinees resolve
 -- concretely and never reach the recovery.
 mod Main do
+  needs IO.Console
   mod Inner do
     type Row = Row(List(Int))
     fn mkrow(i : Int) : Row do Row(Cons(i, Cons(i + 1, Nil))) end

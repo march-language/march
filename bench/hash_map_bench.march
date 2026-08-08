@@ -13,6 +13,7 @@
 -- each with three timing lines.  Times should grow linearly (2× n ≈ 2× ms).
 
 mod HashMapBench do
+  needs IO.Console
 
 -- ── Helpers ────────────────────────────────────────────────────────────────
 

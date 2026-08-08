@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: expected `(Int, Int)` but got `(Int, Int, Int)`.
 mod M do
+  needs IO.Console
   fn takes_pair(p : (Int, Int)) : Int do
     let (a, b) = p
     a + b

@@ -7,6 +7,7 @@
 -- ".Text" suffix resolver then picked the stdlib ctor's tag (1) instead of
 -- Inline.Text (0), so the first-variant match silently missed → "MISS".
 mod XModCtorCollision do
+  needs IO.Console
   fn main() : Unit do
     let out =
       match Inl.one("hi") do

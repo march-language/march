@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Session-types widening, Task 2 -- MPST (multi-party, >2 roles) protocol
   -- projection + send/recv-pair consistency typing (core-march-types.md
   -- §2.7.3-§2.7.4). `protocol Relay` has 3 roles, so `project_protocol`

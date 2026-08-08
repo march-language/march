@@ -5,6 +5,7 @@
 -- Rejected via `types_overlap` (unifiability), which `canonical_impl_key`
 -- exact-equality (Stage 1) did not catch. Accept twin: t85.
 mod M do
+  needs IO.Console
   interface Descr(a) do
     fn descr : a -> String
   end

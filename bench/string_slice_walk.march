@@ -37,6 +37,7 @@
 -- Usage: march --compile --opt 2 bench/string_slice_walk.march -o /tmp/string_slice_walk
 
 mod StringSliceWalk do
+  needs IO.Console
 
 -- Keep identical to string_split_large.
 pfn rows() : Int do 50000 end

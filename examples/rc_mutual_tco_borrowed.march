@@ -21,6 +21,7 @@
 -- Expected output: 2
 
 mod RcMutualTcoBorrowed do
+  needs IO.Console
 
 fn build_loop(seed, n) do
   -- seed is a borrowed parameter (only ever passed at borrowed positions

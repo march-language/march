@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn double(x : Int) : Int do x * 2 end
 
   fn apply_it(f : Int -> Int, n : Int) : Int do f(n) end

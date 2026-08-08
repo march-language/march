@@ -1,4 +1,5 @@
 mod Probe8 do
+  needs IO.Console
 
 mod Inner do
   fn greet3(name : String, loud : Bool, suffix : String) : String do

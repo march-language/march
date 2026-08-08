@@ -72,6 +72,47 @@ git log is authoritative for exact commits.
   uses of these sigils, all in the compiler's own tests, and none with a hole.
 
 
+### Changed
+
+- **BREAKING: a module that calls a capability builtin directly must now
+  declare it.** This was a warning; it is an error.
+
+  ```march
+  mod MyApp do
+    needs IO.Console      -- now required
+    fn main() do
+      println("hi")
+    end
+  end
+  ```
+
+  The error names the capability and carries a machine-applicable fix, so
+  `forge fix` inserts the line for you.
+
+  Why now: `needs` was a hard floor for capability-*passing* code and merely
+  advisory for a direct builtin call — which is the code most likely to abuse
+  it. Making it an error was previously blocked on granularity, because
+  capability propagation worked at module granularity and contracting `List`
+  (whose `pmap` calls `task_spawn`) would have forced `needs IO.Spawn` on
+  every module importing `List` to call `map`. Per-function transitive closure
+  fixed that, so the severity could follow.
+
+  **What it does and does not guarantee.** It catches a *direct* call —
+  `file_read(p)`. It does *not* catch the same operation through a stdlib
+  wrapper — `File.read(p)` — which stays silent under `--check`. The complete
+  check remains `--cap-strict`, which works on emitted code and cannot be
+  evaded by re-routing through a helper. So `needs` is now a mandatory,
+  mechanically-verified manifest of the builtins a module calls directly; it
+  is not on its own proof that a module cannot reach a capability.
+
+  Note also what has *not* changed: `needs` is still a self-declaration. Any
+  module may write any `needs` line, and IO builtins take no capability
+  argument. This makes you *declare* what you touch; it does not make anyone
+  *grant* it.
+
+  Two things deliberately left alone: an `extern` block implying `IO.Foreign`
+  is still a warning, and the declared-but-unused warning is unchanged.
+
 ### Added
 
 - **Process capabilities have their own type: `ActorCap(a)`.** `get_cap`,

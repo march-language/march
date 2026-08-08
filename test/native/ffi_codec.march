@@ -3,6 +3,7 @@
 -- plain C structs, compute, and encode a fresh Point/Shape back. ffi_codec.c is
 -- the realistic post-`forge ffi gen-c` artifact (codecs + filled-in shims).
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   type Point = { x : Int, y : Int }

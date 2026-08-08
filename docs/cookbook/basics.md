@@ -163,6 +163,7 @@ Every file has exactly one top-level `mod`. Nest modules with `mod Inner do ... 
 
 ```march
 mod MyApp do
+  needs IO.Console
   mod Utils do
     fn clamp(n, lo, hi) do
       match do
@@ -185,6 +186,7 @@ end
 
 ```march
 mod Calc do
+  needs IO.Console
   type Expr =
     Num(Float)
     | Plus(Expr, Expr)
@@ -248,6 +250,7 @@ The `update` function eliminates the get-then-put pattern that Map requires:
 
 ```march
 mod WordCount do
+  needs IO.Console
   fn count_words(words : List(String)) do
     List.fold_left(words, HashMap.new(), fn (acc, w) ->
       HashMap.update(acc, w, fn opt ->

@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   type Opt = Non | Som(Int)
   type Boxed = Wrap((Int, Opt))
   -- A PatCon (Wrap) whose sole sub-pattern is a PatTuple, whose second

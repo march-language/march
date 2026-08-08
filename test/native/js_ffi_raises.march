@@ -1,6 +1,7 @@
 -- Regression: a `raises` extern wraps JS throw into Err, normal return into Ok.
 -- Helper: test/native/js_ffi_raises_helper.mjs exports parseNum (throws on NaN).
 mod JsFfiRaises do
+  needs IO.Console
   needs IO.Foreign
 
   extern "./js_ffi_raises_helper.mjs" : Cap(IO.Foreign) do

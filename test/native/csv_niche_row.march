@@ -12,6 +12,7 @@
 -- real row as EOF immediately, so callbacks never fired and aggregations
 -- silently summed to 0 with no error.
 mod Test do
+  needs IO.Console
   needs IO.FileRead
 
   fn nth(lst, i) do

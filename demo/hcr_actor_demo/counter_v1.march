@@ -5,6 +5,7 @@
 -- State: { count: Int }
 
 mod MyApp do
+  needs IO.Console
 
   actor Counter do
     state { count: Int }

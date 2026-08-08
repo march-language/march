@@ -5,6 +5,7 @@
 -- emit_stmts, so after the innermost call returned, every frame fell into
 -- `default: throw "non-exhaustive pattern match"`).
 mod JsMatchStmtFallthrough do
+  needs IO.Console
   fn walk(xs : List(Int), n : Int) : Unit do
     match xs do
       Nil -> println("nil at " ++ int_to_string(n))

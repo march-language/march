@@ -4,6 +4,7 @@
 -- otherwise ECallPtr's `f._0(f, x)` dispatch calls a record and dies with
 -- "TypeError: f._0 is not a function".
 mod JsClosureReuseApplySlot do
+  needs IO.Console
   type Payload = JustN(Int) | Many(List(Int))
 
   pfn rev(xs, acc) do

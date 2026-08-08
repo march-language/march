@@ -1,4 +1,5 @@
 mod ActorCallTimeout do
+  needs IO.Console
   type CallGet = CallGet
 
   actor Silent do

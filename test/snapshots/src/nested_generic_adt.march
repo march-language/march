@@ -2,6 +2,7 @@
 -- nested TCon type args monomorphize and how the niche-vs-boxed Option
 -- representation lowers for a heap-carrying payload.
 mod NestedGenericAdt do
+  needs IO.Console
   fn head_opt(xs : List(Int)) : Option(Int) do
     match xs do
       Cons(h, _) -> Some(h)

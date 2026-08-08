@@ -514,6 +514,7 @@ Create `test/native/single_use_inline_rc.march`:
 
 ```march
 mod SingleUseInlineRc do
+  needs IO.Console
   fn helper(xs : List(Int)) : Int do
     println("helper:start")
     let n = List.length(xs)

@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: is used more than once here
 mod Main do
+  needs IO.Console
   -- Session-types widening, Task 3 -- linear channel endpoint used twice.
   -- `Chan(Role, Proto)` resolves to `TLin (Linear, TChan ...)` (§2.7.6):
   -- a `let`-bound channel continuation must be consumed EXACTLY ONCE. This

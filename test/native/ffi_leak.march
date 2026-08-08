@@ -6,6 +6,7 @@
 -- live_allocs() and ffi_test_slen are C symbols in runtime/march_ffi.c, linked
 -- automatically into every --compile binary.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   extern "rt" : Cap(Ffi) do

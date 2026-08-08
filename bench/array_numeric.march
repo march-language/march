@@ -12,6 +12,7 @@
 -- (interpreter path; shows fast-path speedup from NativeArray builtins)
 
 mod ArrayNumeric do
+  needs IO.Console
 
 needs IO.Clock
 

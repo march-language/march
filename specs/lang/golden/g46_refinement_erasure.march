@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Typing witness for zero runtime footprint (core-march-types.md §2.14 —
   -- widening slice 12): `{T | pred}` is checked ONLY by `--check`/`--compile`'s
   -- front end (the separate lib/refinecheck post-typecheck pass) — typecheck.ml

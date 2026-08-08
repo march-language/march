@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: Chan.choose: label
 mod Main do
+  needs IO.Console
   -- Session-types widening, Task 3 -- invalid choose label.
   -- `Chan.choose` (typecheck.ml:3564) requires the channel be at SChoose(bs)
   -- and the label to name one of the declared branches. `:maybe` is not a

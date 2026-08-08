@@ -1,4 +1,5 @@
 mod P26CondArmGeLe do
+  needs IO.Console
   -- §3.3/§3.4 arm-boundary lookahead: an ECond (scrutinee-less `match do cond
   -- -> body end` boolean chain) arm condition may use the TWO-CHAR comparison
   -- operators `>=` / `<=`, not only `>` / `<`. The token filter's `->`-scan

@@ -2,6 +2,7 @@
 -- call-argument position in the same call.  Pins the fixed owned+borrowed
 -- double-dec behavior (perceus.ml find_inc_vars / post_dec_vars).
 mod MixedOwnedBorrowedArgs do
+  needs IO.Console
   fn both(owned : String, borrowed : String, n : Int) : String do
     if n > 0 do
       owned

@@ -150,6 +150,7 @@ let test_literal_outside_scope_is_rejected () =
   rejects "read outside the declared scope"
     {|
 mod ScopeViol do
+  needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn main() : () do
     match file_read("/etc/shadow") do
@@ -164,6 +165,7 @@ let test_literal_inside_scope_is_accepted () =
   accepts "read inside the declared scope"
     {|
 mod ScopeOkay do
+  needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn main() : () do
     match file_read("/etc/myapp/db.conf") do
@@ -180,6 +182,7 @@ let test_dotdot_escape_is_rejected () =
   rejects "..-escape from the scope"
     {|
 mod ScopeEscape do
+  needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn main() : () do
     match file_read("/etc/myapp/../shadow") do
@@ -197,6 +200,7 @@ let test_computed_path_is_silent () =
   accepts "computed path is not second-guessed"
     {|
 mod ScopeDyn do
+  needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn load(p : String) : String do
     match file_read(p) do
@@ -216,6 +220,7 @@ let test_unscoped_declaration_permits_any_path () =
   accepts "unscoped needs permits any path"
     {|
 mod ScopeUnscoped do
+  needs IO.Console
   needs IO.FileRead
   fn main() : () do
     match file_read("/etc/shadow") do
@@ -230,6 +235,7 @@ let test_scope_union () =
   accepts "a path in the second of two declared scopes"
     {|
 mod ScopeUnion do
+  needs IO.Console
   needs IO.FileRead("/etc/app"), IO.FileRead("/usr/share/app")
   fn main() : () do
     match file_read("/usr/share/app/x") do
@@ -246,6 +252,7 @@ let test_parent_capability_scope_applies () =
   accepts "scope on IO.FileSystem covers a read beneath it"
     {|
 mod ScopeParent do
+  needs IO.Console
   needs IO.FileSystem("/srv")
   fn main() : () do
     match file_read("/srv/data/x") do
@@ -262,6 +269,7 @@ let test_second_path_argument_is_checked () =
   rejects "the destination of a rename is checked"
     {|
 mod ScopeTwoPath do
+  needs IO.Console
   needs IO.FileWrite("/var/tmp")
   fn main() : () do
     match file_rename("/var/tmp/a", "/etc/passwd") do

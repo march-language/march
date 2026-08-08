@@ -7,6 +7,7 @@
 -- refutation of `_ >= 0` exists), so refinecheck stays silent. This is the
 -- companion to reject/t87, where `below(0)` DOES force a negative result.
 mod M do
+  needs IO.Console
   fn takepos(k : {Int | _ >= 0}) : Int do k end
   fn below(n : Int) : {Int | _ < n} do n - 1 end
   fn main() do

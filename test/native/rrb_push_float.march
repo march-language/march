@@ -24,6 +24,7 @@
 -- unconditionally to the unknown-type placeholder — so a discarded field now
 -- flows through monomorphization exactly like a named one.
 mod Main do
+  needs IO.Console
   fn main() do
     let v0 = RRB.empty()
     let v1 = RRB.push(v0, 1.5)

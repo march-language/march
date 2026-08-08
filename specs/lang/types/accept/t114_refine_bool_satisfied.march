@@ -4,6 +4,7 @@
 -- boolean LITERAL argument, refinecheck evaluates `true == true` and
 -- discharges it trivially. Reject companion: reject/t92 (`needTrue(false)`).
 mod M do
+  needs IO.Console
   fn needTrue(b : {Bool | _ == true}) : Int do 1 end
   fn main() do
     println(int_to_string(needTrue(true)))

@@ -1,4 +1,5 @@
 mod ActorCounter do
+  needs IO.Console
   -- A 0-arg sentinel used as the Actor.call "inner_msg".
   -- march_actor_call reads its tag (0) to build the call message,
   -- which dispatches to the GetValue handler at tag position 0.

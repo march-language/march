@@ -13,6 +13,7 @@
 -- All I/O is real TCP. The green-thread scheduler interleaves the acceptor
 -- and connector tasks naturally (connect blocks until accept is ready).
 mod NodeDiscovery do
+  needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
 

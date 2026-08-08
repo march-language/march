@@ -7,6 +7,7 @@
 -- Also covers: a binding read BEFORE it is shadowed (b = a + x, a still 100),
 -- and a pattern variable shadowing an outer local inside a match arm.
 mod JsLetShadowing do
+  needs IO.Console
   fn main() : Unit do
     let x = 10
     let x = x + 5

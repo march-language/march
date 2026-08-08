@@ -10,6 +10,7 @@
 -- Self-checks: value range and distinctness; the golden diff additionally
 -- pins cross-run determinism.
 mod JsRandomDeterminism do
+  needs IO.Console
   fn main() : Unit do
     let rng = Random.seed(42)
     let (a, rng2) = Random.range(rng, 0, 1000000)

@@ -1,4 +1,5 @@
 mod P02MatchMultiExprArms do
+  needs IO.Console
   type Shape =
     Circle(Int)
   | Square(Int)

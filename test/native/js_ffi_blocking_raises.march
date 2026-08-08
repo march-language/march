@@ -1,6 +1,7 @@
 -- Regression: a `blocking raises` extern is both await-ed and wrapped in Ok/Err.
 -- Helper: test/native/js_ffi_blocking_raises_helper.mjs exports asyncParsePos.
 mod JsFfiBlockingRaises do
+  needs IO.Console
   needs IO.Foreign
   needs IO.Foreign.Blocking
 

@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: `let?` cannot be the last expression in a block.
 mod R05LetqLastInBlock do
+  needs IO.Console
   fn f() do
     let? x = Ok(1)
   end

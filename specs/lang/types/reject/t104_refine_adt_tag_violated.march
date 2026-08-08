@@ -5,6 +5,7 @@
 -- definite counterexample, not a skip. Accept companion: accept/t92
 -- (`unwrap(Some(1))`).
 mod M do
+  needs IO.Console
   fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
   fn main() do
     println(int_to_string(unwrap(None)))

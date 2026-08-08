@@ -4,6 +4,7 @@
 -- the EMatch lowering which recursed correctly). Verified fixed; this pins the
 -- 2-deep, 3-deep, and mixed-type shapes (interp == compiled).
 mod Main do
+  needs IO.Console
   fn main() : () do
     let ((a, b), (c, d)) = ((1, 2), (3, 4))
     println(int_to_string(a + b + c + d))

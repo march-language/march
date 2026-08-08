@@ -86,6 +86,7 @@ let file_read_sym =
 let pure_src =
   {|
 mod PureStripApp do
+  needs IO.Console
   fn main() : () do
     println(int_to_string(1 + 1))
   end
@@ -95,6 +96,7 @@ end
 let closure_src =
   {|
 mod ClosureStripApp do
+  needs IO.Console
   needs IO.FileRead
 
   fn apply1(f : (String) -> a, p : String) : a do
@@ -146,6 +148,7 @@ let run_capture bin =
 let actor_src =
   {|
 mod ActorStripApp do
+  needs IO.Console
   actor Counter do
     state { count : Int }
     init  { count: 0 }
@@ -238,6 +241,7 @@ let compile_sandboxed src_text out_bin =
 let sb_net_src =
   {|
 mod SbNetApp do
+  needs IO.Console
   needs IO.NetListen
   fn main() : () do
     match tcp_listen(19097) do

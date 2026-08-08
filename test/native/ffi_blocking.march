@@ -2,6 +2,7 @@
 -- thread cooperatively yields) and returns the correct result. ffi_test_dbl
 -- lives in runtime/march_ffi.c.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   needs IO.Foreign.Blocking

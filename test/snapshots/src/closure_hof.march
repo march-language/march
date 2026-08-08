@@ -2,6 +2,7 @@
 -- ($Clo_ / $apply$ naming) for a captured free variable passed through a
 -- generic HOF parameter.
 mod ClosureHof do
+  needs IO.Console
   fn apply_twice(f : (Int) -> Int, x : Int) : Int do
     f(f(x))
   end

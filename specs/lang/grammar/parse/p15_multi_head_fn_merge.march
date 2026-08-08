@@ -1,4 +1,5 @@
 mod P15MultiHeadFnMerge do
+  needs IO.Console
   fn fib(0) do
     0
   end

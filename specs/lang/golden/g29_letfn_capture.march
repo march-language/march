@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- A local recursive `fn go` that CLOSES OVER an outer `let` binding (`step`)
   -- WHILE also calling itself — proving lexical capture and recursion together.
   -- The env_ref the closure re-reads (eval.ml:6880) is the block's env extended

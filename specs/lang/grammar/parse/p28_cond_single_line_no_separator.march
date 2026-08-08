@@ -1,4 +1,5 @@
 mod P28CondSingleLineNoSeparator do
+  needs IO.Console
   -- §5.3 cond form (`match do ... end`, no scrutinee): a single arm written
   -- entirely on the SAME physical line as `match do` (no leading NL/PIPE
   -- arm_sep before the first `cond_branch`) previously failed to parse,

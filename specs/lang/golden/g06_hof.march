@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn twice(f, x) do f(f(x)) end
   fn main() do
     let inc = fn n -> n + 1

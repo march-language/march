@@ -19,6 +19,7 @@
 -- impl body IS being read, its companion shows reading it does not false-
 -- positive on a guarded divisor.
 mod ImplDiv do
+  needs IO.Console
   cap no_panic
 
   type Box = Box(Int)

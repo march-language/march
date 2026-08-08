@@ -15,6 +15,7 @@
 --   6. Html.content_hash(iol) gives an ETag for the rendered fragment.
 
 mod Templates do
+  needs IO.Console
 
 -- ---------------------------------------------------------------------------
 -- Data types

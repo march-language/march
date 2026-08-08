@@ -187,7 +187,13 @@ def build_runner(cells):
             mods.append(src)
         else:
             inlines.append(src)
-    prog = ["mod NotebookRunner do", ""]
+    # `needs IO` rather than a narrower capability, deliberately. Since
+    # 2026-08-06 an undeclared direct builtin call is an ERROR, and this
+    # synthesized wrapper has to cover whatever the notebook's loose
+    # expression cells call — which is arbitrary doc code, not a fixed set.
+    # The root capability cannot under-declare; an unused-capability warning
+    # does not fail the check.
+    prog = ["mod NotebookRunner do", "  needs IO", ""]
     for m in mods:
         prog += [m, ""]
     prog.append("fn main() do")

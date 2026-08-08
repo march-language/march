@@ -5,6 +5,7 @@
 -- float expression refinecheck evaluates to `-1.0`, definitely refuting
 -- `_ >= 0.0`. Accept companion: accept/t99 (`sqrtish(4.0)`).
 mod M do
+  needs IO.Console
   fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end
   fn main() do
     println(float_to_string(sqrtish(0.0 -. 1.0)))

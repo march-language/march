@@ -4,6 +4,7 @@
 -- check NOTHING. `needTrue(false)` passes the literal `false`, definitely
 -- refuting `_ == true`. Accept companion: accept/t101 (`needTrue(true)`).
 mod M do
+  needs IO.Console
   fn needTrue(b : {Bool | _ == true}) : Int do 1 end
   fn main() do
     println(int_to_string(needTrue(false)))

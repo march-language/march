@@ -17,6 +17,7 @@
 -- bit63:=bit62, pre-seeded in the atom show table), is_cap_valid is wired, and
 -- send is typed Option(Unit) with TTuple [] niche-unsafe.
 mod Main do
+  needs IO.Console
   actor Counter do
     state { count : Int }
     init  { count: 0 }

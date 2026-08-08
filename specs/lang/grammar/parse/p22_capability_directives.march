@@ -1,4 +1,5 @@
 mod P22CapabilityDirectives do
+  needs IO.Console
   needs IO.Network, IO.Clock
   proof cap Trusted
   cap no_panic

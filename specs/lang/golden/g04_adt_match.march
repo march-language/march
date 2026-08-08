@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   type Color = Red | Green
   fn name(c) do
     match c do

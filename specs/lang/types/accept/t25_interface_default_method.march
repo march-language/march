@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- Default methods (`md_default`): an interface method may carry a default
   -- body. An impl that OMITS such a method is NOT a missing-method error —
   -- desugar's `inject_defaults` (desugar.ml:897) synthesises a zero-param

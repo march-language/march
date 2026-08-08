@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: Unknown interface `NotDeclared` — is it declared above this impl?
 mod M do
+  needs IO.Console
   type Dog = Dog(String)
 
   impl NotDeclared(Dog) do

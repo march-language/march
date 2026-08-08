@@ -20,6 +20,8 @@
 --   bench/par_fib
 
 mod ParFib do
+  needs IO.Console
+  needs IO.Spawn
 
 pfn fib(n : Int) : Int do
   if n < 2 do n

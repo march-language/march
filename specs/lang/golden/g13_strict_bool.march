@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn side(tag) do
     println(tag)
     true

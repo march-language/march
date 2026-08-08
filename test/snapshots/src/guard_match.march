@@ -2,6 +2,7 @@
 -- shape for match arms that DO have a final catch-all (no panic default
 -- inserted) but DO carry guard conditions per arm.
 mod GuardMatch do
+  needs IO.Console
   fn classify(x : Int) : String do
     match x do
       n when n > 0 -> "pos"

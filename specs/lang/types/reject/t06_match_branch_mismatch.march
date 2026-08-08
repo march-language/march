@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: All branches of a match must have the same type.
 mod M do
+  needs IO.Console
   type Shape = Circle(Int) | Square(Int)
 
   fn describe(s) do

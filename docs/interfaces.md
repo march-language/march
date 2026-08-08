@@ -317,6 +317,7 @@ constructor pattern — this sidesteps a compiled-backend bug described in
 
 ```march
 mod MyStack do
+  needs IO.Console
 
   type Stack(a) = Stack(List(a))
 

@@ -1,4 +1,5 @@
 mod CounterIsland do
+  needs IO.Console
 
 fn render(state_json) do
   "<span>hello from wasm</span>"

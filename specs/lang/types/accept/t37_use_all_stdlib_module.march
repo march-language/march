@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Widening slice 2, Task 4 (`use`/`import`/`alias`): `use List.*` runs the
   -- file-based resolver pre-pass (`lib/resolver/resolver.ml`) BEFORE
   -- typecheck, which finds `List` among the stdlib files the compiler

@@ -10,6 +10,7 @@
 -- Run: dune exec march -- examples/pattern_matching.march
 
 mod PatternMatching do
+  needs IO.Console
 
   -- ── 1. Literals and wildcards ────────────────────────────────────────────
 

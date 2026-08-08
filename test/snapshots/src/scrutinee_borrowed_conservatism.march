@@ -6,6 +6,7 @@
 -- the true side rather than a path-sensitive free that risks a UAF for the
 -- genuine single-sub-path case; see specs/perceus-invariants.md §6).
 mod ScrutineeBorrowedConservatism do
+  needs IO.Console
   fn first_or_recheck(xs : List(Int), flag : Bool) : Int do
     match xs do
       Cons(h, t) ->

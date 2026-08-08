@@ -17,6 +17,7 @@
 --   n=42
 
 mod RcOptionIntTaggedPayload do
+  needs IO.Console
 
 fn main() do
   match String.index_of("hello world", "world") do

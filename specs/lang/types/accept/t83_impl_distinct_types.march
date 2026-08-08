@@ -2,6 +2,7 @@
 -- (interface, type) pairs — no overlap, both register. Companion to
 -- reject/t79 (duplicate) and accept/t84 (distinct interfaces).
 mod M do
+  needs IO.Console
   interface Speak(a) do
     fn speak : a -> String
   end

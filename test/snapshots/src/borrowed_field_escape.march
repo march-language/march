@@ -2,6 +2,7 @@
 -- is returned (escapes the function), so it must be IncRC'd at extraction
 -- rather than freed with the (never-owned) parent record.
 mod BorrowedFieldEscape do
+  needs IO.Console
   type Box = { inner : String }
 
   fn peek(b : Box) : String do

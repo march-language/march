@@ -4,6 +4,7 @@
 -- RC-managed) elements. Expected output equals the interpreter's.
 
 mod Main do
+  needs IO.Console
   fn show_opt_int(o : Option(Int)) : String do
     match o do
       Some(v) -> "Some(" ++ int_to_string(v) ++ ")"

@@ -9,6 +9,7 @@
 -- lowering.  This golden pins single, chained, and match-arm-body shadows;
 -- the compiled output must equal the interpreter's.
 mod ShadowSelfrefLet do
+  needs IO.Console
   -- single self-referencing shadow
   fn single(n : Int) : Int do
     let x = n

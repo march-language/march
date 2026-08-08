@@ -8,6 +8,7 @@
 -- the lower-level register_resource() API directly.
 
 mod LinearDropDemo do
+  needs IO.Console
 
   -- Step 1: Declare the Drop interface.
   -- Any type can implement this to register cleanup logic.

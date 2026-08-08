@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: `stop` outside of a `loop` has no effect
 mod Main do
+  needs IO.Console
   -- Session types: `stop` (2026-07-27) is only meaningful inside a `loop`
   -- body (directly, or nested inside a `choose` branch within one) -- it
   -- exits the loop's back-reference by projecting to `SEnd`. Outside any

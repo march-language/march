@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn compute(n : Int) : Int do
     fn go(k, acc) do
       match k do

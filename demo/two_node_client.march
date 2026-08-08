@@ -1,4 +1,5 @@
 mod TwoNodeClient do
+  needs IO.Console
   -- Same body as server → same CAS hash → admission check passes.
   pfn square(n : Int) : Int do n * n end
 

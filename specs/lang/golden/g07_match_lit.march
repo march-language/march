@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn classify(n) do
     match n do
       0 -> "zero"

@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn describe(msg) do
     "error: " ++ msg
   end

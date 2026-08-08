@@ -10,6 +10,7 @@
 --        bench/string_pipeline
 
 mod StringPipeline do
+  needs IO.Console
 
 -- Build ["n", "n-1", ..., "1"] as a list (reversed, but order doesn't
 -- affect byte-length of the result).

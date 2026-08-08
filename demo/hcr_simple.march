@@ -11,6 +11,7 @@
 -- Probe: echo -n "7" | nc 127.0.0.1 29900; echo
 -- Reload: march-reload --socket /tmp/hcr.sock --name Compute.square --src hcr_simple_patch.march
 mod App do
+  needs IO.Console
   needs IO.NetListen
 
   mod Compute do

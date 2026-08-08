@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn describe(p) do
     match p do
       (0, 0) -> "origin"

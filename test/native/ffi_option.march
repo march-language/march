@@ -1,6 +1,7 @@
 -- Regression: an FFI binding returning Option(Int) must produce the compiler's
 -- niche representation (None=0, Some(x)=x), not a tagged heap cell.
 mod Test do
+  needs IO.Console
   needs Ffi
   needs IO.Foreign
   extern "rt" : Cap(Ffi) do

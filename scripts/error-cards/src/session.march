@@ -1,4 +1,5 @@
 mod LinErr do
+  needs IO.Console
 
   fn consume(s : String) : Int do
     String.byte_size(s)

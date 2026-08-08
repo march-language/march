@@ -2,6 +2,7 @@
 -- is destructured by an irrefutable tuple pattern — the same simple_pattern a
 -- plain `let` accepts. Prints 7.
 mod Main do
+  needs IO.Console
   fn pair() : Result((Int, Int), String) do Ok((3, 4)) end
   fn run() : Result(Int, String) do
     let? (a, b) = pair()

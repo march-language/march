@@ -8,6 +8,7 @@
 -- specialization. Runtime witness: test/native/bare_none_print.march (interp ==
 -- compiled). This --check witness pins acceptance of the surface shapes.
 mod Main do
+  needs IO.Console
   fn main() : () do
     println(None)
     println(to_string(None))

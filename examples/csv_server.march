@@ -10,6 +10,7 @@
 --        -d "name,score\nAlice,92\nBob,78\nCarol,88\nDave,55"
 
 mod CsvServer do
+  needs IO.Console
 
 pfn save_csv(body) do
   let path = "/tmp/march_csv_input.csv"

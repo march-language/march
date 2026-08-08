@@ -1,4 +1,5 @@
 mod P16InterfaceImplPair do
+  needs IO.Console
   interface Describable(a) do
     fn describe: a -> String
   end

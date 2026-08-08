@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Sibling-ctor shadowing regression witness (FIXED 2026-07-10). Two
   -- sibling modules each declare `type Foo` with a SAME-NAMED constructor
   -- `Mk` carrying different payloads -- and each module uses its OWN `Mk`

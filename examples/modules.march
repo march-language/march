@@ -8,6 +8,7 @@
 -- Run: dune exec march -- examples/modules.march
 
 mod ModuleDemo do
+  needs IO.Console
 
   -- ── Part 1: Basic qualified access ──────────────────────────────────────
 

@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   fn classify(n : Int) : String do
     match n do
       n when n > 0 -> "pos"

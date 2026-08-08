@@ -8,6 +8,7 @@
 -- Run: dune exec march -- examples/http_requests.march
 
 mod HttpExample do
+  needs IO.Console
 
   -- Helper to print a Result
   fn print_result(label, result) do

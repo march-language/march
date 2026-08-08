@@ -10,6 +10,7 @@
 -- and must lower to exactly the same shape as the hand-written `chain` below,
 -- which passes the variable to string_concat3 directly.
 mod InterpStringOperandRc do
+  needs IO.Console
   fn interp(s : String) : String do
     "a${s}b"
   end

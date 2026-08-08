@@ -61,6 +61,7 @@ let contains hay needle =
 let helper_src =
   {|
 mod PkgHelper do
+  needs IO.NetConnect
   fn fetch(host : String) : Bool do
     match tcp_connect(host, 80) do
       Ok(_)  -> true
@@ -73,6 +74,7 @@ end
 let entry_src =
   {|
 mod PkgEntry do
+  needs IO.Console
   fn main() : () do
     if PkgHelper.fetch("example.com") do
       println("y")

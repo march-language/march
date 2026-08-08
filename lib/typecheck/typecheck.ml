@@ -9053,7 +9053,18 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             MPText " to the module body." ])
     end
   ) used_caps;
-  (* Check 1b: body-scanned builtin calls that imply an undeclared cap — warning only *)
+  (* Check 1b: a body-scanned builtin call implying an undeclared capability.
+     ERROR since 2026-08-06 (was warning-only).  `needs` was a hard floor for
+     capability-PASSING code and merely advisory for a direct builtin call —
+     which is the code most likely to abuse it.  Per-function transitive
+     closure (#209) made the ceiling precise enough to enforce without
+     collapsing every module to `needs IO`.
+
+     Scope, stated because it is easy to over-read: this catches a DIRECT
+     builtin call in a module body.  A stdlib-MEDIATED call (`File.read`
+     rather than `file_read`) is invisible here and is caught by
+     --cap-strict's ceiling over emitted TIR instead.  Check 1c below
+     (extern -> IO.Foreign) is deliberately NOT flipped. *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     let self_declared = match List.assoc_opt cap_path env.proof_caps with
@@ -9061,7 +9072,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | None -> false
     in
     if not covered && not self_declared then
-      Err.warning_with_fix env.errors ~span:sp
+      Err.error_with_fix env.errors ~span:sp
         ~fix:(Err.FInsert {
           after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
           text = "  needs " ^ cap_path })

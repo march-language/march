@@ -5,6 +5,7 @@
 -- Expected output: 42
 
 mod NewtypeCounter do
+  needs IO.Console
   type Counter = Counter(Int)
 
   fn bump(c) do

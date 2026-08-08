@@ -69,6 +69,7 @@ treat everything else as a filename:
 <!-- scroll:skip -->
 ```march
 mod Repeat do
+  needs IO.Console
 
   type Args = Args(Int, Option(String))
 
@@ -130,6 +131,7 @@ for streaming side effects.
 
 ```march
 mod Cat do
+  needs IO.Console
 
   fn dump(path : String) do
     match File.read(path) do

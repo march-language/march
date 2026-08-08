@@ -119,6 +119,7 @@ When an actor's state record changes between deploys, the server needs to know h
 
 ```march
 mod MyApp do
+  needs IO.Console
 
   -- v2: add a `history` field to track previous counts
   actor Counter do

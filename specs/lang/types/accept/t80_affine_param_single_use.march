@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Linearity (T-LinMark), affine fn-PARAM surface positive (L1 fix,
   -- 2026-07-17): `affine c : Cap` in PARAM position now parses (an AFFINE
   -- param production mirroring LINEAR) and is tracked affine — used at most

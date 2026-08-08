@@ -8,6 +8,7 @@
 -- Run: dune exec march -- examples/http_streaming.march
 
 mod HttpStreaming do
+  needs IO.Console
 
 fn main() do
   let client = HttpClient.new_client()

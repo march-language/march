@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Operational actor witness (core-march.md §4.10): spawn + async send +
   -- run_until_idle. A single observable Counter actor accumulates state via an
   -- `on Inc(n)` handler (each returns the NEW state record), then a `Report`

@@ -90,6 +90,7 @@ String.slice_bytes("hello", 1, 3)     -- "ell"
 
 ```march
 mod Config do
+  needs IO.Console
   type Entry = { key : String, value : String }
 
   fn parse_line(line : String) : Option(Entry) do

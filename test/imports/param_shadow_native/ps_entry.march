@@ -2,6 +2,7 @@
 -- sibling module-level fn ("fields").  Compiled natively; panics on any
 -- wrong result so the dune rule fails on regression.
 mod PsEntry do
+  needs IO.Console
 
 import PsLib
 

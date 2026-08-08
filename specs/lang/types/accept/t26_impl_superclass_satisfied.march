@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- Superclass/`requires` bounds: `interface Greet(a) requires Speak(a)`
   -- means `impl Greet(T)` is only accepted once `impl Speak(T)` is already
   -- in scope (typecheck.ml:7118-7143, the DImpl arm's superclass-discharge

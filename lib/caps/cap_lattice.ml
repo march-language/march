@@ -56,6 +56,32 @@ let cap_subsumes parent child =
     list, preserving the relative order of the caps that remain.  E.g.
     ["IO"; "IO.FileRead"] -> ["IO"]; ["IO.FileRead"; "IO"] -> ["IO"]. *)
 let normalize caps =
+  (* DEDUPLICATE FIRST.  A capability closure is a SET; this used to return a
+     bag, and the difference was not cosmetic.
+
+     [Typecheck.record_fn_caps] folds a function's newly-seen caps into the ones
+     already recorded — [normalize (module_wide_caps @ own_caps @ prior)] — and
+     stores the result back.  Because the filter below only drops a cap that a
+     DIFFERENT cap subsumes ([other <> c]), two equal entries never eliminate
+     each other, so every repeat call appended another copy of the module's
+     declared caps and the stored list grew without bound.  With the filter at
+     O(n^2) in that list, a long-lived typechecker env degraded quadratically.
+
+     That is invisible in a one-shot CLI run (one module, one call) and severe
+     wherever an env is REUSED across many module checks: the property suite
+     typechecks ~1800 generated modules against one cached stdlib seed env,
+     where it cost 1s -> 168s for a single property group.  The LSP and
+     `forge build` (which typechecks each library file as its own entry) reuse
+     envs the same way.
+
+     Deduping bounds the list by the size of the lattice regardless of how many
+     times a function is recorded.  Order of survivors is unchanged: the first
+     occurrence of each cap is kept, which is what the [.mli] promises. *)
+  let seen = Hashtbl.create 16 in
+  let uniq =
+    List.filter (fun c ->
+      if Hashtbl.mem seen c then false else (Hashtbl.add seen c (); true)) caps
+  in
   List.filter (fun c ->
-    not (List.exists (fun other -> other <> c && cap_subsumes other c) caps)
-  ) caps
+    not (List.exists (fun other -> other <> c && cap_subsumes other c) uniq)
+  ) uniq

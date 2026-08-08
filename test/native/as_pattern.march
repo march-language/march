@@ -1,4 +1,5 @@
 mod AsPattern do
+  needs IO.Console
 fn describe(o : Option(Int)) : String do
   match o do
     Some(x) as whole ->

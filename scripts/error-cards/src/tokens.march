@@ -1,4 +1,6 @@
 mod CapErr do
+  needs IO.Console
+  needs IO.Random
 
   fn make_token() : String do
     Bytes.to_string(random_bytes(16))

@@ -8,6 +8,7 @@
 -- Run one instance per node (port from argv, default 29852):
 --   ./load_server 29852
 mod LoadServer do
+  needs IO.Console
   needs IO.NetListen
 
   fn square(n : Int) : Int do n * n end

@@ -9,6 +9,7 @@
 -- tuple from its per-element spans.  Covers plain fns, 3-ary, and mixed
 -- ctor/plain params.
 mod Main do
+  needs IO.Console
   type N = N(Int)
 
   fn eq2(N(a), N(b)) do a == b end

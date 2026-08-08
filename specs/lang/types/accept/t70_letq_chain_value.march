@@ -3,6 +3,7 @@
 -- and the body is Result(_, String) with the SAME error type. Yields
 -- Result(Int, String). (T-LetQ). Value-witnessed by golden g42.
 mod Main do
+  needs IO.Console
   fn step(x : Int) : Result(Int, String) do
     if x > 0 do Ok(x + 1) else Err("neg") end
   end

@@ -15,6 +15,7 @@
 --   ./bench/island_perf_server
 
 mod IslandPerfServer do
+  needs IO.Console
 
 actor Counter do
   state { count : Int }

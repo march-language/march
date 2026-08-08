@@ -1,4 +1,5 @@
 mod P20ProtocolChooseSessionType do
+  needs IO.Console
   protocol Decision do
     Client -> Server : Int
     choose by Server:

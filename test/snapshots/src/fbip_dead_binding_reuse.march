@@ -2,6 +2,7 @@
 -- match, and the arm allocates a same-arity Cons — Perceus should reuse the
 -- freed cell (EReuse) instead of Free+Alloc.
 mod FbipDeadBindingReuse do
+  needs IO.Console
   fn bump_head(xs : List(Int)) : List(Int) do
     match xs do
       Cons(h, t) -> Cons(h + 1, t)

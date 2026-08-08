@@ -22,6 +22,7 @@
 --   /tmp/march_merkle
 
 mod MerkleBench do
+  needs IO.Console
 
 -- Build [lo, lo+1, ..., hi] by counting down from hi and prepending.
 pfn ilist(hi : Int, lo : Int, acc : List(Int)) : List(Int) do

@@ -1,4 +1,5 @@
 mod ForeignActorHttp do
+  needs IO.Console
   needs IO.Spawn
   needs IO.NetListen
   needs IO.NetConnect

@@ -12,6 +12,7 @@
 -- always correct).  Fix: `bind_var`/`bind_linear` remove the bound name from
 -- `fn_arities` so a param/let lexically shadows a same-named top-level fn.
 mod Main do
+  needs IO.Console
   -- top-level `f/1` — the exact collision (arity != fold_left's callback arity)
   fn f(m) do m + 1 end
 

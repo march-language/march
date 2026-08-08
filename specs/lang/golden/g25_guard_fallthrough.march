@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- The FIRST branch's pattern (PatVar n) matches EVERY value, but its guard
   -- `when n > 10` gates selection: a false guard falls through to the next
   -- branch (eval.ml:7340), which also matches but has no guard. Proves the

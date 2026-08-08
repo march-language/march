@@ -6,6 +6,7 @@
 -- Typechecks by the existing application/HOF rules (§2.1). Operationally
 -- witnessed by golden g43.
 mod Main do
+  needs IO.Console
   fn main() do
     let xs = List.range(1, 10)
     let sq = List.pmap(xs, fn x -> x * x)

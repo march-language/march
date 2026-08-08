@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   fn main() do
     let x = 2
     let y = 3

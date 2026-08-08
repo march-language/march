@@ -20,6 +20,7 @@
 --   bench/rrb_bench
 
 mod RRBBench do
+  needs IO.Console
 
   fn main() do
     let n = 1000000

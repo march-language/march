@@ -5,6 +5,7 @@
 -- memoized the fn name before validating — later requests returned a
 -- function that was never defined ("use of undefined value '@__march_eq_*'").
 mod AeEntry do
+  needs IO.Console
 
 import AeLib
 import AeLib2

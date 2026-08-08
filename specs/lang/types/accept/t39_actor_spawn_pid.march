@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   -- Widening actors slice, Task 1 -- ACTOR DECLARATION + `spawn` typing.
   -- `actor Counter do state {…} init {…} on Msg(…) do … end end` typechecks
   -- via `typecheck.ml`'s `DActor` arm (`:6742`): the state record type is built

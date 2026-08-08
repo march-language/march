@@ -6,6 +6,7 @@
 -- Int widened to Float, Float+Float, and col_add_col's Int/Int and Int/Float
 -- dispatch branches.
 mod Main do
+  needs IO.Console
   fn main() : () do
     let a = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
     let b = NativeArray.from_list_int(Cons(10, Cons(20, Cons(30, Nil))))

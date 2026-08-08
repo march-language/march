@@ -4,6 +4,7 @@
 -- flowed through a pattern match — Int 0 -> 1, 5 -> 11, Bool true -> a nonzero
 -- garbage value.  Both a direct local tuple and a tuple in a list are covered.
 mod TupleScalarFields do
+  needs IO.Console
   fn head_int(rows : List((Int, String))) : Int do
     match rows do
     Cons(row, _) ->

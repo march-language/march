@@ -19,6 +19,7 @@
 -- at all -- this file's counterpart shows a PROVEN one propagating exactly
 -- as it should).
 mod M do
+  needs IO.Console
   type Tree = Leaf | Node(Tree, Int, Tree)
   @[measure]
   fn size(t : Tree) : Int do

@@ -8,6 +8,7 @@
 --     march_poly_compare (the original P0 that SIGSEGV'd / mis-sorted compiled)
 -- All three must match the interpreter (2. / 3.5 / -9.).
 mod Main do
+  needs IO.Console
   fn dbl(x : Float) : Float do x *. 2.0 end
   fn main() do
     println(float_to_string(List.head(List.map([1.0, 2.5, 3.0], dbl))))

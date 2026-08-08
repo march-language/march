@@ -7,6 +7,7 @@
 -- counterexample (`n = -1`) that `--check` surfaces in the diagnostic. Accept
 -- companion: accept/t76 (an exhaustive guard that DOES satisfy every branch).
 mod M do
+  needs IO.Console
   fn bad(n : Int) : {Int | _ >= 0} do
     if n < 0 do n else 0 end
   end

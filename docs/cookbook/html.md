@@ -98,6 +98,7 @@ end
 
 ```march
 mod UserList do
+  needs IO.Console
   type User = { name : String, email : String, admin : Bool }
 
   fn render_badge(u : User) : IOList do

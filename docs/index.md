@@ -135,6 +135,7 @@ forge interactive      # launch the REPL
 
 ```march
 mod Chat do
+  needs IO.Console
 
 actor Room do
   state { members : List(String) }

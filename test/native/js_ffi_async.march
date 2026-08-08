@@ -2,6 +2,7 @@
 -- async colour propagates virally through the call chain to main().
 -- Helper: test/native/js_ffi_async_helper.mjs exports an async `delayAdd`.
 mod JsFfiAsync do
+  needs IO.Console
   needs IO.Foreign
   needs IO.Foreign.Blocking
 

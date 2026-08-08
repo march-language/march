@@ -1,5 +1,6 @@
 -- EXPECT-ERROR: can never run
 mod Main do
+  needs IO.Console
   -- Session types: a `loop` block repeats forever (`Rec X. S[X]`), so steps
   -- written after it at the same level are unreachable and rejected at
   -- protocol-declaration time (2026-07-24).

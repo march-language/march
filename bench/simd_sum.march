@@ -13,6 +13,7 @@
 -- language's benchmark in this set self-times the same way, for the same
 -- reason (a flat array fill isn't equivalent cost to a boxed-list build).
 mod SimdSum do
+  needs IO.Console
 
 needs IO.Clock
 

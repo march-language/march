@@ -271,6 +271,7 @@ There is no `Call` wrapper constructor, and the call handler takes exactly one a
 
 ```march
 mod ActorDemo do
+  needs IO.Console
 
   actor Counter do
     state { value : Int }

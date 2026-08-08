@@ -78,6 +78,7 @@ let keys = Vault.keys(store)    -- ["host", "port"]
 
 ```march
 mod RateLimit do
+  needs IO.Console
   let store = Vault.new("rate-limit")
 
   fn check(client_ip : String, limit : Int) : Bool do

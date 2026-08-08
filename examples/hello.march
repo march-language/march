@@ -5,6 +5,7 @@
 -- Run: dune exec march -- examples/hello.march
 
 mod Hello do
+  needs IO.Console
 
   -- Simple function with a type annotation
   fn greet(name : String) : String do

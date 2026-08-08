@@ -1,4 +1,5 @@
 mod Main do
+  needs IO.Console
   type Pair = P(Int, Int)
   -- A guard that reads variables bound by the branch's OWN pattern: `a` and
   -- `b` are bound by PatCon P(a, b), then the guard `when a == b` is evaluated

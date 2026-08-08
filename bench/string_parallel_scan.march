@@ -23,6 +23,7 @@
 -- Usage: march --compile --opt 2 bench/string_parallel_scan.march -o /tmp/string_parallel_scan
 
 mod StringParallelScan do
+  needs IO.Console
 
 pfn buffer_units() : Int do 4000000 end  -- 10 bytes per unit -> 40MB
 

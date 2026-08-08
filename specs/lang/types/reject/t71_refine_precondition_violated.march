@@ -7,6 +7,7 @@
 -- (no path-sensitivity needed), so `--check` rejects with the pinned
 -- "refinement violation" message. Accept companion: accept/t75 (satisfied).
 mod M do
+  needs IO.Console
   fn take_n(n : {Int | _ >= 0}) : Int do n end
   fn main() do
     println(int_to_string(take_n(-3)))

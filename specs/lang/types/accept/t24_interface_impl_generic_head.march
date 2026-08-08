@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- (T-ImplMatch) generic/parameterised impl head: `impl Describe(Box(a))`
   -- covers every instantiation of `Box`, because `impl_matches_ty` treats the
   -- impl's own free type variable `a` as a wildcard (typecheck.ml:4970).

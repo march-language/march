@@ -16,6 +16,7 @@
 --   ok3
 
 mod RcBorrowedDupArg do
+  needs IO.Console
 
 fn main() do
   let s = "hello"

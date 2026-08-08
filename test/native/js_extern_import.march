@@ -1,6 +1,7 @@
 -- Regression: extern "node:..." imports from JS modules via ES import syntax.
 -- Tests explicit = "sym" aliasing AND implicit (march name = JS name) imports.
 mod JsExternImport do
+  needs IO.Console
   needs IO.Foreign
 
   -- Explicit symbol: march name differs from JS export → `import { basename as js_path_basename }`

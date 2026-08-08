@@ -4,6 +4,7 @@
 -- dispatch). Companion to test/imports/adt_eq_native (the Stage-1 Eq witness).
 -- Run BOTH compiled (via the test/dune @runtest rule) and interpreted.
 mod ScEntry do
+  needs IO.Console
 
 import ScLibA
 import ScLibB

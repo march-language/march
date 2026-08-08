@@ -4,6 +4,7 @@
 -- Run: dune exec march -- examples/csv_example.march
 
 mod Main do
+  needs IO.Console
 
 pfn write_demo_csv(path) do
   let content = "name,age,city\nAlice,30,\"New York\"\nBob,25,London\n\"Carol, Jr.\",42,\"Sao Paulo\"\nDave,35,Berlin"

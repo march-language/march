@@ -1,4 +1,5 @@
 mod RecordPattern do
+  needs IO.Console
 fn area({ w: w, h: h }) : Int do w * h end
 
 fn classify(r : { code : Int, msg : String }) : String do

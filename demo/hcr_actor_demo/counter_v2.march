@@ -11,6 +11,7 @@
 --   4. Each Counter calls counter_migrate_state({count}) → {count, history=[]}
 
 mod MyApp do
+  needs IO.Console
 
   actor Counter do
     state { count: Int, history: List(Int) }

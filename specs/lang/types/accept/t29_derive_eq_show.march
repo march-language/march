@@ -1,4 +1,5 @@
 mod M do
+  needs IO.Console
   -- `derive` (core-march-types.md §2.3 / core-march.md §4.4.4): `derive Eq,
   -- Show for Color` expands at DESUGAR time (desugar.ml's `expand_derive`,
   -- BEFORE typecheck ever sees a DDeriving node) into two ordinary `DImpl`

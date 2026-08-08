@@ -3,6 +3,7 @@
 -- shape Lower inserts for any non-exhaustive-looking ECase compilation
 -- (see lower.ml's non-exhaustive-match panic emission).
 mod NoWildcardPanic do
+  needs IO.Console
   fn unwrap_or_die(o : Option(Int)) : Int do
     match o do
       Some(x) -> x

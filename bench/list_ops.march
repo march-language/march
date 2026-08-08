@@ -7,6 +7,7 @@
 --        bench/list_ops
 
 mod ListOps do
+  needs IO.Console
 
 ptype IntList = INil | ICons(Int, IntList)
 

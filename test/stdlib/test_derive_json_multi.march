@@ -1,4 +1,5 @@
 mod TestMultiJson do
+  needs IO.Console
   -- Test that multiple types can derive Json in the same module
   -- without the last derive shadowing previous ones.
 

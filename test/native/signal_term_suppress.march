@@ -4,6 +4,7 @@
 -- UNWATCHED SIGTERM still kills the process (verified separately); this pins the
 -- suppression half of that contract.
 mod Main do
+  needs IO.Console
   fn main() do
     Signal.watch(Signal.Term, fn -> println("term handler"))
     println("before term")

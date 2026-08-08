@@ -45,6 +45,7 @@ Modules can also be nested inline:
 ```march
 mod Outer do
   mod Inner do
+  needs IO.Console
     fn greet() do println("from Inner") end
   end
 
@@ -93,6 +94,7 @@ For types that should expose the name but hide the constructors, use `opaque`:
 
 ```march
 mod Main do
+  needs IO.Console
   mod Token do
     opaque type Token = Token(String)
 
@@ -128,6 +130,7 @@ Call functions or access types from another module using `.`:
 
 ```march
 mod Main do
+  needs IO.Console
   mod Math do
     fn square(n : Int) : Int do n * n end
     fn cube(n : Int) : Int do n * n * n end
@@ -248,6 +251,7 @@ module:
 
 ```march
 mod Example do
+  needs IO.Console
 
   mod MathUtils do
     fn square(x : Int) : Int do x * x end
@@ -337,6 +341,7 @@ Module names map to file paths by convention: `MyApp.Router` → `my_app/router.
 
 ```march
 mod Main do
+  needs IO.Console
   mod Config do
     let version   = "1.0.0"
     let max_items = 1000
