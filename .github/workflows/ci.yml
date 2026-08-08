@@ -305,7 +305,16 @@ jobs:
           eval $(opam env)
           MARCH_BIN="dune exec march --" python3 scripts/gen-scrollmd.py --check
 
-      - name: Check stdlib `march>` doctests
+      # ADVISORY (continue-on-error) — surfaces stdlib doctest drift without
+      # blocking merge. The checker drives the JIT REPL, which is intermittently
+      # nondeterministic on some runners: a trivially-pure doctest
+      # (`Path.is_absolute("/etc")` = `String.starts_with(path, "/")`) once
+      # rendered `false` on a macOS runner while passing 5/5 locally and on
+      # Linux, and the run/skip split varies run-to-run. Until that JIT-REPL
+      # nondeterminism is fixed (specs/todos), a flake here must not redden CI —
+      # so this reports but does not gate.
+      - name: Check stdlib `march>` doctests (advisory)
+        continue-on-error: true
         timeout-minutes: 5
         run: |
           eval $(opam env)
