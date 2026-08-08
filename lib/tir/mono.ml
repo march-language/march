@@ -1122,11 +1122,61 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
      Using a canonical string key (rather than structural Tir.ty key) avoids
      any potential hash/equality issues with complex type trees. *)
   let record_to_typename : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  let sort_fields fs =
+    List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
   List.iter (function
     | Tir.TDRecord (name, fields) ->
-      let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
-      let key = mangle_ty (Tir.TRecord sorted) in
+      let key = mangle_ty (Tir.TRecord (sort_fields fields)) in
       Hashtbl.replace record_to_typename key name
+    | _ -> ()
+  ) m.Tir.tm_types;
+  (* Second key per record type: the DEEP-normalized shape, with every nominal
+     record field expanded to its own structural form.
+
+     The declared shape of `type Outer = {label: String, inner: Inner}` keys on
+     `inner : TCon("Inner")`, but a call site that builds an `Outer` from a
+     record literal carries the fully structural
+     `{inner : {id : Int}, label : String}` — the two mangle strings never
+     match, so interface dispatch (`to_json(o)` on a nested `derive Json`
+     shape) missed and left a bare unresolved method call for the linker.
+     Registering the expanded key as well makes both spellings resolve.
+
+     Declared keys are registered first and are never overwritten here, so a
+     nominal type whose declared shape happens to equal another's expanded
+     shape keeps its own name.  Expansion only fires for parameterless [TCon]s
+     naming a record — a generic record's declared fields carry type variables
+     we have no arguments to substitute — and [seen] cuts recursive types
+     (`type T = {next: Option(T)}`) at the first revisit, leaving the nominal
+     [TCon] in place there. *)
+  let record_fields : (string, (string * Tir.ty) list) Hashtbl.t =
+    Hashtbl.create 8 in
+  List.iter (function
+    | Tir.TDRecord (name, fields) -> Hashtbl.replace record_fields name fields
+    | _ -> ()
+  ) m.Tir.tm_types;
+  let rec expand seen (t : Tir.ty) : Tir.ty =
+    match t with
+    | Tir.TCon (n, []) when not (SSet.mem n seen) ->
+      (match Hashtbl.find_opt record_fields n with
+       | Some fs ->
+         let seen' = SSet.add n seen in
+         Tir.TRecord (sort_fields
+                        (List.map (fun (f, ft) -> (f, expand seen' ft)) fs))
+       | None -> t)
+    | Tir.TCon (n, args) -> Tir.TCon (n, List.map (expand seen) args)
+    | Tir.TRecord fs ->
+      Tir.TRecord (sort_fields (List.map (fun (f, ft) -> (f, expand seen ft)) fs))
+    | Tir.TTuple ts -> Tir.TTuple (List.map (expand seen) ts)
+    | Tir.TFn (ps, r) -> Tir.TFn (List.map (expand seen) ps, expand seen r)
+    | Tir.TPtr t' -> Tir.TPtr (expand seen t')
+    | _ -> t
+  in
+  List.iter (function
+    | Tir.TDRecord (name, fields) ->
+      let deep = expand (SSet.singleton name) (Tir.TRecord (sort_fields fields)) in
+      let key = mangle_ty deep in
+      if not (Hashtbl.mem record_to_typename key) then
+        Hashtbl.replace record_to_typename key name
     | _ -> ()
   ) m.Tir.tm_types;
 
