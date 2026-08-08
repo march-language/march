@@ -3576,11 +3576,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (with-stdout-to native_node_discovery.sorted.out
    (system "LC_ALL=C sort native_node_discovery.out"))))
 
-; REVIVED 2026-08-08 alongside node_call_loopback (same fix: ephemeral port via
-; tcp_listen(0) + tcp_local_port; the scheduler deadlock it was preemptively
-; quarantined against is fixed). Soaked 10/10 clean (0 hangs) under host load ~10.
+; RE-QUARANTINED 2026-08-08: un-quarantined earlier the same day (ephemeral-port
+; fix), which correctly resolved the fixed-port collision — but exposed a
+; DIFFERENT, pre-existing flake on Linux CI. Unlike node_call_loopback/
+; rpc_auto_enroll (whose client prints from a single green thread), this test has
+; node-a AND node-b println their status lines CONCURRENTLY, and roughly 1-in-2
+; ubuntu runs tears two lines together with a lost newline, e.g.
+; `node-b: handshake ok, peer=node-anode-a: handshake ok, peer=node-b` plus a
+; stray blank line — which the sort-before-diff golden cannot absorb (it tolerates
+; REORDERING, not torn lines). This is the SAME torn-output race as
+; signal_term_suppress (below): the ci-infra investigation determined it is NOT
+; I/O-level write interleaving (march_println already does one atomic writev, and
+; a writev-retry fix measured no benefit and was reverted) but a pre-write
+; allocator/GC race between concurrent green threads on >1 scheduler thread.
+; Un-quarantine only once that scheduler race is fixed. The ephemeral-port and
+; deadlock fixes still stand and keep node_call_loopback/rpc_auto_enroll green.
+; Runnable manually via `dune build @test/node_discovery_quarantined`.
 (rule
- (alias runtest)
+ (alias node_discovery_quarantined)
  (action (diff native/node_discovery.expected native_node_discovery.sorted.out)))
 
 ; ── Compiler-emitted enroll/stub: auto-registration of __rpc_stub functions ──
