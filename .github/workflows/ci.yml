@@ -305,6 +305,14 @@ jobs:
           eval $(opam env)
           MARCH_BIN="dune exec march --" python3 scripts/gen-scrollmd.py --check
 
+      - name: Check stdlib `march>` doctests
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            python3 scripts/check-stdlib-doctests.py --check
+
       - name: Check formatting
         timeout-minutes: 3
         run: |
