@@ -553,6 +553,22 @@ void march_panic(void *s) {
     __builtin_trap();
 }
 
+/* Structured cleanup — see march_try_finally in march_runtime.c for the
+ * full contract.  WASM has no longjmp-based panic channel (march_panic
+ * traps the instance above), so there is nothing to catch: on the panic
+ * path the whole instance is already gone before cleanup could run.  This
+ * covers the non-panicking path so programs using File/Logger-style
+ * wrappers still compile and run. Closure apply fn lives at offset 16
+ * (same layout as native; see __try_call's header comment there). */
+void *march_try_finally(void *action, void *cleanup) {
+    typedef int64_t (*apply_fn_t)(void *, int64_t);
+    apply_fn_t apply_action  = *(apply_fn_t *)((char *)action + 16);
+    apply_fn_t apply_cleanup = *(apply_fn_t *)((char *)cleanup + 16);
+    int64_t result = apply_action(action, 1);   /* 1 = dummy Bool argument */
+    (void)apply_cleanup(cleanup, 1);
+    return (void *)result;
+}
+
 /* ── Scheduler stubs ────────────────────────────────────────────────── */
 
 int64_t march_tls_reductions = 0;
