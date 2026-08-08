@@ -7,38 +7,31 @@
           test_cap_sandbox test_audit test_cap_package)
  (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas))
 
-; QUARANTINED from `runtest` (2026-07-24): test_build_check.ml's "forge check"/
-; "forge build" cases shell out to a real `march check` subprocess
-; (forge/lib/cmd_build.ml's check_all). Confirmed failing in CI (both
-; ubuntu-24.04 and macos-15, ~10 of 15 cases each — every case that expects
-; success fails, every case that expects an Error trivially "passes" since
-; ANY failure satisfies it, consistent with a blanket environmental failure
-; of the underlying march invocation rather than 15 independent bugs) but
-; NOT reliably reproducible locally: a direct dune-runtest run here shows
-; only ONE real failure (see below), and a deliberately PATH-restricted
-; local run didn't reproduce the CI-side cascade either — the exact CI/local
-; discrepancy is still unexplained. Separately, that one reproducible local
-; failure is a genuine compiler bug, not a test-infra issue: "forge check 8"
-; (check: qualified-call cycle does not break bare ctor ordering) fails to
-; typecheck a Core/Facade/Worker 3-module qualified-call cycle fixture with
-; `I don't know a constructor called `Bad`` — Core's own `CoreError.Bad` is
-; not being found at all (the suggestion engine falls back to fuzzy-matching
-; an unrelated stdlib type, `Bar` from `SeriesKind`), plausibly a residual
-; gap in the same-day module-resolution fix (commit 7849f0da) for 3-way
-; qualified-call cycles specifically, distinct from the same-name-prefixed
-; sibling case that commit fixed. See specs/todos.md. Un-quarantine (add
-; test_build_check back to the `tests` stanza above) once BOTH the CI/local
-; discrepancy and the constructor-resolution bug are investigated. Runnable
-; manually via `dune build @forge/test/build_check_quarantined`.  Full
-; quarantine inventory (what coverage this leaves dark): specs/todos.md.
+; test_build_check.ml's "forge check"/"forge build"/"forge test" cases shell
+; out to a real `march check` subprocess (forge/lib/cmd_build.ml's check_all).
+; It was QUARANTINED (2026-07-24) on two problems, both now resolved:
+;   1. CI/local divergence — CI (fresh checkout: no `.march-version` pin, no
+;      ~/.march/current global, no `march` on PATH) resolved to a bare `march`
+;      that did not exist, so every subprocess failed identically ("typecheck
+;      failed"); locally the suite silently exercised the installed release via
+;      the global symlink, not the build under test. FIXED by making the suite
+;      HERMETIC: the rule below passes the just-built compiler as MARCH_TEST_BIN
+;      (`%{bin:march}`, which dune also builds) and setup_hermetic_march symlinks
+;      it as `march` on a private PATH with an empty MARCH_HOME. Host-independent.
+;   2. A real constructor-resolution bug (bare `Bar(_)` pattern on a value of a
+;      known type reported ambiguous against stdlib `Plot.Bar`). FIXED in
+;      lib/typecheck/typecheck.ml (the ambiguity diagnostic now defers to a
+;      unique expected-type resolution).
 (executable
  (name test_build_check)
  (modules test_build_check)
  (libraries march_forge alcotest unix qcheck-core qcheck-alcotest march_cas))
 
 (rule
- (alias build_check_quarantined)
- (action (run %{exe:test_build_check.exe})))
+ (alias runtest)
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (run %{exe:test_build_check.exe}))))
 
 (executable
  (name bench_solver)

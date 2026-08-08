@@ -43,6 +43,15 @@ static int g_tests_failed = 0;
     g_tests_passed++;                       \
 } while (0)
 
+/* Request shutdown before running so the scheduler stops once the finite,
+ * self-terminating batch of work drains, rather than idle-nanosleeping forever
+ * waiting for a main green thread that a C harness never has. See the fuller
+ * note in test_scheduler.c. */
+static void run_to_quiescence(void) {
+    march_sched_request_shutdown();
+    march_sched_run();
+}
+
 /* ── Test 1: test_multithread_spawn_10000 ─────────────────────────────── */
 /*
  * Spawn 10,000 processes across multiple schedulers, each increments an
@@ -63,7 +72,7 @@ static void test_multithread_spawn_10000(void) {
         march_proc *p = march_sched_spawn(mt_worker, NULL);
         TEST_ASSERT(p != NULL, "spawn should succeed");
     }
-    march_sched_run();
+    run_to_quiescence();
     TEST_ASSERT(g_mt_counter == 10000, "all 10000 processes should complete");
     TEST_PASS();
 }
@@ -109,7 +118,7 @@ static void test_multithread_send_recv(void) {
     for (int i = 0; i < 50; i++) {
         march_sched_spawn(mt_sender, NULL);
     }
-    march_sched_run();
+    run_to_quiescence();
     TEST_ASSERT(g_mt_recv_count == 500, "receiver should get all 500 messages");
     TEST_PASS();
 }
@@ -136,7 +145,7 @@ static void test_work_stealing(void) {
     for (int i = 0; i < 200; i++) {
         march_sched_spawn(steal_worker, NULL);
     }
-    march_sched_run();
+    run_to_quiescence();
     TEST_ASSERT(g_steal_counter == 200, "all 200 processes should complete via stealing");
     TEST_PASS();
 }

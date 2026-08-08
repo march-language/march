@@ -122,6 +122,57 @@ let cache_root () =
 let obj_name (src : string) =
   Filename.remove_extension (Filename.basename src) ^ ".o"
 
+(* Representative system headers the runtime's TLS/compress/hash sources compile
+   against (march_tls.c → openssl, march_compress.c → zlib/zstd/brotli,
+   march_blake3.c → blake3). Their include DIRECTORIES appear in [cflags] as
+   `-I` flags and their feature toggles as `-D` defines, all folded into the key
+   already — but the header CONTENTS are not. A `brew upgrade openssl@3` (or a CI
+   base-image library bump that leaves clang's `--version` string unchanged)
+   keeps the path, the define, and `cc --version` all identical, so the stale
+   `.o` is served. Folding a digest of the resolved header files closes that
+   hole. This only ever ADDS entropy to the key, so the failure mode is an extra
+   (correct) recompile, never a wrong serve — a header that cannot be resolved
+   is simply recorded as absent rather than skipped silently. *)
+let representative_system_headers =
+  [ "openssl/opensslv.h"; "zlib.h"; "zstd.h"; "brotli/encode.h"; "blake3.h" ]
+
+(* The `-I<dir>` / `-I <dir>` include directories named in [cflags], plus the
+   conventional default search roots, in search order. *)
+let include_dirs_of (cflags : string) : string list =
+  let toks =
+    String.split_on_char ' ' cflags
+    |> List.filter (fun s -> s <> "")
+  in
+  let rec collect acc = function
+    | [] -> List.rev acc
+    | tok :: rest ->
+      if String.length tok > 2 && String.sub tok 0 2 = "-I" then
+        collect (String.sub tok 2 (String.length tok - 2) :: acc) rest
+      else if tok = "-I" then
+        (match rest with
+         | dir :: rest' -> collect (dir :: acc) rest'
+         | [] -> List.rev acc)
+      else collect acc rest
+  in
+  collect [] toks
+  @ [ "/usr/include"; "/usr/local/include"; "/opt/homebrew/include" ]
+
+(* A stable fingerprint of the resolved system headers, for the cache key. *)
+let system_header_identity (cflags : string) : string =
+  let dirs = include_dirs_of cflags in
+  let fingerprint name =
+    match
+      List.find_opt
+        (fun d -> Sys.file_exists (Filename.concat d name))
+        dirs
+    with
+    | Some d ->
+      (try name ^ "=" ^ Digest.to_hex (Digest.file (Filename.concat d name))
+       with _ -> name ^ "=unreadable")
+    | None -> name ^ "=absent"
+  in
+  String.concat ";" (List.map fingerprint representative_system_headers)
+
 (** Compile [sources] to objects once per (runtime, toolchain, flags) triple
     and return the object paths in the same order as [sources].
 
@@ -154,7 +205,11 @@ let ensure_exn ~(cc : string) ~(cflags : string) ~(sources : string list)
                  match it. *)
               Lazy.force Cas.compiler_identity;
               cc_id;
-              cflags ]
+              cflags;
+              (* Header CONTENTS, not just the -I paths already in [cflags] —
+                 catches a system-library upgrade that leaves the path and
+                 `cc --version` unchanged (see [system_header_identity]). *)
+              system_header_identity cflags ]
             @ List.map Filename.basename sources))
     in
     let dir =
