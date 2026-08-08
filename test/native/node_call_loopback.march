@@ -1,7 +1,8 @@
 -- Node.call loopback integration test (P3 L4).
 --
--- Spins up a listener on 29850, spawns a server task that serves exactly
--- three RPC requests, then makes three calls from the same process:
+-- Spins up a listener on an OS-assigned ephemeral port (tcp_listen(0) +
+-- tcp_local_port), spawns a server task that serves exactly three RPC
+-- requests, then makes three calls from the same process:
 --   1. A correct hash match → ok:7
 --   2. A sig_hash mismatch  → err:TypeMismatch
 --   3. An unknown target    → err:NoTarget
@@ -85,11 +86,16 @@ mod NodeCallLoopback do
   end
 
   fn main() do
-    let port = 29850
-
-    let listen_fd = match tcp_listen(port) do
+    -- Bind an OS-assigned ephemeral port (0), then read it back — so two
+    -- concurrent runs on a shared host never collide on a fixed port.
+    let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
+    end
+
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
     end
 
     let srv = task_spawn(fn _ -> run_server(listen_fd))

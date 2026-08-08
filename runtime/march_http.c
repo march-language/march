@@ -233,6 +233,27 @@ void *march_tcp_accept(int64_t listen_fd) {
     return ok_obj;
 }
 
+/* Return the local (bound) TCP port of a socket fd — the OS-assigned port when
+ * the socket was listened on port 0. Lets a test bind an ephemeral port and
+ * then hand it to an in-process client, so two concurrent runs on a shared host
+ * never collide on a fixed port. Result(Int, String); the Int is pre-tagged. */
+void *march_tcp_local_port(int64_t fd) {
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    if (getsockname((int)fd, (struct sockaddr *)&addr, &len) < 0) {
+        void *s = march_string_lit("tcp_local_port: getsockname failed", 34);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    int64_t port = (int64_t)ntohs(addr.sin_port);
+    void *ok_obj = march_alloc(24);
+    /* tag stays 0 = Ok */
+    *(int64_t *)((char *)ok_obj + 16) = (port << 1) | 1;
+    return ok_obj;
+}
+
 /* Per-thread accumulation buffer for march_tcp_recv_http().
  * Allocated on first use and grown as needed; never freed (worker threads
  * are long-lived, OS reclaims memory on exit).  Reused across requests on

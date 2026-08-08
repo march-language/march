@@ -1880,6 +1880,7 @@ let builtin_cap_table : (string * string) list = [
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
   ("tcp_accept",            "IO.NetListen");
+  ("tcp_local_port",        "IO.NetListen");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
@@ -2470,6 +2471,9 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_listen",              Mono (TArrow (t_int, t_result t_int t_string)));
     (* tcp_accept(listen_fd): blocks until a client connects, returns Ok(client_fd) or Err *)
     ("tcp_accept",              Mono (TArrow (t_int, t_result t_int t_string)));
+    (* tcp_local_port(fd): the local (bound) port of a socket — the OS-assigned
+       one when listened on port 0. Returns Ok(port) or Err(reason). *)
+    ("tcp_local_port",          Mono (TArrow (t_int, t_result t_int t_string)));
     (* tcp_connect/send_all/recv_all always fail with a String reason (see
        eval.ml and runtime/march_http.c) — Mono, matching tcp_listen/tcp_accept
        above rather than leaving the error type unconstrained. *)

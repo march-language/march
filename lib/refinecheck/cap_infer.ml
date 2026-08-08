@@ -74,6 +74,7 @@ let cap_table : (string * string) list = [
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
   ("tcp_accept",            "IO.NetListen");
+  ("tcp_local_port",        "IO.NetListen");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
