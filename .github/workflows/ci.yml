@@ -401,6 +401,31 @@ jobs:
             printf "standalone C, clang -O%s: march_string_starts_with(/etc, /) = %s  (expect 1)\n" "$O" "$(/tmp/sw_probe)"
           done
 
+      # DIAGNOSTIC (macOS only, advisory) — the standalone C is correct on this
+      # clang, so the miscompile is in the MARCH-generated path (literal
+      # construction / prelude / call chain). Narrow WHICH construct: is the
+      # literal's length right (byte_size), is it "/"-specific or any single-char
+      # match, is it starts_with-specific or also ends_with/eq? Each line prints
+      # its REPL value next to the expected one.
+      - name: Narrow the String miscompile at the March level (macOS, advisory)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          BIN="$PWD/_build/default/bin/main.exe"
+          probe() { printf '%s\n' "$1" | "$BIN" repl 2>/dev/null | grep -oE 'march\(1\)> = .*' | sed 's/march(1)> = //'; }
+          echo "String.byte_size(\"/etc\")            -> $(probe 'String.byte_size("/etc")')            (expect 4)"
+          echo "String.byte_size(\"/\")               -> $(probe 'String.byte_size("/")')               (expect 1)"
+          echo "\"/etc\" == \"/etc\"                    -> $(probe '"/etc" == "/etc"')                    (expect true)"
+          echo "String.starts_with(\"/etc\", \"\")      -> $(probe 'String.starts_with("/etc", "")')      (expect true)"
+          echo "String.starts_with(\"/etc\", \"/\")     -> $(probe 'String.starts_with("/etc", "/")')     (expect true)"
+          echo "String.starts_with(\"/etc\", \"/e\")    -> $(probe 'String.starts_with("/etc", "/e")')    (expect true)"
+          echo "String.starts_with(\"/etc\", \"/etc\")  -> $(probe 'String.starts_with("/etc", "/etc")')  (expect true)"
+          echo "String.starts_with(\"aetc\", \"a\")     -> $(probe 'String.starts_with("aetc", "a")')     (expect true)"
+          echo "String.ends_with(\"/etc\", \"c\")       -> $(probe 'String.ends_with("/etc", "c")')       (expect true)"
+
       - name: Check formatting
         timeout-minutes: 3
         run: |
