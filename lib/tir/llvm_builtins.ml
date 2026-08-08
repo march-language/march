@@ -91,6 +91,17 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_ext(ptr %s)" };
   { march_name = "todo_"; c_name = Some "march_todo_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_todo_ext(ptr %s)" };
+  (* Structured cleanup: try_finally(action, cleanup) runs action(), then
+     cleanup() (even if action panicked), then re-raises action's panic.
+     Returns the action's value at the polymorphic type `a` DIRECTLY, so
+     ret_ty is the erased TVar "_" (the record_put precedent): the call site
+     reads a uniform ptr and the consumer conditionally untags. A concrete
+     scalar here (e.g. TInt at an Int-instantiated call site) would read the
+     runtime's uniform tagged value raw — 42 back as (42<<1)|1 = 85. Without
+     this row the name fell through to the unknown-extern fallback and
+     linked against a nonexistent bare `try_finally` symbol. *)
+  { march_name = "try_finally"; c_name = Some "march_try_finally"; ret_ty = Some (Tir.TVar "_");
+    in_is_builtin = false; declare_sig = Some "declare ptr  @march_try_finally(ptr %action, ptr %cleanup)" };
   { march_name = "println"; c_name = Some "march_println"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_println(ptr %s)" };
   { march_name = "print_stderr"; c_name = Some "march_print_stderr"; ret_ty = Some Tir.TUnit;
@@ -954,6 +965,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_panic";
   PDeclare "march_panic_ext";
   PDeclare "march_todo_ext";
+  PDeclare "march_try_finally";
   PDeclare "march_test_init";
   PDeclare "march_test_run";
   PDeclare "march_test_setup_all";
