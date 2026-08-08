@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Nested `derive Json` types now compile natively.** Calling `to_json`/
+  `from_json` on a record type that nests another `derive Json` record (e.g.
+  `type Outer = {label: String, inner: Inner}`) previously failed to link
+  (and, after an unrelated fix, failed with a spurious "ambiguous
+  interface-method call") in the compiled/LLVM backend, even though the call
+  was never actually ambiguous and worked fine interpreted. The compiler's
+  record-to-type-name lookup used for interface dispatch now also indexes
+  each record type's deep-normalized (fully structural) shape, not just its
+  declared shape, so a record literal's fully structural type at the call
+  site resolves correctly.
+
 - **`try_finally` now has a native implementation, so compiled programs using
   fd-streaming file I/O link and run.** It was a typecheck+interpreter builtin
   only; any natively compiled program that reached it — `File.with_lines`,
