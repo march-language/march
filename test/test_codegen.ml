@@ -11249,8 +11249,9 @@ let test_compiled_show_atom_multi_parity () =
 (* ── Guard liveness (Wave 2 final review): positive control for
    [fail_if_unresolved_iface_method] ─────────────────────────────────────
    The four parity tests above prove the FIXED pipeline resolves nested
-   interface-method calls; on a healthy compiler the guard's failwith never
-   fires, so nothing exercised it.  If ctx.top_fns naming or the guard's
+   interface-method calls; on a healthy compiler the guard's
+   Ambiguous_iface_call (a user-facing diagnostic since 2026-08-08, formerly
+   a failwith ICE) never fires, so nothing exercised it.  If ctx.top_fns naming or the guard's
    `$`-before-last-dot detection predicate ever drifts, the guard would rot
    silently.  These tests hand-build the exact regression signature as a raw
    Tir.tir_module — a bare `describe` call alongside a registered mangled
@@ -11298,14 +11299,14 @@ let assert_iface_guard_fires ~path_label m =
   match March_tir.Llvm_emit.emit_module m with
   | (_ : string) ->
     Alcotest.fail
-      (path_label ^ ": emit_module was expected to raise Failure — the \
-                     unresolved-iface-method guard did not fire on a bare \
-                     `describe` call with a registered Pretty$Int.describe \
-                     impl")
-  | exception Failure msg ->
+      (path_label ^ ": emit_module was expected to raise \
+                     Ambiguous_iface_call — the unresolved-iface-method \
+                     guard did not fire on a bare `describe` call with a \
+                     registered Pretty$Int.describe impl")
+  | exception March_tir.Llvm_calls.Ambiguous_iface_call msg ->
     Alcotest.(check bool)
       (path_label ^ ": failure names the unresolved symbol (got: " ^ msg ^ ")")
-      true (ir_contains msg "unresolved interface-method call to `describe`");
+      true (ir_contains msg "interface-method call to `describe`");
     Alcotest.(check bool)
       (path_label ^ ": failure names the candidate impl (got: " ^ msg ^ ")")
       true (ir_contains msg "Pretty$Int.describe")
@@ -13118,6 +13119,101 @@ let test_vectorize_generic_fail_warn () =
   Alcotest.(check bool) "severity is Warning, not Error"
     true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Warning)
 
+(* ── derive Json / from_json return-position interface dispatch ─────────
+   `from_json` dispatches on its RESULT type, not its argument (the argument
+   is always a JsonValue) — mono's first-arg interface dispatch can never
+   resolve it.  Two behaviors are pinned here:
+
+   1. SINGLE derive in the module: the call is unambiguous (exactly one
+      JsonFrom impl exists, and its parameter type matches the call's
+      argument type, proving the dispatch position is the result).  Mono
+      must resolve it — this used to fall through to a raw
+      `Undefined symbols: _from_json` linker error.
+
+   2. MULTIPLE derives in one module: the result type at the call site is
+      an unpinned TVar (the typechecker does not back-propagate it), so
+      dispatch is genuinely ambiguous.  The compiler must reject this with
+      a clean user-facing diagnostic (exit 1) naming the candidate impls —
+      not the "internal compiler error" ICE (exit 3) it used to raise, and
+      not a linker error. *)
+
+let derive_json_single_src = {|mod JsonOne do
+  needs IO.Console
+  type Flat = { name : String, age : Int }
+  derive Json for Flat
+
+  fn main() do
+    match Json.parse("{\"name\":\"a\",\"age\":3}") do
+    Err(e) -> println("parse err")
+    Ok(v) -> match from_json(v) do
+      Ok(x) -> println("ok: " ++ x.name)
+      Err(e) -> println("decode err")
+      end
+    end
+  end
+end|}
+
+let test_derive_json_single_from_json_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_json_single" derive_json_single_src in
+  (* interpreter baseline: bare from_json resolves to the sole derive *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter decodes via the single derive"
+    "ok: a" interp_out;
+  let bin = Filename.concat tmp "json_single_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "compiled single-derive bare from_json resolves to the sole impl \
+       (used to be a raw `_from_json` linker error)"
+      "ok: a" run_out
+
+let derive_json_ambiguous_src = {|mod JsonTwo do
+  needs IO.Console
+  type Flat = { name : String, age : Int }
+  derive Json for Flat
+  type Other = { id : Int }
+  derive Json for Other
+
+  fn main() do
+    match Json.parse("{\"name\":\"a\",\"age\":3}") do
+    Err(e) -> println("parse err")
+    Ok(v) -> match from_json(v) do
+      Ok(x) -> println("ok: " ++ x.name)
+      Err(e) -> println("decode err")
+      end
+    end
+  end
+end|}
+
+let test_derive_json_ambiguous_from_json_diagnostic () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_json_ambig" derive_json_ambiguous_src in
+  let bin = Filename.temp_file "march_json_ambig_bin" "" in
+  Sys.remove bin;
+  (* Deliberately NOT compile_march_or_skip (same rationale as
+     test_vectorize_hard_error_fails_compile): the PASSING outcome is a
+     nonzero exit produced inside llvm_emit, before clang is ever invoked,
+     so clang's absence is irrelevant and the skip heuristic would make the
+     passing case vacuous on a clang-less box. *)
+  let cmd = Printf.sprintf "cd %s && %s --compile -o %s %s"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src) in
+  let (rc, output) = run_capture cmd in
+  Alcotest.(check bool) "ambiguous from_json: compile fails (nonzero exit)"
+    true (rc <> 0);
+  Alcotest.(check bool) "diagnostic names the ambiguous method" true
+    (ir_contains output "from_json" && ir_contains output "ambiguous");
+  Alcotest.(check bool) "diagnostic is a clean user error, not an ICE" true
+    (not (ir_contains output "internal compiler error"))
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -13798,6 +13894,12 @@ let codegen_suites =
             test_unit_tail_discard_runs_compiled;
           Alcotest.test_case "`()` tail after a LITERAL discard runs compiled (exit 0)" `Quick
             test_unit_tail_literal_discard_runs_compiled;
+        ] );
+      ( "derive_json_dispatch_codegen", [
+          Alcotest.test_case "compiled single-derive bare from_json resolves" `Quick
+            test_derive_json_single_from_json_compiled;
+          Alcotest.test_case "ambiguous multi-derive from_json: clean diagnostic, not ICE" `Quick
+            test_derive_json_ambiguous_from_json_diagnostic;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick

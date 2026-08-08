@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A bare `from_json` call with a single `derive Json` in scope now compiles
+  natively.** `from_json` dispatches on its result type (its argument is
+  always a `JsonValue`), which monomorphization's first-argument interface
+  dispatch could never resolve — a minimal `derive Json for T` +
+  `from_json(v)` program failed to link with `Undefined symbols: _from_json`.
+  When exactly one implementation exists and its parameter type matches the
+  call's argument type, the call is unambiguous and now resolves to it.
+- **An unresolvable interface-method call (e.g. bare `from_json` with several
+  `derive Json` in the same module) is now a clean compile error instead of an
+  internal compiler error or a linker error.** `--compile` on such a program
+  (e.g. `test/stdlib/test_json_typed.march`) previously died with an ICE
+  (exit 3) or a raw `_from_json` linker failure; it now reports "ambiguous
+  interface-method call", names the candidate implementations, explains that
+  the dispatch position is not concrete at the call site, and exits 1.
+
 - **A bare constructor pattern on a value of a known type is no longer reported
   as ambiguous against a same-named stdlib constructor.** Matching `Defs.make(n)`
   (of type `Defs.Thing`) with a bare `Bar(_)` arm errored with "Constructor `Bar`

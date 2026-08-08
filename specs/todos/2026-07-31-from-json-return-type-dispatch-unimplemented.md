@@ -15,6 +15,16 @@ That guard now exists (`check_json_cap_sites` in
 `specs/progress/2026-08-05-cap-unforgeability.md`), so this item is safe to
 implement. Two things it depends on, both easy to break by accident:
 
+**Compiled-backend status update, 2026-08-08** (see
+`specs/progress/2026-08-08-from-json-native-ice-single-impl-and-diagnostic.md`):
+the native backend now resolves a bare `from_json` when exactly ONE
+`JsonFrom` impl is in scope (`Mono.return_position_single_impl` — the
+argument-type-matches-impl-parameter proof), and rejects the ≥2-impl case
+with a clean "ambiguous interface-method call" diagnostic (exit 1) instead
+of the former ICE/linker error. The interpreter's last-derive-wins rebinding
+is unchanged. This item — true return-type-directed dispatch so the ≥2 case
+can RESOLVE instead of erroring — remains open.
+
 - the check is a **deferred end-of-module sweep**, not a call-site check,
   because the result var is usually pinned by later unification. Making it
   eager silently disables it — `specs/lang/types/reject/t143_cap_from_json_deferred_zonk.march`
