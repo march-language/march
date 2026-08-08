@@ -9123,6 +9123,36 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           MPText " to the module body." ])
   ) extern_cap_uses;
   (* Check 2: every needs declaration must be used *)
+  (* The capabilities this module's OWN functions reach TRANSITIVELY —
+     including through a stdlib wrapper, which none of the source-level lists
+     below can see (the stdlib deliberately declares no `needs`, so
+     [env.module_caps] never carries its uses either).  Without this, the
+     ceiling and Check 2 contradicted each other on the same line: a
+     stdlib-mediated `pmap` REQUIRES `needs IO.Spawn` at the ceiling, and
+     Check 2 then said "no function requires Cap(IO.Spawn) — help: remove",
+     whose autofix re-breaks the build.  First hit minutes after the ceiling
+     became the default (golden g43); filed as
+     specs/todos/2026-08-08-unused-cap-warning-contradicts-ceiling.md.
+
+     Same closure table Check 4 uses for imports, and it is [lazy] for the
+     same reason: only a module that both declares a `needs` and fails every
+     cheaper test below pays for the fixpoint.  Keyed by this module's
+     DECLARED function names ([cap_qname], skipping stdlib-span decls) — not
+     by key shape: at the entry module the prefix is empty, so prelude
+     functions are keyed bare exactly like the user's own, and selecting by
+     shape would fold the prelude's IO.Console into every module (the same
+     trap [own_caps_of_this_module] documents). *)
+  let own_transitive_caps : string list Lazy.t = lazy (
+    let tbl = Lazy.force trans_closures in
+    List.concat_map (fun (d : Ast.decl) ->
+        match d with
+        | Ast.DFn (fd, sp) when not (span_is_stdlib sp) ->
+          (match Hashtbl.find_opt tbl (cap_qname fd.Ast.fn_name.txt) with
+           | Some caps -> caps | None -> [])
+        | _ -> [])
+      decls
+    |> List.sort_uniq String.compare)
+  in
   List.iter (fun need ->
     let need_sp =
       let rec find_span = function
@@ -9138,7 +9168,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses
               || List.exists (fun (_, req_caps) ->
                    List.exists (fun req_cap -> cap_subsumes need req_cap) req_caps
-                 ) env.module_caps in
+                 ) env.module_caps
+              || List.exists (fun cap_path -> cap_subsumes need cap_path)
+                   (Lazy.force own_transitive_caps) in
     if not used then
       Err.warning_with_fix env.errors ~span:need_sp
         ~fix:(Err.FDelete {

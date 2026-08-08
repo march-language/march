@@ -46,6 +46,22 @@ git log is authoritative for exact commits.
   (exit 3) or a raw `_from_json` linker failure; it now reports "ambiguous
   interface-method call", names the candidate implementations, explains that
   the dispatch position is not concrete at the call site, and exits 1.
+
+- **The unused-capability warning no longer contradicts the capability
+  ceiling.** A module reaching a capability only through a stdlib wrapper
+  (`Parallel.pmap` → `IO.Spawn`) was told by the ceiling to add the `needs`
+  line and then by the unused-`needs` warning to remove that same line — with
+  an autofix that re-broke the build. The warning now consults the transitive
+  capability closure (the same analysis import checking uses), so a
+  stdlib-mediated use counts as a use. A `needs` that nothing requires still
+  warns.
+
+- **The "cannot be attributed" ceiling error no longer asserts a cause it
+  cannot know.** It claimed the capability was "reached only through indirect
+  calls" — wrong in every diagnosed case to date. It now states what is known,
+  and says to report the diagnostic if adding the `needs` line does not
+  resolve it, since that indicates an attribution gap in the compiler.
+
 - **A module with no entry point is no longer charged capability violations
   for the entire standard library.** A file with no `fn main` (a library, or a
   test-only file) drew up to 17 ceiling violations naming stdlib modules

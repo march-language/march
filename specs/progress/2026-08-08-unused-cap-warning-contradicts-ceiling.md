@@ -48,3 +48,31 @@ consistent everywhere.
 `march specs/lang/golden/g43_parallel_determinism.march` (interpret) prints
 the warning on stderr; `march --compile` on the same file with the line
 REMOVED fails the ceiling. Both cannot be right.
+
+---
+
+## RESOLVED 2026-08-08 — a third direction, better than either proposed
+
+Neither option above was taken. Typecheck already computes the per-function
+TRANSITIVE capability closure (`fn_transitive_capability_closures_tbl`, the
+table Check 4 uses for imports) — and that closure sees straight through a
+stdlib wrapper to the builtin. Check 2 now consults it: a `needs` reached by
+any function THIS module declares (DFn, stdlib-span decls excluded, keyed by
+`cap_qname` — never by key SHAPE, since at the entry module prelude functions
+are keyed bare exactly like the user's own) is used, so the warning and its
+`remove` autofix simply do not fire on a stdlib-mediated use. Consistent
+across interpret and compile, because it is all inside typecheck — the
+option-1 asymmetry never arises.
+
+Pinned by `cap_propagation` tests "stdlib-mediated needs is not unused"
+(RED first: warning fired on `needs IO.Clock` used only via `DateTime.now()`)
+and "unrelated needs warns with stdlib loaded" (the closure consult must not
+degenerate into never-warn). Witness: `march g43_parallel_determinism.march`
+now runs with zero warnings.
+
+Same commit: `Cap_ceiling.describe`'s `Unattributed` arm no longer asserts
+"reached only through indirect calls" — the one cause it could imagine, and
+wrong for every unattributable capability actually diagnosed in 2026-08 (all
+four had different causes; each investigation began by disbelieving the
+message). It now states what the check knows, lists indirect calls as one
+likely cause, and says to report it if adding `needs` does not resolve it.
