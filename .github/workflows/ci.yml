@@ -305,22 +305,35 @@ jobs:
           eval $(opam env)
           MARCH_BIN="dune exec march --" python3 scripts/gen-scrollmd.py --check
 
-      # ADVISORY (continue-on-error) — surfaces stdlib doctest drift without
-      # blocking merge. The checker drives the JIT REPL, which is intermittently
-      # nondeterministic on some runners: a trivially-pure doctest
-      # (`Path.is_absolute("/etc")` = `String.starts_with(path, "/")`) once
-      # rendered `false` on a macOS runner while passing 5/5 locally and on
-      # Linux, and the run/skip split varies run-to-run. Until that JIT-REPL
-      # nondeterminism is fixed (specs/todos), a flake here must not redden CI —
-      # so this reports but does not gate.
-      - name: Check stdlib `march>` doctests (advisory)
+      # ADVISORY (continue-on-error) + DIAGNOSTIC SOAK. The checker drives the
+      # JIT REPL, which is intermittently nondeterministic on some runners: a
+      # trivially-pure doctest (`Path.is_absolute("/etc")` = `String.starts_with(
+      # path, "/")`) once rendered `false` on a macOS runner while passing 50+/50+
+      # locally (warm/cold/concurrent) and on Linux — a low-rate flake in the
+      # JIT's clang+dlopen path that does NOT reproduce locally (see
+      # specs/todos/2026-08-08-jit-repl-nondeterminism-doctest-flake.md).
+      # Since it only manifests here, run a short --diagnose soak so that WHEN it
+      # recurs, this job captures the evidence to root-cause it: the full batched
+      # REPL session, an isolated re-run on BOTH the default (clang+dlopen) and
+      # the ORC (in-process LLJIT) backend, and the toolchain/arch. A caught
+      # discrepancy fails the step (visible ⚠) but continue-on-error keeps the
+      # job green until the root cause is fixed.
+      - name: Check stdlib `march>` doctests (advisory + diagnostics)
         continue-on-error: true
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           eval $(opam env)
           dune build bin/main.exe
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            python3 scripts/check-stdlib-doctests.py --check
+          export MARCH_BIN="$PWD/_build/default/bin/main.exe"
+          rc=0
+          for i in $(seq 1 6); do
+            echo "===== stdlib doctest run $i/6 ====="
+            python3 scripts/check-stdlib-doctests.py --check --diagnose || rc=1
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::stdlib doctest checker hit a discrepancy on this runner — see the DOCTEST ANOMALY block(s) above (batched session + isolated default-vs-ORC re-run)."
+          fi
+          exit "$rc"
 
       - name: Check formatting
         timeout-minutes: 3

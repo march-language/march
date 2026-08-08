@@ -117,38 +117,112 @@ def extract_doctests(path):
         yield (i + 1, expr, expected, reason)
 
 
-def run_module(bin_path, exprs):
-    """Feed exprs to one `march repl` session; return {input_index: value}.
+def run_repl(bin_path, exprs, backend=None):
+    """Feed exprs to one `march repl` session. Return (values, stdout, stderr).
 
-    The REPL prints `march(N)> = VALUE` where N is the 1-based input index, so
-    the Nth input's value is keyed by N. An input that errors prints a bare
-    `march(N)>` with no `= VALUE` and simply has no entry — alignment is by N,
-    never by position, so one errored expression can't shift the rest.
+    `values` is {input_index: rendered_value}. The REPL prints
+    `march(N)> = VALUE` where N is the 1-based input index, so the Nth input's
+    value is keyed by N. An input that errors prints a bare `march(N)>` with no
+    `= VALUE` and simply has no entry — alignment is by N, never by position, so
+    one errored expression can't shift the rest. `backend` overrides
+    MARCH_JIT_BACKEND for this session (e.g. "orc").
     """
     stdin = "".join(e + "\n" for e in exprs)
+    env = dict(os.environ)
+    if backend is not None:
+        env["MARCH_JIT_BACKEND"] = backend
     proc = subprocess.run(
         [bin_path, "repl"],
-        input=stdin, capture_output=True, text=True, timeout=120,
+        input=stdin, capture_output=True, text=True, timeout=120, env=env,
     )
     values = {}
     for line in proc.stdout.splitlines():
         m = REPL_VALUE_RE.search(line)
         if m:
             values[int(m.group(1))] = m.group(2).rstrip()
-    return values
+    return values, proc.stdout, proc.stderr
+
+
+# Free lowercase identifiers a self-contained doctest expression must NOT
+# reference (a `let` a prior example line set up); used only to decide whether a
+# no-value result is anomalous (worth diagnosing) or an expected setup skip.
+_IDENT_RE = re.compile(r"\b([a-z_][a-zA-Z0-9_]*)\b")
+_KNOWN_FREE = {"fn", "do", "end", "let", "if", "else", "match", "true", "false"}
+
+
+def references_bare_local(expr):
+    """Heuristic: does `expr` reference a lowercase identifier that isn't a
+    module-qualified call target or a keyword? Such an expr needs a prior `let`,
+    so a no-value result for it is an expected skip, not an anomaly."""
+    # Drop `Module.member` qualified names — their leading segment is uppercase.
+    stripped = re.sub(r"\b[A-Z][A-Za-z0-9_]*\.", "", expr)
+    for ident in _IDENT_RE.findall(stripped):
+        if ident in _KNOWN_FREE:
+            continue
+        # A bare lowercase word that is immediately followed by "(" is a call to
+        # a lowercase top-level/stdlib fn (fine); otherwise it's a free var.
+        if not re.search(re.escape(ident) + r"\s*\(", stripped):
+            return True
+    return False
+
+
+def diagnose_anomaly(bin_path, path, lineno, expr, expected, actual,
+                     module_stdout, module_stderr):
+    """Dump everything needed to understand a doctest anomaly on the runner that
+    produced it: the full batched session output, an isolated re-run on the
+    default (clang+dlopen) backend, an ORC (in-process LLJIT) re-run, and env."""
+    bar = "─" * 72
+    print(f"\n╔══ DOCTEST ANOMALY {path}:{lineno}", flush=True)
+    print(f"║  expr     : {expr}", flush=True)
+    print(f"║  expected : {expected!r}", flush=True)
+    print(f"║  actual   : {actual!r}", flush=True)
+    print(f"╟─ full batched `march repl` session for this module {bar[:20]}", flush=True)
+    print(module_stdout, flush=True)
+    if module_stderr.strip():
+        print("║  ── session stderr ──", flush=True)
+        print(module_stderr, flush=True)
+    # Isolated re-run on each backend: does it reproduce alone, and does the
+    # in-process ORC backend (no clang/dlopen/dyld) agree with the doc?
+    for label, backend in (("default (clang+dlopen)", None), ("orc (in-process)", "orc")):
+        try:
+            vals, out, err = run_repl(bin_path, [expr], backend=backend)
+            iso = vals.get(1, "<no value>")
+        except Exception as e:  # noqa: BLE001 — diagnostics must never crash the run
+            iso = f"<re-run raised {e!r}>"
+            out = err = ""
+        print(f"╟─ isolated re-run [{label}]: {iso!r}", flush=True)
+        if err.strip():
+            print(f"║    stderr: {err.strip()[:400]}", flush=True)
+    print(f"╚══ end anomaly {path}:{lineno}\n", flush=True)
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a != "--check"]
+    # --diagnose: on any anomaly (a wrong value, or an unexpected no-value for a
+    # self-contained primitive doctest) dump full evidence — for capturing the
+    # intermittent JIT-REPL nondeterminism on the CI runner that produces it,
+    # since it does not reproduce locally (specs/todos JIT-REPL nondeterminism).
+    diagnose = "--diagnose" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--check", "--diagnose")]
     bin_path = os.environ.get("MARCH_BIN", "./_build/default/bin/main.exe")
     if not os.path.exists(bin_path):
         print(f"error: march binary not found at {bin_path} (set MARCH_BIN)", file=sys.stderr)
         return 2
     files = args or sorted(glob.glob("stdlib/*.march"))
 
+    if diagnose:
+        import platform
+        try:
+            cc = subprocess.run(["clang", "--version"], capture_output=True, text=True, timeout=10).stdout.splitlines()
+            cc = cc[0] if cc else "?"
+        except Exception:  # noqa: BLE001
+            cc = "?"
+        print(f"[diag] arch={platform.machine()} clang={cc} "
+              f"MARCH_JIT_BACKEND={os.environ.get('MARCH_JIT_BACKEND', '(default)')}", flush=True)
+
     total_run = 0
     total_skip = 0
     failures = []
+    anomalies = 0
     skips = []
 
     for path in files:
@@ -167,17 +241,25 @@ def main():
             runnable.append((lineno, expr, expected))
         if not runnable:
             continue
-        values = run_module(bin_path, [e for (_, e, _) in runnable])
+        values, mod_out, mod_err = run_repl(bin_path, [e for (_, e, _) in runnable])
         for idx, (lineno, expr, expected) in enumerate(runnable):
             actual = values.get(idx + 1)  # REPL input index is 1-based
             if actual is None:
-                # The REPL emitted no value for this expression — the example
-                # references a `let` binding a prior line in the same block set
-                # up, which a one-shot eval doesn't have. Skip, don't fail.
+                # The REPL emitted no value for this expression. Usually the
+                # example references a `let` a prior line set up (skip). But a
+                # SELF-CONTAINED primitive doctest yielding no value is
+                # suspicious — under --diagnose, capture it (it might be the
+                # intermittent JIT flake), without changing pass/fail: some ops
+                # (e.g. certain RRB paths) consistently don't JIT-compile, so a
+                # no-value is not by itself a failure.
                 total_skip += 1
                 skips.append(
                     f"  SKIP {path}:{lineno}  {expr!r} — REPL produced no value "
                     f"(example likely needs setup bindings)")
+                if diagnose and not references_bare_local(expr):
+                    anomalies += 1
+                    diagnose_anomaly(bin_path, path, lineno, expr, expected,
+                                     None, mod_out, mod_err)
                 continue
             total_run += 1
             if actual != expected:
@@ -186,10 +268,16 @@ def main():
                     f"        expected: {expected!r}\n"
                     f"        actual:   {actual!r}"
                 )
+                if diagnose:
+                    anomalies += 1
+                    diagnose_anomaly(bin_path, path, lineno, expr, expected,
+                                     actual, mod_out, mod_err)
 
     for s in skips:
         print(s)
-    print(f"\nstdlib doctests: {total_run} run, {total_skip} skipped, {len(failures)} failed")
+    diag_note = f", {anomalies} anomalies diagnosed" if diagnose else ""
+    print(f"\nstdlib doctests: {total_run} run, {total_skip} skipped, "
+          f"{len(failures)} failed{diag_note}")
     if failures:
         print("\n".join(failures))
         return 1
