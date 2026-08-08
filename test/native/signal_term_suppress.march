@@ -5,6 +5,7 @@
 -- suppression half of that contract.
 mod Main do
   needs IO.Console
+  needs IO.Signal
   fn main() do
     Signal.watch(Signal.Term, fn -> println("term handler"))
     println("before term")

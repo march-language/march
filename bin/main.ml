@@ -876,9 +876,13 @@ let do_check       = ref false   (* --check: typecheck only, no codegen or eval 
     "cannot be attributed to any module").  Same gate the typechecker's Check
     1b uses, for the same reason. *)
 
-let own_caps_of_this_module ~stdlib_files typecheck_env
-    (m : March_ast.Ast.module_) : string list =
-  let own = March_typecheck.Typecheck.fn_own_capability_closures typecheck_env in
+(* The names of the functions THIS file declares, span-filtered against the
+   stdlib.  Shared by [own_caps_of_this_module] and by the --cap-strict
+   ceiling's DCE roots (see [Dce.prune_unreachable]'s [extra_root]), which
+   need the same "is this the user's code?" answer and must not drift apart
+   in how they get it. *)
+let user_fn_names_of ~stdlib_files (m : March_ast.Ast.module_) :
+    (string, unit) Hashtbl.t =
   let is_stdlib (sp : March_ast.Ast.span) =
     List.mem sp.March_ast.Ast.file stdlib_files
   in
@@ -893,6 +897,12 @@ let own_caps_of_this_module ~stdlib_files typecheck_env
         | _ -> ()) decls
   in
   walk m.March_ast.Ast.mod_decls;
+  user_fn_names
+
+let own_caps_of_this_module ~stdlib_files typecheck_env
+    (m : March_ast.Ast.module_) : string list =
+  let own = March_typecheck.Typecheck.fn_own_capability_closures typecheck_env in
+  let user_fn_names = user_fn_names_of ~stdlib_files m in
   let belongs qname =
     (* Keys are "Mod.fn" or bare "fn" (lower.ml strips the top-level module
        prefix from declarations in the entry file). *)
@@ -908,7 +918,18 @@ let own_caps_of_this_module ~stdlib_files typecheck_env
   |> List.sort String.compare
 
 let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
-let cap_strict     = ref false   (* --cap-strict: `needs` is a hard ceiling, checked against attributed use *)
+(* `needs` is a hard ceiling, checked against attributed use.  ON by default
+   since 2026-08-08; `--no-cap-strict` opts out.
+
+   It was opt-in from the day it shipped because its false-positive rate made
+   it unusable as a default: capabilities reached through a trampoline-lowered
+   builtin could not be attributed at all (fixed 2026-08-07,
+   specs/progress/2026-08-07-cap-attrib-table-agreement.md), and a module with
+   no entry point was charged for the whole prepended stdlib (fixed with it —
+   see [Dce.prune_unreachable]'s [extra_root]).  With both closed, the check
+   is the only one that sees a stdlib-MEDIATED capability use; leaving it
+   opt-in meant the default build enforced nothing on that route. *)
+let cap_strict     = ref true
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let emit_core_ast_file = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
@@ -2650,9 +2671,36 @@ let compile filename =
        without perturbing it. *)
     let cap_attrib =
       let stdlib_mods = stdlib_module_names stdlib_decls in
+      (* A module with no `main` has no DCE roots, so pruning would keep the
+         whole prepended stdlib and attribution would charge every stdlib
+         module for capabilities the program never reaches — 17 violations for
+         a file whose only declaration was `fn helper(x) = x + 1`.  Root the
+         functions this FILE declares instead; see [Dce.prune_unreachable].
+
+         Matched against the TIR name, which may be prefixed by the module
+         (`M.helper`) and/or suffixed by monomorphization (`helper$Int`), so
+         compare the bare stem.  Prelude functions are excluded by the
+         span filter inside [user_fn_names_of] — not by shape, since `println`
+         is unprefixed exactly like the entry module's own functions. *)
+      let user_fns =
+        user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
+          desugared
+      in
+      let stem n =
+        let n =
+          match String.rindex_opt n '.' with
+          | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+          | None -> n
+        in
+        match String.index_opt n '$' with
+        | Some i -> String.sub n 0 i
+        | None -> n
+      in
       March_tir.Cap_attrib.attribute
         ~transparent:(fun m -> List.mem m stdlib_mods)
-        (March_tir.Dce.prune_unreachable pre_opt_tir)
+        (March_tir.Dce.prune_unreachable
+           ~extra_root:(fun n -> Hashtbl.mem user_fns (stem n))
+           ~fail_open:false pre_opt_tir)
     in
     (* --cap-strict: `needs` as a hard ceiling.  Deliberately checked here,
        against attributed use, rather than by a fifth source-level AST walk.
@@ -2684,11 +2732,34 @@ let compile filename =
       |> List.sort_uniq compare
     in
     if !cap_strict then begin
+      (* The ceiling's used-set is the ATTRIBUTED set — capabilities of the
+         emitted code — and deliberately NOT unioned with
+         [own_caps_of_this_module] any more (changed 2026-08-08, with the
+         default flip).
+
+         The typecheck-side set counts a capability that appears only in a
+         SIGNATURE (`fn main(cap : Cap(IO))`, `fn demo(c : Cap(IO.Console))`)
+         as "used".  Capabilities are erased, so a signature-only capability
+         corresponds to no emitted operation at all; feeding it to the
+         ceiling produced an Unattributed violation nobody could fix — and
+         `main(cap : Cap(IO))` is the DOCUMENTED entry-point shape (R2), so
+         with the ceiling on by default that false positive rejected the
+         sanctioned way to write `main`.
+
+         What the union genuinely bought was a DRIFT DETECTOR between the two
+         capability tables: when attribution's builtin lookup missed ten
+         trampoline-lowered builtins (2026-08-07), it was exactly this diff
+         that surfaced as "cannot be attributed".  That role is now carried
+         by test_cap_attrib_agreement, which pins the two tables to each
+         other directly instead of surfacing their drift as a user-facing
+         false positive.
+
+         [own_caps_of_this_module] itself is unchanged and still feeds
+         --cap-sandbox, where the SIGNATURE reading is the right one: a
+         module that receives a capability by parameter may exercise it, so
+         the sandbox profile must allow it. *)
       let flat_caps =
         List.sort_uniq compare (List.map fst cap_attrib)
-        @ own_caps_of_this_module
-          ~stdlib_files:(stdlib_span_files stdlib_decls) typecheck_env desugared
-        |> List.sort_uniq compare
       in
       (* The entry module is unwrapped by desugar (~is_entry:true), so it has
          no DMod and never lands in [module_caps]; its `needs` accumulate in
@@ -2712,8 +2783,10 @@ let compile filename =
                (March_caps.Cap_ceiling.describe v))
           violations;
         Printf.eprintf
-          "--cap-strict: %d capability ceiling violation(s). Every module's \
-           emitted code must stay within its own `needs`.\n%!"
+          "%d capability ceiling violation(s). Every module's emitted code \
+           must stay within its own `needs`.\n\
+           Add the missing `needs` line to the module named above, or pass \
+           `--no-cap-strict` to build without this check.\n%!"
           (List.length violations);
         exit 1
       end
@@ -4438,7 +4511,8 @@ let () =
     ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
-    ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling: fail the build if any module's emitted code uses a capability it does not declare");
+    ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
+    ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");

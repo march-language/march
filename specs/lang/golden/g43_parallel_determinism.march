@@ -1,5 +1,6 @@
 mod Main do
   needs IO.Console
+  needs IO.Spawn
   -- Operational parallelism witness (core-march.md §4.14): the data-parallel
   -- combinators produce EXACTLY the same result as their sequential
   -- counterparts -- same values, same order -- and that result is byte-identical

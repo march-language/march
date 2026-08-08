@@ -24,7 +24,10 @@ Companion to `specs/2026-08-03-forge-cap-audit-design.md` (artifact channel),
 `--cap-strict` gives a **mechanically checked ceiling**: every module's
 emitted code stays within that module's own `needs`, verified against the TIR
 the compiler is about to lower, and re-checkable from the artifact via
-`forge cap inspect --strict`.
+`forge cap inspect --strict`. **Since 2026-08-08 the ceiling is the DEFAULT**
+(`--no-cap-strict` opts out) — see
+`specs/progress/2026-08-08-cap-strict-default.md` for the two false-positive
+fixes that unblocked it and the repo-wide migration.
 
 That is a *whole-program static analysis*. It is not a type-system theorem,
 and the difference is not pedantic:

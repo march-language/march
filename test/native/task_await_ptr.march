@@ -8,6 +8,7 @@
 -- MARCH_NUM_SCHEDULERS=1.
 mod TaskAwaitPtr do
   needs IO.Console
+  needs IO.Spawn
   fn main() : Unit do
     let s = Task.async(fn () -> "hello" ++ " world")
     match Task.await(s) do

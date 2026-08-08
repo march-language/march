@@ -18,6 +18,8 @@
 
 mod TestJsonTyped do
 
+  needs IO.Console
+
   type Flat = { name : String, age : Int, active : Bool, score : Float }
   derive Json for Flat
 

@@ -15,6 +15,7 @@
 mod TaskAwaitInt do
 
   needs IO.Console
+  needs IO.Spawn
 
   fn main() : Unit do
     -- Task.await on Int: expect Ok(42), not Ok(85).

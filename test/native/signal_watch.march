@@ -5,6 +5,7 @@
 -- in march_sched_run makes the "raise then exit" ordering deterministic.
 mod Main do
   needs IO.Console
+  needs IO.Signal
   fn main() do
     Signal.watch(Signal.Usr2, fn -> println("caught usr2"))
     println("before raise")

@@ -11,6 +11,7 @@ mod RpcAutoEnroll do
   needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
+  needs IO.NetConnect
 
   -- The exported function (the "real" target).
   fn add(a : Int, b : Int) : Int do a + b end

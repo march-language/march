@@ -9,6 +9,7 @@
 
 mod HttpExample do
   needs IO.Console
+  needs IO.NetConnect
 
   -- Helper to print a Result
   fn print_result(label, result) do
