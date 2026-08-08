@@ -335,6 +335,31 @@ jobs:
           fi
           exit "$rc"
 
+      # DIAGNOSTIC (macOS only, advisory) — the doctest checker above proved this
+      # runner's Apple clang deterministically miscompiles String.starts_with
+      # (`is_absolute("/etc") = false`) while a newer clang does not
+      # (specs/todos/2026-08-08-jit-repl-nondeterminism-doctest-flake.md). Bisect
+      # the RUNTIME optimization level (MARCH_RUNTIME_OPT) to pin whether it is an
+      # -O2 optimization miscompile: if -O0/-O1 give `true` and -O2 gives `false`,
+      # the fix is to drop the runtime -O (or the one function's) on this
+      # toolchain; if every level is wrong, it is deeper UB / a clang bug. Prints
+      # the exact clang build and the result per level; never gates.
+      - name: Bisect runtime -O for the String.starts_with miscompile (macOS, advisory)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          BIN="$PWD/_build/default/bin/main.exe"
+          echo "clang: $(clang --version | head -1)"
+          for opt in 0 1 2 3; do
+            out=$(printf 'String.starts_with("/etc", "/")\n' \
+              | MARCH_RUNTIME_OPT="$opt" "$BIN" repl 2>/dev/null \
+              | grep -oE 'march\(1\)> = (true|false)' || echo '(no value)')
+            echo "runtime -O$opt : ${out:-(no value)}   (expect true)"
+          done
+
       - name: Check formatting
         timeout-minutes: 3
         run: |

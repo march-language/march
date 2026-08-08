@@ -699,9 +699,20 @@ let ensure_runtime_so () =
        command plus every header in runtime/) and the full flag string.
        Identical inputs across worktrees share one artifact; any divergence
        gets its own filename instead of overwriting a shared one. *)
+    (* Runtime optimization level. Defaults to -O2; MARCH_RUNTIME_OPT=0|1|2|3
+       overrides it. Folded into flags_sig, which is BOTH the cache key and the
+       compile command, so each level gets its own cached .so. Exists to bisect a
+       clang-version-specific runtime miscompile: a macos-15 runner's Apple clang
+       (1700.0.13.5) compiles String.starts_with to the wrong result at the
+       default -O2 while a newer clang does not (specs/todos). *)
+    let runtime_opt_flag =
+      match Sys.getenv_opt "MARCH_RUNTIME_OPT" with
+      | Some ("0" | "1" | "2" | "3" as n) -> "-O" ^ n
+      | _ -> "-O2"
+    in
     let flags_sig = Printf.sprintf
-      "clang -shared -O2 -fno-strict-aliasing -fwrapv -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
-      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags in
+      "clang -shared %s -fno-strict-aliasing -fwrapv -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
+      runtime_opt_flag evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags in
     let key_buf = Buffer.create 256 in
     Buffer.add_string key_buf flags_sig;
     let c_inputs =

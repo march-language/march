@@ -1,4 +1,32 @@
-# JIT REPL nondeterminism surfaced by the stdlib doctest checker (2026-08-08)
+# macos-15 clang miscompile surfaced by the stdlib doctest checker (2026-08-08)
+
+> **CORRECTED 2026-08-08 — this is NOT JIT-REPL nondeterminism.** The `--diagnose`
+> CI soak (added on PR #224) captured decisive evidence: the failure is
+> **100% DETERMINISTIC on the macos-15 runner** (6/6 soak runs identical:
+> `76 run / 1 failed / 3 anomalies`), affects **BOTH** JIT backends — the default
+> (clang+dlopen) AND in-process ORC both return the wrong value in isolation — and
+> the emitted LLVM IR and the runtime C are both clean on inspection. It is a
+> **clang-version-specific runtime miscompile**: the runner's Apple clang
+> `1700.0.13.5` compiles `march_string_starts_with` (and some RRB paths) to the
+> wrong result at the default runtime `-O2`, while a newer Apple clang
+> (`1700.6.4.2`, local) does not — which is why it never reproduced across 52+
+> local runs. Concretely `String.starts_with("/etc", "/")` returns `false`
+> (only the match-SUCCEEDS case is wrong; `("etc","/")`/`("","/")` are correctly
+> `false`). `test (macos-15)` stays green because no golden exercises this case —
+> the doctest checker is what exposed a real, previously-undetected macOS bug.
+>
+> **Chase (chosen 2026-08-08): bisect the runtime -O on CI.** `bin/main.ml` gained
+> a `MARCH_RUNTIME_OPT=0|1|2|3` override (folded into the runtime `.so` cache key),
+> and the `conformance` job runs a macOS-only advisory step that recompiles the
+> runtime at each level and re-tests `String.starts_with`. If `-O0`/`-O1` give
+> `true` and `-O2` gives `false`, it is an `-O2` optimization miscompile (fix:
+> lower the runtime `-O`, or the one function's, on this toolchain); if every
+> level is wrong it is deeper UB / a clang bug. Awaiting the first macOS CI run of
+> the bisect.
+
+---
+
+## Original (superseded) framing
 
 `scripts/check-stdlib-doctests.py` drives `march repl` (JIT-backed) and compares
 each rendered value to the documented one. On CI it exposed an **intermittent,
