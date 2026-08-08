@@ -15,14 +15,38 @@
 > `false`). `test (macos-15)` stays green because no golden exercises this case —
 > the doctest checker is what exposed a real, previously-undetected macOS bug.
 >
-> **Chase (chosen 2026-08-08): bisect the runtime -O on CI.** `bin/main.ml` gained
-> a `MARCH_RUNTIME_OPT=0|1|2|3` override (folded into the runtime `.so` cache key),
-> and the `conformance` job runs a macOS-only advisory step that recompiles the
-> runtime at each level and re-tests `String.starts_with`. If `-O0`/`-O1` give
-> `true` and `-O2` gives `false`, it is an `-O2` optimization miscompile (fix:
-> lower the runtime `-O`, or the one function's, on this toolchain); if every
-> level is wrong it is deeper UB / a clang bug. Awaiting the first macOS CI run of
-> the bisect.
+> **Chase (chosen 2026-08-08): bisect the runtime -O on CI, then narrow.** Three
+> advisory macOS-only CI probes (in the `conformance` job) pinned it:
+>
+> 1. **Runtime -O bisect** (`MARCH_RUNTIME_OPT=0|1|2|3`, added to `bin/main.ml`):
+>    `String.starts_with("/etc","/") = false` at **every** level incl `-O0`. A
+>    `-O0` miscompile of correct C rules out an optimization-triggered UB in our
+>    code → NOT an -O2 miscompile.
+> 2. **Standalone C probe**: `march_string_starts_with` compiled STANDALONE by the
+>    runner's own clang (`-O0..-O3`) with hand-built structs returns `= 1`
+>    (correct). So the isolated C function is fine on this clang → the miscompile
+>    is in the MARCH-generated path (literal construction / prelude), not the C.
+> 3. **March-level narrowing** (REPL ops on the runner):
+>    - `byte_size("/etc") = 4` ✓ but **`byte_size("/") = 0`** ✗ (a 1-char literal
+>      reads length 0 — `march_string_byte_length` returns `s ? s->len : 0`, so
+>      the short literal's `march_string_lit_static` likely returned NULL/bad);
+>    - `"/etc" == "/etc" = true` ✓;
+>    - **every** `starts_with`/`ends_with` returns `false` (incl the empty-prefix
+>      case, which must be `true`).
+>
+> **Conclusion: a genuine Apple clang `1700.0.13.5` miscompile of the March
+> string-literal runtime path** (short-literal construction via
+> `march_string_lit_static`'s atomic-CAS memoization, plus `starts_with`/
+> `ends_with`). The C source (`march_string_alloc`/`_lit`/`_lit_static`/
+> `_byte_length`/`_starts_with`) is all clean; a newer Apple clang (`1700.6.4.2`)
+> compiles it correctly, which is why 52+ local runs and the `ubuntu` runner all
+> pass. Not reproducible without that exact clang.
+>
+> **Resolution options** (needs a decision): (a) pin/upgrade the macos runner's
+> Xcode to a known-good clang (fastest; masks the bug if it is ultra-subtle
+> March UB rather than an Apple bug); (b) keep bisecting the exact miscompiled
+> construct via more CI cycles, then fix blind + verify on CI (long tail). The
+> doctest gate stays advisory until resolved.
 
 ---
 

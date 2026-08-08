@@ -379,26 +379,46 @@ jobs:
           #include <string.h>
           #include <stdio.h>
           #include <stdlib.h>
+          #include <stdatomic.h>
+          /* Verbatim from runtime/march_runtime.c (struct + the functions on the
+             real "/" literal path), to see if THIS clang miscompiles them. */
           typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
+          void *march_string_alloc(int64_t len) {
+              march_string *s = malloc(sizeof(march_string) + (size_t)len + 1);
+              s->rc = 1; s->tag = 7; s->pad = 0; s->len = len; return s;
+          }
+          void *march_string_lit_static(const char *utf8, int64_t len, void **cell) {
+              _Atomic(void *) *slot = (_Atomic(void *) *)cell;
+              void *cached = atomic_load_explicit(slot, memory_order_acquire);
+              if (cached) return cached;
+              march_string *s = march_string_alloc(len);
+              memcpy(s->data, utf8, (size_t)len);
+              s->data[len] = '\0';
+              void *expected = NULL;
+              if (!atomic_compare_exchange_strong(slot, &expected, s)) { free(s); return expected; }
+              return s;
+          }
+          int64_t march_string_byte_length(void *s) { return s ? ((march_string *)s)->len : 0; }
           int64_t march_string_starts_with(void *s, void *prefix) {
               march_string *ss = (march_string *)s;
               march_string *sp = (march_string *)prefix;
               if (ss->len < sp->len) return 0;
               return memcmp(ss->data, sp->data, (size_t)sp->len) == 0 ? 1 : 0;
           }
-          static march_string *mk(const char *s, int64_t n) {
-              march_string *m = calloc(1, sizeof(march_string) + (size_t)n + 1);
-              m->rc = 1; m->len = n; memcpy(m->data, s, (size_t)n); return m;
-          }
+          static void *cellA, *cellB;
           int main(void) {
-              printf("%lld", (long long)march_string_starts_with(mk("/etc", 4), mk("/", 1)));
+              void *slash = march_string_lit_static("/", 1, &cellA);
+              void *etc   = march_string_lit_static("/etc", 4, &cellB);
+              printf("byte_length(lit_static \"/\")=%lld (expect 1); ", (long long)march_string_byte_length(slash));
+              printf("byte_length(lit_static \"/etc\")=%lld (expect 4); ", (long long)march_string_byte_length(etc));
+              printf("starts_with(/etc,/)=%lld (expect 1)", (long long)march_string_starts_with(etc, slash));
               return 0;
           }
           CEOF
           echo "clang: $(clang --version | head -1)"
           for O in 0 1 2 3; do
             clang -O$O -fno-strict-aliasing -fwrapv -o /tmp/sw_probe /tmp/sw_probe.c
-            printf "standalone C, clang -O%s: march_string_starts_with(/etc, /) = %s  (expect 1)\n" "$O" "$(/tmp/sw_probe)"
+            printf "standalone C, clang -O%s: %s\n" "$O" "$(/tmp/sw_probe)"
           done
 
       # DIAGNOSTIC (macOS only, advisory) — the standalone C is correct on this
