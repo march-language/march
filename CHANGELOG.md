@@ -138,6 +138,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`tcp_local_port(fd) : Result(Int, String)`** — returns a socket's local
+  (bound) port, i.e. the OS-assigned one after `tcp_listen(0)`. Lets a program
+  bind an ephemeral port and hand it to an in-process client, so concurrent
+  runs on a shared host never collide on a fixed port. Requires `IO.NetListen`,
+  like `tcp_listen`/`tcp_accept`.
+
 - **Process capabilities have their own type: `ActorCap(a)`.** `get_cap`,
   `send_checked`, `revoke_cap` and `is_cap_valid` now take and return
   `ActorCap` rather than `Cap`.

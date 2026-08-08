@@ -12043,6 +12043,7 @@ let golden_preamble_native_net_io : string = {|
 ; TCP/network builtins
 declare ptr  @march_tcp_listen(i64 %port)
 declare ptr  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_local_port(i64 %fd)
 declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
 declare ptr  @march_tcp_send_all(i64 %fd, ptr %data)

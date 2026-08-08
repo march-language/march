@@ -437,6 +437,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_listen(i64 %port)" };
   { march_name = "tcp_accept"; c_name = Some "march_tcp_accept"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_accept(i64 %fd)" };
+  { march_name = "tcp_local_port"; c_name = Some "march_tcp_local_port"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_local_port(i64 %fd)" };
   { march_name = "tcp_recv_exact"; c_name = Some "march_tcp_recv_exact"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)" };
   { march_name = "tcp_recv_http"; c_name = Some "march_tcp_recv_http"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -1186,6 +1188,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PComment "; TCP/network builtins";
   PDeclare "march_tcp_listen";
   PDeclare "march_tcp_accept";
+  PDeclare "march_tcp_local_port";
   PDeclare "march_tcp_recv_exact";
   PDeclare "march_tcp_recv_http";
   PDeclare "march_tcp_send_all";
