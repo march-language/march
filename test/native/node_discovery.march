@@ -111,12 +111,17 @@ mod NodeDiscovery do
   -- ── main ─────────────────────────────────────────────────────────────────
 
   fn main() do
-    let port = 29760
-
     -- Bind the listen socket in the main task so it is ready before we spawn.
-    let listen_fd = match tcp_listen(port) do
+    -- Port 0 = an OS-assigned ephemeral port, read back via tcp_local_port, so
+    -- two concurrent runs on a shared host never collide on a fixed port.
+    let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
+    end
+
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
     end
 
     -- node-a runs as an acceptor task (blocks in tcp_accept).

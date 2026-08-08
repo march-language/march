@@ -6,7 +6,7 @@
 --
 -- The server serves one RPC request using NodeRpc.empty() — the C registry
 -- handles the dispatch via the compiler-registered add__rpc_stub entry.
--- Port 29851.
+-- Binds an OS-assigned ephemeral port (tcp_listen(0) + tcp_local_port).
 mod RpcAutoEnroll do
   needs IO.Console
   needs IO.NetListen
@@ -45,11 +45,16 @@ mod RpcAutoEnroll do
   end
 
   fn main() do
-    let port = 29851
-
-    let listen_fd = match tcp_listen(port) do
+    -- Bind an OS-assigned ephemeral port (0) and read it back, so concurrent
+    -- runs on a shared host never collide on a fixed port.
+    let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
+    end
+
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
     end
 
     let srv = task_spawn(fn _ -> run_server(listen_fd))

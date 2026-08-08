@@ -42,6 +42,20 @@ git log is authoritative for exact commits.
   capabilities when building its profile, where receiving one by parameter
   rightly widens what the process may do.)
 
+- **A bare constructor pattern on a value of a known type is no longer reported
+  as ambiguous against a same-named stdlib constructor.** Matching `Defs.make(n)`
+  (of type `Defs.Thing`) with a bare `Bar(_)` arm errored with "Constructor `Bar`
+  is ambiguous between `Defs.Bar` / `Plot.Bar`" even though the scrutinee type
+  uniquely identifies `Defs.Bar` — the resolver picked the right constructor but
+  the ambiguity *diagnostic* was computed from the bare name alone. The diagnostic
+  now defers to a unique expected-type resolution; genuine ambiguity (an untyped
+  scrutinee) still errors.
+
+- **The runtime-object cache now invalidates when a system library's headers
+  change even if their path does not.** A `brew upgrade openssl@3` (or a CI
+  base-image bump) that left the `-I` path, `-D` defines and `clang --version`
+  unchanged could serve a stale `.o`. The cache key now fingerprints the resolved
+  `openssl`/`zlib`/`zstd`/`brotli`/`blake3` headers themselves.
 - **`--cap-strict` no longer rejects correct programs that call `task_spawn`,
   `unix_time_ms`, `uuid_v7`, or the `Signal` builtins.** These are lowered
   through a trampoline rather than a named C symbol, and the capability
@@ -152,6 +166,12 @@ git log is authoritative for exact commits.
   is still a warning, and the declared-but-unused warning is unchanged.
 
 ### Added
+
+- **`tcp_local_port(fd) : Result(Int, String)`** — returns a socket's local
+  (bound) port, i.e. the OS-assigned one after `tcp_listen(0)`. Lets a program
+  bind an ephemeral port and hand it to an in-process client, so concurrent
+  runs on a shared host never collide on a fixed port. Requires `IO.NetListen`,
+  like `tcp_listen`/`tcp_accept`.
 
 - **Process capabilities have their own type: `ActorCap(a)`.** `get_cap`,
   `send_checked`, `revoke_cap` and `is_cap_valid` now take and return

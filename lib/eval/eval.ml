@@ -5541,6 +5541,18 @@ let base_env : env =
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "tcp_accept(listen_fd)"))
+  ; ("tcp_local_port", VBuiltin ("tcp_local_port", function
+        | [VInt fd] ->
+          (try
+             let open Unix in
+             let sock = (Obj.magic fd : file_descr) in
+             (match getsockname sock with
+              | ADDR_INET (_, port) -> VCon ("Ok", [VInt port])
+              | ADDR_UNIX _ ->
+                VCon ("Err", [VString "tcp_local_port: not an INET socket"]))
+           with Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)]))
+        | _ -> eval_error "tcp_local_port(fd)"))
   (* tcp_peer_addr(fd) → String: numeric IP of the connected peer.
      Returns "" when the fd is not a connected INET socket.  IPv4-mapped
      IPv6 addresses (::ffff:1.2.3.4) are normalized to plain IPv4. *)

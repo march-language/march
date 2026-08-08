@@ -305,6 +305,23 @@ jobs:
           eval $(opam env)
           MARCH_BIN="dune exec march --" python3 scripts/gen-scrollmd.py --check
 
+      # ADVISORY (continue-on-error) — surfaces stdlib doctest drift without
+      # blocking merge. The checker drives the JIT REPL, which is intermittently
+      # nondeterministic on some runners: a trivially-pure doctest
+      # (`Path.is_absolute("/etc")` = `String.starts_with(path, "/")`) once
+      # rendered `false` on a macOS runner while passing 5/5 locally and on
+      # Linux, and the run/skip split varies run-to-run. Until that JIT-REPL
+      # nondeterminism is fixed (specs/todos), a flake here must not redden CI —
+      # so this reports but does not gate.
+      - name: Check stdlib `march>` doctests (advisory)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            python3 scripts/check-stdlib-doctests.py --check
+
       - name: Check formatting
         timeout-minutes: 3
         run: |
@@ -560,27 +577,33 @@ jobs:
             chmod +x "$f"
           done
 
-      # Fails if any group in the binary is neither covered by a shard filter
-      # nor the oracle group — so adding a property group upstream can't
-      # silently go unrun by this workflow.
-      - name: Guard — every property group is covered by some shard
+      # Record exactly which property groups THIS shard's filter matches, for
+      # the `property-coverage` job below to union and compare against the full
+      # group list. This replaces a hand-maintained `COVERED` string that
+      # duplicated the shard filters: that copy caught a NEWLY ADDED group (its
+      # original purpose) but NOT an UNWIRED one — deleting a group from a shard
+      # filter while leaving `COVERED` alone kept the guard green while the group
+      # silently stopped running. Deriving coverage from the shards' own filters
+      # closes that gap with a single source of truth (the matrix filters).
+      - name: Record groups this shard covers
         run: |
           set -euo pipefail
           B=_build/default/test/test_properties.exe
           # `list` prints "<group> <case-index> <description>"; keep the group.
           $B list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
             | sed -E 's/[[:space:]]+[0-9]+[[:space:]]+.*$//' | sed -E 's/[[:space:]]+$//' \
-            | grep -v '^$' | grep -v 'qcheck random seed' | sort -u > /tmp/groups.txt
-          COVERED='type soundness|tir pipeline|tir passes|tir pass invariants|algebraic oracle|semantic properties|parse\+typecheck|classify_compile|record-update converged|cli: timings|oracle: interp = compiled'
-          missing=0
-          while IFS= read -r g; do
-            if ! printf '%s' "$g" | grep -qE "$COVERED"; then
-              echo "::error::property group '$g' is not covered by any property-tests shard nor by property-oracle"
-              missing=1
-            fi
-          done < /tmp/groups.txt
-          echo "--- groups found ---"; cat /tmp/groups.txt
-          exit $missing
+            | grep -v '^$' | grep -v 'qcheck random seed' | sort -u \
+            | grep -E '${{ matrix.filter }}' > "covered-${{ matrix.shard }}.txt"
+          echo "shard '${{ matrix.shard }}' covers:"; cat "covered-${{ matrix.shard }}.txt"
+
+      # One artifact per (os, shard). Only ubuntu's are consumed downstream (the
+      # group list is OS-independent), but uploading both keeps the step uniform.
+      - name: Upload this shard's covered-groups report
+        uses: actions/upload-artifact@v4
+        with:
+          name: covered-groups-${{ matrix.os }}-${{ matrix.shard }}
+          path: covered-${{ matrix.shard }}.txt
+          if-no-files-found: error
 
       - name: Property tests (shard ${{ matrix.shard }})
         timeout-minutes: 25
@@ -699,3 +722,60 @@ jobs:
         run: |
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "${{ matrix.cases }}" -e
+
+  # Asserts that every property group in test_properties.exe is actually run by
+  # SOME property-tests shard (or is the oracle group, which property-oracle
+  # owns). The truth comes from the shards' own recorded coverage (the
+  # `covered-groups-*` artifacts each shard uploads), NOT a second hand-kept
+  # copy of the filters — so a group dropped from a shard filter reddens here
+  # instead of silently going unrun. Fail-closed: a missing artifact or an
+  # unreadable list fails the job rather than passing vacuously.
+  property-coverage:
+    runs-on: ubuntu-24.04
+    needs: [ocaml-build, property-tests]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
+          path: _build/default
+      - name: Restore exec bit
+        run: |
+          set -e
+          test -f _build/default/test/test_properties.exe \
+            || { echo "::error::test_properties.exe missing from the ocaml-build artifact"; exit 1; }
+          chmod +x _build/default/test/test_properties.exe
+
+      - name: Download every shard's covered-groups report
+        uses: actions/download-artifact@v4
+        with:
+          pattern: covered-groups-ubuntu-24.04-*
+          path: covered
+          merge-multiple: true
+
+      - name: Assert the shards' union covers every property group
+        run: |
+          set -euo pipefail
+          B=_build/default/test/test_properties.exe
+          $B list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+            | sed -E 's/[[:space:]]+[0-9]+[[:space:]]+.*$//' | sed -E 's/[[:space:]]+$//' \
+            | grep -v '^$' | grep -v 'qcheck random seed' | sort -u > all.txt
+          shards=$(find covered -name '*.txt' | wc -l | tr -d ' ')
+          if [ "$shards" -eq 0 ]; then
+            echo "::error::no covered-groups-* artifacts were downloaded — the property-tests shards did not report their coverage."
+            exit 1
+          fi
+          # The oracle group is deliberately run by property-oracle, not the shards.
+          { echo 'oracle: interp = compiled'; cat covered/*.txt; } | sort -u > union.txt
+          echo "--- all property groups ---"; cat all.txt
+          echo "--- covered (union of $shards shard reports + oracle) ---"; cat union.txt
+          missing=$(comm -23 all.txt union.txt)
+          if [ -n "$missing" ]; then
+            echo "::error::these property groups run in NO property-tests shard and are not the oracle group — a shard filter no longer matches them:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "OK: all $(wc -l < all.txt) property groups are covered by a shard or the oracle."

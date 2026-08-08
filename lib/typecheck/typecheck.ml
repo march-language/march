@@ -1880,6 +1880,7 @@ let builtin_cap_table : (string * string) list = [
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
   ("tcp_accept",            "IO.NetListen");
+  ("tcp_local_port",        "IO.NetListen");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
@@ -2470,6 +2471,9 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_listen",              Mono (TArrow (t_int, t_result t_int t_string)));
     (* tcp_accept(listen_fd): blocks until a client connects, returns Ok(client_fd) or Err *)
     ("tcp_accept",              Mono (TArrow (t_int, t_result t_int t_string)));
+    (* tcp_local_port(fd): the local (bound) port of a socket — the OS-assigned
+       one when listened on port 0. Returns Ok(port) or Err(reason). *)
+    ("tcp_local_port",          Mono (TArrow (t_int, t_result t_int t_string)));
     (* tcp_connect/send_all/recv_all always fail with a String reason (see
        eval.ml and runtime/march_http.c) — Mono, matching tcp_listen/tcp_accept
        above rather than leaving the error type unconstrained. *)
@@ -4020,8 +4024,27 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
           DECLARING MODULE (not just more than one bare type name — two
           candidates from the SAME module sharing a ctor name across
           unrelated types is the pre-existing, harmless case below) is
-          genuinely ambiguous when the current module owns none of them. *)
-       (if not (String.contains name.txt '.') then begin
+          genuinely ambiguous when the current module owns none of them.
+
+          BUT a KNOWN scrutinee/expected type that UNIQUELY identifies the
+          constructor is not ambiguous at all — step 1 of the resolution
+          precedence above already picked the right candidate by type. The
+          diagnostic must mirror that: matching a value of type `Defs.Thing`
+          via bare `Bar(_)` is unambiguous even when stdlib's `Plot.SeriesKind`
+          also declares a `Bar`, so gate the whole ambiguity report on the
+          expected type NOT having resolved it (same `lookup_ctor_in_type_unique`
+          predicate `by_expected_unique` uses). *)
+       let resolved_by_expected_unique =
+         (not (String.contains name.txt '.'))
+         && (match expected with
+             | Some t ->
+               (match repr t with
+                | TCon (tn, _) -> lookup_ctor_in_type_unique name.txt tn env <> None
+                | _ -> false)
+             | None -> false)
+       in
+       (if not (String.contains name.txt '.')
+           && not resolved_by_expected_unique then begin
          let candidates = all_ctor_candidates_named name.txt env in
          let distinct_modules = List.sort_uniq compare (List.map snd candidates) in
          let local_owns_one =

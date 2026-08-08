@@ -48,6 +48,20 @@ static int g_tests_failed = 0;
     g_tests_passed++;                       \
 } while (0)
 
+/* ── Termination contract ─────────────────────────────────────────────────
+ * march_sched_run() no longer auto-terminates when the run queues drain: it
+ * loops until shutdown has been REQUESTED *and* no live procs remain. That is
+ * the "compiled `main` runs as a green thread, and its return requests
+ * shutdown" contract (runtime/march_scheduler.c) — without a main green thread
+ * these tests used to idle-nanosleep forever. Each test here spawns a finite,
+ * self-terminating batch of work, so we request shutdown up front ("stop once
+ * everything drains"); march_scheduler.h documents this as the required
+ * pre-run call. Every test drives the scheduler through this helper. */
+static void run_to_quiescence(void) {
+    march_sched_request_shutdown();
+    march_sched_run();
+}
+
 /* ── Test 1: spawn_1000 ───────────────────────────────────────────────── */
 /*
  * Spawn 1000 processes, each of which atomically increments a counter.
@@ -70,7 +84,7 @@ static void test_spawn_1000(void) {
         TEST_ASSERT(p != NULL, "march_sched_spawn should not return NULL");
     }
 
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_counter_1000 == 1000,
                 "counter should equal the number of spawned processes");
@@ -109,7 +123,7 @@ static void test_yield_interleaving(void) {
     march_sched_init();
     march_sched_spawn(ilog_a, NULL);
     march_sched_spawn(ilog_b, NULL);
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_ipos == 4, "should have exactly 4 log entries");
     TEST_ASSERT(g_ilog[0] == 'A', "entry 0 should be A (A runs first)");
@@ -154,7 +168,7 @@ static void test_reduction_preemption(void) {
     march_sched_init();
     march_sched_spawn(reduce_x, NULL);
     march_sched_spawn(reduce_y, NULL);
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_rpos == 4, "should have exactly 4 log entries");
 
@@ -203,7 +217,7 @@ static void test_nested_spawn(void) {
     for (int i = 0; i < 5; i++) {
         march_sched_spawn(nested_spawner, (void *)(intptr_t)10);
     }
-    march_sched_run();
+    run_to_quiescence();
 
     /* 5 spawners × (1 self + 10 children) = 55 */
     TEST_ASSERT(g_nested_count == 55,
@@ -243,7 +257,7 @@ static void test_send_recv_basic(void) {
     march_sched_init();
     g_receiver = march_sched_spawn(recv_worker, NULL);
     march_sched_spawn(send_worker, NULL);
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_recv_count == 1, "receiver should have gotten exactly 1 message");
     TEST_PASS();
@@ -279,7 +293,7 @@ static void test_send_recv_multiple(void) {
     march_sched_init();
     g_multi_receiver = march_sched_spawn(multi_recv_worker, (void *)(intptr_t)100);
     march_sched_spawn(multi_send_worker, (void *)(intptr_t)100);
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_multi_recv == 100, "receiver should have gotten 100 messages");
     TEST_PASS();
@@ -315,7 +329,7 @@ static void test_waiting_wakeup(void) {
     march_sched_init();
     march_proc *a = march_sched_spawn(waiting_a, NULL);
     march_sched_spawn(waiting_b, (void *)a);
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_wpos == 4, "should have 4 log entries");
     TEST_ASSERT(g_wlog[0] == 'A', "A starts first");
@@ -359,7 +373,7 @@ static void test_try_recv(void) {
     march_sched_init();
     march_proc *r = march_sched_spawn(try_recv_worker, NULL);
     march_sched_spawn(try_recv_sender, (void *)r);
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_try_recv_null == 1, "try_recv should return NULL when empty");
     TEST_ASSERT(g_try_recv_got == 1,  "try_recv should return msg when available");
@@ -399,7 +413,7 @@ static void test_stack_growth_deep(void) {
     /* ~512 bytes × 20 frames ≈ 10 KiB > MARCH_STACK_INITIAL (4 KiB).
      * Forces at least two guard-page faults and growths. */
     march_sched_spawn(growth_worker, (void *)(intptr_t)20);
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_growth_done == 1,
                 "deep-recursion process should complete after stack growth");
@@ -413,7 +427,7 @@ static void test_stack_growth_many(void) {
     for (int i = 0; i < 50; i++) {
         march_sched_spawn(growth_worker, (void *)(intptr_t)20);
     }
-    march_sched_run();
+    run_to_quiescence();
 
     TEST_ASSERT(g_growth_done == 50,
                 "all 50 deep-recursion processes should complete");

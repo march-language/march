@@ -109,22 +109,18 @@
                test_scheduler.c ../runtime/march_scheduler.c
                -lpthread)))
 
-; NOTE: the RUN of test_scheduler_runner is disabled — the binary still BUILDS
-; (compile-check of march_scheduler.c standalone), but running it HANGS.  It
-; bit-rotted against the scheduler's current termination model: march_sched_run
-; now expects the "main-as-green-thread" shutdown path (compiled `main` runs as a
-; green thread whose return triggers shutdown), whereas this test spawns worker
-; procs and calls march_sched_run() from a plain C main with no main-green-thread
-; — so g_all_done is never set and it idle-sleeps forever (confirmed via lldb:
-; stuck in march_sched_run's nanosleep).  The test has been dark since the
-; Signal.watch commit (9c97391a) broke its LINK, masking this.  Revival = update
-; the harness to the current termination contract (spawn work, then drive
-; shutdown).  Tracked in specs/todos.md.  The scheduler itself is covered by every
-; compiled actor integration test.
-; (rule
-;  (alias   runtest)
-;  (deps    (file test_scheduler_runner))
-;  (action  (run ./test_scheduler_runner)))
+; REVIVED 2026-08-08: the harness now requests shutdown before march_sched_run()
+; (via run_to_quiescence), matching the current "run until shutdown requested AND
+; no live procs remain" termination contract — compiled `main` normally supplies
+; that request when its green thread returns; a plain C harness must do it
+; explicitly. Previously the RUN was disabled because it idle-nanosleeped forever
+; (g_all_done never set), which had itself been masked for weeks by a LINK failure
+; the Signal.watch commit (9c97391a) introduced (fixed by the weak no-op
+; march_signal_drain in march_scheduler.c).
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_runner))
+ (action  (run ./test_scheduler_runner)))
 
 ; ── HCR versioned dispatch table unit test ───────────────────────────────
 (rule
@@ -414,13 +410,13 @@
                test_scheduler_mt.c ../runtime/march_scheduler.c
                -lpthread)))
 
-; RUN disabled for the same reason as test_scheduler_runner above (bit-rotted
-; against the main-as-green-thread termination model; hangs in march_sched_run's
-; idle nanosleep).  Binary still builds as a compile-check.  See the note above.
-; (rule
-;  (alias   runtest)
-;  (deps    (file test_scheduler_mt_runner))
-;  (action  (run ./test_scheduler_mt_runner)))
+; REVIVED 2026-08-08 alongside test_scheduler_runner above (same run_to_quiescence
+; fix: request shutdown before march_sched_run so a batch of finite work
+; terminates instead of idle-nanosleeping for a nonexistent main green thread).
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_mt_runner))
+ (action  (run ./test_scheduler_mt_runner)))
 
 ; ── SIMD HTTP parser tests ───────────────────────────────────────────────
 ; -msse4.2 is only passed on x86-64; the source guards SSE4.2 paths with
@@ -3522,20 +3518,15 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (with-stdout-to native_node_call_loopback.out
         (system "./native_node_call_loopback")))))
 
-; QUARANTINED from `runtest` (2026-07-24): confirmed hanging in CI — a
-; `dune runtest` run's `Test` step timed out at exactly the 30-minute
-; timeout-minutes ceiling, and the orphan-process cleanup log named
-; `native_node_call_loopback` as the process still running when it was
-; killed. Same task_spawn/multi-scheduler shape as the task_burst_await
-; deadlock documented as a P0 in specs/todos.md ("Scheduler fork-join
-; throughput collapse") — plausibly the same missed-wakeup class, though
-; not yet root-caused for this specific test (real TCP loopback adds
-; another axis vs. task_burst_await's pure in-process burst). Un-quarantine
-; (restore `(alias runtest)` below) once investigated. Runnable manually via
-; `dune build @test/node_call_loopback_quarantined`.  Full quarantine
-; inventory (what coverage this leaves dark): specs/todos.md.
+; REVIVED 2026-08-08: back on `runtest`. It was quarantined (2026-07-24) after
+; a CI hang, but the underlying scheduler fork-join deadlock has since been
+; fixed, and the remaining blocker was a FIXED-port collision on shared hosts
+; (bind 29850 races a stale/concurrent listener, SO_REUSEADDR lets both bind).
+; The test now binds an OS-assigned ephemeral port (tcp_listen(0) +
+; tcp_local_port) so no two runs collide. Soaked 10/10 clean (0 hangs) under
+; host load ~10.
 (rule
- (alias node_call_loopback_quarantined)
+ (alias runtest)
  (action (diff native/node_call_loopback.expected native_node_call_loopback.out)))
 
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
@@ -3585,16 +3576,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (with-stdout-to native_node_discovery.sorted.out
    (system "LC_ALL=C sort native_node_discovery.out"))))
 
-; QUARANTINED from `runtest` (2026-07-24): same multi-scheduler
-; task_spawn/task_await + real TCP loopback shape as node_call_loopback
-; (quarantined above after a confirmed CI hang) — pulled preemptively
-; rather than burning another ~30min CI round-trip to discover it
-; independently. See specs/todos.md's scheduler-deadlock P0 entry.
-; Un-quarantine once that's investigated. Runnable manually via
-; `dune build @test/node_discovery_quarantined`.  Full quarantine
-; inventory (what coverage this leaves dark): specs/todos.md.
+; REVIVED 2026-08-08 alongside node_call_loopback (same fix: ephemeral port via
+; tcp_listen(0) + tcp_local_port; the scheduler deadlock it was preemptively
+; quarantined against is fixed). Soaked 10/10 clean (0 hangs) under host load ~10.
 (rule
- (alias node_discovery_quarantined)
+ (alias runtest)
  (action (diff native/node_discovery.expected native_node_discovery.sorted.out)))
 
 ; ── Compiler-emitted enroll/stub: auto-registration of __rpc_stub functions ──
@@ -3628,20 +3614,14 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (with-stdout-to native_rpc_auto_enroll.out
         (system "./native_rpc_auto_enroll")))))
 
-; QUARANTINED from `runtest` (2026-07-24): same multi-scheduler
-; task_spawn/task_await + real TCP loopback shape as node_call_loopback
-; (quarantined above after a confirmed CI hang) — pulled preemptively
-; rather than burning another ~30min CI round-trip to discover it
-; independently. ALSO separately confirmed failing on the macOS CI runner
-; with an actual diff mismatch (`result:15` expected, `fail:call_error`
-; got) rather than a hang — a DISTINCT issue from the scheduler deadlock,
-; not yet root-caused (possibly CI-networking-specific: port contention,
-; connection refused, etc.). See specs/todos.md's scheduler-deadlock P0
-; entry. Un-quarantine once BOTH failure modes are investigated. Runnable
-; manually via `dune build @test/rpc_auto_enroll_quarantined`.  Full
-; quarantine inventory (what coverage this leaves dark): specs/todos.md.
+; REVIVED 2026-08-08 alongside node_call_loopback. Both failure modes trace to
+; the fixed 29851 port: the hang (scheduler deadlock, since fixed) and the macOS
+; `result:15` vs `fail:call_error` mismatch (a stale/concurrent listener on the
+; same port answering the connect — "port contention" as suspected). Binding an
+; ephemeral port (tcp_listen(0) + tcp_local_port) removes the collision; soaked
+; 10/10 clean on macOS under host load ~10, the `call_error` mismatch gone.
 (rule
- (alias rpc_auto_enroll_quarantined)
+ (alias runtest)
  (action (diff native/rpc_auto_enroll.expected native_rpc_auto_enroll.out)))
 
 ; ── Regression (2026-07-02): a user local named with the march_ prefix
