@@ -109,22 +109,18 @@
                test_scheduler.c ../runtime/march_scheduler.c
                -lpthread)))
 
-; NOTE: the RUN of test_scheduler_runner is disabled — the binary still BUILDS
-; (compile-check of march_scheduler.c standalone), but running it HANGS.  It
-; bit-rotted against the scheduler's current termination model: march_sched_run
-; now expects the "main-as-green-thread" shutdown path (compiled `main` runs as a
-; green thread whose return triggers shutdown), whereas this test spawns worker
-; procs and calls march_sched_run() from a plain C main with no main-green-thread
-; — so g_all_done is never set and it idle-sleeps forever (confirmed via lldb:
-; stuck in march_sched_run's nanosleep).  The test has been dark since the
-; Signal.watch commit (9c97391a) broke its LINK, masking this.  Revival = update
-; the harness to the current termination contract (spawn work, then drive
-; shutdown).  Tracked in specs/todos.md.  The scheduler itself is covered by every
-; compiled actor integration test.
-; (rule
-;  (alias   runtest)
-;  (deps    (file test_scheduler_runner))
-;  (action  (run ./test_scheduler_runner)))
+; REVIVED 2026-08-08: the harness now requests shutdown before march_sched_run()
+; (via run_to_quiescence), matching the current "run until shutdown requested AND
+; no live procs remain" termination contract — compiled `main` normally supplies
+; that request when its green thread returns; a plain C harness must do it
+; explicitly. Previously the RUN was disabled because it idle-nanosleeped forever
+; (g_all_done never set), which had itself been masked for weeks by a LINK failure
+; the Signal.watch commit (9c97391a) introduced (fixed by the weak no-op
+; march_signal_drain in march_scheduler.c).
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_runner))
+ (action  (run ./test_scheduler_runner)))
 
 ; ── HCR versioned dispatch table unit test ───────────────────────────────
 (rule
@@ -414,13 +410,13 @@
                test_scheduler_mt.c ../runtime/march_scheduler.c
                -lpthread)))
 
-; RUN disabled for the same reason as test_scheduler_runner above (bit-rotted
-; against the main-as-green-thread termination model; hangs in march_sched_run's
-; idle nanosleep).  Binary still builds as a compile-check.  See the note above.
-; (rule
-;  (alias   runtest)
-;  (deps    (file test_scheduler_mt_runner))
-;  (action  (run ./test_scheduler_mt_runner)))
+; REVIVED 2026-08-08 alongside test_scheduler_runner above (same run_to_quiescence
+; fix: request shutdown before march_sched_run so a batch of finite work
+; terminates instead of idle-nanosleeping for a nonexistent main green thread).
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_mt_runner))
+ (action  (run ./test_scheduler_mt_runner)))
 
 ; ── SIMD HTTP parser tests ───────────────────────────────────────────────
 ; -msse4.2 is only passed on x86-64; the source guards SSE4.2 paths with
