@@ -360,6 +360,47 @@ jobs:
             echo "runtime -O$opt : ${out:-(no value)}   (expect true)"
           done
 
+      # DIAGNOSTIC (macOS only, advisory) — the runtime -O bisect above returns
+      # `false` at EVERY level incl -O0, which rules out an optimization miscompile
+      # and points at either a genuine clang bug in the C or the March-generated
+      # prelude. This probe isolates it: compile march_string_starts_with
+      # STANDALONE with the runner's own clang at -O0..-O3 and call it directly.
+      #   * all "= 1"  → the C function is fine on this clang; the miscompile is in
+      #     the MARCH-generated code (prelude/fragment IR → LLVM), not the runtime C.
+      #   * any "= 0"  → this clang genuinely miscompiles trivial correct C
+      #     (an Apple clang bug) → fix by pinning/upgrading the runner's Xcode.
+      - name: Probe whether the runner clang miscompiles the C directly (macOS, advisory)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          cat > /tmp/sw_probe.c <<'CEOF'
+          #include <stdint.h>
+          #include <string.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
+          int64_t march_string_starts_with(void *s, void *prefix) {
+              march_string *ss = (march_string *)s;
+              march_string *sp = (march_string *)prefix;
+              if (ss->len < sp->len) return 0;
+              return memcmp(ss->data, sp->data, (size_t)sp->len) == 0 ? 1 : 0;
+          }
+          static march_string *mk(const char *s, int64_t n) {
+              march_string *m = calloc(1, sizeof(march_string) + (size_t)n + 1);
+              m->rc = 1; m->len = n; memcpy(m->data, s, (size_t)n); return m;
+          }
+          int main(void) {
+              printf("%lld", (long long)march_string_starts_with(mk("/etc", 4), mk("/", 1)));
+              return 0;
+          }
+          CEOF
+          echo "clang: $(clang --version | head -1)"
+          for O in 0 1 2 3; do
+            clang -O$O -fno-strict-aliasing -fwrapv -o /tmp/sw_probe /tmp/sw_probe.c
+            printf "standalone C, clang -O%s: march_string_starts_with(/etc, /) = %s  (expect 1)\n" "$O" "$(/tmp/sw_probe)"
+          done
+
       - name: Check formatting
         timeout-minutes: 3
         run: |
