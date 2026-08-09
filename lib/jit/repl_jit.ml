@@ -31,6 +31,9 @@ type t = {
   clang        : string;
   tmp_dir      : string;
   undef_flag   : string;  (* "-undefined dynamic_lookup" on macOS, "" elsewhere *)
+  rt_link      : string;  (* macOS: " <runtime.so>" to bind runtime symbols
+                             two-level (see compile_fragment_clang); "" on Linux,
+                             where flat-namespace resolution is not a problem. *)
   mutable counter : int;
   (* Persistent variable slots: (bare_name, slot_idx, tir_ty).
      Each REPL variable is assigned a unique slot index; its value is stored in
@@ -98,7 +101,10 @@ let create ~runtime_so ?(clang="clang") () =
   (* Load the runtime .so first so its symbols are globally available *)
   let rt_handle = Jit.dlopen runtime_so in
   let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
-  { runtime_so; clang; tmp_dir; undef_flag;
+  (* Only macOS needs the explicit two-level runtime binding; Linux resolves
+     RTLD_GLOBAL symbols correctly, so keep its link line unchanged. *)
+  let rt_link = if is_macos () then " " ^ Filename.quote runtime_so else "" in
+  { runtime_so; clang; tmp_dir; undef_flag; rt_link;
     counter = 0; var_slots = []; next_slot = 0;
     handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
@@ -174,12 +180,19 @@ let compile_fragment_clang ctx (ir : string) : Jit.dl_handle =
   end;
   (* Compile to .so via stdin.
      -x ir -: read LLVM IR from stdin; avoids the .ll file write round-trip.
-     -undefined dynamic_lookup (macOS): undefined symbols resolve at dlopen
-     time from RTLD_GLOBAL so later fragments can omit already-compiled stdlib.
-     -O0 -fno-lto: fragments are one-shot and don't benefit from optimization. *)
+     runtime .so as an explicit link input (BEFORE -x ir so it is treated as a
+     dylib, not IR): binds the fragment's runtime symbols (march_string_*, …)
+     TWO-LEVEL to that exact dylib instead of leaving them to macOS flat-namespace
+     -undefined dynamic_lookup resolution — which macOS 15's dyld resolves WRONG
+     for the short-string-literal path (see specs/todos JIT miscompile). Prelude
+     and prior-fragment symbols are not in the runtime .so, so they still fall to
+     dynamic_lookup, preserving incremental compilation.
+     -undefined dynamic_lookup (macOS): remaining undefined symbols resolve at
+     dlopen time from RTLD_GLOBAL so later fragments can omit already-compiled
+     stdlib.  -O0 -fno-lto: fragments are one-shot; no optimization benefit. *)
   let cmd = Printf.sprintf
-    "%s -x ir -shared -fPIC -O0 -fno-lto%s -o %s - 2>&1"
-    ctx.clang ctx.undef_flag so_path in
+    "%s -shared -fPIC -O0 -fno-lto%s%s -x ir -o %s - 2>&1"
+    ctx.clang ctx.undef_flag ctx.rt_link so_path in
   let t_clang0 = if profile_enabled then Unix.gettimeofday () else 0. in
   let (ic, oc) = Unix.open_process cmd in
   output_string oc ir;
@@ -795,9 +808,9 @@ let precompile_stdlib ctx
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
   let so_path    = Filename.concat cache_dir
-    ("stdlib_prelude_O1_" ^ short_hash ^ ".so") in
+    ("stdlib_prelude_O1_tln_" ^ short_hash ^ ".so") in
   let names_path = Filename.concat cache_dir
-    ("stdlib_prelude_O1_" ^ short_hash ^ ".names") in
+    ("stdlib_prelude_O1_tln_" ^ short_hash ^ ".names") in
   (* ── Cache hit path ───────────────────────────────────────────────────── *)
   if Sys.file_exists so_path && Sys.file_exists names_path then begin
     (try
@@ -855,8 +868,15 @@ let precompile_stdlib ctx
            cache dir is shared across concurrent sessions, and dlopen of a
            half-written .so crashes or hangs the reader. *)
         let so_tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
-        let cmd = Printf.sprintf "%s -shared -fPIC -O1%s -o %s %s 2>&1"
-          ctx.clang ctx.undef_flag so_tmp ll_path in
+        (* Link the prelude against the runtime .so explicitly so its calls into
+           the runtime (e.g. Path.is_absolute -> String.starts_with ->
+           march_string_starts_with, and every string-literal construction via
+           march_string_lit_static) bind TWO-LEVEL to that dylib rather than via
+           macOS flat-namespace -undefined dynamic_lookup, which macOS 15's dyld
+           resolves WRONG for the short-literal path (specs/todos JIT miscompile).
+           dynamic_lookup stays for any symbol not defined in the runtime .so. *)
+        let cmd = Printf.sprintf "%s -shared -fPIC -O1%s%s -o %s %s 2>&1"
+          ctx.clang ctx.undef_flag ctx.rt_link so_tmp ll_path in
         let ic = Unix.open_process_in cmd in
         let errbuf = Buffer.create 256 in
         (try while true do Buffer.add_char errbuf (input_char ic) done
