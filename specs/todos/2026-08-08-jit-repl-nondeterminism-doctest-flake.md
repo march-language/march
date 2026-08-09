@@ -84,6 +84,24 @@
 > `march`-compiled native binaries have this short-string-literal miscompile on
 > **macOS 15 specifically**, and revisit if macOS 15 is a supported target. The
 > doctest gate stays advisory until resolved.
+>
+> **CORRECTION 3 / OUTCOME (2026-08-09) — it is NONDETERMINISTIC; the attempted
+> fixes were tried on CI and REVERTED.** Option (a) was implemented — a macOS
+> two-level runtime binding for the prelude/fragment `.so`s (`ctx.rt_link` in
+> `repl_jit.ml`) plus a macOS `-O1` runtime default (`bin/main.ml`) — and neither
+> reliably fixed it. The `-O` bisect that had looked deterministic within a single
+> CI run turned out to track the FIRST runtime build: run 1 (default `-O2`) failed
+> at `-O2` and passed `-O0/-O1/-O3`; run 2 (default `-O1`) failed at `-O1` and
+> passed `-O2/-O0/-O3`. So the failing configuration is whatever the doctest soak
+> builds first — i.e. **the runtime/prelude `.so` built first in the job is
+> miscompiled while later rebuilds are fine**: build- or runtime-nondeterminism on
+> the macos-15 runner, NOT an `-O`-level or link-scheme bug. Both fix commits were
+> reverted; `MARCH_RUNTIME_OPT` (a runtime `-O` override) was kept as a harmless
+> debug lever; the one-shot CI probes (bisect/standalone-C/narrowing/Xcode-enum)
+> were removed, leaving only the advisory `--diagnose` doctest soak. **This needs a
+> macOS 15 host to reproduce and root-cause** (likely Apple-clang build
+> nondeterminism on the large `march_runtime.c` TU, or a runner/dyld interaction);
+> Linux and macOS 26 are unaffected. Gate remains advisory.
 
 ---
 
