@@ -102,18 +102,45 @@ let rec walk (caps, callees) (e : Tir.expr) =
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a ->
     (add_atoms caps [ a ], callees)
 
-let attribute ?(transparent = fun _ -> false) (m : Tir.tir_module) :
+let attribute ?(transparent = fun _ -> false)
+    ?(transparent_fns = fun _ -> false) (m : Tir.tir_module) :
     (string * string) list =
   (* lower.ml strips the entry file-module's name from its own declarations,
      so an unprefixed function is the entry module's.  Dependency modules
      keep their prefix (verified: @BigLib.load survives to emitted IR). *)
   let entry = if m.Tir.tm_name = "" then "main" else m.Tir.tm_name in
+  (* [Handler_owner] first: a synthesized actor-handler name is BARE by
+     contract (`Weeble_Zorp` — the spawn symbol and HCR manifest assert the
+     short spelling), so deriving ownership from the name charges every
+     nested module's handler to the entry module.  Lowering records the
+     declaring module out-of-band; only then fall back to the name. *)
   let owner_of fn_name =
-    match Hot_reload.module_of_name fn_name with "" -> entry | o -> o
+    match Handler_owner.owner_of fn_name with
+    | Some o -> o
+    | None ->
+      (match Hot_reload.module_of_name fn_name with "" -> entry | o -> o)
   in
   (* The entry module is the program itself; seeing through it would leave a
      capability with nowhere to land. *)
   let is_transparent owner = owner <> entry && transparent owner in
+  (* Transparency is decided per FUNCTION, not only per owner-module, because
+     the PRELUDE's functions are unprefixed — `println$String` names no module,
+     so [owner_of] resolves it to the entry module and the module-level test
+     can never see through it.  Before [transparent_fns], the console use
+     inside the prelude's `println` wrapper was therefore charged to the ENTRY
+     module no matter which nested module called it: `mod Outer` containing
+     `mod Inner` (with `needs IO.Console`) whose function calls `println` drew
+     "module `Outer` uses `IO.Console`" — a violation Inner's declaration
+     could not satisfy, and Outer's would mask.  First diagnosed through the
+     actor-handler route (the todo blamed the handler's bare name — that gap
+     was real too, see [Handler_owner], but fixing it alone changed nothing
+     because the capability sat one frame lower, in the wrapper).  The
+     [transparent_fns] check deliberately ignores the entry guard above:
+     prelude functions' owner IS the entry module, which is exactly why they
+     need their own predicate. *)
+  let see_through fn_name =
+    transparent_fns fn_name || is_transparent (owner_of fn_name)
+  in
 
   let direct : (string, SSet.t) Hashtbl.t = Hashtbl.create 64 in
   let callers : (string, string list) Hashtbl.t = Hashtbl.create 256 in
@@ -140,7 +167,7 @@ let attribute ?(transparent = fun _ -> false) (m : Tir.tir_module) :
      attributing it to the stdlib wrapper would report the same owner for
      every dependency in the program and answer nobody's question. *)
   let responsible_owners fn_name =
-    if not (is_transparent (owner_of fn_name)) then [ owner_of fn_name ]
+    if not (see_through fn_name) then [ owner_of fn_name ]
     else begin
       let seen = Hashtbl.create 16 in
       let found = ref SSet.empty in
@@ -149,8 +176,8 @@ let attribute ?(transparent = fun _ -> false) (m : Tir.tir_module) :
           Hashtbl.replace seen n ();
           List.iter
             (fun c ->
-               let o = owner_of c in
-               if is_transparent o then go c else found := SSet.add o !found)
+               if see_through c then go c
+               else found := SSet.add (owner_of c) !found)
             (Option.value ~default:[] (Hashtbl.find_opt callers n))
         end
       in

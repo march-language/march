@@ -27,7 +27,9 @@
     program never calls contributes nothing here either. *)
 
 val attribute :
-  ?transparent:(string -> bool) -> Tir.tir_module -> (string * string) list
+  ?transparent:(string -> bool) ->
+  ?transparent_fns:(string -> bool) ->
+  Tir.tir_module -> (string * string) list
 (** [attribute m] returns sorted, de-duplicated [(cap_path, owner_module)]
     pairs — e.g. [("IO.FileRead", "BigLib")].
 
@@ -38,6 +40,17 @@ val attribute :
     handful of stdlib modules and the report answers nobody's question.
     Measured before this existed: a dep calling [File.read] produced
     [IO.FileRead ← File].
+
+    [transparent_fns] names FUNCTIONS to see through, and exists because the
+    module predicate cannot express the PRELUDE: its declarations are
+    unwrapped into the entry module, so `println$String` carries no module
+    prefix, resolves to the entry module, and is exempt from [transparent] by
+    the never-see-through-the-entry rule. Without it, the console use inside
+    the `println` wrapper was charged to the ENTRY module regardless of which
+    nested module called it — `needs IO.Console` on the calling module could
+    not satisfy the ceiling, and on the entry module masked the true owner.
+    In practice: the stdlib-span top-level function names, mono-suffix
+    stripped by the caller ([bin/main.ml] matches on the [$]-stem).
 
     When the direct owner is transparent, the reverse call graph is walked to
     the nearest non-transparent callers, and the capability is attributed to
