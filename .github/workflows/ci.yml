@@ -305,16 +305,16 @@ jobs:
           eval $(opam env)
           MARCH_BIN="dune exec march --" python3 scripts/gen-scrollmd.py --check
 
-      # ADVISORY (continue-on-error) — surfaces stdlib doctest drift without
-      # blocking merge. The checker drives the JIT REPL, which is intermittently
-      # nondeterministic on some runners: a trivially-pure doctest
-      # (`Path.is_absolute("/etc")` = `String.starts_with(path, "/")`) once
-      # rendered `false` on a macOS runner while passing 5/5 locally and on
-      # Linux, and the run/skip split varies run-to-run. Until that JIT-REPL
-      # nondeterminism is fixed (specs/todos), a flake here must not redden CI —
-      # so this reports but does not gate.
-      - name: Check stdlib `march>` doctests (advisory)
-        continue-on-error: true
+      # Runs the JIT REPL and validates every stdlib `march>` example against the
+      # value it renders. A HARD gate on Linux, where it is deterministic and
+      # clean. Scoped OFF macOS: the JIT's core cross-dylib string miscompile is
+      # now FIXED (repl_jit.ml two-level runtime link, see
+      # specs/progress/2026-08-09-jit-macos-cross-dylib-string-miscompile.md), but
+      # the GitHub macos-15 runner has a RESIDUAL nondeterminism even with the fix
+      # (first runtime .so built in a job can still miscompile) that needs a
+      # macOS 15 host to root-cause. Re-enable on macOS once that residual is gone.
+      - name: Check stdlib `march>` doctests
+        if: runner.os != 'macOS'
         timeout-minutes: 5
         run: |
           eval $(opam env)
