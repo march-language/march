@@ -10100,6 +10100,7 @@ let test_file_with_lines_streaming_compiled () =
     (Printf.sprintf
     "mod WithLines do\n\
     \  needs IO.Console\n\
+    \  needs IO.FileRead\n\
     \  fn main() : Unit do\n\
     \    let path = \"%s\"\n\
     \    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do\n\
