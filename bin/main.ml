@@ -2696,8 +2696,36 @@ let compile filename =
         | Some i -> String.sub n 0 i
         | None -> n
       in
+      (* The PRELUDE's functions are the complement of [user_fns] at the top
+         level: stdlib-span [DFn]s, unwrapped into the entry module, so their
+         TIR names are BARE exactly like the user's own.  They must be
+         see-through per FUNCTION — the module predicate above cannot express
+         them (they name no module, and their owner resolves to the entry
+         module, which is never transparent).  Without this, the console use
+         inside `println$String` was charged to the ENTRY module no matter
+         which nested module called it, and that module's own `needs` could
+         not satisfy the ceiling. *)
+      let prelude_fns = Hashtbl.create 64 in
+      let walk_prelude decls =
+        List.iter (fun (d : March_ast.Ast.decl) ->
+            match d with
+            | March_ast.Ast.DFn (fd, sp) ->
+              if List.mem sp.March_ast.Ast.file
+                   (stdlib_span_files stdlib_decls) then
+                Hashtbl.replace prelude_fns
+                  fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
+            | March_ast.Ast.DMod _ -> ()  (* prefixed; module transparency covers them *)
+            | _ -> ()) decls
+      in
+      walk_prelude desugared.March_ast.Ast.mod_decls;
       March_tir.Cap_attrib.attribute
         ~transparent:(fun m -> List.mem m stdlib_mods)
+        ~transparent_fns:(fun n ->
+          (* Bare names only: a dotted name belongs to a module and is judged
+             by the module predicate.  Matching the stem of a dotted name here
+             would make a user function that merely SHARES a prelude name
+             (`MyMod.println`) see-through. *)
+          not (String.contains n '.') && Hashtbl.mem prelude_fns (stem n))
         (March_tir.Dce.prune_unreachable
            ~extra_root:(fun n -> Hashtbl.mem user_fns (stem n))
            ~fail_open:false pre_opt_tir)

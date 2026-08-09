@@ -1067,6 +1067,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   _module_alias_snapshots := Hashtbl.create 16;
   Hashtbl.reset _alias_candidates;
   Hashtbl.reset _alias_reported;
+  Handler_owner.reset ();
   _lowered_modules := Hashtbl.create 8;
   (* Pre-register every top-level DMod name from the combined module.
      This prevents _ensure_module_lowered from re-parsing a stdlib file with a
@@ -1677,6 +1678,18 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    the linker can resolve them (e.g. close_all → Pool.close_all). *)
                 let (new_types, new_fns) = Lower_actor.lower_actor mod_env ~hot_reload name.txt actor_def in
                 let renamed_fns = List.map (Lower_decls.rename_tir_vars prefix direct_fn_names) new_fns in
+                (* The synthesized fn names above are BARE by contract (the
+                   spawn symbol and the HCR manifest both assert the short
+                   spelling), so the name cannot say which module declared the
+                   actor.  Record ownership out-of-band for capability
+                   attribution — without this, a handler's IO was charged to
+                   the ENTRY module and this module's own `needs` could not
+                   satisfy the ceiling.  [prefix] carries a trailing dot. *)
+                let owner = String.sub prefix 0 (max 0 (String.length prefix - 1)) in
+                List.iter
+                  (fun (fd : Tir.fn_def) ->
+                     Handler_owner.register ~fn_name:fd.Tir.fn_name ~owner)
+                  renamed_fns;
                 types := List.rev_append new_types !types;
                 fns   := List.rev_append renamed_fns !fns
               | Ast.DExtern (edef, _) ->

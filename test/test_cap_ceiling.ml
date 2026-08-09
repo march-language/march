@@ -499,9 +499,88 @@ let test_no_cap_strict_opts_out () =
   if rc <> 0 then
     Alcotest.failf "--no-cap-strict should disable the ceiling:\n%s" out
 
+(* ── Actor handlers declared in a NESTED module ─────────────────────────────
+
+   A handler's synthesized TIR fn name is BARE (`Weeble_Zorp`: actor short
+   name + `_` + message name) — the HCR manifest format asserts that spelling,
+   and `spawn(Weeble)` emits `_Weeble_spawn` from the short name, so the name
+   itself cannot be qualified. [Cap_attrib.attribute]'s [owner_of] resolves an
+   unprefixed name to the ENTRY module, so a `println` inside a handler
+   declared in `Inner` was charged to `Outer`, and `Inner`'s own
+   `needs IO.Console` could not satisfy the ceiling
+   (specs/todos/2026-08-08-actor-handler-attribution-charges-entry-module.md).
+
+   The fix is a side table ([Handler_owner]) recording each synthesized
+   handler name's declaring module at lowering time, consulted before the
+   entry fallback.  Both directions are pinned: the declaring module's `needs`
+   must satisfy the ceiling (first test — RED before the fix), and a nested
+   module WITHOUT the declaration must be named as the violator itself, not
+   the entry module (second test — the half that keeps "attribute handlers to
+   the entry module and let its needs cover them" from passing). *)
+let test_nested_actor_handler_satisfied_by_declaring_module () =
+  accepts "nested actor handler covered by Inner's needs"
+    {|
+mod CeilActorOuter do
+  mod Inner do
+    needs IO.Console
+    actor Weeble do
+      state { count : Int }
+      init { count: 0 }
+      on Zorp(msg : String) do
+        println(msg)
+        state
+      end
+    end
+    fn run_it() do
+      let pid = spawn(Weeble)
+      send(pid, Zorp("hi"))
+    end
+  end
+  fn main() do
+    Inner.run_it()
+  end
+end
+|}
+
+(* Caught at TYPECHECK, not the ceiling: the handler's `println` is a direct
+   builtin call, so Check 1b's body scan (which folds actor handler bodies in)
+   rejects it before compilation reaches the ceiling — and names `Inner`,
+   which is the property this test pins.  Same re-pointing the severity flip
+   applied to the other direct routes; the ceiling half of the fix is
+   witnessed by the ACCEPT test above, where the declaration must satisfy
+   attribution or the build fails on `CeilActorOuter`. *)
+let test_nested_actor_handler_violation_names_inner () =
+  rejects_at_typecheck "nested actor handler without needs blames Inner"
+    ~expect:"`Inner` does not declare `needs IO.Console`"
+    {|
+mod CeilActorOuter2 do
+  mod Inner do
+    actor Weeble do
+      state { count : Int }
+      init { count: 0 }
+      on Zorp(msg : String) do
+        println(msg)
+        state
+      end
+    end
+    fn run_it() do
+      let pid = spawn(Weeble)
+      send(pid, Zorp("hi"))
+    end
+  end
+  fn main() do
+    Inner.run_it()
+  end
+end
+|}
+
 let tests =
   unit_tests
   @ [
+      Alcotest.test_case "nested actor handler covered by declaring module" `Slow
+        test_nested_actor_handler_satisfied_by_declaring_module;
+      Alcotest.test_case "nested actor handler violation names Inner" `Slow
+        test_nested_actor_handler_violation_names_inner;
       Alcotest.test_case "--cap-strict still accepted" `Slow
         test_explicit_cap_strict_still_accepted;
       Alcotest.test_case "--no-cap-strict opts out" `Slow
