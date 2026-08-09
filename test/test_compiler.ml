@@ -9582,6 +9582,73 @@ let test_cap_propagation_still_warns_unrelated () =
   Alcotest.(check bool) "unrelated needs IO.Console still warns when unused" true
     (has_warning_with ctx "unused capability")
 
+(* A `needs` satisfied only through a STDLIB call must not warn as unused.
+   Found 2026-08-08, minutes after the ceiling became the default, on the first
+   file it forced a migration of (golden g43): the ceiling — emitted-code
+   attribution — demands `needs IO.Spawn` for a stdlib-mediated `pmap`, and the
+   source-level Check 2 then said "no function requires Cap(IO.Spawn) —
+   help: remove the unused capability declaration", whose autofix re-breaks the
+   build.  The two checks gave contradictory instructions for the same line.
+
+   The sibling-module suppression above ([env.module_caps]) never covers this:
+   the stdlib deliberately declares no `needs` (doing so weakens attribution —
+   see the severity-flip progress doc), so a stdlib module never contributes an
+   entry.  The fix consults the per-function TRANSITIVE capability closure —
+   the same table Check 4 already uses for imports — which sees straight
+   through the stdlib wrapper to the builtin.
+
+   The stdlib file must be span-registered exactly as bin/main.ml does, or the
+   body-scan error fires on the stdlib's own builtin calls
+   (see [assert_stdlib_file_typechecks_cleanly]). *)
+let with_stdlib_registered name k =
+  let saved = !March_typecheck.Typecheck.stdlib_source_files in
+  let candidates = [
+    Filename.concat "stdlib" name;
+    Filename.concat "../../../stdlib" name;
+    Filename.concat "../../stdlib" name;
+  ] in
+  March_typecheck.Typecheck.stdlib_source_files := candidates @ saved;
+  Fun.protect ~finally:(fun () ->
+    March_typecheck.Typecheck.stdlib_source_files := saved) k
+
+let test_stdlib_mediated_needs_is_not_unused () =
+  with_stdlib_registered "datetime.march" (fun () ->
+    let dt = load_stdlib_file_for_test "datetime.march" in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "Main"; span = dummy_span };
+      mod_decls = dt :: (parse_and_desugar {|mod Main do
+        needs IO.Clock
+        fn stamp() : Int do
+          DateTime.now()
+        end
+      end|}).March_ast.Ast.mod_decls;
+    } in
+    let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+    Alcotest.(check bool)
+      "needs IO.Clock reached only via DateTime.now must not warn unused" false
+      (has_warning_with errors "unused capability"))
+
+(* The suppression must stay selective: with the same stdlib loaded, a `needs`
+   that nothing — direct, signature, sibling, or stdlib-mediated — requires
+   still warns.  Without this, "consult the closure" could degenerate into
+   "never warn" and pass the test above by checking nothing. *)
+let test_unrelated_needs_still_warns_with_stdlib_loaded () =
+  with_stdlib_registered "datetime.march" (fun () ->
+    let dt = load_stdlib_file_for_test "datetime.march" in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "Main"; span = dummy_span };
+      mod_decls = dt :: (parse_and_desugar {|mod Main do
+        needs IO.NetListen
+        fn stamp() : Int do
+          DateTime.now()
+        end
+      end|}).March_ast.Ast.mod_decls;
+    } in
+    let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+    Alcotest.(check bool)
+      "needs IO.NetListen with no use of any kind still warns" true
+      (has_warning_with errors "unused capability"))
+
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
 (* Helper: run typecheck then the standalone cap_infer pass.
@@ -12408,6 +12475,7 @@ let compiler_suites =
       ("cap_ceiling", Test_cap_ceiling.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
+      ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ( "match_diagnostics",
         [
           Alcotest.test_case "or-pattern binding accepted" `Quick
@@ -13167,6 +13235,8 @@ let compiler_suites =
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
+          Alcotest.test_case "stdlib-mediated needs is not unused"          `Quick test_stdlib_mediated_needs_is_not_unused;
+          Alcotest.test_case "unrelated needs warns with stdlib loaded"     `Quick test_unrelated_needs_still_warns_with_stdlib_loaded;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;

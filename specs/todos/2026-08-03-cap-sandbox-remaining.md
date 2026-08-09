@@ -20,10 +20,7 @@ are what is left, all narrow.
   externally via a mount-namespace allow-list. Until then `IO.FileRead` is
   advisory for the self-imposed variant on BOTH platforms.
 
-- [ ] **Two SBPL baselines can drift.** `forge/lib/cap_sandbox.ml`'s
-  `sbpl_baseline` and `bin/main.ml`'s `cap_sandbox_define` construct the same
-  deny-default profile independently. Both are short and commented as mirrors,
-  but nothing mechanically enforces agreement. A drift test — compile a fixture
-  with `--cap-sandbox`, extract the embedded profile, diff against
-  `Cap_sandbox.profile_for` for the same cap set — would close it, in the same
-  spirit as the `builtin_cap_table` accounting test.
+- [x] **Two SBPL baselines can drift** — CLOSED 2026-08-08 by
+  `test/test_cap_sandbox_profile.ml` (normalized clause-set equality plus
+  both polarities of the conditional grants); see
+  `specs/progress/2026-08-08-cap-attrib-owner-fixes.md`.

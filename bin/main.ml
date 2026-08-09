@@ -851,18 +851,28 @@ let do_check       = ref false   (* --check: typecheck only, no codegen or eval 
       typechecker saw, including linked stdlib, so it must be filtered to this
       file or a pure program reports "needs everything".
 
-    Read by --cap-sandbox and --cap-strict.  This used to claim it was shared
-    with `march caps` "so the reported set and the embedded sandbox profile
-    cannot disagree" — that is FALSE and was corrected 2026-08-06.  `march
-    caps` goes through [run_check_cmd ~emit_caps:true] and applies its OWN
-    [belongs], keyed on the module names the listed files declare; this one
-    builds [user_fn_names] from [DFn] declarations only, so a key that is not a
-    [DFn] name (a module-level [let]'s, or an impl method's
-    "Iface$Ty.method") never belongs here while `march caps` does see it.  The
-    two therefore CAN disagree, and since 2026-08-06 they demonstrably do for a
-    module whose only IO lives in a module-level [let].  Tracked in
-    specs/todos/2026-08-06-cap-sandbox-belongs-filter-misses-non-dfn-keys.md;
-    do not restore the sharing claim without actually sharing the predicate.
+    Read by --cap-sandbox (the embedded profile's grant set).  Until #225 the
+    --cap-strict ceiling read it too; the ceiling's used-set is now
+    attribution-only.
+
+    The [belongs] filter collects EVERY key shape
+    [fn_own_capability_closures] can produce for this file's declarations —
+    bare [DFn]/[DLet] names, dotted nested-module names, impl methods'
+    "[Prefix.]Iface$Ty.method" manglings, actor handlers' bare synthesized
+    "Actor_Msg" names, and the bare dispatch node an impl emits.  It was
+    [DFn]-only until 2026-08-08
+    (2026-08-06-cap-sandbox-belongs-filter-misses-non-dfn-keys.md), which made
+    the sandbox profile UNDER-grant: a program whose only write lived in a
+    module-level [let] embedded a pure program's profile and was denied at
+    runtime by its own sandbox.  Pinned by test_cap_sandbox_profile's "widens
+    the profile" fixtures, one per key shape.
+
+    NOT shared with `march caps` — that goes through
+    [run_check_cmd ~emit_caps:true] with its OWN [belongs], keyed on the
+    module names the listed files declare (its keys are never entry-unwrapped,
+    so the predicates cannot be unified without unifying the key economy).
+    Do not restore the pre-2026-08-06 sharing claim without actually sharing
+    the predicate.
 
     [stdlib_files] must list the files whose declarations are the standard
     library's (see [stdlib_span_files]).  The callers pass [desugared] AFTER
@@ -899,19 +909,69 @@ let user_fn_names_of ~stdlib_files (m : March_ast.Ast.module_) :
   walk m.March_ast.Ast.mod_decls;
   user_fn_names
 
+(* MIRRORS the local [impl_ty_key] inside Typecheck's [check_module_needs] —
+   the producer of the "Iface$Ty.method" closure keys this file must match.
+   Four stable arms; if a fifth impl-target shape ever lands there, the
+   "impl method widens the profile" fixture in test_cap_sandbox_profile is
+   the drift alarm (its key stops belonging and the grant disappears). *)
+let impl_ty_key_of (t : March_ast.Ast.ty) : string =
+  match t with
+  | March_ast.Ast.TyCon (n, _) -> n.March_ast.Ast.txt
+  | March_ast.Ast.TyTuple tys -> Printf.sprintf "$Tuple%d" (List.length tys)
+  | March_ast.Ast.TyRecord _ -> "$Record"
+  | _ -> "$Unknown"
+
 let own_caps_of_this_module ~stdlib_files typecheck_env
     (m : March_ast.Ast.module_) : string list =
   let own = March_typecheck.Typecheck.fn_own_capability_closures typecheck_env in
-  let user_fn_names = user_fn_names_of ~stdlib_files m in
-  let belongs qname =
-    (* Keys are "Mod.fn" or bare "fn" (lower.ml strips the top-level module
-       prefix from declarations in the entry file). *)
-    match String.index_opt qname '.' with
-    | None -> Hashtbl.mem user_fn_names qname
-    | Some i ->
-      String.sub qname 0 i = m.March_ast.Ast.mod_name.March_ast.Ast.txt
-      || Hashtbl.mem user_fn_names qname
+  let is_stdlib (sp : March_ast.Ast.span) =
+    List.mem sp.March_ast.Ast.file stdlib_files
   in
+  let own_keys = Hashtbl.create 64 in
+  (* [prefix] follows [check_module_needs]'s [cap_qname] convention: empty at
+     the entry level (the entry module is unwrapped), dotted below. *)
+  let qname prefix leaf = if prefix = "" then leaf else prefix ^ "." ^ leaf in
+  let add prefix leaf = Hashtbl.replace own_keys (qname prefix leaf) () in
+  let rec walk prefix decls =
+    List.iter (fun (d : March_ast.Ast.decl) ->
+        match d with
+        | March_ast.Ast.DFn (fd, sp) ->
+          if not (is_stdlib sp) then
+            add prefix fd.March_ast.Ast.fn_name.March_ast.Ast.txt
+        | March_ast.Ast.DLet (_, b, sp) ->
+          (match b.March_ast.Ast.bind_pat with
+           | March_ast.Ast.PatVar n when not (is_stdlib sp) ->
+             add prefix n.March_ast.Ast.txt
+           | _ -> ())
+        | March_ast.Ast.DImpl (idef, sp) ->
+          if not (is_stdlib sp) then begin
+            let ty_key = impl_ty_key_of idef.March_ast.Ast.impl_ty in
+            List.iter (fun ((mn : March_ast.Ast.name), _) ->
+                add prefix
+                  (idef.March_ast.Ast.impl_iface.March_ast.Ast.txt
+                   ^ "$" ^ ty_key ^ "." ^ mn.March_ast.Ast.txt);
+                (* The bare dispatch node ([check_module_needs] emits it when
+                   no DFn shares the name; adding it unconditionally is safe —
+                   when a DFn does share it, the DFn arm already added it). *)
+                add prefix mn.March_ast.Ast.txt)
+              idef.March_ast.Ast.impl_methods
+          end
+        | March_ast.Ast.DActor (_, name, actor, sp) ->
+          (* Handlers are keyed BARE ("Weeble_Zorp") regardless of nesting —
+             the HCR-manifest convention [check_module_needs]'s DActor branch
+             mirrors — so deliberately no [prefix] here. *)
+          if not (is_stdlib sp) then
+            List.iter (fun (h : March_ast.Ast.actor_handler) ->
+                add ""
+                  (name.March_ast.Ast.txt ^ "_"
+                   ^ h.March_ast.Ast.ah_msg.March_ast.Ast.txt))
+              actor.March_ast.Ast.actor_handlers
+        | March_ast.Ast.DMod (nm, _, inner, _) ->
+          walk (qname prefix nm.March_ast.Ast.txt) inner
+        | _ -> ()) decls
+  in
+  walk "" m.March_ast.Ast.mod_decls;
+  let belongs qname = Hashtbl.mem own_keys qname in
   List.concat_map (fun (qname, cs) -> if belongs qname then cs else []) own
   |> List.sort_uniq String.compare
   |> March_caps.Cap_lattice.normalize
@@ -2696,8 +2756,36 @@ let compile filename =
         | Some i -> String.sub n 0 i
         | None -> n
       in
+      (* The PRELUDE's functions are the complement of [user_fns] at the top
+         level: stdlib-span [DFn]s, unwrapped into the entry module, so their
+         TIR names are BARE exactly like the user's own.  They must be
+         see-through per FUNCTION — the module predicate above cannot express
+         them (they name no module, and their owner resolves to the entry
+         module, which is never transparent).  Without this, the console use
+         inside `println$String` was charged to the ENTRY module no matter
+         which nested module called it, and that module's own `needs` could
+         not satisfy the ceiling. *)
+      let prelude_fns = Hashtbl.create 64 in
+      let walk_prelude decls =
+        List.iter (fun (d : March_ast.Ast.decl) ->
+            match d with
+            | March_ast.Ast.DFn (fd, sp) ->
+              if List.mem sp.March_ast.Ast.file
+                   (stdlib_span_files stdlib_decls) then
+                Hashtbl.replace prelude_fns
+                  fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
+            | March_ast.Ast.DMod _ -> ()  (* prefixed; module transparency covers them *)
+            | _ -> ()) decls
+      in
+      walk_prelude desugared.March_ast.Ast.mod_decls;
       March_tir.Cap_attrib.attribute
         ~transparent:(fun m -> List.mem m stdlib_mods)
+        ~transparent_fns:(fun n ->
+          (* Bare names only: a dotted name belongs to a module and is judged
+             by the module predicate.  Matching the stem of a dotted name here
+             would make a user function that merely SHARES a prelude name
+             (`MyMod.println`) see-through. *)
+          not (String.contains n '.') && Hashtbl.mem prelude_fns (stem n))
         (March_tir.Dce.prune_unreachable
            ~extra_root:(fun n -> Hashtbl.mem user_fns (stem n))
            ~fail_open:false pre_opt_tir)
