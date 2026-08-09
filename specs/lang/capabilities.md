@@ -312,6 +312,60 @@ The same ceiling can be re-checked on a compiled binary with
 `forge cap inspect --strict`, which reads each module's declared and measured
 capability sets out of the artifact.
 
+### The grant — `main`'s parameter bounds the whole program
+
+Everything above verifies the *manifest*: `needs` must be present and truthful,
+end to end. None of it stops anything — a module that declares
+`needs IO.Network` and exfiltrates passes every check, because the declaration
+is true. The grant is where March says **no**.
+
+`main`'s capability parameter is the program's grant, and the program's whole
+transitive capability closure must sit under it:
+
+```march
+mod Report do
+  needs IO.Console
+
+  fn main(cap : Cap(IO.Console)) : () do
+    println("report done")
+  end
+end
+```
+
+`Cap(IO.Console)` here is a machine-checked claim: this program — every helper,
+every stdlib call, every dependency `main` reaches — touches nothing beyond the
+console. Add one `file_write` anywhere in that closure and the build fails:
+
+```
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
+(reached in `Report.save`). The grant is a ceiling on the WHOLE program —
+declaring `needs IO.FileWrite` does not raise it.
+help: widen the grant (e.g. `Cap(IO)`), or remove the use.
+```
+
+Three signatures, three meanings:
+
+| `main` signature | grant |
+|---|---|
+| `fn main()` | ambient — no gate; every pre-grant program keeps compiling |
+| `fn main(cap : Cap(IO))` | full IO — the established entry-point convention |
+| `fn main(cap : Cap(IO.Console))` | narrow — the closure must sit under it |
+
+Two deliberate edges:
+
+- **`IO.Foreign` cannot sit under a narrow grant.** What linked C code does is
+  invisible to the capability lattice, so a program whose closure reaches an
+  `extern` block is refused under any grant narrower than `Cap(IO)` — the
+  check will not certify a bound it cannot see.
+- **The grant bounds what `main` reaches, not what the file contains.** Dead
+  code costs nothing, the same reachability the ceiling uses. (Its `needs`
+  line is still required — the manifest checks are unchanged and orthogonal.)
+
+The grant is `needs`' missing other half: `needs` says what a *module*
+touches; the grant bounds what the *program* may. Sandbox ladder stages A/B
+(`specs/2026-08-08-r1-no-ambient-io-design.md`); per-function grants (effect
+rows) are stage C and not built.
+
 ### When *not* to use IO caps
 
 **Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee of the ERROR-level kind above **only for the signature/`use`/`extern` surface** — the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import, so this guarantee is strongest when the functions in question actually take `Cap(X)` parameters (or `use` something that does). Since 2026-08-06 a module with no `needs` that calls IO builtins directly in function bodies is REJECTED (`--check` exits 1), not merely warned. A stdlib-mediated call remains outside this check — see above.

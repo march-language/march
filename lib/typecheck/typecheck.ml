@@ -12477,6 +12477,156 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
     entries) instead of allocating a fresh one, so a caller who built [seed_env]
     from a separately-checked module can still recover types for BOTH that
     module's spans and [m]'s own via the single returned [type_map]. *)
+(* ── R1 stages A+B: the grant check ──────────────────────────────────────
+   specs/2026-08-08-r1-no-ambient-io-design.md.
+
+   `main`'s capability parameter IS the program's grant, and the program's
+   transitive capability closure from `main` must sit under it.  This is the
+   first check in the capability system that says NO rather than "declare
+   it": every earlier check (1b, the ceiling, R3, R2) verifies that the
+   MANIFEST is truthful, and a hostile module with a truthful manifest passes
+   them all.  Here, `fn main(cap : Cap(IO.Console))` makes "this program
+   reaches nothing beyond the console" a compile-time property no `needs`
+   line can override.
+
+   Adoption contract (each clause pinned in test_compiler's cap_grant group):
+   - no capability parameter → NO gate.  Ambient, exactly today's behavior;
+     stage A/B breaks no existing program.
+   - `Cap(IO)` → the full grant; every IO-lattice point sits under it.
+   - `Cap(IO.X)` → narrow grant, enforced transitively through helpers and
+     the stdlib alike.
+   - `IO.Foreign` under a narrow grant is REFUSED with its own message: what
+     linked C does is not modellable, so certifying a bound over it would be
+     a lie (ladder doc, "interactions to design for").
+
+   Design constraints inherited from a week of capability bugs:
+   - Judged on the TYPECHECK-side closure ([fn_transitive_capability_
+     closures_tbl]), which both the interpreter and compile paths share — the
+     unused-warning contradiction came from gating one path on an analysis
+     the other path does not run.
+   - Reachability-based: caps(main), not the file's union.  Dead code costs
+     nothing, matching the ceiling's post-#225 semantics.
+   - Non-IO capability roots (FFI caps like `Ffi`/`LibC`) are OUTSIDE the IO
+     lattice and outside this check — they are governed by the extern checks;
+     holding them under an IO grant would reject every FFI program with a
+     message about a lattice they are not in.  Their IO shadow (`IO.Foreign`)
+     is what the Foreign clause above bounds.
+   - The check runs at the end of [check_module_core] only — never on the
+     REPL's [check_module_with_env] path, which has no entry point to be
+     granted from (the same exemption R2 gives it). *)
+let check_main_grant (env : env) (decls : Ast.decl list) : unit =
+  let main_grant : (string * Ast.span) option =
+    List.find_map
+      (function
+        | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
+          (match def.Ast.fn_clauses with
+           | clause :: _ ->
+             (match clause.Ast.fc_params with
+              | [ Ast.FPNamed p ] | [ Ast.FPDefault (p, _) ] ->
+                (match p.Ast.param_ty with
+                 | Some ty ->
+                   (match March_caps.Cap_surface_ty.caps_in_ty ty with
+                    | g :: _ -> Some (g, clause.Ast.fc_span)
+                    | [] -> None)
+                 | None -> None)
+              | _ -> None)
+           | [] -> None)
+        | _ -> None)
+      decls
+  in
+  match main_grant with
+  | None -> ()
+  | Some (grant, span) ->
+    let closure =
+      match
+        Hashtbl.find_opt (fn_transitive_capability_closures_tbl env) "main"
+      with
+      | Some caps -> caps
+      | None -> []
+    in
+    (* One function that holds [c] directly AND is reachable from main, for
+       the diagnostic.  Restricting to the reachable set matters: the first
+       version picked any holder from [own_cap_closures] — the whole env,
+       linked stdlib included — and named `Logger.with_span` for an IO.Clock
+       reached through `Random.int`, sending the user to a function their
+       program never calls.
+
+       The BFS resolves a reference the same two ways the closure fixpoint's
+       resolver tries first (the name as-is, then qualified by the refering
+       key's module prefix); the remaining resolver shapes are rare enough
+       that a miss only shrinks the candidate set — the fallback below then
+       names an arbitrary holder rather than dropping the hint, which is
+       still where the capability lives even if reachability was not
+       re-proven here. *)
+    let reachable_from_main =
+      let visited = Hashtbl.create 64 in
+      let queue = Queue.create () in
+      Queue.push "main" queue;
+      while not (Queue.is_empty queue) do
+        let k = Queue.pop queue in
+        if not (Hashtbl.mem visited k) then begin
+          Hashtbl.replace visited k ();
+          let prefix =
+            match String.rindex_opt k '.' with
+            | Some i -> String.sub k 0 (i + 1)
+            | None -> ""
+          in
+          List.iter
+            (fun r ->
+               if Hashtbl.mem env.own_cap_closures r
+                  || Hashtbl.mem env.fn_refs r
+               then Queue.push r queue;
+               let q = prefix ^ r in
+               if q <> r
+                  && (Hashtbl.mem env.own_cap_closures q
+                      || Hashtbl.mem env.fn_refs q)
+               then Queue.push q queue)
+            (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
+        end
+      done;
+      visited
+    in
+    let reached_in c =
+      let holders =
+        Hashtbl.fold
+          (fun k own acc -> if List.mem c own then k :: acc else acc)
+          env.own_cap_closures []
+      in
+      let non_main = List.filter (fun k -> k <> "main") holders in
+      match List.filter (Hashtbl.mem reachable_from_main) non_main with
+      | k :: _ -> Some k
+      | [] ->
+        (match non_main with
+         | k :: _ -> Some k
+         | [] -> (match holders with k :: _ -> Some k | [] -> None))
+    in
+    List.iter
+      (fun c ->
+         if not (cap_subsumes "IO" c) then ()  (* FFI root; not this lattice *)
+         else if cap_subsumes "IO.Foreign" c && grant <> "IO" then
+           Err.error env.errors ~span
+             (Printf.sprintf
+                "`main` is granted `Cap(%s)`, but the program reaches `%s` — \
+                 linked C code, whose behavior the capability lattice cannot \
+                 bound. A narrow grant cannot be certified over an `extern` \
+                 block.\n\
+                 help: grant `Cap(IO)` instead, or remove the extern \
+                 dependency from everything `main` reaches."
+                grant c)
+         else if not (cap_subsumes grant c) then
+           Err.error env.errors ~span
+             (Printf.sprintf
+                "`main` is granted `Cap(%s)`, but the program reaches `%s`%s. \
+                 The grant is a ceiling on the WHOLE program — declaring \
+                 `needs %s` does not raise it.\n\
+                 help: widen the grant (e.g. `Cap(IO)`), or remove the use."
+                grant c
+                (match reached_in c with
+                 | Some f -> Printf.sprintf " (reached in `%s`)" f
+                 | None -> "")
+                c))
+      (List.sort_uniq String.compare closure)
+
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   let type_map = match seed_env with
@@ -12776,6 +12926,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      never "EntryName.Lib.Sub.f". *)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
     ~cap_qname_prefix:"";
+  (* R1: hold the program's capability closure under main's grant. *)
+  check_main_grant final_env m.Ast.mod_decls;
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;

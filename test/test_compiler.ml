@@ -9649,6 +9649,162 @@ let test_unrelated_needs_still_warns_with_stdlib_loaded () =
       "needs IO.NetListen with no use of any kind still warns" true
       (has_warning_with errors "unused capability"))
 
+(* ── R1 stages A+B: main's capability parameter IS the grant ──────────────
+   specs/2026-08-08-r1-no-ambient-io-design.md.
+
+   Everything before this made `needs` a mandatory, mechanically-verified
+   MANIFEST — auditing, not sandboxing: a module that declares `needs
+   IO.Network` exfiltrates and every check passes, because the declaration is
+   truthful.  The grant check is the first place March says NO: the program's
+   transitive capability closure from `main` must sit under what `main`'s
+   signature was GRANTED, no matter what anyone declared.
+
+   Adoption contract, pinned by the tests below in both directions:
+   - `fn main()` (no capability parameter) = ambient, today's behavior,
+     UNCHANGED — stage A/B breaks no existing program.
+   - `fn main(cap : Cap(IO))` = full grant; everything IO sits under it.
+   - `fn main(cap : Cap(IO.Console))` = narrow grant; reaching any capability
+     outside it — directly, through a helper, or through the stdlib — is a
+     compile error naming the capability and a function that reaches it.
+   - `IO.Foreign` under a narrow grant is refused outright: what linked C
+     does is not modellable, so the check will not certify a bound it cannot
+     see (ladder doc §interactions), rather than pretend `extern` respects
+     the lattice. *)
+
+let test_grant_narrow_covers_console () =
+  let ctx = typecheck {|mod GrantOk do
+    needs IO.Console
+    fn main(cap : Cap(IO.Console)) : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "console under Cap(IO.Console) is within the grant"
+    false (has_errors ctx)
+
+let test_grant_narrow_rejects_filewrite () =
+  (* `needs IO.FileWrite` IS declared — the manifest is truthful, every
+     pre-grant check passes, and that is exactly the point: declaring does
+     not grant. *)
+  let ctx = typecheck {|mod GrantViolate do
+    needs IO.Console
+    needs IO.FileWrite
+    fn main(cap : Cap(IO.Console)) : () do
+      match file_write("/tmp/grant_x", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "IO.FileWrite outside Cap(IO.Console) is an error"
+    true (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "the violating capability is named"
+    true (has_error_with ctx "IO.FileWrite")
+
+let test_grant_violation_through_helper () =
+  (* The closure is transitive: main never writes, a helper does.  Without
+     this, hiding the call one frame down would evade the grant. *)
+  let ctx = typecheck {|mod GrantHelper do
+    needs IO.Console
+    needs IO.FileWrite
+    fn save() : () do
+      match file_write("/tmp/grant_h", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      save()
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "helper-reached IO.FileWrite is still a grant error"
+    true (has_error_with ctx "granted `Cap(IO.Console)`")
+
+let test_grant_full_io_accepts_everything () =
+  (* `needs IO` is Check 1's requirement for the Cap(IO) SIGNATURE — the
+     established entry-point convention (test/native/main_cap_io.march). *)
+  let ctx = typecheck {|mod GrantFull do
+    needs IO
+    fn main(cap : Cap(IO)) : () do
+      match file_write("/tmp/grant_f", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "Cap(IO) grants everything" false (has_errors ctx)
+
+let test_grant_absent_is_ambient () =
+  (* No capability parameter = no gate.  This is the compatibility half of
+     the design: every existing program keeps compiling. *)
+  let ctx = typecheck {|mod GrantLegacy do
+    needs IO.Console
+    needs IO.FileWrite
+    fn main() : () do
+      match file_write("/tmp/grant_l", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "parameterless main stays ambient" false (has_errors ctx)
+
+let test_grant_narrow_refuses_foreign () =
+  let ctx = typecheck {|mod GrantForeign do
+    needs IO.Console
+    needs Ffi
+    extern "rt" : Cap(Ffi) do
+      fn ffi_id(x : Int) : Int = "march_test_ffi_id"
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      println(int_to_string(ffi_id(1)))
+    end
+  end|} in
+  Alcotest.(check bool) "IO.Foreign under a narrow grant is refused"
+    true (has_error_with ctx "linked C code")
+
+let test_grant_dead_code_is_not_charged () =
+  (* The grant bounds what main REACHES, not what the file contains — same
+     reachability notion as the ceiling post-#225.  A dead helper's
+     capability costs nothing (it still needs its `needs` line; that check
+     is orthogonal and stays). *)
+  let ctx = typecheck {|mod GrantDead do
+    needs IO.Console
+    needs IO.FileWrite
+    fn never_called() : () do
+      match file_write("/tmp/grant_d", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "unreachable capability is not a grant violation"
+    false (has_error_with ctx "granted `Cap(IO.Console)`")
+
+let test_main_signature_accepts_narrow_cap () =
+  (* Pre-R1, [Desugar.check_main_signature] accepted exactly Cap(IO); a
+     narrow grant must not be rejected at the signature. *)
+  Alcotest.(check bool) "fn main(cap : Cap(IO.Console)) is a legal signature"
+    false
+    (desugar_has_errors {|mod GrantSig do
+      needs IO.Console
+      fn main(cap : Cap(IO.Console)) : () do
+        println("hi")
+      end
+    end|})
+
+let test_main_signature_still_rejects_non_cap () =
+  Alcotest.(check bool) "fn main(x : Int) is still rejected"
+    true
+    (desugar_has_errors {|mod GrantSigBad do
+      fn main(x : Int) : () do
+        ()
+      end
+    end|})
+
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
 (* Helper: run typecheck then the standalone cap_infer pass.
@@ -13237,6 +13393,17 @@ let compiler_suites =
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
           Alcotest.test_case "stdlib-mediated needs is not unused"          `Quick test_stdlib_mediated_needs_is_not_unused;
           Alcotest.test_case "unrelated needs warns with stdlib loaded"     `Quick test_unrelated_needs_still_warns_with_stdlib_loaded;
+        ] );
+      ( "cap_grant", [
+          Alcotest.test_case "narrow grant covers console"        `Quick test_grant_narrow_covers_console;
+          Alcotest.test_case "narrow grant rejects filewrite"     `Quick test_grant_narrow_rejects_filewrite;
+          Alcotest.test_case "violation through a helper"         `Quick test_grant_violation_through_helper;
+          Alcotest.test_case "Cap(IO) grants everything"          `Quick test_grant_full_io_accepts_everything;
+          Alcotest.test_case "parameterless main stays ambient"   `Quick test_grant_absent_is_ambient;
+          Alcotest.test_case "narrow grant refuses IO.Foreign"    `Quick test_grant_narrow_refuses_foreign;
+          Alcotest.test_case "dead code is not charged"           `Quick test_grant_dead_code_is_not_charged;
+          Alcotest.test_case "signature accepts narrow cap"       `Quick test_main_signature_accepts_narrow_cap;
+          Alcotest.test_case "signature still rejects non-cap"    `Quick test_main_signature_still_rejects_non_cap;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;

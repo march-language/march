@@ -74,7 +74,18 @@ Everything below is downstream of closing that.
 
 ## 2. What the claim would require
 
-### R1. No ambient authority (load-bearing)
+### R1. No ambient authority (load-bearing) — **STAGES A+B SHIPPED 2026-08-09**
+
+**Built 2026-08-09** — `specs/2026-08-08-r1-no-ambient-io-design.md` (staged
+plan) and `specs/progress/2026-08-09-r1-grant-check-stages-ab.md`. `main`'s
+capability parameter is the program's GRANT: `fn main(cap : Cap(IO.Console))`
+holds the program's whole transitive capability closure under the console at
+compile time, no matter what any module declares. A parameterless `main` stays
+ambient (nothing existing breaks); `Cap(IO)` is the full grant. `IO.Foreign`
+is refused under any narrow grant — a bound over linked C would be a lie.
+What remains of R1 is stage C: per-FUNCTION grants via effect rows (R5),
+where the guarantee composes per dependency instead of per program. The
+paragraphs below predate the staging and describe the full destination.
 
 `file_read` must be uncallable without evidence of `Cap(IO.FileRead)`. Two
 formulations:

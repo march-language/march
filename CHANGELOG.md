@@ -11,6 +11,21 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`main`'s capability parameter is now the program's grant — the first
+  check that says no rather than "declare it".**
+  `fn main(cap : Cap(IO.Console))` makes a machine-checked claim: the whole
+  program — every helper, stdlib call, and dependency `main` reaches —
+  touches nothing beyond the console, and a truthful `needs` manifest does
+  not raise that ceiling. A parameterless `main` stays ambient (no existing
+  program breaks); `Cap(IO)` is the full grant, as before. `IO.Foreign` is
+  refused under any narrow grant, since linked C cannot be bounded by the
+  lattice. The violation error names the capability and a
+  reachable-from-`main` function that uses it. Enforced identically by
+  `march --check`, the interpreter, and the compiler. (Sandbox ladder R1
+  stages A+B; per-function grants are future work.)
+
 ### Changed
 
 - **The capability ceiling is now on by default.** `march --compile` fails the
