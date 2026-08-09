@@ -446,6 +446,30 @@ jobs:
           echo "String.starts_with(\"aetc\", \"a\")     -> $(probe 'String.starts_with("aetc", "a")')     (expect true)"
           echo "String.ends_with(\"/etc\", \"c\")       -> $(probe 'String.ends_with("/etc", "c")')       (expect true)"
 
+      # DIAGNOSTIC (macOS only, advisory) — the miscompile is LLVM 17.0.0 / Apple
+      # clang 1700.0.13.5 (the runner default) mangling our generated IR; a newer
+      # clang compiles it correctly. Enumerate every Xcode on the image, select
+      # each, and re-test String.starts_with("/etc","/") — so we learn which Xcode
+      # (clang) to pin in .github/actions/march-setup. Prints Xcode path + clang
+      # build + result per toolchain.
+      - name: Find an Xcode/clang that compiles String.starts_with correctly (macOS, advisory)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          BIN="$PWD/_build/default/bin/main.exe"
+          echo "default clang: $(clang --version | head -1)"
+          for xc in /Applications/Xcode_*.app /Applications/Xcode.app; do
+            [ -d "$xc/Contents/Developer" ] || continue
+            sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null || continue
+            ver=$(clang --version | head -1)
+            out=$(printf 'String.starts_with("/etc", "/")\n' | "$BIN" repl 2>/dev/null \
+              | grep -oE 'march\(1\)> = (true|false)' || echo '(no value)')
+            echo "$(basename "$xc"): $ver -> ${out:-(none)}  (want true)"
+          done
+
       - name: Check formatting
         timeout-minutes: 3
         run: |
