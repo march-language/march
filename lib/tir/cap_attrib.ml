@@ -118,7 +118,24 @@ let attribute ?(transparent = fun _ -> false)
     match Handler_owner.owner_of fn_name with
     | Some o -> o
     | None ->
-      (match Hot_reload.module_of_name fn_name with "" -> entry | o -> o)
+      (* An impl method's TIR name is the iface mangling
+         `[Prefix.]Iface$Ty.method`.  Taking the last-dot prefix as the owner
+         yielded the SYNTHETIC module `Iface$Ty` — which no `needs` line can
+         declare for, so a correctly-declared program was unfixably rejected
+         ("module `Save$Thing` uses `IO.FileWrite` ...").  The owner is what
+         precedes the mangled segment: the module that declared the impl, or
+         the entry module when nothing does. *)
+      let n =
+        if Tir_names.is_iface_mangled fn_name then
+          match String.index_opt fn_name '$' with
+          | Some j ->
+            (match String.rindex_from_opt fn_name j '.' with
+             | Some i -> String.sub fn_name 0 i
+             | None -> "")
+          | None -> fn_name
+        else Hot_reload.module_of_name fn_name
+      in
+      (match n with "" -> entry | o -> o)
   in
   (* The entry module is the program itself; seeing through it would leave a
      capability with nowhere to land. *)

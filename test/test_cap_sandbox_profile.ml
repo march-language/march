@@ -182,9 +182,129 @@ let test_conditional_grants_agree () =
       (has embedded_clauses "(allow network*)")
   end
 
+(* ── The belongs filter must see every closure key shape ────────────────────
+
+   The embedded profile derives from [own_caps_of_this_module], whose
+   [belongs] filter collected DFn names ONLY
+   (2026-08-06-cap-sandbox-belongs-filter-misses-non-dfn-keys.md).  A
+   capability recorded under any other key shape — a module-level [let]'s
+   bare name, a nested module's dotted name, an impl method's
+   [Iface$Ty.method] mangling — was silently dropped, so the profile
+   under-granted: a program whose only write lives in a module-level [let]
+   embedded a profile with NO file-write clause, indistinguishable from a
+   pure program's, and was then DENIED AT RUNTIME by its own sandbox.
+
+   One fixture per key shape, each asserting the grant is present.  The
+   negative direction (a capability-free program grants nothing) is the
+   baseline test above — [profile_of] with no FileWrite yields no
+   file-write clause, or [test_conditional_grants_agree] would fail. *)
+let profile_of (src : string) : string list =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  let f = Filename.temp_file "sbx_belongs" ".march" in
+  let oc = open_out f in
+  output_string oc src;
+  close_out oc;
+  let bin = Filename.temp_file "sbx_belongs" ".bin" in
+  let log = Filename.temp_file "sbx_belongs" ".log" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s --cap-sandbox --compile -o %s %s > %s 2>&1"
+         (Filename.quote compiler_exe) (Filename.quote bin)
+         (Filename.quote f) (Filename.quote log))
+  in
+  if rc <> 0 then begin
+    let ic = open_in log in
+    let out = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    Alcotest.failf "--cap-sandbox compile failed (%d):\n%s" rc out
+  end;
+  let ic =
+    Unix.open_process_in
+      (Printf.sprintf "strings %s | grep '(version 1)' | head -1"
+         (Filename.quote bin))
+  in
+  let line = try input_line ic with End_of_file -> "" in
+  ignore (Unix.close_process_in ic);
+  List.iter (fun x -> try Sys.remove x with Sys_error _ -> ()) [ f; bin; log ];
+  clauses_of line
+
+let assert_grants_file_write name src =
+  if not is_macos then Alcotest.skip ()
+  else
+    Alcotest.(check bool)
+      (name ^ ": profile grants file-write*")
+      true
+      (List.mem "(allow file-write*)" (profile_of src))
+
+let test_module_level_let_widens_profile () =
+  assert_grants_file_write "module-level let"
+    {|
+mod SbxLet do
+  needs IO.Console
+  needs IO.FileWrite
+  let touched = file_write("/tmp/sbx_let_out", "d")
+  fn main() do
+    println("hi")
+  end
+end
+|}
+
+let test_nested_module_widens_profile () =
+  assert_grants_file_write "nested module fn"
+    {|
+mod SbxNest do
+  needs IO.Console
+  mod Inner do
+    needs IO.FileWrite
+    fn save() do
+      match file_write("/tmp/sbx_nest_out", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end
+  fn main() do
+    Inner.save()
+    println("hi")
+  end
+end
+|}
+
+let test_impl_method_widens_profile () =
+  assert_grants_file_write "impl method"
+    {|
+mod SbxImpl do
+  needs IO.Console
+  needs IO.FileWrite
+  type Thing = Thing(Int)
+  interface Save(a) do
+    fn persist : a -> Unit
+  end
+  impl Save(Thing) do
+    fn persist(_t) do
+      match file_write("/tmp/sbx_impl_out", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end
+  fn main() do
+    persist(Thing(1))
+    println("hi")
+  end
+end
+|}
+
 let tests =
   [ Alcotest.test_case "sbpl baselines agree (embedded vs forge)" `Slow
       test_baselines_agree;
     Alcotest.test_case "sbpl conditional grants agree" `Slow
       test_conditional_grants_agree;
+    Alcotest.test_case "module-level let widens the profile" `Slow
+      test_module_level_let_widens_profile;
+    Alcotest.test_case "nested module widens the profile" `Slow
+      test_nested_module_widens_profile;
+    Alcotest.test_case "impl method widens the profile" `Slow
+      test_impl_method_widens_profile;
   ]

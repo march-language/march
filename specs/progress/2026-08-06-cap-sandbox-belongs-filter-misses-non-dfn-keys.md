@@ -40,3 +40,31 @@ Either point both surfaces at one predicate, or extend the walk in
 docstring's sharing claim, and re-measure `--cap-sandbox` profiles across the
 corpus: widening the profile is the direction that grants more, so it needs its
 own sweep rather than being folded into an unrelated change.
+
+---
+
+## RESOLVED 2026-08-08 — and probing it found a worse sibling
+
+The walk in `own_caps_of_this_module` now collects every key shape
+`fn_own_capability_closures` produces for this file: bare `DFn`/`DLet` names,
+dotted nested-module names, impl methods' `[Prefix.]Iface$Ty.method`
+manglings (via `impl_ty_key_of`, a documented mirror of the producer's local
+`impl_ty_key` — the "impl method widens the profile" fixture is the drift
+alarm), actor handlers' bare synthesized names, and the impl dispatch node.
+The docstring's stale sharing claim was rewritten: `march caps` still applies
+its own predicate, and the two cannot share one without sharing a key
+economy — the divergence is now documented instead of denied.
+
+Pinned by three "widens the profile" fixtures in
+`test/test_cap_sandbox_profile.ml` (module-level `let`, nested module, impl
+method — each RED before the fix), with the pure-program direction covered by
+the conditional-grants test.
+
+**The sibling found while reproducing:** the CEILING had the same key-shape
+blindness for impl methods, and there it rejects rather than under-grants.
+`Cap_attrib`'s name-derived owner for `Save$Thing.persist` was the synthetic
+module `Save$Thing`, which no `needs` line can declare for — a
+correctly-declared program was unfixably rejected under the now-default
+ceiling. Fixed in `owner_of`: for an iface-mangled name the owner is what
+precedes the mangled segment (the impl's declaring module, or the entry).
+Pinned by cap_ceiling "impl method covered by declaring module" (RED first).

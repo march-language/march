@@ -574,9 +574,51 @@ mod CeilActorOuter2 do
 end
 |}
 
+(* ── Impl methods ───────────────────────────────────────────────────────────
+
+   An impl method's TIR name is the iface mangling `Save$Thing.persist`, so
+   name-derived ownership produced the SYNTHETIC owner `Save$Thing` — a
+   "module" no `needs` line can ever declare for, making a correctly-declared
+   program unfixably rejected:
+
+     module `Save$Thing` uses `IO.FileWrite` but does not declare ...
+
+   Found 2026-08-08 while closing the belongs-filter gap
+   (2026-08-06-cap-sandbox-belongs-filter-misses-non-dfn-keys.md) — the same
+   key-shape blindness, but where the sandbox side merely UNDER-GRANTED
+   (denial at runtime), the ceiling side REJECTS, and the ceiling is on by
+   default.  The owner of `[Prefix.]Iface$Ty.method` is `Prefix` — the module
+   that declared the impl — never the mangled segment. *)
+let test_impl_method_covered_by_declaring_module () =
+  accepts "impl method covered by the entry module's needs"
+    {|
+mod CeilImpl do
+  needs IO.Console
+  needs IO.FileWrite
+  type Thing = Thing(Int)
+  interface Save(a) do
+    fn persist : a -> Unit
+  end
+  impl Save(Thing) do
+    fn persist(_t) do
+      match file_write("/tmp/ceil_impl_out", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end
+  fn main() do
+    persist(Thing(1))
+    println("done")
+  end
+end
+|}
+
 let tests =
   unit_tests
   @ [
+      Alcotest.test_case "impl method covered by declaring module" `Slow
+        test_impl_method_covered_by_declaring_module;
       Alcotest.test_case "nested actor handler covered by declaring module" `Slow
         test_nested_actor_handler_satisfied_by_declaring_module;
       Alcotest.test_case "nested actor handler violation names Inner" `Slow

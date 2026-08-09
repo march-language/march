@@ -47,6 +47,19 @@ git log is authoritative for exact commits.
   interface-method call", names the candidate implementations, explains that
   the dispatch position is not concrete at the call site, and exits 1.
 
+- **An `impl` method that performs IO no longer trips the capability ceiling
+  with an unfixable synthetic module name.** Attribution derived the owner of
+  `Save$Thing.persist` from the name and reported `module `Save$Thing` uses
+  `IO.FileWrite`` — a "module" no `needs` line can declare for, so a
+  correctly-declared program was rejected. The owner is now the module that
+  declared the impl.
+
+- **The `--cap-sandbox` profile now grants capabilities used from a
+  module-level `let`, a nested module, or an `impl` method.** The grant set
+  collected `fn` declarations only, so a program whose only write lived in
+  one of those shapes embedded a pure program's profile and was denied at
+  runtime by its own sandbox.
+
 - **A nested module's capability use is now attributed to that module, not
   the program's entry module.** Two gaps compounded: an actor handler's
   synthesized function name is bare (`Weeble_Zorp`), and the prelude's
