@@ -11099,16 +11099,16 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
    [Weeble] inside [Outer.Inner] lowers to bare "Weeble_Zorp", NOT
    "Inner.Weeble_Zorp"), so [check_module_needs]'s DActor branch must key
    [record_fn_caps] the same bare way rather than through [cap_qname]. *)
-(* `needs IO.Console` on Outer is NOT redundant with Inner's: the handler's
-   synthesized TIR name is bare ("Weeble_Zorp", see the manifest assertion
-   below), so capability ATTRIBUTION cannot see which module declared the
-   actor and charges the entry module — the default-on ceiling therefore
-   demands the declaration on Outer.  That is a mis-ownership, tracked in
-   specs/todos/2026-08-08-actor-handler-attribution-charges-entry-module.md;
-   when it is fixed, Outer's line here should become removable. *)
+(* Inner's `needs IO.Console` alone satisfies the default-on ceiling: the
+   handler's TIR name is bare ("Weeble_Zorp", see the manifest assertion
+   below), and attribution learns its declaring module from the
+   [Handler_owner] side table lowering populates — fixed 2026-08-08, see
+   specs/progress/2026-08-08-cap-attrib-owner-fixes.md.  This fixture
+   compiling WITHOUT a `needs` on Outer is itself part of the regression
+   surface: if the side table regresses, the ceiling charges Outer and this
+   compile fails. *)
 let hcr_manifest_actor_handler_caps_fixture_src =
   "mod Outer do\n\
-  \  needs IO.Console\n\
   \  mod Inner do\n\
   \    needs IO.Console\n\
   \    actor Weeble do\n\

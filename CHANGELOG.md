@@ -24,6 +24,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A nested module's capability use is now attributed to that module, not
+  the program's entry module.** Two gaps compounded: an actor handler's
+  synthesized function name is bare (`Weeble_Zorp`), and the prelude's
+  wrappers (`println` et al.) are unwrapped into the entry module — both made
+  attribution resolve the owner to the entry module, so `needs IO.Console` on
+  the module that actually did the printing could not satisfy the capability
+  ceiling, while a declaration on the entry module masked the true owner.
+  Lowering now records each handler's declaring module, and attribution sees
+  through prelude wrappers to the calling module.
+
 - **The unused-capability warning no longer contradicts the capability
   ceiling.** A module reaching a capability only through a stdlib wrapper
   (`Parallel.pmap` → `IO.Spawn`) was told by the ceiling to add the `needs`
