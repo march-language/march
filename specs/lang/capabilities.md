@@ -32,7 +32,7 @@ That invisibility causes three recurring problems:
 
 **Audit blind spots.** Answering "which modules talk to the network?" in a large codebase means grepping and hoping — unless the compiler tracks it.
 
-March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph — The *absence* of a capability declaration is a machine-verified, build-breaking guarantee both where `Cap(X)` flows through a signature (a function/actor/extern parameter, or a transitive `use`) and where a function body calls an IO builtin directly — the latter was a warning until 2026-08-06 and is now an error. One honesty caveat remains, and it is stated rather than glossed: a stdlib-MEDIATED call (`File.read` rather than `file_read`) is outside this check and is caught only by `--cap-strict` over emitted code. See "What the compiler tells you," below, live-verified.
+March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph — The *absence* of a capability declaration is a machine-verified, build-breaking guarantee both where `Cap(X)` flows through a signature (a function/actor/extern parameter, or a transitive `use`) and where a function body calls an IO builtin directly — the latter was a warning until 2026-08-06 and is now an error. One honesty caveat remains, and it is stated rather than glossed: a stdlib-MEDIATED call (`File.read` rather than `file_read`) is outside this check and is caught instead by the capability ceiling over emitted code, which runs on the compile path (on by default since 2026-08-07) and not under `--check`. See "What the compiler tells you," below, live-verified.
 
 ```march
 mod Price do
@@ -243,30 +243,37 @@ than it earns:
 - It catches a **direct** call to a capability builtin — `file_read(p)`.
 - It does **not** catch the same operation routed through a stdlib wrapper —
   `File.read(p)`. That call is invisible to this check, and `--check` exits 0.
-- The complete check is `--cap-strict`, below, which works on **emitted code**
-  and therefore cannot be evaded by re-routing through a helper. It is opt-in
-  and runs on the compile path, not under `--check`.
+- The complete check is the **capability ceiling**, below, which works on
+  **emitted code** and therefore cannot be evaded by re-routing through a
+  helper. It is on by default, but it runs on the compile path — so `--check`
+  alone still exits 0 on the stdlib-mediated call.
 
 So `needs` is a **mandatory, mechanically-verified manifest** of the builtins a
 module calls directly — not, on its own, proof that a module cannot reach a
-capability. For that, build with `--cap-strict`.
+capability. That comes from the ceiling, which means it comes from `march
+--compile`, not from `--check`.
 
 It is also worth separating two things the word "capability" covers here: this
 check makes you *declare* what you touch. It does not make anyone *grant* it —
 `needs` is a self-declaration, and any module may write any `needs` line. IO
 builtins take no capability argument.
 
-### `--cap-strict` — the declared set as a hard ceiling
+### The capability ceiling — on by default
 
-`march --cap-strict` turns `needs` from a floor into a ceiling: the build fails
-if **any** module's emitted code uses a capability that module did not declare.
+`needs` is a ceiling as well as a floor: the build fails if **any** module's
+emitted code uses a capability that module did not declare. This is the
+default as of 2026-08-07; `--no-cap-strict` opts out, and `--cap-strict` is
+still accepted if you would rather say it explicitly.
 
 ```
-$ march --cap-strict --compile -o app app.march
+$ march --compile -o app app.march
 -- CAPABILITY CEILING --
 module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`
 
---cap-strict: 1 capability ceiling violation(s).
+1 capability ceiling violation(s). Every module's emitted code must stay
+within its own `needs`.
+Add the missing `needs` line to the module named above, or pass
+`--no-cap-strict` to build without this check.
 ```
 
 Three things make it stronger than the warnings above.
@@ -282,8 +289,7 @@ are ambiently available without one.)
 **It applies per module, including dependencies that never opted in.** March
 dependencies ship as source, so the check runs on your build of their code. A
 dependency declaring only `needs IO.Console` whose helper reads `/etc/passwd`
-builds clean by default and fails under `--cap-strict`. You do not need the
-publisher's cooperation.
+fails your build. You do not need the publisher's cooperation.
 
 **It fails closed.** A capability the compiler cannot attribute to any module —
 reached only through an indirect call — is reported as a violation rather than
@@ -293,10 +299,14 @@ Because attribution charges a stdlib-mediated call to the *calling* module, the
 standard library's own declarations are not involved: the module that called
 `File.write` is the one required to declare `needs IO.FileWrite`.
 
-It is opt-in, and it is strict — most existing code needs `needs` declarations
-added before it passes, `needs IO.Console` most commonly. `IO.Foreign` is
-excluded: `extern` blocks are already an error when undeclared, and what linked
-C code does is outside the capability model entirely.
+It is strict, and turning it on by default is a breaking change for code
+written before it: a module that reaches a capability through the stdlib now
+has to say so, `needs IO.Console` most commonly. The compiler names the module
+and the capability, so each fix is one line. `--no-cap-strict` unblocks a build
+you do not want to migrate yet.
+
+`IO.Foreign` is excluded: `extern` blocks are already an error when undeclared,
+and what linked C code does is outside the capability model entirely.
 
 The same ceiling can be re-checked on a compiled binary with
 `forge cap inspect --strict`, which reads each module's declared and measured

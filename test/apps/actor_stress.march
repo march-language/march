@@ -20,6 +20,7 @@
 mod ActorStress do
 
   needs IO.Console
+  needs IO.Spawn
 
   -- ── Actor 1: Counter with inc / dec / clear / print ──────────────────
 

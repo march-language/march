@@ -2,6 +2,7 @@
 -- Run with: dune exec march -- test test/stdlib/test_csv.march
 
 mod TestCsv do
+  needs IO.FileWrite
 
 pfn do_write(path, content) do
   match File.write(path, content) do

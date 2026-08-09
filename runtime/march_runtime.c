@@ -1469,6 +1469,92 @@ void *__try_call_val(void *thunk) {
     return result;
 }
 
+/* ── march_try_finally ───────────────────────────────────────────────────── */
+/*
+ * try_finally : (Bool -> a) -> (Bool -> b) -> a
+ *
+ * Runs action(), then cleanup(), and returns action's result.  If action
+ * panics, cleanup STILL runs, and the panic is then re-raised (so it
+ * reaches whatever handler is outermost — test harness, supervised actor,
+ * or the default print-and-exit).  A panic raised by cleanup itself is
+ * swallowed, matching the interpreter builtin (lib/eval/eval.ml's
+ * "try_finally": `try ignore (cleanup ()) with _ -> ()`).
+ *
+ * This is the primitive behind stdlib resource wrappers (File.with_lines /
+ * File.with_chunks close their fd here; Logger pops its context stack), so
+ * the panic path is the whole point: without it a panicking callback leaks
+ * the resource.
+ *
+ * Panic capture reuses the test-harness longjmp channel exactly like
+ * __try_call / __try_call_val above (save/restore of march_test_jmp_buf +
+ * march_test_fail_buf + march_test_in_test supports nesting); see their
+ * header comments for the closure layout and for why there is NO
+ * march_decrc of either closure here (a capturing closure's apply function
+ * releases its own $clo reference as its first action, on both the
+ * normal-return and the longjmp path).
+ *
+ * The March return type is the type variable `a`, so like __try_call_val
+ * the action's result is returned in the *uniform* representation, verbatim
+ * (heap pointers raw, immediates low-bit-tagged) — the compiled call site
+ * declares `ptr @march_try_finally` and the consumer coerces.  Ownership of
+ * the result transfers straight through (Perceus return convention).
+ * cleanup's result is discarded WITHOUT a decrc: for a Unit-returning
+ * cleanup (the overwhelmingly common case) the apply's return slot is not
+ * a meaningful uniform value, so blindly decrc'ing it could corrupt a
+ * stranger's heap object.  A heap-returning cleanup therefore leaks one
+ * reference — same accepted trade-off as __try_call's panic path.
+ */
+void *march_try_finally(void *action, void *cleanup) {
+    typedef int64_t (*apply_fn_t)(void *, int64_t);
+    apply_fn_t apply_action  = *(apply_fn_t *)((char *)action + 16);
+    apply_fn_t apply_cleanup = *(apply_fn_t *)((char *)cleanup + 16);
+
+    jmp_buf saved_jmp;
+    char    saved_fail[sizeof(march_test_fail_buf)];
+    int     saved_in_test = march_test_in_test;
+    memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
+    memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
+
+    march_test_fail_buf[0] = '\0';
+    march_test_in_test     = 1;
+
+    int64_t result   = 0;
+    int     panicked = 0;
+
+    if (setjmp(march_test_jmp_buf) == 0) {
+        result = apply_action(action, 1);   /* 1 = dummy Bool argument */
+    } else {
+        panicked = 1;
+    }
+
+    /* Capture action's panic message before cleanup can clobber the buffer. */
+    void *err_str = NULL;
+    if (panicked) {
+        const char *msg = march_test_fail_buf[0]
+            ? march_test_fail_buf : "panic";
+        err_str = march_string_lit(msg, (int64_t)strlen(msg));
+    }
+
+    /* Run cleanup under its own guard: its panic must neither mask action's
+       panic nor escape a successful action. */
+    march_test_fail_buf[0] = '\0';
+    if (setjmp(march_test_jmp_buf) == 0) {
+        (void)apply_cleanup(cleanup, 1);
+    }
+    /* else: cleanup panicked — swallowed. */
+
+    /* Restore the outer panic handler BEFORE re-raising, so the re-raise
+       lands in the caller's handler, not back in our own (stale) setjmp. */
+    memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
+    memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
+    march_test_in_test = saved_in_test;
+
+    if (panicked) {
+        march_panic(err_str);   /* does not return */
+    }
+    return (void *)result;
+}
+
 /* ── Actor runtime — green thread based ──────────────────────────────────── */
 /*
  * Design overview
@@ -3742,31 +3828,43 @@ void *march_file_close(void *handle_ptr) {
     return mk_ok_unit();
 }
 
+/* file_read_line / file_read_chunk : Int -> Option(String).
+ *
+ * Option(String) is NICHE-encoded in compiled March (Some's payload is the
+ * value itself, None is raw NULL — see the csv_next_row note in
+ * lib/typecheck/typecheck.ml for the same convention), so these MUST return
+ * the march_string directly or NULL.  They historically returned mk_ok /
+ * mk_err Result cells like the rest of the file family — under the niche
+ * read, every return (including the EOF Err) looked like Some(<Result
+ * cell>), so a compiled read-to-EOF loop never terminated and any use of
+ * the "line" crashed on the misread cell.  Unreachable until try_finally
+ * gained a native implementation (nothing fd-based would link), which is
+ * why it survived: the interpreter (lib/eval/eval.ml) always had the
+ * Some/None contract these now match.  Non-EOF read errors fold into None
+ * (end of stream), mirroring the interpreter's End_of_file handling — the
+ * Option type has no error channel. */
 void *march_file_read_line(void *handle_ptr) {
     FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
-    if (!f) return mk_err_cstr("file not open");
+    if (!f) return NULL;                                   /* None */
     char buf[4096];
-    if (!fgets(buf, sizeof(buf), f)) {
-        if (feof(f)) return mk_err_cstr("eof");
-        return mk_err_errno();
-    }
+    if (!fgets(buf, sizeof(buf), f)) return NULL;          /* None: EOF/error */
     size_t len = strlen(buf);
     /* Strip trailing newline */
     if (len > 0 && buf[len-1] == '\n') { buf[--len] = '\0'; }
     if (len > 0 && buf[len-1] == '\r') { buf[--len] = '\0'; }
-    return mk_ok(march_string_lit(buf, (int64_t)len));
+    return march_string_lit(buf, (int64_t)len);            /* Some(line) */
 }
 
 void *march_file_read_chunk(void *handle_ptr, int64_t size) {
     FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
-    if (!f || size <= 0) return mk_err_cstr("file not open");
+    if (!f || size <= 0) return NULL;                      /* None */
     char *buf = (char *)malloc((size_t)size);
-    if (!buf) return mk_err_cstr("out of memory");
+    if (!buf) return NULL;                                 /* None */
     size_t n = fread(buf, 1, (size_t)size, f);
+    if (n == 0) { free(buf); return NULL; }                /* None: EOF/error */
     void *s = march_string_lit(buf, (int64_t)n);
     free(buf);
-    if (n == 0 && feof(f)) return mk_err_cstr("eof");
-    return mk_ok(s);
+    return s;                                              /* Some(chunk) */
 }
 
 /* ── Directory builtins ─────────────────────────────────────────────── */

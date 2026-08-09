@@ -10,6 +10,8 @@
 
 mod TestTls do
 
+  needs IO.NetConnect.TLS
+
   -- ── Helpers ────────────────────────────────────────────────────────────
 
   pfn make_stub_conn() do

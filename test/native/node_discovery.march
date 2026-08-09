@@ -16,6 +16,8 @@ mod NodeDiscovery do
   needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
+  needs IO.NetConnect
+  needs IO.Random
 
   pfn secret() do "test-cluster-secret" end
 

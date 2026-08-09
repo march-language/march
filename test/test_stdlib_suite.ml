@@ -5482,6 +5482,7 @@ let test_compiled_pmap_matches_map () =
   output_string oc
     "mod PmapParity do\n\
     \  needs IO.Process\n\
+    \  needs IO.Spawn\n\
     \  fn main() : Unit do\n\
     \    let xs = List.range(0, 2000)\n\
     \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
@@ -10192,6 +10193,8 @@ let test_compiled_check_property_passes () =
   let oc = open_out src in
   output_string oc
     "mod CheckTag do\n\
+    \  needs IO.Clock\n\
+    \  needs IO.Process\n\
     \  describe \"tagging\" do\n\
     \    test \"trivially-true property passes compiled\" do\n\
     \      Check.all(Gen.int(0, 5), fn x -> x >= 0)\n\
@@ -11153,8 +11156,16 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
    [Weeble] inside [Outer.Inner] lowers to bare "Weeble_Zorp", NOT
    "Inner.Weeble_Zorp"), so [check_module_needs]'s DActor branch must key
    [record_fn_caps] the same bare way rather than through [cap_qname]. *)
+(* `needs IO.Console` on Outer is NOT redundant with Inner's: the handler's
+   synthesized TIR name is bare ("Weeble_Zorp", see the manifest assertion
+   below), so capability ATTRIBUTION cannot see which module declared the
+   actor and charges the entry module — the default-on ceiling therefore
+   demands the declaration on Outer.  That is a mis-ownership, tracked in
+   specs/todos/2026-08-08-actor-handler-attribution-charges-entry-module.md;
+   when it is fixed, Outer's line here should become removable. *)
 let hcr_manifest_actor_handler_caps_fixture_src =
   "mod Outer do\n\
+  \  needs IO.Console\n\
   \  mod Inner do\n\
   \    needs IO.Console\n\
   \    actor Weeble do\n\
@@ -12056,6 +12067,7 @@ let test_compiled_vault_scalar_roundtrip () =
   output_string oc
     "mod VaultScalar do\n\
     \  needs IO.Process\n\
+    \  needs IO.Mut\n\
     \  fn main() : Unit do\n\
     \    let t = Vault.new(\"vs_test\")\n\
     \    Vault.set(t, \"b\", true)\n\
@@ -12104,6 +12116,7 @@ let test_compiled_vault_scalar_roundtrip () =
 let vault_update_src =
   "mod VaultUpdate do\n\
     \  needs IO.Process\n\
+  \  needs IO.Mut\n\
   \  fn inc(n) do\n\
   \    n + 1\n\
   \  end\n\

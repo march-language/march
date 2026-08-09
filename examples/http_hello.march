@@ -1,5 +1,6 @@
 -- examples/http_hello.march
 mod HttpHello do
+  needs IO.NetListen
 
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do

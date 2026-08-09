@@ -156,6 +156,16 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
    Called from BOTH unqualified_fns consumers — the general EApp call path
    and the ECallPtr no-var-slot catch-all — with the same message, so any
    future refinement of this check lands in both. *)
+
+(* An unresolved interface-method call with >=2 candidate impls is (since
+   Mono's [return_position_single_impl] fallback) a USER error, not a
+   compiler bug: a return-position-dispatched method (derive Json's
+   `from_json`) called where the result type is an unpinned TVar, so no
+   pass can soundly pick an impl.  Raised instead of [failwith] so
+   bin/main.ml can render it as a clean diagnostic (exit 1) rather than an
+   internal-compiler-error report (exit 3). *)
+exception Ambiguous_iface_call of string
+
 let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
   let candidates =
     Hashtbl.fold (fun name _ acc ->
@@ -168,14 +178,38 @@ let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
         else acc)
       ctx.Llvm_ctx.top_fns []
   in
+  (* The impls may have been dropped from top_fns entirely (nothing else
+     referenced them, so mono's reachability walk never enqueued them) —
+     consult the lowering-time dispatch table too, so the ambiguous-call
+     shape gets this diagnostic instead of a raw `Undefined symbols:
+     _from_json` linker error. *)
+  let candidates =
+    if candidates <> [] then candidates
+    else
+      let rec find name =
+        match Hashtbl.find_opt (Lower_state.get_iface_methods ()) name with
+        | Some impls ->
+          List.fold_left (fun acc (_, m) ->
+              if List.mem m acc then acc else m :: acc) [] impls
+          |> List.rev
+        | None ->
+          (match String.index_opt name '.' with
+           | None -> []
+           | Some i -> find (String.sub name (i + 1) (String.length name - i - 1)))
+      in
+      find bare_name
+  in
   if candidates <> [] then
-    failwith (Printf.sprintf
-      "llvm_emit: unresolved interface-method call to `%s` reached codegen \
-       unspecialized (mono.ml should have rewritten this to a concrete impl). \
-       Candidate impls found (dispatch is ambiguous / was never resolved): %s. \
-       This is a monomorphization bug, not a linker issue — refusing to \
-       silently bind to an arbitrary one of these impls."
-      bare_name (String.concat ", " candidates))
+    raise (Ambiguous_iface_call (Printf.sprintf
+      "ambiguous interface-method call to `%s`: %d implementations are in \
+       scope (%s) and the call site's types do not determine which one \
+       applies.\n\
+       This method dispatches on a position that is not concrete at this \
+       call site (for `from_json`-style methods, the RESULT type). \
+       Restructure so only one implementation is in scope for the call — \
+       e.g. keep one `derive`/`impl` per module — or route the call through \
+       a helper defined next to the intended type's `derive`/`impl`."
+      bare_name (List.length candidates) (String.concat ", " candidates)))
 
 (** Emit a `$clo_wrap` trampoline that forwards to [fn_name] and returns the
     result in the generic ptr ABI shared by all closure dispatch (see

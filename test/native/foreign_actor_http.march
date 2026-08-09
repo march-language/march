@@ -3,6 +3,7 @@ mod ForeignActorHttp do
   needs IO.Spawn
   needs IO.NetListen
   needs IO.NetConnect
+  needs IO.Process
 
   -- Zero-arg sentinel for Actor.call; tag 0 dispatches to the FIRST handler.
   type CallGet = CallGet

@@ -1,0 +1,28 @@
+-- Regression: nested `derive Json` types must dispatch `to_json` natively.
+--
+-- `to_json(t)` resolves by first-argument type through mono.ml's
+-- record_to_typename map.  A record built from a literal carries the fully
+-- structural type ({ mid : { leaf : { id : Int }, ... }, ... }) while the map
+-- was keyed only on the DECLARED shape ({ mid : TCon "Mid", ... }), so the
+-- mangle strings never matched, dispatch missed, and the bare `to_json` call
+-- reached the linker as an undefined symbol.  Two nesting levels are needed:
+-- one level alone leaves the outer key nominal-free and would pass by luck.
+mod NestedDeriveJson do
+  needs IO.Console
+
+  type Leaf = { id : Int }
+  derive Json for Leaf
+
+  type Mid = { leaf : Leaf, tag : String }
+  derive Json for Mid
+
+  type Top = { mid : Mid, n : Int }
+  derive Json for Top
+
+  fn main() do
+    let t = { mid: { leaf: { id: 7 }, tag: "m" }, n: 3 }
+    println(Json.to_string(to_json(t)))
+    let flat = { id: 42 }
+    println(Json.to_string(to_json(flat)))
+  end
+end

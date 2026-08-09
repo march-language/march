@@ -234,9 +234,10 @@ to ship actually carries, and which module in it is responsible.
 ### Reading is not enforcing
 
 Both commands on this page *read* — they report authority, they do not restrain
-it. The one place a capability declaration is *enforced* at build time is
-`march --cap-strict`, which fails the build when any module's emitted code uses
+it. The one place a capability declaration is *enforced* at build time is the
+capability ceiling, which fails the build when any module's emitted code uses
 a capability it did not declare — including a dependency that never opted in.
+It is on by default; `--no-cap-strict` turns it off.
 See [capability ceilings]({{ site.baseurl }}/docs/capabilities/#cap-strict).
 
 The rows above marked "bounds nothing" (`IO.Foreign`, raw syscalls, an

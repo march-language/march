@@ -9991,6 +9991,158 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
         true (Test_helpers.contains "boom" run_out)
     done
 
+(* try_finally — the third member of the try-call family, and the one the
+   stdlib leans on for resource cleanup (File.with_lines / File.with_chunks /
+   Logger's context stack). Unlike __try_call/__try_call_val it was a
+   typecheck+interpreter builtin ONLY: no llvm_builtins row, so compiled
+   call sites fell into the unknown-extern fallback and emitted
+   `declare ptr @try_finally(...)` against a C symbol that never existed —
+   any program whose compiled code reached try_finally failed at LINK time
+   ("Undefined symbols: _try_finally", first seen via
+   examples/read_file.march's File.with_lines call).
+
+   try_finally returns the action's value at the polymorphic type `a`
+   DIRECTLY (not wrapped in a Result field like its siblings), so its
+   llvm_builtins row uses ret_ty = TVar "_" (the record_put precedent): the
+   call site reads a uniform ptr and the consumer coerces. The Int case
+   below is the adversarial witness for exactly that — if the runtime
+   returned a raw untagged value, or the call site skipped the conditional
+   untag, 42 would come back as 85 ((42<<1)|1) compiled-only. *)
+let test_try_finally_value_and_order_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfin"
+    "mod TryFin do\n\
+    \  needs IO.Console\n\
+    \  fn main() : Unit do\n\
+    \    let k = 40\n\
+    \    let n = try_finally(\n\
+    \      fn _ ->\n\
+    \        let _ = println(\"action\")\n\
+    \        k + 2,\n\
+    \      fn _ -> println(\"cleanup\"))\n\
+    \    println(int_to_string(n))\n\
+    \    let s = try_finally(fn _ -> \"he\" ++ \"ap\", fn _ -> ())\n\
+    \    println(s)\n\
+    \  end\n\
+     end\n"
+  in
+  let expected = "action\ncleanup\n42\nheap" in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted try_finally value + cleanup order"
+    expected interp_out;
+  let bin = Filename.concat tmp "tryfinbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string) "compiled matches interpreted" expected run_out
+
+(* The semantic contract that justifies try_finally's existence: cleanup runs
+   even when the action panics, and the panic still propagates afterwards
+   (nonzero exit). Combined stdout+stderr capture can interleave the two
+   streams arbitrarily around process exit, so assert presence of both
+   markers rather than their relative order — cleanup-before-repanic is
+   enforced by construction inside march_try_finally. *)
+let test_try_finally_cleanup_runs_on_panic_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfinpanic"
+    "mod TryFinPanic do\n\
+    \  needs IO.Console\n\
+    \  fn main() : Unit do\n\
+    \    let label = \"kaboom\"\n\
+    \    let _ = try_finally(\n\
+    \      fn _ ->\n\
+    \        let _ = panic(label)\n\
+    \        0,\n\
+    \      fn _ -> println(\"cleanup-ran\"))\n\
+    \    println(\"unreachable\")\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "tryfinpanicbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let out_file = Filename.concat tmp "tryfinpanic.out" in
+    let rc = Sys.command (Printf.sprintf "%s > %s 2>&1"
+                            (Filename.quote bin) (Filename.quote out_file)) in
+    let run_out = read_cmd_output (Printf.sprintf "cat %s" (Filename.quote out_file)) in
+    Alcotest.(check bool) "panicking action still exits nonzero" true (rc <> 0);
+    Alcotest.(check bool) "cleanup ran before the panic propagated" true
+      (Test_helpers.contains "cleanup-ran" run_out);
+    Alcotest.(check bool) "the original panic message propagated" true
+      (Test_helpers.contains "kaboom" run_out);
+    Alcotest.(check bool) "code after try_finally did not run" false
+      (Test_helpers.contains "unreachable" run_out)
+
+(* The fd-streaming builtins' C→March return contract — the SECOND bug the
+   try_finally link failure was masking. file_read_line/file_read_chunk are
+   typed Option(String), which is NICHE-encoded compiled (Some's payload is
+   the value itself, None is raw NULL), but the C runtime returned mk_ok /
+   mk_err RESULT cells: every return — including the EOF Err — read as
+   Some(<Result cell>), so a read-to-EOF fold never terminated (the
+   File.with_lines hang) and using the misread "line" crashed (SIGBUS in a
+   straight-line read). Unreachable before try_finally linked: every
+   fd-streaming stdlib path goes through it, and the interpreter (where
+   stdlib tests run) has its own correct Some/None implementation. This
+   drives File.with_lines end-to-end, compiled vs interpreted. *)
+let test_file_with_lines_streaming_compiled () =
+  (* The input file lives in its own temp path, embedded into the source
+     verbatim, so the test is hermetic and CWD-independent. *)
+  let input_path = Filename.temp_file "march_withlines_input" ".txt" in
+  let oc = open_out input_path in
+  output_string oc "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+  close_out oc;
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_withlines"
+    (Printf.sprintf
+    "mod WithLines do\n\
+    \  needs IO.Console\n\
+    \  fn main() : Unit do\n\
+    \    let path = \"%s\"\n\
+    \    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do\n\
+    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
+    \    Ok(first3) -> do\n\
+    \      println(int_to_string(List.length(first3)))\n\
+    \      println(List.fold_left(first3, \"\", fn(acc, line) -> acc ++ line ++ \"|\"))\n\
+    \    end\n\
+    \    end\n\
+    \    match File.with_lines(path, fn(lines) -> Seq.to_list(lines)) do\n\
+    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
+    \    Ok(all) -> println(int_to_string(List.length(all)))\n\
+    \    end\n\
+    \  end\n\
+     end\n" input_path)
+  in
+  let expected = "3\nalpha|beta|gamma|\n5" in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted File.with_lines streaming"
+    expected interp_out;
+  let bin = Filename.concat tmp "withlinesbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    (* Bounded run: the pre-fix failure mode was an infinite read loop, so a
+       plain Sys.command here would hang the whole suite. *)
+    let out_file = Filename.concat tmp "withlines.out" in
+    (match Test_helpers.run_with_timeout ~timeout_secs:30.0 ~stdout_file:out_file
+             [| bin |] with
+     | `Timeout ->
+       Alcotest.fail
+         "compiled File.with_lines hung (>30s): fd-streaming EOF was never \
+          seen — the file_read_line niche-Option contract is broken again"
+     | `Exited 0 ->
+       let run_out = read_cmd_output (Printf.sprintf "cat %s" (Filename.quote out_file)) in
+       Alcotest.(check string) "compiled matches interpreted" expected run_out
+     | `Exited rc ->
+       Alcotest.failf "compiled File.with_lines exited with rc=%d" rc)
+
 (* NativeArray.map_int/map_float et al. and TypedArray.map/fold — a THIRD
    family of call sites sharing the same double-consumption bug as
    __try_call above, but shaped differently: instead of one call plus an
@@ -10191,6 +10343,7 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_sigwatchcap"
     "mod SigWatchCap do\n\
     \  needs IO.Console\n\
+    \  needs IO.Signal\n\
     \  fn main() do\n\
     \    let k = 99\n\
     \    Signal.watch(Signal.Usr2, fn -> println(\"caught \" ++ int_to_string(k)))\n\
@@ -11249,8 +11402,9 @@ let test_compiled_show_atom_multi_parity () =
 (* ── Guard liveness (Wave 2 final review): positive control for
    [fail_if_unresolved_iface_method] ─────────────────────────────────────
    The four parity tests above prove the FIXED pipeline resolves nested
-   interface-method calls; on a healthy compiler the guard's failwith never
-   fires, so nothing exercised it.  If ctx.top_fns naming or the guard's
+   interface-method calls; on a healthy compiler the guard's
+   Ambiguous_iface_call (a user-facing diagnostic since 2026-08-08, formerly
+   a failwith ICE) never fires, so nothing exercised it.  If ctx.top_fns naming or the guard's
    `$`-before-last-dot detection predicate ever drifts, the guard would rot
    silently.  These tests hand-build the exact regression signature as a raw
    Tir.tir_module — a bare `describe` call alongside a registered mangled
@@ -11298,14 +11452,14 @@ let assert_iface_guard_fires ~path_label m =
   match March_tir.Llvm_emit.emit_module m with
   | (_ : string) ->
     Alcotest.fail
-      (path_label ^ ": emit_module was expected to raise Failure — the \
-                     unresolved-iface-method guard did not fire on a bare \
-                     `describe` call with a registered Pretty$Int.describe \
-                     impl")
-  | exception Failure msg ->
+      (path_label ^ ": emit_module was expected to raise \
+                     Ambiguous_iface_call — the unresolved-iface-method \
+                     guard did not fire on a bare `describe` call with a \
+                     registered Pretty$Int.describe impl")
+  | exception March_tir.Llvm_calls.Ambiguous_iface_call msg ->
     Alcotest.(check bool)
       (path_label ^ ": failure names the unresolved symbol (got: " ^ msg ^ ")")
-      true (ir_contains msg "unresolved interface-method call to `describe`");
+      true (ir_contains msg "interface-method call to `describe`");
     Alcotest.(check bool)
       (path_label ^ ": failure names the candidate impl (got: " ^ msg ^ ")")
       true (ir_contains msg "Pretty$Int.describe")
@@ -11811,6 +11965,7 @@ declare void @march_print(ptr %s)
 declare void @march_panic(ptr %s)
 declare ptr  @march_panic_ext(ptr %s)
 declare ptr  @march_todo_ext(ptr %s)
+declare ptr  @march_try_finally(ptr %action, ptr %cleanup)
 declare void @march_test_init(i32 %argc, ptr %argv)
 declare void @march_test_run(ptr %fn, ptr %name, ptr %setup_or_null)
 declare void @march_test_setup_all(ptr %fn)
@@ -13118,6 +13273,101 @@ let test_vectorize_generic_fail_warn () =
   Alcotest.(check bool) "severity is Warning, not Error"
     true ((List.hd diags).March_errors.Errors.severity = March_errors.Errors.Warning)
 
+(* ── derive Json / from_json return-position interface dispatch ─────────
+   `from_json` dispatches on its RESULT type, not its argument (the argument
+   is always a JsonValue) — mono's first-arg interface dispatch can never
+   resolve it.  Two behaviors are pinned here:
+
+   1. SINGLE derive in the module: the call is unambiguous (exactly one
+      JsonFrom impl exists, and its parameter type matches the call's
+      argument type, proving the dispatch position is the result).  Mono
+      must resolve it — this used to fall through to a raw
+      `Undefined symbols: _from_json` linker error.
+
+   2. MULTIPLE derives in one module: the result type at the call site is
+      an unpinned TVar (the typechecker does not back-propagate it), so
+      dispatch is genuinely ambiguous.  The compiler must reject this with
+      a clean user-facing diagnostic (exit 1) naming the candidate impls —
+      not the "internal compiler error" ICE (exit 3) it used to raise, and
+      not a linker error. *)
+
+let derive_json_single_src = {|mod JsonOne do
+  needs IO.Console
+  type Flat = { name : String, age : Int }
+  derive Json for Flat
+
+  fn main() do
+    match Json.parse("{\"name\":\"a\",\"age\":3}") do
+    Err(e) -> println("parse err")
+    Ok(v) -> match from_json(v) do
+      Ok(x) -> println("ok: " ++ x.name)
+      Err(e) -> println("decode err")
+      end
+    end
+  end
+end|}
+
+let test_derive_json_single_from_json_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_json_single" derive_json_single_src in
+  (* interpreter baseline: bare from_json resolves to the sole derive *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter decodes via the single derive"
+    "ok: a" interp_out;
+  let bin = Filename.concat tmp "json_single_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "compiled single-derive bare from_json resolves to the sole impl \
+       (used to be a raw `_from_json` linker error)"
+      "ok: a" run_out
+
+let derive_json_ambiguous_src = {|mod JsonTwo do
+  needs IO.Console
+  type Flat = { name : String, age : Int }
+  derive Json for Flat
+  type Other = { id : Int }
+  derive Json for Other
+
+  fn main() do
+    match Json.parse("{\"name\":\"a\",\"age\":3}") do
+    Err(e) -> println("parse err")
+    Ok(v) -> match from_json(v) do
+      Ok(x) -> println("ok: " ++ x.name)
+      Err(e) -> println("decode err")
+      end
+    end
+  end
+end|}
+
+let test_derive_json_ambiguous_from_json_diagnostic () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_json_ambig" derive_json_ambiguous_src in
+  let bin = Filename.temp_file "march_json_ambig_bin" "" in
+  Sys.remove bin;
+  (* Deliberately NOT compile_march_or_skip (same rationale as
+     test_vectorize_hard_error_fails_compile): the PASSING outcome is a
+     nonzero exit produced inside llvm_emit, before clang is ever invoked,
+     so clang's absence is irrelevant and the skip heuristic would make the
+     passing case vacuous on a clang-less box. *)
+  let cmd = Printf.sprintf "cd %s && %s --compile -o %s %s"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src) in
+  let (rc, output) = run_capture cmd in
+  Alcotest.(check bool) "ambiguous from_json: compile fails (nonzero exit)"
+    true (rc <> 0);
+  Alcotest.(check bool) "diagnostic names the ambiguous method" true
+    (ir_contains output "from_json" && ir_contains output "ambiguous");
+  Alcotest.(check bool) "diagnostic is a clean user error, not an ICE" true
+    (not (ir_contains output "internal compiler error"))
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -13799,6 +14049,12 @@ let codegen_suites =
           Alcotest.test_case "`()` tail after a LITERAL discard runs compiled (exit 0)" `Quick
             test_unit_tail_literal_discard_runs_compiled;
         ] );
+      ( "derive_json_dispatch_codegen", [
+          Alcotest.test_case "compiled single-derive bare from_json resolves" `Quick
+            test_derive_json_single_from_json_compiled;
+          Alcotest.test_case "ambiguous multi-derive from_json: clean diagnostic, not ICE" `Quick
+            test_derive_json_ambiguous_from_json_diagnostic;
+        ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
             test_float_lit_match_arm_compiled;
@@ -13826,6 +14082,12 @@ let codegen_suites =
             test_try_call_val_single_capture_no_double_free_compiled;
           Alcotest.test_case "single-capture __try_call thunk panics: no double-free (15x)" `Quick
             test_try_call_panic_with_capture_no_double_free_compiled;
+          Alcotest.test_case "try_finally: value untag + cleanup order (compiled vs interpreted)" `Quick
+            test_try_finally_value_and_order_compiled;
+          Alcotest.test_case "try_finally: cleanup runs when the action panics (compiled)" `Quick
+            test_try_finally_cleanup_runs_on_panic_compiled;
+          Alcotest.test_case "File.with_lines streaming: fd Option niche contract (compiled)" `Quick
+            test_file_with_lines_streaming_compiled;
           Alcotest.test_case "NativeArray.map_int: reused capturing closure not freed mid-map (20x)" `Quick
             test_native_array_map_reused_capturing_closure_compiled;
           Alcotest.test_case "NativeArray.set_int: aliased (rc>1) array is copy-on-write, not mutated" `Quick

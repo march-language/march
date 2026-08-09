@@ -612,6 +612,36 @@ let rec rewrite_calls
     | None -> None
     | Some (impls, tname) -> resolve_impl_by_type impls tname
   in
+  (* Return-position dispatch fallback (derive Json's `from_json` shape): an
+     interface method whose dispatch position is the RESULT type, not the
+     first argument — the argument has the same fixed type in every impl
+     (e.g. from_json : JsonValue -> Result(T, DecodeError)), so
+     [resolve_impl_by_type] on the first-arg type name can never match.
+     When exactly ONE distinct impl symbol is registered AND its own first
+     parameter type equals the call's first-argument type (proving the
+     argument is not the dispatch position — the call typechecked against
+     this very signature), the call is unambiguous: resolve to that impl.
+     Previously this shape fell through to a raw `Undefined symbols:
+     _from_json` linker error.  With >=2 impls the result type at the call
+     site is an unpinned TVar (the typechecker does not back-propagate the
+     target type into the call's span), so dispatch is genuinely ambiguous —
+     leave the call unresolved for the user-facing ambiguity diagnostic in
+     [Llvm_calls.fail_if_unresolved_iface_method]. *)
+  let return_position_single_impl
+      (impls : (string * string) list) (arg_ty : Tir.ty) : string option =
+    let uniq_syms =
+      List.fold_left (fun acc (_, m) ->
+          if List.mem m acc then acc else m :: acc) [] impls in
+    match uniq_syms with
+    | [m] ->
+      (match Hashtbl.find_opt fn_table m with
+       | Some impl_fn ->
+         (match impl_fn.Tir.fn_params with
+          | p :: _ when mangle_ty p.Tir.v_ty = mangle_ty arg_ty -> Some m
+          | _ -> None)
+       | None -> None)
+    | _ -> None
+  in
   match expr with
   | Tir.EApp (f_var, args) ->
     (* Ensure functions passed as arguments are discovered *)
@@ -705,7 +735,9 @@ let rec rewrite_calls
                 (match try_collision_dispatch impls tname f_var args with
                  | Some e -> e   (* colliding short name — runtime tag dispatch *)
                  | None ->
-                (match resolve_impl_by_type impls tname with
+                (match (match resolve_impl_by_type impls tname with
+                        | Some m -> Some m
+                        | None -> return_position_single_impl impls arg_ty) with
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
                    (* Resolved!  Enqueue the impl (specialized under this
@@ -857,7 +889,9 @@ let rec rewrite_calls
                    (match try_collision_dispatch impls tname v args with
                     | Some e -> e   (* colliding short name — runtime tag dispatch *)
                     | None ->
-                   (match resolve_impl_by_type impls tname with
+                   (match (match resolve_impl_by_type impls tname with
+                           | Some m -> Some m
+                           | None -> return_position_single_impl impls arg_ty) with
                     | None -> expr
                     | Some mangled_name ->
                       (* Specialize under this call's concrete arg types —
@@ -1122,11 +1156,61 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
      Using a canonical string key (rather than structural Tir.ty key) avoids
      any potential hash/equality issues with complex type trees. *)
   let record_to_typename : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  let sort_fields fs =
+    List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
   List.iter (function
     | Tir.TDRecord (name, fields) ->
-      let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
-      let key = mangle_ty (Tir.TRecord sorted) in
+      let key = mangle_ty (Tir.TRecord (sort_fields fields)) in
       Hashtbl.replace record_to_typename key name
+    | _ -> ()
+  ) m.Tir.tm_types;
+  (* Second key per record type: the DEEP-normalized shape, with every nominal
+     record field expanded to its own structural form.
+
+     The declared shape of `type Outer = {label: String, inner: Inner}` keys on
+     `inner : TCon("Inner")`, but a call site that builds an `Outer` from a
+     record literal carries the fully structural
+     `{inner : {id : Int}, label : String}` — the two mangle strings never
+     match, so interface dispatch (`to_json(o)` on a nested `derive Json`
+     shape) missed and left a bare unresolved method call for the linker.
+     Registering the expanded key as well makes both spellings resolve.
+
+     Declared keys are registered first and are never overwritten here, so a
+     nominal type whose declared shape happens to equal another's expanded
+     shape keeps its own name.  Expansion only fires for parameterless [TCon]s
+     naming a record — a generic record's declared fields carry type variables
+     we have no arguments to substitute — and [seen] cuts recursive types
+     (`type T = {next: Option(T)}`) at the first revisit, leaving the nominal
+     [TCon] in place there. *)
+  let record_fields : (string, (string * Tir.ty) list) Hashtbl.t =
+    Hashtbl.create 8 in
+  List.iter (function
+    | Tir.TDRecord (name, fields) -> Hashtbl.replace record_fields name fields
+    | _ -> ()
+  ) m.Tir.tm_types;
+  let rec expand seen (t : Tir.ty) : Tir.ty =
+    match t with
+    | Tir.TCon (n, []) when not (SSet.mem n seen) ->
+      (match Hashtbl.find_opt record_fields n with
+       | Some fs ->
+         let seen' = SSet.add n seen in
+         Tir.TRecord (sort_fields
+                        (List.map (fun (f, ft) -> (f, expand seen' ft)) fs))
+       | None -> t)
+    | Tir.TCon (n, args) -> Tir.TCon (n, List.map (expand seen) args)
+    | Tir.TRecord fs ->
+      Tir.TRecord (sort_fields (List.map (fun (f, ft) -> (f, expand seen ft)) fs))
+    | Tir.TTuple ts -> Tir.TTuple (List.map (expand seen) ts)
+    | Tir.TFn (ps, r) -> Tir.TFn (List.map (expand seen) ps, expand seen r)
+    | Tir.TPtr t' -> Tir.TPtr (expand seen t')
+    | _ -> t
+  in
+  List.iter (function
+    | Tir.TDRecord (name, fields) ->
+      let deep = expand (SSet.singleton name) (Tir.TRecord (sort_fields fields)) in
+      let key = mangle_ty deep in
+      if not (Hashtbl.mem record_to_typename key) then
+        Hashtbl.replace record_to_typename key name
     | _ -> ()
   ) m.Tir.tm_types;
 

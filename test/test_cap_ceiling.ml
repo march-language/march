@@ -102,7 +102,7 @@ let compiler_exe =
   let exe_dir = Filename.dirname Sys.executable_name in
   Filename.concat exe_dir "../bin/main.exe"
 
-let compile_strict src_text =
+let compile_with ~flags src_text =
   if not (Sys.file_exists compiler_exe) then
     Alcotest.failf "compiler not found at %s" compiler_exe;
   let src = Filename.temp_file "cap_ceiling" ".march" in
@@ -113,8 +113,8 @@ let compile_strict src_text =
   let bin = Filename.temp_file "cap_ceiling" ".bin" in
   let rc =
     Sys.command
-      (Printf.sprintf "%s --cap-strict --compile -o %s %s > %s 2>&1"
-         (Filename.quote compiler_exe) (Filename.quote bin)
+      (Printf.sprintf "%s %s --compile -o %s %s > %s 2>&1"
+         (Filename.quote compiler_exe) flags (Filename.quote bin)
          (Filename.quote src) (Filename.quote out))
   in
   let ic = open_in out in
@@ -122,6 +122,12 @@ let compile_strict src_text =
   close_in ic;
   List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out; bin ];
   (rc, s)
+
+(* DEFAULT flags, deliberately: the ceiling is on by default since 2026-08-07,
+   and these tests assert the behavior a user gets without asking for
+   anything.  [--cap-strict] is still accepted (a no-op spelling of the
+   default); [test_no_cap_strict_opts_out] covers the opt-out. *)
+let compile_strict src_text = compile_with ~flags:"" src_text
 
 let rejects name src =
   let rc, out = compile_strict src in
@@ -376,9 +382,136 @@ mod CeilConsoleUndeclared do
 end
 |}
 
+(* ── A module with no entry point must not be charged for the whole stdlib ──
+
+   Measured 2026-08-07, before the fix: this file — which uses no capability
+   at all — produced SEVENTEEN ceiling violations, every one of them naming a
+   stdlib module (`Check` uses IO.Clock, `Socket` uses IO.NetConnect, `Process`
+   uses IO.Process, …).
+
+   The cause is not in the ceiling. [Dce.root_names] fails OPEN: with no
+   `main`, no setup/migrate, no exports and no tests, a module has no roots,
+   and rather than prune everything it keeps everything. That is the right call
+   for DCE — deleting a library's entire body would be absurd — but the ceiling
+   reads the pruned TIR to decide what the program USES, so an unpruned stdlib
+   made every stdlib module's capability look reachable. Attribution then found
+   no non-transparent caller for any of them and named the stdlib module, which
+   is [responsible_owners]' documented fallback behaving correctly on input
+   that should never have reached it.
+
+   This is the single largest source of ceiling false positives: of 110 failing
+   programs in a 312-program sweep, 86 had no `main`.
+
+   The fix supplies the ceiling its own roots (the functions this FILE
+   declares) and turns the fail-open off for it alone; codegen's DCE is
+   untouched. Two properties have to survive, and each has a test below:
+
+   - A main-less module is NOT capability-free. Its own functions are its API
+     surface, so a capability they reach is still charged
+     ([..._still_charged_for_its_own_use]). Without this, "prune harder" would
+     pass by checking nothing.
+   - The roots cannot be recovered from TIR NAMES. [Lower] strips the entry
+     module's prefix from its own declarations and the prelude's functions
+     (`println`, `panic`, …) are unprefixed too, so "no dot" selects both —
+     measured, rooting every unprefixed function charged the entry module
+     IO.Console, IO.FileWrite and IO.NetConnect for a file whose only
+     declaration was `fn helper(x) = x + 1`. The roots come from the desugared
+     AST, where a span still says which file a declaration came from. That is
+     what the first test would catch if someone "simplified" it back. *)
+let test_no_main_module_is_not_charged_for_the_stdlib () =
+  accepts "main-less module using no capability"
+    {|
+mod CeilNoMain do
+  fn helper(x : Int) : Int do
+    x + 1
+  end
+end
+|}
+
+let test_no_main_module_still_charged_for_its_own_use () =
+  rejects_naming "main-less module using a capability"
+    ~expect:"does not declare `needs IO.FileWrite`"
+    {|
+mod CeilNoMainUses do
+  needs IO.Console
+  fn save(p : String, d : String) : () do
+    match File.write(p, d) do
+      Ok(_)  -> println("ok")
+      Err(_) -> println("e")
+    end
+  end
+end
+|}
+
+(* The degenerate end of the same case: a file with NO declarations at all,
+   only a `test` block. `--compile` does not compile test bodies into the
+   binary, so it has no roots by any route — not even the file's own
+   functions, because it has none. It used to draw the same 17 stdlib
+   violations. Reporting nothing is the honest answer for a binary that runs
+   no user code; the capability use inside a test body is checked when tests
+   are actually built, where [tm_tests] roots them. *)
+let test_test_only_file_reports_nothing () =
+  accepts "file containing only a test block"
+    {|
+mod CeilTestOnly do
+
+test "trivial" do
+  assert true
+end
+
+end
+|}
+
+(* ── Default flip, 2026-08-07 ─────────────────────────────────────────────
+   The ceiling is the DEFAULT.  Three spellings, three tests:
+
+   - no flag: enforced (every [rejects]-family test above already runs with no
+     flag, so the whole file is the witness);
+   - [--cap-strict]: still accepted, same behavior — kept so scripts written
+     against the opt-in era don't break, and so intent can be stated
+     explicitly;
+   - [--no-cap-strict]: the opt-out, which must actually disable the check —
+     the program below is the stdlib-mediated route the severity flip cannot
+     see, so if the opt-out silently stopped working, nothing else in the
+     suite would notice. *)
+let undeclared_stdlib_write_src =
+  {|
+mod CeilOptOut do
+  needs IO.Console
+  fn main() : () do
+    match File.write("/tmp/cap_ceiling_optout", "d") do
+      Ok(_)  -> println("ok")
+      Err(_) -> println("e")
+    end
+  end
+end
+|}
+
+let test_explicit_cap_strict_still_accepted () =
+  let rc, out = compile_with ~flags:"--cap-strict" undeclared_stdlib_write_src in
+  if rc = 0 then
+    Alcotest.failf "--cap-strict should still enforce the ceiling:\n%s" out
+
+let test_no_cap_strict_opts_out () =
+  let rc, out =
+    compile_with ~flags:"--no-cap-strict" undeclared_stdlib_write_src
+  in
+  if rc <> 0 then
+    Alcotest.failf "--no-cap-strict should disable the ceiling:\n%s" out
+
 let tests =
   unit_tests
   @ [
+      Alcotest.test_case "--cap-strict still accepted" `Slow
+        test_explicit_cap_strict_still_accepted;
+      Alcotest.test_case "--no-cap-strict opts out" `Slow
+        test_no_cap_strict_opts_out;
+      Alcotest.test_case "main-less module is not charged for the stdlib" `Slow
+        test_no_main_module_is_not_charged_for_the_stdlib;
+      Alcotest.test_case "test-only file reports nothing" `Slow
+        test_test_only_file_reports_nothing;
+      Alcotest.test_case "main-less module still charged for its own use" `Slow
+        test_no_main_module_still_charged_for_its_own_use;
       Alcotest.test_case "route: direct builtin call" `Slow
         test_direct_builtin_route;
       Alcotest.test_case "route: stdlib wrapper (was silent)" `Slow

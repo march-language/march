@@ -1,10 +1,26 @@
 # The ceiling counts a signature-only capability as an unattributable use
 
 Found 2026-08-07 while fixing indirect-call attribution
-(`specs/progress/2026-08-07-cap-attrib-table-agreement.md`). It is the last
-remaining `--cap-strict` false positive in `examples/` + `bench/` — 1 of 72.
+(`specs/progress/2026-08-07-cap-attrib-table-agreement.md`).
 
-- [ ] **A capability that appears only in a SIGNATURE is reported as
+**CLOSED 2026-08-08, with the default flip
+(`specs/progress/2026-08-08-cap-strict-default.md`).** What forced it: the
+false positive fired on `fn main(cap : Cap(IO))` — the DOCUMENTED entry-point
+shape (`test/native/main_cap_io.march` exists to pin exactly that pattern) —
+so once the ceiling became the default, the bug rejected the sanctioned way
+to write `main`, not just a demo file. The fix is the "likely right answer"
+recorded below: the strict check's used-set is now the attributed (body-
+derived) set alone, and `own_caps_of_this_module` no longer feeds it — it
+still feeds `--cap-sandbox`, where the signature reading is correct. The
+drift-detector value the union provided (it is what surfaced the 2026-08-07
+attribution bug) is carried by `test_cap_attrib_agreement` instead. The
+`Cap_ceiling.describe` reason-carrying improvement below remains unbuilt;
+with no remaining feeder for `Unattributed` it is a dormant backstop, and the
+misleading message matters correspondingly less.
+
+The original filing follows.
+
+- [x] **A capability that appears only in a SIGNATURE is reported as
   "cannot be attributed to any module".** Reproducer is in the tree:
 
   ```

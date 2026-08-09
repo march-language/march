@@ -11,6 +11,17 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **The capability ceiling is now on by default.** `march --compile` fails the
+  build if any module's emitted code uses a capability that module does not
+  declare in `needs` — including a stdlib-mediated use (`File.read`), which no
+  other check sees, and including dependencies that never opted in.
+  `--no-cap-strict` opts out; `--cap-strict` is still accepted as an explicit
+  spelling of the default. **This is a breaking change** for code written
+  before it: the fix is one `needs` line per named module, and the error names
+  the module and the capability.
+
 ### Fixed
 
 - **A natively compiled program opening a nonexistent file no longer misreads
@@ -21,6 +32,64 @@ git log is authoritative for exact commits.
   of a tagged `FileError` cell — compiled code matching or inspecting the
   `Err` payload would read a string header as if it were an ADT cell. Fixed
   by building a real, correctly-tagged `FileError` cell in the C runtime.
+- **A bare `from_json` call with a single `derive Json` in scope now compiles
+  natively.** `from_json` dispatches on its result type (its argument is
+  always a `JsonValue`), which monomorphization's first-argument interface
+  dispatch could never resolve — a minimal `derive Json for T` +
+  `from_json(v)` program failed to link with `Undefined symbols: _from_json`.
+  When exactly one implementation exists and its parameter type matches the
+  call's argument type, the call is unambiguous and now resolves to it.
+- **An unresolvable interface-method call (e.g. bare `from_json` with several
+  `derive Json` in the same module) is now a clean compile error instead of an
+  internal compiler error or a linker error.** `--compile` on such a program
+  (e.g. `test/stdlib/test_json_typed.march`) previously died with an ICE
+  (exit 3) or a raw `_from_json` linker failure; it now reports "ambiguous
+  interface-method call", names the candidate implementations, explains that
+  the dispatch position is not concrete at the call site, and exits 1.
+- **A module with no entry point is no longer charged capability violations
+  for the entire standard library.** A file with no `fn main` (a library, or a
+  test-only file) drew up to 17 ceiling violations naming stdlib modules
+  (`Socket` uses `IO.NetConnect`, …) that its code never reached: with no
+  roots, dead-code elimination kept everything, and the ceiling read the
+  unpruned result as "used". The ceiling now roots reachability at the
+  functions the file itself declares. A main-less module that genuinely
+  reaches a capability is still charged for it.
+
+- **A capability appearing only in a type signature no longer trips the
+  ceiling.** `fn main(cap : Cap(IO))` — the documented entry-point shape — was
+  reported as "`IO` is used but cannot be attributed to any module", a
+  violation no `needs` line could fix. Capabilities are erased, so a
+  signature-only capability corresponds to no emitted operation; the ceiling
+  now judges emitted code only. (`--cap-sandbox` still counts signature
+  capabilities when building its profile, where receiving one by parameter
+  rightly widens what the process may do.)
+- **Nested `derive Json` types now compile natively.** Calling `to_json`/
+  `from_json` on a record type that nests another `derive Json` record (e.g.
+  `type Outer = {label: String, inner: Inner}`) previously failed to link
+  (and, after the from_json fix above, failed with a spurious "ambiguous
+  interface-method call") in the compiled/LLVM backend, even though the call
+  was never actually ambiguous and worked fine interpreted. The compiler's
+  record-to-type-name lookup used for interface dispatch now also indexes
+  each record type's deep-normalized (fully structural) shape, not just its
+  declared shape, so a record literal's fully structural type at the call
+  site resolves correctly.
+
+- **`try_finally` now has a native implementation, so compiled programs using
+  fd-streaming file I/O link and run.** It was a typecheck+interpreter builtin
+  only; any natively compiled program that reached it — `File.with_lines`,
+  `File.with_chunks`, `Logger`'s context stack, or a direct call — failed at
+  link time with `Undefined symbols: "_try_finally"` (first seen via
+  `examples/read_file.march`). The native version preserves the interpreter's
+  contract: cleanup runs even when the action panics (the panic is re-raised
+  after cleanup; a panic inside cleanup itself is swallowed).
+
+- **`file_read_line` / `file_read_chunk` no longer misread every compiled
+  result.** The C runtime returned `Ok`/`Err` Result cells while the March
+  type is `Option(String)` (niche-encoded: `None` is NULL, `Some`'s payload is
+  the value itself), so a compiled read-to-EOF loop never saw EOF
+  (`File.with_lines` spun forever) and any use of the "line" crashed. Both now
+  return the string directly or NULL, matching the interpreter. This was
+  unreachable before the `try_finally` fix above — nothing fd-based could link.
 
 - **A bare constructor pattern on a value of a known type is no longer reported
   as ambiguous against a same-named stdlib constructor.** Matching `Defs.make(n)`

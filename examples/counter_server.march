@@ -18,6 +18,7 @@
 
 mod CounterServer do
   needs IO.Console
+  needs IO.NetListen
 
 actor Counter do
   state { count : Int }

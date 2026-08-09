@@ -24,6 +24,7 @@
 -- the default thread-pool one (see bin/main.ml, -DMARCH_HTTP_USE_EVLOOP).
 
 mod TfbServer do
+  needs IO.NetListen
 
   -- Built through Json.encode_* rather than the bare `Object`/`Str`
   -- constructors: `Str` is ambiguous across Json, Msgpack and IOList, and the

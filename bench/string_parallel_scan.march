@@ -24,6 +24,7 @@
 
 mod StringParallelScan do
   needs IO.Console
+  needs IO.Spawn
 
 pfn buffer_units() : Int do 4000000 end  -- 10 bytes per unit -> 40MB
 
