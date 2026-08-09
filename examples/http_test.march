@@ -11,6 +11,8 @@
 
 mod HttpTest do
   needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
 
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do

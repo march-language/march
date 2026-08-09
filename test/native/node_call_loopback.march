@@ -16,6 +16,7 @@ mod NodeCallLoopback do
   needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
+  needs IO.NetConnect
 
   -- Marshalling stub for Calc.add: decode [a, b], return a + b.
   pfn add_invoke(args : List(Int)) : Result(List(Int), String) do

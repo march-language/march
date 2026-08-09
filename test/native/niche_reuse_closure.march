@@ -13,6 +13,7 @@
 -- Mirrors the original SearchIndex.first_line failure that hung `march_doc`.
 
 mod NicheReuseClosure do
+  needs IO.Console
 
   type JV = JStr(String) | JObj(List((String, JV)))
 

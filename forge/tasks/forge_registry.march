@@ -20,6 +20,7 @@ mod ForgeRegistry do
   needs IO.FileRead
   needs IO.FileWrite
   needs IO.Random
+  needs IO.Process
 
   import Process
 

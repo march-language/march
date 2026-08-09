@@ -10343,6 +10343,7 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_sigwatchcap"
     "mod SigWatchCap do\n\
     \  needs IO.Console\n\
+    \  needs IO.Signal\n\
     \  fn main() do\n\
     \    let k = 99\n\
     \    Signal.watch(Signal.Usr2, fn -> println(\"caught \" ++ int_to_string(k)))\n\

@@ -9,6 +9,7 @@
 
 mod HttpStreaming do
   needs IO.Console
+  needs IO.NetConnect
 
 fn main() do
   let client = HttpClient.new_client()

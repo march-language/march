@@ -4,6 +4,8 @@
 
 mod TestJsonStream do
 
+  needs IO.Console
+
 -- Render an event list as a compact string so assertions compare one string.
 pfn ev_str(e) do
   match e do
