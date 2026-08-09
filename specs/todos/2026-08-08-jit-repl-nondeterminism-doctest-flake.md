@@ -51,16 +51,39 @@
 > why 52+ local runs and the `ubuntu` runner all pass. Not reproducible without
 > that exact toolchain.
 >
-> **Resolution options** (needs a decision): (a) **pin/upgrade the macos runner's
-> Xcode** to a known-good clang (e.g. select the image's newest Xcode in
-> `.github/actions/march-setup`); fastest and robust, and correct if this is an
-> Apple/LLVM 17.0.0 codegen bug — which the evidence favors. (b) **Harden the
-> emitted IR**: dump the REPL fragment/prelude IR for the `"/"` literal + the
-> `march_string_lit_static`/`string_starts_with` call sites and audit the
-> attributes the March backend attaches (`nonnull`, `dereferenceable(N)`,
-> `noalias`, poison flags); if one is over-promising, drop/correct it in
-> `lib/tir/llvm_*` — this fixes it for every toolchain but needs CI cycles to
-> confirm (no local repro). The doctest gate stays advisory until resolved.
+> **CORRECTION 2 (2026-08-08) — it is NOT the clang version either.** Enumerating
+> every Xcode on the macos-15 image and re-testing showed **all** of them return
+> `false`, including clang-16 builds AND `clang-1700.6.4.2` (Xcode 26.3), which is
+> the EXACT clang version on the local machine where it returns `true`. So the
+> same clang version gives opposite results on the runner vs local. Further:
+> `march` does not link LLVM (it emits `.ll` TEXT by hand — `otool`/`ocamlfind`
+> confirm no LLVM lib), and the emitted IR is byte-identical (same baked triple
+> `arm64-apple-macosx15.0.0`, `@.str3 = c"/\00"`, `lit_static(..., i64 1, ...)`).
+> Identical IR + same clang version ⇒ the differentiator is the **runner
+> environment: macOS 15 (CI) vs macOS 26 (local dev)**. Pinning Xcode CANNOT fix
+> it — no toolchain on the image compiles it correctly.
+>
+> **Refined mechanism hypothesis:** the standalone single-binary C is correct on
+> the macos-15 runner, but the march-generated program fails there — the
+> difference is march's **cross-dylib** layout (fragment `.so` / prelude `.so` →
+> runtime `.so`, macOS flat namespace via `-undefined dynamic_lookup` +
+> RTLD_GLOBAL). So this is most likely a **macOS-15 dyld/linker symbol-resolution
+> issue** with that flat-namespace scheme for short-literal construction — which
+> macOS 26's dyld tolerates. Not reproducible without a macOS 15 host.
+>
+> **Resolution options** (needs a decision — pin-Xcode is OUT, disproven above):
+> (a) **Change the macOS link scheme** away from flat-namespace
+> `-undefined dynamic_lookup` for JIT fragments/prelude — e.g. two-level
+> namespace, or statically link the runtime objects into each fragment instead of
+> resolving them across a `dlopen`'d runtime `.so`. Most likely the actual fix,
+> but only verifiable on a macOS 15 host / CI (no local repro on macOS 26).
+> (b) **Investigate on a macOS 15 machine** — the only environment that
+> reproduces it; dump the fragment `.so` symbol table + `dyld` resolution
+> (`DYLD_PRINT_BINDINGS`) for `march_string_lit_static` to confirm the wrong
+> binding. (c) **Accept + document**: keep the doctest gate advisory, note that
+> `march`-compiled native binaries have this short-string-literal miscompile on
+> **macOS 15 specifically**, and revisit if macOS 15 is a supported target. The
+> doctest gate stays advisory until resolved.
 
 ---
 
