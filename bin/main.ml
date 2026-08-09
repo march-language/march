@@ -708,7 +708,14 @@ let ensure_runtime_so () =
     let runtime_opt_flag =
       match Sys.getenv_opt "MARCH_RUNTIME_OPT" with
       | Some ("0" | "1" | "2" | "3" as n) -> "-O" ^ n
-      | _ -> "-O2"
+      | _ ->
+        (* macOS defaults to -O1: Apple clang miscompiles the runtime TU at -O2
+           on macOS 15 (String.starts_with/ends_with, HashMap/RRB ops return
+           wrong values or 0-length), while -O1 (and -O3) are correct — bisected
+           on CI, see specs/todos. The isolated functions compile fine, so it is
+           an intra-TU -O2 optimization bug. Linux keeps -O2. Detect macOS the
+           same way the FFI-shim link path does. *)
+        if Sys.file_exists "/System/Library/CoreServices" then "-O1" else "-O2"
     in
     let flags_sig = Printf.sprintf
       "clang -shared %s -fno-strict-aliasing -fwrapv -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
