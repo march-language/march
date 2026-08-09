@@ -612,6 +612,36 @@ let rec rewrite_calls
     | None -> None
     | Some (impls, tname) -> resolve_impl_by_type impls tname
   in
+  (* Return-position dispatch fallback (derive Json's `from_json` shape): an
+     interface method whose dispatch position is the RESULT type, not the
+     first argument — the argument has the same fixed type in every impl
+     (e.g. from_json : JsonValue -> Result(T, DecodeError)), so
+     [resolve_impl_by_type] on the first-arg type name can never match.
+     When exactly ONE distinct impl symbol is registered AND its own first
+     parameter type equals the call's first-argument type (proving the
+     argument is not the dispatch position — the call typechecked against
+     this very signature), the call is unambiguous: resolve to that impl.
+     Previously this shape fell through to a raw `Undefined symbols:
+     _from_json` linker error.  With >=2 impls the result type at the call
+     site is an unpinned TVar (the typechecker does not back-propagate the
+     target type into the call's span), so dispatch is genuinely ambiguous —
+     leave the call unresolved for the user-facing ambiguity diagnostic in
+     [Llvm_calls.fail_if_unresolved_iface_method]. *)
+  let return_position_single_impl
+      (impls : (string * string) list) (arg_ty : Tir.ty) : string option =
+    let uniq_syms =
+      List.fold_left (fun acc (_, m) ->
+          if List.mem m acc then acc else m :: acc) [] impls in
+    match uniq_syms with
+    | [m] ->
+      (match Hashtbl.find_opt fn_table m with
+       | Some impl_fn ->
+         (match impl_fn.Tir.fn_params with
+          | p :: _ when mangle_ty p.Tir.v_ty = mangle_ty arg_ty -> Some m
+          | _ -> None)
+       | None -> None)
+    | _ -> None
+  in
   match expr with
   | Tir.EApp (f_var, args) ->
     (* Ensure functions passed as arguments are discovered *)
@@ -705,7 +735,9 @@ let rec rewrite_calls
                 (match try_collision_dispatch impls tname f_var args with
                  | Some e -> e   (* colliding short name — runtime tag dispatch *)
                  | None ->
-                (match resolve_impl_by_type impls tname with
+                (match (match resolve_impl_by_type impls tname with
+                        | Some m -> Some m
+                        | None -> return_position_single_impl impls arg_ty) with
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
                    (* Resolved!  Enqueue the impl (specialized under this
@@ -857,7 +889,9 @@ let rec rewrite_calls
                    (match try_collision_dispatch impls tname v args with
                     | Some e -> e   (* colliding short name — runtime tag dispatch *)
                     | None ->
-                   (match resolve_impl_by_type impls tname with
+                   (match (match resolve_impl_by_type impls tname with
+                           | Some m -> Some m
+                           | None -> return_position_single_impl impls arg_ty) with
                     | None -> expr
                     | Some mangled_name ->
                       (* Specialize under this call's concrete arg types —

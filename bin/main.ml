@@ -3864,6 +3864,14 @@ let compile filename =
    with
    | March_errors.Errors.ParseError _ as exn -> raise exn
    | March_tir.Js_emit.Js_emit_error _ as exn -> raise exn
+   | March_tir.Llvm_calls.Ambiguous_iface_call msg ->
+     (* A user-program error (an interface-method call whose dispatch
+        position is not concrete at the call site — e.g. bare `from_json`
+        with several `derive Json` in scope), not a compiler bug: render it
+        as an ordinary diagnostic and exit 1, distinct from the
+        internal-compiler-error path below (exit 3). *)
+     Printf.eprintf "error: %s\n%!" msg;
+     exit 1
    | exn ->
      (* Every diagnosed failure in this pipeline (parse errors, typecheck
         errors, user-file capability-policy violations, clang/link failures)

@@ -24,6 +24,20 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A bare `from_json` call with a single `derive Json` in scope now compiles
+  natively.** `from_json` dispatches on its result type (its argument is
+  always a `JsonValue`), which monomorphization's first-argument interface
+  dispatch could never resolve — a minimal `derive Json for T` +
+  `from_json(v)` program failed to link with `Undefined symbols: _from_json`.
+  When exactly one implementation exists and its parameter type matches the
+  call's argument type, the call is unambiguous and now resolves to it.
+- **An unresolvable interface-method call (e.g. bare `from_json` with several
+  `derive Json` in the same module) is now a clean compile error instead of an
+  internal compiler error or a linker error.** `--compile` on such a program
+  (e.g. `test/stdlib/test_json_typed.march`) previously died with an ICE
+  (exit 3) or a raw `_from_json` linker failure; it now reports "ambiguous
+  interface-method call", names the candidate implementations, explains that
+  the dispatch position is not concrete at the call site, and exits 1.
 - **A module with no entry point is no longer charged capability violations
   for the entire standard library.** A file with no `fn main` (a library, or a
   test-only file) drew up to 17 ceiling violations naming stdlib modules
@@ -44,7 +58,7 @@ git log is authoritative for exact commits.
 - **Nested `derive Json` types now compile natively.** Calling `to_json`/
   `from_json` on a record type that nests another `derive Json` record (e.g.
   `type Outer = {label: String, inner: Inner}`) previously failed to link
-  (and, after an unrelated fix, failed with a spurious "ambiguous
+  (and, after the from_json fix above, failed with a spurious "ambiguous
   interface-method call") in the compiled/LLVM backend, even though the call
   was never actually ambiguous and worked fine interpreted. The compiler's
   record-to-type-name lookup used for interface dispatch now also indexes
