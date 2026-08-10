@@ -12700,28 +12700,44 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
      REPL's [check_module_with_env] path, which has no entry point to be
      granted from (the same exemption R2 gives it). *)
 let check_main_grant (env : env) (decls : Ast.decl list) : unit =
-  let main_grant : (string * Ast.span) option =
+  (* R1 stage D: `main`'s grant is the UNION over ALL of its capability
+     parameters, not the head of the first one's caps.  Same rule as
+     [check_fn_grants]; [Desugar.check_main_signature] guarantees every
+     parameter is a `Cap(P)`.
+
+     [main_site] is found whether or not a grant is present, because stage D
+     needs the span to report a MISSING grant — the case where [grants] is
+     empty and the program is nonetheless not pure. *)
+  let main_site : (string list * Ast.span) option =
     List.find_map
       (function
         | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
           (match def.Ast.fn_clauses with
            | clause :: _ ->
-             (match clause.Ast.fc_params with
-              | [ Ast.FPNamed p ] | [ Ast.FPDefault (p, _) ] ->
-                (match p.Ast.param_ty with
-                 | Some ty ->
-                   (match March_caps.Cap_surface_ty.caps_in_ty ty with
-                    | g :: _ -> Some (g, clause.Ast.fc_span)
-                    | [] -> None)
-                 | None -> None)
-              | _ -> None)
+             let grants =
+               List.concat_map
+                 (fun p ->
+                    match p with
+                    | Ast.FPNamed p | Ast.FPDefault (p, _) -> (
+                      match p.Ast.param_ty with
+                      | Some ty -> March_caps.Cap_surface_ty.caps_in_ty ty
+                      | None -> [])
+                    | Ast.FPPat _ -> [])
+                 clause.Ast.fc_params
+             in
+             Some (List.sort_uniq String.compare grants, clause.Ast.fc_span)
            | [] -> None)
         | _ -> None)
       decls
   in
+  let main_grant : (string list * Ast.span) option =
+    match main_site with
+    | Some (_ :: _ as grants, span) -> Some (grants, span)
+    | _ -> None
+  in
   match main_grant with
   | None -> ()
-  | Some (grant, span) ->
+  | Some (grants, span) ->
     let closure =
       match
         Hashtbl.find_opt (fn_transitive_capability_closures_tbl env) "main"
@@ -12785,27 +12801,43 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
          | k :: _ -> Some k
          | [] -> (match holders with k :: _ -> Some k | [] -> None))
     in
+    let covered c = List.exists (fun g -> cap_subsumes g c) grants in
+    let show_grant =
+      String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
+    in
     List.iter
       (fun c ->
          if not (cap_subsumes "IO" c) then ()  (* FFI root; not this lattice *)
-         else if cap_subsumes "IO.Foreign" c && grant <> "IO" then
+         else if covered c then ()
+         (* R1 stage D moved this behind [covered], matching
+            [check_fn_grants].  While `main` could hold exactly ONE
+            capability, refusing `IO.Foreign` under anything but `Cap(IO)` was
+            right: certifying a console bound over an extern block would be a
+            lie, and there was no way to say "console AND foreign".  Now that
+            the grant is a SET, a `Cap(IO.Foreign)` parameter IS an explicit
+            grant of the unbounded thing, written by someone who knows what
+            they authorized.  So the refusal applies only where the grant does
+            not cover it — where it would otherwise be an ordinary violation,
+            and this is the more informative message to give. *)
+         else if cap_subsumes "IO.Foreign" c then
            Err.error env.errors ~span
              (Printf.sprintf
-                "`main` is granted `Cap(%s)`, but the program reaches `%s` — \
+                "`main` is granted %s, but the program reaches `%s` — \
                  linked C code, whose behavior the capability lattice cannot \
                  bound. A narrow grant cannot be certified over an `extern` \
                  block.\n\
-                 help: grant `Cap(IO)` instead, or remove the extern \
+                 help: grant `Cap(IO)`, or add a `Cap(IO.Foreign)` parameter \
+                 to accept that bound explicitly, or remove the extern \
                  dependency from everything `main` reaches."
-                grant c)
-         else if not (cap_subsumes grant c) then
+                show_grant c)
+         else
            Err.error env.errors ~span
              (Printf.sprintf
-                "`main` is granted `Cap(%s)`, but the program reaches `%s`%s. \
+                "`main` is granted %s, but the program reaches `%s`%s. \
                  The grant is a ceiling on the WHOLE program — declaring \
                  `needs %s` does not raise it.\n\
                  help: widen the grant (e.g. `Cap(IO)`), or remove the use."
-                grant c
+                show_grant c
                 (match reached_in c with
                  | Some f -> Printf.sprintf " (reached in `%s`)" f
                  | None -> "")

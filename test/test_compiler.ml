@@ -10391,7 +10391,8 @@ let test_main_grant_is_the_union_of_its_cap_params () =
     needs IO.Spawn
     fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
       println("start")
-      task_spawn(fn _ -> println("worker"))
+      let _t = task_spawn(fn _ -> println("worker"))
+      ()
     end
   end|} in
   Alcotest.(check bool) "a program reaching both granted caps is accepted"
