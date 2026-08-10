@@ -5606,6 +5606,278 @@ void *native_float_arr_to_list(void *arr) {
     return lst;
 }
 
+/* ── Narrow element widths: f32 / i32 / u8 ─────────────────────────────
+ * March-side scalars stay int64_t/double; stores narrow by C cast
+ * (two's-complement wrap for ints, round-to-nearest-even for f32) and
+ * loads widen exactly (uint8_t zero-extends, int32_t sign-extends).
+ * Layout/RC/FBIP contracts identical to the i64/f64 families above. */
+
+#define DEF_NARROW_INT_ARR(PREFIX, CTYPE, KIND)                               \
+void *PREFIX##_alloc_raw(int64_t len) {                                       \
+    return native_arr_alloc(len, (int64_t)sizeof(CTYPE), KIND);               \
+}                                                                             \
+void *PREFIX##_make(int64_t len, int64_t def) {                               \
+    void *arr = native_arr_alloc(len, (int64_t)sizeof(CTYPE), KIND);          \
+    CTYPE d = (CTYPE)def;                                                     \
+    for (int64_t i = 0; i < len; i++)                                         \
+        *(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) = d;     \
+    return arr;                                                               \
+}                                                                             \
+int64_t PREFIX##_length(void *arr) { return *(int64_t *)((char *)arr + 16); } \
+int64_t PREFIX##_get(void *arr, int64_t i) {                                  \
+    return (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+}                                                                             \
+void *PREFIX##_set(void *arr, int64_t i, int64_t val) {                       \
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {                    \
+        *(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) = (CTYPE)val; \
+        return arr;                                                           \
+    }                                                                         \
+    int64_t len = PREFIX##_length(arr);                                       \
+    void *new_arr = native_arr_alloc(len, (int64_t)sizeof(CTYPE), KIND);      \
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR,    \
+           (size_t)(len * (int64_t)sizeof(CTYPE)));                           \
+    *(CTYPE *)((char *)new_arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) = (CTYPE)val; \
+    march_decrc(arr);                                                         \
+    return new_arr;                                                           \
+}                                                                             \
+int64_t PREFIX##_sum(void *arr) {                                             \
+    int64_t len = PREFIX##_length(arr), s = 0;                                \
+    for (int64_t i = 0; i < len; i++)                                         \
+        s += (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+    return s;                                                                 \
+}                                                                             \
+/* RC contract identical to native_int_arr_map above. */                      \
+void *PREFIX##_map(void *arr, void *f) {                                      \
+    int64_t len = PREFIX##_length(arr);                                       \
+    void *new_arr = native_arr_alloc(len, (int64_t)sizeof(CTYPE), KIND);      \
+    for (int64_t i = 0; i < len; i++) {                                       \
+        int64_t x = (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+        march_incrc(f);                                                       \
+        *(CTYPE *)((char *)new_arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) =    \
+            (CTYPE)clo_call_int_int(f, x);                                    \
+    }                                                                         \
+    march_decrc(f);                                                           \
+    return new_arr;                                                           \
+}                                                                             \
+void *PREFIX##_map2(void *arr1, void *arr2, void *f) {                        \
+    int64_t len = PREFIX##_length(arr1);                                      \
+    if (len != PREFIX##_length(arr2)) {                                       \
+        fputs("march: " #PREFIX "_map2: array length mismatch\n", stderr); exit(1); \
+    }                                                                         \
+    void *new_arr = native_arr_alloc(len, (int64_t)sizeof(CTYPE), KIND);      \
+    for (int64_t i = 0; i < len; i++) {                                       \
+        int64_t x = (int64_t)*(CTYPE *)((char *)arr1 + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+        int64_t y = (int64_t)*(CTYPE *)((char *)arr2 + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+        march_incrc(f);                                                       \
+        *(CTYPE *)((char *)new_arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) =    \
+            (CTYPE)clo_call_int_int_int(f, x, y);                             \
+    }                                                                         \
+    march_decrc(f);                                                           \
+    return new_arr;                                                           \
+}                                                                             \
+void *PREFIX##_from_list(void *lst) {                                         \
+    int64_t n = 0;                                                            \
+    void *tmp = lst;                                                          \
+    while (*(int32_t *)((char *)tmp + 8) == 1) { n++; tmp = *(void **)((char *)tmp + 24); } \
+    void *arr = native_arr_alloc(n, (int64_t)sizeof(CTYPE), KIND);            \
+    void *cur = lst;                                                          \
+    for (int64_t i = 0; i < n; i++) {                                         \
+        int64_t raw = *(int64_t *)((char *)cur + 16);                         \
+        int64_t v = (raw & 1) ? (raw >> 1) : raw;                             \
+        *(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) = (CTYPE)v; \
+        cur = *(void **)((char *)cur + 24);                                   \
+    }                                                                         \
+    return arr;                                                               \
+}                                                                             \
+void *PREFIX##_to_list(void *arr) {                                           \
+    int64_t len = PREFIX##_length(arr);                                       \
+    void *lst = make_nil();                                                   \
+    for (int64_t i = len - 1; i >= 0; i--) {                                  \
+        int64_t v = (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+        void *cons = march_alloc(32);                                         \
+        *(int32_t *)((char *)cons + 8) = 1;                                   \
+        *(int64_t *)((char *)cons + 16) = (v << 1) | 1;                       \
+        *(void **)((char *)cons + 24) = lst;                                  \
+        lst = cons;                                                           \
+    }                                                                         \
+    return lst;                                                               \
+}
+
+DEF_NARROW_INT_ARR(native_i32_arr, int32_t, NATIVE_ELEM_I32)
+DEF_NARROW_INT_ARR(native_u8_arr,  uint8_t, NATIVE_ELEM_U8)
+
+void *native_f32_arr_alloc_raw(int64_t len) {
+    return native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+}
+
+void *native_f32_arr_make(int64_t len, double def) {
+    void *arr = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    float d = (float)def;    /* round to nearest-even binary32 */
+    for (int64_t i = 0; i < len; i++)
+        *(float *)((char *)arr + NATIVE_ARR_HDR + i * 4) = d;
+    return arr;
+}
+
+int64_t native_f32_arr_length(void *arr) { return *(int64_t *)((char *)arr + 16); }
+
+double native_f32_arr_get(void *arr, int64_t i) {
+    return (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+}
+
+/* FBIP/COW contract identical to native_float_arr_set above. */
+void *native_f32_arr_set(void *arr, int64_t i, double val) {
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        *(float *)((char *)arr + NATIVE_ARR_HDR + i * 4) = (float)val;
+        return arr;
+    }
+    int64_t len = native_f32_arr_length(arr);
+    void *new_arr = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 4));
+    *(float *)((char *)new_arr + NATIVE_ARR_HDR + i * 4) = (float)val;
+    march_decrc(arr);
+    return new_arr;
+}
+
+double native_f32_arr_sum(void *arr) {
+    int64_t len = native_f32_arr_length(arr);
+    double s = 0.0;
+    /* Same scoped reassociation as native_float_arr_sum — see its comment. */
+    {
+#pragma clang fp reassociate(on)
+        for (int64_t i = 0; i < len; i++)
+            s += (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+    }
+    return s;
+}
+
+/* RC contract identical to native_int_arr_map above. */
+void *native_f32_arr_map(void *arr, void *f) {
+    int64_t len = native_f32_arr_length(arr);
+    void *new_arr = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    for (int64_t i = 0; i < len; i++) {
+        double x = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+        march_incrc(f);
+        *(float *)((char *)new_arr + NATIVE_ARR_HDR + i * 4) = (float)clo_call_dbl_dbl(f, x);
+    }
+    march_decrc(f);
+    return new_arr;
+}
+
+void *native_f32_arr_map2(void *arr1, void *arr2, void *f) {
+    int64_t len = native_f32_arr_length(arr1);
+    if (len != native_f32_arr_length(arr2)) {
+        fputs("march: native_f32_arr_map2: array length mismatch\n", stderr); exit(1);
+    }
+    void *new_arr = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    for (int64_t i = 0; i < len; i++) {
+        double x = (double)*(float *)((char *)arr1 + NATIVE_ARR_HDR + i * 4);
+        double y = (double)*(float *)((char *)arr2 + NATIVE_ARR_HDR + i * 4);
+        march_incrc(f);
+        *(float *)((char *)new_arr + NATIVE_ARR_HDR + i * 4) = (float)clo_call_dbl_dbl_dbl(f, x, y);
+    }
+    march_decrc(f);
+    return new_arr;
+}
+
+void *native_f32_arr_from_list(void *lst) {
+    int64_t n = 0;
+    void *tmp = lst;
+    while (*(int32_t *)((char *)tmp + 8) == 1) { n++; tmp = *(void **)((char *)tmp + 24); }
+    void *arr = native_arr_alloc(n, 4, NATIVE_ELEM_F32);
+    void *cur = lst;
+    for (int64_t i = 0; i < n; i++) {
+        /* List(Float) elements are BOXED — see native_float_arr_from_list. */
+        void *boxed = *(void **)((char *)cur + 16);
+        *(float *)((char *)arr + NATIVE_ARR_HDR + i * 4) = (float)march_unbox_float(boxed);
+        cur = *(void **)((char *)cur + 24);
+    }
+    return arr;
+}
+
+void *native_f32_arr_to_list(void *arr) {
+    int64_t len = native_f32_arr_length(arr);
+    void *lst = make_nil();
+    for (int64_t i = len - 1; i >= 0; i--) {
+        /* Box each element — see native_float_arr_to_list's comment. */
+        double v = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+        void *boxed = march_alloc_float(v);
+        void *cons = march_alloc(32);
+        *(int32_t *)((char *)cons + 8) = 1;
+        *(void **)((char *)cons + 16) = boxed;
+        *(void **)((char *)cons + 24) = lst;
+        lst = cons;
+    }
+    return lst;
+}
+
+/* ── Width conversions ── wrap/round per the narrow-store rule; never trap. */
+void *native_float_to_f32_arr(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    void *out = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    for (int64_t i = 0; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        *(float *)((char *)out + NATIVE_ARR_HDR + i * 4) = (float)v;
+    }
+    return out;
+}
+void *native_f32_to_float_arr(void *arr) {
+    int64_t len = native_f32_arr_length(arr);
+    void *out = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
+    for (int64_t i = 0; i < len; i++) {
+        double v = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+        memcpy((char *)out + NATIVE_ARR_HDR + i * 8, &v, 8);
+    }
+    return out;
+}
+void *native_int_to_i32_arr(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    void *out = native_arr_alloc(len, 4, NATIVE_ELEM_I32);
+    for (int64_t i = 0; i < len; i++)
+        *(int32_t *)((char *)out + NATIVE_ARR_HDR + i * 4) =
+            (int32_t)*(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+    return out;
+}
+void *native_i32_to_int_arr(void *arr) {
+    int64_t len = native_i32_arr_length(arr);
+    void *out = native_arr_alloc(len, 8, NATIVE_ELEM_I64);
+    for (int64_t i = 0; i < len; i++)
+        *(int64_t *)((char *)out + NATIVE_ARR_HDR + i * 8) =
+            (int64_t)*(int32_t *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+    return out;
+}
+void *native_int_to_u8_arr(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    void *out = native_arr_alloc(len, 1, NATIVE_ELEM_U8);
+    for (int64_t i = 0; i < len; i++)
+        *(uint8_t *)((char *)out + NATIVE_ARR_HDR + i) =
+            (uint8_t)*(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+    return out;
+}
+void *native_u8_to_int_arr(void *arr) {
+    int64_t len = native_u8_arr_length(arr);
+    void *out = native_arr_alloc(len, 8, NATIVE_ELEM_I64);
+    for (int64_t i = 0; i < len; i++)
+        *(int64_t *)((char *)out + NATIVE_ARR_HDR + i * 8) =
+            (int64_t)*(uint8_t *)((char *)arr + NATIVE_ARR_HDR + i);
+    return out;
+}
+void *native_i32_to_f32_arr(void *arr) {
+    int64_t len = native_i32_arr_length(arr);
+    void *out = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    for (int64_t i = 0; i < len; i++)
+        *(float *)((char *)out + NATIVE_ARR_HDR + i * 4) =
+            (float)*(int32_t *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+    return out;
+}
+void *native_u8_to_f32_arr(void *arr) {
+    int64_t len = native_u8_arr_length(arr);
+    void *out = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    for (int64_t i = 0; i < len; i++)
+        *(float *)((char *)out + NATIVE_ARR_HDR + i * 4) =
+            (float)*(uint8_t *)((char *)arr + NATIVE_ARR_HDR + i);
+    return out;
+}
+
 /* native_int_arr_filter_mask / native_float_arr_filter_mask:
  * Keep elements where the parallel TypedArray(Bool) mask is true.
  * TypedArray Bool elements are tagged scalars: true=(1<<1)|1=3, false=(0<<1)|1=1.

@@ -3875,6 +3875,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_map2.expected native_arr_map2.out)))
 
+; Compiled/interpreted parity witness for narrow native array element widths
+; (f32/i32/u8): same t1-t6 cases as test_stdlib_suite.ml's
+; "native_array_narrow" interpreter suite, printed to stdout so the compiled
+; binary's output can be diffed byte-for-byte against the interpreter's.
+(rule
+ (targets native_arr_narrow native_arr_narrow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_narrow.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_narrow
+        native/native_arr_narrow.march)
+   (with-stdout-to native_arr_narrow.out
+        (system "./native_arr_narrow")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
+
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
  (deps (file %{exe:../bin/main.exe})
