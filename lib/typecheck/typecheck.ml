@@ -1943,6 +1943,61 @@ let builtin_cap_table : (string * string) list = [
   ("tls_peer_cn",           "IO.NetConnect.TLS");
 ]
 
+(** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
+    [PatVar]s) — exactly the set that wins real name resolution over a global
+    builtin of the same bare name at this module's scope (verified:
+    interpreted and compiled, a module-level `fn`/`let` of the same name is
+    what actually runs, never the builtin).
+
+    Every capability-inference pass below is a raw SYNTACTIC scan
+    ([March_ast.Calls.names_and_name_spans]) matching a call's NAME against
+    [builtin_cap_table]/a derived banned-set, with no resolution awareness.
+    Before this existed, EVERY one of them treated an ordinary function named
+    `file_read`, `random_bytes`, `dns_resolve`, … — or a `cap pure`/
+    `cap deterministic` module's own same-named helper — as a call to the
+    capability-bearing builtin of that name, and (since Check 1b's severity
+    flip, 2026-08-06) that is a hard, default-on compile ERROR demanding a
+    capability the program never uses (specs/2026-08-09-cap-loose-ends-plan.md,
+    Tier 0).
+
+    Deliberately NOT extended to nested-module names (already immune — a
+    nested module's qualified TIR/AST name, e.g. "Lib.file_read", never
+    string-matches a bare table key) or to a parameter/local `let` shadowing
+    a builtin WITHIN a function body (a real, rarer residual gap needing
+    actual scope-aware resolution these AST-level passes don't have — filed
+    as a follow-up, not blocking this fix).
+
+    ONE shared implementation rather than one per call site: this codebase
+    has repeatedly been bitten by near-duplicate capability walks drifting
+    apart (the "two-tables-drift" pattern) — [check_module_needs],
+    [check_pure_module] and [check_deterministic_module] all consult this,
+    rather than each re-deriving its own notion of "locally declared". *)
+let locally_declared_names_of (decls : Ast.decl list) : (string, unit) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  List.iter (function
+      (* STDLIB-SPAN declarations must NOT count as "locally declared":
+         prelude is unwrapped into the ENTRY module's OWN flat [decls] list
+         (see [check_module_needs]'s dedup-first-span comment, and
+         [own_caps_of_this_module]'s identical trap), so without this filter
+         prelude's `println`/`print`/etc. — sitting in the SAME [decls] this
+         function scans for the entry module — were themselves treated as
+         "locally declared", shadowing every entry-module call to `println`.
+         Measured: a program with NO `needs` at all calling bare `println`
+         WRONGLY TYPECHECKED (a corpus regression,
+         reject/t40_migrate_state_does_io.march, caught by the corpus sweep
+         after the naive first version of this function shipped — the OCaml
+         unit tests for the shadowing fix all used the bare, no-stdlib
+         [typecheck] helper and could not have caught it). *)
+      | Ast.DFn (def, sp) when not (span_is_stdlib sp) ->
+        Hashtbl.replace tbl def.Ast.fn_name.Ast.txt ()
+      | Ast.DLet (_, b, sp) when not (span_is_stdlib sp) ->
+        (match b.Ast.bind_pat with
+         | Ast.PatVar n -> Hashtbl.replace tbl n.Ast.txt ()
+         | _ -> ())
+      | _ -> ())
+    decls;
+  tbl
+
 (** [cap_subsumes parent child] — true if [parent] is an ancestor of (or equal to) [child].
     E.g., cap_subsumes "IO" "IO.FileRead" = true.
     See [March_caps.Cap_lattice.cap_subsumes]. *)
@@ -8387,6 +8442,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []
   ) decls in
+  (* See [locally_declared_names_of] for why a raw call-name match against
+     [builtin_cap_table] must first check for module-local shadowing. *)
+  let locally_declared_names = locally_declared_names_of decls in
+  let cap_of_builtin_call (name : string) : string option =
+    if Hashtbl.mem locally_declared_names name then None
+    else List.assoc_opt name builtin_cap_table
+  in
   (* Per-function inferred IO-capability closure (Phase5C-A.2): attributes the
      same cap data the checks below already compute to the owning function and
      records it into [env.cap_closures] for a later hot-deploy
@@ -8587,7 +8649,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      lost, not to start warning about forms that never warned. *)
   let builtin_caps_of_expr (e : Ast.expr) : string list =
     List.filter_map
-      (fun (call_name, _) -> List.assoc_opt call_name builtin_cap_table)
+      (fun (call_name, _) -> cap_of_builtin_call call_name)
       (March_ast.Calls.names_and_name_spans e)
   in
   let default_param_exprs (c : Ast.fn_clause) : Ast.expr list =
@@ -8779,7 +8841,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       List.iter (fun (h : Ast.actor_handler) ->
           let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
           let body_caps = List.filter_map (fun (call_name, _) ->
-              List.assoc_opt call_name builtin_cap_table
+              cap_of_builtin_call call_name
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
           record_fn_caps fn_qname body_caps;
           record_fn_refs fn_qname
@@ -8909,7 +8971,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       in
       List.iter (fun body ->
           List.iter (fun (builtin, path, sp) ->
-              match List.assoc_opt builtin builtin_cap_table with
+              match cap_of_builtin_call builtin with
               | None -> ()
               | Some cap ->
                 (* Scopes declared for this capability, or for anything that
@@ -8953,7 +9015,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | Ast.DFn (def, _) ->
         let per_clause = List.map (fun clause ->
           List.filter_map (fun (call_name, call_span) ->
-            match List.assoc_opt call_name builtin_cap_table with
+            match cap_of_builtin_call call_name with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
           ) (March_ast.Calls.names_and_name_spans clause.Ast.fc_body)
@@ -8994,7 +9056,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
-          match List.assoc_opt call_name builtin_cap_table with
+          match cap_of_builtin_call call_name with
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
         ) (March_ast.Calls.names_and_name_spans b.Ast.bind_expr)
@@ -9009,7 +9071,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | Ast.DActor (_, _, actor, _) ->
         List.concat_map (fun (h : Ast.actor_handler) ->
             List.filter_map (fun (call_name, call_span) ->
-              match List.assoc_opt call_name builtin_cap_table with
+              match cap_of_builtin_call call_name with
               | Some cap_name -> Some (cap_name, call_span)
               | None -> None
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body)
@@ -10609,13 +10671,18 @@ let pure_suggestion : string =
 
 let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let mod_name = env.current_module in
+  (* See [locally_declared_names_of]: a `cap pure` module's own function
+     sharing a builtin's name (e.g. its own `random_bytes`) is not a call to
+     that builtin. *)
+  let locally_declared_names = locally_declared_names_of decls in
   List.iter (fun d ->
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
         let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
-          if StringSet.mem name pure_banned then
+          if StringSet.mem name pure_banned
+             && not (Hashtbl.mem locally_declared_names name) then
             Err.error errors ~span:site_span
               (Printf.sprintf
                  "`%s` in `mod %s` (declared `cap pure`) calls `%s`, which has side effects.\n\n%s"
@@ -10674,13 +10741,17 @@ let deterministic_suggestion : string =
 
 let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let mod_name = env.current_module in
+  (* See [locally_declared_names_of]: same shadowing guard as
+     [check_pure_module]. *)
+  let locally_declared_names = locally_declared_names_of decls in
   List.iter (fun d ->
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
         let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
-          if StringSet.mem name deterministic_banned then
+          if StringSet.mem name deterministic_banned
+             && not (Hashtbl.mem locally_declared_names name) then
             Err.error errors ~span:site_span
               (Printf.sprintf
                  "`%s` in `mod %s` (declared `cap deterministic`) calls `%s`, \

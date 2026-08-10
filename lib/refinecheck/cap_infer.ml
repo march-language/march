@@ -155,17 +155,30 @@ let need_covers cap needs =
 
 (* ── Call-site walker ────────────────────────────────────────────────────── *)
 
-(** [iter_cap_calls f e] calls [f call_name call_span] for every direct
-    function call in [e] to a capability-requiring builtin.
+(** [iter_cap_calls ?shadowed f e] calls [f call_name call_span] for every
+    direct function call in [e] to a capability-requiring builtin.
     Walks the full expression tree; conservatively ignores higher-order calls
-    (EApp where the callee is not EVar). *)
-let rec iter_cap_calls (f : string -> A.span -> unit) (e : A.expr) : unit =
-  let go = iter_cap_calls f in
+    (EApp where the callee is not EVar).
+
+    [shadowed] answers "is this bare name declared by the current module
+    itself?" — a raw call-name match against [cap_table] is not evidence the
+    builtin was called if a module-level `fn`/`let` of the same name shadows
+    it (shadowing wins real name resolution; see the identical guard and its
+    rationale in [Typecheck.locally_declared_names_of], which this mirrors —
+    THIS module's own [cap_table] duplicates that one, so it needed the
+    identical fix independently). Confirmed live even after the typecheck-side
+    fix: this pass's HINT kept firing on a module's own `file_read`, the
+    typechecker's ERROR having stopped. Defaults to "nothing is shadowed" so
+    every existing caller keeps its exact prior behavior. *)
+let rec iter_cap_calls ?(shadowed = fun (_ : string) -> false)
+    (f : string -> A.span -> unit) (e : A.expr) : unit =
+  let go = iter_cap_calls ~shadowed f in
   match e with
   | A.EApp (A.EVar fn_name, args, _) ->
-    (match cap_of_call fn_name.A.txt with
-     | Some _ -> f fn_name.A.txt fn_name.A.span
-     | None   -> ());
+    (if not (shadowed fn_name.A.txt) then
+       match cap_of_call fn_name.A.txt with
+       | Some _ -> f fn_name.A.txt fn_name.A.span
+       | None   -> ());
     List.iter go args
   | A.EApp (callee, args, _) ->
     go callee; List.iter go args
@@ -326,6 +339,12 @@ let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
     (mod_name : string) (errctx : Err.ctx) (decls : A.decl list) : unit =
   let needs = declared_needs decls in
   let hinted : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+  (* Reuses [Typecheck.locally_declared_names_of] rather than re-deriving a
+     third copy of the same tiny walk — this pass already duplicates
+     [builtin_cap_table] as its own [cap_table]; duplicating the shadow-set
+     walk too would be the same drift risk a second time over. *)
+  let locally_declared_names = March_typecheck.Typecheck.locally_declared_names_of decls in
+  let shadowed name = Hashtbl.mem locally_declared_names name in
   (* The chain that forced this capability. A capability is a property of the
      whole path, not of the one call that happens to need it: the reader has to
      thread `needs` through every function between `main` and here, and until
@@ -360,10 +379,10 @@ let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
       | A.DFn (fd, _) ->
         List.iter
           (fun (clause : A.fn_clause) ->
-            iter_cap_calls (emit_if_missing fd.A.fn_name.A.txt) clause.A.fc_body)
+            iter_cap_calls ~shadowed (emit_if_missing fd.A.fn_name.A.txt) clause.A.fc_body)
           fd.A.fn_clauses
       | A.DLet (_vis, b, _) ->
-        iter_cap_calls (emit_if_missing "") b.A.bind_expr
+        iter_cap_calls ~shadowed (emit_if_missing "") b.A.bind_expr
       | A.DMod (inner_name, _, inner_decls, _) ->
         check_decls ?graph inner_name.A.txt errctx inner_decls
       | _ -> ())

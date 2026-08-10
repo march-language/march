@@ -1,0 +1,24 @@
+mod Main do
+  -- specs/2026-08-09-cap-loose-ends-plan.md, Tier 0. Every capability scan
+  -- below the typechecker's real name resolution is a raw SYNTACTIC walk
+  -- matching a call's NAME against a builtin table -- with no awareness
+  -- that a module-level `fn`/`let` of the same bare name SHADOWS the
+  -- builtin, and shadowing wins real resolution (verified separately,
+  -- interpreted AND compiled: `file_read(1)` here returns 101, the real
+  -- builtin is never reached). Before the fix this exited 1: "function body
+  -- calls a builtin that requires `Cap(IO.FileRead)`" -- for a program that
+  -- uses ZERO IO.FileRead, and since Check 1b's 2026-08-06 severity flip
+  -- that is a hard, unconditional, default-on ERROR with no workaround
+  -- short of renaming the function. `file_read`'s C symbol is
+  -- `march_file_read` -- no runtime naming collision at all, confirming the
+  -- bug lived entirely in the AST-level scan, nowhere near codegen.
+  needs IO.Console
+
+  fn file_read(x : Int) : Int do
+    x + 100
+  end
+
+  fn main() : () do
+    println(int_to_string(file_read(1)))
+  end
+end
