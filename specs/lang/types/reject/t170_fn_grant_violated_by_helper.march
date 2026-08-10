@@ -1,0 +1,36 @@
+-- EXPECT-ERROR: `log` is granted `Cap(IO.Console)`
+mod Main do
+  -- R1 stage C reject witness (2026-08-10) — the same decisive property as
+  -- t166, moved from the PROGRAM to a single FUNCTION. `main` here takes no
+  -- capability parameter at all, so stages A/B have nothing to say: this
+  -- program is ambient, and every earlier check passes. Every `needs` line
+  -- is truthful, Check 1b passes, the ceiling passes, R3 has nothing to
+  -- forge.
+  --
+  -- It is still rejected, because `log` was HANDED `Cap(IO.Console)` and its
+  -- transitive reach leaves that ceiling. This is the guarantee stage C adds
+  -- over stage B: it composes per function and per dependency, so a library
+  -- function's bound holds without the whole program opting in.
+  --
+  -- As in t166 the violation lives one frame down, in the helper: a grant an
+  -- attacker could evade by moving the call away would bound nothing. Accept
+  -- companion t170 is this file minus the `save` call inside `log`.
+  needs IO.Console
+  needs IO.FileWrite
+
+  fn save(msg : String) : () do
+    match file_write("/tmp/t170_out", msg) do
+      Ok(_)  -> ()
+      Err(_) -> ()
+    end
+  end
+
+  fn log(_cap : Cap(IO.Console), msg : String) : () do
+    save(msg)
+    println(msg)
+  end
+
+  fn main() : () do
+    ()
+  end
+end

@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Capability grants now compose per function, not just per program.**
+  Any function that takes a concrete capability parameter is checked against
+  it: `fn log(cap : Cap(IO.Console), msg : String)` may reach nothing beyond
+  the console, transitively, through helpers and the stdlib alike — and,
+  unlike the whole-program grant, it is checked wherever the function is
+  declared, so a library's bound holds without the application opting in.
+  Rows are inferred; nothing is written in source and no printed type
+  changes. A higher-order function that invokes a callback it was GIVEN still
+  certifies (whoever supplies the callback is charged for it), while a
+  function that invokes a value with no traceable origin is refused under a
+  narrow grant rather than certified — the same stance already taken on
+  `IO.Foreign`. Violations name the chain that reaches the capability.
+  (Sandbox ladder R1 stage C.)
 - **`main`'s capability parameter is now the program's grant — the first
   check that says no rather than "declare it".**
   `fn main(cap : Cap(IO.Console))` makes a machine-checked claim: the whole

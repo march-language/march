@@ -1,0 +1,41 @@
+mod Main do
+  -- R1 stage C accept witness (2026-08-10) — the companion to the t170
+  -- reject file, and the half that must keep working: a function granted
+  -- `Cap(IO.Console)` whose
+  -- whole transitive reach really is console-only is certified, and the
+  -- module may still declare and use `IO.FileWrite` ELSEWHERE. The grant
+  -- bounds what `log` reaches, not what the file contains.
+  --
+  -- `run` pins the conditional half of a row: it invokes a function it was
+  -- given. Its own static reach is console-only, so it certifies — and
+  -- nothing is lost, because whoever supplies the callback is charged for
+  -- that callback by the same reference edge that has always driven the
+  -- capability closure.
+  --
+  -- Neither `log` nor `run` is called from `main`: a capability parameter is
+  -- a discharge point wherever it is declared, so a LIBRARY function's bound
+  -- is checked without any entry point opting in. That is the whole point of
+  -- stage C over stage B.
+  needs IO.Console
+  needs IO.FileWrite
+
+  fn save(msg : String) : () do
+    match file_write("/tmp/t170_out", msg) do
+      Ok(_)  -> ()
+      Err(_) -> ()
+    end
+  end
+
+  fn log(_cap : Cap(IO.Console), msg : String) : () do
+    println(msg)
+  end
+
+  fn run(_cap : Cap(IO.Console), job : (() -> ())) : () do
+    println("before")
+    job()
+  end
+
+  fn main() : () do
+    save("t170")
+  end
+end

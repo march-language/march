@@ -1,6 +1,12 @@
 # R1 stage C — per-function effect rows: design
 
-Status: DESIGN, nothing built. Written 2026-08-10, after stages A/B shipped
+Status: SHIPPED 2026-08-10 — see
+`specs/progress/2026-08-10-r1-stage-c-effect-rows.md` for what landed and
+the two places implementation corrected this design (recorded in
+"Corrections found during implementation" at the end of this file rather than
+rewritten in place, so the reasoning that produced them survives).
+
+Originally: DESIGN, nothing built. Written 2026-08-10, after stages A/B shipped
 (#236, `specs/progress/2026-08-09-r1-grant-check-stages-ab.md`). Parent design:
 `specs/2026-08-08-r1-no-ambient-io-design.md` (stage C section and the
 "interactions to design for" list, all of which this doc answers).
@@ -345,3 +351,61 @@ strengthened to "no type surface changes at all".
   swap must preserve.
 - `forge` `grant = [...]` manifest sugar — still deferred, unchanged from
   the parent design.
+
+## Corrections found during implementation
+
+Two rules above were wrong, and both were found by building the thing rather
+than by re-reading the design. Recorded here, not silently patched, because
+the reasoning that produced them is the part worth keeping.
+
+**1. An `ASOpaque` ARGUMENT must not set `unknown`** (the fixpoint section
+above says it does). Only invoking an untraceable HEAD sets it. Charging every
+opaque argument would refuse every function that passes a string to a
+callback, and it buys nothing: any actual invocation of an untraceable value
+is flagged at whichever function performs it, and `unknown` propagates along
+reference edges, so a discharge point that can reach the invoker is still
+refused. A discharge point that cannot reach the invoker genuinely does not
+perform that invocation within its static reach.
+
+**2. `IO.Foreign` needs a different rule at function granularity than at
+`main`.** Stage B refuses `IO.Foreign` under any grant but `Cap(IO)`, which is
+right when the grant is one capability handed to the whole program. At
+function granularity a parameter of type `Cap(IO.Foreign)` IS an explicit
+grant of the unbounded thing, and the caller supplying it knows exactly what
+it authorizes — so the refusal applies only where the grant does not cover
+`IO.Foreign`, i.e. where it would otherwise be an ordinary violation and this
+message is simply the more informative one. Caught by an existing test
+(`test_cap_hierarchy_args_ok`, four narrow cap parameters including
+`Cap(IO.Foreign)`), not by any new one.
+
+Also worth recording because it changed the shape of the work: the design's
+`call_args` position machinery turned out NOT to be load-bearing for
+soundness. Tracing it through showed that a callback supplied by name is
+already charged to the supplier by the free-variable edge, and one supplied
+as a lambda is already charged by the body walk — so `deps` is descriptive at
+every discharge point, and `unknown` is the only new component that can
+reject. It was still implemented as designed (it is what makes the row a row,
+and it is the hook an in-`ty` system would consume), but the guarantee would
+hold without it, and a future simplification pass should know that.
+
+### What the U-rate gate measured
+
+The design made shipping the refusal conditional on measuring it first
+(`MARCH_DUMP_CAP_ROWS=1` exists for exactly this, and re-runs the measurement
+after any change to the seed walk). Over a stdlib-loaded program: **107 of
+2453 functions carry a transitive `unknown`, 4.4%**, and they cluster exactly
+where the design predicted — `Seq`/`Flow` (a lazy sequence is a closure stored
+in a constructor and invoked later), `Compress`'s streaming codecs, `Check`'s
+property runner, `ChannelServer`. Nothing in the common path is poisoned:
+`List.map`, `Enum.map`, `Option.map`, `Result.and_then` and `println` all come
+back clean, and `List.map`'s row is `caps=[] deps=[f]` — the polymorphism the
+whole stage exists for, confirmed empirically rather than assumed.
+
+The honest statement of the residual gap: a function that builds a `Flow`
+itself and consumes it is refused under a narrow grant even though everything
+it invokes was charged at construction. Distinguishing that from a `Flow`
+arriving from outside needs provenance tracking through ADT payloads, which
+approach B does not do. The refusal ships as an error because 4.4% is rare,
+because zero corpus programs hit it, and because the alternative — certifying
+a bound over an invocation the analysis cannot see — is the thing this design
+refuses to do anywhere else.
