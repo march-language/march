@@ -68,8 +68,9 @@ let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : 
     | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom bound a)
     | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom bound a)
     | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom bound a, ty, List.map (rename_atom bound) args)
-    | Tir.EAllocHole (ty, args, hole) ->
-      Tir.EAllocHole (ty, List.map (rename_atom bound) args, hole)
+    | Tir.EAllocHole (tok, ty, args, hole) ->
+      Tir.EAllocHole (Option.map (rename_atom bound) tok, ty,
+                      List.map (rename_atom bound) args, hole)
     | Tir.ESetField (o, i, v) ->
       Tir.ESetField (rename_atom bound o, i, rename_atom bound v)
     | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr bound e1, rename_expr bound e2)
@@ -173,8 +174,9 @@ let uniquify_fn (fn : Tir.fn_def) : Tir.fn_def =
     | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom env a)
     | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom env a)
     | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom env a, ty, List.map (rename_atom env) args)
-    | Tir.EAllocHole (ty, args, hole) ->
-      Tir.EAllocHole (ty, List.map (rename_atom env) args, hole)
+    | Tir.EAllocHole (tok, ty, args, hole) ->
+      Tir.EAllocHole (Option.map (rename_atom env) tok, ty,
+                      List.map (rename_atom env) args, hole)
     | Tir.ESetField (o, i, v) ->
       Tir.ESetField (rename_atom env o, i, rename_atom env v)
     | Tir.ESeq (e1, e2)  -> Tir.ESeq (go env e1, go env e2)

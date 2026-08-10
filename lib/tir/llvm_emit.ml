@@ -3492,7 +3492,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      that reaches an unfilled hole is a no-op rather than a wild dereference.
      That is the property the whole TRMC scheme leans on for the window between
      allocation and fill. *)
-  | Tir.EAllocHole (Tir.TCon (ctor, _), args, hole) ->
+  | Tir.EAllocHole (tok, Tir.TCon (ctor, _), args, hole) ->
     (* Same repr guard as EStackAlloc: this arm builds a BOXED cell
        unconditionally, so a Newtype-/Niche-repr type would be constructed
        boxed and decoded erased.  TRMC must never select such a type. *)
@@ -3518,30 +3518,76 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         "LLVM emit: EAllocHole of %s has hole index %d outside arity %d"
         ctor hole arity);
     let entry = ctor_entry ctx ctor arity in
-    let ptr = emit_heap_alloc ctx entry.ce_tag arity in
     (* [args] carries only the FILLED fields, in order, with the hole's slot
-       skipped — so walk the full field list and consume [args] around it. *)
-    let rest = ref args in
-    for i = 0 to arity - 1 do
-      if i <> hole then begin
-        match !rest with
-        | atom :: tl ->
-          rest := tl;
-          let field_ty = match List.nth_opt entry.ce_fields i with
-            | Some t -> llvm_ty t | None -> "ptr" in
-          let (v_ty, v_val) = emit_atom ctx atom in
-          emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
-        | [] ->
-          failwith (Printf.sprintf
-            "LLVM emit: EAllocHole of %s supplies %d filled field(s) for arity %d"
-            ctor (List.length args) arity)
-      end
-    done;
-    ("ptr", ptr)
+       skipped.  Pair each with its destination index and LLVM field type, and
+       evaluate the operands ONCE here — before any branch — so the reuse and
+       fresh paths below store already-materialised SSA values (same discipline
+       as EReuse; evaluating inside a branch would define values in one block
+       and use them in another). *)
+    let slot_vals =
+      let rest = ref args in
+      List.filter_map (fun i ->
+        if i = hole then None
+        else match !rest with
+          | atom :: tl ->
+            rest := tl;
+            let field_ty = match List.nth_opt entry.ce_fields i with
+              | Some t -> llvm_ty t | None -> "ptr" in
+            let (v_ty, v_val) = emit_atom ctx atom in
+            Some (i, field_ty, coerce ctx v_ty v_val field_ty)
+          | [] ->
+            failwith (Printf.sprintf
+              "LLVM emit: EAllocHole of %s supplies %d filled field(s) for arity %d"
+              ctor (List.length args) arity)
+      ) (List.init arity (fun i -> i))
+    in
+    let store_slots p =
+      List.iter (fun (i, field_ty, v) -> emit_store_field ctx p i field_ty v)
+        slot_vals
+    in
+    (match tok with
+     | None ->
+       let ptr = emit_heap_alloc ctx entry.ce_tag arity in
+       store_slots ptr;
+       ("ptr", ptr)
+     | Some reuse_atom ->
+       (* Same discipline as EReuse: take the cell over when it is unique at
+          runtime, otherwise release it and allocate fresh. *)
+       let (_, rv) = emit_atom ctx reuse_atom in
+       let rc = fresh ctx "rhrc" in
+       emit ctx (Printf.sprintf
+                   "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
+       let uniq = fresh ctx "rhuniq" in
+       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" uniq rc);
+       let reuse_lbl = fresh_block ctx "rhole_reuse" in
+       let fresh_lbl = fresh_block ctx "rhole_fresh" in
+       let merge_lbl = fresh_block ctx "rhole_merge" in
+       emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                        uniq reuse_lbl fresh_lbl);
+       emit_label ctx reuse_lbl;
+       emit_store_tag ctx rv entry.ce_tag;
+       store_slots rv;
+       (* A fresh cell comes from calloc and is already zero.  A REUSED cell is
+          not: its hole slot still holds the old child pointer, whose ownership
+          has already moved to the match's branch variables.  Leaving it there
+          would let any drop in the window before the fill walk into a child
+          someone else now owns — so clear it explicitly. *)
+       emit_store_field ctx rv hole "ptr" "null";
+       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+       emit_label ctx fresh_lbl;
+       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
+       let hp = emit_heap_alloc ctx entry.ce_tag arity in
+       store_slots hp;
+       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+       emit_label ctx merge_lbl;
+       let result = fresh ctx "rhole_r" in
+       emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
+                   result rv reuse_lbl hp fresh_lbl);
+       ("ptr", result))
 
   (* TRMC only ever selects a data constructor, so a non-TCon hole allocation
      is a bug in the transformation rather than a shape to support. *)
-  | Tir.EAllocHole (ty, _, _) ->
+  | Tir.EAllocHole (_, ty, _, _) ->
     failwith (Printf.sprintf
       "LLVM emit: EAllocHole of non-constructor type %s — TRMC selects data \
        constructors only" (Tir.show_ty ty))

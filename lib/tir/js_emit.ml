@@ -730,7 +730,7 @@ and emit_val_impl ctx expr =
   (* EReuse(old, ty, args): Perceus reuses old's memory — in GC'd JS just alloc fresh *)
   | Tir.EReuse (_, ty, args) -> emit_tagged_alloc ctx ty args
 
-  | Tir.EAllocHole (ty, args, hole) -> emit_tagged_alloc_hole ctx ty args hole
+  | Tir.EAllocHole (_, ty, args, hole) -> emit_tagged_alloc_hole ctx ty args hole
 
   (* TRMC hole fill: an in-place property write, sequenced with [undefined] so
      the expression's value is unit rather than the assigned value. *)

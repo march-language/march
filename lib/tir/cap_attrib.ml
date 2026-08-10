@@ -92,7 +92,7 @@ let rec walk (caps, callees) (e : Tir.expr) =
   | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     (add_atoms caps atoms, callees)
   | Tir.EReuse (a, _, atoms) -> (add_atoms caps (a :: atoms), callees)
-  | Tir.EAllocHole (_, atoms, _) -> (add_atoms caps atoms, callees)
+  | Tir.EAllocHole (_, _, atoms, _) -> (add_atoms caps atoms, callees)
   | Tir.ESetField (o, _, v) -> (add_atoms caps [ o; v ], callees)
   (* RC ops and EFree only ever carry an already-bound local, never a
      top-level function name, but scanning them costs nothing and keeps this

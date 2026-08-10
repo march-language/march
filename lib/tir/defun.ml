@@ -267,8 +267,10 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
     | Tir.EUpdate (a, fields) ->
       fv_atom a bound;
       List.iter (fun (_, a) -> fv_atom a bound) fields
-    | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args)
-    | Tir.EAllocHole (_, args, _) ->
+    | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) ->
+      List.iter (fun a -> fv_atom a bound) args
+    | Tir.EAllocHole (tok, _, args, _) ->
+      Option.iter (fun a -> fv_atom a bound) tok;
       List.iter (fun a -> fv_atom a bound) args
     | Tir.ESetField (o, _, v) -> fv_atom o bound; fv_atom v bound
     | Tir.EFree a -> fv_atom a bound

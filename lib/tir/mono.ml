@@ -121,8 +121,9 @@ let rec subst_expr (s : ty_subst) : Tir.expr -> Tir.expr = function
   | Tir.EAtomicDecRC a    -> Tir.EAtomicDecRC (subst_atom s a)
   | Tir.EReuse (a, ty, args) ->
     Tir.EReuse (subst_atom s a, subst_ty s ty, List.map (subst_atom s) args)
-  | Tir.EAllocHole (ty, args, hole) ->
-    Tir.EAllocHole (subst_ty s ty, List.map (subst_atom s) args, hole)
+  | Tir.EAllocHole (tok, ty, args, hole) ->
+    Tir.EAllocHole (Option.map (subst_atom s) tok, subst_ty s ty,
+                    List.map (subst_atom s) args, hole)
   | Tir.ESetField (o, i, v) ->
     Tir.ESetField (subst_atom s o, i, subst_atom s v)
   | Tir.ESeq (e1, e2)     -> Tir.ESeq (subst_expr s e1, subst_expr s e2)
@@ -349,7 +350,8 @@ let retype_known_vars (vars : Tir.var list) (body : Tir.expr) : Tir.expr =
     | Tir.EAtomicIncRC atom -> Tir.EAtomicIncRC (ra env atom)
     | Tir.EAtomicDecRC atom -> Tir.EAtomicDecRC (ra env atom)
     | Tir.EReuse (atom, ty, args) -> Tir.EReuse (ra env atom, ty, ral env args)
-    | Tir.EAllocHole (ty, args, hole) -> Tir.EAllocHole (ty, ral env args, hole)
+    | Tir.EAllocHole (tok, ty, args, hole) ->
+      Tir.EAllocHole (Option.map (ra env) tok, ty, ral env args, hole)
     | Tir.ESetField (o, i, v) -> Tir.ESetField (ra env o, i, ra env v)
     | Tir.ESeq (e1, e2) -> Tir.ESeq (go env e1, go env e2)
   in
@@ -1128,7 +1130,8 @@ let refine_field_types (body : Tir.expr) : Tir.expr =
     | Tir.EAtomicIncRC a       -> Tir.EAtomicIncRC (ra a)
     | Tir.EAtomicDecRC a       -> Tir.EAtomicDecRC (ra a)
     | Tir.EReuse (a, t, args)  -> Tir.EReuse (ra a, t, ral args)
-    | Tir.EAllocHole (t, args, hole) -> Tir.EAllocHole (t, ral args, hole)
+    | Tir.EAllocHole (tok, t, args, hole) ->
+      Tir.EAllocHole (Option.map ra tok, t, ral args, hole)
     | Tir.ESetField (o, i, v)  -> Tir.ESetField (ra o, i, ra v)
     | Tir.ESeq (e1, e2)        -> Tir.ESeq (go e1, go e2)
   in

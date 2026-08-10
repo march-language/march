@@ -1258,6 +1258,12 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
 let codegen_cas_tags () =
   "rtcflags2"
   :: (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
+  (* MARCH_TRMC rewrites eligible functions into destination-passing style, so
+     it changes the emitted binary.  Without this tag a cached non-TRMC
+     artifact silently satisfies a TRMC build and vice versa — which is exactly
+     how the first TRMC benchmark run reported a 0.06s "TRMC off" number that
+     was really the TRMC binary served from the cache. *)
+  @ (if Sys.getenv_opt "MARCH_TRMC" <> None then ["trmc"] else [])
   @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
@@ -2522,6 +2528,10 @@ let compile filename =
        longer syntactically visible.  See
        specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
     March_tir.Trmc.report tir;
+    (* Phase 3 (WIP, gated on MARCH_TRMC=1): destination-passing rewrite of
+       TRMC-eligible functions.  Off by default — this is a measurement
+       vehicle until the RC integration (phase 4) is done. *)
+    let tir = March_tir.Trmc.transform_module tir in
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
        by lower_actor for every actor definition. Only collected when both
@@ -3793,7 +3803,9 @@ let compile filename =
             | EReuse (a, _, args) ->
               scan_atom caller a;
               List.iter (scan_atom caller) args
-            | EAllocHole (_, args, _) -> List.iter (scan_atom caller) args
+            | EAllocHole (tok, _, args, _) ->
+              Option.iter (scan_atom caller) tok;
+              List.iter (scan_atom caller) args
             | ESetField (o, _, v) -> scan_atom caller o; scan_atom caller v
           and scan_atom _caller _a = ()
           in
