@@ -377,6 +377,48 @@ cheapest first:
 (1) is achievable now and worth doing regardless. (3) is the only one that
 actually closes the gap.
 
+**Correction, 2026-08-10: (1) and (2) are both substantially BUILT, and this
+section was written as if neither existed.**
+
+- (1) ships in this repo: `specs/lang/types/{accept,reject}` (282 files) plus
+  the grammar and golden corpora, driven by the CI-only `@types-check` alias
+  that asserts diagnostic TEXT rather than merely accept/reject.
+- (2) ships in a separate repo, `march-language/march-lean` — ~9.6k lines of
+  Lean 4 (no Mathlib) that independently re-implement March's error-level
+  static checks and re-check March's own `--emit-core-ast` output.
+  `MarchLean/CapCheck.lean` alone is 4400 lines and mirrors the capability
+  checks; `CapLattice.lean` mirrors `lib/caps/cap_lattice.ml`'s hierarchy,
+  `capSubsumes` and `normalize`. `scripts/conformance-harness.sh` runs it over
+  this repo's corpora and classifies MATCH / MISMATCH / SKIP /
+  KNOWN_LIMITATION / MARCH_SELF_INCONSISTENT.
+
+It has already paid for itself in the way an oracle is supposed to: it found
+that `calls_in_expr` was not total over `Ast.expr` (no `ETuple`/`ERecord`/
+`EList` arm, catch-all `| _ -> acc`), so a `*_migrate_state` function
+performing IO from inside a tuple literal was silently ACCEPTED — and then
+found the identical gap in a SECOND function of the same name feeding three
+more checks. One fixed upstream (march PR #136), one filed (march issue #82).
+That is precisely the bug class a conformance corpus cannot find, because the
+check does not fire and nothing looks wrong.
+
+Two things to keep straight when citing it:
+
+- **It is not R6, and it contains no theorems.** There are zero `theorem`/
+  `lemma` declarations; the `example : … := by native_decide` lines are
+  kernel-checked assertions about specific inputs — stronger than an alcotest
+  case, but per-instance, not a general property. `native_decide` also puts
+  the Lean compiler in the trusted base, which is worth saying out loud if the
+  word "verified" is ever attached to it.
+- **Its ledgers drift against this repo's corpus and that drift is silent
+  here.** `scripts/expected-skips.txt` and `known-limitations.txt` are
+  enforced bidirectionally (a stale entry FAILS, so the lists can only
+  shrink) — excellent discipline on their side, but both top out around
+  `t140` while this repo is at `t170`. Anything landing a new ERROR-level
+  check here (R1 stages A/B did, stage C does — `CapCheck.lean` contains no
+  model of a grant at all) makes this repo's new reject fixtures wrong-accepts
+  over there. **Adding a check here is a change to two repos**; the oracle is
+  only evidence while it is in sync.
+
 ### R8. The runtime escape hatches — **AUDITED 2026-08-06**
 
 Answered with probes rather than reasoning; see
