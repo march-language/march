@@ -363,3 +363,29 @@ export function march_list_concat(a, b) {
   for (const x of arr.reverse()) result = { $: "Cons", _0: x, _1: result };
   return result;
 }
+
+/* ── Structural equality ────────────────────────────────────────────
+ * Deep, tag-aware `==`/`!=` for NON-primitive operands. js_emit routes
+ * bare `==`/`!=` here whenever either operand's static type is not a
+ * primitive (an ADT/tuple/record, or an erased type variable that may hold
+ * one at runtime); primitive-vs-primitive stays on JS `===`. Values are the
+ * usual shapes: variants `{ $: tag, _0, _1, … }`, records `{ field: … }`,
+ * tuples `{ _0, _1, … }`, scalars as JS number/string/boolean. Mirrors
+ * native's per-type __eq / march_poly_eq. */
+export function march_deep_eq(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null ||
+      typeof a !== "object" || typeof b !== "object") {
+    return a === b;
+  }
+  /* Constructor tag ($) must match; undefined on both for records/tuples. */
+  if (a.$ !== b.$) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+    if (!march_deep_eq(a[k], b[k])) return false;
+  }
+  return true;
+}

@@ -537,13 +537,30 @@ and emit_val_impl ctx expr =
 
   | Tir.EApp (f, args) ->
     let name = f.Tir.v_name in
+    (* Operands `==`/`!=` compares STRUCTURALLY iff both are primitive (JS `===`
+       is correct for Int/Float/Bool/String/Atom); on any non-primitive operand
+       (ADT/tuple/record, or an erased TVar) JS `===` is reference equality and
+       gives wrong answers (e.g. `x == Some(Ctor)` was always false). Route those
+       through march_deep_eq, mirroring native's ensure_adt_eq_fn / march_poly_eq. *)
+    let is_prim_eq_ty = function
+      | Tir.TBool | Tir.TInt | Tir.TFloat | Tir.TString | Tir.TCon ("Atom", []) -> true
+      | _ -> false in
     begin match inline_binop name with
     | Some op when List.length args = 2 ->
-      emit ctx "(";
-      emit_atom ctx (List.nth args 0);
-      emit ctx (" " ^ op ^ " ");
-      emit_atom ctx (List.nth args 1);
-      emit ctx ")"
+      (match op, args with
+       | ("===" | "!=="), [a; b]
+         when not (is_prim_eq_ty (atom_ty a) && is_prim_eq_ty (atom_ty b)) ->
+         use_runtime ctx "march_deep_eq";
+         if op = "!==" then emit ctx "(!";
+         emit ctx "march_deep_eq(";
+         emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")";
+         if op = "!==" then emit ctx ")"
+       | _ ->
+         emit ctx "(";
+         emit_atom ctx (List.nth args 0);
+         emit ctx (" " ^ op ^ " ");
+         emit_atom ctx (List.nth args 1);
+         emit ctx ")")
     | _ ->
       begin match name, args with
       | ("neg_int" | "neg_float" | "negate" | "-" | "-."), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"

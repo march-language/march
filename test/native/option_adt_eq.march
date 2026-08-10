@@ -1,0 +1,25 @@
+mod M do
+  needs IO.Console
+
+  type Color = Red | Green | Blue
+
+  fn label(x, y) do
+    if x == y do "eq" else "ne" end
+  end
+
+  fn nlabel(x, y) do
+    if x != y do "ne" else "eq" end
+  end
+
+  fn main() do
+    let a = Some(Green)
+    let b = Some(Green)
+    let c = Some(Blue)
+    -- structural `==` on Option(ADT): a and b are distinct heap values but
+    -- structurally equal; JS `===` (reference equality) would print "ne".
+    println(label(a, b))
+    println(label(a, c))
+    println(nlabel(a, b))
+    println(nlabel(a, c))
+  end
+end
