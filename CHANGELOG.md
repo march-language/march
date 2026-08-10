@@ -56,6 +56,19 @@ git log is authoritative for exact commits.
   `task_wait_done`'s in-scheduler branch, and `march_sched_wait_idle`) now spin
   briefly and then sleep, so a stalled wait under heavy host oversubscription no
   longer holds a CPU at ~100%. Wait-forever semantics are unchanged.
+- **A function or `let` named after a capability-bearing builtin (`file_read`,
+  `random_bytes`, `dns_resolve`, …) no longer falsely requires that
+  capability.** Every capability scan matched a call by NAME alone, with no
+  awareness that a module-level declaration shadows a builtin of the same
+  name — and shadowing wins real name resolution, so the program never
+  touched the capability it was accused of needing. Since the capability
+  ceiling's severity flip this was a hard, default-on compile error with no
+  workaround short of renaming the function; it is now silent, and an
+  actual (unshadowed) builtin call is still caught correctly. The inferred
+  capability set (`march caps`, feeding `forge audit --inferred` and the
+  `--cap-sandbox` profile) had the identical bug in the opposite direction —
+  silently over-reporting a capability never used — also fixed.
+
 - **A natively compiled program opening a nonexistent file no longer misreads
   the error value's representation.** `file_open`'s `Err` case is typed
   `Result(Int, FileError)`, and the interpreter builds a real `FileError` ADT
