@@ -1,0 +1,53 @@
+-- SIMD cross-language benchmark: sum / map / map2 over an f32 (narrow, 4-byte)
+-- NativeArray, mirroring bench/simd_sum.march, bench/simd_map.march and
+-- bench/simd_map2.march at N=5M -- the f64 (Float, 8-byte) variants of the
+-- same three shapes. This benchmark exists to compare f32 against f64
+-- same-box, same-build: narrow elements halve memory traffic and give SIMD
+-- 2x the lanes per vector register, so map/map2 are expected meaningfully
+-- below their f64 counterparts if the inline-loop vectorization pass fires
+-- for the f32 entry points the way it does for map_float.
+--
+-- Data generation (NativeArray.make_f32 fills a fresh array with a constant)
+-- is NOT part of the timed region -- only the operation itself is, exactly
+-- as in the f64 benches (see bench/simd_sum.march for the full rationale).
+mod SimdF32 do
+  needs IO.Console
+
+needs IO.Clock
+
+pfn elapsed_ms(t0 : Float, t1 : Float) : Float do
+  (t1 -. t0) *. 1000.0
+end
+
+fn main() : Unit do
+  let n = 5000000
+
+  -- sum_f32
+  let sum_arr = NativeArray.make_f32(n, 1.0)
+  let t0s = unix_time(())
+  let s = NativeArray.sum_f32(sum_arr)
+  let t1s = unix_time(())
+  println("SUM_RESULT " ++ float_to_string(s))
+  println("SUM_TIME_MS " ++ float_to_string(elapsed_ms(t0s, t1s)))
+
+  -- map_f32
+  let map_arr = NativeArray.make_f32(n, 1.0)
+  let t0m = unix_time(())
+  let mapped = NativeArray.map_f32(map_arr, fn x -> x *. 2.0 +. 1.0)
+  let t1m = unix_time(())
+  let sm = NativeArray.sum_f32(mapped)
+  println("MAP_RESULT " ++ float_to_string(sm))
+  println("MAP_TIME_MS " ++ float_to_string(elapsed_ms(t0m, t1m)))
+
+  -- map2_f32
+  let a = NativeArray.make_f32(n, 1.0)
+  let b = NativeArray.make_f32(n, 2.0)
+  let t0c = unix_time(())
+  let combined = NativeArray.map2_f32(a, b, fn (x, y) -> x +. y)
+  let t1c = unix_time(())
+  let sc = NativeArray.sum_f32(combined)
+  println("MAP2_RESULT " ++ float_to_string(sc))
+  println("MAP2_TIME_MS " ++ float_to_string(elapsed_ms(t0c, t1c)))
+end
+
+end
