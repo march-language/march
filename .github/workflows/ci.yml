@@ -360,7 +360,7 @@ jobs:
   # were flaky/non-reproducible. A clean runner isolates whether TRMC is the cause.
   trmc-suite:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -379,7 +379,8 @@ jobs:
           dune build bin/main.exe
 
       - name: Test suite with TRMC enabled
-        timeout-minutes: 20
+        timeout-minutes: 35
+        # Cold build + full test suite (~20 min of tests) with TRMC enabled.
         run: |
           eval $(opam env)
           MARCH_TRMC=1 ./scripts/run-tests.sh
