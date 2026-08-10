@@ -12138,11 +12138,18 @@ let scrutinee_is_param_or_smaller (params : StringSet.t) (smaller : StringSet.t)
     for its extent, so a call to a shadowing local is not misattributed to the
     same-named recursive function. *)
 let rec check_tail_position
+    ?(display = fun (n : string) -> n)
     (errors : Err.ctx)
     (recursive_names : StringSet.t)
     (fn_name : string)
     (fn_params : StringSet.t)
     (body : Ast.expr) : unit =
+  (* [recursive_names] is in the post-desugar CALL-SITE namespace, which inside
+     a nested `mod` carries a qualifying prefix the author never typed
+     (`Inner.boom` for a source that says `boom`).  [display] maps a matched
+     call-site name back to the bare name, so the diagnostic quotes the program
+     rather than the desugarer's rewrite.  Defaults to the identity for the
+     inner-`fn` recursion below, whose names are local and never qualified. *)
   (* [smaller] accumulates variables known to be structurally smaller than a
      function parameter (introduced by pattern-matching on a parameter). *)
   let rec chk in_tail (names : StringSet.t) (smaller : StringSet.t) ctx expr =
@@ -12162,7 +12169,7 @@ let rec check_tail_position
                "Function `%s`: recursive call to `%s` is not in tail position \
                 (%s).\n\
                 Hint: Consider using an accumulator parameter."
-               fn_name fn.txt ctx)
+               fn_name (display fn.txt) ctx)
         else begin
           (* Structural recursion: warn but allow — distinguish arithmetic
              reductions (n-1, n-2) from pattern-bound sub-components. *)
@@ -12312,8 +12319,57 @@ let rec check_tail_position
   chk true recursive_names StringSet.empty "" body
 
 (** Run tail-call enforcement for all [DFn] declarations in [decls]
-    (at a single scope level).  Recurses into [DMod] sub-modules. *)
-let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) : unit =
+    (at a single scope level).  Recurses into [DMod] sub-modules.
+
+    [mod_path] is the accumulated dotted path of the enclosing [DMod]s, with a
+    trailing dot ("" at the top level, then "Inner.", then "Outer.Inner.").
+    [file_mod] is the name of the module this file declares.
+
+    ── Why a PATH is needed at all ──────────────────────────────────────────
+
+    This pass runs AFTER desugaring, and desugaring rewrites call sites into a
+    different namespace than the one declarations live in.
+    [Desugar.qualify_module_refs] rewrites bare intra-module CALL SITES inside
+    every nested [DMod] to [Prefix.name] ([EVar "boom"] -> [EVar "Inner.boom"]),
+    and deliberately leaves the DECLARATION name alone.  Building [fn_names]
+    from the bare [def.fn_name.txt] therefore searched a post-desugar body for a
+    pre-desugar name: [collect_direct_fn_calls] matched nothing, [is_recursive]
+    came out false, and the function was never checked.  Everything this pass
+    rejects at the top level was silently accepted one [mod] deeper, at any
+    depth — and the [DMod] recursion below, which looks like it covers nested
+    modules, ran and found nothing.
+
+    The top level of the ENTRY file hid this: [qualify_module_refs] seeds
+    [entry_prefix = ""] and only rewrites inside [DMod] NODES, and the parser
+    splits a file's sole top-level [mod] into [mod_name]/[mod_decls] — so a
+    top-level [DFn] is never qualified and never mismatched.
+
+    ── Why TWO candidate prefixes ───────────────────────────────────────────
+
+    A name declared here can be referenced under either of two conventions, and
+    which one applies is a property of the FILE, not of this declaration list:
+
+    - [mod_path] — the entry file's convention.  [desugar_module] passes
+      [~entry_prefix:""] when [is_entry], so the accumulation starts empty.
+    - [file_mod ^ "." ^ mod_path] — the non-entry convention.  A dependency
+      file is desugared with [~entry_prefix:(mod_name ^ ".")], so a nested
+      module inside stdlib's [Helper] qualifies to ["Helper.Inner."], not
+      ["Inner."].
+
+    Typecheck is not told which one it is looking at, so it accepts both.  This
+    costs nothing in precision: a file is one or the other, so the inapplicable
+    candidate simply never occurs in any body.
+
+    At the TOP level ([mod_path = ""]) the second candidate is [file_mod ^ "."],
+    which additionally catches a hand-written SELF-QUALIFIED call in a non-entry
+    module ([Helper.boom] inside [mod Helper]) — [strip_entry_self_qual]
+    normalises that away only for the entry file, so in a dependency it survives
+    to here and was a second, nesting-free instance of the same blind spot.
+    Recognising it cannot misfire: inside [mod Helper], [Helper.boom] is
+    unambiguously this module's [boom]. *)
+let rec enforce_tail_calls_in_decls
+    ?(mod_path = "") ~(file_mod : string)
+    (errors : Err.ctx) (decls : Ast.decl list) : unit =
   (* Names declared in an [extern] block at this level.  An extern has no
      body, so it can never recurse; a bare call to one must not be resolved
      against a same-named ordinary function (the entry module's decls include
@@ -12328,22 +12384,49 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
       | _ -> acc
     ) StringSet.empty decls
   in
-  (* Collect function names at this level *)
-  let fn_names =
+  (* Collect function names at this level, BARE — the namespace declarations
+     and diagnostics live in, and the one the call graph is keyed by. *)
+  let bare_fn_names =
     List.fold_left (fun acc d ->
       match d with
       | Ast.DFn (def, _) -> StringSet.add def.fn_name.txt acc
       | _ -> acc
     ) StringSet.empty decls
   in
-  let fn_names = StringSet.diff fn_names extern_names in
+  (* Extern names are subtracted BARE, before qualification: an extern is never
+     qualified at a call site either ([qualify_level] passes [~externs:false]),
+     so the two sets are comparable only here. *)
+  let bare_fn_names = StringSet.diff bare_fn_names extern_names in
+  (* The two conventions a name declared here can be referenced under — see
+     this function's doc comment. *)
+  let prefixes = [ mod_path; file_mod ^ "." ^ mod_path ] in
+  (* [call_names] is the CALL-SITE namespace (what [collect_direct_fn_calls]
+     and [check_tail_position] match [EVar]s against); [to_bare] maps back, so
+     the graph, the SCCs and the diagnostics all stay in the bare namespace. *)
+  let to_bare = Hashtbl.create 16 in
+  let call_names =
+    StringSet.fold (fun bare acc ->
+      List.fold_left (fun acc p ->
+        let qualified = p ^ bare in
+        Hashtbl.replace to_bare qualified bare;
+        StringSet.add qualified acc
+      ) acc prefixes
+    ) bare_fn_names StringSet.empty
+  in
+  (* Callees of [body], as BARE local names. *)
+  let bare_calls_in body =
+    StringSet.fold (fun called acc ->
+      match Hashtbl.find_opt to_bare called with
+      | Some bare -> StringSet.add bare acc
+      | None -> acc
+    ) (collect_direct_fn_calls call_names body) StringSet.empty
+  in
   (* Build call graph *)
   let adj = List.filter_map (function
     | Ast.DFn (def, _) ->
       (match def.fn_clauses with
        | [clause] ->
-         Some (def.fn_name.txt,
-               collect_direct_fn_calls fn_names clause.Ast.fc_body)
+         Some (def.fn_name.txt, bare_calls_in clause.Ast.fc_body)
        | _ -> None)
     | _ -> None
   ) decls in
@@ -12367,7 +12450,14 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
            StringSet.mem def.fn_name.txt direct
          in
          if is_recursive && not (List.mem "no_warn_recursion" def.fn_attrs) then begin
-           let rec_set = List.fold_right StringSet.add scc StringSet.empty in
+           (* [check_tail_position] matches [EVar]s, so the recursive-name set
+              has to be in the CALL-SITE namespace, not the bare one. *)
+           let rec_set =
+             List.fold_left (fun acc bare ->
+               List.fold_left (fun acc p -> StringSet.add (p ^ bare) acc)
+                 acc prefixes
+             ) StringSet.empty scc
+           in
            let fn_params =
              List.fold_left (fun acc p ->
                match p with
@@ -12376,11 +12466,15 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
                | Ast.FPPat pat -> StringSet.union acc (collect_pattern_vars pat)
              ) StringSet.empty clause.Ast.fc_params
            in
-           check_tail_position errors rec_set def.fn_name.txt fn_params clause.Ast.fc_body
+           let display n =
+             match Hashtbl.find_opt to_bare n with Some b -> b | None -> n in
+           check_tail_position ~display errors rec_set def.fn_name.txt fn_params
+             clause.Ast.fc_body
          end
        | _ -> ())
-    | Ast.DMod (_, _, inner_decls, _) ->
-      enforce_tail_calls_in_decls errors inner_decls
+    | Ast.DMod (name, _, inner_decls, _) ->
+      enforce_tail_calls_in_decls
+        ~mod_path:(mod_path ^ name.txt ^ ".") ~file_mod errors inner_decls
     | _ -> ()
   ) decls
 
@@ -12943,7 +13037,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
-  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
+  enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map, final_env)
 
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
@@ -13184,7 +13278,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   last_with_env_final := final_env;
   (* Pass 3: tail-call enforcement *)
-  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
+  enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map)
 
 (** Like [check_module_with_env] but also returns the final typing env.
