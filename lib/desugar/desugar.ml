@@ -2564,18 +2564,43 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
         (match def.fn_clauses with
          | [] -> ()
          | clause :: _ ->
+           (* R1 stage D
+              (specs/2026-08-10-r1-stage-d-grant-required-design.md): `main`
+              may take ANY NUMBER of capability parameters, and the grant is
+              their union — the same rule [Typecheck.check_fn_grants] already
+              applies to ordinary functions.
+
+              This is a prerequisite for requiring a grant at all, not a
+              convenience. Before it, `main` could hold exactly ONE capability,
+              so a program needing (say) both `IO.Console` and `IO.Spawn` could
+              not state a narrow grant and had to widen to `Cap(IO)` — 30% of
+              the programs the stage-D migration touches. Flipping the default
+              without this would push a third of the ecosystem to the full
+              grant and earn a WEAKER guarantee than the ambient state it
+              replaced.
+
+              The relaxation is "one cap parameter" → "any number of cap
+              parameters", NOT "arbitrary parameters": every parameter must
+              still be a capability, so a MIXED list is rejected exactly as a
+              non-capability one is. A grant that described only some of what
+              `main` receives would not be a grant. *)
+           let cap_param = function
+             | FPNamed p | FPDefault (p, _) -> is_cap_io_ty p.param_ty
+             | FPPat _ -> false
+           in
            match clause.fc_params with
            | [] -> ()
-           | [ FPNamed p ] when is_cap_io_ty p.param_ty -> ()
-           | [ FPDefault (p, _) ] when is_cap_io_ty p.param_ty -> ()
+           | params when List.for_all cap_param params -> ()
            | params ->
              let n = List.length params in
+             let n_caps = List.length (List.filter cap_param params) in
              Err.error errors ~span:clause.fc_span
                (Printf.sprintf
-                  "`main` must take zero arguments, or exactly one argument of type `Cap(IO)` (or a narrower point of the IO lattice, e.g. `Cap(IO.Console)`) — the capability the runtime GRANTS the program at startup; the whole program is then held to it.\n\
-                   Found %d parameter%s instead.\n\
-                   help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(cap : Cap(IO.Console)) : () do ... end` to prove the program touches nothing beyond the console."
-                  n (if n = 1 then "" else "s")))
+                  "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
+                   Found %d parameter%s, %d of which %s a capability.\n\
+                   help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do ... end` to grant exactly what the program needs."
+                  n (if n = 1 then "" else "s")
+                  (n - n_caps) (if n - n_caps = 1 then "is not" else "are not")))
       | _ -> ()
     ) decls
 

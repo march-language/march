@@ -10349,7 +10349,7 @@ let test_main_multi_cap_signature_accepted () =
     (desugar_has_errors {|mod StageDMulti do
       needs IO.Console
       needs IO.Spawn
-      fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do
+      fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
         println("hi")
       end
     end|})
@@ -10389,7 +10389,7 @@ let test_main_grant_is_the_union_of_its_cap_params () =
   let ctx = typecheck {|mod StageDUnion do
     needs IO.Console
     needs IO.Spawn
-    fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do
+    fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
       println("start")
       task_spawn(fn _ -> println("worker"))
     end
@@ -10402,7 +10402,7 @@ let test_main_grant_union_still_rejects_outside () =
     needs IO.Console
     needs IO.Spawn
     needs IO.FileWrite
-    fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do
+    fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
       match file_write("/tmp/stage_d_u", "d") do
         Ok(_) -> println("ok")
         Err(_) -> println("e")
@@ -10425,7 +10425,7 @@ let test_main_explicit_foreign_grant_accepted () =
     extern "rt" : Cap(Ffi) do
       fn ffi_id3(x : Int) : Int = "march_test_ffi_id"
     end
-    fn main(console : Cap(IO.Console), foreign : Cap(IO.Foreign)) : () do
+    fn main(cap_console : Cap(IO.Console), cap_foreign : Cap(IO.Foreign)) : () do
       println(int_to_string(ffi_id3(1)))
     end
   end|} in
@@ -10439,7 +10439,7 @@ let test_main_foreign_under_console_still_refused () =
     extern "rt" : Cap(Ffi) do
       fn ffi_id4(x : Int) : Int = "march_test_ffi_id"
     end
-    fn main(console : Cap(IO.Console)) : () do
+    fn main(cap_console : Cap(IO.Console)) : () do
       println(int_to_string(ffi_id4(1)))
     end
   end|} in

@@ -162,9 +162,17 @@ such a payload; the ceiling route does not, which is a filed Tier-2 loose end
 (`specs/2026-08-09-cap-loose-ends-plan.md`). Doing it here closes half of that
 item and establishes the shape for the other half.
 
-Parameter naming for the generated signature: the lattice leaf, lowercased,
-with dots dropped (`IO.Console` → `console`, `IO.FileRead` → `file_read`),
-falling back to `cap`/`cap2`/… on collision.
+Parameter naming for the generated signature: **`cap_` + the lattice leaf,
+lowercased** (`IO.Console` → `cap_console`, `IO.FileRead` → `cap_file_read`,
+`IO` → `cap_io`).
+
+The prefix is not decoration. The obvious scheme — bare leaf name — was tried
+first and produces UNPARSEABLE code: `IO.Spawn` → `spawn`, and `spawn` is a
+reserved keyword (`ESpawn`, the `spawn(Actor)` form). That is not a corner
+case, it is the second most common grant in the corpus (6 programs need
+console + spawn), so the naive rule would have broken the migration at scale.
+A fixed `cap_` prefix cannot collide with any keyword present or future, needs
+no reserved-word table to be kept in sync with the lexer, and reads no worse.
 
 ### D5. Codegen — the risk area
 
