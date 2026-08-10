@@ -3035,6 +3035,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/atom_ctor_field.expected js_atom_ctor_field.out)))
 
+; Regression: multi-head fn with a literal-Int arg pattern must not infinite-loop
+; under --target js (js_emit all_imm_lit_tags). Non-js-prefixed source, so it
+; also gets native IR-gate coverage; here we pin its JS runtime output.
+(rule
+ (targets js_multihead_literal_arg.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/multihead_literal_arg.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_multihead_literal_arg.mjs native/multihead_literal_arg.march)))
+
+(rule
+ (targets js_multihead_literal_arg.out)
+ (deps js_multihead_literal_arg.mjs march_runtime.mjs)
+ (action (with-stdout-to js_multihead_literal_arg.out (run node js_multihead_literal_arg.mjs))))
+
+(rule (alias runtest) (action (diff native/multihead_literal_arg.expected js_multihead_literal_arg.out)))
+
 (rule
  (targets js_closure_bool_field.mjs)
  (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)

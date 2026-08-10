@@ -947,7 +947,21 @@ and emit_case_impl ctx result_var expr =
           | None -> emit_stmts ctx d)
        | None -> ())
     end else
-    if is_literal_scrutinee_ty s_ty then begin
+    (* Also take the literal if/else path when the scrutinee's static type is
+       ERASED (a TVar-typed tuple-field / ctor-payload binder — e.g. the `n` in a
+       desugared multi-head fn `match (cells, n) do (cells, 0) -> … | (cells, n)
+       -> …`) but every branch tag is an immediate literal (Int/Bool/Atom).
+       Otherwise we emit `switch (n.$) { case "0": … }` on a raw number, whose
+       `.$` is `undefined`, so the base case is dead and the fn infinite-loops.
+       Mirrors the native backend's all_imm_lit_tags (llvm_case.ml). *)
+    let all_imm_lit_tags =
+      branches <> [] &&
+      List.for_all (fun br ->
+        let t = br.Tir.br_tag in
+        t = "true" || t = "false" || int_of_string_opt t <> None
+        || (String.length t > 0 && t.[0] = ':')) branches
+    in
+    if is_literal_scrutinee_ty s_ty || all_imm_lit_tags then begin
       (* Literal/bool: if/else chain *)
       List.iteri (fun i br ->
         if i = 0 then (emit_indent ctx; emit ctx "if (")
