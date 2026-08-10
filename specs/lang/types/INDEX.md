@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 280/280 — 135 accept, 145
+Exit 0 iff every program behaves as declared (currently 282/282 — 135 accept, 147
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -561,7 +561,11 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t158_get_cap_is_not_io_authority` | **a process capability is not IO authority (R8 audit, 2026-08-06)** — `get_cap : Pid(a) -> Option(Cap(a))` shared the `Cap` constructor with IO capabilities, so a FREE `a` unified with `IO` and handed the caller root authority; this typechecked with exit 0 in a module whose `main` takes no parameter and is granted nothing. The route needed a correction: `spawn` returns `Pid[state]` and PINS `a`, so the ordinary actor path was already safe, and `self()` is not a `Pid` at all — the vector is `pid_of_int : Int -> Pid(a)`, whose `a` is free (it exists so supervisors can rebuild a Pid from a state field, and is documented unsafe). Fixed by SPLITTING the constructor: `Cap` is IO authority (`VUnit`, erased, governed by `needs` and the lattice), `ActorCap` is a process capability (`VCap(pid, epoch)`, epoch-validated). A sweep would have patched one symptom and left the conflation to reopen it for the next builtin returning `Cap(a)` | ``ActorCap`` |
 | `t166_grant_narrow_violated_by_helper` | **R1 STAGES A+B — DECLARING DOES NOT GRANT (2026-08-09) — the property no earlier check could state.** Every `needs` line in this file is truthful; Check 1b, the ceiling, R3 and R4 all pass — the manifest is perfect — and the program is rejected anyway, because `main` was granted `Cap(IO.Console)` and the closure reaches `IO.FileWrite`. The violation deliberately lives in a HELPER, not in `main`: a grant evadable by moving the call one frame away would bound nothing, so this witness pins transitivity, not just the direct case. The diagnostic names a reachable-from-`main` function that holds the capability (an early version named an arbitrary stdlib holder — `Logger.with_span` for an `IO.Clock` reached via `Random.int` — sending the user to code their program never calls). Accept companion `t167` | ``granted `Cap(IO.Console)` `` |
 
-**Result: 280 / 280 (135 accept, 145 reject).**
+**Result: 282 / 282 (135 accept, 147 reject).** `reject/t169`–`t170`
+(`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
+2026-08-09 alongside the narrow-element-width work) are not yet written up
+as their own table entries — they mirror the existing `t164`/`t165` pattern
+for `NativeIntArr`/`NativeFloatArr`, which likewise have no table entries.
 | `t91_choice_tail_step_required` | **(post-`choose` tail projection, 2026-07-24)** — `project_steps`' `ProtoChoice` arm now projects each branch with the steps that FOLLOW the choice block (`rest_ty ()`) instead of the outer continuation. Pre-fix the trailing `Client -> Server : String` vanished from both roles' projections and closing early was wrongly ACCEPTED | `` Chan.close: channel is at `` |
 | `t93_steps_after_loop_unreachable` | **(session types, `loop` µ-type recursion, 2026-07-24)** — a `loop` block's projection is `Rec X. S[X]`, which never exits, so any step written after a `loop` at the same nesting level can never run. `DProtocol` validation now walks `proto_steps` and rejects a non-empty tail after a top-level (or choice-branch) `loop`. Accept twin `t92` | `can never run` |
 | `t94_chan_new_multiparty_protocol` | **(session types, `Chan.new` role-count guard, 2026-07-24)** — `Chan.new` is the BINARY channel constructor; its `infer_expr` arm had a silent `(* 3+ roles: just return first two as a pair *)` fallback that handed back two projections which are not duals of each other, with no diagnostic. Now errors and points at `MPST.new` for multi-party protocols | ``Chan.new: protocol `Tri` has 3 roles`` |

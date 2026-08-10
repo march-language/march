@@ -1,0 +1,48 @@
+-- Narrow-widths task (2026-08) — P10 inline-loop vectorization extended to
+-- f32/i32/u8 (see specs/optimizations.md P10). Exercises the three narrow
+-- widths' single-use, fresh-lambda map/map2 eligibility bar so
+-- Native_map_inline.ml rewrites the call to the inline loop, and
+-- Llvm_emit.emit_native_map_inline_loop/emit_native_map2_inline_loop's
+-- per-width descriptor (nmap_width_of_prefix) emits the correct memory
+-- type/alignment plus widen (fpext/sext/zext) before the callback and
+-- narrow (fptrunc/trunc) before the store:
+--   map_f32:  fn x -> x *. 2.0 +. 1.0   over 8 x 1.5   -> unboxed $mapfast$ clone
+--
+--   map_u8:   fn x -> x / 100           over 8 x 200
+--     The callback divides -- NOT purely +,-,* -- specifically because a
+--     linear op that stores back to the SAME width the load widened FROM
+--     is mathematically insensitive to the load's sext-vs-zext choice: the
+--     narrow-on-store trunc keeps only the low 8 bits, and for +,-,*
+--     those low bits are identical whether the load zero- or sign-extended
+--     (two's-complement wraparound cancels the difference). Division does
+--     NOT commute with that truncation, so it genuinely exercises the
+--     widen direction: seed 200 has bit 7 set, so a correct zext reads it
+--     as +200 (200/100 = 2) while a regressed sext would read it as -56
+--     (-56/100 = 0, truncating division) -- a visible difference (2 vs 0)
+--     that survives the narrow-to-u8 store, unlike the old `x * 30` body.
+--
+--   map2_i32: fn (x, y) -> x / y        over 8x(-5) / 8x2
+--     Same reasoning for i32: `-5 + 4` (the old body) would produce the
+--     identical low-32-bit store either way, so it never actually
+--     distinguished sext from zext on the load of `a`. Division does: a
+--     correct sext reads -5 as -5 (-5/2 = -2, truncating division), while
+--     a regressed zext would read the i32 bit pattern of -5 as the huge
+--     positive 4294967291 (4294967291/2 = 2147483645) -- wildly different
+--     after the narrow-to-i32 store, and visible in the summed output.
+mod NarrowInline do
+  needs IO.Console
+  fn main() do
+    let f = NativeArray.make_f32(8, 1.5)
+    let g = NativeArray.map_f32(f, fn x -> x *. 2.0 +. 1.0)
+    println(NativeArray.sum_f32(g))          -- 8 * 4.0 = 32.0
+
+    let u = NativeArray.make_u8(8, 200)
+    let v = NativeArray.map_u8(u, fn x -> x / 100)   -- 200/100 = 2 (zext); -56/100 = 0 if sext-buggy
+    println(NativeArray.sum_u8(v))           -- 8 * 2 = 16
+
+    let a = NativeArray.make_i32(8, -5)
+    let b = NativeArray.make_i32(8, 2)
+    let c = NativeArray.map2_i32(a, b, fn (x, y) -> x / y)
+    println(NativeArray.sum_i32(c))          -- 8 * -2 = -16
+  end
+end

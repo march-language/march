@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: cannot be sent in actor messages
+mod Main do
+  -- Companion to reject/t164 for NativeU8Arr (P10 narrow-width NativeArray
+  -- backing type).
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on MsgArr(arr : NativeU8Arr) do
+      { n: 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    let arr = NativeArray.make_u8(4, 0)
+    send(w, MsgArr(arr))
+  end
+end

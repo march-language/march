@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`NativeArray` gained narrow element widths: f32, i32, u8** — both
+  interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
+  `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,
+  plus 8 conversions like `NativeArray.int_to_u8_arr`. Integer stores wrap mod
+  2^w two's-complement, float stores round to nearest-even binary32, and
+  loads widen exactly; operations never trap. `map_f32`/`map2_f32`/`sum_f32`
+  get the same inline-loop vectorization treatment as the existing f64 path
+  (confirmed `<4 x float>` NEON codegen); halving the element width to f32
+  measured ~2.0-2.4x faster than f64 at N=5M (sum 0.49ms vs 1.19ms, map
+  2.27ms vs 4.54ms, map2 2.67ms vs 6.40ms; see `bench/RESULTS.md`).
+  `fold_i32`/`fold_u8`/`fold_f32` do not exist yet (interpreted or compiled)
+  — they'll be added once the existing `fold_int`/`fold_float` compiled-
+  linkage gap closes.
 - **`main`'s capability parameter is now the program's grant — the first
   check that says no rather than "declare it".**
   `fn main(cap : Cap(IO.Console))` makes a machine-checked claim: the whole
