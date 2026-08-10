@@ -10864,6 +10864,92 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
     program failed to link with "Undefined symbols: _http_fetch".  This test
     compiles a trivial `println("hi")` with `--no-opt` and asserts the binary
     links, runs, prints `hi`, and exits 0. It fails (link error) pre-fix. *)
+(* ── R1 stage D: the entry adapter must supply N erased capabilities ─────
+   specs/2026-08-10-r1-stage-d-grant-required-design.md §D5.
+
+   Capabilities are erased, and `march_spawn_main` invokes the program entry
+   through a bare zero-argument, void-returning function pointer.  A `main`
+   that takes capability parameters
+   therefore cannot be spawned directly — llvm_toplevel emits a thin 0-arg
+   thunk that supplies the erased capabilities (null pointers) and forwards
+   into the real, N-arg mangled main.
+
+   This is proven-dangerous ground: the FIRST version of the 1-parameter case
+   passed the entry pointer straight to `march_spawn_main` with a real unused
+   parameter in its LLVM signature, and the resulting ABI mismatch SIGBUS'd at
+   startup (test/native/main_cap_io.march is that incident's regression file).
+   Stage D generalizes the thunk from one null to N, so the same class of
+   mismatch is one hardcoded argument list away from returning.
+
+   Typecheck-side tests cannot see any of this — they pass while the binary
+   crashes.  These four must be compiled AND run. *)
+
+let test_main_adapter_zero_caps () =
+  (* The arity-0 fast path: no thunk at all, the entry is spawned directly.
+     Under stage D a parameterless `main` must be pure, and a pure `main`
+     cannot print (printing needs a grant) — so this asserts the shape the
+     parity helper cannot express: EMPTY stdout and exit 0. That is the state
+     the 38 already-pure in-repo programs are in, and it must keep linking and
+     running. *)
+  let src =
+    "mod Main do\n\
+    \  fn twice(n : Int) : Int do n * 2 end\n\
+    \  fn main() : () do\n\
+    \    let _n = twice(21)\n\
+    \    ()\n\
+    \  end\n\
+     end\n" in
+  let (project_root, main_exe, src_path, tmp) =
+    write_march_source ~name:"march_staged_adapter0" src in
+  let bin = Filename.concat tmp "march_staged_adapter0bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src:src_path () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out =
+      read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a pure parameterless main links, runs silently, and exits 0"
+      "EXIT:0" run_out
+
+let test_main_adapter_one_cap () =
+  assert_compiled_interp_parity
+    ~name:"march_staged_adapter1"
+    ~src:"mod Main do\n\
+         \  needs IO.Console\n\
+         \  fn main(_cap_console : Cap(IO.Console)) : () do println(\"a1\") end\n\
+          end\n"
+    ~expected:"a1" ()
+
+let test_main_adapter_two_caps () =
+  assert_compiled_interp_parity
+    ~name:"march_staged_adapter2"
+    ~src:"mod Main do\n\
+         \  needs IO.Console\n\
+         \  needs IO.Clock\n\
+         \  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do\n\
+         \    let _t = unix_time()\n\
+         \    println(\"a2\")\n\
+         \  end\n\
+          end\n"
+    ~expected:"a2" ()
+
+let test_main_adapter_three_caps () =
+  assert_compiled_interp_parity
+    ~name:"march_staged_adapter3"
+    ~src:"mod Main do\n\
+         \  needs IO.Console\n\
+         \  needs IO.Clock\n\
+         \  needs IO.Random\n\
+         \  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do\n\
+         \    let _t = unix_time()\n\
+         \    let _b = random_bytes(4)\n\
+         \    println(\"a3\")\n\
+         \  end\n\
+          end\n"
+    ~expected:"a3" ()
+
 let test_compiled_no_opt_prunes_unreachable () =
   let src =
     "mod Main do\n  needs IO.Console\n  fn main() do println(\"hi\") end\nend\n" in
@@ -14123,6 +14209,16 @@ let codegen_suites =
             test_erased_update_missing_field_panics_compiled;
           Alcotest.test_case "compiled multi-field update values (B5)" `Quick
             test_erased_update_multi_field_values_compiled;
+        ] );
+      ( "main_cap_adapter", [
+          Alcotest.test_case "compiled main with Cap(IO)" `Quick
+            test_main_adapter_zero_caps;
+          Alcotest.test_case "compiled main with 1 narrow cap" `Quick
+            test_main_adapter_one_cap;
+          Alcotest.test_case "compiled main with 2 caps" `Quick
+            test_main_adapter_two_caps;
+          Alcotest.test_case "compiled main with 3 caps" `Quick
+            test_main_adapter_three_caps;
         ] );
       ( "iface_impl_mono_codegen", [
           Alcotest.test_case "compiled default-arg call at every arity (source-level resolution)" `Quick
