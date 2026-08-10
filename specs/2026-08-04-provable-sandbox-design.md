@@ -1,9 +1,20 @@
 # Toward a provable sandbox
 
-Status: **mostly design. R2, R3 and R4 are built (2026-08-05); R1 and R5–R9
-are not.** This page exists to say precisely what the claim "provably sandboxed by
+Status: **R2, R3, R4/R4a built (2026-08-05/06); R1 stages A+B built
+(2026-08-09); R1 stage C + a bounded form of R5 built (2026-08-10); R6–R9 are
+not.** This page exists to say precisely what the claim "provably sandboxed by
 the type system" would require, what March already has, and which of it is
 worth building.
+
+**The one correction a reader must carry through the whole page:** R1 as built
+is an OPT-IN GATE, not a token discipline. `file_read(p)` still compiles with
+no capability in scope. What R1 shipped is *if you write a capability
+parameter, it is enforced as a ceiling on everything that function (or, at
+`main`, that program) reaches*. The paragraphs below that say "built-in IO is
+ambient" are therefore still true of the DEFAULT, and every claim in §3 has to
+be read with the qualifier "for code that opts in by naming a grant". Closing
+that — making an unannotated `file_read` an error — is a separate decision
+this page does not make.
 
 Stage 1 of §3 — "capabilities cannot be fabricated, only received and
 narrowed" — is earned, and with R2 it is earned in the strong sense: there is
@@ -295,7 +306,40 @@ R3 still rejects it because `cap_in_solved_ty` reports an unpinned capability
 argument as `_` rather than skipping it. Had it skipped, R4a would have
 silently reopened R3's hole and the corpus would have gone green doing it.
 
-### R5. Effect polymorphism that survives higher-order code
+### R5. Effect polymorphism that survives higher-order code — **BOUNDED FORM BUILT 2026-08-10**
+
+**Built 2026-08-10** as R1 stage C —
+`specs/2026-08-10-r1-stage-c-effect-rows-design.md` and
+`specs/progress/2026-08-10-r1-stage-c-effect-rows.md`. Three corrections to
+what this section (written 2026-08-04) assumes:
+
+- **It was not the hardest type-system work on this page, because it did not
+  need to be type-system work at all.** The premise that a flat per-function
+  closure would union every argument a HOF was ever passed is FALSE for
+  March's implementation: reference edges come from `free_vars_expr`, so a
+  parameter contributes no edge (`List.map`'s row is empty, verified) and a
+  callback supplied by name is charged to the SUPPLIER by the supplier's own
+  edge. First-order and direct-callback code was already sound and precise.
+- **So rows landed beside the type system, not inside it.** `lib/caps/
+  cap_rows.ml` carries `{caps; deps; unknown}` per function; `ty`, `unify`,
+  `generalize` and `pp_ty` are untouched, and no printed type changed. The
+  let-generalization interaction this page implies would be the main risk was
+  sidestepped structurally rather than solved: `deps` is per-parameter and
+  per-definition, not a quantified variable.
+- **The `apply1(file_read, p)` hole this section cites as motivating** is the
+  case that was already handled — the atom scan it mentions is on the TIR
+  side; the typecheck-side closure gets it from the free-variable edge.
+
+What is genuinely NOT delivered, and why stage 4 still needs work here: a
+function value with no traceable creation site (pulled from a record, a ref,
+an ADT payload — `Seq`/`Flow`'s stored-closure representation is the real
+population, 4.4% of stdlib functions) is REFUSED under a narrow grant rather
+than typed. That is a sound refusal, not a hole, but it is not the row
+polymorphism a soundness theorem would quantify over. R6 would need either
+provenance tracking through data or the in-`ty` formulation this deliberately
+deferred.
+
+Original text follows.
 
 `map : (a -> b ! e) -> List(a) -> List(b) ! e`. Without row polymorphism you
 either cannot write HOFs over effectful functions or you have a hole exactly
@@ -467,8 +511,8 @@ shippable increment.
 |---|---|---|
 | **0** | **shipped** | "`needs` is a ceiling on every module, including dependencies that never opted in, verified against emitted code and re-checkable from the artifact" |
 | **1 — unforgeable** | R3, R4 — **shipped 2026-08-05** | "capabilities cannot be fabricated, only received and narrowed" |
-| **2 — no ambient IO** | R1b, R2 | "a module can only perform IO with authority it was given" |
-| **3 — compositional** | R5 | "…and that holds for higher-order and library code, checked per-definition rather than per-program" |
+| **2 — no ambient IO** | R1b, R2 — **shipped 2026-08-09, OPT-IN ONLY** | "a module can only perform IO with authority it was given" — sayable **only of code that names a grant**. An unannotated program is still ambient by design (the adoption contract), so the unqualified sentence is NOT yet earned. What is earned: "a program that declares its grant cannot exceed it, whatever any dependency declares" |
+| **3 — compositional** | R5 — **shipped 2026-08-10, bounded** | "…and that holds per function and for library code, checked at each definition rather than only per-program" — earned for the cases the analysis can trace, which is first-order code, callbacks passed by name, and lambdas. A function value laundered through a data structure is REFUSED under a narrow grant rather than typed, so the claim is "checked per-definition, and where it cannot be checked it is refused, never assumed" |
 | **4 — proved** | R6, R7 | "provably capability-safe for the core language, modulo FFI, compiler correctness, and console egress" |
 | **5 — unqualified** | R9 | not reachable |
 
@@ -561,6 +605,35 @@ to forget and most likely to bite:
 > so a dependency that can print can exfiltrate through your CI logs without
 > needing any other capability. What March gives you there is attribution —
 > which module prints — not prevention.
+
+Newly defensible as of 2026-08-09/10 (R1 stages A–C), and the wording matters
+because the tempting shorter version is false:
+
+> In March, a capability parameter is a *ceiling*, not a request. `fn main(cap
+> : Cap(IO.Console))` means the whole program — every helper, every stdlib
+> call, every dependency it reaches — touches nothing beyond the console, at
+> compile time, and no `needs` declaration anywhere can raise it. Since
+> 2026-08-10 the same holds of any single function: `fn handler(cap :
+> Cap(IO.Console), …)` is checked at its own definition, so a library can
+> prove its own bound without seeing the application.
+
+Three qualifiers travel with it, and omitting any one turns it into a lie:
+
+- **It is opt-in.** Code that names no grant is ambient, exactly as before.
+  This is the adoption contract that let R1 ship without breaking a single
+  program, and it means "March programs cannot perform undeclared IO" is
+  still NOT true. The true sentence is "a March program that states its grant
+  cannot exceed it."
+- **A callback you are handed is the caller's responsibility, not yours.** A
+  function granted `Cap(IO.Console)` that invokes a function it was given
+  certifies as console-only, because whoever supplied that function is
+  charged for it at the supply site. That is sound but it is a
+  *compositional* claim, not a local one — the guarantee lives on the chain,
+  not in the single signature.
+- **Where the analysis cannot see, it refuses rather than certifies.** An
+  invocation of a function value with no traceable origin cannot be bounded,
+  so a narrow grant over it is a compile error. This is the same stance taken
+  on `IO.Foreign`, and it is the honest reading of "checked per-definition".
 
 Not defensible, and should not be said until stage 4:
 
