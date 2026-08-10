@@ -8184,15 +8184,9 @@ let test_crypto_hmac () =
 
 let test_crypto_random_bytes () =
   let env = eval_with_crypto {|mod Test do
-    pfn count(xs, n) do
-      match xs do
-      Nil -> n
-      Cons(_, t) -> count(t, n + 1)
-      end
-    end
     fn f() do
       let b = Crypto.random_bytes(16)
-      match b do Bytes(xs) -> count(xs, 0) end
+      Bytes.length(b)
     end
   end|} in
   Alcotest.(check int) "random_bytes returns 16 bytes" 16
@@ -8267,7 +8261,7 @@ let test_compress_parse_ok () =
 let test_gzip_encode_returns_bytes () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(104, Cons(101, Cons(108, Cons(108, Cons(111, Nil))))))
+      let b = Bytes.from_list([104, 101, 108, 108, 111])
       match Compress.Gzip.encode(b) do
       Ok(compressed) -> 1
       Err(_) -> 0
@@ -8279,20 +8273,12 @@ let test_gzip_encode_returns_bytes () =
 let test_gzip_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(104, Cons(101, Cons(108, Cons(108, Cons(111, Nil))))))
+      let original = Bytes.from_list([104, 101, 108, 108, 111])
       match Compress.Gzip.encode(original) do
       Ok(compressed) ->
         match Compress.Gzip.decode(compressed) do
@@ -8308,11 +8294,11 @@ let test_gzip_roundtrip () =
 let test_gzip_empty () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Nil)
+      let b = Bytes.empty()
       match Compress.Gzip.encode(b) do
       Ok(compressed) ->
         match Compress.Gzip.decode(compressed) do
-        Ok(Bytes(Nil)) -> 1
+        Ok(back) -> if Bytes.is_empty(back) do 1 else 0 end
         _ -> 0
         end
       Err(_) -> 0
@@ -8324,7 +8310,7 @@ let test_gzip_empty () =
 let test_gzip_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Gzip.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8341,19 +8327,10 @@ let test_gzip_compressed_smaller () =
       else make_bytes(n - 1, val, Cons(val, acc)) end
     end
     pfn byte_length(b) do
-      match b do
-      Bytes(xs) ->
-        fn go(ys, n) do
-          match ys do
-          Nil -> n
-          Cons(_, t) -> go(t, n + 1)
-          end
-        end
-        go(xs, 0)
-      end
+      Bytes.length(b)
     end
     fn f() do
-      let b = Bytes(make_bytes(100, 65, Nil))
+      let b = Bytes.from_list(make_bytes(100, 65, Nil))
       match Compress.Gzip.encode(b) do
       Ok(compressed) -> byte_length(compressed)
       Err(_) -> 999
@@ -8367,7 +8344,7 @@ let test_gzip_compressed_smaller () =
 let test_gzip_level_explicit () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      let b = Bytes.from_list([65, 66, 67])
       match Compress.Gzip.encode_level(b, Gzip.BestSpeed) do
       Ok(_) -> 1
       Err(_) -> 0
@@ -8381,20 +8358,12 @@ let test_gzip_level_explicit () =
 let test_deflate_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(100, Cons(101, Cons(102, Nil))))
+      let original = Bytes.from_list([100, 101, 102])
       match Compress.Deflate.encode(original) do
       Ok(compressed) ->
         match Compress.Deflate.decode(compressed) do
@@ -8410,11 +8379,11 @@ let test_deflate_roundtrip () =
 let test_deflate_empty () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Nil)
+      let b = Bytes.empty()
       match Compress.Deflate.encode(b) do
       Ok(compressed) ->
         match Compress.Deflate.decode(compressed) do
-        Ok(Bytes(Nil)) -> 1
+        Ok(back) -> if Bytes.is_empty(back) do 1 else 0 end
         _ -> 0
         end
       Err(_) -> 0
@@ -8428,20 +8397,12 @@ let test_deflate_empty () =
 let test_zstd_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(122, Cons(115, Cons(116, Cons(100, Nil)))))
+      let original = Bytes.from_list([122, 115, 116, 100])
       match Compress.Zstd.encode(original) do
       Ok(compressed) ->
         match Compress.Zstd.decode(compressed) do
@@ -8457,7 +8418,7 @@ let test_zstd_roundtrip () =
 let test_zstd_level_best () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(65, Cons(66, Nil)))
+      let b = Bytes.from_list([65, 66])
       match Compress.Zstd.encode_level(b, Zstd.Best) do
       Ok(_) -> 1
       Err(_) -> 0
@@ -8471,20 +8432,12 @@ let test_zstd_level_best () =
 let test_brotli_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(98, Cons(114, Cons(111, Cons(116, Cons(108, Cons(105, Nil)))))))
+      let original = Bytes.from_list([98, 114, 111, 116, 108, 105])
       match Compress.Brotli.encode(original) do
       Ok(compressed) ->
         match Compress.Brotli.decode(compressed) do
@@ -8500,7 +8453,7 @@ let test_brotli_roundtrip () =
 let test_brotli_mode_text () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      let b = Bytes.from_list([65, 66, 67])
       match Compress.Brotli.encode_mode(b, Brotli.Text, Brotli.Level(4)) do
       Ok(_) -> 1
       Err(_) -> 0
@@ -8573,11 +8526,11 @@ let test_gzip_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Gzip.encode(b) do
         Ok(compressed) ->
           match Compress.Gzip.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8591,11 +8544,11 @@ let test_deflate_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Deflate.encode(b) do
         Ok(compressed) ->
           match Compress.Deflate.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8609,11 +8562,11 @@ let test_zstd_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Zstd.encode(b) do
         Ok(compressed) ->
           match Compress.Zstd.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8627,11 +8580,11 @@ let test_brotli_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Brotli.encode(b) do
         Ok(compressed) ->
           match Compress.Brotli.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8659,10 +8612,10 @@ let test_gzip_compression_shrinks_repetitive () =
     end
     fn f() do
       Check.all(Gen.int(0, 255), fn v ->
-        let bytes_200 = Bytes(replicate(200, v))
+        let bytes_200 = Bytes.from_list(replicate(200, v))
         match Compress.Gzip.encode(bytes_200) do
-        Ok(Bytes(compressed_list)) ->
-          list_length(compressed_list) < 200
+        Ok(compressed) ->
+          Bytes.length(compressed) < 200
         Err(_) -> false
         end
       )
@@ -8690,7 +8643,7 @@ let test_accept_encoding_trims_spaces () =
 let test_deflate_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Deflate.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8702,7 +8655,7 @@ let test_deflate_decode_invalid () =
 let test_zstd_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Zstd.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8714,7 +8667,7 @@ let test_zstd_decode_invalid () =
 let test_brotli_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Brotli.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8727,20 +8680,12 @@ let test_zstd_fast_negative_level () =
   (* Zstd.Fast(-1) uses a zstd negative level (ultra-fast). Must round-trip. *)
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      let original = Bytes.from_list([65, 66, 67])
       match Compress.Zstd.encode_level(original, Zstd.Fast(-1)) do
       Ok(compressed) ->
         match Compress.Zstd.decode(compressed) do
