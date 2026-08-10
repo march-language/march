@@ -23,7 +23,7 @@ today:
    §D3 — it is a per-function concept; the program is closed).
 4. Diagnostic names the exact grant (`caps(main)`) + JSON `fix` payload so
    `forge fix` applies it.
-5. Migrate 109 in-repo files via the autofix; verify with
+5. Migrate 283 in-repo files via the autofix; verify with
    `specs/lang/types/check_types.sh` and a real-binary compile of examples/,
    bench/, test/native/, test/stdlib/ — not green alcotest alone.
 
