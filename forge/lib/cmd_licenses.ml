@@ -30,13 +30,14 @@ let format rows ~json =
 
 (* --- dependency enumeration (IO) --- *)
 
-let cas_deps_dir root =
-  Filename.concat root (Filename.concat ".march" (Filename.concat "cas" "deps"))
-
-let dep_dir ~root ~base ~name ~dep =
-  match dep with
-  | Project.PathDep p -> if Filename.is_relative p then Filename.concat base p else p
-  | _ -> Filename.concat (cas_deps_dir root) name
+(* Git/registry deps are installed under [~/.march/cas/deps/<name>] (see
+   [Project.dep_root_dir]) — NOT under the project root. [base] is the
+   directory of the project that DECLARED [dep], needed to resolve a
+   relative PathDep. *)
+let dep_dir ~base ~name ~dep =
+  match Project.dep_root_dir ~project_root:base (name, dep) with
+  | Some d -> d
+  | None -> Filename.concat base name
 
 (* Walk every (transitive) dependency, reading version + license from its
    forge.toml; deps that can't be read are listed with no metadata. *)
@@ -45,7 +46,7 @@ let collect proj =
   let tbl = Hashtbl.create 32 in
   let rec visit ~base ~name ~dep =
     if not (Hashtbl.mem tbl name) then begin
-      let dir = dep_dir ~root ~base ~name ~dep in
+      let dir = dep_dir ~base ~name ~dep in
       match Project.load_from_dir dir with
       | Ok p ->
         Hashtbl.replace tbl name (Some p.Project.version, p.Project.license);

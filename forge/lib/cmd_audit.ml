@@ -141,13 +141,14 @@ let scope_note ~inferred =
 (*  Dependency enumeration                                             *)
 (* ------------------------------------------------------------------ *)
 
-let cas_deps_dir root =
-  Filename.concat root (Filename.concat ".march" (Filename.concat "cas" "deps"))
-
-let dep_dir ~root ~base ~name ~dep =
-  match dep with
-  | Project.PathDep p -> if Filename.is_relative p then Filename.concat base p else p
-  | _ -> Filename.concat (cas_deps_dir root) name
+(* Git/registry deps are installed under [~/.march/cas/deps/<name>] (see
+   [Project.dep_root_dir]) — NOT under the project root. [base] is the
+   directory of the project that DECLARED [dep], needed to resolve a
+   relative PathDep. *)
+let dep_dir ~base ~name ~dep =
+  match Project.dep_root_dir ~project_root:base (name, dep) with
+  | Some d -> d
+  | None -> Filename.concat base name
 
 (** Every transitive dependency paired with the capabilities it declares.
     Mirrors [Cmd_licenses.collect]'s walk so the two agree on what counts as a
@@ -173,7 +174,7 @@ let collect ?(inferred = false) (proj : Project.project) : dep_caps list =
   let tbl : (string, dep_caps) Hashtbl.t = Hashtbl.create 32 in
   let rec visit ~base ~name ~dep =
     if not (Hashtbl.mem tbl name) then begin
-      let dir = dep_dir ~root ~base ~name ~dep in
+      let dir = dep_dir ~base ~name ~dep in
       let installed = Sys.file_exists dir && Sys.is_directory dir in
       Hashtbl.replace tbl name
         { dc_name = name;

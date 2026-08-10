@@ -256,6 +256,17 @@ git log is authoritative for exact commits.
   the compiler, bastion, forgepm, conduit, depot and march_doc there are six
   uses of these sigils, all in the compiler's own tests, and none with a hole.
 
+- **`forge audit`, `forge licenses`, and `forge tree` now find git/registry
+  dependencies that `forge deps` actually installed.** All three reimplemented
+  their own dependency-directory lookup as `<project_root>/.march/cas/deps/<name>`,
+  but `forge deps` installs git and registry dependencies under
+  `$HOME/.march/cas/deps/<name>` — a global, cross-project location. A
+  just-installed git or registry dependency was therefore always reported as
+  "not installed" (`forge audit`), with blank version/license (`forge
+  licenses`), or as a childless leaf (`forge tree`). Path dependencies were
+  unaffected. Fixed by routing all three through the same `Project.dep_root_dir`
+  resolver `forge deps` already uses.
+
 
 ### Changed
 
