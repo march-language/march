@@ -10258,23 +10258,22 @@ let test_fn_grant_main_is_not_double_reported () =
 
 (* The regression class this project has been bitten by twice: a capability
    pass built on `parse_and_desugar` alone never sees the shape the REAL
-   pipeline produces, where prelude is unwrapped into the entry module's own
-   flat declaration list.  See
+   pipeline produces.  See
    specs/progress/2026-08-09-cap-shadowing-false-positive.md — nine green unit
    tests shipped a regression that silenced the most basic capability check in
-   the system.  This test puts a stage-C discharge point in a module that has
-   the real stdlib prepended, flattened the way bin/main.ml flattens it. *)
+   the system, because every one of them used the bare helper.
+
+   The two shapes bin/main.ml actually produces are both covered below: an
+   ordinary stdlib module keeps its `DMod` wrapper (so its members are keyed
+   "DateTime.now"), while prelude.march alone is UNWRAPPED into the entry
+   module's own flat declaration list (so `println` is keyed bare and sits in
+   the very list a module-level scan walks). *)
 let test_fn_grant_with_stdlib_prepended () =
   with_stdlib_registered "datetime.march" (fun () ->
     let dt = load_stdlib_file_for_test "datetime.march" in
-    let flattened =
-      match dt with
-      | March_ast.Ast.DMod (_, _, inner, _) -> inner
-      | d -> [ d ]
-    in
     let m = March_ast.Ast.{
       mod_name = { txt = "Main"; span = dummy_span };
-      mod_decls = flattened @ (parse_and_desugar {|mod Main do
+      mod_decls = dt :: (parse_and_desugar {|mod Main do
         needs IO.Console
         needs IO.Clock
         fn stamped(cap : Cap(IO.Console)) : () do
@@ -10289,6 +10288,46 @@ let test_fn_grant_with_stdlib_prepended () =
     Alcotest.(check bool)
       "a stdlib-mediated IO.Clock violates a Cap(IO.Console) function grant"
       true (has_error_with errors "granted `Cap(IO.Console)`"))
+
+let test_fn_grant_with_prelude_flattened () =
+  (* Prelude's declarations ride in the entry module's own flat list, exactly
+     as bin/main.ml unwraps them.  Both directions are asserted: the console
+     grant still certifies over prelude's own `println`, and a capability
+     reached THROUGH a flattened prelude function is still caught — the
+     asymmetry that the shadowing regression got wrong in the silencing
+     direction. *)
+  let prelude = load_stdlib_file_for_test "prelude.march" in
+  let flattened =
+    match prelude with
+    | March_ast.Ast.DMod (_, _, inner, _) -> inner
+    | d -> [ d ]
+  in
+  let m = March_ast.Ast.{
+    mod_name = { txt = "Main"; span = dummy_span };
+    mod_decls = flattened @ (parse_and_desugar {|mod Main do
+      needs IO.Console
+      needs IO.FileWrite
+      fn talk(cap : Cap(IO.Console), msg : String) : () do
+        println(msg)
+      end
+      fn scribble(cap : Cap(IO.Console), msg : String) : () do
+        match file_write("/tmp/fn_grant_prelude", msg) do
+          Ok(_) -> println("ok")
+          Err(_) -> println("e")
+        end
+      end
+      fn main() : () do
+        ()
+      end
+    end|}).March_ast.Ast.mod_decls;
+  } in
+  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  Alcotest.(check bool)
+    "a prelude-mediated console use still certifies under Cap(IO.Console)"
+    true (has_error_with errors "IO.FileWrite");
+  Alcotest.(check bool)
+    "the console-only function is not itself reported"
+    false (has_error_with errors "`talk` is granted")
 
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
@@ -14145,6 +14184,7 @@ let compiler_suites =
           Alcotest.test_case "dead code is not charged"            `Quick test_fn_grant_dead_code_is_not_charged;
           Alcotest.test_case "main is not double-reported"         `Quick test_fn_grant_main_is_not_double_reported;
           Alcotest.test_case "real stdlib-prepended shape"         `Quick test_fn_grant_with_stdlib_prepended;
+          Alcotest.test_case "real prelude-flattened shape"        `Quick test_fn_grant_with_prelude_flattened;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;
