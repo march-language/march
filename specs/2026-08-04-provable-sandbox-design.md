@@ -349,7 +349,57 @@ as a value and the TIR analysis lost it until the atom scan was added.
 This is the hardest *type-system* work in the list, and the main reason R1b is
 a research-adjacent project rather than an afternoon.
 
-### R6. A soundness theorem
+### R6. A soundness theorem — **NOT started; its ALGEBRAIC SUBSTRATE is mechanized (2026-08-08, unpushed)**
+
+The theorem below is untouched. What exists, and is worth knowing before
+anyone restates "March has no mechanized anything", is the layer underneath
+it: `march-language/march-lean` branch `claude/calculus-proof-capabilities-
+0a1127` (unpushed as of 2026-08-10) adds `MarchLean/Calculus/` — **54
+theorems, zero `sorry`/`admit`, with a CI step that greps the build output
+for `declaration uses 'sorry'` and fails on a hit** (Lean makes `sorry` a
+warning, so a bare `lake build` would pass with unproven theorems).
+
+- `Lattice.lean` — the capability hierarchy is a **partial order**, proved
+  abstractly over any well-formed table: `subsumesIn_refl` / `_trans` /
+  `_antisymm`, `siblings_incomparable`, `absent_subsumesIn`, fuel adequacy
+  (`ancestorsIn_fuel_adequate` — the "safe bound" that was a prose comment),
+  `normalizeIn_idem`, `coveredIn_normalizeIn`, `coveredIn_mono`.
+- `Concrete.lean` — `WellFormedB hierarchy = true` **by kernel `decide`**,
+  then every abstract theorem instantiated at the shipping names. This is the
+  load-bearing one for us: if `lib/caps/cap_lattice.ml` ever gains a duplicate
+  name, a dangling parent, or a cycle and the port follows, that `decide`
+  fails at build time. `cap_lattice.ml`'s "finite forest, no cycles" stops
+  being a comment.
+- `Verdicts.lean` — `CapResult.andThen` is a monoid (associative, identity
+  `ok`, `violation` left-absorbs), and `tierOf` is a monoid homomorphism onto
+  `Tier.max`, so a fold's verdict TIER is order-independent even though its
+  message is leftmost-wins.
+
+Two things to keep straight. **It is metatheory of the checker's own
+definitions, not of March.** Its design doc's non-goals are explicit and
+correct: no operational semantics for march programs, no soundness or
+completeness theorem relating checker to program behavior, no refinement
+against march's OCaml, and no claim that a proved checker is a correct oracle
+of march. So it is not the theorem below and does not pretend to be. **And it
+is metatheory of the LEAN PORT** — `Concrete.lean`'s `decide` protects
+`CapLattice.lean`'s table, which mirrors ours by hand; a divergence between
+the two tables is exactly the kind of thing it cannot see, and the
+conformance harness is what covers that.
+
+What it does buy, concretely and today: **the laws R1's grant checks lean on
+are now proved rather than assumed.** `check_main_grant` and stage C's
+`check_fn_grants` are `coveredIn`-shaped queries — "is this reached cap
+covered by some granted cap under `cap_subsumes`" — and their informal
+soundness argument appeals to transitivity (a violation through a helper
+really is a violation), antisymmetry (two grants that cover each other are
+the same grant), and `coveredIn_mono` (widening a grant never turns an accept
+into a reject). Those are `Lattice.lean`'s theorems. Phase P2 (whole-checker
+theorems: tier order-independence, normalize-stability, IO-cap monotonicity,
+each paired with a machine-checked counterexample showing where the
+behavioral-cap layer breaks the law) is designed but **not built** — no
+`CheckCaps.lean` on the branch.
+
+Original text follows.
 
 A core calculus (λ-calculus + rows + a capability lattice + an IO-labelled
 operational semantics), and:
@@ -403,21 +453,24 @@ check does not fire and nothing looks wrong.
 
 Two things to keep straight when citing it:
 
-- **It is not R6, and it contains no theorems.** There are zero `theorem`/
-  `lemma` declarations; the `example : … := by native_decide` lines are
+- **It is not R6.** On `main` the validation is entirely testing: zero
+  `theorem`/`lemma`, and the `example : … := by native_decide` lines are
   kernel-checked assertions about specific inputs — stronger than an alcotest
-  case, but per-instance, not a general property. `native_decide` also puts
+  case, but per-instance, not general properties. `native_decide` also puts
   the Lean compiler in the trusted base, which is worth saying out loud if the
-  word "verified" is ever attached to it.
-- **Its ledgers drift against this repo's corpus and that drift is silent
+  word "verified" is ever attached to it. **A proof layer exists on an
+  unpushed branch — see R6 below.**
+- **Its ledgers drift against this repo's corpus, and that drift is silent
   here.** `scripts/expected-skips.txt` and `known-limitations.txt` are
-  enforced bidirectionally (a stale entry FAILS, so the lists can only
-  shrink) — excellent discipline on their side, but both top out around
-  `t140` while this repo is at `t170`. Anything landing a new ERROR-level
-  check here (R1 stages A/B did, stage C does — `CapCheck.lean` contains no
-  model of a grant at all) makes this repo's new reject fixtures wrong-accepts
-  over there. **Adding a check here is a change to two repos**; the oracle is
-  only evidence while it is in sync.
+  enforced bidirectionally (a stale entry FAILS, so the lists can only shrink)
+  — good discipline on their side, but the CI pins a march SHA, and both
+  `main` (top fixture ~`t140`) and the calculus branch (re-baselined to 277
+  files, top fixture `t165`, pinned at march `6867c783`) predate R1: `t166`/
+  `t167` (stages A/B) and `t170` (stage C) appear in neither ledger, and
+  `CapCheck.lean` models no grant check on either branch (`grant` occurs
+  twice, both in R2's `root_cap` message). **Adding an ERROR-level check here
+  is a change to two repos**; the oracle is only evidence while it is in
+  sync.
 
 ### R8. The runtime escape hatches — **AUDITED 2026-08-06**
 

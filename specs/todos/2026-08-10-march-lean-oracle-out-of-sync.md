@@ -18,9 +18,11 @@ Two gaps, both pointing the same way:
    March's capability checks, zero occurrences of "grant". R1 stage A/B
    (whole-program, 2026-08-09) and stage C (per-function, 2026-08-10) are both
    ERROR-level checks it cannot see.
-2. **Its ledgers predate ~30 of our fixtures.** `scripts/expected-skips.txt`
-   and `scripts/known-limitations.txt` top out around `t140`; this repo is at
-   `t170`.
+2. **Its ledgers and its pinned march SHA predate R1.** On `main` the ledgers
+   top out around `t140`. The unpushed branch
+   `claude/calculus-proof-capabilities-0a1127` is much closer — re-baselined
+   to 277 files, top fixture `t165` — but its CI pins march `6867c783`, which
+   predates stages A/B, so `t166`/`t167` and `t170` are in neither ledger.
 
 Predicted (NOT verified — no Lean toolchain was available when this was
 filed, and the harness was not run): `reject/t166_grant_narrow_violated_by_
