@@ -1,6 +1,20 @@
 # R1 — no ambient IO: design sketch and sequencing
 
-Status: DESIGN ONLY, nothing here is built. Written 2026-08-08, after the
+Status: stages A and B SHIPPED 2026-08-09
+(`specs/progress/2026-08-09-r1-grant-check-stages-ab.md`); stage C (effect
+rows, R5) remains design-only.
+
+One correction against the original text, recorded rather than rewritten: the
+Stage A paragraph below says a parameterless `main` "gets an EMPTY grant" and
+errors on any non-empty closure — which, taken literally, breaks every
+existing IO program and contradicts this spec's own adoption-contract
+paragraph ("neither breaks a single existing program"). The implementation
+resolves it the adoption-contract way: **no capability parameter = no gate**
+(ambient, unchanged); the gate exists only when `main` names a grant. "Pure
+main" is claimed by writing a narrow grant whose closure is empty, not by
+omitting the parameter.
+
+Originally: DESIGN ONLY, nothing here is built. Written 2026-08-08, after the
 capability ceiling became the default (#225), because R1 is now the only
 load-bearing gap left below stage 3 of the sandbox ladder
 (`specs/2026-08-04-provable-sandbox-design.md` §3) and it deserved more than

@@ -1,0 +1,27 @@
+mod Main do
+  -- R1 stages A+B (2026-08-09, specs/2026-08-08-r1-no-ambient-io-design.md):
+  -- `main`'s capability parameter IS the program's grant, and this is the
+  -- accept half of the first check that says NO rather than "declare it".
+  --
+  -- `Cap(IO.Console)` here is a machine-checked claim: the transitive
+  -- capability closure from `main` — through `greet`, through the prelude's
+  -- `println` wrapper, down to the `print` builtin — sits under IO.Console,
+  -- so this program provably touches nothing beyond the console. Reject
+  -- companion t166 is byte-identical except one `file_write` call in the
+  -- helper, which is enough to break the proof.
+  --
+  -- The `needs` line is still required (the manifest and the grant are
+  -- separate: `needs` says what a MODULE touches, the grant bounds what the
+  -- PROGRAM may). The signature itself needs no `needs IO` — Check 1 demands
+  -- the declared need cover the signature's cap, and IO.Console covers
+  -- IO.Console.
+  needs IO.Console
+
+  fn greet(name : String) : () do
+    println("hello " ++ name)
+  end
+
+  fn main(cap : Cap(IO.Console)) : () do
+    greet("march")
+  end
+end
