@@ -8077,7 +8077,7 @@ let test_eval_no_yield_when_disabled () =
 let test_eval_task_spawn_await () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t = task_spawn(fn x -> 42)
       task_await_unwrap(t)
     end
@@ -8089,7 +8089,7 @@ let test_eval_task_spawn_await () =
 let test_eval_task_await_unwrap () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t = task_spawn(fn x -> 99)
       task_await_unwrap(t)
     end
@@ -8101,7 +8101,7 @@ let test_eval_task_await_unwrap () =
 let test_eval_task_multiple () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t1 = task_spawn(fn x -> 10)
       let t2 = task_spawn(fn x -> 20)
       let r1 = task_await_unwrap(t1)
@@ -8116,7 +8116,7 @@ let test_eval_task_multiple () =
 let test_eval_task_captures_env () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let x = 5
       let t = task_spawn(fn u -> x * x)
       task_await_unwrap(t)
@@ -8129,7 +8129,7 @@ let test_eval_task_captures_env () =
 let test_eval_spawn_steal_requires_pool () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       task_spawn_steal(42, fn x -> 1)
     end
   end|} in
@@ -8179,7 +8179,7 @@ let test_eval_task_sends_to_actor () =
       end
     end
 
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let pid = spawn(Counter)
       let t = task_spawn(fn x -> send(pid, Increment(10)))
       task_await_unwrap(t)
@@ -8308,7 +8308,7 @@ let test_compile_task_reductions_reads_tls () =
 let test_compile_task_await_in_ir () =
   let ir = emit_actor_ir {|mod TaskAwaitTest do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t = task_spawn(fn _ -> 42)
       task_await(t)
     end
@@ -8460,7 +8460,7 @@ let test_cancel_tokens_independent () =
 let test_spawn_with_cancel_active () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let tok = task_cancel_token_new()
       let t = task_spawn_with_cancel(fn _ -> 42, tok)
       task_await(t)
@@ -8473,7 +8473,7 @@ let test_spawn_with_cancel_active () =
 let test_spawn_with_cancel_precancelled () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let tok = task_cancel_token_new()
       task_cancel(tok)
       let t = task_spawn_with_cancel(fn _ -> 99, tok)
@@ -8487,7 +8487,7 @@ let test_spawn_with_cancel_precancelled () =
 let test_cancel_by_id () =
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t = task_spawn(fn _ -> 7)
       task_cancel_by_id(t)
       task_await(t)
@@ -8504,7 +8504,7 @@ let test_task_race_single () =
   let task_decl = load_stdlib_file_for_test "task.march" in
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t = task_spawn(fn _ -> 100)
       Task.race([t])
     end
@@ -8518,7 +8518,7 @@ let test_task_race_cancels_losers () =
   let task_decl = load_stdlib_file_for_test "task.march" in
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t1 = task_spawn(fn _ -> 1)
       let t2 = task_spawn(fn _ -> 2)
       Task.race([t1, t2])
@@ -8545,7 +8545,7 @@ let test_task_all_settled () =
   let list_decl = load_stdlib_file_for_test "list.march" in
   let src = {|mod Test do
   needs IO.Spawn
-    fn main(_cap_spawn : Cap(IO.Spawn)) do
+    fn main() do
       let t1 = task_spawn(fn _ -> 10)
       let t2 = task_spawn(fn _ -> 20)
       task_cancel_by_id(t2)
@@ -11239,6 +11239,7 @@ let test_compiled_entry_self_qual_extern_nested_parity () =
     ~name:"march_entry_self_qual_extern_nested"
     ~src:"mod Foo do\n\
     \  needs IO.Console\n\
+    \  needs IO.Foreign\n\
          \  mod Bar do\n\
          \    needs IO.Foreign\n\
          \    needs IO.FileSystem\n\
