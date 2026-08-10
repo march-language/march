@@ -1,0 +1,19 @@
+-- Isolates the cost TRMC targets: traversal count in list producers.
+-- Threads the list so each pass sees a unique value (FBIP reuse applies).
+mod ListProducers do
+  needs IO.Console
+
+  fn step(xs : List(Int)) : List(Int) do
+    List.map(xs, fn x -> x + 1)
+  end
+
+  fn repeat_n(xs : List(Int), k : Int) : List(Int) do
+    if k <= 0 do xs else repeat_n(step(xs), k - 1) end
+  end
+
+  fn main() do
+    let xs = List.range(1, 20000)
+    let ys = repeat_n(xs, 2000)
+    println(List.sum_int(ys))
+  end
+end
