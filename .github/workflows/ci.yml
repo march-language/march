@@ -330,7 +330,7 @@ jobs:
 
   sanitize-gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -346,6 +346,19 @@ jobs:
           dune build bin/main.exe
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
+
+      - name: Golden corpus AddressSanitizer gate — TRMC enabled
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            MARCH_TRMC=1 ./specs/lang/golden/sanitize.sh
+
+      - name: Test suite with TRMC enabled
+        timeout-minutes: 20
+        run: |
+          eval $(opam env)
+          MARCH_TRMC=1 ./scripts/run-tests.sh
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and all 8 property-oracle shards below each used to
