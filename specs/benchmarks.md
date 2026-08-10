@@ -339,10 +339,27 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 | FBIP reuse | Each pass sees a uniquely-owned list, so `EReuse` still applies independent of TRMC |
 | Recursive driver | `repeat_n` is itself tail-recursive; the cost under test is entirely inside `step`/`List.map` |
 
-**Baseline (2026-08-10, compiled `--opt 2`, TRMC currently gated behind `MARCH_TRMC=1` and off by default):**
-see `.superpowers/sdd/2026-08-10-trmc-on-by-default/task-2-report.md` for the full raw
-timings (3 runs; run 1 discarded as ~25% warmup). This is the number Task 8's
-before/after TRMC-default comparison must beat.
+**Baseline (2026-08-10, macOS/arm64 shared/contended dev machine, compiled
+`--compile --opt 2`, TRMC off — `MARCH_TRMC` unset, which is the default):**
+3 runs of the compiled binary, run 1 discarded as ~25% warmup:
+
+| run | real | user | sys |
+|---|---|---|---|
+| 1 (warmup, discarded) | 0.96s | 0.64s | 0.05s |
+| 2 | 0.77s | 0.64s | 0.04s |
+| 3 | 0.86s | 0.64s | 0.04s |
+
+**Usable baseline: real ≈ 0.77-0.86s, user ≈ 0.64s (runs 2-3).** Compare on
+`user` CPU time, not `real` — on a contended machine `real` wall-clock time
+picks up scheduler noise (this file's own tree_transform/list_ops/binary_trees
+sweep saw `real` vary 2x run-to-run while `user` stayed flat), so `user` is
+the number Task 8's before/after comparison must beat. Measured on a
+different machine class, these absolute numbers do not carry over — re-measure
+before comparing. Full raw tables (including the TRMC on/off sweep over
+`tree_transform`/`list_ops`/`binary_trees`) are archived in
+`.superpowers/sdd/2026-08-10-trmc-on-by-default/task-2-report.md`, which is a
+workspace-local (git-ignored) file kept for extra detail only — the numbers
+above are the durable, version-controlled record.
 
 ---
 
