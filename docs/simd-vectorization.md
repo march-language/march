@@ -83,10 +83,11 @@ pipeline.
 `map_f32`/`map2_f32`/`sum_f32` get the identical inline-loop vectorization
 treatment described above for `map_float`/`map2_float`/`sum_float` —
 confirmed via `-emit-llvm` to compile to real `<4 x float>` NEON vector
-instructions, not just scalar unrolling. `fold_i32`/`fold_u8`/`fold_f32` are
-excluded from the compiled path for the same reason `fold_int`/`fold_float`
-are (see Known limitations below) — they'll gain compiled support together
-once that linkage gap closes.
+instructions, not just scalar unrolling. `fold_i32`/`fold_u8`/`fold_f32` do
+not exist yet at all (interpreted or compiled) — deliberately scoped out,
+since giving them a compiled implementation would mean solving the same
+linkage problem that blocks `fold_int`/`fold_float` today (see Known
+limitations below); they'll be added once that gap closes.
 
 Same-box, same-build f32-vs-f64 comparison at N=5M (median of 6 samples,
 two opposite orderings to cancel first-position warmup bias — see
@@ -154,8 +155,8 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
 - **`fold_int` / `fold_float` have no compiled implementation yet** — calling
   either from a `--compile` build fails to link. Use `sum`/`map` or a manual
   index loop until this lands. The narrow-width equivalents
-  (`fold_f32`/`fold_i32`/`fold_u8`) share the same gap and will gain compiled
-  support at the same time.
+  (`fold_f32`/`fold_i32`/`fold_u8`) don't exist at all yet — interpreted or
+  compiled — and will be added once this linkage gap closes.
 - **`DataFrame`**: `Sum`/`Mean` aggregation and `col_add_col` (column-column
   arithmetic, via `map2_int`/`map2_float`) use the vectorized `NativeArray`
   primitives above under the hood. `Min`/`Max`/`Std`/`Variance`/`Median`

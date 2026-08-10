@@ -700,23 +700,30 @@ type nmap_width = {
   nw_boundary_float : bool;
 }
 
+(** [None] for anything other than the five known width prefixes — the
+    caller must treat that as "not one of our synthetic inline names" and
+    fall through to the general EApp arm, NOT crash the compiler. This is
+    total by construction: [decode_nmap_inline_name] recognizes the
+    synthetic-name SHAPE only (prefix/suffix pattern), so a user-defined
+    function that happens to match that shape (e.g. a hand-written
+    [__my_map_inline]) can reach here with an unknown prefix. *)
 let nmap_width_of_prefix = function
-  | "native_int_arr"   -> { nw_len_fn = "native_int_arr_length";
-                            nw_alloc_fn = "native_int_arr_alloc_raw";
-                            nw_mem_ty = "i64"; nw_elem_size = 8; nw_boundary_float = false }
-  | "native_float_arr" -> { nw_len_fn = "native_float_arr_length";
-                            nw_alloc_fn = "native_float_arr_alloc_raw";
-                            nw_mem_ty = "double"; nw_elem_size = 8; nw_boundary_float = true }
-  | "native_f32_arr"   -> { nw_len_fn = "native_f32_arr_length";
-                            nw_alloc_fn = "native_f32_arr_alloc_raw";
-                            nw_mem_ty = "float"; nw_elem_size = 4; nw_boundary_float = true }
-  | "native_i32_arr"   -> { nw_len_fn = "native_i32_arr_length";
-                            nw_alloc_fn = "native_i32_arr_alloc_raw";
-                            nw_mem_ty = "i32"; nw_elem_size = 4; nw_boundary_float = false }
-  | "native_u8_arr"    -> { nw_len_fn = "native_u8_arr_length";
-                            nw_alloc_fn = "native_u8_arr_alloc_raw";
-                            nw_mem_ty = "i8"; nw_elem_size = 1; nw_boundary_float = false }
-  | p -> failwith ("nmap_width_of_prefix: unknown width prefix " ^ p)
+  | "native_int_arr"   -> Some { nw_len_fn = "native_int_arr_length";
+                                  nw_alloc_fn = "native_int_arr_alloc_raw";
+                                  nw_mem_ty = "i64"; nw_elem_size = 8; nw_boundary_float = false }
+  | "native_float_arr" -> Some { nw_len_fn = "native_float_arr_length";
+                                  nw_alloc_fn = "native_float_arr_alloc_raw";
+                                  nw_mem_ty = "double"; nw_elem_size = 8; nw_boundary_float = true }
+  | "native_f32_arr"   -> Some { nw_len_fn = "native_f32_arr_length";
+                                  nw_alloc_fn = "native_f32_arr_alloc_raw";
+                                  nw_mem_ty = "float"; nw_elem_size = 4; nw_boundary_float = true }
+  | "native_i32_arr"   -> Some { nw_len_fn = "native_i32_arr_length";
+                                  nw_alloc_fn = "native_i32_arr_alloc_raw";
+                                  nw_mem_ty = "i32"; nw_elem_size = 4; nw_boundary_float = false }
+  | "native_u8_arr"    -> Some { nw_len_fn = "native_u8_arr_length";
+                                  nw_alloc_fn = "native_u8_arr_alloc_raw";
+                                  nw_mem_ty = "i8"; nw_elem_size = 1; nw_boundary_float = false }
+  | _ -> None
 
 (** Widen a just-loaded memory-typed value [v] up to [width]'s callback
     boundary type (`i64` for the int-shaped widths, `double` for the
@@ -782,6 +789,22 @@ let decode_nmap_inline_name (name : string) : (string * bool * bool) option =
     if has_suffix "_map2_inline" rest then Some (strip_suffix "_map2_inline" rest, true, unboxed)
     else if has_suffix "_map_inline" rest then Some (strip_suffix "_map_inline" rest, false, unboxed)
     else None
+
+(** Combines [decode_nmap_inline_name] (name-SHAPE recognition) with
+    [nmap_width_of_prefix] (prefix-is-a-known-width lookup) into one total
+    function: [None] unless BOTH the name shape matches AND the decoded
+    prefix is one of the five known widths. The dispatch arms below use
+    this (not [decode_nmap_inline_name] alone) as their [when] guard, so a
+    name that merely LOOKS like a synthetic inline name but carries an
+    unrecognized width prefix falls through to the general EApp arm instead
+    of reaching [nmap_width_of_prefix] partial-match failure. *)
+let decode_nmap_inline_call (name : string) : (nmap_width * bool * bool) option =
+  match decode_nmap_inline_name name with
+  | None -> None
+  | Some (prefix, is_map2, unboxed) ->
+    (match nmap_width_of_prefix prefix with
+     | None -> None
+     | Some width -> Some (width, is_map2, unboxed))
 
 (** P10 Phase 2/2c — shared codegen for the NativeArray map inline loop.
     Emits: length -> uninitialized alloc -> for-loop (load elem, tag/box to
@@ -2660,9 +2683,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      guard matches any name [Native_map_inline.inline_name_of] can produce;
      anything else falls through to the general EApp arm below. *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v])
-    when (match decode_nmap_inline_name f.Tir.v_name with Some (_, false, _) -> true | _ -> false) ->
-    let (prefix, _, unboxed) = Option.get (decode_nmap_inline_name f.Tir.v_name) in
-    let width = nmap_width_of_prefix prefix in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, false, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
     emit_native_map_inline_loop ctx ~width ~unboxed ~arr_atom ~apply_name ~clo_reg:"null"
 
@@ -2681,9 +2703,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      one hoisted load of `f` plus a per-element fadd, same vectorization
      story as Phase 2's non-capturing case. *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v; clo_atom])
-    when (match decode_nmap_inline_name f.Tir.v_name with Some (_, false, _) -> true | _ -> false) ->
-    let (prefix, _, unboxed) = Option.get (decode_nmap_inline_name f.Tir.v_name) in
-    let width = nmap_width_of_prefix prefix in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, false, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
@@ -2695,17 +2716,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      names and two leading array atoms instead of one. See
      [emit_native_map2_inline_loop]. *)
   | Tir.EApp (f, [arr1_atom; arr2_atom; Tir.AVar apply_v])
-    when (match decode_nmap_inline_name f.Tir.v_name with Some (_, true, _) -> true | _ -> false) ->
-    let (prefix, _, unboxed) = Option.get (decode_nmap_inline_name f.Tir.v_name) in
-    let width = nmap_width_of_prefix prefix in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, true, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
     emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg:"null"
 
   (* ── Native array map2 inline loop, capturing closure ──────────────── *)
   | Tir.EApp (f, [arr1_atom; arr2_atom; Tir.AVar apply_v; clo_atom])
-    when (match decode_nmap_inline_name f.Tir.v_name with Some (_, true, _) -> true | _ -> false) ->
-    let (prefix, _, unboxed) = Option.get (decode_nmap_inline_name f.Tir.v_name) in
-    let width = nmap_width_of_prefix prefix in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, true, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in

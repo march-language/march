@@ -344,7 +344,7 @@ mod NativeArray do
 
   -- Conversions
 
-  doc "Widen a NativeFloatArr to NativeF32Arr, rounding each element to binary32 (nearest-even). O(n)."
+  doc "Narrow a NativeFloatArr to a NativeF32Arr, rounding each element to binary32 (nearest-even). O(n)."
   fn float_to_f32_arr(arr) do
     native_float_to_f32_arr(arr)
   end

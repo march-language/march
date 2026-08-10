@@ -21,12 +21,13 @@ API, plus inline-loop vectorization for the compiled path.
   `length`, `get`, `set`, `sum`, `map`, `map2`, `from_list`, `to_list`, plus
   8 conversions between the five element types (e.g.
   `NativeArray.int_to_u8_arr`, `f32_to_float_arr`). `fold_f32`/`fold_i32`/
-  `fold_u8` were **excluded from the compiled path** — deliberately, not an
-  oversight — because the existing `fold_int`/`fold_float` compiled linkage
-  is itself unimplemented (see `docs/simd-vectorization.md`'s Known
-  limitations); the narrow-width folds inherit the identical gap and will
-  land together with the fix for the existing two, rather than duplicating
-  a linkage strategy that doesn't exist yet.
+  `fold_u8` were **not implemented at all, interpreted or compiled** —
+  deliberately, not an oversight — because the existing `fold_int`/
+  `fold_float` compiled linkage is itself unimplemented (see
+  `docs/simd-vectorization.md`'s Known limitations); adding narrow-width
+  folds now would mean solving that linkage problem twice, so they'll land
+  together with the fix for the existing two rather than duplicating a
+  strategy that doesn't exist yet.
 - **Task 4** — inline-loop vectorization for the new widths, matching the
   existing `map_float`/`map2_float`/`sum_float` treatment: a
   non-capturing/single-capture callback with a concrete signature gets
@@ -76,13 +77,13 @@ Plus 8 conversions crossing between the five element types (e.g.
 
 ## Fold exclusion
 
-`fold_i32`/`fold_u8`/`fold_f32` exist only on the interpreter path. Calling
-any `fold_*` variant (existing or narrow) from a `--compile` build fails to
-link — this predates the narrow-width work and applies uniformly; the narrow
-widths were not given a bespoke compiled fold implementation because that
-would mean solving the same linkage problem twice. Once `fold_int`/
-`fold_float`'s compiled linkage gap closes, the narrow variants should follow
-the same fix rather than being revisited independently.
+`fold_i32`/`fold_u8`/`fold_f32` do not exist at all — neither interpreted nor
+compiled. Calling `fold_int`/`fold_float` (the pre-existing widths) from a
+`--compile` build fails to link — this predates the narrow-width work; the
+narrow widths were not given a fold implementation at all because adding one
+now would mean solving the same linkage problem twice. Once `fold_int`/
+`fold_float`'s compiled linkage gap closes, the narrow variants should be
+added following the same fix rather than being implemented independently.
 
 ## Verification
 

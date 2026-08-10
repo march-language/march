@@ -58,5 +58,12 @@ mod Main do
 
     let cc = NativeArray.from_list_i32([3])
     println(NativeArray.to_list_float(NativeArray.f32_to_float_arr(NativeArray.i32_to_f32_arr(cc))))
+
+    -- i32_to_int_arr / u8_to_int_arr round-trips
+    let dd = NativeArray.from_list_i32([-7, 2000000000])
+    println(NativeArray.to_list_int(NativeArray.i32_to_int_arr(dd)))
+
+    let ee = NativeArray.from_list_int([300, -1])
+    println(NativeArray.to_list_int(NativeArray.u8_to_int_arr(NativeArray.int_to_u8_arr(ee))))
   end
 end

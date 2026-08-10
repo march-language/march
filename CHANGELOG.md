@@ -23,8 +23,9 @@ git log is authoritative for exact commits.
   (confirmed `<4 x float>` NEON codegen); halving the element width to f32
   measured ~2.0-2.4x faster than f64 at N=5M (sum 0.49ms vs 1.19ms, map
   2.27ms vs 4.54ms, map2 2.67ms vs 6.40ms; see `bench/RESULTS.md`).
-  `fold_i32`/`fold_u8`/`fold_f32` are not yet available compiled, the same
-  gap as the existing `fold_int`/`fold_float`.
+  `fold_i32`/`fold_u8`/`fold_f32` do not exist yet (interpreted or compiled)
+  — they'll be added once the existing `fold_int`/`fold_float` compiled-
+  linkage gap closes.
 
 ### Changed
 
