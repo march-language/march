@@ -10,6 +10,9 @@ file's own functions. Verified to report `IO.FileRead` for a module that declare
 warning-only gap). Notarizing the *declared* set instead would manufacture a false
 `registry-MISMATCH` against that module's own honest binary.
 
+**Investigated further 2026-08-10** — see `specs/2026-08-10-cap-tier5-investigation.md`. The client-side `cap_set_of_project` item below is ALREADY DONE: `Cap_package.of_package` (forge/lib/cap_package.ml) does exactly this, correctly (verified: it is what's under the "Measured 2026-08-03" note below), just not wired into `cmd_publish.ml` yet — that wiring is a half-day of plumbing once forgepm work starts, not a design problem. Also: the file reference below
+(`forge/tasks/registry.march`) is stale — it's `forge/tasks/forge_registry.march` today.
+
 **Blocked on the registry server, which lives in a different repo (forgepm).**
 `forge publish` does not build a JSON payload in-process: `Registry_client.run_action`
 compiles and runs an embedded March client (`forge/tasks/registry.march`) that speaks

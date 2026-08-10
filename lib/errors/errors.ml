@@ -62,17 +62,17 @@ let warning ctx ~span message =
   report ctx
     { severity = Warning; span; message; labels = []; notes = []; code = None; fix = None }
 
-let hint ctx ~span message =
+let hint ctx ~span ?code message =
   report ctx
-    { severity = Hint; span; message; labels = []; notes = []; code = None; fix = None }
+    { severity = Hint; span; message; labels = []; notes = []; code; fix = None }
 
 let warning_with_code ctx ~span ~code message =
   report ctx
     { severity = Warning; span; message; labels = []; notes = []; code = Some code; fix = None }
 
-let error_with_fix ctx ~span ~fix message =
+let error_with_fix ctx ~span ?code ~fix message =
   report ctx
-    { severity = Error; span; message; labels = []; notes = []; code = None; fix = Some fix }
+    { severity = Error; span; message; labels = []; notes = []; code; fix = Some fix }
 
 let warning_with_fix ctx ~span ~fix message =
   report ctx

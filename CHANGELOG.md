@@ -81,6 +81,14 @@ git log is authoritative for exact commits.
   capability set (`march caps`, feeding `forge audit --inferred` and the
   `--cap-sandbox` profile) had the identical bug in the opposite direction —
   silently over-reporting a capability never used — also fixed.
+- **A missing-capability violation no longer prints two overlapping
+  diagnostics at the same source location.** Both the typechecker's own
+  `needs`-coverage check and the separate capability-inference pass anchor
+  at the exact call site and were repeating each other's "add `needs X`"
+  sentence almost verbatim. The hint now shows only what the error doesn't
+  already say — the call chain from `main` down to the offending call — and
+  is omitted entirely when there is no chain to show (a library with no
+  `main`, or a violation already inside `main`).
 
 - **A natively compiled program opening a nonexistent file no longer misreads
   the error value's representation.** `file_open`'s `Err` case is typed
@@ -268,6 +276,17 @@ git log is authoritative for exact commits.
   Sigils without interpolation are unchanged. Nothing is known to break: across
   the compiler, bastion, forgepm, conduit, depot and march_doc there are six
   uses of these sigils, all in the compiler's own tests, and none with a hole.
+
+- **`forge audit`, `forge licenses`, and `forge tree` now find git/registry
+  dependencies that `forge deps` actually installed.** All three reimplemented
+  their own dependency-directory lookup as `<project_root>/.march/cas/deps/<name>`,
+  but `forge deps` installs git and registry dependencies under
+  `$HOME/.march/cas/deps/<name>` — a global, cross-project location. A
+  just-installed git or registry dependency was therefore always reported as
+  "not installed" (`forge audit`), with blank version/license (`forge
+  licenses`), or as a childless leaf (`forge tree`). Path dependencies were
+  unaffected. Fixed by routing all three through the same `Project.dep_root_dir`
+  resolver `forge deps` already uses.
 
 
 ### Changed

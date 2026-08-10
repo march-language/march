@@ -328,6 +328,15 @@ let call_path (g : (string, string list) Hashtbl.t) ~(entry : string)
     !result
   end
 
+(** The fixed separator between a hint's "add `needs X`" prefix and its
+    call-chain suffix. Exposed (rather than left as an inline [Printf.sprintf]
+    literal) so a presentation-layer consumer can split a hint's message on
+    it — bin/main.ml uses this to show only the chain when the same missing
+    capability is already reported by the typechecker's Check 1b at the
+    identical span, instead of re-deriving the split by parsing prose it
+    doesn't own. *)
+let chain_marker = "\nreached from `main`: "
+
 (* ── Per-module check ────────────────────────────────────────────────────── *)
 
 (** Walk [decls] belonging to module [mod_name], emitting a hint for every
@@ -358,7 +367,7 @@ let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
       (match call_path g ~entry:"main" ~target:enclosing with
        | None | Some [ _ ] -> ""
        | Some path ->
-         Printf.sprintf "\nreached from `main`: %s" (String.concat " → " path))
+         chain_marker ^ String.concat " → " path)
   in
   let emit_if_missing enclosing call_name call_span =
     match cap_of_call call_name with
@@ -368,7 +377,14 @@ let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
       else if Hashtbl.mem hinted cap then ()
       else begin
         Hashtbl.replace hinted cap ();
-        Err.hint errctx ~span:call_span
+        (* [~code] tags this hint with the exact missing capability so a
+           presentation-layer consumer (bin/main.ml) can recognise when the
+           typechecker's Check 1b already reported the same fact at the same
+           span — without either pass depending on the other. This pass's
+           own contract (full text, unconditional) is untouched; see the
+           module header and
+           specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
+        Err.hint errctx ~span:call_span ~code:("cap_needs:" ^ cap)
           (Printf.sprintf
              "call to `%s` requires `needs %s` — add `needs %s` to module `%s`%s"
              call_name cap cap mod_name (chain_note enclosing))
