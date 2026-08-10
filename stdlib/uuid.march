@@ -284,23 +284,23 @@ mod UUID do
           Cons(h, t) -> Cons(h, list_append(t, ys))
           end
         end
-        let input = Bytes(list_append(ns_bytes, name_to_bytes(name)))
+        let input = Bytes.from_list(list_append(ns_bytes, name_to_bytes(name)))
         -- SHA-1 hash of namespace || name
         let hash_bytes = sha1_bytes(input)
-        match hash_bytes do
-        Bytes(hash_list) ->
-          -- Take first 16 bytes, set version=5 and variant bits
-          fn take16(lst, i, acc) do
-            if i >= 16 do rev_list(acc)
-            else match lst do
-              Nil -> rev_list(acc)
-              Cons(b, rest) -> take16(rest, i + 1, Cons(b, acc))
-              end end
-          end
-          let sixteen = take16(hash_list, 0, Nil)
-          let versioned = set_version_variant(sixteen, 5)
-          UUID(bytes_to_uuid_str(versioned))
+        -- Bytes.to_list, not a `Bytes(hash_list)` destructure: the payload is
+        -- a String buffer now, not a cons spine.
+        let hash_list = Bytes.to_list(hash_bytes)
+        -- Take first 16 bytes, set version=5 and variant bits
+        fn take16(lst, i, acc) do
+          if i >= 16 do rev_list(acc)
+          else match lst do
+            Nil -> rev_list(acc)
+            Cons(b, rest) -> take16(rest, i + 1, Cons(b, acc))
+            end end
         end
+        let sixteen = take16(hash_list, 0, Nil)
+        let versioned = set_version_variant(sixteen, 5)
+        UUID(bytes_to_uuid_str(versioned))
       end
     end
   end

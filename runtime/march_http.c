@@ -118,31 +118,18 @@ static void *make_cons(void *head, void *tail) {
     return c;
 }
 
-/* Build a March List(Int) Cons node: tag=1, field0=int (raw i64), field1=tail.
- * Monomorphized List(Int) stores ints raw (no low-bit tag), matching the
- * layout produced by Bytes.from_list on the March side. */
-static void *make_int_cons(int64_t n, void *tail) {
-    void *c = march_alloc(16 + 16);
-    *(int32_t *)((char *)c + 8)  = 1;          /* tag = 1 (Cons) */
-    /* Pre-tag the Int payload with (n<<1)|1: under the uniform low-bit
-     * integer tagging scheme, the compiler emits `ashr #1` when extracting
-     * an Int field, so a raw value would be halved on untag. */
-    *(int64_t *)((char *)c + 16) = (n << 1) | 1;
-    *(void **)((char *)c + 24)   = tail;
-    return c;
-}
-
-/* Build a Bytes(List(Int)) wrapper value from raw bytes.  Matches the
- * March stdlib `type Bytes = Bytes(List(Int))` layout: a 24-byte wrapper
- * whose single field at offset 16 points to a List(Int) chain whose
- * Cons nodes carry raw i64 byte values. */
+/* Build a Bytes(String) wrapper value from raw bytes.  Matches the March
+ * stdlib `type Bytes = Bytes(String)` layout: a 24-byte wrapper whose single
+ * field at offset 16 points to a march_string {rc,tag,pad,len,data[]}.
+ *
+ * This replaced a per-byte cons-cell builder (~32 bytes of heap per byte of
+ * payload, plus a full spine walk on every Bytes.get).  See
+ * specs/plans/2026-08-10-array-backed-bytes-design.md. */
 static void *make_bytes_from_raw(const uint8_t *data, int64_t len) {
-    void *list = march_alloc(16); /* Nil: tag=0 */
-    for (int64_t i = len - 1; i >= 0; i--)
-        list = make_int_cons((int64_t)data[i], list);
+    void *s = march_string_lit((const char *)data, len);
     void *b = march_alloc(16 + 8);
     /* tag stays 0 = Bytes ctor */
-    *(void **)((char *)b + 16) = list;
+    *(void **)((char *)b + 16) = s;
     return b;
 }
 
@@ -492,7 +479,7 @@ void *march_tcp_recv_chunk(int64_t fd_arg, int64_t max_bytes) {
  * Reads exactly n bytes from the socket, blocking until all are received. */
 void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     if (n <= 0) {
-        /* Ok(Bytes(Nil)) — empty Bytes, not empty String. */
+        /* Ok(Bytes("")) — an empty Bytes wrapper, not a bare empty String. */
         return make_ok(make_bytes_from_raw(NULL, 0));
     }
     uint8_t *buf = (uint8_t *)malloc((size_t)n);
@@ -512,9 +499,9 @@ void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     }
     march_unblock_preempt(&saved);
     /* The March-side declaration is `tcp_recv_exact : Int -> Int -> Result(Bytes, String)`,
-     * where `type Bytes = Bytes(List(Int))`.  Return a proper Bytes wrapper
-     * (NOT a march_string) so that `match Ok(header) -> Bytes.get(header, 0)`
-     * reads the List(Int) chain at offset 16 rather than raw UTF-8 bytes. */
+     * where `type Bytes = Bytes(String)`.  Return the Bytes WRAPPER, not a bare
+     * march_string: `match Ok(header) -> Bytes.get(header, 0)` destructures the
+     * constructor first and reads the payload at offset 16. */
     void *b = make_bytes_from_raw(buf, n);
     free(buf);
     return make_ok(b);
