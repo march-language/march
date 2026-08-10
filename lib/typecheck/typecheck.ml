@@ -9157,7 +9157,12 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | None -> false
     in
     if not covered && not self_declared then
-      Err.error_with_fix env.errors ~span:sp
+      (* [~code] tags this diagnostic with the exact missing capability so
+         that a presentation-layer consumer (bin/main.ml) can recognise when
+         [Cap_infer]'s call-site hint at the SAME span is reporting the same
+         fact, without either pass having to know about the other — see
+         specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
+      Err.error_with_fix env.errors ~span:sp ~code:("cap_needs:" ^ cap_path)
         ~fix:(Err.FInsert {
           after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
           text = "  needs " ^ cap_path })
