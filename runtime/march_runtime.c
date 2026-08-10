@@ -5165,18 +5165,34 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
     return result;
 }
 
-/* ── Native int/float arrays ────────────────────────────────────────── */
-/* Layout: march_hdr(16) + int64_t len(8) + elements(len*8)             */
-#define NATIVE_ARR_HDR 24
+/* ── Native int/float arrays ──────────────────────────────────────────── */
+/* Layout (ALL element widths share it — phase C's vector loads depend on
+ * elem_kind and the 16-byte data alignment):
+ *   march_hdr(16) + int64_t len(8) + uint8_t elem_kind(1) + pad(7)
+ *   + elements(len * elem_size), data 16-byte aligned.
+ * elem_kind: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8. */
+#define NATIVE_ARR_HDR 32
+#define NATIVE_ELEM_I64 0
+#define NATIVE_ELEM_F64 1
+#define NATIVE_ELEM_F32 2
+#define NATIVE_ELEM_I32 3
+#define NATIVE_ELEM_U8  4
 
-static void *native_arr_alloc(int64_t len) {
+static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     if (len < 0) { fputs("march: native array: negative length\n", stderr); exit(1); }
     int64_t body;
-    if (__builtin_mul_overflow(len, (int64_t)8, &body)) {
+    if (__builtin_mul_overflow(len, elem_size, &body)) {
         fputs("march: native array: array too large\n", stderr); exit(1);
     }
     void *arr = march_alloc(NATIVE_ARR_HDR + body);
+    /* march_alloc returns 16-aligned memory and NATIVE_ARR_HDR is a multiple
+     * of 16, so data is unconditionally 16-aligned — assert it so a future
+     * allocator change fails loudly instead of faulting a vector load. */
+    if ((((uintptr_t)arr + NATIVE_ARR_HDR) & 15) != 0) {
+        fputs("march: native array: misaligned allocation\n", stderr); exit(1);
+    }
     *(int64_t *)((char *)arr + 16) = len;
+    *(uint8_t *)((char *)arr + 24) = kind;
     return arr;
 }
 
@@ -5235,11 +5251,11 @@ static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
  * every slot is written by the loop before any read, so leaving them
  * uninitialized (unlike native_int_arr_make/native_float_arr_make, which
  * fill with a default) is safe and avoids a redundant full pass. */
-void *native_int_arr_alloc_raw(int64_t len) { return native_arr_alloc(len); }
-void *native_float_arr_alloc_raw(int64_t len) { return native_arr_alloc(len); }
+void *native_int_arr_alloc_raw(int64_t len) { return native_arr_alloc(len, 8, NATIVE_ELEM_I64); }
+void *native_float_arr_alloc_raw(int64_t len) { return native_arr_alloc(len, 8, NATIVE_ELEM_F64); }
 
 void *native_int_arr_make(int64_t len, int64_t def) {
-    void *arr = native_arr_alloc(len);
+    void *arr = native_arr_alloc(len, 8, NATIVE_ELEM_I64);
     for (int64_t i = 0; i < len; i++)
         *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = def;
     return arr;
@@ -5280,7 +5296,7 @@ void *native_int_arr_set(void *arr, int64_t i, int64_t val) {
         return arr;
     }
     int64_t len = native_int_arr_length(arr);
-    void *new_arr = native_arr_alloc(len);
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_I64);
     memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
     *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = val;
     march_decrc(arr);
@@ -5339,7 +5355,7 @@ double native_int_arr_sumsq_dev(void *arr, double mean) {
  * reproduced by test/native/native_arr_map_inline_capture.march. */
 void *native_int_arr_map(void *arr, void *f) {
     int64_t len = native_int_arr_length(arr);
-    void *new_arr = native_arr_alloc(len);
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_I64);
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
         march_incrc(f);
@@ -5361,7 +5377,7 @@ void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
     if (len != native_int_arr_length(arr2)) {
         fputs("march: native_int_arr_map2: array length mismatch\n", stderr); exit(1);
     }
-    void *new_arr = native_arr_alloc(len);
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_I64);
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr1 + NATIVE_ARR_HDR + i * 8);
         int64_t y = *(int64_t *)((char *)arr2 + NATIVE_ARR_HDR + i * 8);
@@ -5391,7 +5407,7 @@ void native_arr_map2_check_len(int64_t len1, int64_t len2) {
  * native_int_arr_sum already does for the reduction case. */
 void *native_int_arr_to_float_arr(void *arr) {
     int64_t len = native_int_arr_length(arr);
-    void *new_arr = native_arr_alloc(len);
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
         double d = (double)x;
@@ -5404,7 +5420,7 @@ void *native_int_arr_from_list(void *lst) {
     int64_t n = 0;
     void *tmp = lst;
     while (*(int32_t *)((char *)tmp + 8) == 1) { n++; tmp = *(void **)((char *)tmp + 24); }
-    void *arr = native_arr_alloc(n);
+    void *arr = native_arr_alloc(n, 8, NATIVE_ELEM_I64);
     void *cur = lst;
     for (int64_t i = 0; i < n; i++) {
         /* List Cons cells store Int elements as tagged ptrs: (n<<1)|1. Untag. */
@@ -5431,7 +5447,7 @@ void *native_int_arr_to_list(void *arr) {
 }
 
 void *native_float_arr_make(int64_t len, double def) {
-    void *arr = native_arr_alloc(len);
+    void *arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
     for (int64_t i = 0; i < len; i++)
         memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &def, 8);
     return arr;
@@ -5454,7 +5470,7 @@ void *native_float_arr_set(void *arr, int64_t i, double val) {
         return arr;
     }
     int64_t len = native_float_arr_length(arr);
-    void *new_arr = native_arr_alloc(len);
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
     memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
     memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &val, 8);
     march_decrc(arr);
@@ -5515,7 +5531,7 @@ double native_float_arr_sumsq_dev(void *arr, double mean) {
 /* RC contract identical to native_int_arr_map above. */
 void *native_float_arr_map(void *arr, void *f) {
     int64_t len = native_float_arr_length(arr);
-    void *new_arr = native_arr_alloc(len);
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
     for (int64_t i = 0; i < len; i++) {
         double x; memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
         march_incrc(f);
@@ -5536,7 +5552,7 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
     if (len != native_float_arr_length(arr2)) {
         fputs("march: native_float_arr_map2: array length mismatch\n", stderr); exit(1);
     }
-    void *new_arr = native_arr_alloc(len);
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
     for (int64_t i = 0; i < len; i++) {
         double x, y;
         memcpy(&x, (char *)arr1 + NATIVE_ARR_HDR + i * 8, 8);
@@ -5553,7 +5569,7 @@ void *native_float_arr_from_list(void *lst) {
     int64_t n = 0;
     void *tmp = lst;
     while (*(int32_t *)((char *)tmp + 8) == 1) { n++; tmp = *(void **)((char *)tmp + 24); }
-    void *arr = native_arr_alloc(n);
+    void *arr = native_arr_alloc(n, 8, NATIVE_ELEM_F64);
     void *cur = lst;
     for (int64_t i = 0; i < n; i++) {
         /* List(Float) elements are BOXED (see native_float_arr_to_list): the
@@ -5610,7 +5626,7 @@ void *native_int_arr_filter_mask(void *arr, void *mask) {
         if (raw_bool >> 1)
             ((int64_t *)tmp)[count++] = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
     }
-    void *out = native_arr_alloc(count);
+    void *out = native_arr_alloc(count, 8, NATIVE_ELEM_I64);
     memcpy((char *)out + NATIVE_ARR_HDR, tmp, (size_t)(count * 8));
     free(tmp);
     return out;
@@ -5635,7 +5651,7 @@ void *native_float_arr_filter_mask(void *arr, void *mask) {
             count++;
         }
     }
-    void *out = native_arr_alloc(count);
+    void *out = native_arr_alloc(count, 8, NATIVE_ELEM_F64);
     memcpy((char *)out + NATIVE_ARR_HDR, tmp, (size_t)(count * 8));
     free(tmp);
     return out;

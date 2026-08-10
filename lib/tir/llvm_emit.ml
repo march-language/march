@@ -745,12 +745,12 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
   emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
 
   emit_label ctx body_lbl;
-  (* Both source and dest arrays share the same NATIVE_ARR_HDR=24 layout
+  (* Both source and dest arrays share the same NATIVE_ARR_HDR=32 layout
      (march_runtime.c), so one offset serves both GEPs. *)
   let soff = fresh ctx "nmap_soff" in
   emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
   let byte_off = fresh ctx "nmap_off" in
-  emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
   let sptr = fresh ctx "nmap_sptr" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
   let x = fresh ctx "nmap_x" in
@@ -880,12 +880,12 @@ let emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~a
 
   emit_label ctx body_lbl;
   (* Both source arrays and the dest array share the same
-     NATIVE_ARR_HDR=24 layout (march_runtime.c), so one offset serves all
+     NATIVE_ARR_HDR=32 layout (march_runtime.c), so one offset serves all
      three GEPs. *)
   let soff = fresh ctx "nmap2_soff" in
   emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
   let byte_off = fresh ctx "nmap2_off" in
-  emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
   let sptr1 = fresh ctx "nmap2_sptr1" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr1 arr1_v byte_off);
   let x = fresh ctx "nmap2_x" in
