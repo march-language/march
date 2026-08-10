@@ -58,7 +58,10 @@ let rec all_atom_vars (e : Tir.expr) : StringSet.t =
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> vars_of_atom a
   | Tir.EReuse (a, _, args) ->
     StringSet.union (vars_of_atom a) (vars_of_atoms args)
-  | Tir.EAllocHole (_, args, _) -> vars_of_atoms args
+  | Tir.EAllocHole (tok, _, args, _) ->
+    StringSet.union
+      (match tok with Some a -> vars_of_atom a | None -> StringSet.empty)
+      (vars_of_atoms args)
   | Tir.ESetField (o, _, v) ->
     StringSet.union (vars_of_atom o) (vars_of_atom v)
 
@@ -229,7 +232,7 @@ let rec escaping_vars (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
      a heap cell, and ESetField stores into one whose lifetime this analysis
      cannot see.  A stack-promoted value written through either would dangle
      once the frame returns, so nothing here may be stack-allocated. *)
-  | Tir.EAllocHole (_, args, _) -> candidate_atoms args
+  | Tir.EAllocHole (_, _, args, _) -> candidate_atoms args
   | Tir.ESetField (o, _, v) ->
     StringSet.union (candidate_atoms [o]) (candidate_atoms [v])
 

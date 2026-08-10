@@ -108,9 +108,13 @@ let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
     live_after
     |> StringSet.union (vars_of_atom a)
     |> StringSet.union (vars_of_atoms atoms)
-  | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms)
-  | Tir.EAllocHole (_, atoms, _) ->
+  | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     StringSet.union live_after (vars_of_atoms atoms)
+  | Tir.EAllocHole (tok, _, atoms, _) ->
+    live_after
+    |> StringSet.union
+         (match tok with Some a -> vars_of_atom a | None -> StringSet.empty)
+    |> StringSet.union (vars_of_atoms atoms)
   (* TRMC hole-fill: reads both the target object and the stored value. *)
   | Tir.ESetField (o, _, v) ->
     live_after
@@ -158,8 +162,9 @@ let rec name_free_in (name : string) (e : Tir.expr) : bool =
     || Option.fold ~none:false ~some:(name_free_in name) default
   | Tir.ESeq (e1, e2)                        -> name_free_in name e1 || name_free_in name e2
   | Tir.ETuple atoms | Tir.EAlloc (_, atoms)
-  | Tir.EStackAlloc (_, atoms)
-  | Tir.EAllocHole (_, atoms, _)             -> atoms_use atoms
+  | Tir.EStackAlloc (_, atoms)               -> atoms_use atoms
+  | Tir.EAllocHole (tok, _, atoms, _)        ->
+    (match tok with Some a -> atom_uses a | None -> false) || atoms_use atoms
   | Tir.ESetField (o, _, v)                  -> atom_uses o || atom_uses v
   | Tir.ERecord fields                       -> List.exists (fun (_, a) -> atom_uses a) fields
   | Tir.EField (a, _)                        -> atom_uses a

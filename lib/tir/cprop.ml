@@ -291,8 +291,10 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
   | Tir.EStackAlloc (ty, args) ->
     Tir.EStackAlloc (ty, subst_atoms ~changed env avar args)
 
-  | Tir.EAllocHole (ty, args, hole) ->
-    Tir.EAllocHole (ty, subst_atoms ~changed env avar args, hole)
+    (* The reuse token, like EReuse's, is NOT substituted: it names the exact
+     cell whose storage is taken over. *)
+  | Tir.EAllocHole (tok, ty, args, hole) ->
+    Tir.EAllocHole (tok, ty, subst_atoms ~changed env avar args, hole)
 
   (* The stored VALUE may be substituted like any other operand.  The target
      object may NOT: ESetField mutates it in place, so replacing it with an

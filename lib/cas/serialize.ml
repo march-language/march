@@ -302,10 +302,17 @@ let rec write_expr buf (next : int ref) (scope : (string * int) list) (e : expr)
   (* TRMC.  The hole INDEX is part of the fingerprint: two otherwise identical
      allocations that leave different fields unwritten are different programs,
      so omitting it would let the CAS serve one for the other. *)
-  | EAllocHole (ty, args, hole) ->
+  | EAllocHole (tok, ty, args, hole) ->
     buf_u8 buf 0x53;
     write_ty buf ty;
     buf_u32_le buf hole;
+    (* The reuse token is part of the fingerprint: the same hole allocation
+       with and without a token compiles to different code (in-place reuse vs
+       a fresh cell), so omitting it would let the CAS serve one for the
+       other. *)
+    (match tok with
+     | None -> buf_u8 buf 0x00
+     | Some a -> buf_u8 buf 0x01; write_atom buf scope a);
     buf_u32_le buf (List.length args);
     List.iter (write_atom buf scope) args
   | ESetField (o, i, v) ->

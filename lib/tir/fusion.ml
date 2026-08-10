@@ -130,8 +130,9 @@ let rec use_count (n : string) : Tir.expr -> int = function
     uca n a + List.fold_left (fun s (_, a) -> s + uca n a) 0 fs
   | Tir.EReuse (a, _, atoms) ->
     uca n a + List.fold_left (fun s a -> s + uca n a) 0 atoms
-  | Tir.EAllocHole (_, atoms, _) ->
-    List.fold_left (fun s a -> s + uca n a) 0 atoms
+  | Tir.EAllocHole (tok, _, atoms, _) ->
+    (match tok with Some a -> uca n a | None -> 0)
+    + List.fold_left (fun s a -> s + uca n a) 0 atoms
   | Tir.ESetField (o, _, v)  -> uca n o + uca n v
   | Tir.ESeq (e1, e2)        -> use_count n e1 + use_count n e2
 

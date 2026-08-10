@@ -118,8 +118,10 @@ let rec expr_mentions_any (names : string list) (e : Tir.expr) : bool =
   | Tir.EUpdate (a, fs) ->
     atom_mentions_any names a
     || List.exists (fun (_, av) -> atom_mentions_any names av) fs
-  | Tir.EAlloc (_, xs) | Tir.EStackAlloc (_, xs)
-  | Tir.EAllocHole (_, xs, _) -> atoms_mention_any names xs
+  | Tir.EAlloc (_, xs) | Tir.EStackAlloc (_, xs) -> atoms_mention_any names xs
+  | Tir.EAllocHole (tok, _, xs, _) ->
+    (match tok with Some a -> atom_mentions_any names a | None -> false)
+    || atoms_mention_any names xs
   | Tir.ESetField (o, _, v) ->
     atom_mentions_any names o || atom_mentions_any names v
   | Tir.ESeq (e1, e2) ->
@@ -189,7 +191,8 @@ let rec rename_expr (from_name : string) (to_name : string) (e : Tir.expr)
   | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (ra a)
   | Tir.EFree a -> Tir.EFree (ra a)
   | Tir.EReuse (a, t, xs) -> Tir.EReuse (ra a, t, List.map ra xs)
-  | Tir.EAllocHole (t, xs, hole) -> Tir.EAllocHole (t, List.map ra xs, hole)
+  | Tir.EAllocHole (tok, t, xs, hole) ->
+    Tir.EAllocHole (Option.map ra tok, t, List.map ra xs, hole)
   | Tir.ESetField (o, i, v) -> Tir.ESetField (ra o, i, ra v)
 
 (* ── Core transform ─────────────────────────────────────────────────────── *)

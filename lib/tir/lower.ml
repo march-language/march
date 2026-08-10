@@ -1834,7 +1834,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> atom_uses name a
     | Tir.EReuse (a, _, atoms) ->
       atom_uses name a || List.exists (atom_uses name) atoms
-    | Tir.EAllocHole (_, atoms, _) -> List.exists (atom_uses name) atoms
+    | Tir.EAllocHole (tok, _, atoms, _) ->
+      (match tok with Some a -> atom_uses name a | None -> false)
+      || List.exists (atom_uses name) atoms
     | Tir.ESetField (o, _, v) -> atom_uses name o || atom_uses name v
     | Tir.ESeq (e1, e2) -> fn_body_uses name e1 || fn_body_uses name e2
   and atom_uses name a =

@@ -44,8 +44,9 @@ let rec free_vars : Tir.expr -> StringSet.t = function
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> free_atom a
   | Tir.EReuse (a, _, args)  ->
     List.fold_left (fun s v -> StringSet.union s (free_atom v)) (free_atom a) args
-  | Tir.EAllocHole (_, args, _) ->
-    List.fold_left (fun s v -> StringSet.union s (free_atom v)) StringSet.empty args
+  | Tir.EAllocHole (tok, _, args, _) ->
+    List.fold_left (fun s v -> StringSet.union s (free_atom v))
+      (match tok with Some a -> free_atom a | None -> StringSet.empty) args
   | Tir.ESetField (o, _, v)  -> StringSet.union (free_atom o) (free_atom v)
   | Tir.ESeq (e1, e2)        -> StringSet.union (free_vars e1) (free_vars e2)
 
