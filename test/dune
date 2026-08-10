@@ -4027,6 +4027,57 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nclones boxcalls < native_arr_map_inline_unboxed_llvm_check.out; \
     test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 || { echo \"expected 2 unboxed \\$mapfast\\$ clones with zero boxing calls in their bodies (found clones=$nclones boxcalls=$boxcalls)\" >&2; exit 1; }")))
 
+; Narrow-widths task (2026-08) — extends the P10 inline-loop vectorization
+; machinery above to f32/i32/u8 (Native_map_inline.ml's generalized
+; inline_name_of + Llvm_emit.nmap_width_of_prefix). Same eligibility bar
+; (fresh, single-use lambda) as the legacy int/float widths; exercises
+; map_f32 (unboxed $mapfast$ clone -- f32 is float-boundary, same Stage 4
+; Option B as map_float), map_u8 (boxed int-ABI path, i8 memory type), and
+; map2_i32 (boxed int-ABI path, i32 memory type). Assert correctness (the
+; .expected diff below), that all three inlined (no general-path call
+; remains for any of the three target builtins), and that the f32 unboxed
+; clone's enclosing loop actually loads/stores `float` (not `double`) --
+; i.e. the narrow memory type made it all the way through, not just the
+; boundary type.
+(rule
+ (targets native_arr_narrow_inline native_arr_narrow_inline.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_narrow_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_narrow_inline
+        native/native_arr_narrow_inline.march)
+   (with-stdout-to native_arr_narrow_inline.out
+        (system "./native_arr_narrow_inline")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_narrow_inline.expected native_arr_narrow_inline.out)))
+
+(rule
+ (targets native_arr_narrow_inline_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_narrow_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_narrow_inline.march)
+   (with-stdout-to native_arr_narrow_inline_llvm_check.out
+    (run bash -c
+     "echo \"$(grep -c nmap_pre native/native_arr_narrow_inline.ll) $(grep -c '= call ptr @native_f32_arr_map(ptr\\|= call ptr @native_u8_arr_map(ptr\\|= call ptr @native_i32_arr_map2(ptr' native/native_arr_narrow_inline.ll) $(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_narrow_inline.ll) $(grep -c 'load float' native/native_arr_narrow_inline.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_narrow_inline_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r pre gen mapfast loadfloat < native_arr_narrow_inline_llvm_check.out; \
+    test \"$pre\" -gt 0 -a \"$gen\" -eq 0 -a \"$mapfast\" -ge 1 -a \"$loadfloat\" -ge 1 || \
+    { echo \"expected all 3 narrow-width map/map2 calls inlined (nmap_pre>0), 0 general-path calls, >=1 \\$mapfast\\$ unboxed f32 clone, and >=1 'load float' in the emitted IR (found nmap_pre=$pre general-calls=$gen mapfast=$mapfast loadfloat=$loadfloat)\" >&2; exit 1; }")))
+
 ; map2 (two-array) counterpart of the map inlining/vectorization machinery
 ; above (P10, added 2026-07-27 alongside the map2 primitive itself). Same
 ; eligibility bar, same $mapfast$ unboxed-clone trick for a concrete
