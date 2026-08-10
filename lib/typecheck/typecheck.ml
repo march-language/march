@@ -838,6 +838,31 @@ type env = {
 
       Recorded at exactly the [record_fn_caps] call sites, so a key here is a
       key there. Consumed only by [fn_transitive_capability_closures]. *)
+  fn_row_seeds : (string, March_caps.Cap_rows.seed) Hashtbl.t;
+  (** R1 stage C: per-function ROW seeds, keyed exactly like [fn_refs] and
+      recorded at exactly the [record_fn_refs] call sites.  Where [fn_refs]
+      answers "what does this function reference", a seed answers the two
+      questions a PER-FUNCTION grant needs and a whole-program grant did not:
+      which of its own parameters it invokes (the conditional, effect-
+      polymorphic part of its row) and whether it invokes a value whose
+      creation site cannot be traced (the part no caller can discharge).
+
+      Purely additive: with an empty table [Cap_rows.solve] reproduces the
+      pre-stage-C flat closure exactly, which is why
+      [fn_transitive_capability_closures_tbl] can be its caps projection
+      rather than a second implementation.  See
+      [specs/2026-08-10-r1-stage-c-effect-rows-design.md]. *)
+  fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
+  (** R1 stage C: functions whose signature makes them a DISCHARGE POINT —
+      qualified name → (the concrete capability paths their PARAMETERS grant,
+      the span to report against).  Recorded by [check_module_needs] (which
+      already owns the [cap_qname] convention and already runs for nested
+      modules), consumed once by [check_fn_grants] at the end of
+      [check_module_core], after every module's recording has happened.
+
+      Parameter caps only: a returned [Cap(X)] is not a capability the
+      function was HANDED.  [main] is excluded — [check_main_grant] owns it,
+      and reporting both would double every whole-program violation. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -916,6 +941,8 @@ let make_env errors type_map = {
   cap_closures = Hashtbl.create 64;
   own_cap_closures = Hashtbl.create 64;
   fn_refs = Hashtbl.create 64;
+  fn_row_seeds = Hashtbl.create 64;
+  fn_grant_points = Hashtbl.create 16;
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
@@ -8291,66 +8318,24 @@ let is_migrate_fn_name (fn_name : string) : bool =
     Defined ABOVE [check_module_needs] because that function consumes it —
     Check 4 asks what the functions an importer actually references require,
     rather than what the imported module as a whole requires. *)
+let fn_capability_rows_tbl (env : env)
+  : (string, March_caps.Cap_rows.row) Hashtbl.t =
+  March_caps.Cap_rows.solve ~own_caps:env.own_cap_closures ~refs:env.fn_refs
+    ~seeds:env.fn_row_seeds
+
 let fn_transitive_capability_closures_tbl (env : env)
   : (string, string list) Hashtbl.t =
-  let current : (string, string list) Hashtbl.t = Hashtbl.create 64 in
-  Hashtbl.iter (fun k v -> Hashtbl.replace current k v) env.own_cap_closures;
-  (* Resolve a reference name to a function key.
-
-     Observed key shapes (verified against the existing cap-closure tests and
-     [bin/main.ml]'s [own_caps_of_this_module]): a top-level function of the
-     ENTRY module is keyed BARE ("public_reader") because [check_module_core]
-     passes ~cap_qname_prefix:"" for it, mirroring TIR's unwrapping of the
-     entry module; a nested [DMod]'s function is keyed by its dotted path
-     relative to the entry ("Lib.Sub.f").
-
-     Reference names arrive already DESUGARED: desugar's [qualify_module_refs]
-     rewrites a bare intra-module reference inside a nested [DMod] to the
-     dotted form ("Lib.touch"), and its [EField] arm flattens `A.B.c` into a
-     single dotted [EVar] — while the entry module's own top-level bodies keep
-     bare names. So both spellings occur, and both must resolve: try the
-     owner-module-prefixed form first (bare reference from a nested module),
-     then the raw name (an already-dotted reference, or an entry-level bare
-     one). *)
-  let resolve (owner : string) (r : string) : string option =
-    let qualified =
-      match String.rindex_opt owner '.' with
-      | Some i -> String.sub owner 0 i ^ "." ^ r
-      | None -> r
-    in
-    if Hashtbl.mem current qualified then Some qualified
-    else if Hashtbl.mem current r then Some r
-    else None
-  in
-  let changed = ref true in
-  while !changed do
-    changed := false;
-    Hashtbl.iter (fun fn_qname refs ->
-        let own = Option.value ~default:[] (Hashtbl.find_opt current fn_qname) in
-        let from_refs =
-          List.concat_map (fun r ->
-              match resolve fn_qname r with
-              | None -> []
-              | Some key -> Option.value ~default:[] (Hashtbl.find_opt current key))
-            refs
-        in
-        (* [List.sort_uniq] BEFORE normalize is load-bearing, not tidiness:
-           [Cap_lattice.normalize] drops caps SUBSUMED by another, but its
-           filter skips the [other <> c] case, so it does NOT drop an exact
-           DUPLICATE. Without the dedup, [own @ from_refs] grows by one copy of
-           each already-held cap on every sweep, the value never compares equal
-           to the previous one, and the fixpoint spins forever. Observed as a
-           hang on the very first test case before this was added. *)
-        let merged =
-          March_caps.Cap_lattice.normalize (List.sort_uniq compare (own @ from_refs))
-        in
-        if List.sort compare merged <> List.sort compare own then begin
-          Hashtbl.replace current fn_qname merged;
-          changed := true
-        end)
-      env.fn_refs
-  done;
-  current
+  (* The caps PROJECTION of the row table, not a second fixpoint.  R1 stage C
+     moved this computation into [Cap_rows.solve] verbatim — same resolver,
+     same [sort_uniq]-before-[normalize] ordering, same iterate-to-fixpoint
+     over [fn_refs] — precisely so the flat closure and the rows cannot drift
+     apart.  Two independently-maintained capability tables is this
+     codebase's established failure mode; a projection cannot exhibit it. *)
+  let tbl : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  Hashtbl.iter
+    (fun k (r : March_caps.Cap_rows.row) -> Hashtbl.replace tbl k r.caps)
+    (fn_capability_rows_tbl env);
+  tbl
 
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
@@ -8621,7 +8606,18 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   let record_fn_refs (fn_qname : string) (bodies : (string list * Ast.expr) list) =
     let refs = List.concat_map (fun (bound, e) -> free_vars_expr bound e) bodies in
     let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
-    Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior))
+    Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior));
+    (* R1 stage C: the ROW seed for the same bodies, from the same
+       (params, body) pairing.  Recorded here rather than at a parallel set of
+       call sites so a form that gains reference edges can never silently miss
+       its row — the two are the same list, walked twice. *)
+    let seed = March_caps.Cap_rows.seed_of_bodies bodies in
+    let prior_seed =
+      Option.value ~default:March_caps.Cap_rows.empty_seed
+        (Hashtbl.find_opt env.fn_row_seeds fn_qname)
+    in
+    Hashtbl.replace env.fn_row_seeds fn_qname
+      (March_caps.Cap_rows.merge_seed prior_seed seed)
   in
   (* Names bound by a clause's parameter list. [FPPat] goes through
      [free_vars_pattern] so a destructuring head ([fn f((a, b))]) binds its
