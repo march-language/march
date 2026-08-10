@@ -498,14 +498,30 @@ Add to `test/test_trmc.ml` before `let suites = [`:
 
 ```ocaml
 (* REPL/JIT must apply the same transform as the compiled path, or a function
-   behaves one way in the REPL and another when compiled. *)
+   behaves one way in the REPL and another when compiled.  repl_jit may re-lower
+   a module the driver already transformed, so the transform has to be
+   idempotent — running it twice must not produce a second $dps helper.
+
+   The fixture uses a genuinely ELIGIBLE function: on an empty module both
+   sides are trivially zero and the assertion holds no matter how broken the
+   transform is. *)
 let test_transform_is_idempotent_on_a_transformed_module () =
-  let m = module_of [] in
+  let self = v "f" (Tir.TFn ([list_int], list_int)) in
+  let t = v "t" list_int and h = v "h" Tir.TInt in
+  let body =
+    Tir.ELet (t, Tir.EApp (self, [Tir.AVar (v "xs" list_int)]),
+              Tir.EAlloc (Tir.TCon ("List.Cons", []),
+                          [Tir.AVar h; Tir.AVar t]))
+  in
+  let m = module_of [fn "f" [v "xs" list_int] body] in
   Trmc.enabled := true;
   let once = Trmc.transform_module m in
   let twice = Trmc.transform_module once in
   Trmc.enabled := false;
-  Alcotest.(check int) "transforming twice adds no functions"
+  (* Non-vacuousness: the first pass must actually have added the helper. *)
+  Alcotest.(check int) "first transform adds the $dps helper"
+    2 (List.length once.Tir.tm_fns);
+  Alcotest.(check int) "transforming twice adds nothing further"
     (List.length once.Tir.tm_fns) (List.length twice.Tir.tm_fns)
 ```
 
@@ -518,7 +534,7 @@ Register it in the `"trmc"` suite list:
 - [ ] **Step 2: Run it**
 
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc`
-Expected: PASS (an empty module is trivially idempotent). This test exists to pin idempotence before wiring a second call site, because `repl_jit` may re-lower a module the driver already transformed.
+Expected: PASS. If the second assertion fails with 3 instead of 2, the transform is not idempotent — it re-transformed its own helper. Fix that before wiring the second call site in Step 3, because `repl_jit` re-lowers modules the driver has already transformed.
 
 - [ ] **Step 3: Wire the transform into the REPL/JIT pipeline**
 
