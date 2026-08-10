@@ -92,8 +92,14 @@ Unchanged, and deliberately:
 
 ### D2. Multi-capability `main`
 
-- `check_main_signature` accepts N ≥ 0 parameters, each of type `Cap(P)` with
-  P a known point of the lattice. Unknown paths stay rejected here, as today.
+- `check_main_signature` accepts N ≥ 0 parameters, **every one of which must
+  be a `Cap(P)`** with P a known point of the lattice. Unknown paths stay
+  rejected here, as today. A non-capability parameter (`fn main(x : Int)`) is
+  still rejected, and so is a MIXED list (`fn main(cap : Cap(IO), x : Int)`) —
+  the relaxation is "one cap parameter" → "any number of cap parameters", not
+  "arbitrary parameters". The existing error message needs rewording for the
+  plural case; `reject/t*` witnesses for both shapes are part of the corpus
+  work below.
 - The grant is the UNION over all cap parameters — the identical rule
   `check_fn_grants` uses, not a second one.
 - `check_main_grant` consumes the full list rather than `g :: _`.
@@ -217,9 +223,15 @@ data should inform whether it is worth its major-version cost.
   multi-cap `main` accepted and its grant is the union; a violation under a
   multi-cap grant still errors; `Cap(IO.Foreign)` as an explicit parameter is
   accepted while `IO.Foreign` under a console-only grant is refused; test
-  bodies and no-`main` libraries unaffected; and at least one test against the
-  real stdlib-prepended shape (the lesson of
+  bodies and no-`main` libraries unaffected; a `main` with a non-capability
+  parameter and a `main` with a MIXED parameter list are both still rejected;
+  and at least one test against the real stdlib-prepended shape (the lesson of
   `specs/progress/2026-08-09-cap-shadowing-false-positive.md`).
+- A regression witness for D3: a program whose `main` row carries a transitive
+  `unknown` must still compile under a narrow grant.
+  `test/stdlib/csv_server.march` is the live instance — if a future change
+  makes it fail, that is D3 being silently reversed, which is exactly the kind
+  of drift a passing suite would otherwise hide.
 - `test_codegen.ml`: compiled-and-run at 0/1/2/3 cap parameters (D5).
 - Corpus: matched accept/reject pair after t170, plus a multi-cap accept
   witness — the case that was previously inexpressible.
