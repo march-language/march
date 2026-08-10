@@ -91,7 +91,7 @@ mod Base64 do
   ## Examples
 
       march> Base64.decode("SGVsbG8=")
-      Ok(Bytes([72, 101, 108, 108, 111]))
+      Ok(Bytes("Hello"))
       march> Base64.decode("!!")
       Err(:invalid)
   """
@@ -126,7 +126,7 @@ mod Base64 do
   ## Examples
 
       march> Base64.url_decode("SGVsbG8")
-      Ok(Bytes([72, 101, 108, 108, 111]))
+      Ok(Bytes("Hello"))
       march> Base64.url_decode("!!")
       Err(:invalid)
   """

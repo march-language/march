@@ -1883,9 +1883,13 @@ let eval_with_regex src =
   let regex_decl = load_stdlib_file_for_test "regex.march" in
   eval_with_stdlib [regex_decl] src
 
+(* [type Bytes = Bytes(String)] — the payload IS the raw byte buffer.  The
+   cons-spine arm is kept so a value produced by an older serialized fixture
+   still reads correctly. *)
 let bytes_val_to_string bv =
   let open March_eval.Eval in
   match bv with
+  | VCon ("Bytes", [VString s]) -> s
   | VCon ("Bytes", [lst]) ->
     let buf = Buffer.create 8 in
     let rec go = function
@@ -1937,15 +1941,23 @@ let eval_with_uri src =
   let decl = load_stdlib_file_for_test "uri.march" in
   eval_with_stdlib [decl] src
 
+(* crypto/compress/uuid all traffic in Bytes, and since Bytes is an
+   array-backed [Bytes(String)] their sources call Bytes.to_list /
+   Bytes.from_list rather than destructuring a cons payload — so bytes.march
+   has to be in the environment.  Under the old representation these suites
+   got away with building `Bytes(Cons(...))` literals, which the interpreter
+   accepts without the module loaded. *)
+let bytes_decl_for_stdlib = lazy (load_stdlib_file_for_test "bytes.march")
+
 let eval_with_crypto src =
   let decl = load_stdlib_file_for_test "crypto.march" in
-  eval_with_stdlib [decl] src
+  eval_with_stdlib [Lazy.force bytes_decl_for_stdlib; decl] src
 
 let load_compress_decl () = load_stdlib_file_for_test "compress.march"
 
 let eval_with_compress src =
   let decl = load_compress_decl () in
-  eval_with_stdlib [decl] src
+  eval_with_stdlib [Lazy.force bytes_decl_for_stdlib; decl] src
 
 let eval_with_compress_and_check src =
   let compress_decl = load_compress_decl () in
@@ -1953,11 +1965,12 @@ let eval_with_compress_and_check src =
   let random_decl = load_stdlib_file_for_test "random.march" in
   let gen_decl    = load_stdlib_file_for_test "gen.march" in
   let check_decl  = load_stdlib_file_for_test "check.march" in
-  eval_with_stdlib [list_decl; random_decl; gen_decl; check_decl; compress_decl] src
+  eval_with_stdlib [Lazy.force bytes_decl_for_stdlib; list_decl; random_decl;
+                    gen_decl; check_decl; compress_decl] src
 
 let eval_with_uuid src =
   let decl = load_stdlib_file_for_test "uuid.march" in
-  eval_with_stdlib [decl] src
+  eval_with_stdlib [Lazy.force bytes_decl_for_stdlib; decl] src
 
 let eval_with_duration src =
   let decl = load_stdlib_file_for_test "duration.march" in

@@ -38,17 +38,16 @@ pfn byte_to_hex(n) do
 end
 
 -- Convert a Bytes value to a lowercase hex string.
+-- Goes through Bytes.to_list rather than destructuring the constructor:
+-- the payload is a String buffer now, not a cons spine.
 pfn bytes_to_hex(b) do
-  match b do
-  Bytes(xs) ->
-    fn go(bs, acc) do
-      match bs do
-      Nil -> string_join(rev_list(acc), "")
-      Cons(n, rest) -> go(rest, Cons(byte_to_hex(n), acc))
-      end
+  fn go(bs, acc) do
+    match bs do
+    Nil -> string_join(rev_list(acc), "")
+    Cons(n, rest) -> go(rest, Cons(byte_to_hex(n), acc))
     end
-    go(xs, Nil)
   end
+  go(Bytes.to_list(b), Nil)
 end
 
 -- Hex character value: returns 0–15, or -1 on invalid input.
@@ -190,7 +189,7 @@ fn verify_password(plain, stored) do
       match hex_str_to_bytes(salt_hex) do
       None -> false
       Some(byte_list) ->
-        let salt_bytes = Bytes(byte_list)
+        let salt_bytes = Bytes.from_list(byte_list)
         match pbkdf2_sha256(plain, salt_bytes, iters, pw_dklen) do
         Ok(new_bytes) ->
           let new_hex = bytes_to_hex(new_bytes)

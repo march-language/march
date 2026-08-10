@@ -2965,26 +2965,28 @@ external caml_march_zstd_decode    : string -> string        = "caml_march_zstd_
 external caml_march_brotli_encode  : string -> int -> int -> string = "caml_march_brotli_encode"
 external caml_march_brotli_decode  : string -> string        = "caml_march_brotli_decode"
 
-(** Convert an OCaml raw string to a March Bytes(List(Int)) value. *)
+(** Convert an OCaml raw string to a March Bytes value.
+
+    [type Bytes = Bytes(String)] — the payload is the raw byte buffer itself,
+    so this is a wrap rather than the per-byte cons spine it used to build.
+    See specs/plans/2026-08-10-array-backed-bytes-design.md. *)
 let march_bytes_of_string (s : string) : value =
-  let n = String.length s in
-  let lst = ref (VCon ("Nil", [])) in
-  for i = n - 1 downto 0 do
-    lst := VCon ("Cons", [VInt (Char.code s.[i]); !lst])
-  done;
-  VCon ("Bytes", [!lst])
+  VCon ("Bytes", [VString s])
 
 (** Extract raw bytes from a March value (String or Bytes). *)
 let march_val_to_raw (v : value) : (string, string) result =
   match v with
   | VString s -> Ok s
+  | VCon ("Bytes", [VString s]) -> Ok s
+  (* Tolerate the legacy cons-spine payload: an FFI shim or a serialized value
+     produced before the representation change can still reach here. *)
   | VCon ("Bytes", [lst]) ->
     let buf = Buffer.create 16 in
     let rec go = function
       | VCon ("Nil", []) -> Ok ()
       | VCon ("Cons", [VInt b; rest]) ->
         Buffer.add_char buf (Char.chr (b land 0xFF)); go rest
-      | _ -> Error "Bytes: expected list of Int"
+      | _ -> Error "Bytes: expected String payload"
     in
     (match go lst with Ok () -> Ok (Buffer.contents buf) | Error e -> Error e)
   | _ -> Error (Printf.sprintf "expected String or Bytes, got %s" (value_to_string v))
@@ -5638,14 +5640,10 @@ let base_env : env =
           let sock = (Obj.magic fd : Unix.file_descr) in
           let buf = Bytes.create n in
           let rec loop off =
-            if off >= n then begin
-              (* Build March Bytes(List(Int)) value: Bytes(Cons(b0, Cons(b1, ... Nil))) *)
-              let lst = ref (VCon ("Nil", [])) in
-              for i = n - 1 downto 0 do
-                lst := VCon ("Cons", [VInt (Char.code (Bytes.get buf i)); !lst])
-              done;
-              VCon ("Ok", [VCon ("Bytes", [!lst])])
-            end else
+            if off >= n then
+              (* Bytes is Bytes(String): the received buffer IS the payload. *)
+              VCon ("Ok", [VCon ("Bytes", [VString (Bytes.to_string buf)])])
+            else
               (try
                  let got = Unix.recv sock buf off (n - off) [] in
                  if got = 0 then VCon ("Err", [VString "connection closed"])
