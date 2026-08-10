@@ -12373,12 +12373,18 @@ let test_interp_http_server_idle_client_does_not_block_others () =
       let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" in
       ignore (Unix.write_substring client_sock request 0 (String.length request));
       (* Bound the read with select() so a hang shows up as a fast,
-         deterministic test failure instead of blocking the suite. *)
-      let deadline = 2.0 in
+         deterministic test failure instead of blocking the suite. As in the
+         WebSocket sibling below, the read bound and the promptness threshold
+         are separate constants: [read_deadline] decides when we stop waiting,
+         [prompt_limit] is the regression bar, and the bar is loose because
+         the pre-fix bug yields no response at all — tightening it only buys
+         false failures on a loaded machine. *)
+      let read_deadline = 6.0 in
+      let prompt_limit  = 3.0 in
       let buf = Buffer.create 256 in
       let rec read_until_closed_or_deadline () =
         let elapsed = Unix.gettimeofday () -. start_time in
-        let remaining = deadline -. elapsed in
+        let remaining = read_deadline -. elapsed in
         if remaining <= 0.0 then ()
         else
           match Unix.select [client_sock] [] [] remaining with
@@ -12406,9 +12412,10 @@ let test_interp_http_server_idle_client_does_not_block_others () =
       Alcotest.(check bool)
         (Printf.sprintf
            "second client served promptly (%.3fs) despite idle first client \
-            — must be well under the %.1fs deadline, not just barely under it"
-           elapsed deadline)
-        true (elapsed < 1.0))
+            — must be under the %.1fs promptness limit (itself well inside \
+            the %.1fs read deadline)"
+           elapsed prompt_limit read_deadline)
+        true (elapsed < prompt_limit))
   end
 
 (* Regression (sibling of the idle-HTTP-client test above, one layer deeper):
@@ -12554,11 +12561,24 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
       Unix.connect client_sock connect_addr;
       let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" in
       ignore (Unix.write_substring client_sock request 0 (String.length request));
-      let deadline = 2.0 in
+      (* Two deliberately different numbers, and they are not interchangeable:
+         [read_deadline] only bounds how long we wait before giving up (so a
+         pre-fix hang fails fast instead of blocking the suite), while
+         [prompt_limit] is the actual regression threshold. [prompt_limit]
+         must stay strictly below [read_deadline] or the check degenerates
+         into the "got a response at all" assertion above.
+
+         The bar is loose on purpose. A served request is milliseconds on an
+         idle box; the pre-fix bug produces no response at all, so anything
+         well under [read_deadline] discriminates. A tight bar buys no extra
+         detection and does cost false failures — this fired once at 1.284s
+         purely because other builds were running on the same machine. *)
+      let read_deadline = 6.0 in
+      let prompt_limit  = 3.0 in
       let buf = Buffer.create 256 in
       let rec read_until_closed_or_deadline () =
         let elapsed = Unix.gettimeofday () -. start_time in
-        let remaining = deadline -. elapsed in
+        let remaining = read_deadline -. elapsed in
         if remaining <= 0.0 then ()
         else
           match Unix.select [client_sock] [] [] remaining with
@@ -12628,9 +12648,10 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
       Alcotest.(check bool)
         (Printf.sprintf
            "HTTP client served promptly (%.3fs) despite an open idle WebSocket \
-            — must be well under the %.1fs deadline"
-           elapsed deadline)
-        true (elapsed < 1.0);
+            — must be under the %.1fs promptness limit (itself well inside \
+            the %.1fs read deadline)"
+           elapsed prompt_limit read_deadline)
+        true (elapsed < prompt_limit);
       Alcotest.(check bool)
         "the parked WebSocket still echoes after the HTTP request \
          (fiber resumed, not dropped)"
