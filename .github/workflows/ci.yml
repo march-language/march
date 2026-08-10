@@ -385,6 +385,45 @@ jobs:
           eval $(opam env)
           MARCH_TRMC=1 ./scripts/run-tests.sh
 
+  # A/B control for trmc-suite above. trmc-suite fails intermittently — a
+  # different test each run, always "a march process produced no output and
+  # died" — and we've been attributing that to MARCH_TRMC=1. But no CI job
+  # has ever run scripts/run-tests.sh WITHOUT that variable, so we have no
+  # baseline to compare against; the existing `test` job doesn't count, since
+  # it runs `dune runtest`, a different harness. This job is that baseline:
+  # identical to trmc-suite in every respect except the test step does not
+  # set MARCH_TRMC. Keep the two jobs in lockstep — any other difference
+  # would confound the comparison and defeat the point of having a control.
+  # Delete this job once the question (TRMC vs. flaky harness/runner) is
+  # settled.
+  trmc-suite-control:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      # This job was split out of sanitize-gate (see comment above), where the
+      # build was implicit — inherited from an earlier step in that job. Standalone,
+      # nothing builds the compiler first, so it needs its own Build step.
+      - name: Build
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build bin/main.exe
+
+      - name: Test suite (control, TRMC off)
+        timeout-minutes: 35
+        # Cold build + full test suite (~20 min of tests) WITHOUT TRMC — the
+        # control arm for trmc-suite's A/B comparison.
+        run: |
+          eval $(opam env)
+          ./scripts/run-tests.sh
+
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and all 8 property-oracle shards below each used to
   # independently pay ~2.3min opam-install + a fresh `dune build` — 9 job
