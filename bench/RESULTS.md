@@ -226,9 +226,14 @@ same-box, same-build, f32 vs. f64** — the point isn't a cross-language
 comparison, it's whether halving the element width and doubling the SIMD lane
 count actually pays off. Absolute ms are not a regression baseline across
 machine/load states; the f32/f64 *ratio* measured in the same run is what
-matters, and (as a sanity check only) the f64 legs below were re-run from the
-same build as the existing simd-sum/simd-map/simd-map2 control and land within
-the historical range in the table above.
+matters. As a sanity check only, the f64 legs below were re-run from the same
+build as the existing simd-sum/simd-map/simd-map2 control: they came in
+somewhat *faster* than that historical table (e.g. sum's 0.91 ms min and
+map's 4.43 ms min/4.54 ms median both fall below every corresponding
+historical figure), plausibly compiler improvements landed since those rows
+were recorded and/or ordinary run-to-run variance — not evidence of a
+regression either way. That gap doesn't affect the load-bearing comparison
+here, which is the same-run f32-vs-f64 ratio, not the historical table.
 
 Methodology: 6 timed samples per operation (two 3-run round-robins, one
 `f32, f64-sum, f64-map, f64-map2` ordered and one reversed, to cancel the
@@ -242,7 +247,7 @@ both f32 and f64 runs roughly equally rather than favor either.
 | simd-f32 sum(5M)  | Median  | Min     | Max     |
 |--------------------|---------|---------|---------|
 | f32 (NativeArray)  | 0.49 ms | 0.48 ms | 0.67 ms |
-| f64 (NativeArray)  | 1.19 ms | 0.91 ms | 1.35 ms |
+| f64 (NativeArray)  | 1.19 ms | 0.91 ms | 1.34 ms |
 
 | simd-f32 map(5M)   | Median  | Min     | Max     |
 |--------------------|---------|---------|---------|
