@@ -14,16 +14,18 @@ so every byte of a payload was one 32-byte heap cons cell holding a
 tagged 63-bit integer. Consequences, all measured rather than assumed
 (interpreted `march`, arm64 macOS, payload = `String.repeat("abcdefghij", n)`):
 
-| operation                | 4 000 B  | 16 000 B | 64 000 B |
-|--------------------------|---------:|---------:|---------:|
-| `Bytes.from_string`      |    47 ms |   189 ms |   810 ms |
-| `Bytes.get(b, len-1)`    |    67 ms |   263 ms |  1063 ms |
-| `Bytes.slice(b, len-100, 100)` | 65 ms | 264 ms |  1057 ms |
-| `Bytes.length` × 100     |  3449 ms | 13383 ms | 54439 ms |
-| 2 000 sequential `get`   | 32810 ms | 32282 ms | 32814 ms |
+| operation                | 4 000 B  | 16 000 B | 64 000 B | 256 000 B |
+|--------------------------|---------:|---------:|---------:|----------:|
+| `Bytes.from_string`      |    47 ms |   189 ms |   810 ms |   4165 ms |
+| `Bytes.length` (once)    |     — ms |     — ms |     — ms |   2373 ms |
+| `Bytes.get(b, len-1)`    |    67 ms |   263 ms |  1063 ms |   4485 ms |
+| `Bytes.slice(b, len-n, n)` |  65 ms |   264 ms |  1057 ms |   4389 ms |
+| `Bytes.length` × 100     |  3449 ms | 13383 ms | 54439 ms |         — |
+| 2 000 sequential `get`   | 32810 ms | 32282 ms | 32814 ms |         — |
 
-`length` is O(n), `get` is O(i), `slice` is O(start+len). A 256 KB
-`from_string` did not finish in ten minutes.
+`length` is O(n), `get` is O(i), `slice` is O(start+len). The 256 KB benchmark
+was killed after 29 minutes wall / 1574 s CPU, still inside its "20 000
+sequential gets" loop.
 
 At the C FFI boundary it was worse: `compress_bytes_from_raw` allocated one
 cons cell per byte, so `march_gzip_decode` of a 12 MB tar allocated ~12M cells
@@ -107,6 +109,38 @@ a `march_string *`. That is deliberate:
 
 Memory per byte of payload drops from ~32 bytes (a cons cell) to 1.
 
+### Measured, after
+
+Same benchmarks, same machine, interpreted. Every operation is now flat in
+payload size, which is the point:
+
+| operation                  | 4 000 B | 64 000 B | 256 000 B | 12 000 000 B |
+|----------------------------|--------:|---------:|----------:|-------------:|
+| `Bytes.from_string`        | 0.045ms |  0.045ms |   0.047ms |      0.048ms |
+| `Bytes.length` (once)      |       — |        — |   0.054ms |            — |
+| `Bytes.get(b, len-1)`      | 0.087ms |  0.087ms |   0.087ms |      0.095ms |
+| `Bytes.slice(b, len-n, n)` | 0.104ms |  0.078ms |   0.078ms |      0.080ms |
+| `Bytes.to_string`          | 0.043ms |  0.044ms |   0.041ms |            — |
+| `Bytes.length` × 100       | 10.5 ms |  10.3 ms |         — |            — |
+| 2 000 sequential `get`     |  218 ms |   220 ms |         — |            — |
+
+At 256 KB that is `from_string` 4165 ms → 0.047 ms (~88 000x), `length`
+2373 ms → 0.054 ms (~44 000x), `get(last)` 4485 ms → 0.087 ms (~52 000x),
+`slice` 4389 ms → 0.078 ms (~56 000x). The whole 256 KB benchmark program,
+which was killed unfinished at 29 minutes, now runs to completion in 3.3 s.
+
+The remaining `get` cost is interpreter dispatch, not the representation:
+2 000 gets take the same 218 ms whether the payload is 4 KB or 64 KB.
+
+Gzip, previously impossible at these sizes (one cons cell per byte on both
+sides of the FFI):
+
+| payload | `Gzip.encode` | `Gzip.decode` |
+|--------:|--------------:|--------------:|
+|    1 MB |       2.04 ms |       0.46 ms |
+|    3 MB |       5.90 ms |       7.84 ms |
+|   12 MB |      23.19 ms |      11.49 ms |
+
 ### The `to_list` / `from_list` regression
 
 These were O(1) — they were the constructor and its inverse. They are now
@@ -147,6 +181,29 @@ conservative choice and it is a deliberate one:
 
 Sharing slices are a plausible follow-up, but they should be a separate
 change with their own RC design, not a rider on this one.
+
+### Consumer-side workarounds are now the bottleneck
+
+Downstream code written to dodge the old costs should be un-written. forgepm's
+tar walker (`lib/forgepm/packages/tarball.march`) was rewritten to consume a
+`List(Int)` CURSOR precisely because `Bytes.get(data, i)` was O(i) — its own
+comment says so. With an array-backed `Bytes` that cursor is not merely
+unnecessary, it is the limiting factor: `Bytes.to_list(tar_data)` on the 5.6 MB
+tar inside a 3.1 MB `.tar.gz` allocates 5.6M cons cells and overflows the
+interpreter stack after 228 s.
+
+Reverting that walker to plain offset indexing (`Bytes.get` / `Bytes.slice`,
+no intermediate list) on the same archive:
+
+| step                    | cursor walker      | offset-indexed |
+|-------------------------|--------------------|---------------:|
+| `Bytes.from_string`     | 0.047 ms           |       0.047 ms |
+| `Tarball.parse`         | stack overflow     |          49 ms |
+| `extract_readme`        | stack overflow     |          77 ms |
+| `extract_march_sources` | stack overflow     |        5 649 ms |
+
+(448 `.march` members.) Total wall time 6.9 s for an archive that could not be
+processed at all before.
 
 ## Streaming
 
