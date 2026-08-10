@@ -10329,6 +10329,186 @@ let test_fn_grant_with_prelude_flattened () =
     "the console-only function is not itself reported"
     false (has_error_with errors "`talk` is granted")
 
+(* ── R1 stage D: a grant is REQUIRED, and `main` may hold a SET ───────────
+   specs/2026-08-10-r1-stage-d-grant-required-design.md.
+
+   Stages A–C made a declared grant enforceable. They left the default
+   ambient: `fn main()` with no capability parameter performed IO freely,
+   which is what let them ship without breaking a program. That adoption
+   contract is retired here — the whole R1 gap was one line, the `| None ->
+   ()` arm of [check_main_grant].
+
+   The two halves ship together on purpose. Flipping the default WITHOUT
+   letting `main` hold several capabilities would force every program needing
+   (say) console AND spawn to widen to `Cap(IO)` — 30% of the migrating
+   corpus — which earns a WORSE claim than the opt-in state it replaces. *)
+
+let test_main_multi_cap_signature_accepted () =
+  Alcotest.(check bool) "main may take several capability parameters"
+    false
+    (desugar_has_errors {|mod StageDMulti do
+      needs IO.Console
+      needs IO.Spawn
+      fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do
+        println("hi")
+      end
+    end|})
+
+let test_main_non_cap_param_still_rejected () =
+  Alcotest.(check bool) "a non-capability parameter is still rejected"
+    true
+    (desugar_has_errors {|mod StageDBadParam do
+      fn main(x : Int) : () do
+        ()
+      end
+    end|})
+
+let test_main_mixed_param_list_rejected () =
+  (* The relaxation is "one cap param" → "any number of cap params", NOT
+     "arbitrary parameters". A mixed list would make the grant a claim about
+     only some of what `main` receives. *)
+  Alcotest.(check bool) "a mixed capability/non-capability list is rejected"
+    true
+    (desugar_has_errors {|mod StageDMixed do
+      needs IO
+      fn main(cap : Cap(IO), x : Int) : () do
+        ()
+      end
+    end|})
+
+let test_main_unknown_cap_path_still_rejected () =
+  Alcotest.(check bool) "an unknown lattice point is still rejected"
+    true
+    (desugar_has_errors {|mod StageDBadPath do
+      fn main(cap : Cap(IO.Nope)) : () do
+        ()
+      end
+    end|})
+
+let test_main_grant_is_the_union_of_its_cap_params () =
+  let ctx = typecheck {|mod StageDUnion do
+    needs IO.Console
+    needs IO.Spawn
+    fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do
+      println("start")
+      task_spawn(fn _ -> println("worker"))
+    end
+  end|} in
+  Alcotest.(check bool) "a program reaching both granted caps is accepted"
+    false (has_errors ctx)
+
+let test_main_grant_union_still_rejects_outside () =
+  let ctx = typecheck {|mod StageDUnionViolate do
+    needs IO.Console
+    needs IO.Spawn
+    needs IO.FileWrite
+    fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do
+      match file_write("/tmp/stage_d_u", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "a capability outside the union is still an error"
+    true (has_error_with ctx "IO.FileWrite")
+
+let test_main_explicit_foreign_grant_accepted () =
+  (* Stage B refuses IO.Foreign under any grant but Cap(IO), which is right
+     when `main` holds exactly ONE capability. Once it can hold a set, a
+     `Cap(IO.Foreign)` parameter is an explicit grant of the unbounded thing
+     and the person who wrote the signature knows what they authorized —
+     stage C's rule, applied here for the same reason. *)
+  let ctx = typecheck {|mod StageDForeignOk do
+    needs IO.Console
+    needs IO.Foreign
+    needs Ffi
+    extern "rt" : Cap(Ffi) do
+      fn ffi_id3(x : Int) : Int = "march_test_ffi_id"
+    end
+    fn main(console : Cap(IO.Console), foreign : Cap(IO.Foreign)) : () do
+      println(int_to_string(ffi_id3(1)))
+    end
+  end|} in
+  Alcotest.(check bool) "an explicit Cap(IO.Foreign) grant is honored"
+    false (has_error_with ctx "linked C code")
+
+let test_main_foreign_under_console_still_refused () =
+  let ctx = typecheck {|mod StageDForeignBad do
+    needs IO.Console
+    needs Ffi
+    extern "rt" : Cap(Ffi) do
+      fn ffi_id4(x : Int) : Int = "march_test_ffi_id"
+    end
+    fn main(console : Cap(IO.Console)) : () do
+      println(int_to_string(ffi_id4(1)))
+    end
+  end|} in
+  Alcotest.(check bool) "IO.Foreign uncovered by the grant is still refused"
+    true (has_error_with ctx "linked C code")
+
+(* ── the flip itself ────────────────────────────────────────────────────── *)
+
+let test_parameterless_main_doing_io_is_an_error () =
+  let ctx = typecheck {|mod StageDAmbient do
+    needs IO.Console
+    fn main() : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "a parameterless main performing IO is rejected"
+    true (has_error_with ctx "declares no grant");
+  Alcotest.(check bool) "the reached capability is named"
+    true (has_error_with ctx "IO.Console")
+
+let test_parameterless_main_that_is_pure_still_compiles () =
+  (* 212 of 330 in-repo programs are in this state; they must be untouched. *)
+  let ctx = typecheck {|mod StageDPure do
+    fn add(x : Int, y : Int) : Int do x + y end
+    fn main() : () do
+      let _ = add(1, 2)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a pure parameterless main still compiles"
+    false (has_errors ctx)
+
+let test_module_without_main_is_not_gated () =
+  (* A library has no entry point to be granted from. Stage C is what covers
+     its capability-parameter functions; stage D is about programs. *)
+  let ctx = typecheck {|mod StageDLib do
+    needs IO.Console
+    fn shout(msg : String) : () do
+      println(msg)
+    end
+  end|} in
+  Alcotest.(check bool) "a module with no main is not gated"
+    false (has_error_with ctx "declares no grant")
+
+let test_stage_d_with_stdlib_prepended () =
+  (* The regression class this repo has been bitten by twice — a capability
+     pass built on `parse_and_desugar` alone never sees the shape the real
+     pipeline produces. See
+     specs/progress/2026-08-09-cap-shadowing-false-positive.md. *)
+  let prelude = load_stdlib_file_for_test "prelude.march" in
+  let flattened =
+    match prelude with
+    | March_ast.Ast.DMod (_, _, inner, _) -> inner
+    | d -> [ d ]
+  in
+  let m = March_ast.Ast.{
+    mod_name = { txt = "Main"; span = dummy_span };
+    mod_decls = flattened @ (parse_and_desugar {|mod Main do
+      needs IO.Console
+      fn main() : () do
+        println("hi")
+      end
+    end|}).March_ast.Ast.mod_decls;
+  } in
+  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  Alcotest.(check bool)
+    "a prelude-mediated console use still trips the missing-grant error"
+    true (has_error_with errors "declares no grant")
+
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
 (* Helper: run typecheck then the standalone cap_infer pass.
@@ -14185,6 +14365,20 @@ let compiler_suites =
           Alcotest.test_case "main is not double-reported"         `Quick test_fn_grant_main_is_not_double_reported;
           Alcotest.test_case "real stdlib-prepended shape"         `Quick test_fn_grant_with_stdlib_prepended;
           Alcotest.test_case "real prelude-flattened shape"        `Quick test_fn_grant_with_prelude_flattened;
+        ] );
+      ( "cap_grant_required", [
+          Alcotest.test_case "multi-cap main signature accepted"   `Quick test_main_multi_cap_signature_accepted;
+          Alcotest.test_case "non-cap param still rejected"        `Quick test_main_non_cap_param_still_rejected;
+          Alcotest.test_case "mixed param list rejected"           `Quick test_main_mixed_param_list_rejected;
+          Alcotest.test_case "unknown cap path still rejected"     `Quick test_main_unknown_cap_path_still_rejected;
+          Alcotest.test_case "grant is the union of cap params"    `Quick test_main_grant_is_the_union_of_its_cap_params;
+          Alcotest.test_case "union still rejects outside caps"    `Quick test_main_grant_union_still_rejects_outside;
+          Alcotest.test_case "explicit Cap(IO.Foreign) accepted"   `Quick test_main_explicit_foreign_grant_accepted;
+          Alcotest.test_case "Foreign under console still refused" `Quick test_main_foreign_under_console_still_refused;
+          Alcotest.test_case "parameterless main + IO is an error" `Quick test_parameterless_main_doing_io_is_an_error;
+          Alcotest.test_case "parameterless pure main compiles"    `Quick test_parameterless_main_that_is_pure_still_compiles;
+          Alcotest.test_case "module without main is not gated"    `Quick test_module_without_main_is_not_gated;
+          Alcotest.test_case "real stdlib-prepended shape"         `Quick test_stage_d_with_stdlib_prepended;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;
