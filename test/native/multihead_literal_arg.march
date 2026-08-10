@@ -1,0 +1,13 @@
+-- Regression: a multi-head fn mixing a literal-Int pattern (`0`) with a
+-- plain-variable pattern (`n`) in another arg position lost its base case
+-- under --target js (the desugared `match (cells, n) do (cells, 0) -> …`
+-- emitted `switch (n.$)` on a raw number, so `case "0"` was dead) and
+-- infinite-recursed. Native was always correct. See js_emit all_imm_lit_tags.
+mod M do
+  needs IO.Console
+  fn build(cells, 0) do cells end
+  fn build(cells, n) do build(Cons(n, cells), n - 1) end
+  fn main() do
+    println(String.from_int(List.length(build(Nil, 3))))
+  end
+end

@@ -39,6 +39,23 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **JS backend: `==`/`!=` on a non-primitive operand now compares
+  structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
+  (or an erased type variable that may hold one) lowered to JavaScript `===`,
+  i.e. reference equality — so `x == Some(Ctor)` on two distinct-but-equal heap
+  values was always `false`. Such comparisons now go through a deep structural
+  equality helper (matching the native backend); primitive-vs-primitive
+  comparisons still use fast `===`/`!==`.
+- **JS backend: a multi-head function with a literal-integer argument pattern
+  no longer infinite-loops.** `fn f(xs, 0) … / fn f(xs, n) …` compiled with
+  `--target js` emitted a `switch` on a value whose tag was `undefined`, so the
+  base case was dead and the function recursed forever. The literal-tag case
+  now lowers the same way the native backend does.
+- **Scheduler busy-spins back off instead of pegging a core.** Three
+  unbounded scheduler spin-waits (`march_sched_wake`'s parked-process wait,
+  `task_wait_done`'s in-scheduler branch, and `march_sched_wait_idle`) now spin
+  briefly and then sleep, so a stalled wait under heavy host oversubscription no
+  longer holds a CPU at ~100%. Wait-forever semantics are unchanged.
 - **A natively compiled program opening a nonexistent file no longer misreads
   the error value's representation.** `file_open`'s `Err` case is typed
   `Result(Int, FileError)`, and the interpreter builds a real `FileError` ADT
