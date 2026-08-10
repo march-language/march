@@ -59,6 +59,51 @@ called directly, or stored and called later), or that captures more than
 one variable, still runs correctly — it just falls back to the general
 closure-dispatch path, which does not vectorize.
 
+## Narrow element widths
+
+Beyond the `Int`/`Float` (i64/f64) element types shown above, `NativeArray`
+also supports three narrower element widths: **f32**, **i32**, and **u8**
+(backed by `NativeF32Arr`/`NativeI32Arr`/`NativeU8Arr`), each with the same
+`make`/`length`/`get`/`set`/`sum`/`map`/`map2`/`from_list`/`to_list` shape as
+`Int`/`Float`, plus 8 conversions to/from the wider types (e.g.
+`NativeArray.int_to_u8_arr`). They exist to trade range/precision for memory
+bandwidth and SIMD lane count — half the bytes per element than f64/i64 means
+twice the lanes per vector instruction.
+
+**Boundary rule:** integer stores truncate mod 2^w two's-complement, float
+stores round to nearest-even binary32, and loads widen exactly (`u8`
+zero-extends to 0..255, `i32` sign-extends). `sum_i32`/`sum_u8` accumulate in
+i64, `sum_f32` in double. None of this ever traps — an out-of-range store
+wraps or rounds rather than erroring.
+
+**f32 double-rounding caveat:** map callbacks compute in double and round to
+f32 on store; results can differ in the last ulp from a true single-precision
+pipeline.
+
+`map_f32`/`map2_f32`/`sum_f32` get the identical inline-loop vectorization
+treatment described above for `map_float`/`map2_float`/`sum_float` —
+confirmed via `-emit-llvm` to compile to real `<4 x float>` NEON vector
+instructions, not just scalar unrolling. `fold_i32`/`fold_u8`/`fold_f32` are
+excluded from the compiled path for the same reason `fold_int`/`fold_float`
+are (see Known limitations below) — they'll gain compiled support together
+once that linkage gap closes.
+
+Same-box, same-build f32-vs-f64 comparison at N=5M (median of 6 samples,
+two opposite orderings to cancel first-position warmup bias — see
+`bench/RESULTS.md`'s `simd-f32` section for full methodology):
+
+| Benchmark (N=5M) | f32      | f64      | Speedup |
+|-------------------|----------|----------|---------|
+| `sum(arr)`         | 0.49 ms  | 1.19 ms  | ~2.4x   |
+| `map(x -> x*2+1)`  | 2.27 ms  | 4.54 ms  | ~2.0x   |
+| `map2(a, b, +)`    | 2.67 ms  | 6.40 ms  | ~2.4x   |
+
+`map`'s ~2.0x sits right at the theoretical ceiling from doubling the lane
+count; `sum`/`map2` beat that ratio slightly, within the noise of a shared,
+loaded benchmark machine (absolute ms are not a regression baseline across
+runs — see the "Read this before the numbers" caveats on
+[SIMD Benchmarks]({{ site.baseurl }}/docs/simd-benchmarks/)).
+
 ## How to trigger it
 
 1. **Use `NativeArray`, not `Array` or `List`, for the hot data.** `Array`'s
@@ -108,7 +153,9 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
 
 - **`fold_int` / `fold_float` have no compiled implementation yet** — calling
   either from a `--compile` build fails to link. Use `sum`/`map` or a manual
-  index loop until this lands.
+  index loop until this lands. The narrow-width equivalents
+  (`fold_f32`/`fold_i32`/`fold_u8`) share the same gap and will gain compiled
+  support at the same time.
 - **`DataFrame`**: `Sum`/`Mean` aggregation and `col_add_col` (column-column
   arithmetic, via `map2_int`/`map2_float`) use the vectorized `NativeArray`
   primitives above under the hood. `Min`/`Max`/`Std`/`Variance`/`Median`

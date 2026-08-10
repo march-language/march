@@ -39,9 +39,15 @@
 --     boxed closure-call path on a 5M-element benchmark; see
 --     docs/simd-benchmarks.md's "Fix history: map2".
 --
--- Two opaque element types are supported:
---   NativeIntArr   — wraps int array
---   NativeFloatArr — wraps float array
+-- Five opaque element types are supported:
+--   NativeIntArr   — wraps int array (i64)
+--   NativeFloatArr — wraps float array (f64)
+--   NativeF32Arr   — narrow float array (f32); stores round to nearest-even
+--   NativeI32Arr   — narrow int array (i32); stores truncate mod 2^32
+--   NativeU8Arr    — narrow int array (u8); stores truncate mod 2^8
+-- Narrow-width stores never trap; loads widen exactly (u8 zero-extends,
+-- i32 sign-extends). See docs/simd-vectorization.md's "Narrow element
+-- widths" section for the full boundary rule and benchmarks.
 --
 -- Usage:
 --   let arr = NativeArray.make_float(1000, 0.0)
