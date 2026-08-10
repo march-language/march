@@ -68,6 +68,14 @@ git log is authoritative for exact commits.
   capability set (`march caps`, feeding `forge audit --inferred` and the
   `--cap-sandbox` profile) had the identical bug in the opposite direction —
   silently over-reporting a capability never used — also fixed.
+- **A missing-capability violation no longer prints two overlapping
+  diagnostics at the same source location.** Both the typechecker's own
+  `needs`-coverage check and the separate capability-inference pass anchor
+  at the exact call site and were repeating each other's "add `needs X`"
+  sentence almost verbatim. The hint now shows only what the error doesn't
+  already say — the call chain from `main` down to the offending call — and
+  is omitted entirely when there is no chain to show (a library with no
+  `main`, or a violation already inside `main`).
 
 - **A natively compiled program opening a nonexistent file no longer misreads
   the error value's representation.** `file_open`'s `Err` case is typed
