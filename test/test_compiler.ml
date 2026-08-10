@@ -11858,6 +11858,209 @@ let test_tce_real_mutual_recursion_still_errors () =
   Alcotest.(check bool) "genuine mutual recursion still reported"
     true (has_error_with ctx "not in tail position")
 
+(* ── Pass 3 inside a nested `mod` ────────────────────────────────────────────
+
+   `enforce_tail_calls_in_decls` recurses into `DMod`, so Pass 3 *runs* at every
+   nesting level — but it found nothing there, because it was comparing two
+   different namespaces.  `Desugar.qualify_module_refs` rewrites bare
+   intra-module CALL SITES inside every nested `DMod` to `Prefix.name`
+   (`EVar "boom"` -> `EVar "Inner.boom"`), and deliberately leaves the
+   DECLARATION name alone.  Pass 3 then built `fn_names` from the bare
+   `def.fn_name.txt`, so `collect_direct_fn_calls` searched a post-desugar body
+   for a pre-desugar name, matched nothing, and concluded the function was not
+   recursive at all.
+
+   The entry module was unaffected and hid this: `qualify_module_refs` seeds
+   `entry_prefix = ""` and only rewrites inside `DMod` NODES, and the parser
+   splits a file's sole top-level `mod` into `mod_name`/`mod_decls` — so the
+   entry level has no prefix to mismatch.
+
+   Everything Pass 3 rejects at top level was therefore silently accepted one
+   `mod` deeper. *)
+
+let test_tce_nested_mod_non_tail_recursion_errors () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn boom(n : Int) : Int do
+        if n == 0 do 0 else boom(n + 1) + 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "non-tail recursion inside a nested mod is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_mutual_recursion_errors () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn even(n : Int) : Int do
+        if n == 0 do 1 else 1 + odd(n) end
+      end
+      fn odd(n : Int) : Int do
+        if n == 0 do 0 else even(n) end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "mutual recursion inside a nested mod is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_doubly_nested_mod_non_tail_recursion_errors () =
+  (* The prefix ACCUMULATES (`Outer.Inner.`), so a fix that only strips one
+     level would still miss this. *)
+  let ctx = typecheck {|mod T do
+    mod Outer do
+      mod Inner do
+        fn boom(n : Int) : Int do
+          if n == 0 do 0 else boom(n + 1) + 1 end
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "non-tail recursion two mods deep is reported"
+    true (has_error_with ctx "not in tail position")
+
+(* Controls: the fix must not over-correct.  Each of these is a shape Pass 3
+   deliberately allows at top level, and must keep allowing one mod deeper. *)
+
+let test_tce_nested_mod_structural_recursion_no_error () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn fact(n : Int) : Int do
+        if n <= 1 do 1 else fact(n - 1) * n end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "structural recursion inside a nested mod: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_tail_recursion_no_error () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn count(n : Int, acc : Int) : Int do
+        if n == 0 do acc else count(n - 1, acc + 1) end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "tail recursion inside a nested mod: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_no_warn_recursion_opts_out () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      @[no_warn_recursion]
+      fn boom(n : Int) : Int do
+        if n == 0 do 0 else boom(n + 1) + 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "`no_warn_recursion` still opts out inside a nested mod"
+    false (has_error_with ctx "not in tail position")
+
+(* A DEPENDENCY file is desugared with [~is_entry:false], which changes two
+   things at once: [strip_entry_self_qual] does NOT run (so a hand-written
+   self-qualified call survives verbatim), and [qualify_module_refs] is seeded
+   with [~entry_prefix:(mod_name ^ ".")] (so a nested module qualifies to
+   "Helper.Inner.", not "Inner.").  Both were blind spots, and the second one
+   is why this pass accepts BOTH candidate prefixes at every level. *)
+let typecheck_non_entry src =
+  let m = March_desugar.Desugar.desugar_module ~is_entry:false (parse_module src) in
+  let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+  errors
+
+let test_tce_non_entry_self_qualified_call_errors () =
+  (* No nesting at all — `Helper.boom` inside `mod Helper` is this module's own
+     `boom`, but the call site carries a prefix the declaration does not. *)
+  let ctx = typecheck_non_entry {|mod Helper do
+    fn boom(n : Int) : Int do
+      if n == 0 do 0 else Helper.boom(n + 1) + 1 end
+    end
+  end|} in
+  Alcotest.(check bool) "self-qualified call in a dependency module is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_non_entry_nested_mod_errors () =
+  (* Prefix here is "Helper.Inner.", so a fix that accumulated only the nested
+     names would still miss this. *)
+  let ctx = typecheck_non_entry {|mod Helper do
+    mod Inner do
+      fn boom(n : Int) : Int do
+        if n == 0 do 0 else boom(n + 1) + 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested mod inside a dependency module is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_non_entry_structural_recursion_no_error () =
+  let ctx = typecheck_non_entry {|mod Helper do
+    mod Inner do
+      fn fact(n : Int) : Int do
+        if n <= 1 do 1 else fact(n - 1) * n end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "structural recursion in a dependency module: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_local_shadow_no_false_recursion () =
+  (* The shadowing discipline must survive the namespace change.  `Desugar`
+     already declines to qualify a call to a shadowed name (`make_qualifier`
+     tracks `bound`), so the call site stays bare `go` while the declaration
+     is `Inner.go` — the two must not be conflated back together. *)
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn helper(n : Int) : Int do
+        fn go(k : Int, acc : Int) : Int do
+          if k == 0 do acc else go(k - 1, acc + 1) end
+        end
+        go(n, 0)
+      end
+      fn go(m : Int) : Int do
+        if helper(m) == 0 do 0 else 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "local helper shadowing a nested-mod fn: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_let_lambda_shadow_no_false_recursion () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn helper(n : Int) : Int do
+        let go = fn k -> k + 1
+        go(n)
+      end
+      fn go(m : Int) : Int do
+        if helper(m) == 0 do 0 else 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "let-bound lambda shadowing a nested-mod fn: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_arm_bound_shadow_no_false_recursion () =
+  (* The sharpest of the three.  `f`/`g` really ARE mutually recursive here, so
+     the SCC is genuine and `f` really is checked — only the arm-bound `g` must
+     not be mistaken for the module's `g`.  At top level `check_tail_position`
+     retires the arm binder itself; inside a nested `mod` the recursive-name set
+     is qualified (`Inner.g`), so that retirement is a no-op and the property
+     rests entirely on `Desugar.make_qualifier` having declined to qualify the
+     shadowed call.  This test is what proves it does. *)
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn f(n : Int) : Int do
+        match Some(fn x -> x + 1) do
+          Some(g) -> g(n) + 1
+          None -> g(n)
+        end
+      end
+      fn g(n : Int) : Int do
+        if n == 0 do 0 else f(n - 1) end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "arm-bound name shadowing a nested-mod SCC member: no error"
+    false (has_error_with ctx "not in tail position")
+
 (* ── collect_direct_names: the inner pattern walk must be exhaustive ─────── *)
 
 (* `collect_direct_names`' inner pattern walk feeds `strip_entry_self_qual`. Its
@@ -13567,6 +13770,18 @@ let compiler_suites =
           Alcotest.test_case "match-arm name shadowing an SCC member: no error"     `Quick test_tce_arm_bound_name_shadows_scc_member;
           Alcotest.test_case "genuine non-tail self-recursion: still errors"        `Quick test_tce_real_non_tail_recursion_still_errors;
           Alcotest.test_case "genuine mutual recursion: still errors"               `Quick test_tce_real_mutual_recursion_still_errors;
+          Alcotest.test_case "nested mod, non-tail self-recursion: errors"          `Quick test_tce_nested_mod_non_tail_recursion_errors;
+          Alcotest.test_case "nested mod, mutual recursion: errors"                 `Quick test_tce_nested_mod_mutual_recursion_errors;
+          Alcotest.test_case "doubly-nested mod, non-tail recursion: errors"        `Quick test_tce_doubly_nested_mod_non_tail_recursion_errors;
+          Alcotest.test_case "nested mod, structural recursion: no error"           `Quick test_tce_nested_mod_structural_recursion_no_error;
+          Alcotest.test_case "nested mod, tail recursion: no error"                 `Quick test_tce_nested_mod_tail_recursion_no_error;
+          Alcotest.test_case "nested mod, `no_warn_recursion`: no error"            `Quick test_tce_nested_mod_no_warn_recursion_opts_out;
+          Alcotest.test_case "nested mod, local shadow: no error"                   `Quick test_tce_nested_mod_local_shadow_no_false_recursion;
+          Alcotest.test_case "nested mod, let-lambda shadow: no error"              `Quick test_tce_nested_mod_let_lambda_shadow_no_false_recursion;
+          Alcotest.test_case "nested mod, arm-bound shadow in a real SCC: no error" `Quick test_tce_nested_mod_arm_bound_shadow_no_false_recursion;
+          Alcotest.test_case "dependency mod, self-qualified call: errors"          `Quick test_tce_non_entry_self_qualified_call_errors;
+          Alcotest.test_case "dependency mod, nested mod: errors"                   `Quick test_tce_non_entry_nested_mod_errors;
+          Alcotest.test_case "dependency mod, structural recursion: no error"       `Quick test_tce_non_entry_structural_recursion_no_error;
         ] );
   ]
 
