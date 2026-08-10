@@ -60,7 +60,7 @@ pfn bench_loop(rounds : Int, acc : Int) : Int do
   end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(bench_loop(100, 0)))
 end
 

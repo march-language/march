@@ -35,7 +35,7 @@ mod Main do
     job()
   end
 
-  fn main() : () do
+  fn main(_cap_filewrite : Cap(IO.FileWrite)) : () do
     save("t170")
   end
 end

@@ -42,7 +42,7 @@ pfn par_fib(n : Int, threshold : Int) : Int do
   end
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   -- fib(40) with parallel threshold at 20
   -- ~2^20 ≈ 1M tasks above threshold, each doing fib(20) = ~21K calls
   let result = par_fib(40, 20)

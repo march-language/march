@@ -35,7 +35,7 @@ fn pick(stale : Rec, res : Res) : Rec do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let base  = Rec(["a", "b"], 0)
   let sent  = bump(base, 200)
   let out   = pick(base, Ok2(sent))

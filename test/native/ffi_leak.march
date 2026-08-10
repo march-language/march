@@ -22,7 +22,7 @@ mod Test do
       churn(n - 1)
     end
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     churn(50)                 -- warm up (one-time allocations)
     let base = live_allocs()
     churn(2000)

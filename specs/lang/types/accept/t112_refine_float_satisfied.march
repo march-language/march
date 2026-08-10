@@ -7,7 +7,7 @@
 mod M do
   needs IO.Console
   fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(float_to_string(sqrtish(4.0)))
   end
 end

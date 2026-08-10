@@ -6,6 +6,7 @@
 mod Test do
   needs IO.Console
   needs Ffi
+  needs IO.Foreign
   type Box = { tag : Int, maybe : Option(Int), name : Option(String), res : Result(Int, String) }
   extern "c" : Cap(Ffi) do
     fn make(tag: Int): Box = "ffi_optres_make"
@@ -29,7 +30,7 @@ mod Test do
       Err(e) -> e
     end
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     let b = make(7)                       -- C-built Box, typed Option/Result fields
     println(int_to_string(b.tag))         -- 7
     println(opt_int(b.maybe))             -- 42

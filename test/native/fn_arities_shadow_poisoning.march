@@ -16,7 +16,7 @@ mod Main do
   -- top-level `f/1` — the exact collision (arity != fold_left's callback arity)
   fn f(m) do m + 1 end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     -- exercise several stdlib HOFs whose callback param is `f`
     let xs = Cons(1, Cons(2, Cons(3, Nil)))
     println(int_to_string(f(10)))                              -- 11

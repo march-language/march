@@ -19,7 +19,7 @@ mod Test do
       Rect(w, h) -> w * h
     end
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(area(mk_circle(5))))    -- Circle(5)  -> 75
     println(int_to_string(area(mk_rect(4, 6))))   -- Rect(4,6)  -> 24
     let p = mk_point(3, 4)

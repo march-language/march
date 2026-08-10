@@ -202,7 +202,7 @@ fn demo_stats_integration() do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   demo_construction()
   demo_lazy()
   demo_groupby()

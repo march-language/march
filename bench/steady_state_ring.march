@@ -161,7 +161,7 @@ mod SteadyStateRing do
     end
   end
 
-  pfn main() : Unit do
+  pfn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) : Unit do
     let n = env_int("STEADY_OPS", 2000000)
     let work = env_int("STEADY_WORK", 512)
     let siblings = env_int("STEADY_SIBLINGS", 0)

@@ -29,7 +29,7 @@ mod Main do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let (cc, sc) = Chan.new(Decision)
     let cc2 = Chan.choose(cc, :err)
     let cc3 = Chan.send(cc2, "boom")

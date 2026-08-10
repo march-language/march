@@ -2,7 +2,7 @@
 -- lazy-load path.  Before the emit_case niche-recovery fix this segfaulted.
 mod LazyNiche do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(String.from_int(LazyNicheProbe.first_or(Cons(42, Cons(7, Nil)), 0)))
     println(String.from_int(LazyNicheProbe.first_or(Nil, 99)))
   end

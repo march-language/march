@@ -23,7 +23,7 @@ mod RRBBench do
   needs IO.Console
   needs IO.Spawn
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
     let n = 1000000
 
     -- 1. Sequential baseline: fold_left over RRB.range

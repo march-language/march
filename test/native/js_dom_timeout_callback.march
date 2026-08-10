@@ -7,7 +7,7 @@
 -- `cb._0(cb, 0)` JS closure-call ABI in runtime/march_dom.mjs.
 mod JsDomTimeoutCallback do
   needs IO.Console
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     Js.Dom.set_timeout(0, fn _ -> println("fired"))
   end
 end

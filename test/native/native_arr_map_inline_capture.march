@@ -25,7 +25,7 @@ mod Main do
     end
   end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     -- Single capture, Float (dataframe.march's `col +. f` / `col *. f` shape).
     let f = 3.0
     let farr = NativeArray.from_list_float(Cons(1.0, Cons(2.0, Cons(3.0, Nil))))

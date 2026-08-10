@@ -25,7 +25,7 @@ mod M do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(describe(pick_color(true)))
     println(describe(pick_color(false)))
     println(describe(tagged(41)))

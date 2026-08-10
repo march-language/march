@@ -12,7 +12,7 @@ mod Main do
       { count: state.count + 1 }
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let pid = spawn(Counter)
     Actor.cast(pid, Inc())
     Actor.cast(pid, Inc())

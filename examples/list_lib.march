@@ -79,7 +79,7 @@ end
 
 -- ─── Main ─────────────────────────────────────────────────────────────────
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   let nums = il_range(1, 10)
   println("range 1..10:   " ++ to_string(il_to_list(nums)))
   println("length:        " ++ String.from_int(il_length(nums)))

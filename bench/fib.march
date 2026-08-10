@@ -10,7 +10,7 @@ pfn fib(n : Int) : Int do
   else fib(n - 1) + fib(n - 2) end
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(fib(40)))
 end
 

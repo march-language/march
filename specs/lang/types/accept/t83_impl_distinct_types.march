@@ -14,7 +14,7 @@ mod M do
   impl Speak(Cat) do
     fn speak(_self) do "meow" end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(speak(Dog))
     println(speak(Cat))
   end

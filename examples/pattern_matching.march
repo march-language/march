@@ -100,7 +100,7 @@ mod PatternMatching do
   fn list_sum(Nil)         : Int do 0 end
   fn list_sum(Cons(x, xs)) : Int do x + list_sum(xs) end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- 1. Literals
     println(describe_int(0))
     println(describe_int(1))

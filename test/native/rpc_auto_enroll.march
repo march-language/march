@@ -44,7 +44,7 @@ mod RpcAutoEnroll do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn)) do
     -- Bind an OS-assigned ephemeral port (0) and read it back, so concurrent
     -- runs on a shared host never collide on a fixed port.
     let listen_fd = match tcp_listen(0) do

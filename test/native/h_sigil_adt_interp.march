@@ -50,7 +50,7 @@ mod HSigilAdtInterp do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     -- tag 0, two fields: was silently empty
     let p = Point(1, 2)
     println("tag0=" ++ IOList.to_string(~H"<p>${p}</p>"))

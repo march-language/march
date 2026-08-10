@@ -10,7 +10,7 @@
 --     general closure-call path, which must still be correct)
 mod Main do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     let ints = NativeArray.from_list_int(Cons(-3, Cons(-1, Cons(0, Cons(1, Cons(3, Nil))))))
     let ints2 = NativeArray.map_int(ints, fn x -> x * x * 3 + x * 7 - 5)
     println(NativeArray.to_list_int(ints2))   -- [1, -9, -5, 5, 43]

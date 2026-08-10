@@ -35,7 +35,7 @@ mod PreemptStarvation do
     if n <= 0 do acc else burn(n - 1, acc + n) end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     let a = task_spawn(fn _ ->
       let r = burn(100000000, 0)
       println("A done")

@@ -48,7 +48,7 @@ pfn scan_late(buf : String, needle : String, i : Int, n : Int, acc : Int) : Int 
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let buf = String.repeat("abcdefghij", buffer_units())
   -- Splice a unique marker in at ~90% so the "found late" case has something
   -- to find.  Built once, outside the timed loops.

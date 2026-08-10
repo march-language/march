@@ -54,7 +54,7 @@ mod LinearDropDemo do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("=== Linear Drop Handlers Demo (Phase 6b) ===")
 
     let pid = spawn(Worker)

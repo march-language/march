@@ -6,7 +6,7 @@
 mod M do
   needs IO.Console
   fn needTrue(b : {Bool | _ == true}) : Int do 1 end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(needTrue(true)))
   end
 end

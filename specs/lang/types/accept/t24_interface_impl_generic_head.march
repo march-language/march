@@ -16,7 +16,7 @@ mod M do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(describe(Box(1)))
     println(describe(Box("hi")))
   end

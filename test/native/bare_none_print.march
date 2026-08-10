@@ -7,7 +7,7 @@
 -- Interp == compiled; prints None-shaped output regardless of element type.
 mod Main do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println(None)
     println(to_string(None))
     let x : Option(String) = None

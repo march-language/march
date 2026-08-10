@@ -31,7 +31,7 @@ fn twice(n : Int) : Int do
   end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(describe(Some(21)))
   println(describe(None))
   println(int_to_string(tier(1)))

@@ -26,7 +26,7 @@ pfn make_float_list(n : Int, offset : Float) : List(Float) do
   go(n - 1, Nil)
 end
 
-fn main() : Unit do
+fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let n = 5000000
   let a = NativeArray.from_list_float(make_float_list(n, 0.0))
   let b = NativeArray.from_list_float(make_float_list(n, 1.0))

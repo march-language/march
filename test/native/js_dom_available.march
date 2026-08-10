@@ -25,7 +25,7 @@ mod JsDomAvailable do
     Js.Dom.store_set("k", "v")
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     println("dom available")
   end
 end

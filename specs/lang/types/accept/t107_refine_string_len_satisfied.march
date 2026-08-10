@@ -7,7 +7,7 @@
 mod M do
   needs IO.Console
   fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(nonempty("abc")))
   end
 end

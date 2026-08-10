@@ -78,7 +78,7 @@ mod ModuleDemo do
       ++ "  decode(encode(42))=" ++ String.from_int(decoded))
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     demo_qualified()
     demo_nested()
     demo_private()

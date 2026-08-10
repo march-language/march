@@ -29,7 +29,7 @@ mod SupervisorSpawnChildren do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let sup = spawn(Sup)
     let wa = child_int(sup, "wa")
     let wb = child_int(sup, "wb")

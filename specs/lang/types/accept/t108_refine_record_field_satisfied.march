@@ -10,7 +10,7 @@ mod M do
   needs IO.Console
   type Cfg = { port : Int }
   fn serve(c : {v : Cfg | v.port >= 1}) : Int do c.port end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(serve({ port: 8080 })))
   end
 end

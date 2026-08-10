@@ -40,7 +40,7 @@ pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let buf = String.repeat("aaa,bbb,ccc,ddd\n", rows())
   println("checksum=" ++ to_string(go(buf, 0, iterations(), 0)))
 end

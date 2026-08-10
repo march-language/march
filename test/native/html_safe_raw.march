@@ -15,7 +15,7 @@ mod HtmlSafeRaw do
     ~H"<body>${Html.raw(IOList.to_string(body))}</body>"
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let icon = Html.raw("XXXYYY")
     let direct = ~H"<button>${icon}</button>"
     println(IOList.to_string(direct))
