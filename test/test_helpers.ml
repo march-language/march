@@ -810,7 +810,18 @@ let march_project_root () =
 
 (** Run a shell command, returning (exit_code, combined_stdout_stderr).
     Used to capture the March compiler's own diagnostic output so a real
-    compile failure can be reported with the actual error, not swallowed. *)
+    compile failure can be reported with the actual error, not swallowed.
+
+    [Sys.command] returns whatever [/bin/sh -c] returns as its own exit
+    status, which for a plain [system(3)] wait means: if the child died from
+    a signal, the shell reports 128+signum (so 137 == SIGKILL, 139 ==
+    SIGSEGV, 134 == SIGABRT); anything below 128 is a real [exit(n)] (or
+    [exit(-1)], which C truncates to the low byte, i.e. 255) from the child
+    itself or from the shell. So an observed rc of 255 is NOT evidence of a
+    signal kill — 255 can only mean an explicit exit(255)/exit(-1) somewhere
+    in the pipeline ([march --compile] itself, a subprocess it spawns such
+    as clang/the linker, or the shell failing to exec at all), never a crash
+    that the shell is translating from a signal number. *)
 let run_capture cmd =
   let tmp = Filename.temp_file "march_test_capture" ".txt" in
   let rc = Sys.command (Printf.sprintf "( %s ) >%s 2>&1" cmd (Filename.quote tmp)) in
@@ -837,7 +848,7 @@ let compile_march_raw ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src 
     record_jit_skip (Printf.sprintf "no clang on PATH (compiling %s)" src);
     `Skipped
   end else
-    `Failed (rc, output)
+    `Failed (rc, output, cmd)
 
 (** Compile [src] with `main_exe --compile [extra_args] -o bin src`
     (optionally prefixed with extra env/cd via [cmd_prefix]; [extra_args]
@@ -851,11 +862,38 @@ let compile_march ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
   match compile_march_raw ~cmd_prefix ~extra_args ~main_exe ~bin ~src () with
   | `Ok bin -> `Ok bin
   | `Skipped -> `Skipped
-  | `Failed (rc, output) ->
-    Alcotest.failf
-      "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
-       PATH, so this is a real compiler failure, not an environment gap):\n%s"
-      rc src output
+  | `Failed (rc, output, cmd) ->
+    if output <> "" then
+      Alcotest.failf
+        "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
+         PATH, so this is a real compiler failure, not an environment gap):\n%s"
+        rc src output
+    else
+      (* Empty captured output despite redirecting both stdout and stderr
+         means the failing stage died before writing anything we could
+         catch (or its output never reached the redirected fd at all) — the
+         plain rc/src message above tells us nothing in that case, so dump
+         everything needed to reproduce by hand: the exact command line,
+         the full source of the (small, generated) program that failed to
+         compile, and the MARCH_TRMC value this test process actually saw,
+         since that's the variable under suspicion for the nondeterministic
+         ubuntu-24.04 rc=255/empty-output failure this is meant to debug. *)
+      let src_contents =
+        try read_file_contents src
+        with Sys_error e -> Printf.sprintf "<could not read %s: %s>" src e
+      in
+      Alcotest.failf
+        "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
+         PATH, so this is a real compiler failure, not an environment gap):\n\
+         <empty captured output>\n\
+         command: %s\n\
+         MARCH_TRMC=%s\n\
+         --- source (%s) ---\n\
+         %s\n\
+         --- end source ---"
+        rc src cmd
+        (match Sys.getenv_opt "MARCH_TRMC" with Some v -> v | None -> "<unset>")
+        src src_contents
 
 (** Like [compile_march], but calls [Alcotest.fail] directly instead of
     returning a variant — for the common case where the caller has no
