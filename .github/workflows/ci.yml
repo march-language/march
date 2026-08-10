@@ -330,7 +330,7 @@ jobs:
 
   sanitize-gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -353,6 +353,20 @@ jobs:
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             MARCH_TRMC=1 ./specs/lang/golden/sanitize.sh
+
+  # Runs the full test suite with MARCH_TRMC=1 on its own fresh runner. It used to be
+  # a third phase inside sanitize-gate, but that confounded resource exhaustion (two
+  # ASAN sweeps already run on that runner) with the TRMC variable itself — failures
+  # were flaky/non-reproducible. A clean runner isolates whether TRMC is the cause.
+  trmc-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
 
       - name: Test suite with TRMC enabled
         timeout-minutes: 20
