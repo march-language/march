@@ -12735,6 +12735,65 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
     | Some (_ :: _ as grants, span) -> Some (grants, span)
     | _ -> None
   in
+  let main_closure () =
+    match
+      Hashtbl.find_opt (fn_transitive_capability_closures_tbl env) "main"
+    with
+    | Some caps -> caps
+    | None -> []
+  in
+  (* R1 stage D: a program that performs IO must SAY what it performs it
+     under.  This arm is the whole of R1's opt-in gap — before stage D it was
+     `| None -> ()`, and that single line is why "March programs cannot
+     perform undeclared IO" was false while stages A–C were shipped.
+
+     An empty closure still passes: a `main` that touches nothing satisfies a
+     grant of nothing, which is why the majority of existing programs (212 of
+     330 measured) are untouched by the flip.
+
+     The row's [unknown] flag is deliberately NOT consulted here — see the
+     design's §D3.  [unknown] exists because a FUNCTION can receive a closure
+     from outside itself, so no caller can be charged for what it does.  At
+     `main` the program is closed: every closure it invokes was created
+     somewhere inside it and charged at its creation site.  The two genuine
+     "outside" routes are handled elsewhere — FFI surfaces as `IO.Foreign`,
+     and hot code reload is outside the claim entirely. *)
+  (match main_site with
+   | Some ([], span) -> (
+     match List.sort_uniq String.compare (main_closure ()) with
+     | [] -> ()
+     | caps ->
+       let named = List.filter (fun c -> cap_subsumes "IO" c) caps in
+       if named <> [] then
+         let show_caps =
+           String.concat ", " (List.map (fun c -> Printf.sprintf "`%s`" c) named)
+         in
+         let suggested =
+           String.concat ", "
+             (List.map
+                (fun c ->
+                   (* `cap_` prefix, not the bare leaf: `IO.Spawn` would give
+                      `spawn`, which is a RESERVED KEYWORD and does not parse.
+                      A fixed prefix cannot collide with any keyword and needs
+                      no reserved-word table kept in sync with the lexer. *)
+                   let leaf =
+                     match String.rindex_opt c '.' with
+                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+                     | None -> c
+                   in
+                   Printf.sprintf "cap_%s : Cap(%s)"
+                     (String.lowercase_ascii leaf) c)
+                named)
+         in
+         Err.error env.errors ~span
+           (Printf.sprintf
+              "`main` performs IO but declares no grant. The program reaches \
+               %s; a `main` with no capability parameter is granted nothing.\n\
+               help: declare the grant `main` actually needs —\n\
+              \        fn main(%s) : ()\n\
+               or grant everything with `fn main(cap : Cap(IO))`."
+              show_caps suggested))
+   | _ -> ());
   match main_grant with
   | None -> ()
   | Some (grants, span) ->
