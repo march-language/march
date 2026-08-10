@@ -11,6 +11,30 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: a program that performs IO must declare the grant it performs
+  it under.** `fn main()` with no capability parameter is now granted
+  *nothing*, so reaching any capability from it is a compile error naming the
+  exact grant the program needs — previously a parameterless `main` was
+  ambient and could do anything. This is what makes "a March program cannot
+  perform IO without declaring its authority" true rather than
+  aspirational; before it, the honest claim was only "a program that *states*
+  its grant cannot exceed it".
+  A `main` that performs no IO is unaffected. Migration is one line and the
+  compiler computes it for you — the error prints the exact signature to
+  paste. (Sandbox ladder R1 stage D.)
+- **`main` may now hold several capabilities**, e.g.
+  `fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn))`; the
+  grant is their union. Previously it could hold exactly one, so a program
+  needing two narrow capabilities had to widen to `Cap(IO)`. Shipped
+  alongside the change above deliberately: without it, requiring a grant
+  would have pushed roughly a third of real programs to the root capability
+  and earned a weaker guarantee than the ambient default it replaced.
+  Relatedly, `IO.Foreign` under a narrow grant is now refused only when the
+  grant does not cover it — an explicit `Cap(IO.Foreign)` parameter is an
+  honest grant of the unbounded thing.
+
 ### Added
 
 - **Capability grants now compose per function, not just per program.**

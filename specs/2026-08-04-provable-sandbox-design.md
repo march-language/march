@@ -1,26 +1,32 @@
 # Toward a provable sandbox
 
 Status: **R2, R3, R4/R4a built (2026-08-05/06); R1 stages A+B built
-(2026-08-09); R1 stage C + a bounded form of R5 built (2026-08-10); R6–R9 are
-not.** This page exists to say precisely what the claim "provably sandboxed by
+(2026-08-09); R1 stage C + a bounded form of R5, and stage D (the ambient
+default retired) built (2026-08-10); R6 not started though its algebraic
+substrate is mechanized; R7 substantially built; R8 audited; R9 never.** This page exists to say precisely what the claim "provably sandboxed by
 the type system" would require, what March already has, and which of it is
 worth building.
 
-**The one correction a reader must carry through the whole page:** R1 as built
-is an OPT-IN GATE, not a token discipline. `file_read(p)` still compiles with
-no capability in scope. What R1 shipped is *if you write a capability
-parameter, it is enforced as a ceiling on everything that function (or, at
-`main`, that program) reaches*. The paragraphs below that say "built-in IO is
-ambient" are therefore still true of the DEFAULT, and every claim in §3 has to
-be read with the qualifier "for code that opts in by naming a grant". Closing
-that — making an unannotated `file_read` an error — is a separate decision
-this page does not make.
+**The one correction a reader must carry through the whole page:** the
+paragraphs below saying "built-in IO is ambient" were true when written and
+are now FALSE at program granularity. R1 stage D (2026-08-10,
+`specs/2026-08-10-r1-stage-d-grant-required-design.md`) retired the ambient
+default: a `main` with no capability parameter is granted nothing, so a
+program that performs IO without declaring its grant does not compile.
+
+What is still ambient is the FUNCTION level. `file_read(p)` inside a helper
+needs no token in scope — the helper is bounded only by whatever grant sits
+above it on the chain from `main`, or by its own `Cap(P)` parameter if it
+declares one (stage C). Making an unannotated `file_read` an error in its own
+right is R1a, and this page still does not recommend it.
 
 Stage 1 of §3 — "capabilities cannot be fabricated, only received and
 narrowed" — is earned, and with R2 it is earned in the strong sense: there is
-no ambient capability to pick up either. Nothing above it is. In particular
-**built-in IO is still ambient** (§1, R1), which is the load-bearing gap and is
-untouched by what shipped — a module still performs IO holding nothing.
+no ambient capability to pick up either. (The sentence that stood here until
+2026-08-10 — "built-in IO is still ambient … a module still performs IO
+holding nothing" — was the load-bearing gap for four days and is now closed at
+program granularity by stage D. It remains true of individual FUNCTIONS; see
+the correction above.)
 
 Companion to `specs/2026-08-03-forge-cap-audit-design.md` (artifact channel),
 `specs/2026-08-04-path-scoped-capabilities-design.md`,
@@ -70,8 +76,11 @@ capability lattice with subsumption (`lib/caps/cap_lattice.ml`), attenuation
 
 ### The one thing that is missing
 
-**Built-in IO is ambient.** Any module can write `file_read(p)` with no token
-in scope. `needs` is a declaration reconciled against a separate analysis —
+**Built-in IO is ambient** — written 2026-08-04, closed at PROGRAM
+granularity by stage D on 2026-08-10, still true of individual functions. Any
+module can write `file_read(p)` with no token in scope; what changed is that
+the program containing it must now declare the resulting capability at
+`main`. `needs` is a declaration reconciled against a separate analysis —
 which is exactly why `--cap-strict` could be implemented as a pass over TIR
 rather than as a typing rule.
 
@@ -85,14 +94,17 @@ Everything below is downstream of closing that.
 
 ## 2. What the claim would require
 
-### R1. No ambient authority (load-bearing) — **STAGES A+B SHIPPED 2026-08-09**
+### R1. No ambient authority (load-bearing) — **A+B SHIPPED 2026-08-09; C+D SHIPPED 2026-08-10**
 
 **Built 2026-08-09** — `specs/2026-08-08-r1-no-ambient-io-design.md` (staged
 plan) and `specs/progress/2026-08-09-r1-grant-check-stages-ab.md`. `main`'s
 capability parameter is the program's GRANT: `fn main(cap : Cap(IO.Console))`
 holds the program's whole transitive capability closure under the console at
-compile time, no matter what any module declares. A parameterless `main` stays
-ambient (nothing existing breaks); `Cap(IO)` is the full grant. `IO.Foreign`
+compile time, no matter what any module declares. A parameterless `main` stayed
+ambient at that point (nothing existing broke) — **stage D reversed exactly
+that on 2026-08-10**, and a parameterless `main` is now granted nothing;
+`Cap(IO)` is the full grant, and `main` may hold several capabilities whose
+union is the grant. `IO.Foreign`
 is refused under any narrow grant — a bound over linked C would be a lie.
 What remains of R1 is stage C: per-FUNCTION grants via effect rows (R5),
 where the guarantee composes per dependency instead of per program. The
@@ -606,7 +618,7 @@ shippable increment.
 |---|---|---|
 | **0** | **shipped** | "`needs` is a ceiling on every module, including dependencies that never opted in, verified against emitted code and re-checkable from the artifact" |
 | **1 — unforgeable** | R3, R4 — **shipped 2026-08-05** | "capabilities cannot be fabricated, only received and narrowed" |
-| **2 — no ambient IO** | R1b, R2 — **shipped 2026-08-09, OPT-IN ONLY** | "a module can only perform IO with authority it was given" — sayable **only of code that names a grant**. An unannotated program is still ambient by design (the adoption contract), so the unqualified sentence is NOT yet earned. What is earned: "a program that declares its grant cannot exceed it, whatever any dependency declares" |
+| **2 — no ambient IO** | R1b, R2 — **shipped; ambient default retired 2026-08-10 (stage D)** | "a program can only perform IO with authority it was given" — now earned at PROGRAM granularity without the opt-in qualifier: a parameterless `main` is granted nothing, so undeclared IO is a compile error. Still NOT earned: the per-FUNCTION form ("a module can only perform IO with authority it was given"), which is R1a and needs every IO-performing stdlib function to take a token |
 | **3 — compositional** | R5 — **shipped 2026-08-10, bounded** | "…and that holds per function and for library code, checked at each definition rather than only per-program" — earned for the cases the analysis can trace, which is first-order code, callbacks passed by name, and lambdas. A function value laundered through a data structure is REFUSED under a narrow grant rather than typed, so the claim is "checked per-definition, and where it cannot be checked it is refused, never assumed" |
 | **4 — proved** | R6, R7 | "provably capability-safe for the core language, modulo FFI, compiler correctness, and console egress" |
 | **5 — unqualified** | R9 | not reachable |

@@ -1,6 +1,11 @@
 # R1 stage D — grant required: closing the ambient default
 
-Status: DESIGN, nothing built. Written 2026-08-10, immediately after stage C
+Status: SHIPPED 2026-08-10. Corrections found while building it are recorded
+inline (the migration count, the `spawn` keyword collision, the interpreter's
+matching one-capability assumption, and the `needs`/`Cap` shadowing
+interactions) rather than rewritten away.
+
+Originally: DESIGN, nothing built. Written 2026-08-10, immediately after stage C
 shipped (`specs/progress/2026-08-10-r1-stage-c-effect-rows.md`). Parent:
 `specs/2026-08-08-r1-no-ambient-io-design.md`; ladder:
 `specs/2026-08-04-provable-sandbox-design.md`.
@@ -214,6 +219,19 @@ historically dangerous, and this codebase's record is full of compiled-only
 bugs that typecheck-side tests cannot see. **Compiled-and-run tests at 0, 1, 2
 and 3 cap parameters are mandatory**; a typecheck-only test would pass while
 the binary crashes.
+
+**Correction found by writing those tests: the INTERPRETER has the same
+contract and this section originally missed it.** `lib/eval/eval.ml`'s `main`
+invocation built its argument list as `match main_arity with Some 1 -> [VUnit]
+| _ -> []` — hardcoded to one, exactly like the LLVM thunk. A 2-capability
+`main` therefore died on the eval path with "arity mismatch: expected 2 args,
+got 0" while the compiled path was already correct.
+
+That is the failure mode this project keeps rediscovering, in a new place: the
+two backends implement one contract, and a test that exercises only one of
+them cannot see them diverge. The `main_cap_adapter` group runs BOTH at every
+arity for that reason, and both sites now carry a comment pointing at the
+other.
 
 ## Migration
 
