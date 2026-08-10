@@ -12637,6 +12637,143 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
         true ws_still_works)
   end
 
+(* ── NativeArray narrow element types (f32/i32/u8) — interpreter path ──────
+   Boundary rule (never traps): integer stores wrap mod 2^w two's-complement;
+   float stores round to nearest-even binary32; loads widen exactly.
+   sum_i32/sum_u8 accumulate in Int (i64); sum_f32 accumulates in Float
+   (double) over already-rounded elements. *)
+
+let vfloat = function March_eval.Eval.VFloat f -> f | _ -> failwith "expected VFloat"
+
+(* u8: wrap on store, zero-extend on load *)
+let test_native_u8_wrap_and_zero_extend () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_u8(3, 0)
+      let a = NativeArray.set_u8(a, 0, 300)   -- 300 mod 256 = 44
+      let a = NativeArray.set_u8(a, 1, -1)    -- wraps to 255
+      let a = NativeArray.set_u8(a, 2, 256)   -- wraps to 0
+      [NativeArray.get_u8(a, 0), NativeArray.get_u8(a, 1), NativeArray.get_u8(a, 2)]
+    end
+  end|} in
+  Alcotest.(check (list int)) "u8 wrap + zero-extend loads" [44; 255; 0]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* i32: wrap both signs *)
+let test_native_i32_wrap_both_signs () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_i32(3, 0)
+      let a = NativeArray.set_i32(a, 0, 4294967296)   -- 2^32 wraps to 0
+      let a = NativeArray.set_i32(a, 1, 2147483648)   -- 2^31 wraps negative
+      let a = NativeArray.set_i32(a, 2, 2147483647)   -- max, exact
+      [NativeArray.get_i32(a, 0), NativeArray.get_i32(a, 1), NativeArray.get_i32(a, 2)]
+    end
+  end|} in
+  Alcotest.(check (list int)) "i32 wrap both signs" [0; -2147483648; 2147483647]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* f32: rounds on store, widens exactly on load.
+   0.1 rounded to binary32 then widened is 0.10000000149011612. *)
+let test_native_f32_round_trip () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_f32(1, 0.0)
+      let a = NativeArray.set_f32(a, 0, 0.1)
+      NativeArray.get_f32(a, 0)
+    end
+  end|} in
+  Alcotest.(check (float 0.0)) "f32 store rounds, load widens exactly"
+    0.10000000149011612 (vfloat (call_fn env "f" []))
+
+(* u8 sum accumulates wide: 300 elements of 255 = 76500, far past one byte *)
+let test_native_u8_sum_wide_accumulate () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_u8(300, 255)
+      NativeArray.sum_u8(a)
+    end
+  end|} in
+  Alcotest.(check int) "u8 sum accumulates in Int, not mod 256" 76500
+    (vint (call_fn env "f" []))
+
+(* map/from_list/to_list round-trip for u8; map result wraps *)
+let test_native_u8_from_list_map_to_list () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let u = NativeArray.from_list_u8([100, 250])
+      let u2 = NativeArray.map_u8(u, fn x -> x * 2)   -- 200, 500 wraps to 244
+      NativeArray.to_list_u8(u2)
+    end
+  end|} in
+  Alcotest.(check (list int)) "u8 map wraps on overflow" [200; 244]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* map2/from_list/to_list round-trip for i32 *)
+let test_native_i32_from_list_map2_to_list () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let i = NativeArray.from_list_i32([1, 2])
+      let j = NativeArray.from_list_i32([5, 6])
+      NativeArray.to_list_i32(NativeArray.map2_i32(i, j, fn (a, b) -> a + b))
+    end
+  end|} in
+  Alcotest.(check (list int)) "i32 map2 elementwise add" [6; 8]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* map/from_list/to_list round-trip for f32 *)
+let test_native_f32_from_list_map_to_list () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let f_ = NativeArray.from_list_f32([1.0, 2.0])
+      NativeArray.to_list_f32(NativeArray.map_f32(f_, fn x -> x +. 1.5))
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0))) "f32 map adds 1.5" [2.5; 3.5]
+    (List.map vfloat (vlist (call_fn env "f" [])))
+
+(* Conversions — widening directions are exact, narrowing directions
+   round/wrap. *)
+let test_native_int_to_i32_arr_conversion () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let i = NativeArray.from_list_int([1, 2])
+      NativeArray.to_list_i32(NativeArray.int_to_i32_arr(i))
+    end
+  end|} in
+  Alcotest.(check (list int)) "int_to_i32_arr exact for in-range values" [1; 2]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_native_int_to_u8_arr_conversion_wraps () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let big = NativeArray.from_list_int([300])
+      NativeArray.to_list_u8(NativeArray.int_to_u8_arr(big))
+    end
+  end|} in
+  Alcotest.(check (list int)) "int_to_u8_arr wraps mod 256" [44]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_native_float_to_f32_arr_conversion () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let f_ = NativeArray.from_list_float([1.5, 2.5])
+      NativeArray.to_list_f32(NativeArray.float_to_f32_arr(f_))
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0))) "float_to_f32_arr exact for values with exact binary32 reprs"
+    [1.5; 2.5] (List.map vfloat (vlist (call_fn env "f" [])))
+
+let test_native_i32_to_f32_to_float_arr_conversion () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let c = NativeArray.from_list_i32([3])
+      NativeArray.to_list_float(NativeArray.f32_to_float_arr(NativeArray.i32_to_f32_arr(c)))
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0))) "i32_to_f32_arr then f32_to_float_arr round-trips exactly"
+    [3.0] (List.map vfloat (vlist (call_fn env "f" [])))
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -13397,6 +13534,19 @@ let stdlib_suites =
         Alcotest.test_case "empty filter"                   `Quick test_df_empty_filter;
         Alcotest.test_case "single row"                     `Quick test_df_single_row;
         Alcotest.test_case "drop_nulls"                     `Quick test_df_drop_nulls;
+      ]);
+      ("native_array_narrow", [
+        Alcotest.test_case "u8 wrap + zero-extend loads"        `Quick test_native_u8_wrap_and_zero_extend;
+        Alcotest.test_case "i32 wrap both signs"                `Quick test_native_i32_wrap_both_signs;
+        Alcotest.test_case "f32 store rounds, load widens"      `Quick test_native_f32_round_trip;
+        Alcotest.test_case "u8 sum accumulates wide"            `Quick test_native_u8_sum_wide_accumulate;
+        Alcotest.test_case "u8 from_list/map/to_list wraps"     `Quick test_native_u8_from_list_map_to_list;
+        Alcotest.test_case "i32 from_list/map2/to_list"         `Quick test_native_i32_from_list_map2_to_list;
+        Alcotest.test_case "f32 from_list/map/to_list"          `Quick test_native_f32_from_list_map_to_list;
+        Alcotest.test_case "int_to_i32_arr conversion"          `Quick test_native_int_to_i32_arr_conversion;
+        Alcotest.test_case "int_to_u8_arr conversion wraps"     `Quick test_native_int_to_u8_arr_conversion_wraps;
+        Alcotest.test_case "float_to_f32_arr conversion"        `Quick test_native_float_to_f32_arr_conversion;
+        Alcotest.test_case "i32_to_f32_arr then f32_to_float_arr" `Quick test_native_i32_to_f32_to_float_arr_conversion;
       ]);
       ("vault stdlib", [
         Alcotest.test_case "set and get"                  `Quick test_vault_set_get;

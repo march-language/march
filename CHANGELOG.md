@@ -11,6 +11,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`NativeArray` gained narrow element widths: f32, i32, u8** (interpreter
+  path — `NativeF32Arr`/`NativeI32Arr`/`NativeU8Arr`, e.g.
+  `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`, plus conversions like
+  `NativeArray.int_to_u8_arr`). Integer stores wrap mod 2^w two's-complement,
+  float stores round to nearest-even binary32, and loads widen exactly;
+  operations never trap. Compiled (`--compile`) support for these widths is
+  still pending.
+
 ### Changed
 
 - **The capability ceiling is now on by default.** `march --compile` fails the

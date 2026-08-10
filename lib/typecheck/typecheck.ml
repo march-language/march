@@ -2752,6 +2752,97 @@ let builtin_bindings : (string * scheme) list =
     ("native_float_arr_filter_mask",
        Mono (TArrow (TCon ("NativeFloatArr", []),
              TArrow (TCon ("TypedArray", [t_bool]), TCon ("NativeFloatArr", [])))));
+    (* Narrow-width NativeArray families — f32/i32/u8 (P10 narrow types).
+       Opaque 0-arity types, same shape as NativeIntArr/NativeFloatArr above.
+       Interpreter-path only; compiled (LLVM/runtime) support is a later task.
+       No alloc_raw / fold / min / max / sumsq_dev / filter_mask for these
+       widths -- only the 9-op family + conversions. *)
+    (* f32 *)
+    ("native_f32_arr_make",
+       Mono (TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", [])))));
+    ("native_f32_arr_length",
+       Mono (TArrow (TCon ("NativeF32Arr", []), t_int)));
+    ("native_f32_arr_get",
+       Mono (TArrow (TCon ("NativeF32Arr", []), TArrow (t_int, t_float))));
+    ("native_f32_arr_set",
+       Mono (TArrow (TCon ("NativeF32Arr", []),
+             TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", []))))));
+    ("native_f32_arr_sum",
+       Mono (TArrow (TCon ("NativeF32Arr", []), t_float)));
+    ("native_f32_arr_map",
+       Mono (TArrow (TCon ("NativeF32Arr", []),
+             TArrow (TArrow (t_float, t_float), TCon ("NativeF32Arr", [])))));
+    ("native_f32_arr_map2",
+       Mono (TArrow (TCon ("NativeF32Arr", []),
+             TArrow (TCon ("NativeF32Arr", []),
+             TArrow (TArrow (t_float, TArrow (t_float, t_float)), TCon ("NativeF32Arr", []))))));
+    ("native_f32_arr_from_list",
+       Mono (TArrow (t_list t_float, TCon ("NativeF32Arr", []))));
+    ("native_f32_arr_to_list",
+       Mono (TArrow (TCon ("NativeF32Arr", []), t_list t_float)));
+    (* i32 *)
+    ("native_i32_arr_make",
+       Mono (TArrow (t_int, TArrow (t_int, TCon ("NativeI32Arr", [])))));
+    ("native_i32_arr_length",
+       Mono (TArrow (TCon ("NativeI32Arr", []), t_int)));
+    ("native_i32_arr_get",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TArrow (t_int, t_int))));
+    ("native_i32_arr_set",
+       Mono (TArrow (TCon ("NativeI32Arr", []),
+             TArrow (t_int, TArrow (t_int, TCon ("NativeI32Arr", []))))));
+    ("native_i32_arr_sum",
+       Mono (TArrow (TCon ("NativeI32Arr", []), t_int)));
+    ("native_i32_arr_map",
+       Mono (TArrow (TCon ("NativeI32Arr", []),
+             TArrow (TArrow (t_int, t_int), TCon ("NativeI32Arr", [])))));
+    ("native_i32_arr_map2",
+       Mono (TArrow (TCon ("NativeI32Arr", []),
+             TArrow (TCon ("NativeI32Arr", []),
+             TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeI32Arr", []))))));
+    ("native_i32_arr_from_list",
+       Mono (TArrow (t_list t_int, TCon ("NativeI32Arr", []))));
+    ("native_i32_arr_to_list",
+       Mono (TArrow (TCon ("NativeI32Arr", []), t_list t_int)));
+    (* u8 *)
+    ("native_u8_arr_make",
+       Mono (TArrow (t_int, TArrow (t_int, TCon ("NativeU8Arr", [])))));
+    ("native_u8_arr_length",
+       Mono (TArrow (TCon ("NativeU8Arr", []), t_int)));
+    ("native_u8_arr_get",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TArrow (t_int, t_int))));
+    ("native_u8_arr_set",
+       Mono (TArrow (TCon ("NativeU8Arr", []),
+             TArrow (t_int, TArrow (t_int, TCon ("NativeU8Arr", []))))));
+    ("native_u8_arr_sum",
+       Mono (TArrow (TCon ("NativeU8Arr", []), t_int)));
+    ("native_u8_arr_map",
+       Mono (TArrow (TCon ("NativeU8Arr", []),
+             TArrow (TArrow (t_int, t_int), TCon ("NativeU8Arr", [])))));
+    ("native_u8_arr_map2",
+       Mono (TArrow (TCon ("NativeU8Arr", []),
+             TArrow (TCon ("NativeU8Arr", []),
+             TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeU8Arr", []))))));
+    ("native_u8_arr_from_list",
+       Mono (TArrow (t_list t_int, TCon ("NativeU8Arr", []))));
+    ("native_u8_arr_to_list",
+       Mono (TArrow (TCon ("NativeU8Arr", []), t_list t_int)));
+    (* Conversions *)
+    ("native_float_to_f32_arr",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TCon ("NativeF32Arr", []))));
+    ("native_f32_to_float_arr",
+       Mono (TArrow (TCon ("NativeF32Arr", []), TCon ("NativeFloatArr", []))));
+    ("native_int_to_i32_arr",
+       Mono (TArrow (TCon ("NativeIntArr", []), TCon ("NativeI32Arr", []))));
+    ("native_i32_to_int_arr",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TCon ("NativeIntArr", []))));
+    ("native_int_to_u8_arr",
+       Mono (TArrow (TCon ("NativeIntArr", []), TCon ("NativeU8Arr", []))));
+    ("native_u8_to_int_arr",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("NativeIntArr", []))));
+    ("native_i32_to_f32_arr",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TCon ("NativeF32Arr", []))));
+    ("native_u8_to_f32_arr",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("NativeF32Arr", []))));
     (* TypedArray builtins — contiguous native arrays for columnar DataFrame storage *)
     ("typed_array_create",   poly1 (fun a ->
         TArrow (t_int, TArrow (a, TCon ("TypedArray", [a])))));
@@ -2890,7 +2981,8 @@ let builtin_types : (string * int) list =
     (* RingBuf — mutable fixed-capacity circular buffer (non-sendable) *)
     ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
-    ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
+    ("NativeIntArr",   0); ("NativeFloatArr", 0);
+    ("NativeF32Arr",   0); ("NativeI32Arr",   0); ("NativeU8Arr", 0); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
@@ -5073,13 +5165,16 @@ let offer_unrefined_error env span (r : session_ty ref) op =
 
 (** Type constructor names that cannot appear in actor message payloads.
     These types carry mutable state that must remain owned by a single actor.
-    NativeIntArr/NativeFloatArr are NativeArray's real backing types -- the
-    NativeArray stdlib module (stdlib/native_array.march) is a function
-    namespace over these two opaque 0-arity constructors, not a type of its
-    own, so "NativeArray" itself would be a silent no-op entry here (see
-    where native_int_arr_make/native_float_arr_make are registered, this
+    NativeIntArr/NativeFloatArr/NativeF32Arr/NativeI32Arr/NativeU8Arr are
+    NativeArray's real backing types -- the NativeArray stdlib module
+    (stdlib/native_array.march) is a function namespace over these opaque
+    0-arity constructors, not a type of its own, so "NativeArray" itself
+    would be a silent no-op entry here (see where
+    native_int_arr_make/native_float_arr_make are registered, this
     file, around the NativeArray builtins section). *)
-let non_sendable_types = ["RingBuf"; "NativeIntArr"; "NativeFloatArr"]
+let non_sendable_types =
+  ["RingBuf"; "NativeIntArr"; "NativeFloatArr";
+   "NativeF32Arr"; "NativeI32Arr"; "NativeU8Arr"]
 
 (** [check_sendable errors span ty] walks [ty] and emits an error for every
     non-sendable type constructor it finds. Called from the [ECon] arm on

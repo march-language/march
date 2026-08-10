@@ -1918,6 +1918,11 @@ let eval_with_dataframe src =
     Lazy.force df_decl;
   ] src
 
+let native_array_decl = lazy (load_stdlib_file_for_test "native_array.march")
+
+let eval_with_native_array src =
+  eval_with_stdlib [Lazy.force native_array_decl] src
+
 (* ── Vault stdlib tests ─────────────────────────────────────────────────── *)
 
 let vault_decl = lazy (load_stdlib_file_for_test "vault.march")
