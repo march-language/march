@@ -9983,6 +9983,313 @@ let test_main_signature_still_rejects_non_cap () =
       end
     end|})
 
+(* ── R1 stage C: per-function grants (effect rows) ────────────────────────
+   specs/2026-08-10-r1-stage-c-effect-rows-design.md.
+
+   Stages A/B check ONE row against ONE grant, at `main`.  Stage C makes any
+   function that takes a concrete `Cap(P)` parameter a DISCHARGE POINT: its
+   own transitive capability row must sit under the capabilities its
+   parameters were handed.  The guarantee stops being "this BINARY cannot
+   touch the filesystem" and becomes "this FUNCTION cannot", which is what
+   composes across dependencies.
+
+   The claim being certified is deliberately CONDITIONAL — "this function's
+   static reach fits under P, plus whatever function values you hand it" —
+   and the tests below pin both halves of that:
+   - a function that invokes a PARAMETER still certifies (its callers are
+     charged for what they supply, by the free-variable edge that has always
+     driven the closure), and
+   - a function that invokes a value with no traceable creation site is
+     REFUSED under a narrow grant, the same way stage B refuses to certify a
+     narrow grant over `IO.Foreign`, rather than certifying a bound it cannot
+     see. *)
+
+let test_fn_grant_narrow_covers_console () =
+  let ctx = typecheck {|mod FnGrantOk do
+    needs IO.Console
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      println(msg)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a console-only helper under Cap(IO.Console) is fine"
+    false (has_errors ctx)
+
+let test_fn_grant_narrow_rejects_filewrite () =
+  (* The manifest is truthful — `needs IO.FileWrite` is declared and the
+     module-level checks are all satisfied.  Declaring still does not grant,
+     now at function granularity. *)
+  let ctx = typecheck {|mod FnGrantViolate do
+    needs IO.Console
+    needs IO.FileWrite
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      match file_write("/tmp/fn_grant_x", msg) do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "IO.FileWrite outside a Cap(IO.Console) parameter errors"
+    true (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "the violating capability is named"
+    true (has_error_with ctx "IO.FileWrite")
+
+let test_fn_grant_violation_through_helper () =
+  (* Transitive, and the diagnostic names the chain that reaches it — the
+     evidence stage B could only give as a single hop. *)
+  let ctx = typecheck {|mod FnGrantHelper do
+    needs IO.Console
+    needs IO.FileWrite
+    fn save(msg : String) : () do
+      match file_write("/tmp/fn_grant_h", msg) do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      save(msg)
+      println(msg)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a helper-reached capability is still a grant error"
+    true (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "the chain to the capability is named"
+    true (has_error_with ctx "save")
+
+let test_fn_grant_multi_cap_params_union () =
+  (* A helper may hold several narrow caps; the grant is their union, unlike
+     `main`, which the signature check restricts to exactly one parameter. *)
+  let ctx = typecheck {|mod FnGrantMulti do
+    needs IO.Console
+    needs IO.FileWrite
+    fn both(c : Cap(IO.Console), w : Cap(IO.FileWrite), msg : String) : () do
+      match file_write("/tmp/fn_grant_m", msg) do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "every parameter's capability counts toward the grant"
+    false (has_errors ctx)
+
+let test_fn_grant_polymorphic_cap_param_is_no_gate () =
+  (* `Cap(a)` is capability-POLYMORPHIC plumbing (this is how `cap_narrow` is
+     typed).  It names no lattice point, so it grants nothing and must create
+     no discharge point — otherwise every narrowing helper would be refused
+     for reaching capabilities it only forwards. *)
+  let ctx = typecheck {|mod FnGrantPoly do
+    needs IO
+    fn forward(c : Cap(a)) : Cap(a) do
+      c
+    end
+    fn noisy(c : Cap(IO)) : () do
+      match file_write("/tmp/fn_grant_p", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a Cap(a) parameter creates no discharge point"
+    false (has_errors ctx)
+
+let test_fn_grant_invoking_a_parameter_still_certifies () =
+  (* The row's conditional half.  `run` invokes a function it was GIVEN; its
+     own static reach is console-only and it certifies as such.  Nothing is
+     lost: whoever supplies `job` is charged for `job`'s row by the same
+     free-variable edge that has always driven the closure, and that supplier
+     is under its own discharge point. *)
+  let ctx = typecheck {|mod FnGrantHof do
+    needs IO.Console
+    fn run(cap : Cap(IO.Console), job : (() -> ())) : () do
+      println("before")
+      job()
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "invoking a parameter is a conditional row, not a violation"
+    false (has_errors ctx)
+
+let test_fn_grant_supplier_is_charged_for_the_callback () =
+  (* The other half of the same property: the caller that NAMES the effectful
+     callback is the one that must hold the capability for it. *)
+  let ctx = typecheck {|mod FnGrantSupplier do
+    needs IO.Console
+    needs IO.FileWrite
+    fn run(job : (() -> ())) : () do
+      job()
+    end
+    fn writer() : () do
+      match file_write("/tmp/fn_grant_s", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn caller(cap : Cap(IO.Console)) : () do
+      run(writer)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "supplying an effectful callback is charged to the supplier"
+    true (has_error_with ctx "granted `Cap(IO.Console)`")
+
+let test_fn_grant_refuses_untraceable_invocation () =
+  (* The refusal at the precision frontier.  `dispatch` invokes a function it
+     pulled out of a record — no creation site this analysis can trace, so no
+     caller can be charged for it and no narrow bound can be certified.  Like
+     the `IO.Foreign` clause, this is refused rather than silently allowed. *)
+  let ctx = typecheck {|mod FnGrantOpaque do
+    needs IO.Console
+    type Handler = { run : (() -> ()) }
+    fn dispatch(cap : Cap(IO.Console), h : Handler) : () do
+      let f = h.run
+      f()
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "an untraceable invocation refuses a narrow grant"
+    true (has_error_with ctx "cannot trace")
+
+let test_fn_grant_full_io_accepts_untraceable_invocation () =
+  (* The refusal is specific to a NARROW grant, exactly like stage B's
+     `IO.Foreign` rule: `Cap(IO)` bounds nothing within the IO lattice, so
+     there is nothing to certify falsely. *)
+  let ctx = typecheck {|mod FnGrantOpaqueFull do
+    needs IO
+    type Handler2 = { run : (() -> ()) }
+    fn dispatch(cap : Cap(IO), h : Handler2) : () do
+      let f = h.run
+      f()
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Cap(IO) certifies nothing narrow, so nothing is refused"
+    false (has_errors ctx)
+
+let test_fn_grant_narrow_refuses_foreign () =
+  let ctx = typecheck {|mod FnGrantForeign do
+    needs IO.Console
+    needs Ffi
+    extern "rt" : Cap(Ffi) do
+      fn ffi_id2(x : Int) : Int = "march_test_ffi_id"
+    end
+    fn wrapped(cap : Cap(IO.Console)) : () do
+      println(int_to_string(ffi_id2(1)))
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "IO.Foreign under a narrow per-function grant is refused"
+    true (has_error_with ctx "linked C code")
+
+let test_fn_grant_dead_code_is_not_charged () =
+  let ctx = typecheck {|mod FnGrantDead do
+    needs IO.Console
+    needs IO.FileWrite
+    fn never_called() : () do
+      match file_write("/tmp/fn_grant_d", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      println(msg)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a capability the function does not reach costs nothing"
+    false (has_errors ctx)
+
+let test_fn_grant_main_is_not_double_reported () =
+  (* `main` is `check_main_grant`'s discharge point.  If stage C claimed it
+     too, every whole-program violation would be reported twice. *)
+  let ctx = typecheck {|mod FnGrantMainOnce do
+    needs IO.Console
+    needs IO.FileWrite
+    fn main(cap : Cap(IO.Console)) : () do
+      match file_write("/tmp/fn_grant_once", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end|} in
+  let mentions sub (m : string) =
+    let sub_len = String.length sub and m_len = String.length m in
+    let found = ref false in
+    for i = 0 to m_len - sub_len do
+      if String.sub m i sub_len = sub then found := true
+    done;
+    !found
+  in
+  let n =
+    List.length
+      (List.filter
+         (fun d ->
+            d.March_errors.Errors.severity = March_errors.Errors.Error
+            && mentions "granted `Cap(IO.Console)`"
+                 d.March_errors.Errors.message)
+         ctx.March_errors.Errors.diagnostics)
+  in
+  Alcotest.(check int) "exactly one grant diagnostic for main" 1 n
+
+(* The regression class this project has been bitten by twice: a capability
+   pass built on `parse_and_desugar` alone never sees the shape the REAL
+   pipeline produces, where prelude is unwrapped into the entry module's own
+   flat declaration list.  See
+   specs/progress/2026-08-09-cap-shadowing-false-positive.md — nine green unit
+   tests shipped a regression that silenced the most basic capability check in
+   the system.  This test puts a stage-C discharge point in a module that has
+   the real stdlib prepended, flattened the way bin/main.ml flattens it. *)
+let test_fn_grant_with_stdlib_prepended () =
+  with_stdlib_registered "datetime.march" (fun () ->
+    let dt = load_stdlib_file_for_test "datetime.march" in
+    let flattened =
+      match dt with
+      | March_ast.Ast.DMod (_, _, inner, _) -> inner
+      | d -> [ d ]
+    in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "Main"; span = dummy_span };
+      mod_decls = flattened @ (parse_and_desugar {|mod Main do
+        needs IO.Console
+        needs IO.Clock
+        fn stamped(cap : Cap(IO.Console)) : () do
+          println(int_to_string(DateTime.now()))
+        end
+        fn main() : () do
+          ()
+        end
+      end|}).March_ast.Ast.mod_decls;
+    } in
+    let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+    Alcotest.(check bool)
+      "a stdlib-mediated IO.Clock violates a Cap(IO.Console) function grant"
+      true (has_error_with errors "granted `Cap(IO.Console)`"))
+
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
 (* Helper: run typecheck then the standalone cap_infer pass.
@@ -13823,6 +14130,21 @@ let compiler_suites =
           Alcotest.test_case "dead code is not charged"           `Quick test_grant_dead_code_is_not_charged;
           Alcotest.test_case "signature accepts narrow cap"       `Quick test_main_signature_accepts_narrow_cap;
           Alcotest.test_case "signature still rejects non-cap"    `Quick test_main_signature_still_rejects_non_cap;
+        ] );
+      ( "cap_fn_grant", [
+          Alcotest.test_case "narrow fn grant covers console"      `Quick test_fn_grant_narrow_covers_console;
+          Alcotest.test_case "narrow fn grant rejects filewrite"   `Quick test_fn_grant_narrow_rejects_filewrite;
+          Alcotest.test_case "violation through a helper, chained" `Quick test_fn_grant_violation_through_helper;
+          Alcotest.test_case "multi cap params union to the grant" `Quick test_fn_grant_multi_cap_params_union;
+          Alcotest.test_case "Cap(a) param creates no gate"        `Quick test_fn_grant_polymorphic_cap_param_is_no_gate;
+          Alcotest.test_case "invoking a param still certifies"    `Quick test_fn_grant_invoking_a_parameter_still_certifies;
+          Alcotest.test_case "the supplier is charged for callback" `Quick test_fn_grant_supplier_is_charged_for_the_callback;
+          Alcotest.test_case "untraceable invocation is refused"   `Quick test_fn_grant_refuses_untraceable_invocation;
+          Alcotest.test_case "Cap(IO) refuses nothing narrow"      `Quick test_fn_grant_full_io_accepts_untraceable_invocation;
+          Alcotest.test_case "narrow fn grant refuses IO.Foreign"  `Quick test_fn_grant_narrow_refuses_foreign;
+          Alcotest.test_case "dead code is not charged"            `Quick test_fn_grant_dead_code_is_not_charged;
+          Alcotest.test_case "main is not double-reported"         `Quick test_fn_grant_main_is_not_double_reported;
+          Alcotest.test_case "real stdlib-prepended shape"         `Quick test_fn_grant_with_stdlib_prepended;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;
