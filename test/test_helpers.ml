@@ -812,22 +812,65 @@ let march_project_root () =
     Used to capture the March compiler's own diagnostic output so a real
     compile failure can be reported with the actual error, not swallowed.
 
-    [Sys.command] returns whatever [/bin/sh -c] returns as its own exit
-    status, which for a plain [system(3)] wait means: if the child died from
-    a signal, the shell reports 128+signum (so 137 == SIGKILL, 139 ==
-    SIGSEGV, 134 == SIGABRT); anything below 128 is a real [exit(n)] (or
-    [exit(-1)], which C truncates to the low byte, i.e. 255) from the child
-    itself or from the shell. So an observed rc of 255 is NOT evidence of a
-    signal kill — 255 can only mean an explicit exit(255)/exit(-1) somewhere
-    in the pipeline ([march --compile] itself, a subprocess it spawns such
-    as clang/the linker, or the shell failing to exec at all), never a crash
-    that the shell is translating from a signal number. *)
+    CORRECTION (superseding the previous version of this comment): the
+    previous comment here claimed rc=255 could never be evidence of a signal
+    kill, reasoning about what a shell's own exit status would be after a
+    signal death. That reasoning does not describe what this function
+    actually observed: it used [Sys.command], whose OCaml runtime does its
+    own [wait]/[waitpid] on the child and collapses EVERY signal death
+    (SIGKILL, SIGSEGV, SIGABRT, anything) to the single value 255, with the
+    real signal number discarded entirely (verified empirically:
+    [Sys.command "kill -9 $$"] and [Sys.command "kill -11 $$"] both return
+    255). So a real CI failure — `march --compile` reporting rc=255 with
+    completely empty captured output — was, contrary to the old comment,
+    fully consistent with "the compiler was killed by a signal", and there
+    was no way to tell SIGKILL (OOM killer / external kill — a resource
+    problem) from SIGSEGV (a genuine crash) apart. Losing that distinction
+    cost a full debugging cycle.
+
+    Fix: use [Unix.system], which returns a [Unix.process_status] that keeps
+    exited vs. signaled vs. stopped distinct, and a signal death is now
+    reported in the returned output (appended, clearly marked) rather than
+    silently thrown away. The [int] half of the return value still reports
+    255 for a signal death (preserving the historical value so any existing
+    rc=255 comparisons keep working) — the actual signal number lives only
+    in the appended output line, so read it there, not from the int. *)
 let run_capture cmd =
   let tmp = Filename.temp_file "march_test_capture" ".txt" in
-  let rc = Sys.command (Printf.sprintf "( %s ) >%s 2>&1" cmd (Filename.quote tmp)) in
+  let status =
+    Unix.system (Printf.sprintf "( %s ) >%s 2>&1" cmd (Filename.quote tmp))
+  in
   let output = read_file_contents tmp in
   (try Sys.remove tmp with Sys_error _ -> ());
-  (rc, output)
+  (* [n] here is OCaml's own PORTABLE signal encoding (see [Sys.sigkill] etc.
+     in the stdlib), NOT the raw OS signal number — verified empirically:
+     on this machine [Sys.sigkill = -7], [Sys.sigsegv = -10],
+     [Sys.sigabrt = -1], not 9/11/6. Match against the [Sys.sig*] constants
+     rather than hardcoding 9/11/6, but still report the familiar OS number
+     in the message since that's what a reader recognizes. *)
+  let describe_signal n =
+    if n = Sys.sigkill then "SIGKILL (OS signal 9) — OOM killer or an external kill; a resource problem"
+    else if n = Sys.sigsegv then "SIGSEGV (OS signal 11) — a genuine crash inside the process"
+    else if n = Sys.sigabrt then "SIGABRT (OS signal 6)"
+    else Printf.sprintf "OCaml signal code %d (see Sys.sig* for the mapping)" n
+  in
+  match status with
+  | Unix.WEXITED rc -> (rc, output)
+  | Unix.WSIGNALED n ->
+    let note =
+      Printf.sprintf
+        "\n[run_capture] *** PROCESS KILLED BY SIGNAL *** %s\n\
+         (Sys.command/`sh -c` would have collapsed this to a bare rc=255 \
+         with the signal number discarded — see the comment above \
+         run_capture in test/test_helpers.ml)\n"
+        (describe_signal n)
+    in
+    (255, output ^ note)
+  | Unix.WSTOPPED n ->
+    let note =
+      Printf.sprintf "\n[run_capture] *** PROCESS STOPPED BY SIGNAL %d ***\n" n
+    in
+    (255, output ^ note)
 
 (** Like [compile_march] but never calls [Alcotest.fail]/[Alcotest.skip]
     itself — returns the raw outcome so a caller can inspect a real
