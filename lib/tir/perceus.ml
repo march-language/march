@@ -181,6 +181,30 @@ type env = {
       (** Variables that appear as message arguments to [send()] in the
           current function.  Values in this set use atomic RC operations.
           Was [_actor_sent]. *)
+  moved_vars : StringSet.t;
+      (** Variables whose ownership has been MOVED into a heap object by an
+          [ESetField] anywhere in the current function (the TRMC hole-fill).
+
+          The store transfers the reference: the object's field now holds it,
+          and the object's own lifetime releases it.  The mover must therefore
+          never drop the value again — not at a dead binding, not at a branch
+          end, and in particular not as a post-call [EDecRC] when the value is
+          subsequently passed at a borrowed parameter position.
+
+          That last case is the one that bites.  In a TRMC loop the freshly
+          allocated cell is stored into the parent's hole and then handed to
+          the recursive call as its destination; borrow inference correctly
+          marks the destination parameter borrowed, so the caller-side
+          "borrowed arg at its last use" rule fires and emits a drop after the
+          call.  That drop releases a cell the parent now owns through its
+          field, AND it knocks the recursive call out of tail position so
+          [Llvm_tco] can no longer form a loop — which is the entire point of
+          the transformation.
+
+          Function-scoped and computed once by [collect_moved_vars]: a
+          conservative whole-body set is correct here because a value may be
+          moved on one path and dropped on another, and suppressing the drop
+          on every path is the safe direction (the object owns it either way). *)
   (* Subtree-scoped: updated on descent into ELet bindings / ECase branches. *)
   borrowed_field_vars : StringSet.t;
       (** Variables that were extracted from a borrowed record/tuple
@@ -238,6 +262,7 @@ let empty_env : env = {
   current_fn_name = "";
   closure_fvs = StringSet.empty;
   actor_sent = StringSet.empty;
+  moved_vars = StringSet.empty;
   borrowed_field_vars = StringSet.empty;
   var_ctx = StringMap.empty;
 }
@@ -301,6 +326,25 @@ let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
     in
     scan fn.Tir.fn_body StringSet.empty
   | _ -> StringSet.empty
+
+(** Collect the variables moved into a heap object by an [ESetField].  See
+    [env.moved_vars] for why every such variable must be exempt from drops. *)
+let collect_moved_vars (fn : Tir.fn_def) : StringSet.t =
+  let acc = ref StringSet.empty in
+  let rec go e =
+    match e with
+    | Tir.ESetField (_, _, Tir.AVar v) -> acc := StringSet.add v.Tir.v_name !acc
+    | Tir.ESetField _ -> ()
+    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> go e1; go e2
+    | Tir.ELetRec (fns, body) ->
+      List.iter (fun (fd : Tir.fn_def) -> go fd.Tir.fn_body) fns; go body
+    | Tir.ECase (_, branches, default) ->
+      List.iter (fun (br : Tir.branch) -> go br.Tir.br_body) branches;
+      Option.iter go default
+    | _ -> ()
+  in
+  go fn.Tir.fn_body;
+  !acc
 
 (* ── Actor-send analysis ─────────────────────────────────────────────────── *)
 
@@ -553,6 +597,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
                   the caller from re-acquiring the double-free. *)
                && not (i = 0 && callee_is_apply)
                && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+               && not (StringSet.mem v.Tir.v_name env.moved_vars)
                && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars)
                && not (StringSet.mem v.Tir.v_name !seen) ->
           (* Borrowed field vars (extracted from a borrowed record parameter)
@@ -673,6 +718,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
                && not (StringSet.mem v.Tir.v_name live_after)
                && Borrow.is_borrowed env.borrow_map fname i
                && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+               && not (StringSet.mem v.Tir.v_name env.moved_vars)
                && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars)
                && not (StringSet.mem v.Tir.v_name !seen) ->
           seen := StringSet.add v.Tir.v_name !seen;
@@ -892,6 +938,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     let e2'' =
       if not (StringSet.mem v.Tir.v_name live_into_e2)
          && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+         && not (StringSet.mem v.Tir.v_name env.moved_vars)
          && not is_borrowed_field then
         (* Dead binding — insert cleanup at start of e2.
            Use atomic DecRC for actor-sent values (may be concurrently accessed).
@@ -1109,6 +1156,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         if needs_rc v.Tir.v_ty
            && not (StringSet.mem v.Tir.v_name live_before_br)
            && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+           && not (StringSet.mem v.Tir.v_name env.moved_vars)
            && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars) then
           Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
         else
@@ -1174,6 +1222,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         |> (fun s -> StringSet.diff s bound)
         |> (fun s -> StringSet.diff s live_after)
         |> (fun s -> StringSet.diff s env.closure_fvs)
+        |> (fun s -> StringSet.diff s env.moved_vars)
         |> (fun s -> StringSet.diff s env.borrowed_field_vars)
         |> (fun s -> match scrutinee_name with
             | Some n -> StringSet.remove n s
@@ -1286,10 +1335,16 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
   (* TRMC.  EAllocHole stores its operands into a fresh cell exactly as
      EAlloc does, so it takes the same ownership treatment: an operand still
      live afterwards needs an IncRC. *)
-  | Tir.EAllocHole (ty, atoms, hole) ->
+  | Tir.EAllocHole (tok, ty, atoms, hole) ->
     let inc_vars = find_inc_vars env atoms live_after in
-    let e' = wrap_incrcs env inc_vars (Tir.EAllocHole (ty, atoms, hole)) in
-    (e', StringSet.union live_after (vars_of_atoms atoms))
+    let e' = wrap_incrcs env inc_vars (Tir.EAllocHole (tok, ty, atoms, hole)) in
+    let lb =
+      live_after
+      |> StringSet.union
+           (match tok with Some a -> vars_of_atom a | None -> StringSet.empty)
+      |> StringSet.union (vars_of_atoms atoms)
+    in
+    (e', lb)
 
   (* ESetField MOVES [v] into [o]: the object takes over the reference, so no
      IncRC is emitted for [v] and no drop may be emitted for it afterwards.
@@ -1390,8 +1445,8 @@ let rename_borrowed_shadows (borrowed : StringSet.t) (body : Tir.expr) : Tir.exp
     | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (atom subst a)
     | Tir.EReuse (a, ty, args) ->
       Tir.EReuse (atom subst a, ty, List.map (atom subst) args)
-    | Tir.EAllocHole (ty, args, hole) ->
-      Tir.EAllocHole (ty, List.map (atom subst) args, hole)
+    | Tir.EAllocHole (tok, ty, args, hole) ->
+      Tir.EAllocHole (tok, ty, List.map (atom subst) args, hole)
     | Tir.ESetField (o, i, v) ->
       Tir.ESetField (atom subst o, i, atom subst v)
   in
@@ -1737,6 +1792,7 @@ let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
       current_fn_name = fn'.Tir.fn_name;
       closure_fvs;
       actor_sent = collect_actor_sent_vars fn'.Tir.fn_body;
+      moved_vars = collect_moved_vars fn';
       borrowed_field_vars = StringSet.empty;
       var_ctx =
         List.fold_left (fun ctx v -> StringMap.add v.Tir.v_name v ctx)

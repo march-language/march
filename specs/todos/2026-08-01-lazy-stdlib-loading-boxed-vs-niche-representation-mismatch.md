@@ -179,6 +179,31 @@ the likely source), and gate the error on the disagreement. The two programs abo
 your accept/reject pair — `g44_crdt_convergence.march` must keep compiling, and the
 `ConsistentHash` repro must become a compile error.
 
+### Step 2 — blocker identified 2026-08-09 (why the repr predicate can't land in mono yet)
+
+The disagreement predicate is `Repr.repr_of_ty(caller_ret) <> Repr.repr_of_ty(callee_ret)`
+comparing the FULL repr including the niche `tagged` bit. But `repr_of_ty` is only sound
+when passed the real `collision_set` — a same-short-name type declared by ≥2 modules is
+forced `Boxed` regardless of ctor shape (`Collision_set.is_colliding`, see the Html/IOList
+tag-0 and ambiguous-ctor families). That set is computed at **codegen** time
+(`Llvm_ctx.collision_set`, via `Collision_set.compute`) and consumed at every emit site
+(`llvm_case.ml`, `llvm_emit.ml`). **mono runs before it exists** and has no handle on it.
+
+Calling `repr_of_ty` in the mono fallback with an empty collision_set would misclassify a
+collision-forced-`Boxed` type as `Niche`, firing the new compile error on programs that
+are perfectly correct today — a false-positive regression on exactly the collision cases
+the codebase carefully handles. So a sound Step 2 requires first threading (or eagerly
+computing) the collision_set into the mono pass, which is an architectural change, not the
+afternoon the fallback edit looked like.
+
+Decision for the 0.3.0 release: **not landing Step 2 now.** The class bug stays contained
+by Step 1's exhaustiveness guardrail (`test_stdlib_manifest_is_exhaustive`,
+`test/test_compiler.ml`), which fails the build the moment a new stdlib module is absent
+from the eager list — the only realistic path to reintroduction. Step 2 (collision_set into
+mono, then the accept/reject pair below) remains the real class fix for whoever has the
+time; it is defense-in-depth on an already-guarded, non-shippable failure mode, not a
+release blocker.
+
 ## Step 3 — give lazy modules real inference (option 1, only if step 2 proves too coarse)
 
 Option 2 from the original analysis, and the one to take: **monomorphization refuses to

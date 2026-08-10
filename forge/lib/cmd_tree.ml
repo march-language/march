@@ -2,18 +2,18 @@
 
     forge.lock stores a flat list of resolved packages with no edges, so the
     graph is reconstructed by reading each installed dependency's own
-    forge.toml. Git/registry deps live under <root>/.march/cas/deps/<name>;
+    forge.toml. Git/registry deps live under ~/.march/cas/deps/<name>;
     path deps are relative to the forge.toml that declares them. Dependencies
     that aren't installed (or can't be read) show as leaves. *)
 
-let cas_deps_dir root =
-  Filename.concat root (Filename.concat ".march" (Filename.concat "cas" "deps"))
-
-let dep_dir ~root ~base ~name ~dep =
-  match dep with
-  | Project.PathDep p ->
-    if Filename.is_relative p then Filename.concat base p else p
-  | _ -> Filename.concat (cas_deps_dir root) name
+(* Git/registry deps are installed under [~/.march/cas/deps/<name>] (see
+   [Project.dep_root_dir]) — NOT under the project root. [base] is the
+   directory of the project that DECLARED [dep], needed to resolve a
+   relative PathDep. *)
+let dep_dir ~base ~name ~dep =
+  match Project.dep_root_dir ~project_root:base (name, dep) with
+  | Some d -> d
+  | None -> Filename.concat base name
 
 (* Walk the installed dependency dirs from [proj], building a name -> child
    names adjacency table. Returns (root_name, deps_of). *)
@@ -24,7 +24,7 @@ let build_adjacency proj =
     if not (Hashtbl.mem tbl name) then begin
       let dir = match dep_opt with
         | None     -> root
-        | Some dep -> dep_dir ~root ~base ~name ~dep
+        | Some dep -> dep_dir ~base ~name ~dep
       in
       let deps =
         match Project.load_from_dir dir with

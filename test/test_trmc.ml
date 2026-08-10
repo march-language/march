@@ -155,7 +155,7 @@ let trmc_hole_module () : Tir.tir_module =
   let c = v "c" list_int_ty and n = v "n" list_int_ty in
   let h = v "h" Tir.TInt and t = v "t" list_int_ty in
   let body =
-    Tir.ELet (c, Tir.EAllocHole (Tir.TCon ("List.Cons", []),
+    Tir.ELet (c, Tir.EAllocHole (None, Tir.TCon ("List.Cons", []),
                                  [Tir.ALit (March_ast.Ast.LitInt 42)], 1),
       Tir.ELet (n, Tir.EAlloc (Tir.TCon ("List.Nil", []), []),
         Tir.ESeq (Tir.ESetField (Tir.AVar c, 1, Tir.AVar n),

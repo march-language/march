@@ -405,6 +405,85 @@ left alone. The likely shape is `EReuse` gaining a hole index, mirroring
 `EAllocHole` — a small amendment to the IR surface that will land after this
 one.
 
+## Phase 4 (2026-08-07) — TRMC is now FASTER than the accumulator style
+
+Both causes fixed. Same 20k/2000 workload, correct output throughout:
+
+| variant | time | vs today's stdlib | peak RSS |
+|---|---:|---:|---:|
+| natural, TRMC off | ~0.29s | 1.8x slower | 4.37 MB |
+| TRMC + 4B only | ~0.98s | 5.8x slower | 3.42 MB |
+| **TRMC + 4A + 4B** | **~0.06s** | **2.7x FASTER** | 3.41 MB |
+| accumulator + `reverse` (today) | ~0.16s | — | 3.41 MB |
+
+That beats the 1.5–2x estimate this file recorded before the work started.
+
+### 4B — the post-call drop (`moved_vars`)
+
+A new `Perceus.env.moved_vars`, populated per function by `collect_moved_vars`:
+every variable that appears as the VALUE of an `ESetField` is exempt from drops
+at all five sites where `closure_fvs` already suppresses them.
+
+The store transfers the reference into the object's field, so the mover must
+never drop it again. The case that bit was the caller-side "borrowed arg at its
+last use" rule: the freshly built cell is stored into the parent's hole and then
+handed to the recursive call as its destination, so a drop landed after the
+call. Removing it is not only an ownership fix — it restores the call to tail
+position, and `Llvm_tco` then forms a real loop. Verified in the emitted IR:
+`br label %tco_loop1` back-edge, zero self-calls in `nmap$dps`.
+
+**4B alone did not move the clock** (0.99s -> 0.98s). It fixes the stack and the
+ownership error; the time was all cause A.
+
+### 4A — reuse-with-hole (`EAllocHole` gains a reuse token)
+
+`EAllocHole of atom option * ty * atom list * int`. `Perceus_fbip.try_fbip_sink`
+now pairs a scrutinee drop with a hole allocation of matching arity exactly as
+it does with `EAlloc`, emitting `reuse_hole xs as List.Cons(h+1, _)`.
+
+Codegen mirrors `EReuse`: load the RC, and on `rc = 1` take the cell over in
+place, otherwise `march_decrc` and allocate fresh. The one thing it does that
+`EReuse` does not is **explicitly clear the hole slot on the reuse path**. A
+fresh cell comes from `calloc` and is already zero, but a reused cell's hole
+slot still holds the old child pointer whose ownership has already moved to the
+match's branch variables — leaving it would let any drop in the window before
+the fill walk into a child someone else now owns.
+
+This is the paper's "TRMC interacts well with reuse analysis" claim made real,
+and it is the whole win: it is the difference between 0.98s and 0.06s.
+
+### Correctness evidence
+
+- Full suite green with `MARCH_TRMC=1` — **2444 tests, zero failures**, with
+  the transformation active on all 19 eligible stdlib functions.
+- Full suite green with TRMC off.
+- **TIR snapshots unchanged** (33 tests). This is the decisive check that the
+  default path did not move: `moved_vars` is empty without an `ESetField` and
+  the new FBIP arm only matches `EAllocHole`, so the default pipeline is
+  provably inert — and the snapshots confirm the emitted IR shape is identical.
+
+### Measurement trap found (and fixed)
+
+`MARCH_TRMC` was not in `cas_flags`, so a cached artifact from one mode
+silently satisfied a build in the other. This produced a bogus "TRMC off"
+reading of 0.06s that was really the TRMC binary served from the cache — the
+numbers above were re-taken against a cold cache and confirmed. Fixed by adding
+a `trmc` tag to `codegen_cas_tags ()` (the shared helper, so both `cas_flags`
+sites get it). Any future flag that changes emitted code must do the same.
+
+### What is still NOT established
+
+- **One benchmark shape.** The 2.7x is a list-map workload. No claim is made
+  for tree-shaped or mixed workloads.
+- **No sanitizer evidence.** `MARCH_SANITIZE=1` still hangs on these programs
+  with TRMC *off*, so it proves nothing either way. The hole-clear on the reuse
+  path is reasoned, not stress-tested against a drop landing in the window.
+- **Still gated on `MARCH_TRMC=1`.** Not a default pipeline stage.
+- **The stdlib does not benefit yet.** `map`/`filter`/`filter_map` are still
+  accumulator-style and are classified `already-tail`, so TRMC does not touch
+  them. The 19 eligible functions (`insert_sorted`, `zip`, `ring_insert`,
+  `list_append`, …) do benefit, but the headline win needs Phase 6.
+
 ### Verdict on phases 2–5
 
 19 functions, all one constructor shape, plus one partial. That is a real but

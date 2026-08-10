@@ -2544,8 +2544,19 @@ let check_app_main_exclusivity (errors : Err.ctx) (decls : decl list) : unit =
     mismatched-arity [main] there is an ABI-level miscompile (observed as a
     SIGBUS). *)
 let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
+  (* R1 (specs/2026-08-08-r1-no-ambient-io-design.md): `main` may be granted
+     any point of the IO lattice, not only the root — the parameter type IS
+     the program's grant, and Typecheck's [check_main_grant] holds the
+     program's capability closure under it.  An unknown path (`Cap(IO.Nope)`)
+     is rejected HERE rather than silently becoming a grant nothing sits
+     under, which would read as "everything forbidden" with no explanation. *)
   let is_cap_io_ty = function
-    | Some (TyCon (n, [ TyCon (inner, []) ])) -> n.txt = "Cap" && inner.txt = "IO"
+    | Some (TyCon (n, [ TyCon (inner, []) ])) ->
+      n.txt = "Cap"
+      && (inner.txt = "IO"
+          || (String.length inner.txt > 3
+              && String.sub inner.txt 0 3 = "IO."
+              && List.mem_assoc inner.txt March_caps.Cap_lattice.hierarchy))
     | _ -> false
   in
   List.iter (function
@@ -2561,9 +2572,9 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
              let n = List.length params in
              Err.error errors ~span:clause.fc_span
                (Printf.sprintf
-                  "`main` must take zero arguments, or exactly one argument of type `Cap(IO)` — the initial IO capability the runtime grants at startup.\n\
+                  "`main` must take zero arguments, or exactly one argument of type `Cap(IO)` (or a narrower point of the IO lattice, e.g. `Cap(IO.Console)`) — the capability the runtime GRANTS the program at startup; the whole program is then held to it.\n\
                    Found %d parameter%s instead.\n\
-                   help: use `fn main() : () do ... end`, or `fn main(cap : Cap(IO)) : () do ... end` to receive the IO capability."
+                   help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(cap : Cap(IO.Console)) : () do ... end` to prove the program touches nothing beyond the console."
                   n (if n = 1 then "" else "s")))
       | _ -> ()
     ) decls

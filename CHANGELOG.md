@@ -26,6 +26,18 @@ git log is authoritative for exact commits.
   `fold_i32`/`fold_u8`/`fold_f32` do not exist yet (interpreted or compiled)
   — they'll be added once the existing `fold_int`/`fold_float` compiled-
   linkage gap closes.
+- **`main`'s capability parameter is now the program's grant — the first
+  check that says no rather than "declare it".**
+  `fn main(cap : Cap(IO.Console))` makes a machine-checked claim: the whole
+  program — every helper, stdlib call, and dependency `main` reaches —
+  touches nothing beyond the console, and a truthful `needs` manifest does
+  not raise that ceiling. A parameterless `main` stays ambient (no existing
+  program breaks); `Cap(IO)` is the full grant, as before. `IO.Foreign` is
+  refused under any narrow grant, since linked C cannot be bounded by the
+  lattice. The violation error names the capability and a
+  reachable-from-`main` function that uses it. Enforced identically by
+  `march --check`, the interpreter, and the compiler. (Sandbox ladder R1
+  stages A+B; per-function grants are future work.)
 
 ### Changed
 
@@ -39,6 +51,44 @@ git log is authoritative for exact commits.
   the module and the capability.
 
 ### Fixed
+
+- **JS backend: `==`/`!=` on a non-primitive operand now compares
+  structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
+  (or an erased type variable that may hold one) lowered to JavaScript `===`,
+  i.e. reference equality — so `x == Some(Ctor)` on two distinct-but-equal heap
+  values was always `false`. Such comparisons now go through a deep structural
+  equality helper (matching the native backend); primitive-vs-primitive
+  comparisons still use fast `===`/`!==`.
+- **JS backend: a multi-head function with a literal-integer argument pattern
+  no longer infinite-loops.** `fn f(xs, 0) … / fn f(xs, n) …` compiled with
+  `--target js` emitted a `switch` on a value whose tag was `undefined`, so the
+  base case was dead and the function recursed forever. The literal-tag case
+  now lowers the same way the native backend does.
+- **Scheduler busy-spins back off instead of pegging a core.** Three
+  unbounded scheduler spin-waits (`march_sched_wake`'s parked-process wait,
+  `task_wait_done`'s in-scheduler branch, and `march_sched_wait_idle`) now spin
+  briefly and then sleep, so a stalled wait under heavy host oversubscription no
+  longer holds a CPU at ~100%. Wait-forever semantics are unchanged.
+- **A function or `let` named after a capability-bearing builtin (`file_read`,
+  `random_bytes`, `dns_resolve`, …) no longer falsely requires that
+  capability.** Every capability scan matched a call by NAME alone, with no
+  awareness that a module-level declaration shadows a builtin of the same
+  name — and shadowing wins real name resolution, so the program never
+  touched the capability it was accused of needing. Since the capability
+  ceiling's severity flip this was a hard, default-on compile error with no
+  workaround short of renaming the function; it is now silent, and an
+  actual (unshadowed) builtin call is still caught correctly. The inferred
+  capability set (`march caps`, feeding `forge audit --inferred` and the
+  `--cap-sandbox` profile) had the identical bug in the opposite direction —
+  silently over-reporting a capability never used — also fixed.
+- **A missing-capability violation no longer prints two overlapping
+  diagnostics at the same source location.** Both the typechecker's own
+  `needs`-coverage check and the separate capability-inference pass anchor
+  at the exact call site and were repeating each other's "add `needs X`"
+  sentence almost verbatim. The hint now shows only what the error doesn't
+  already say — the call chain from `main` down to the offending call — and
+  is omitted entirely when there is no chain to show (a library with no
+  `main`, or a violation already inside `main`).
 
 - **A natively compiled program opening a nonexistent file no longer misreads
   the error value's representation.** `file_open`'s `Err` case is typed
@@ -226,6 +276,17 @@ git log is authoritative for exact commits.
   Sigils without interpolation are unchanged. Nothing is known to break: across
   the compiler, bastion, forgepm, conduit, depot and march_doc there are six
   uses of these sigils, all in the compiler's own tests, and none with a hole.
+
+- **`forge audit`, `forge licenses`, and `forge tree` now find git/registry
+  dependencies that `forge deps` actually installed.** All three reimplemented
+  their own dependency-directory lookup as `<project_root>/.march/cas/deps/<name>`,
+  but `forge deps` installs git and registry dependencies under
+  `$HOME/.march/cas/deps/<name>` — a global, cross-project location. A
+  just-installed git or registry dependency was therefore always reported as
+  "not installed" (`forge audit`), with blank version/license (`forge
+  licenses`), or as a childless leaf (`forge tree`). Path dependencies were
+  unaffected. Fixed by routing all three through the same `Project.dep_root_dir`
+  resolver `forge deps` already uses.
 
 
 ### Changed

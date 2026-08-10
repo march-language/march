@@ -208,7 +208,8 @@ let rec add_expr_names names = function
     add_atom_name names atom
   | Tir.EReuse (reuse, _, args) ->
     add_atom_names (add_atom_name names reuse) args
-  | Tir.EAllocHole (_, args, _) -> add_atom_names names args
+  | Tir.EAllocHole (tok, _, args, _) ->
+    add_atom_names (match tok with Some a -> add_atom_name names a | None -> names) args
   | Tir.ESetField (o, _, v) -> add_atom_name (add_atom_name names o) v
   | Tir.ESeq (first, second) ->
     add_expr_names (add_expr_names names first) second
@@ -317,8 +318,9 @@ let alpha_rename (params : Tir.var list) (body : Tir.expr)
     | Tir.EReuse (a, ty, args) ->
       Tir.EReuse
         (subst_atom env a, ty, List.map (subst_atom env) args)
-    | Tir.EAllocHole (ty, args, hole) ->
-      Tir.EAllocHole (ty, List.map (subst_atom env) args, hole)
+    | Tir.EAllocHole (tok, ty, args, hole) ->
+      Tir.EAllocHole (Option.map (subst_atom env) tok, ty,
+                      List.map (subst_atom env) args, hole)
     | Tir.ESetField (o, i, v) ->
       Tir.ESetField (subst_atom env o, i, subst_atom env v)
     | Tir.ESeq (e1, e2)      ->

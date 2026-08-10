@@ -500,7 +500,7 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
      EAlloc — an owning use.  ESetField likewise moves the stored value into
      the object; the TARGET is only mutated, which is not an owning use of
      the target itself. *)
-  | Tir.EAllocHole (_, args, _) ->
+  | Tir.EAllocHole (_, _, args, _) ->
     List.exists (fun a -> atom_is name a) args
   | Tir.ESetField (_, _, v) -> atom_is name v
 

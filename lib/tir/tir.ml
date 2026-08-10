@@ -67,6 +67,15 @@ type expr =
      property is what makes it safe for a cell to be dropped (or deep-dropped)
      between allocation and hole-fill.
 
+     The optional first component is a REUSE TOKEN, set by [Perceus_fbip] when
+     a dropped cell of matching arity is available.  With a token the cell is
+     reused in place when it is unique at runtime (rc = 1), falling back to a
+     fresh allocation when shared — the same discipline as [EReuse].  Reuse
+     must CLEAR the hole slot explicitly: unlike a fresh [calloc]'d cell, a
+     reused cell's slot still holds the old child pointer, and leaving it
+     there would let a drop in the window before the fill walk into a child
+     whose ownership has already moved to the match's branch variables.
+
      [ESetField (obj, i, v)] writes [v] into field [i] of [obj] in place and
      evaluates to unit.  Ownership MOVES into the object: no incref is emitted
      for [v], and Perceus must not also drop it.
@@ -77,7 +86,7 @@ type expr =
      TRMC loop writes the same field of a freshly allocated cell.  That keeps
      raw interior pointers out of the IR entirely, so [Rc_types.needs_rc] and
      [Escape] need no new notion of an unowned pointer. *)
-  | EAllocHole of ty * atom list * int
+  | EAllocHole of atom option * ty * atom list * int
   | ESetField  of atom * int * atom
 
 (* A case branch: constructor tag + bound variables → body. *)
@@ -243,9 +252,10 @@ let rec show_expr = function
     Printf.sprintf "EReuse(%s,%s,[%s])" (show_atom a) (show_ty t)
       (String.concat "," (List.map show_atom args))
   | ESeq (e1, e2) -> Printf.sprintf "ESeq(%s,%s)" (show_expr e1) (show_expr e2)
-  | EAllocHole (t, args, hole) ->
-    Printf.sprintf "EAllocHole(%s,[%s],%d)" (show_ty t)
-      (String.concat "," (List.map show_atom args)) hole
+  | EAllocHole (tok, t, args, hole) ->
+    Printf.sprintf "EAllocHole(%s,%s,[%s],%d)"
+      (match tok with Some a -> show_atom a | None -> "-")
+      (show_ty t) (String.concat "," (List.map show_atom args)) hole
   | ESetField (o, i, v) ->
     Printf.sprintf "ESetField(%s,%d,%s)" (show_atom o) i (show_atom v)
 
