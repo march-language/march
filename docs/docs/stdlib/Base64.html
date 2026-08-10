@@ -2009,7 +2009,7 @@ valid Base64 (wrong length, bad characters, or bad padding).
 ## Examples
 
     march&gt; Base64.decode(&quot;SGVsbG8=&quot;)
-    Ok(Bytes([72, 101, 108, 108, 111]))
+    Ok(Bytes(&quot;Hello&quot;))
     march&gt; Base64.decode(&quot;!!&quot;)
     Err(:invalid)</code></pre></div></div>
 <div class="item" id="fn-encode"><div class="ih"><span class="badge bfn">fn</span><span class="name">encode</span><span class="sig">encode(data)</span><a class="anchor-link" href="#fn-encode" title="Link">#</a></div><div class="ib"><p>Encode a Bytes value as standard Base64 (RFC 4648 §4, with <code>=</code> padding).</p><h3>Examples</h3><pre><code>    march&gt; Base64.encode(Bytes.from_string(&quot;Hello&quot;))
@@ -2029,7 +2029,7 @@ to track which variant they have on hand.
 ## Examples
 
     march&gt; Base64.url_decode(&quot;SGVsbG8&quot;)
-    Ok(Bytes([72, 101, 108, 108, 111]))
+    Ok(Bytes(&quot;Hello&quot;))
     march&gt; Base64.url_decode(&quot;!!&quot;)
     Err(:invalid)</code></pre></div></div>
 <div class="item" id="fn-url_encode"><div class="ih"><span class="badge bfn">fn</span><span class="name">url_encode</span><span class="sig">url_encode(data)</span><a class="anchor-link" href="#fn-url_encode" title="Link">#</a></div><div class="ib"><p>Encode a Bytes value as URL-safe Base64 (RFC 4648 §5).</p><pre><code>Uses `-` and `_` instead of `+` and `/`, and omits trailing `=` padding.
