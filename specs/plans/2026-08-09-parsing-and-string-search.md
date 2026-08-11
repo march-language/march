@@ -4,9 +4,22 @@ Design notes. Covers the parser combinator core, error reporting (a first-class
 design goal, not an afterthought), syntax options, and the separate question of
 general string search. Status: exploratory, no implementation.
 
-Revised 2026-08-09: examples rewritten in actual March syntax, two open
+Revised 2026-08-09 (a): examples rewritten in actual March syntax, two open
 decisions closed against the repo, existing `Regex`/`String` search surface
 reckoned with, and the error-design section expanded to a full contract.
+
+Revised 2026-08-09 (b): prior-art survey added (§5.2–5.3). Four changes fell
+out of it — pipe-as-sequence is available today and unblocks much of §4.1
+without new syntax; the case for `let*` is now a typing argument rather than a
+convenience one (§4.3); the commit model is an argued decision rather than an
+inherited default (§2.2); and the validation corpus moves from markdown to the
+four hand-written stdlib parsers, which are better ground truth (§5.3, §10).
+
+Revised 2026-08-09 (c): §8 added — inline parser probes in the LSP, run
+against sample input in the editor. Folded in as part of this plan rather than
+a separate LSP item because it is the feedback loop that makes §3's error
+quality visible while the grammar is being written, and because it shares the
+doctest and golden-error-corpus machinery §3.7 already needs.
 
 ---
 
@@ -90,6 +103,29 @@ end
 
 Commit is also the hook that makes error *context* work — see §3.3.
 
+**Which commit model — an argued choice, not an inherited default.** There are
+two established answers and we should pick deliberately:
+
+- **PEG + explicit cut** (this plan, fastparse's `~/`, Prolog): backtracking is
+  free by default, `commit` opts into hard failure. Predictable, but every
+  good error message depends on someone having placed a cut. Forget one and
+  the message silently degrades — cut placement is the known way people get
+  PEG parsers wrong.
+- **Consumption commits** (Parsec, Megaparsec): consuming any input commits
+  you to the current alternative, and `try` opts back *into* backtracking.
+  Error locality comes for free because a partially-consumed alternative
+  cannot be silently abandoned. The cost is the well-documented surprise of
+  needing `try` in front of alternatives that share a prefix.
+
+We take PEG + explicit cut, because predictability of *backtracking* is the
+property §1 is built around and because `try`-forgetting failures are
+mis-parses while cut-forgetting failures are merely worse messages. But note
+that §3.4's label rule already turns on the consumed/not-consumed
+distinction, so the reply type must track consumption regardless. Having paid
+for that bookkeeping, a `commit_on_consume` combinator that opts a single
+nonterminal into Parsec's behavior is nearly free, and grammars with heavy
+shared prefixes will want it. Provide both; default to neither being implicit.
+
 ---
 
 ## 3. Errors are the product
@@ -98,10 +134,18 @@ A parser library's real output, most days, is not an AST — it is the message a
 user reads when their input is wrong. The March compiler already has a voice
 ("I was expecting `=` in the let? binding here") and a diagnostic type with
 spans (`lib/errors/errors.ml`). The combinator library must be able to produce
-diagnostics of that quality for user-written grammars, or the markdown parser
-and every forge-built tool on top of it will have worse errors than the
-compiler hosting them. This section is the contract; the `Parser` type is
-shaped around it.
+diagnostics of that quality for user-written grammars, or every forge-built
+tool on top of it will have worse errors than the compiler hosting it. This
+section is the contract; the `Parser` type is shaped around it.
+
+**PEG makes this harder, not easier, and there is proof.** Ordered choice
+actively destroys error information: when the last alternative fails, the
+reasons the earlier ones failed have already been discarded. CPython is the
+large-scale demonstration. PEP 617 replaced CPython's LL(1) parser with a PEG
+parser; the diagnostics regressed so badly that CPython now runs a **second
+parsing pass with a dedicated family of `invalid_*` grammar rules** whose only
+purpose is producing good messages. That is the cost of treating error design
+as downstream of the engine. Everything below exists so we do not pay it.
 
 ### 3.1 The reply and error types
 
@@ -217,7 +261,7 @@ first. Two recovery combinators, both opt-in:
 Message quality regresses silently unless pinned. From day one: a golden
 corpus of bad inputs with expected rendered diagnostics, exactly like the
 compiler's `reject/` corpus and the `@types-check` diagnostic-text corpus.
-The acceptance bar for step 1 of the sequencing (§9) includes the error
+The acceptance bar for step 1 of the sequencing (§10) includes the error
 goldens, not just the accept cases.
 
 ---
@@ -250,6 +294,33 @@ end
 Safe baseline. Gets noisy for real grammars, but it is where the semantics —
 and per §3, the error contract — get proven.
 
+**Pipe-as-sequence: NimbleParsec's trick, available today.** Draft 1 treated
+the absence of `<|>` / `*>` as forcing a choice between deeply nested
+`alt(seq(...))` calls and a whole language feature. There is a third option,
+and Elixir's NimbleParsec is the proof it works: **make sequencing be the pipe
+operator.** Each combinator takes the accumulated parser as its first argument
+and returns a new one, so `a |> then(b) |> then(c)` reads as "a, then b, then
+c". March's pipe desugars as `x |> f(a)` → `f(x, a)`, which is exactly the
+shape this needs — no new syntax, no new language feature, works right now:
+
+```march
+fn date() : Parser((Int, Int, Int)) do
+  integer(4)
+  |> skip_then(chr('-'))
+  |> and_then(integer(2))
+  |> skip_then(chr('-'))
+  |> and_then(integer(2))
+  |> map(fn ((y, m), d) -> (y, m, d))
+end
+```
+
+The catch is types, and it is the whole argument for §4.3 — see there. In
+short: `and_then` accumulates **left-nested tuples** (`((y, m), d)`), which is
+fine at two or three elements and becomes unreadable past four. So
+pipe-as-sequence is the right tool for short, flat, linear sequences, and it
+should exist in the core API. It is not a general answer to grammar
+ergonomics.
+
 ### 4.2 Operator sugar — BLOCKED on a language feature
 
 ```march
@@ -265,13 +336,36 @@ therefore gated on a significant language feature whose costs (formatter, LSP,
 error messages for precedence mistakes) extend far beyond parsing. Ranked
 last unless user-defined operators are wanted on independent grounds.
 
-### 4.3 Monadic binding sugar
+### 4.3 Monadic binding sugar — the recommended target
 
-March already ships two pieces of precedent here: `let?` (Result propagation,
-shipped and conformance-tested — `specs/lang/let-propagation.md`) and
-`with ... do ... else ... end` (multi-step Result chaining). A generalized
-bind sugar is a sibling of an existing feature, not a novelty. In March's
-block style (no `in` — March lets never take one):
+**This is the option the type system chooses for us.** The argument is not
+primarily about reuse (that comes second); it is that static typing forecloses
+the alternatives.
+
+Work through why NimbleParsec's ergonomics (§4.1) are as good as they are.
+Elixir is dynamically typed, so a pipeline of combinators can accumulate its
+results onto a single flat, heterogeneous list — `integer(4) |> string("-") |>
+integer(2)` just pushes three values of three different shapes into one
+accumulator and lets you sort them out at the end. **March cannot express
+that.** Under Hindley-Milner a list is homogeneous, so a typed
+pipe-of-combinators has exactly two escapes:
+
+1. **Left-nested tuples** — `and_then` grows `((a, b), c)`, then `(((a, b), c),
+   d)`. Readable at two elements, tolerable at three, actively hostile at six,
+   and every intermediate `map` has to spell out the whole nest. This is why
+   §4.1 is scoped to short linear sequences.
+2. **Applicative operators with curried constructors** — `Ctor <$> p1 <*> p2
+   <*> p3`, the Haskell answer. It composes beautifully and stays flat at any
+   arity. It also *requires user-defined infix operators*, which §4.2 verified
+   March does not have. The escape from the typing problem lands us straight
+   back on the blocked language feature.
+
+Monadic binding is the third door, and it is the reason OCaml and Haskell —
+both statically typed, both without NimbleParsec's freedom — converged on
+`let*` and `do` notation for precisely this problem. Named binders stay flat at
+any arity, each sub-result gets a name instead of a tuple position, and it
+needs no new operators. Sequencing, branching on an intermediate result, and
+early return all read as ordinary control flow:
 
 ```march
 fn add_expr() : Parser(Expr) do
@@ -289,10 +383,27 @@ fn add_expr() : Parser(Expr) do
 end
 ```
 
-Reads like ordinary March control flow; desugars to `flat_map`. The argument
-for this over 4.2 is that the same sugar pays off well beyond parsing:
-`Option`, `Result`, and actor message handling all want it, and it composes
-with the `let?` design work already done. Open sub-question: whether `let*`
+(Spelling is illustrative — whether the block marker is `parse do`, a general
+`do`-block over any bind-able type, or something else is part of the design
+work, not settled here.)
+
+Note what the `match` in the middle buys: **context-sensitive parsing**, where
+what you parse next depends on what you just parsed. Applicative operators
+cannot express that at all (that is the formal difference between applicative
+and monadic), and pipe-as-sequence can only fake it with an escape hatch. Any
+grammar with length-prefixed data, indentation sensitivity, or version
+negotiation needs it — which covers most wire protocols and both YAML and
+Markdown.
+
+The reuse argument is now the *secondary* one, and it is still good: March
+already ships `let?` (Result propagation, conformance-tested —
+`specs/lang/let-propagation.md`) and `with ... do ... else ... end` (multi-step
+Result chaining), so a generalized bind is a sibling of shipped features rather
+than a novelty, and the same sugar pays off for `Option`, `Result`, and actor
+message handling — and it composes with design work already done rather than
+starting cold.
+
+Desugars to `flat_map`. Open sub-question, carried to §9: whether `let*`
 generalizes `let?` (one mechanism, `Result` as an instance) or sits beside it.
 
 ### 4.4 `~p` sigil grammar DSL
@@ -321,7 +432,9 @@ core.
 
 ---
 
-## 5. What SNOBOL and Icon actually teach
+## 5. Prior art
+
+### 5.1 What SNOBOL and Icon actually teach
 
 SNOBOL4 is the deepest prior art here and predates the Wadler/Hutton
 combinator formalization by decades.
@@ -353,6 +466,86 @@ shows we have already lived it.
 **Confirms, adds nothing: cursor threading.** SNOBOL's `POS` / `RPOS`
 implicitly threaded a position through matches. Same as our byte-index state,
 in 1962-vintage clothing. Useful as evidence the approach is well-tested.
+
+### 5.2 The modern landscape
+
+| Library | Language | Execution model | Error quality |
+|---|---|---|---|
+| NimbleParsec | Elixir | macro-compiled, pipe-sequenced | basic |
+| fastparse | Scala | macro-compiled PEG, `~/` cut | good, cut traces |
+| Megaparsec | Haskell | runtime combinators | best in class |
+| attoparsec / angstrom | Haskell / OCaml | runtime, incremental | deliberately poor |
+| nom | Rust | byte slices, zero-copy | opt-in, mediocre |
+| chumsky | Rust | runtime, recovery-first | excellent, recovery built in |
+| pest | Rust | PEG DSL, derive macro | good (rule names are labels) |
+| menhir | OCaml | LR generator | good, but LR not PEG |
+
+**NimbleParsec (Elixir)** compiles combinators — which are *data*, not
+closures — into ordinary function heads at macro-expansion time, so what ships
+is BEAM bytecode doing binary pattern matching. Two lessons, pulling opposite
+ways. Its pipe-as-sequence ergonomics port to March for free (§4.1); its
+result-accumulation model does not port at all, because it depends on dynamic
+typing (§4.3). Its errors are not a model to copy: failure point, reason
+string, remaining input, line and offset, with a `label` but no expected-set
+merging and no furthest-failure heuristic.
+
+**fastparse (Scala) is the closest sibling** — a statically typed language
+doing PEG with an explicit cut operator (`~/`, exactly our `commit`) and
+macro-compilation for speed. If §4.4's sigil DSL happens, fastparse and `pest`
+are the two implementations to read first. fastparse also ships a failure
+*trace* showing which cuts were crossed, which is the practical answer to the
+"cut placement is where people get PEG wrong" hazard named in §2.2.
+
+**Megaparsec (Haskell) is where §3 should shop.** Expected/unexpected sets,
+`label`, furthest-position merging, custom error components, and a rendered
+error bundle are all there and battle-tested; §3.1–3.5 is essentially an
+argument for porting its ideas onto a PEG-with-cut engine rather than its
+consumption-commit engine.
+
+**chumsky (Rust) is the reference for §3.6.** Recovery strategies
+(`skip_until`, nested-delimiter recovery) were designed in from the start
+rather than retrofitted, which is exactly the bet §3 is making.
+
+**nom (Rust) is the cautionary version of our own thesis.** It is the
+zero-copy byte-slice model §2.1 describes, and its error type churned across
+seven major versions precisely because error design was retrofitted onto a
+speed-first core. **attoparsec** is the honest counterweight: it documents
+discarding error detail *in exchange for* speed. Together they say the
+success-path-carries-only-an-integer design in §3.1 is the interesting needle
+to thread, not a free lunch.
+
+**Rust's `regex` crate validates §6.2 wholesale.** It is a linear-time engine
+with a documented no-backtracking guarantee, using `memchr`-style SIMD literal
+prefilters and an Aho-Corasick automaton for alternations. That is precisely
+the three-case architecture proposed in §6.2, shipped and proven at scale.
+
+### 5.3 Two findings that changed this document
+
+**PEG's error problem is empirical, not theoretical** — see the CPython
+`invalid_*` second-pass story in §3. It is the strongest available argument
+for treating error design as load-bearing rather than downstream.
+
+**Markdown is a weak forcing function, and the stdlib is a strong one.**
+Draft 1 made the markdown parser step 2 of the sequencing. But essentially no
+production markdown parser is combinator-based: cmark, Elixir's Earmark,
+markdown-it, and comrak all use a line-oriented block scanner with a container
+stack, followed by a separate inline pass whose emphasis resolution uses a
+delimiter-run algorithm that is deliberately not context-free. CommonMark is
+*specified* in those operational terms. Making markdown the proving ground
+therefore risks one of two bad outcomes: contorting the library toward a shape
+only markdown wants, or concluding the library failed when the correct answer
+was "markdown wants a hand-written block scanner, with combinators only for
+inline spans."
+
+Meanwhile the repo already contains a far better corpus. `stdlib/toml.march`
+(1045 lines), `stdlib/yaml.march` (958), `stdlib/xml.march` (894), and
+`stdlib/json.march` (734) are roughly 3,600 lines of hand-written recursive
+descent — and they already carry position-aware error types
+(`TomlError(msg, line, col)`, `YamlError`, `XmlError`) and thread
+`Err((message, failure_index))` through their character loops. That is the
+state-plus-positioned-failure shape §3 proposes to formalize, independently
+arrived at four times by hand. They come with existing tests, existing
+performance characteristics, and existing messages to beat. See §10.
 
 ---
 
@@ -467,7 +660,148 @@ the Icon generator idea in §5.
 
 ---
 
-## 8. Open decisions
+## 8. Editor integration: inline parser probes
+
+Run a parser against sample input directly in the editor, inline, while you
+write the grammar.
+
+This belongs in *this* document rather than a separate LSP plan because it is
+what makes §3 self-enforcing. Error quality is the stated product, but error
+quality is also the thing that silently rots — nobody notices a message got
+worse until a user complains. If a grammar author sees their parser's actual
+rendered diagnostic, on their actual malformed sample, as they type, then §3
+stops being an aspiration in a design doc and becomes the thing they are
+looking at all day. That is a much stronger enforcement mechanism than the
+golden corpus in §3.7, and it is cheap because §3.5 already requires a
+`to_diagnostic` that produces the compiler's own diagnostic type.
+
+### 8.1 The sample lives in the source, as a doctest
+
+March already has doctests — the `march>` convention, extracted and run by
+`lib/doctest/doctest.ml` and `forge test`. Parser probes should be a form of
+doctest rather than a new mechanism, so that one annotation serves two
+consumers: the inline editor preview *and* the test suite.
+
+```march
+doc """
+    parse> json_value() @ "{\"a\": [1, true]}"
+    Ok(JObject([("a", JArray([JNumber(1.0), JBool(true)]))]))
+
+    parse> json_value() @ "{\"a\": }"
+    error 1:8: I was expecting a value
+"""
+fn json_value() : Parser(Json) do ... end
+```
+
+Note the second probe pins **rendered error text**, not just failure. That
+collapses two things the plan currently treats separately: the golden error
+corpus of §3.7 and the doctest suite become the same artifact, living next to
+the grammar rule they constrain instead of in a parallel fixture tree. A
+message regression then fails `forge test` for the same reason a wrong AST
+does.
+
+### 8.2 What the editor shows
+
+Three surfaces, all of which the LSP already has the capability registered
+for:
+
+- **CodeLens** above each parser declaration — `▶ 3 probes · 2 ok, 1 error`.
+  `codeLensProvider` is already advertised (`lsp/lib/server.ml:654`, with the
+  handler at `:1131`).
+- **Inlay hints** showing each probe's result inline, behind a
+  `march.inlayHints.parserProbes` client setting, following the existing
+  `march.inlayHints.performanceAnnotations` / `.parameterNames` pattern
+  (`lsp/lib/server.ml:15–51`).
+- **Diagnostics positioned inside the sample string** — the important one.
+  When a probe fails, take the `ParseErr.pos` byte offset from §3.1, map it
+  into the sample literal's own extent, and publish the rendered diagnostic as
+  a squiggle *on that character of the sample*. Your parser's errors become
+  editor squiggles on your test input. This is the feature; the other two are
+  convenience.
+
+**Prerequisite, and it is a real blocker — verified 2026-08-09.** March
+string-literal spans cover only the opening quote, not the literal's extent:
+`"localhost"` beginning at column 24 records span 24–25, so slicing by it
+yields a bare `"`. Integer and other literal spans are correct; this is
+specific to strings. The mechanism is visible in `lib/lexer/lexer.mll:121` —
+the main `token` rule matches only `'"'` and then hands off to a separate
+`read_string` lexer entry (`:205`), and each recursive call into that entry
+resets the lexeme start position, so the opening quote's position is lost by
+the time `STRING` is finally returned.
+
+Offsetting into a sample string therefore has nothing correct to offset
+*from*, and the squiggle would collapse onto the quote character for every
+probe regardless of where the parse error actually is. Fixing literal spans is
+a hard prerequisite for 8.2's third bullet.
+
+Worth noting *why* this has survived: consumers have consistently worked
+around it rather than fixed it. `forge refactor bundle` hit exactly this —
+rewriting `f("x", 1)` produced a corrupted `a = "` — and the fix there was a
+string-aware comma splitter that avoids trusting spans at all, rather than
+correcting the span. A workaround is the right call for one consumer; it is
+the wrong call for the fourth. This feature should fix the span.
+
+### 8.3 Architecture: follow `refine_command.ml`
+
+`lsp/lib/refine_command.ml` is a near-exact precedent and its design notes
+apply almost verbatim:
+
+- **The code action or lens carries a *command*, not a result.** Running a
+  parser needs a fully loaded module — stdlib load, import resolution,
+  typecheck, then evaluation — which is far too much to spend on cursor
+  movement. `refine_command` makes exactly this argument for Z3 queries.
+- **The work happens in the compiler behind a flag** (`march
+  --parse-probe-json`, alongside the existing `--refine-suggest-json`),
+  because the pipeline that turns a file into a checkable module lives in
+  `bin/main.ml`, not in a library the LSP can link.
+- **Shared implementation with the doctest runner**, so that a probe shown in
+  the editor and the same probe run by `forge test` produce identical bytes.
+  This is the stated design goal of `refine_command` and it is what stops the
+  editor preview and CI from disagreeing.
+- **Expose it in `lsp/lib/query_cli.ml`** next to `hover` / `type` /
+  `definition` / `diagnostics`, so the feature is testable headlessly. Every
+  other LSP feature here is tested that way; a feature that requires a live
+  editor to test will not stay working.
+
+Execution is interpreted (`lib/eval`), not compiled — no compile step, and the
+interpreter already handles arbitrary modules.
+
+### 8.4 This runs user code, which needs saying out loud
+
+A parser probe evaluates arbitrary March from the open file. `forge test`
+already does that, but with an important difference: the user asked. The LSP
+would do it as a side effect of typing. Consequences:
+
+- **Out-of-process with a hard timeout and cancellation on document change.**
+  The shell-out in 8.3 gives the isolation for free; the timeout is
+  non-negotiable. **A left-recursive PEG rule is an infinite loop** — and a
+  grammar under active editing is unusually likely to pass through a
+  left-recursive intermediate state on the way to a correct one. This is the
+  normal case, not the adversarial one.
+- **Detect left recursion and report it as a diagnostic**, rather than letting
+  it surface as a mysterious timeout. The probe harness is the natural place
+  for that check, and it is useful independent of the editor: PEG's inability
+  to handle left recursion is the single most common way people new to PEG
+  write a broken grammar.
+- **Debounce, and run on save or explicit invocation by default**, not per
+  keystroke.
+- **Default the setting off.** Executing file contents without a per-run
+  request is a meaningful trust escalation over the LSP's current behavior,
+  which only ever *analyzes*. Turning it on should be a deliberate act, and it
+  should respect whatever workspace-trust signal the client offers.
+
+### 8.5 Do not generalize this yet
+
+The underlying mechanism — "evaluate this expression against this literal and
+render the result inline" — has nothing parser-specific about it, and the
+temptation to ship a general expression-evaluator lens will be immediate.
+Resist it until the parser case is proven. A general evaluator is a much
+larger surface for both scope and the trust question in 8.4, and the parser
+case is the one with a concrete forcing argument (§3) behind it.
+
+---
+
+## 9. Open decisions
 
 1. ~~User-defined infix operators.~~ **Closed 2026-08-09: March does not
    support them** (fixed operator set in `lib/parser/parser.mly`). Option 4.2
@@ -487,23 +821,71 @@ the Icon generator idea in §5.
    propagation or coexist with it?
 6. **Sigil compile-time expansion** (§4.4): does the existing sigil mechanism
    support compile-time desugaring, or is that new machinery?
+7. ~~Commit model.~~ **Closed 2026-08-09: PEG + explicit cut**, with a
+   `commit_on_consume` opt-in for shared-prefix grammars, since the reply
+   type must track consumption anyway for §3.4's label rule. Rationale in
+   §2.2.
+8. **The acceptable speed factor versus hand-written recursive descent**
+   (§10 step 2). Must be chosen before the JSON/TOML measurement, not after,
+   or the number will be rationalized to whatever the result turns out to
+   be. A plausible failure mode is a good one: combinators for config
+   formats, hand-written for hot paths.
+9. **Do parser probes default on or off?** (§8.4) They execute file contents
+   without a per-run request, which is a trust escalation over an LSP that
+   otherwise only analyzes. Recommendation is off-by-default plus
+   workspace-trust awareness, but this is a product call, not a technical one.
+10. **Does the probe annotation extend `march>` doctests or sit beside them?**
+   (§8.1) Sharing the extractor in `lib/doctest/doctest.ml` is the point of
+   the design; whether `parse>` is a new prefix in that grammar or a distinct
+   block type affects how much of the runner is reusable.
 
 ---
 
-## 9. Suggested sequencing
+## 10. Suggested sequencing
 
 1. Combinator core, syntax option 4.1, **error contract included** (§3):
    reply type with soft/hard failure, furthest-failure merging, commit +
    context, labels, `to_diagnostic`. No syntax decisions required. The
    acceptance bar is the golden *error* corpus (§3.7) alongside the accept
    cases — PEG semantics proven AND messages pinned.
-2. Prove it on the markdown parser. Markdown is the right forcing function:
-   it exercises backtracking, nesting, and — via §3.6's recovery combinators —
-   multi-error reporting at once, and it is already the one genuine gap
-   blocking Cadence.
-3. Decide syntax sugar. 4.3 (`let*`/`parse do`) versus the `~p` sigil, with
-   the combinator semantics already settled underneath; 4.2 only if
-   user-defined operators land for independent reasons.
+2. **Prove it against the stdlib parsers, not markdown** (revised — see
+   §5.3). Reimplement `stdlib/json.march` first, then `stdlib/toml.march`,
+   with the existing hand-written versions as the control. This is real
+   ground truth: existing tests, existing performance, existing error
+   messages. Three explicit acceptance gates, all measured against the
+   hand-written original on the same box:
+   - **Correctness:** passes the existing test suites unchanged.
+   - **Speed:** within a stated factor of hand-written recursive descent.
+     Decide the acceptable factor *before* measuring, and if it is missed,
+     the honest outcome may be "combinators for config formats, hand-written
+     for hot paths" rather than a rewrite.
+   - **Errors:** strictly better messages than `TomlError(msg, line, col)`
+     on a corpus of malformed inputs. If §3's machinery cannot beat four
+     hand-rolled parsers that each independently reinvented
+     position-carrying errors, it has not earned its complexity.
+2b. **Then markdown, scoped to what it actually tests.** Markdown is still
+   the genuine gap blocking Cadence, but treat it as the exercise for §3.6's
+   recovery combinators and for inline-span parsing — not as proof that
+   block structure should be combinator-shaped. Expect the block phase to be
+   a hand-written line scanner with a container stack, as it is in every
+   production implementation (§5.3); that is a finding about CommonMark, not
+   a failure of the library.
+3. Decide syntax sugar. §4.3 (`let*`) is the recommended target and §4.3 now
+   argues it is what the type system forces, not merely what is convenient;
+   evaluate it against the `~p` sigil with the combinator semantics already
+   settled underneath. §4.2 only if user-defined operators land for
+   independent reasons. Note that §4.1's pipe-as-sequence may cover enough
+   of the common cases to make this less urgent than draft 1 assumed —
+   measure how much of the JSON/TOML rewrite is genuinely context-sensitive
+   before committing to new sugar.
+3b. **Inline parser probes (§8), starting with the CLI half.** The doctest
+   form (§8.1) and the `march --parse-probe-json` path (§8.3) are useful on
+   their own — they give the JSON/TOML rewrite in step 2 its error-corpus
+   mechanism, so build them *during* step 2 rather than after it. The editor
+   surfaces follow once there is something to surface; the in-sample
+   diagnostic squiggle additionally waits on the string-literal span fix
+   (§8.2), which is worth scheduling early since it is small, independent,
+   and already has three consumers working around it.
 4. Search module separately. SIMD literal scan first (upgrading the existing
    `String.index_of` family), then Aho-Corasick (which March-written lexers
    want anyway), then the linear-worst-case engine — which is not optional
