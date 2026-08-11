@@ -270,6 +270,44 @@ first-timed-variant slot) — every other f32 map2 sample clustered at
 f32 regression; it is the reason this run used two opposite orderings rather
 than one.
 
+### Cross-language f32: March vs. NumPy (2026-08-10, post-merge re-run)
+
+A second run after the narrow-widths work merged (PR #246), this time
+including NumPy at BOTH element widths — the original `simd-*` NumPy rows on
+this page are float64 (`np.arange(n) / 100.0` yields float64), so the new
+`bench/python/simd_{sum,map,map2}_numpy_f32.py` variants (explicit
+`.astype(np.float32)`, float32 scalar operands) exist to make the f32
+comparison like-for-like. Same protocol as every table on this page: each
+sample is one fresh process invocation, self-timed around the op only.
+
+Methodology: March legs are medians of 10 samples (five interleaved
+round-robins, alternating f64-first/f32-first orderings); NumPy legs are
+medians of 5 one-shot invocations interleaved with them. Machine shared with
+~6 long-lived pegged background processes from unrelated sessions (load
+average ~9.5 on 14 cores, stable — not burst load); the f64 March control
+came in at or slightly below the historical rows above, validating the run.
+
+| N=5M, medians (ms) | March f64 | March f32 | NumPy f64 | NumPy f32 |
+|--------------------|-----------|-----------|-----------|-----------|
+| sum                | 1.02      | **0.40**  | 0.70      | 0.74      |
+| map (x*2+1)        | 3.69      | **1.81**  | 1.58      | 2.05      |
+| map2 (a+b)         | 4.90      | **1.85**  | 1.18      | 1.76      |
+
+March f32/f64 ratios in this run: sum 2.5x, map 2.0x, map2 2.6x —
+consistent with the table above. Like-for-like at f32, **March beats NumPy
+on sum (1.8x) and map (~13%), and ties it on map2 (~5%)** — the
+pre-narrow-widths 4x map2 gap (6.4 ms vs 1.6 ms) is gone.
+
+One protocol-dependent oddity, recorded so nobody "fixes" it later: in this
+one-shot-per-process protocol NumPy's f32 legs measure consistently *slower*
+than its f64 legs (5/5 rounds for map and map2), while a warm in-process
+`timeit` loop on the same arrays shows the expected f32 advantage (map
+~1.43 ms vs ~2.20 ms). The one-shot numbers include first-touch/cold-cache
+effects that evidently hit NumPy's f32 kernels harder; March's one-shot
+numbers include the same cold-start effects and still show the full f32 win.
+Cross-protocol numbers are not comparable — every figure in the table above
+is one-shot, matching the rest of this page.
+
 ---
 
 ## Where March wins and trails

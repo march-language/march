@@ -385,6 +385,7 @@ printf '  generation / interpreter startup) and reports it via a TIME_MS line.\n
 [ -n "$ELIXIR"         ] && show_interp_self_timed "Elixir" elixir "$BENCH_DIR/elixir/simd_sum.exs" || skip "Elixir"
 [ -n "$PYTHON3"        ] && show_interp_self_timed "Python" "$PYTHON3" "$BENCH_DIR/python/simd_sum.py" || skip "Python"
 [ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy"  "$NUMPY_PY" "$BENCH_DIR/python/simd_sum_numpy.py" || skip "NumPy"
+[ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy-f32" "$NUMPY_PY" "$BENCH_DIR/python/simd_sum_numpy_f32.py" || skip "NumPy-f32"
 
 # ── simd-map(5M) — elementwise Float map ─────────────────────────────────────
 header "simd-map(5M) — elementwise (x * 2.0 + 1.0)"
@@ -396,17 +397,19 @@ printf '  inlined clone (Stage 4 Option B) and genuinely vectorizes. Self-timed 
 [ -n "$ELIXIR"         ] && show_interp_self_timed "Elixir" elixir "$BENCH_DIR/elixir/simd_map.exs" || skip "Elixir"
 [ -n "$PYTHON3"        ] && show_interp_self_timed "Python" "$PYTHON3" "$BENCH_DIR/python/simd_map.py" || skip "Python"
 [ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy"  "$NUMPY_PY" "$BENCH_DIR/python/simd_map_numpy.py" || skip "NumPy"
+[ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy-f32" "$NUMPY_PY" "$BENCH_DIR/python/simd_map_numpy_f32.py" || skip "NumPy-f32"
 
 # ── simd-map2(5M) — elementwise two-array zip ────────────────────────────────
 header "simd-map2(5M) — elementwise (a[i] + b[i])"
-printf '  March map2_float is correct but NOT YET vectorized/inlined (see docs/simd-vectorization.md\n'
-printf '  "Known limitations") — included deliberately so the numbers stay honest. Self-timed.\n'
+printf '  March map2_float gets the same closure-inlining/vectorization treatment as map_float\n'
+printf '  (see docs/simd-vectorization.md and RESULTS.md "Fix history: map2"). Self-timed.\n'
 [ -x "$TMP/march_sm2"  ] && show_self_timed "March"  "$TMP/march_sm2"              || skip "March"
 [ -x "$TMP/ocaml_sm2"  ] && show_self_timed "OCaml"  "$TMP/ocaml_sm2"              || skip "OCaml"
 [ -x "$TMP/rust_sm2"   ] && show_self_timed "Rust"   "$TMP/rust_sm2"               || skip "Rust"
 [ -n "$ELIXIR"         ] && show_interp_self_timed "Elixir" elixir "$BENCH_DIR/elixir/simd_map2.exs" || skip "Elixir"
 [ -n "$PYTHON3"        ] && show_interp_self_timed "Python" "$PYTHON3" "$BENCH_DIR/python/simd_map2.py" || skip "Python"
 [ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy"  "$NUMPY_PY" "$BENCH_DIR/python/simd_map2_numpy.py" || skip "NumPy"
+[ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy-f32" "$NUMPY_PY" "$BENCH_DIR/python/simd_map2_numpy_f32.py" || skip "NumPy-f32"
 
 printf '\n'
 bold "Done."
