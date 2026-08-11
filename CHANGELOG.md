@@ -54,6 +54,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`mailbox_size` on compiled binaries returned only the monitor Down
+  count, not the actual mailbox depth — the two backends now agree.**
 - Actor.call with a timeout no longer busy-polls the scheduler while
   waiting — N pending callers no longer steal CPU from the actor they are
   waiting on.

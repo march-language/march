@@ -116,6 +116,13 @@ int main(void) {
         assert(waited >= 0 && waited < 1000);
     }
 
+    /* 4: mbox_count is accurate without running the scheduler (deterministic:
+     * the proc is spawned but never dispatched, so nothing drains). */
+    march_sched_init();
+    march_proc *idle = march_sched_spawn_daemon(sleeper_times_out, NULL);
+    for (int i = 0; i < 5; i++) march_sched_send(idle, (void *)0x1);
+    assert(march_sched_mbox_count(idle) == 5);
+
     printf("test_scheduler_timer: all passed\n");
     return 0;
 }

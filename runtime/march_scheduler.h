@@ -142,7 +142,12 @@ typedef struct march_proc {
     size_t                     stack_alloc;     /* Total mmap size: MARCH_STACK_MAX + one guard page */
     march_mbox_node           *mailbox;      /* Head of message queue (FIFO)             */
     march_mbox_node           *mbox_tail;    /* Tail of message queue (for O(1) enqueue) */
-    int64_t                    mbox_count;   /* Number of messages in mailbox            */
+    _Atomic int64_t             mbox_count;  /* Number of messages in mailbox. Atomic:
+                                                 writers (mbox_push/mbox_pop) always run
+                                                 under mbox_lock, but wake_idle_daemons /
+                                                 march_sched_wait_idle / march_sched_mbox_count
+                                                 read it from other OS threads without
+                                                 the lock. */
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
     /* Wake permit (LockSupport/park-unpark style).  march_sched_wake deposits
      * one BEFORE it inspects `status`; march_sched_park_self consumes one
@@ -295,6 +300,11 @@ int64_t      march_sched_total_spawned(void);
  * Safe to call from any process or from the scheduler context.
  * Returns 0 on success, -1 if target is NULL or DEAD. */
 int          march_sched_send(march_proc *target, void *msg);
+
+/* Return the current mailbox depth (number of undelivered messages) for a
+ * process. Relaxed atomic read — safe to call from any thread without
+ * mbox_lock. Returns 0 if p is NULL. */
+int64_t      march_sched_mbox_count(march_proc *p);
 
 /* Sentinel returned by march_sched_recv when the process was woken without a
  * message (killed or spurious wakeup).  This is the address of a static C

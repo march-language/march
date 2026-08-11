@@ -4570,3 +4570,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/h_css_url_context.expected native_h_css_url_context.out)))
+
+; ── mailbox_size reports real queue depth (compiled) ──────────────────
+; march_mailbox_size used to return only the monitor Down count, so a flooded
+; actor's live mailbox depth was invisible on the compiled backend even
+; though the interpreter's mailbox_size (Queue.length) reported it correctly.
+; This fixture floods 100 messages, drains via run_until_idle, then kills the
+; actor and drains again — both cases should read back 0 once idle. The
+; deterministic non-idle depth assertion lives at the C unit level in
+; test/test_scheduler_timer.c (march_sched_mbox_count), since a compiled
+; March program has no way to observe mailbox depth before the scheduler
+; drains it. Compile natively, run, diff.
+(rule
+ (targets native_mailbox_depth native_mailbox_depth.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/mailbox_depth.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mailbox_depth
+        native/mailbox_depth.march)
+   (with-stdout-to native_mailbox_depth.out
+        (system "./native_mailbox_depth")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mailbox_depth.expected native_mailbox_depth.out)))

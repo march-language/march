@@ -4657,13 +4657,21 @@ int64_t march_monitor(void *watcher, void *target) {
     return ref;
 }
 
-/* mailbox_size: return count of Down messages delivered to this actor's
-   "down_count" (watcher side only — regular actor messages are not counted). */
+/* mailbox_size: live queue depth (pending, undelivered actor messages) plus
+   "down_count" (pending Down notifications). The interpreter materializes
+   Down notifications as real mailbox messages, so this sum is the
+   parity-correct meaning across both backends. */
 int64_t march_mailbox_size(void *pid) {
     if (!IS_HEAP_PTR(pid)) return 0;
     march_actor_meta *meta = find_meta(pid);
     if (!meta) return 0;
-    return atomic_load_explicit(&meta->down_count, memory_order_relaxed);
+    int64_t depth = 0;
+    pthread_mutex_lock(&g_tbl_mu);
+    march_proc *gt = meta->green_thread;
+    if (gt) depth = march_sched_mbox_count(gt);
+    pthread_mutex_unlock(&g_tbl_mu);
+    return depth + atomic_load_explicit(&meta->down_count,
+                                        memory_order_relaxed);
 }
 
 /* run_until_idle: flush the async message queue.

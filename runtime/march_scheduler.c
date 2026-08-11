@@ -580,7 +580,7 @@ static void mbox_push(march_proc *p, void *msg) {
         p->mailbox = node;
     }
     p->mbox_tail = node;
-    p->mbox_count++;
+    atomic_fetch_add_explicit(&p->mbox_count, 1, memory_order_relaxed);
 }
 
 static void *mbox_pop(march_proc *p) {
@@ -589,7 +589,7 @@ static void *mbox_pop(march_proc *p) {
     void *msg = node->msg;
     p->mailbox = node->next;
     if (!p->mailbox) p->mbox_tail = NULL;
-    p->mbox_count--;
+    atomic_fetch_sub_explicit(&p->mbox_count, 1, memory_order_relaxed);
     free(node);
     return msg;
 }
@@ -687,7 +687,7 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
     p->arg        = arg;
     p->mailbox    = NULL;
     p->mbox_tail  = NULL;
-    p->mbox_count = 0;
+    atomic_init(&p->mbox_count, 0);
     atomic_init(&p->mbox_lock, 0);
     p->owner_sched = NULL;
 #ifdef MARCH_TSAN_BUILD
@@ -768,7 +768,7 @@ static int wake_idle_daemons(void) {
         march_proc *q = g_proc_registry[i];
         if (!q || !q->is_daemon) continue;
         if (atomic_load_explicit(&q->status, memory_order_acquire) == PROC_WAITING
-                && q->mbox_count == 0) {
+                && atomic_load_explicit(&q->mbox_count, memory_order_relaxed) == 0) {
             march_sched_wake(q);
             woken++;
         }
@@ -1163,7 +1163,8 @@ void march_sched_wait_idle(void) {
                 atomic_load_explicit(&q->status, memory_order_acquire);
             if (st == PROC_RUNNABLE || st == PROC_RUNNING || st == PROC_PARKED) {
                 busy = 1;
-            } else if (st == PROC_WAITING && q->mbox_count > 0) {
+            } else if (st == PROC_WAITING
+                       && atomic_load_explicit(&q->mbox_count, memory_order_relaxed) > 0) {
                 /* Message enqueued but wake not yet delivered — transient. */
                 busy = 1;
             }
@@ -1273,6 +1274,11 @@ int march_sched_send(march_proc *target, void *msg) {
         march_sched_wake(target);
     }
     return 0;
+}
+
+int64_t march_sched_mbox_count(march_proc *p) {
+    if (!p) return 0;
+    return atomic_load_explicit(&p->mbox_count, memory_order_relaxed);
 }
 
 /* NOINLINE: migration barrier, same rationale as march_sched_yield — a proc
