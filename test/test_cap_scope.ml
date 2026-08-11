@@ -152,7 +152,7 @@ let test_literal_outside_scope_is_rejected () =
 mod ScopeViol do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/shadow") do
       Ok(_) -> println("o")
       Err(_) -> println("e")
@@ -167,7 +167,7 @@ let test_literal_inside_scope_is_accepted () =
 mod ScopeOkay do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/myapp/db.conf") do
       Ok(_) -> println("o")
       Err(_) -> println("e")
@@ -184,7 +184,7 @@ let test_dotdot_escape_is_rejected () =
 mod ScopeEscape do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/myapp/../shadow") do
       Ok(_) -> println("o")
       Err(_) -> println("e")
@@ -208,7 +208,7 @@ mod ScopeDyn do
       Err(_) -> ""
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(load("/anything/at/all"))
   end
 end
@@ -222,7 +222,7 @@ let test_unscoped_declaration_permits_any_path () =
 mod ScopeUnscoped do
   needs IO.Console
   needs IO.FileRead
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/shadow") do
       Ok(_) -> println("o")
       Err(_) -> println("e")
@@ -237,7 +237,7 @@ let test_scope_union () =
 mod ScopeUnion do
   needs IO.Console
   needs IO.FileRead("/etc/app"), IO.FileRead("/usr/share/app")
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/usr/share/app/x") do
       Ok(_) -> println("o")
       Err(_) -> println("e")
@@ -254,7 +254,8 @@ let test_parent_capability_scope_applies () =
 mod ScopeParent do
   needs IO.Console
   needs IO.FileSystem("/srv")
-  fn main() : () do
+  needs IO.FileRead
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/srv/data/x") do
       Ok(_) -> println("o")
       Err(_) -> println("e")
@@ -271,7 +272,7 @@ let test_second_path_argument_is_checked () =
 mod ScopeTwoPath do
   needs IO.Console
   needs IO.FileWrite("/var/tmp")
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match file_rename("/var/tmp/a", "/etc/passwd") do
       Ok(_) -> println("o")
       Err(_) -> println("e")

@@ -79,7 +79,7 @@ let fixture_src =
 mod SbxDrift do
   needs IO.Console
   needs IO.FileWrite
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
     match file_write("/tmp/sbx_drift_out", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -244,7 +244,7 @@ mod SbxLet do
   needs IO.Console
   needs IO.FileWrite
   let touched = file_write("/tmp/sbx_let_out", "d")
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("hi")
   end
 end
@@ -264,7 +264,7 @@ mod SbxNest do
       end
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
     Inner.save()
     println("hi")
   end
@@ -289,7 +289,7 @@ mod SbxImpl do
       end
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
     persist(Thing(1))
     println("hi")
   end

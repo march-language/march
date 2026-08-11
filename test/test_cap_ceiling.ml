@@ -192,7 +192,8 @@ let test_direct_builtin_route () =
     {|
 mod CeilDirect do
   needs IO.Console
-  fn main() : () do
+  needs IO.FileWrite
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match file_write("/tmp/x", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -210,7 +211,8 @@ let test_stdlib_route_was_completely_silent () =
     {|
 mod CeilStdlib do
   needs IO.Console
-  fn main() : () do
+  needs IO.FileWrite
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match File.write("/tmp/x", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -228,7 +230,7 @@ mod CeilValue do
   fn apply1(f : (String) -> a, p : String) : a do
     f(p)
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     match apply1(file_read, "/etc/hosts") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -249,6 +251,7 @@ mod CeilApp do
   needs IO.Console
   mod Dep do
     needs IO.Console
+    needs IO.FileRead
     fn greet(n : String) : String do
       match file_read("/etc/passwd") do
         Ok(s)  -> s
@@ -256,7 +259,7 @@ mod CeilApp do
       end
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.greet("world"))
   end
 end
@@ -270,7 +273,7 @@ let test_a_correctly_declared_program_compiles () =
 mod CeilOkay do
   needs IO.Console
   needs IO.FileWrite
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match File.write("/tmp/x", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -285,7 +288,8 @@ let test_parent_declaration_satisfies_the_ceiling () =
 mod CeilParent do
   needs IO.Console
   needs IO.FileSystem
-  fn main() : () do
+  needs IO.FileWrite
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match File.write("/tmp/x", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -318,7 +322,7 @@ mod CeilDeepOkay do
       end
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
   end
 end
@@ -333,6 +337,7 @@ let test_doubly_nested_module_without_needs_is_still_caught () =
     {|
 mod CeilDeepBad do
   needs IO.Console
+  needs IO.FileWrite
   mod Innocent do
     mod DeeplyNested do
       fn write_it(data : String) : Bool do
@@ -343,7 +348,7 @@ mod CeilDeepBad do
       end
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
   end
 end
@@ -375,8 +380,10 @@ let test_console_use_without_needs_is_still_caught () =
   rejects_at_typecheck "undeclared console use"
     ~expect:"does not declare `needs IO.Console`"
     {|
+
+  needs IO.Console
 mod CeilConsoleUndeclared do
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println("hi")
   end
 end
@@ -478,7 +485,8 @@ let undeclared_stdlib_write_src =
   {|
 mod CeilOptOut do
   needs IO.Console
-  fn main() : () do
+  needs IO.FileWrite
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match File.write("/tmp/cap_ceiling_optout", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
@@ -607,7 +615,7 @@ mod CeilImpl do
       end
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
     persist(Thing(1))
     println("done")
   end

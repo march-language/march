@@ -280,6 +280,7 @@ end|} in
 let test_format_fixpoint () =
   (* A source written in already-formatted style should be unchanged *)
   let src = {|mod Demo do
+  needs IO.Console
 
 type Shape = Circle(Float) | Rect(Float, Float)
 
@@ -290,7 +291,7 @@ fn area(s : Shape) : Float do
   end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   let s = Circle(5.0)
   let a = area(s)
   print(a)
