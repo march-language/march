@@ -29,44 +29,34 @@
 
 /* ── Helpers (mirrors march_extras.c) ────────────────────────────────────── */
 
+/* Bytes is Bytes(String): a one-field boxed ADT cell whose field 0 (offset 16)
+ * is a march_string — one allocation, explicit length, contiguous payload.
+ *
+ * This is the hottest instance of the old representation's cost.  Building a
+ * Bytes from raw used to allocate one ~32-byte cons cell per byte, so
+ * march_gzip_decode of a 12 MB tar allocated ~12M cells (hundreds of MB) and
+ * a 3.1 MB tarball could not be processed at all; reading one back walked the
+ * whole spine twice.  Both are now a single memcpy.  See
+ * specs/plans/2026-08-10-array-backed-bytes-design.md. */
 static void *compress_bytes_from_raw(const uint8_t *data, size_t len) {
-    void *list = march_alloc(16); /* Nil */
-    for (ssize_t i = (ssize_t)len - 1; i >= 0; i--) {
-        void *node = march_alloc(16 + 8 + 8);
-        *(int32_t *)((char *)node + 8) = 1; /* tag = Cons */
-        /* Pre-tag the Int payload with (n<<1)|1 — uniform low-bit integer
-         * tagging for generic ctor slots (see make_int_cons, march_http.c). */
-        *(int64_t *)((char *)node + 16) = ((int64_t)data[i] << 1) | 1;
-        *(void **)((char *)node + 24) = list;
-        list = node;
-    }
+    void *s = march_string_lit((const char *)data, (int64_t)len);
     void *b = march_alloc(16 + 8);
     /* tag = 0 = Bytes ctor */
-    *(void **)((char *)b + 16) = list;
+    *(void **)((char *)b + 16) = s;
     return b;
 }
 
+/* Returns a malloc'd copy; caller frees.  The copy (rather than borrowing
+ * march_string::data) is kept because every caller below owns and frees the
+ * buffer, and zlib/zstd/brotli want a plain uint8_t* they may not alias the
+ * March heap for. */
 static uint8_t *compress_bytes_to_raw(void *bytes_val, size_t *out_len) {
-    void *list = *(void **)((char *)bytes_val + 16);
-    size_t n = 0;
-    void *p = list;
-    while (p) {
-        int32_t tag = *(int32_t *)((char *)p + 8);
-        if (tag == 0) break;
-        n++;
-        p = *(void **)((char *)p + 24);
-    }
+    march_string *ms = *(march_string **)((char *)bytes_val + 16);
+    size_t n = ms ? (size_t)ms->len : 0;
     uint8_t *buf = malloc(n > 0 ? n : 1);
     if (!buf) { *out_len = 0; return NULL; }
+    if (n > 0) memcpy(buf, ms->data, n);
     *out_len = n;
-    p = list; size_t i = 0;
-    while (p && i < n) {
-        int32_t tag = *(int32_t *)((char *)p + 8);
-        if (tag == 0) break;
-        /* Untag the Int payload: generic ctor slots store (n<<1)|1. */
-        buf[i++] = (uint8_t)((*(int64_t *)((char *)p + 16) >> 1) & 0xFF);
-        p = *(void **)((char *)p + 24);
-    }
     return buf;
 }
 

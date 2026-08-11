@@ -678,6 +678,134 @@ let is_trivial_dec_chain = Llvm_tco.is_trivial_dec_chain
    re-export bare. *)
 let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
 
+(** Narrow-widths task (2026-08) — per-width descriptor resolved from an
+    inline-loop synthetic name's stripped prefix (see
+    [Native_map_inline.inline_name_of]/[decode_nmap_inline_name] below).
+    [nw_mem_ty]/[nw_elem_size] describe the array's IN-MEMORY element
+    representation; the callback ("boundary") ABI the apply fn is called
+    at is always either `i64` (tagged immediate, for the three int-shaped
+    widths) or `double` (float-boxing family, for float/f32) regardless of
+    memory width — see [nw_boundary_float]. When the memory type differs
+    from the boundary type, the loop needs a widen after the load (before
+    the callback) and a narrow before the store (after the callback); see
+    [nmap_widen]/[nmap_narrow] and their use in [emit_native_map_inline_loop]
+    / [emit_native_map2_inline_loop]. For the two legacy widths (int/float)
+    memory type == boundary type, so widen/narrow are no-ops and the
+    emitted IR is byte-identical to before this task. *)
+type nmap_width = {
+  nw_len_fn : string;
+  nw_alloc_fn : string;
+  nw_mem_ty : string;
+  nw_elem_size : int;
+  nw_boundary_float : bool;
+}
+
+(** [None] for anything other than the five known width prefixes — the
+    caller must treat that as "not one of our synthetic inline names" and
+    fall through to the general EApp arm, NOT crash the compiler. This is
+    total by construction: [decode_nmap_inline_name] recognizes the
+    synthetic-name SHAPE only (prefix/suffix pattern), so a user-defined
+    function that happens to match that shape (e.g. a hand-written
+    [__my_map_inline]) can reach here with an unknown prefix. *)
+let nmap_width_of_prefix = function
+  | "native_int_arr"   -> Some { nw_len_fn = "native_int_arr_length";
+                                  nw_alloc_fn = "native_int_arr_alloc_raw";
+                                  nw_mem_ty = "i64"; nw_elem_size = 8; nw_boundary_float = false }
+  | "native_float_arr" -> Some { nw_len_fn = "native_float_arr_length";
+                                  nw_alloc_fn = "native_float_arr_alloc_raw";
+                                  nw_mem_ty = "double"; nw_elem_size = 8; nw_boundary_float = true }
+  | "native_f32_arr"   -> Some { nw_len_fn = "native_f32_arr_length";
+                                  nw_alloc_fn = "native_f32_arr_alloc_raw";
+                                  nw_mem_ty = "float"; nw_elem_size = 4; nw_boundary_float = true }
+  | "native_i32_arr"   -> Some { nw_len_fn = "native_i32_arr_length";
+                                  nw_alloc_fn = "native_i32_arr_alloc_raw";
+                                  nw_mem_ty = "i32"; nw_elem_size = 4; nw_boundary_float = false }
+  | "native_u8_arr"    -> Some { nw_len_fn = "native_u8_arr_length";
+                                  nw_alloc_fn = "native_u8_arr_alloc_raw";
+                                  nw_mem_ty = "i8"; nw_elem_size = 1; nw_boundary_float = false }
+  | _ -> None
+
+(** Widen a just-loaded memory-typed value [v] up to [width]'s callback
+    boundary type (`i64` for the int-shaped widths, `double` for the
+    float-boxing widths); identity (no instruction emitted) when memory
+    type already equals boundary type -- the legacy i64/f64 widths, where
+    this must be a true no-op to keep their IR byte-identical. u8 widens
+    with `zext` (loads are 0..255, matching [NativeArray.get_u8]'s
+    documented zero-extend contract and the runtime's DEF_NARROW_INT_ARR
+    `(int64_t)(uint8_t)` cast); i32 widens with `sext`. *)
+let nmap_widen ctx (width : nmap_width) (v : string) : string =
+  match width.nw_mem_ty with
+  | "i64" | "double" -> v
+  | "float" ->
+    let r = fresh ctx "nmap_w" in
+    emit ctx (Printf.sprintf "%s = fpext float %s to double" r v); r
+  | "i32" ->
+    let r = fresh ctx "nmap_w" in
+    emit ctx (Printf.sprintf "%s = sext i32 %s to i64" r v); r
+  | "i8" ->
+    let r = fresh ctx "nmap_w" in
+    emit ctx (Printf.sprintf "%s = zext i8 %s to i64" r v); r
+  | other -> failwith ("nmap_widen: unexpected mem type " ^ other)
+
+(** Narrow a boundary-typed callback result [v] down to [width]'s memory
+    type before storing it (mirrors the runtime's DEF_NARROW_INT_ARR/f32
+    `(CTYPE)`/`(float)` truncating casts: two's-complement wrap for i32/u8,
+    round-to-nearest-even for f32); identity for the legacy i64/f64 widths. *)
+let nmap_narrow ctx (width : nmap_width) (v : string) : string =
+  match width.nw_mem_ty with
+  | "i64" | "double" -> v
+  | "float" ->
+    let r = fresh ctx "nmap_n" in
+    emit ctx (Printf.sprintf "%s = fptrunc double %s to float" r v); r
+  | "i32" ->
+    let r = fresh ctx "nmap_n" in
+    emit ctx (Printf.sprintf "%s = trunc i64 %s to i32" r v); r
+  | "i8" ->
+    let r = fresh ctx "nmap_n" in
+    emit ctx (Printf.sprintf "%s = trunc i64 %s to i8" r v); r
+  | other -> failwith ("nmap_narrow: unexpected mem type " ^ other)
+
+(** Decompose an inline-loop synthetic name (produced by
+    [Native_map_inline.inline_name_of]) back into (width_prefix, is_map2,
+    unboxed), e.g. ["__native_f32_arr_map2_inline_unboxed"] ->
+    [("native_f32_arr", true, true)]. [None] for anything that isn't one of
+    these synthetic names (the general EApp arm's problem). *)
+let decode_nmap_inline_name (name : string) : (string * bool * bool) option =
+  let has_prefix pre s =
+    let lp = String.length pre and ln = String.length s in
+    ln >= lp && String.sub s 0 lp = pre
+  in
+  let has_suffix suf s =
+    let ls = String.length suf and ln = String.length s in
+    ln >= ls && String.sub s (ln - ls) ls = suf
+  in
+  let strip_suffix suf s = String.sub s 0 (String.length s - String.length suf) in
+  if not (has_prefix "__" name) then None
+  else
+    let rest = String.sub name 2 (String.length name - 2) in
+    let (rest, unboxed) =
+      if has_suffix "_unboxed" rest then (strip_suffix "_unboxed" rest, true) else (rest, false)
+    in
+    if has_suffix "_map2_inline" rest then Some (strip_suffix "_map2_inline" rest, true, unboxed)
+    else if has_suffix "_map_inline" rest then Some (strip_suffix "_map_inline" rest, false, unboxed)
+    else None
+
+(** Combines [decode_nmap_inline_name] (name-SHAPE recognition) with
+    [nmap_width_of_prefix] (prefix-is-a-known-width lookup) into one total
+    function: [None] unless BOTH the name shape matches AND the decoded
+    prefix is one of the five known widths. The dispatch arms below use
+    this (not [decode_nmap_inline_name] alone) as their [when] guard, so a
+    name that merely LOOKS like a synthetic inline name but carries an
+    unrecognized width prefix falls through to the general EApp arm instead
+    of reaching [nmap_width_of_prefix] partial-match failure. *)
+let decode_nmap_inline_call (name : string) : (nmap_width * bool * bool) option =
+  match decode_nmap_inline_name name with
+  | None -> None
+  | Some (prefix, is_map2, unboxed) ->
+    (match nmap_width_of_prefix prefix with
+     | None -> None
+     | Some width -> Some (width, is_map2, unboxed))
+
 (** P10 Phase 2/2c — shared codegen for the NativeArray map inline loop.
     Emits: length -> uninitialized alloc -> for-loop (load elem, tag/box to
     the wire ptr ABI, DIRECT call to [apply_name], untag/unbox, store).
@@ -694,11 +822,14 @@ let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
     or return. This is what actually lets the loop vectorize; the
     argument-box-reuse path above (still used when [unboxed] is false,
     e.g. a still-generic signature) only cuts allocation traffic. *)
-let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg
+let emit_native_map_inline_loop ctx ~(width : nmap_width) ~unboxed ~arr_atom ~apply_name ~clo_reg
     : string * string =
-  let elem_ty = if is_float then "double" else "i64" in
-  let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
-  let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
+  let is_float = width.nw_boundary_float in
+  let boundary_ty = if is_float then "double" else "i64" in
+  let mem_ty = width.nw_mem_ty in
+  let elem_size = width.nw_elem_size in
+  let len_fn = width.nw_len_fn in
+  let alloc_fn = width.nw_alloc_fn in
   (* Open a dedicated preheader so its label is known for the loop phi,
      regardless of what block was open before this arm ran. *)
   let preheader = fresh_block ctx "nmap_pre" in
@@ -745,16 +876,21 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
   emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
 
   emit_label ctx body_lbl;
-  (* Both source and dest arrays share the same NATIVE_ARR_HDR=24 layout
-     (march_runtime.c), so one offset serves both GEPs. *)
+  (* Both source and dest arrays share the same NATIVE_ARR_HDR=32 layout
+     (march_runtime.c), so one offset serves both GEPs. The multiplier and
+     the load/store alignment are the width's own element size (8 for the
+     legacy i64/f64 widths -- unchanged -- 4 for f32/i32, 1 for u8). *)
   let soff = fresh ctx "nmap_soff" in
-  emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
+  emit ctx (Printf.sprintf "%s = mul i64 %s, %d" soff i elem_size);
   let byte_off = fresh ctx "nmap_off" in
-  emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
   let sptr = fresh ctx "nmap_sptr" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
   let x = fresh ctx "nmap_x" in
-  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" x mem_ty sptr elem_size);
+  (* Widen the just-loaded memory-typed value up to the callback boundary
+     type (no-op for the legacy i64/f64 widths). *)
+  let x = nmap_widen ctx width x in
   (* RC contract: [apply_name] is called once per element with the SAME
      [clo_reg] throughout the loop.  For a capturing closure (clo_reg <>
      "null"), lib/tir/perceus.ml's insert_apply_fn_clo_drop makes every one
@@ -787,7 +923,7 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
      function was already exempt before the $clo ownership work. *)
   if clo_reg <> "null" then
     emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
-  let y_native =
+  let y_boundary =
     if unboxed then begin
       (* No box either side: raw double in, raw double out. This is the
          shape that actually vectorizes — no allocation call anywhere in
@@ -802,16 +938,19 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
           emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield b);
           emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield);
           b
-        | None -> coerce ctx elem_ty x "ptr"
+        | None -> coerce ctx boundary_ty x "ptr"
       in
       let y = fresh ctx "nmap_y" in
       emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s)" y apply_name clo_reg wire_arg);
-      coerce ctx "ptr" y elem_ty
+      coerce ctx "ptr" y boundary_ty
     end
   in
+  (* Narrow the boundary-typed result back down to the memory type before
+     storing it (no-op for the legacy i64/f64 widths). *)
+  let y_native = nmap_narrow ctx width y_boundary in
   let dptr = fresh ctx "nmap_dptr" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
-  emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty y_native dptr);
+  emit ctx (Printf.sprintf "store %s %s, ptr %s, align %d" mem_ty y_native dptr elem_size);
   emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
   emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
 
@@ -834,11 +973,14 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
     [native_arr_map2_check_len] (runtime/march_runtime.c). It's emitted once
     in the preheader (not per-iteration), so it costs nothing in the hot
     loop and doesn't touch anything the vectorizer looks at. *)
-let emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
+let emit_native_map2_inline_loop ctx ~(width : nmap_width) ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
     : string * string =
-  let elem_ty = if is_float then "double" else "i64" in
-  let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
-  let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
+  let is_float = width.nw_boundary_float in
+  let boundary_ty = if is_float then "double" else "i64" in
+  let mem_ty = width.nw_mem_ty in
+  let elem_size = width.nw_elem_size in
+  let len_fn = width.nw_len_fn in
+  let alloc_fn = width.nw_alloc_fn in
   let preheader = fresh_block ctx "nmap2_pre" in
   emit_term ctx (Printf.sprintf "br label %%%s" preheader);
   emit_label ctx preheader;
@@ -880,27 +1022,33 @@ let emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~a
 
   emit_label ctx body_lbl;
   (* Both source arrays and the dest array share the same
-     NATIVE_ARR_HDR=24 layout (march_runtime.c), so one offset serves all
-     three GEPs. *)
+     NATIVE_ARR_HDR=32 layout (march_runtime.c), so one offset serves all
+     three GEPs. The multiplier and the load/store alignment are the
+     width's own element size (8 for the legacy i64/f64 widths --
+     unchanged -- 4 for f32/i32, 1 for u8). *)
   let soff = fresh ctx "nmap2_soff" in
-  emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
+  emit ctx (Printf.sprintf "%s = mul i64 %s, %d" soff i elem_size);
   let byte_off = fresh ctx "nmap2_off" in
-  emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
   let sptr1 = fresh ctx "nmap2_sptr1" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr1 arr1_v byte_off);
   let x = fresh ctx "nmap2_x" in
-  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr1);
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" x mem_ty sptr1 elem_size);
   let sptr2 = fresh ctx "nmap2_sptr2" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr2 arr2_v byte_off);
   let y = fresh ctx "nmap2_y" in
-  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" y elem_ty sptr2);
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" y mem_ty sptr2 elem_size);
+  (* Widen both just-loaded memory-typed values up to the callback boundary
+     type (no-op for the legacy i64/f64 widths). *)
+  let x = nmap_widen ctx width x in
+  let y = nmap_widen ctx width y in
   (* Same RC contract as [emit_native_map_inline_loop] above: incrc before
      each call to balance that call's internal $clo drop for a capturing
      closure, matched by a final decrc after the loop (below) that
      releases the one transferred reference. *)
   if clo_reg <> "null" then
     emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
-  let z_native =
+  let z_boundary =
     if unboxed then begin
       let z = fresh ctx "nmap2_z" in
       emit ctx (Printf.sprintf "%s = call double @%s(ptr %s, double %s, double %s)" z apply_name clo_reg x y);
@@ -915,16 +1063,19 @@ let emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~a
           emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield2 b2);
           emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" y vfield2);
           (b1, b2)
-        | None -> (coerce ctx elem_ty x "ptr", coerce ctx elem_ty y "ptr")
+        | None -> (coerce ctx boundary_ty x "ptr", coerce ctx boundary_ty y "ptr")
       in
       let z = fresh ctx "nmap2_z" in
       emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s, ptr %s)" z apply_name clo_reg wire_x wire_y);
-      coerce ctx "ptr" z elem_ty
+      coerce ctx "ptr" z boundary_ty
     end
   in
+  (* Narrow the boundary-typed result back down to the memory type before
+     storing it (no-op for the legacy i64/f64 widths). *)
+  let z_native = nmap_narrow ctx width z_boundary in
   let dptr = fresh ctx "nmap2_dptr" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
-  emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty z_native dptr);
+  emit ctx (Printf.sprintf "store %s %s, ptr %s, align %d" mem_ty z_native dptr elem_size);
   emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
   emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
 
@@ -2520,17 +2671,22 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Float keeps the alloc/unbox calls (real heap allocations) in the loop
      body, which blocks vectorization — see specs/optimizations.md P10.
      $clo is `null`: the apply body never reads it (no free vars to load).
-     "..._unboxed" (Float only — Stage 4 Option B) calls an unboxed clone
-     of the apply fn instead, see [Native_map_inline.try_unboxed_variant]
-     and [emit_native_map_inline_loop]'s [~unboxed] doc. *)
+     "..._unboxed" (Float/f32 only — Stage 4 Option B) calls an unboxed
+     clone of the apply fn instead, see
+     [Native_map_inline.try_unboxed_variant] and
+     [emit_native_map_inline_loop]'s [~unboxed] doc.
+
+     Narrow-widths task (2026-08): the per-name if/else that used to pick
+     `~is_float`/`len_fn`/`alloc_fn` here is replaced by
+     [decode_nmap_inline_name] + [nmap_width_of_prefix] — same synthetic-name
+     recognition, generalized to f32/i32/u8 without new arms. The [when]
+     guard matches any name [Native_map_inline.inline_name_of] can produce;
+     anything else falls through to the general EApp arm below. *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v])
-    when f.Tir.v_name = "__native_int_arr_map_inline"
-      || f.Tir.v_name = "__native_float_arr_map_inline"
-      || f.Tir.v_name = "__native_float_arr_map_inline_unboxed" ->
-    let is_float = f.Tir.v_name <> "__native_int_arr_map_inline" in
-    let unboxed = f.Tir.v_name = "__native_float_arr_map_inline_unboxed" in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, false, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
-    emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg:"null"
+    emit_native_map_inline_loop ctx ~width ~unboxed ~arr_atom ~apply_name ~clo_reg:"null"
 
   (* ── Native array map inline loop, capturing closure (P10 Phase 2c) ──
      Same rewrite/codegen as Phase 2 above, but for a closure that DOES
@@ -2547,15 +2703,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      one hoisted load of `f` plus a per-element fadd, same vectorization
      story as Phase 2's non-capturing case. *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v; clo_atom])
-    when f.Tir.v_name = "__native_int_arr_map_inline"
-      || f.Tir.v_name = "__native_float_arr_map_inline"
-      || f.Tir.v_name = "__native_float_arr_map_inline_unboxed" ->
-    let is_float = f.Tir.v_name <> "__native_int_arr_map_inline" in
-    let unboxed = f.Tir.v_name = "__native_float_arr_map_inline_unboxed" in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, false, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
-    emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg
+    emit_native_map_inline_loop ctx ~width ~unboxed ~arr_atom ~apply_name ~clo_reg
 
   (* ── Native array map2 inline loop, non-capturing closure ────────────
      [Native_map_inline]'s two-array counterpart of the non-capturing arm
@@ -2563,25 +2716,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      names and two leading array atoms instead of one. See
      [emit_native_map2_inline_loop]. *)
   | Tir.EApp (f, [arr1_atom; arr2_atom; Tir.AVar apply_v])
-    when f.Tir.v_name = "__native_int_arr_map2_inline"
-      || f.Tir.v_name = "__native_float_arr_map2_inline"
-      || f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" ->
-    let is_float = f.Tir.v_name <> "__native_int_arr_map2_inline" in
-    let unboxed = f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, true, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
-    emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg:"null"
+    emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg:"null"
 
   (* ── Native array map2 inline loop, capturing closure ──────────────── *)
   | Tir.EApp (f, [arr1_atom; arr2_atom; Tir.AVar apply_v; clo_atom])
-    when f.Tir.v_name = "__native_int_arr_map2_inline"
-      || f.Tir.v_name = "__native_float_arr_map2_inline"
-      || f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" ->
-    let is_float = f.Tir.v_name <> "__native_int_arr_map2_inline" in
-    let unboxed = f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" in
+    when (match decode_nmap_inline_call f.Tir.v_name with Some (_, true, _) -> true | _ -> false) ->
+    let (width, _, unboxed) = Option.get (decode_nmap_inline_call f.Tir.v_name) in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
-    emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
+    emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->

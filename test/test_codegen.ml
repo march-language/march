@@ -8419,6 +8419,38 @@ let test_native_float_arr_ir () =
   Alcotest.(check bool) "float make call returns ptr" true
     (ir_contains ir "= call ptr @native_float_arr_make")
 
+(** native narrow-width (f32/i32/u8) builtins must appear in the LLVM preamble
+    and generate correct call instructions: i64 return for int-family get/sum,
+    double for f32 get/sum, ptr for make/map/conversions. *)
+let test_native_narrow_arr_ir () =
+  let ir = emit_actor_ir {|mod Test do
+    fn make_u8_arr(n : Int, fill : Int) : NativeU8Arr do
+      native_u8_arr_make(n, fill)
+    end
+    fn get_u8_elem(arr : NativeU8Arr, i : Int) : Int do
+      native_u8_arr_get(arr, i)
+    end
+    fn sum_i32_arr(arr : NativeI32Arr) : Int do
+      native_i32_arr_sum(arr)
+    end
+    fn map_f32_arr(arr : NativeF32Arr, f : Float -> Float) : NativeF32Arr do
+      native_f32_arr_map(arr, f)
+    end
+    fn to_u8(arr : NativeIntArr) : NativeU8Arr do
+      native_int_to_u8_arr(arr)
+    end
+  end|} in
+  Alcotest.(check bool) "native_u8_arr_make declared" true
+    (ir_contains ir "declare ptr    @native_u8_arr_make");
+  Alcotest.(check bool) "native_u8_arr_get call returns i64" true
+    (ir_contains ir "= call i64 @native_u8_arr_get");
+  Alcotest.(check bool) "native_i32_arr_sum call returns i64" true
+    (ir_contains ir "= call i64 @native_i32_arr_sum");
+  Alcotest.(check bool) "native_f32_arr_map declared" true
+    (ir_contains ir "@native_f32_arr_map");
+  Alcotest.(check bool) "native_int_to_u8_arr declared" true
+    (ir_contains ir "@native_int_to_u8_arr")
+
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
 let test_cancel_token_new () =
@@ -12400,6 +12432,45 @@ declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)
 declare ptr    @native_int_arr_alloc_raw(i64 %len)
 declare ptr    @native_float_arr_alloc_raw(i64 %len)
 declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
+; Narrow native arrays (f32/i32/u8)
+declare ptr    @native_f32_arr_make(i64 %len, double %def)
+declare i64    @native_f32_arr_length(ptr %arr)
+declare double @native_f32_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)
+declare double @native_f32_arr_sum(ptr %arr)
+declare ptr    @native_f32_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_f32_arr_map2(ptr %a, ptr %b, ptr %f)
+declare ptr    @native_f32_arr_from_list(ptr %lst)
+declare ptr    @native_f32_arr_to_list(ptr %arr)
+declare ptr    @native_i32_arr_make(i64 %len, i64 %def)
+declare i64    @native_i32_arr_length(ptr %arr)
+declare i64    @native_i32_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)
+declare i64    @native_i32_arr_sum(ptr %arr)
+declare ptr    @native_i32_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_i32_arr_map2(ptr %a, ptr %b, ptr %f)
+declare ptr    @native_i32_arr_from_list(ptr %lst)
+declare ptr    @native_i32_arr_to_list(ptr %arr)
+declare ptr    @native_u8_arr_make(i64 %len, i64 %def)
+declare i64    @native_u8_arr_length(ptr %arr)
+declare i64    @native_u8_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)
+declare i64    @native_u8_arr_sum(ptr %arr)
+declare ptr    @native_u8_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_u8_arr_map2(ptr %a, ptr %b, ptr %f)
+declare ptr    @native_u8_arr_from_list(ptr %lst)
+declare ptr    @native_u8_arr_to_list(ptr %arr)
+declare ptr    @native_float_to_f32_arr(ptr %arr)
+declare ptr    @native_f32_to_float_arr(ptr %arr)
+declare ptr    @native_int_to_i32_arr(ptr %arr)
+declare ptr    @native_i32_to_int_arr(ptr %arr)
+declare ptr    @native_int_to_u8_arr(ptr %arr)
+declare ptr    @native_u8_to_int_arr(ptr %arr)
+declare ptr    @native_i32_to_f32_arr(ptr %arr)
+declare ptr    @native_u8_to_f32_arr(ptr %arr)
+declare ptr    @native_f32_arr_alloc_raw(i64 %len)
+declare ptr    @native_i32_arr_alloc_raw(i64 %len)
+declare ptr    @native_u8_arr_alloc_raw(i64 %len)
 ; RingBuf builtins — mutable fixed-capacity circular buffer
 declare ptr    @ring_buf_make(i64 %cap)
 declare void   @ring_buf_push(ptr %rb, ptr %x)
@@ -14044,6 +14115,7 @@ let codegen_suites =
         [
           Alcotest.test_case "int arr IR"   `Quick (with_reset test_native_int_arr_ir);
           Alcotest.test_case "float arr IR" `Quick (with_reset test_native_float_arr_ir);
+          Alcotest.test_case "narrow arr IR" `Quick (with_reset test_native_narrow_arr_ir);
         ] );
       ( "tasks",
         [

@@ -47,7 +47,9 @@
     untouched and falls back to the existing, correct,
     closure-struct-and-indirect-call path. *)
 
-let target_map_names = [ "native_int_arr_map"; "native_float_arr_map" ]
+let target_map_names =
+  [ "native_int_arr_map"; "native_float_arr_map";
+    "native_f32_arr_map"; "native_i32_arr_map"; "native_u8_arr_map" ]
 
 (* P10 Phase 2/2c's two-array counterpart (map2 added 2026-07-27 to unblock
    DataFrame.col_add_col). Same eligibility bar and inlining trick as the
@@ -57,16 +59,30 @@ let target_map_names = [ "native_int_arr_map"; "native_float_arr_map" ]
    the trailing closure arg, and a 2-param ($clo, a, b) apply fn instead of
    1-param. See [find_target_call2]/[subst_call2]/[find_target_call_var2]/
    [subst_call_capturing2] below and [Llvm_emit.emit_native_map2_inline_loop]. *)
-let target_map2_names = [ "native_int_arr_map2"; "native_float_arr_map2" ]
+let target_map2_names =
+  [ "native_int_arr_map2"; "native_float_arr_map2";
+    "native_f32_arr_map2"; "native_i32_arr_map2"; "native_u8_arr_map2" ]
 
-let inline_name_of ~unboxed = function
-  | "native_int_arr_map"   -> "__native_int_arr_map_inline"
-  | "native_float_arr_map" -> if unboxed then "__native_float_arr_map_inline_unboxed"
-                              else "__native_float_arr_map_inline"
-  | "native_int_arr_map2"   -> "__native_int_arr_map2_inline"
-  | "native_float_arr_map2" -> if unboxed then "__native_float_arr_map2_inline_unboxed"
-                               else "__native_float_arr_map2_inline"
-  | other -> other
+(* Narrow-widths task (2026-08): generalized from the old fixed if/else so
+   f32/i32/u8 don't need their own arms -- the inline symbol is always
+   derived from the builtin name by stripping the "_map"/"_map2" suffix and
+   re-wrapping it, e.g. "native_f32_arr_map" -> "__native_f32_arr_map_inline"
+   (~unboxed:true -> "..._inline_unboxed"). Produces the EXACT SAME strings
+   as the old hard-coded table for the two legacy widths -- verified by the
+   IR-identical regression bar in test/dune's native_arr_map_inline_unboxed
+   grep counts. *)
+let inline_name_of ~unboxed (name : string) : string =
+  let has_suffix suf s =
+    let ls = String.length suf and ln = String.length s in
+    ln >= ls && String.sub s (ln - ls) ls = suf
+  in
+  let strip_suffix suf s = String.sub s 0 (String.length s - String.length suf) in
+  let unboxed_sfx = if unboxed then "_unboxed" else "" in
+  if has_suffix "_map2" name then
+    "__" ^ strip_suffix "_map2" name ^ "_map2_inline" ^ unboxed_sfx
+  else if has_suffix "_map" name then
+    "__" ^ strip_suffix "_map" name ^ "_map_inline" ^ unboxed_sfx
+  else name
 
 (** Float-boxing Stage 4, Option B — the unboxed variant of an apply fn.
 
@@ -113,19 +129,23 @@ let is_all_float_signature (fn : Tir.fn_def) : bool =
       | _clo :: rest -> List.for_all (fun (p : Tir.var) -> p.Tir.v_ty = Tir.TFloat) rest
       | [] -> false)
 
-(** If [target_name] is ["native_float_arr_map"] or ["native_float_arr_map2"]
-    and the apply fn behind [apply_var] has an all-Float signature, synthesize
-    its unboxed clone
-    (pushing it onto [extra_fns] so [run] can add it to the module) and
+(** If [target_name] is one of the float-boundary map builtins
+    (["native_float_arr_map"]/["native_float_arr_map2"] or, since the
+    narrow-widths task, ["native_f32_arr_map"]/["native_f32_arr_map2"] --
+    both have concrete `Float`-only March signatures) and the apply fn
+    behind [apply_var] has an all-Float signature, synthesize its unboxed
+    clone (pushing it onto [extra_fns] so [run] can add it to the module) and
     return a fresh [Tir.var] referencing it — same construction
     [Defun.lift_lambda] uses for the boxed fn-pointer atom (opaque
     [TPtr TUnit], never RC'd: a code address, not a heap value). Returns
-    [None] for anything else (Int has no box to skip; a non-Float or
+    [None] for anything else (Int/i32/u8 have no box to skip -- their wire
+    values are tagged immediates, not heap floats -- and a non-Float or
     still-generic signature keeps the boxed path). *)
 let try_unboxed_variant (apply_fns : (string, Tir.fn_def) Hashtbl.t)
     (extra_fns : Tir.fn_def list ref) (target_name : string) (apply_var : Tir.var)
     : Tir.var option =
-  if target_name <> "native_float_arr_map" && target_name <> "native_float_arr_map2" then None
+  if target_name <> "native_float_arr_map" && target_name <> "native_float_arr_map2"
+  && target_name <> "native_f32_arr_map" && target_name <> "native_f32_arr_map2" then None
   else
     match Hashtbl.find_opt apply_fns apply_var.Tir.v_name with
     | Some fn when is_all_float_signature fn ->

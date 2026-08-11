@@ -31,15 +31,23 @@ let attr_severity (attrs : string list) : severity option =
 let display_name = function
   | "native_int_arr_map"    -> "map_int"
   | "native_float_arr_map"  -> "map_float"
+  | "native_f32_arr_map"    -> "map_f32"
+  | "native_i32_arr_map"    -> "map_i32"
+  | "native_u8_arr_map"     -> "map_u8"
   | "native_int_arr_map2"   -> "map2_int"
   | "native_float_arr_map2" -> "map2_float"
+  | "native_f32_arr_map2"   -> "map2_f32"
+  | "native_i32_arr_map2"   -> "map2_i32"
+  | "native_u8_arr_map2"    -> "map2_u8"
   | other -> other
 
 let is_map2_target name =
   name = "native_int_arr_map2" || name = "native_float_arr_map2"
+  || name = "native_f32_arr_map2" || name = "native_i32_arr_map2" || name = "native_u8_arr_map2"
 
 let is_float_target name =
   name = "native_float_arr_map" || name = "native_float_arr_map2"
+  || name = "native_f32_arr_map" || name = "native_f32_arr_map2"
 
 let reuse_example target =
   let d = display_name target in
