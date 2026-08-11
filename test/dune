@@ -4057,11 +4057,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/simd_vector_mem.expected simd_vector_mem.out)))
 
 ; Task 3: SIMD register-residency / escape fixture. `kernel` is a
-; straight-line load/arith/sum function -- its compiled body must stay
-; entirely in registers (zero march_simd_alloc calls, vector fadd present).
-; `escape` stores the loaded vector into a List cell, forcing exactly one
-; heap box (one march_simd_alloc call). Asserted via -emit-llvm, not output
-; diff -- IR shape is the point.
+; straight-line load/mul/add/sum function -- its compiled body must stay
+; entirely in registers, contributing ZERO march_simd_alloc calls. `escape`
+; stores the loaded vector into a List cell, forcing exactly ONE heap box.
+; Asserted via -emit-llvm, not output diff -- IR shape is the point.
 ;
 ; `kernel`/`escape` are pure and small, so the default optimizer (Inline,
 ; lib/tir/inline.ml) always inlines them into march_main regardless of call
@@ -4069,11 +4068,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; scope a grep against post-opt (and building with --no-opt to keep them as
 ; symbols would defeat the point: the Simd.* wrapper calls would stay as
 ; boxed-ptr calls instead of being inlined down to raw <4 x float> register
-; ops). Instead this scopes by SOURCE ORDER within march_main's inlined
-; body, split at the first march_simd_alloc call: everything before it is
-; kernel's contribution (must contain the vector fadd, zero allocs);
-; everything from it onward is escape's (must contain exactly one alloc,
-; matching this fixture's single escape call site).
+; ops, making a "kernel makes 0 allocs" check vacuous for the wrong reason).
+;
+; A source-order split at the first march_simd_alloc call (an earlier
+; version of this rule) is UNSOUND: the "before the split" half is built by
+; construction from lines that stop at the first march_simd_alloc match, so
+; a "0 allocs in that half" assertion can never fail -- it doesn't test
+; kernel-vs-escape attribution at all, and its sabotage check only ever
+; flipped the always-true threshold, which is guaranteed to fail regardless
+; of whether the split logic means anything (caught in review). The
+; falsifiable version asserts the fixture's only real invariant: march_main
+; contains EXACTLY ONE march_simd_alloc call in total (this fixture has one
+; escape call site; a kernel-side regression that boxes would push the
+; total to 2, an escape-side regression that stops boxing would drop it to
+; 0 -- both directions are caught by a single equality check on the total),
+; strengthened with a presence check for the vector arithmetic itself
+; (`fmul <4 x float>` and `fadd <4 x float>`/`reduce.fadd` both >= 1) so an
+; optimizer that deleted the kernel's body entirely (e.g. DCE'd its unused
+; result) couldn't fake a pass by vacuously satisfying an allocation count
+; with no vector ops behind it.
 (rule
  (targets simd_residency_llvm_check.out)
  (deps (file %{exe:../bin/main.exe})
@@ -4086,20 +4099,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (with-stdout-to simd_residency_llvm_check.out
     (run bash -c
      "mbody=$(awk '/^define ptr @march_main/{f=1} f{print} f && /^}/{exit}' native/simd_residency.ll); \
-      kbody=$(printf '%s\\n' \"$mbody\" | awk '/march_simd_alloc/{exit} {print}'); \
-      ebody=$(printf '%s\\n' \"$mbody\" | awk 'found{print} /march_simd_alloc/{found=1; print}'); \
-      kfadd=$(printf '%s\\n' \"$kbody\" | grep -c 'fadd <4 x float>'); \
-      kalloc=$(printf '%s\\n' \"$kbody\" | grep -c march_simd_alloc); \
-      ealloc=$(printf '%s\\n' \"$ebody\" | grep -c march_simd_alloc); \
-      echo \"$kfadd $kalloc $ealloc\"")))))
+      alloc=$(printf '%s\\n' \"$mbody\" | grep -c march_simd_alloc); \
+      fmul=$(printf '%s\\n' \"$mbody\" | grep -c 'fmul <4 x float>'); \
+      fadd=$(printf '%s\\n' \"$mbody\" | grep -c -E 'fadd <4 x float>|reduce\\.fadd'); \
+      echo \"$alloc $fmul $fadd\"")))))
 
 (rule
  (alias runtest)
  (deps simd_residency_llvm_check.out)
  (action
   (run bash -c
-   "read -r kfadd kalloc ealloc < simd_residency_llvm_check.out; \
-    test \"$kfadd\" -ge 1 -a \"$kalloc\" -eq 0 -a \"$ealloc\" -eq 1 || { echo \"expected kernel body: >=1 fadd <4 x float>, 0 march_simd_alloc calls; escape body: 1 march_simd_alloc call (found kernel-fadd=$kfadd kernel-alloc=$kalloc escape-alloc=$ealloc)\" >&2; exit 1; }")))
+   "read -r alloc fmul fadd < simd_residency_llvm_check.out; \
+    test \"$alloc\" -eq 1 -a \"$fmul\" -ge 1 -a \"$fadd\" -ge 1 || { echo \"expected exactly 1 march_simd_alloc total in march_main (this fixture's single escape call site -- a kernel-side box regression pushes this to 2, an escape-side regression that stops boxing drops it to 0), with >=1 fmul <4 x float> and >=1 fadd/reduce.fadd present (found alloc=$alloc fmul=$fmul fadd=$fadd)\" >&2; exit 1; }")))
 
 ; Task 3: SIMD load bounds-panic fixture -- i=2, lanes=4, length=5 (i+lanes=6
 ; > 5, one past the last legal index i=1). Asserts the COMPILED binary's
