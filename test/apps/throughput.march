@@ -21,6 +21,8 @@
 
 mod Throughput do
   needs IO.Console
+  needs IO.Process
+  needs IO.Spawn
 
   -- ── CPU kernel ────────────────────────────────────────────────────────
   -- Wheel-2-3 trial division: only test candidates of the form 6k±1.

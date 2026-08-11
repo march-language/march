@@ -19,6 +19,20 @@
 --     {"type":"server_output","index":N,"content":"...","running":true/false}
 --     {"type":"server_error","index":N,"message":"..."}
 
+
+  needs IO.Console
+
+  needs IO.FileRead
+
+  needs IO.FileWrite
+
+  needs IO.Mut
+
+  needs IO.NetListen
+
+  needs IO.Process
+
+  needs IO.WebSocket
 mod ForgeNotebookServer do
 
 -- ── String helpers ────────────────────────────────────────────────────────────

@@ -191,7 +191,27 @@ let eval_main ?(with_stdlib = false) m =
   let env = March_eval.Eval.eval_module_env m in
   match List.assoc_opt "main" env with
   | None    -> None
-  | Some fn -> Some (March_eval.Eval.apply fn [])
+  | Some fn ->
+    (* R1 stage D: the generated `main` declares its grant, so it takes one
+       erased capability per parameter — supply them here the way the real
+       entry path does (lib/eval/eval.ml, and the LLVM entry thunk on the
+       compiled side). Applying [] to a granted `main` raises an arity
+       mismatch, which this property would report as "well-typed program
+       crashed the interpreter": a true statement about a test-harness bug,
+       not about the language. *)
+    let arity =
+      List.fold_left
+        (fun acc d ->
+           match d with
+           | Ast.DFn (def, _) when def.Ast.fn_name.Ast.txt = "main" -> (
+             match def.Ast.fn_clauses with
+             | c :: _ -> List.length c.Ast.fc_params
+             | [] -> acc)
+           | _ -> acc)
+        0 m.Ast.mod_decls
+    in
+    Some (March_eval.Eval.apply fn
+            (List.init arity (fun _ -> March_eval.Eval.VUnit)))
 
 (* ── Source string generators ──────────────────────────────────────────── *)
 
