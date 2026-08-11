@@ -110,6 +110,13 @@ static _Atomic int      g_all_done       = 0;
 static _Atomic int64_t  g_live_procs     = 0;
 static _Atomic int      g_sched_shutdown = 0;
 
+/* Timer min-heap state (full definition + helpers near march_sched_wake,
+ * below). Forward-declared here so march_sched_init can reset g_timer_len. */
+typedef struct { int64_t deadline_ms; struct march_proc *proc; } march_timer_ent;
+static pthread_mutex_t  g_timer_mu = PTHREAD_MUTEX_INITIALIZER;
+static march_timer_ent *g_timer_heap = NULL;
+static int              g_timer_len = 0, g_timer_cap = 0;
+
 /* Live procs that are NOT daemons (main, task procs).  When this reaches 0
  * after shutdown is requested, only actor recv loops remain — the idle
  * branch of sched_loop then wakes parked daemons so they exit their loops
@@ -636,6 +643,7 @@ void march_sched_init(void) {
     g_runq_tail = NULL;
     memset(g_proc_registry, 0, sizeof(g_proc_registry));
     g_proc_count = 0;
+    g_timer_len = 0;   /* keep the heap allocation; the mutex is static */
 
     g_num_scheds = MARCH_NUM_SCHEDULERS > 0 ? MARCH_NUM_SCHEDULERS : 1;
     /* Runtime override: MARCH_NUM_SCHEDULERS=N caps the number of OS scheduler
@@ -1480,6 +1488,69 @@ void march_sched_park_self(void) {
      * before swapping back into our context.  Status is now RUNNING. */
 }
 
+/* ── Timers: binary min-heap of (deadline, proc) ─────────────────────── */
+/* No cancellation by design: a stale fire is a spurious wake, which every
+ * park site already tolerates by looping; procs are leak-don't-free so the
+ * proc pointer is always dereferenceable (Task 12 recycles stacks ONLY).
+ * State (g_timer_mu/g_timer_heap/g_timer_len/g_timer_cap) is forward-declared
+ * near the other global state, above, so march_sched_init can reset it. */
+
+int64_t march_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void timer_heap_push(int64_t deadline_ms, march_proc *p) {
+    pthread_mutex_lock(&g_timer_mu);
+    if (g_timer_len == g_timer_cap) {
+        g_timer_cap = g_timer_cap ? g_timer_cap * 2 : 64;
+        g_timer_heap = realloc(g_timer_heap,
+                               (size_t)g_timer_cap * sizeof(march_timer_ent));
+        if (!g_timer_heap) { fputs("march_sched: OOM (timer)\n", stderr); abort(); }
+    }
+    int i = g_timer_len++;
+    g_timer_heap[i] = (march_timer_ent){ deadline_ms, p };
+    while (i > 0) {
+        int par = (i - 1) / 2;
+        if (g_timer_heap[par].deadline_ms <= g_timer_heap[i].deadline_ms) break;
+        march_timer_ent t = g_timer_heap[par];
+        g_timer_heap[par] = g_timer_heap[i];
+        g_timer_heap[i] = t;
+        i = par;
+    }
+    pthread_mutex_unlock(&g_timer_mu);
+}
+
+/* Pop every expired entry and wake its proc. Called from preempt_daemon. */
+static void timer_service(int64_t now_ms) {
+    for (;;) {
+        march_proc *victim = NULL;
+        pthread_mutex_lock(&g_timer_mu);
+        if (g_timer_len > 0 && g_timer_heap[0].deadline_ms <= now_ms) {
+            victim = g_timer_heap[0].proc;
+            g_timer_heap[0] = g_timer_heap[--g_timer_len];
+            int i = 0;
+            for (;;) {
+                int l = 2*i+1, r = 2*i+2, m = i;
+                if (l < g_timer_len && g_timer_heap[l].deadline_ms < g_timer_heap[m].deadline_ms) m = l;
+                if (r < g_timer_len && g_timer_heap[r].deadline_ms < g_timer_heap[m].deadline_ms) m = r;
+                if (m == i) break;
+                march_timer_ent t = g_timer_heap[m];
+                g_timer_heap[m] = g_timer_heap[i];
+                g_timer_heap[i] = t;
+                i = m;
+            }
+        }
+        pthread_mutex_unlock(&g_timer_mu);
+        if (!victim) return;
+        march_sched_wake(victim);   /* outside the lock: wake can spin */
+    }
+}
+
+/* Definition of march_sched_park_self_until is below, after g_preempt_active
+ * is declared (Phase 5A) — the fallback path needs to read that flag. */
+
 /* ── Phase 5A: signal-based preemption ───────────────────────────────── */
 
 /*
@@ -1510,6 +1581,22 @@ void march_sched_park_self(void) {
 
 static _Atomic int  g_preempt_active = 0;
 static pthread_t    g_preempt_thread;
+
+int march_sched_park_self_until(int64_t deadline_ms) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p) return MARCH_PARK_WOKEN;
+    if (march_now_ms() >= deadline_ms) return MARCH_PARK_TIMEOUT;
+    if (!atomic_load_explicit(&g_preempt_active, memory_order_acquire)) {
+        /* No timer service running: degrade to plain yield so the caller's
+         * condition/deadline loop still makes progress. */
+        march_sched_yield();
+        return MARCH_PARK_WOKEN;
+    }
+    timer_heap_push(deadline_ms, p);
+    march_sched_park_self();
+    return (march_now_ms() >= deadline_ms) ? MARCH_PARK_TIMEOUT
+                                           : MARCH_PARK_WOKEN;
+}
 
 /* SIGUSR1 handler: zero the local reduction counter.  The handler is
  * registered with SA_RESTART so that interruptible syscalls are retried
@@ -1543,6 +1630,8 @@ static void *preempt_daemon(void *arg) {
                 pthread_kill(g_scheds[i].thread, SIGUSR1);
             }
         }
+
+        timer_service(march_now_ms());
     }
     return NULL;
 }

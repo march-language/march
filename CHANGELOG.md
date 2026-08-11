@@ -13,6 +13,8 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- Scheduler timers: green threads can park with a deadline (runtime-internal;
+  enables Actor.call deadline waits and supervisor backoff).
 - **`NativeArray` gained narrow element widths: f32, i32, u8** — both
   interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
   `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,

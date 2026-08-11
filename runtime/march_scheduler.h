@@ -342,6 +342,14 @@ void         march_sched_wake(march_proc *target);
  * without checking). */
 void         march_sched_park_self(void);
 
+#define MARCH_PARK_WOKEN   0
+#define MARCH_PARK_TIMEOUT 1
+/* CLOCK_MONOTONIC milliseconds. */
+int64_t march_now_ms(void);
+/* Park until woken or deadline (march_now_ms clock). Spurious returns
+ * possible with either code; callers loop on their own condition. */
+int march_sched_park_self_until(int64_t deadline_ms);
+
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);
