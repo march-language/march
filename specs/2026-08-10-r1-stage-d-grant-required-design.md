@@ -187,8 +187,23 @@ help: declare the grant `main` actually needs —
       `forge fix` can apply this.
 ```
 
-It carries a JSON `fix` payload (an insert/replace keyed to `main`'s signature
-span) so `forge fix` applies it. The direct-builtin `needs` route already emits
+It carries a JSON `fix` payload so `forge fix` applies it — a `FReplace` over
+`main`'s PARAMETER LIST, turning `()` into `(_cap_console : Cap(IO.Console))`.
+
+**This needed a new AST field, which the design originally assumed away.**
+`fn_clause` had no span for its parameter list: `fc_span` covers the whole
+clause (body included) and `fn_name.span` covers only the name, so a replace
+over either produces garbage — over the name, literally
+`fn main(_cap_console : Cap(IO.Console))() : ()`. So `fc_params_span` was
+added to `fn_clause`, set from the `LPAREN`/`RPAREN` tokens in the four
+`fn_decl` productions and to the clause's own `fc_span` at the ~10 sites where
+desugar, derive, the REPL and refinecheck SYNTHESIZE a clause with no source
+parentheses to point at.
+
+The generated parameters are `_`-prefixed (`_cap_console`, not `cap_console`)
+because a migrated `main` does not use them: without the underscore the fix
+trades a capability error for an unused-parameter warning on every program it
+touches. The direct-builtin `needs` route already emits
 such a payload; the ceiling route does not, which is a filed Tier-2 loose end
 (`specs/2026-08-09-cap-loose-ends-plan.md`). Doing it here closes half of that
 item and establishes the shape for the other half.

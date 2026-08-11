@@ -21,9 +21,12 @@ git log is authoritative for exact commits.
   perform IO without declaring its authority" true rather than
   aspirational; before it, the honest claim was only "a program that *states*
   its grant cannot exceed it".
-  A `main` that performs no IO is unaffected. Migration is one line and the
-  compiler computes it for you — the error prints the exact signature to
-  paste. (Sandbox ladder R1 stage D.)
+  A `main` that performs no IO is unaffected. Migration is one line and you do
+  not have to write it: the error prints the exact signature, and carries a
+  machine-applicable fix, so `forge fix` rewrites `fn main()` into
+  `fn main(_cap_console : Cap(IO.Console))` for you. The grant is not a
+  suggestion — it is the set of capabilities the compiler already proved the
+  program reaches. (Sandbox ladder R1 stage D.)
 - **`main` may now hold several capabilities**, e.g.
   `fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn))`; the
   grant is their union. Previously it could hold exactly one, so a program
