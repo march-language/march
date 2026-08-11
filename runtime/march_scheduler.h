@@ -128,6 +128,19 @@ typedef struct march_mbox_node {
     struct march_mbox_node *next;
 } march_mbox_node;
 
+/* ── Mailbox capacity + overflow policy ─────────────────────────────────
+ * mbox_limit == 0 means unbounded (today's behavior, unchanged default). */
+typedef enum {
+    MARCH_MBOX_UNBOUNDED  = 0,   /* default: today's behavior */
+    MARCH_MBOX_DROP_NEW   = 1,   /* reject the incoming message */
+    MARCH_MBOX_DROP_OLD   = 2,   /* evict the oldest queued message */
+    MARCH_MBOX_BLOCK      = 3,   /* Task 8: park the sender */
+} march_mbox_policy;
+
+#define MARCH_SEND_OK       0
+#define MARCH_SEND_DEAD    (-1)
+#define MARCH_SEND_DROPPED  1    /* message NOT enqueued (DROP_NEW) */
+
 /* Forward-declare scheduler so march_proc can hold a pointer to it. */
 struct march_scheduler;
 
@@ -148,6 +161,14 @@ typedef struct march_proc {
                                                  march_sched_wait_idle / march_sched_mbox_count
                                                  read it from other OS threads without
                                                  the lock. */
+    int64_t                    mbox_limit;   /* 0 = unbounded (default). Plain field: only
+                                                 read/written under mbox_lock (set by
+                                                 march_sched_set_mbox_limit, read by
+                                                 march_sched_send). calloc in sched_spawn_common
+                                                 zero-initializes this to 0 = unbounded. */
+    int32_t                    mbox_policy;  /* march_mbox_policy. Same lock discipline as
+                                                 mbox_limit above; calloc zero-inits to
+                                                 MARCH_MBOX_UNBOUNDED (=0). */
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
     /* Wake permit (LockSupport/park-unpark style).  march_sched_wake deposits
      * one BEFORE it inspects `status`; march_sched_park_self consumes one
@@ -298,8 +319,28 @@ int64_t      march_sched_total_spawned(void);
 
 /* Send a message to a process. Enqueues msg and wakes the target if WAITING.
  * Safe to call from any process or from the scheduler context.
- * Returns 0 on success, -1 if target is NULL or DEAD. */
+ * Returns MARCH_SEND_OK (0) on success, MARCH_SEND_DEAD (-1) if target is
+ * NULL or DEAD, or MARCH_SEND_DROPPED (1) if the target's mailbox is at
+ * capacity under MARCH_MBOX_DROP_NEW (message was NOT enqueued). Every
+ * pre-Task-7 caller treats the return as "!= 0 means didn't enqueue"/ignores
+ * it outright; MARCH_SEND_DROPPED is only ever produced once a caller has
+ * opted in via march_sched_set_mbox_limit. */
 int          march_sched_send(march_proc *target, void *msg);
+
+/* Set a mailbox capacity + overflow policy on a process. limit <= 0 means
+ * unbounded (MARCH_MBOX_UNBOUNDED is the default set at spawn). Safe to call
+ * while senders are concurrently active — both fields are written under
+ * mbox_lock. */
+void         march_sched_set_mbox_limit(march_proc *p, int64_t limit,
+                                        march_mbox_policy policy);
+
+/* Register the disposer called for a message dropped by mailbox-overflow
+ * policies (DROP_NEW's rejected message, DROP_OLD's evicted message). The
+ * full runtime (march_runtime.c) registers a real march_decrc-based dtor in
+ * Task 14; until then, or in the standalone scheduler unit tests that link
+ * march_scheduler.c alone, dropped messages are leaked-with-count (see
+ * MARCH_STAT_MSGS_DROPPED) rather than freed — the default is a no-op. */
+void         march_sched_set_msg_dtor(void (*fn)(void *));
 
 /* Return the current mailbox depth (number of undelivered messages) for a
  * process. Relaxed atomic read — safe to call from any thread without

@@ -2893,7 +2893,21 @@ void *march_send(void *actor, void *msg) {
         return none;
     }
 
-    march_sched_send(meta->green_thread, msg);
+    int send_rc = march_sched_send(meta->green_thread, msg);
+    if (send_rc == MARCH_SEND_DEAD) {
+        /* Actor died in the window between the checks above and the send;
+         * march_sched_send did not enqueue or dispose the message (dead
+         * targets are rejected before either happens), so we still own the
+         * one reference we were given. */
+        march_decrc(msg);
+        void *none = march_alloc(16);
+        return none;
+    }
+    /* MARCH_SEND_OK or MARCH_SEND_DROPPED: fire-and-forget semantics are
+     * preserved either way — on DROPPED the mailbox's overflow policy already
+     * handed the message to march_sched_send's registered disposer (Task 14),
+     * so we must NOT decrc it again here. Shedding is observable via
+     * Scheduler.dropped_messages(), not via this return value. */
 
     /* Return Some(()). */
     void *some = march_alloc(16 + 8);

@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Bounded actor mailboxes with overflow policies (runtime-internal)** —
+  `march_sched_set_mbox_limit(proc, limit, policy)` caps a process's mailbox
+  at `limit` messages under `MARCH_MBOX_DROP_NEW` (reject the incoming
+  message) or `MARCH_MBOX_DROP_OLD` (evict the oldest queued message); the
+  default remains `MARCH_MBOX_UNBOUNDED` (`limit == 0`), so no existing
+  program's behavior changes. `march_sched_send` now returns
+  `MARCH_SEND_OK`/`MARCH_SEND_DEAD`/`MARCH_SEND_DROPPED` instead of a bare
+  0/-1; every dropped message bumps `MARCH_STAT_MSGS_DROPPED` (visible via
+  `Scheduler.dropped_messages()`, Task 6) and is handed to a disposer hook
+  registered via `march_sched_set_msg_dtor` (a real March-value dtor lands in
+  Task 14; until then dropped messages are leaked-with-count).
+  `MARCH_MBOX_BLOCK` is defined but not yet implemented (Task 8: park the
+  sender). No stdlib/language surface yet — this is the C substrate a later
+  task will expose.
 - **`Scheduler` stdlib module + `sched_stat` builtin** — runtime observability
   for the actor/task scheduler: `Scheduler.live_procs()`, `total_spawned()`,
   `runq_depth()`, `dropped_messages()`, and a raw `stat(i : Int) : Int`

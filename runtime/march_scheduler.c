@@ -674,6 +674,11 @@ void march_sched_init(void) {
     atomic_store_explicit(&g_sched_shutdown, 0, memory_order_relaxed);
     atomic_store_explicit(&g_runq_head, (march_proc *)NULL, memory_order_relaxed);
     g_runq_tail = NULL;
+    /* C harnesses (e.g. test_scheduler_mbox.c) call march_sched_init() and
+     * then spawn/send without ever running the scheduler, so a prior test's
+     * g_runq_len could still be nonzero here — reset it alongside head/tail
+     * so march_sched_stat(2) starts each init at a known 0. */
+    atomic_store_explicit(&g_runq_len, 0, memory_order_relaxed);
     memset(g_proc_registry, 0, sizeof(g_proc_registry));
     g_proc_count = 0;
     g_timer_len = 0;   /* keep the heap allocation; the mutex is static */
@@ -1296,17 +1301,57 @@ void march_yield_from_compiled(void) {
     march_sched_yield();
 }
 
+/* Message disposer for dropped mailbox messages. The runtime registers a
+ * real dtor (march_decrc / migrate-free) in Task 14; standalone scheduler
+ * builds (and the default, before any caller opts in) leak the payload by
+ * design — every message the current test corpus drops is a tagged
+ * immediate or a raw C struct owned outside March's RC, not a March heap
+ * value. */
+static void (*g_mbox_dispose)(void *) = NULL;
+void march_sched_set_msg_dtor(void (*fn)(void *)) { g_mbox_dispose = fn; }
+static void march_mbox_dispose(void *msg) { if (g_mbox_dispose) g_mbox_dispose(msg); }
+
+void march_sched_set_mbox_limit(march_proc *p, int64_t limit,
+                                march_mbox_policy policy) {
+    if (!p) return;
+    mbox_lock_acquire(p);
+    p->mbox_limit  = limit > 0 ? limit : 0;
+    p->mbox_policy = (int32_t)policy;
+    mbox_lock_release(p);
+}
+
 int march_sched_send(march_proc *target, void *msg) {
     if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD)
-        return -1;
+        return MARCH_SEND_DEAD;
     mbox_lock_acquire(target);
+    if (target->mbox_limit > 0
+            && march_sched_mbox_count(target) >= target->mbox_limit) {
+        switch (target->mbox_policy) {
+        case MARCH_MBOX_DROP_NEW:
+            mbox_lock_release(target);
+            atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
+                                      1, memory_order_relaxed);
+            march_mbox_dispose(msg);          /* Task 14 dtor; counts-only until then */
+            return MARCH_SEND_DROPPED;
+        case MARCH_MBOX_DROP_OLD: {
+            void *old = mbox_pop(target);     /* evict head, then fall through */
+            atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
+                                      1, memory_order_relaxed);
+            /* dispose OUTSIDE the lock is nicer but old is fully unlinked;
+             * dispose here is safe: march_mbox_dispose never re-enters mbox. */
+            march_mbox_dispose(old);
+            break;
+        }
+        default: break;                        /* MARCH_MBOX_BLOCK: Task 8 */
+        }
+    }
     mbox_push(target, msg);
     march_proc_status st = atomic_load_explicit(&target->status, memory_order_acquire);
     mbox_lock_release(target);
     if (st == PROC_WAITING || st == PROC_PARKED) {
         march_sched_wake(target);
     }
-    return 0;
+    return MARCH_SEND_OK;
 }
 
 int64_t march_sched_mbox_count(march_proc *p) {
