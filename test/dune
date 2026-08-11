@@ -4034,6 +4034,101 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/simd_to_string.expected simd_to_string.out)))
 
+; Task 3: SIMD memory traffic (load/store) parity fixture -- u8 byte scan
+; (load + eq + first_set) and a store round-trip + FBIP copy-on-write
+; witness (a binding held across the store observes the ORIGINAL array
+; unchanged). .expected is interpreter-produced; compiled must match
+; byte-for-byte.
+(rule
+ (targets simd_vector_mem simd_vector_mem.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_mem.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_vector_mem
+        native/simd_vector_mem.march)
+   (with-stdout-to simd_vector_mem.out
+        (system "./simd_vector_mem")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_vector_mem.expected simd_vector_mem.out)))
+
+; Task 3: SIMD register-residency / escape fixture. `kernel` is a
+; straight-line load/arith/sum function -- its compiled body must stay
+; entirely in registers (zero march_simd_alloc calls, vector fadd present).
+; `escape` stores the loaded vector into a List cell, forcing exactly one
+; heap box (one march_simd_alloc call). Asserted via -emit-llvm, not output
+; diff -- IR shape is the point.
+;
+; `kernel`/`escape` are pure and small, so the default optimizer (Inline,
+; lib/tir/inline.ml) always inlines them into march_main regardless of call
+; count -- there is no separate `define ... @kernel`/`@escape` symbol to
+; scope a grep against post-opt (and building with --no-opt to keep them as
+; symbols would defeat the point: the Simd.* wrapper calls would stay as
+; boxed-ptr calls instead of being inlined down to raw <4 x float> register
+; ops). Instead this scopes by SOURCE ORDER within march_main's inlined
+; body, split at the first march_simd_alloc call: everything before it is
+; kernel's contribution (must contain the vector fadd, zero allocs);
+; everything from it onward is escape's (must contain exactly one alloc,
+; matching this fixture's single escape call site).
+(rule
+ (targets simd_residency_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_residency.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/simd_residency.march)
+   (with-stdout-to simd_residency_llvm_check.out
+    (run bash -c
+     "mbody=$(awk '/^define ptr @march_main/{f=1} f{print} f && /^}/{exit}' native/simd_residency.ll); \
+      kbody=$(printf '%s\\n' \"$mbody\" | awk '/march_simd_alloc/{exit} {print}'); \
+      ebody=$(printf '%s\\n' \"$mbody\" | awk 'found{print} /march_simd_alloc/{found=1; print}'); \
+      kfadd=$(printf '%s\\n' \"$kbody\" | grep -c 'fadd <4 x float>'); \
+      kalloc=$(printf '%s\\n' \"$kbody\" | grep -c march_simd_alloc); \
+      ealloc=$(printf '%s\\n' \"$ebody\" | grep -c march_simd_alloc); \
+      echo \"$kfadd $kalloc $ealloc\"")))))
+
+(rule
+ (alias runtest)
+ (deps simd_residency_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r kfadd kalloc ealloc < simd_residency_llvm_check.out; \
+    test \"$kfadd\" -ge 1 -a \"$kalloc\" -eq 0 -a \"$ealloc\" -eq 1 || { echo \"expected kernel body: >=1 fadd <4 x float>, 0 march_simd_alloc calls; escape body: 1 march_simd_alloc call (found kernel-fadd=$kfadd kernel-alloc=$kalloc escape-alloc=$ealloc)\" >&2; exit 1; }")))
+
+; Task 3: SIMD load bounds-panic fixture -- i=2, lanes=4, length=5 (i+lanes=6
+; > 5, one past the last legal index i=1). Asserts the COMPILED binary's
+; stderr; the interpreter's panic message has a different prefix (see
+; march_simd_bounds_panic in runtime/march_runtime.c vs. eval.ml's
+; simd_bounds_check), so this is NOT an interpreter-vs-compiled parity
+; fixture -- model is native_arr_map2_inline_length_panic above.
+(rule
+ (targets simd_bounds_panic)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_bounds_panic.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o simd_bounds_panic
+       native/simd_bounds_panic.march)))
+
+(rule
+ (targets simd_bounds_panic.err)
+ (deps simd_bounds_panic)
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to simd_bounds_panic.err
+    (run ./simd_bounds_panic)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_bounds_panic.expected simd_bounds_panic.err)))
+
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
  (deps (file %{exe:../bin/main.exe})

@@ -1,0 +1,40 @@
+-- Register-residency / escape fixture for SIMD load/store lowerings
+-- (Task 3). `kernel` is a straight-line load/arith/sum function: its
+-- compiled body must stay entirely in registers (zero march_simd_alloc
+-- calls). `escape` stores the loaded vector into a List cell, which forces
+-- a heap box (exactly one march_simd_alloc call).
+--
+-- Both `kernel` and `escape` are pure and small, so the default optimizer
+-- (lib/tir/inline.ml) inlines them into march_main regardless of call
+-- count -- there is no per-function symbol left in the -emit-llvm output
+-- to scope a grep against, and running with --no-opt to keep them as
+-- separate functions would defeat the point of the test (the wrapper
+-- Simd.* calls would stay as boxed-ptr calls instead of being inlined down
+-- to raw <4 x float> register ops). Instead test/dune scopes the grep by
+-- SOURCE ORDER within march_main's inlined body: everything before the
+-- first march_simd_alloc call is kernel's contribution (must contain the
+-- vector fadd and zero allocs), everything from the first march_simd_alloc
+-- call onward is escape's (must contain exactly one alloc for this fixture's
+-- single escape call site).
+mod SimdResidency do
+  needs IO.Console
+
+  fn kernel(a, b) do
+    let x = Simd.load_f32x4(a, 0)
+    let y = Simd.load_f32x4(b, 0)
+    let s = Simd.add_f32x4(Simd.mul_f32x4(x, y), Simd.splat_f32x4(1.0))
+    Simd.sum_f32x4(s)
+  end
+
+  fn escape(a) do
+    let v = Simd.load_f32x4(a, 0)
+    [v]
+  end
+
+  fn main() : () do
+    let a = NativeArray.from_list_f32([1.0, 2.0, 3.0, 4.0])
+    let b = NativeArray.from_list_f32([5.0, 6.0, 7.0, 8.0])
+    println(kernel(a, b))
+    println(List.length(escape(a)))
+  end
+end

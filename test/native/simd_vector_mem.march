@@ -1,0 +1,24 @@
+-- Compiled/interpreted parity fixture for SIMD memory traffic: load/store
+-- lowerings and their FBIP copy-on-write contract (Task 3). Mirrors the
+-- interpreter-path unit tests t9-t10 in test/test_stdlib_suite.ml's
+-- "simd_vector" suite (t9 u8 byte scan, t10 load/store round-trip + COW).
+mod Main do
+  needs IO.Console
+
+  fn main() : () do
+    -- t9: u8 byte scan — find a byte value's index via load + eq + first_set
+    let hay = NativeArray.from_list_u8([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 33, 0, 0, 0, 0])
+    let v = Simd.load_u8x16(hay, 0)
+    println(Simd.first_set_u8x16(Simd.eq_u8x16(v, Simd.splat_u8x16(32))))
+
+    -- t10: store round-trip + FBIP COW witness — a binding held across the
+    -- store observes the ORIGINAL array unchanged, while the returned array
+    -- and a load-back from it both see the new value.
+    let arr = NativeArray.make_f32(8, 0.0)
+    let shared = arr
+    let sv = Simd.make_f32x4(9.0, 8.0, 7.0, 6.0)
+    let arr2 = Simd.store_f32x4(arr, 2, sv)
+    let back = Simd.load_f32x4(arr2, 2)
+    println([NativeArray.get_f32(shared, 2), NativeArray.get_f32(arr2, 2), Simd.extract_f32x4(back, 0)])
+  end
+end
