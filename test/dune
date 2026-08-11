@@ -3931,6 +3931,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
+; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
+; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — everything except load/store,
+; which is Task 3): same t1-t8/t12 cases as test_stdlib_suite.ml's
+; "simd_vector" interpreter suite, printed to stdout so the compiled binary's
+; output can be diffed byte-for-byte against the interpreter's.
+(rule
+ (targets simd_vector_core simd_vector_core.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_core.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_vector_core
+        native/simd_vector_core.march)
+   (with-stdout-to simd_vector_core.out
+        (system "./simd_vector_core")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_vector_core.expected simd_vector_core.out)))
+
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
  (deps (file %{exe:../bin/main.exe})

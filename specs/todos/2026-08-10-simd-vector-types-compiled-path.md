@@ -1,20 +1,26 @@
-# Simd vector types — compiled path (Tasks 2–5)
+# Simd vector types — compiled path (Tasks 3–5)
 
-Task 1 (interpreter path — types, 127 builtins, `stdlib/simd.march`,
-Show/Eq/Hash impls, tests, lane-refinement fixtures) is done; see
-`specs/progress/2026-08-10-simd-vector-types-task1-interpreter.md`. The
+Task 1 (interpreter path) and Task 2 (compiled core — runtime box, `coerce`
+vector arms, register-resident inline op lowerings for every op INCLUDING
+`load`/`store` — pulled forward from Task 3 after discovering the original
+"defer load/store" split broke any whole-stdlib compile, since compiling
+`stdlib/simd.march` means compiling its `load_*`/`store_*` wrapper bodies
+regardless of whether the calling program invokes them) are done; see
+`specs/progress/2026-08-10-simd-vector-types-task1-interpreter.md` and
+`specs/progress/2026-08-10-simd-vector-types-task2-compiled-core.md`. The
 remaining work from `docs/superpowers/plans/2026-08-10-simd-vector-types.md`
 (gitignored; ledger at `.superpowers/sdd/2026-08-10-simd-vector-types/`):
 
-- **Task 2** — runtime box (`MARCH_SIMD_TAG = -4`, `march_simd_alloc`/
-  `march_simd_bounds_panic` in `runtime/march_runtime.{c,h}`), `coerce`
-  vector↔ptr arms in `lib/tir/llvm_ctx.ml`, the `Simd` intercept arm + op
-  lowerings in `lib/tir/llvm_emit.ml` (register-resident `<N x T>` SSA
-  values inside function bodies, boxed only at escape points).
-- **Task 3** — `simd_<t>_load`/`_store` lowerings with bounds checks and the
-  FBIP copy-on-write contract (mirroring `native_f32_arr_set`'s in-place
-  vs. copy split), plus residency fixtures proving straight-line kernels
-  allocate zero boxes.
+- **Task 3 (reduced scope)** — the load/store lowerings themselves are
+  done (Task 2). What remains: the dedicated fixtures from
+  `task-3-brief.md` — `test/native/simd_vector_mem.march` (full t9-t11
+  interpreter-parity coverage, byte scan/store-round-trip/COW, beyond the
+  minimal leg Task 2 already added to `simd_vector_core.march`),
+  `test/native/simd_residency.march` + `--emit-llvm` grep rules proving a
+  straight-line kernel allocates zero `march_simd_alloc` boxes while an
+  escaping vector allocates exactly one, and
+  `test/native/simd_bounds_panic.march` + a stderr-diff dune rule (Task 2
+  verified this ad hoc, not wired into `test/dune`).
 - **Task 4** — validation kernels (`bench/simd_kernels.march`: dot product,
   u8 delimiter scanner) and, conditionally, switching DataFrame Min/Max to
   a `Simd`-based fast path.
@@ -22,6 +28,5 @@ remaining work from `docs/superpowers/plans/2026-08-10-simd-vector-types.md`
   (`docs/simd-vectorization.md`), changelog entry for compiled support,
   `docs/pagefind` regeneration.
 
-Until Task 2 lands, `--compile` on any program that calls a `Simd.*`
-function fails (no LLVM lowering, no runtime box) — the 127 builtins exist
-only on the interpreter path today.
+As of Task 2, `--compile` on a program that calls any `Simd.*` function,
+including `load_*`/`store_*`, compiles and runs correctly.

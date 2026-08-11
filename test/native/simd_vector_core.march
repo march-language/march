@@ -1,0 +1,112 @@
+-- Compiled/interpreted parity fixture for explicit 128-bit SIMD vector types
+-- (F32x4/F64x2/I32x4/I64x2/U8x16). Reproduces, in a single file with printed
+-- output, the same cases asserted by the interpreter-path unit tests in
+-- test/test_stdlib_suite.ml's "simd_vector" suite (t1-t8, t12) — everything
+-- except load/store/bounds-panic/actor-sendability (t9-t11, t13), which
+-- exercise memory traffic (Task 3) or actor message passing, out of scope
+-- for the register-resident op lowerings this fixture covers.
+--
+-- NaN is produced via sqrt_f32x4(splat_f32x4(-1.0)) rather than float_nan()
+-- — float_nan() has no compiled lowering (pre-existing gap, unrelated to
+-- SIMD) — which doubles as sqrt op coverage.
+mod Main do
+  needs IO.Console
+
+  fn main() : () do
+    -- t1: make/extract lane order (lane 0 = first arg, lane N = last arg)
+    let v1 = Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
+    println([Simd.extract_f32x4(v1, 0), Simd.extract_f32x4(v1, 3)])
+
+    -- t2: splat + replace
+    let v2 = Simd.replace_i32x4(Simd.splat_i32x4(7), 2, 9)
+    println([Simd.extract_i32x4(v2, 2), Simd.extract_i32x4(v2, 1)])
+
+    -- t3: wrap on ingest (splat narrows like set does)
+    println(Simd.extract_u8x16(Simd.splat_u8x16(300), 0))
+    println(Simd.extract_i32x4(Simd.splat_i32x4(4294967296), 0))
+
+    -- t4: f32 single rounding
+    println(Simd.extract_f32x4(Simd.splat_f32x4(0.1), 0))
+    let g_a = Simd.splat_f32x4(16777216.0)
+    let g_b = Simd.splat_f32x4(1.0)
+    println(Simd.extract_f32x4(Simd.add_f32x4(g_a, g_b), 0))
+
+    -- t5: int lane arithmetic wraps
+    let v5 = Simd.add_i32x4(Simd.splat_i32x4(2147483647), Simd.splat_i32x4(1))
+    println(Simd.extract_i32x4(v5, 0))
+
+    -- t6: minNum NaN rule (NaN via sqrt_f32x4 of a negative splat)
+    let nan_v = Simd.sqrt_f32x4(Simd.splat_f32x4(-1.0))
+    println(Simd.extract_f32x4(Simd.min_f32x4(nan_v, Simd.splat_f32x4(2.0)), 0))
+    let m66 = Simd.min_f32x4(nan_v, nan_v)
+    let x66 = Simd.extract_f32x4(m66, 0)
+    -- NaN self-equality via `==` (fcmp oeq, correct for NaN in both paths) —
+    -- NOT `!=` (a scalar Float `!=` on NaN has a pre-existing compiled/
+    -- interpreted divergence unrelated to SIMD: LLVM's `fcmp one` is
+    -- "ordered and not-equal", which is false when either operand is NaN,
+    -- while the interpreter's `!=` is a plain OCaml `<>` — true for NaN).
+    println(x66 == x66)
+
+    -- t7: sum/hmin/hmax — sequential accumulation
+    println(Simd.sum_f32x4(Simd.make_f32x4(0.1, 0.2, 0.3, 0.4)))
+    println(Simd.sum_i32x4(Simd.splat_i32x4(2000000000)))
+    println(Simd.hmin_f32x4(Simd.make_f32x4(3.0, 1.0, 4.0, 1.5)))
+    println(Simd.hmax_i32x4(Simd.make_i32x4(3, 1, 4, 1)))
+
+    -- t8: compares/masks/select
+    let m8 = Simd.gt_i32x4(Simd.make_i32x4(5, 1, 7, 0), Simd.splat_i32x4(3))
+    println([Simd.any_i32x4(m8), Simd.all_i32x4(m8)])
+    println(Simd.first_set_i32x4(Simd.gt_i32x4(Simd.make_i32x4(5, 1, 7, 0), Simd.splat_i32x4(3))))
+    println(Simd.first_set_i32x4(Simd.eq_i32x4(Simd.splat_i32x4(1), Simd.splat_i32x4(2))))
+    let sel_m = Simd.gt_i32x4(Simd.make_i32x4(5, 1, 7, 0), Simd.splat_i32x4(3))
+    let sel_v = Simd.select_i32x4(sel_m, Simd.splat_i32x4(100), Simd.splat_i32x4(200))
+    println([Simd.extract_i32x4(sel_v, 0), Simd.extract_i32x4(sel_v, 1),
+             Simd.extract_i32x4(sel_v, 2), Simd.extract_i32x4(sel_v, 3)])
+
+    -- also exercise bitwise ops (and/or/xor/not) + shl/shr, not otherwise hit above
+    let bw_a = Simd.make_i32x4(6, 12, -1, 0)
+    let bw_b = Simd.make_i32x4(3, 10, 0, 0)
+    println(Simd.extract_i32x4(Simd.and_i32x4(bw_a, bw_b), 0))
+    println(Simd.extract_i32x4(Simd.or_i32x4(bw_a, bw_b), 1))
+    println(Simd.extract_i32x4(Simd.xor_i32x4(bw_a, bw_b), 1))
+    println(Simd.extract_i32x4(Simd.not_i32x4(bw_a), 3))
+    println(Simd.extract_i32x4(Simd.shl_i32x4(Simd.splat_i32x4(1), 4), 0))
+    println(Simd.extract_i32x4(Simd.shr_i32x4(Simd.splat_i32x4(-16), 2), 0))
+
+    -- u8x16 lane-16 make/eq/select/any/all/first_set + unsigned lt/gt
+    let u16 = Simd.make_u8x16(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 200)
+    println(Simd.extract_u8x16(u16, 15))
+    println(Simd.first_set_u8x16(Simd.eq_u8x16(u16, Simd.splat_u8x16(200))))
+    println(Simd.extract_u8x16(Simd.gt_u8x16(Simd.splat_u8x16(200), Simd.splat_u8x16(10)), 0))
+
+    -- fma / div / f64x2 / i64x2 coverage
+    println(Simd.extract_f32x4(Simd.fma_f32x4(Simd.splat_f32x4(2.0), Simd.splat_f32x4(3.0), Simd.splat_f32x4(1.0)), 0))
+    println(Simd.extract_f32x4(Simd.div_f32x4(Simd.splat_f32x4(9.0), Simd.splat_f32x4(2.0)), 0))
+    let d2 = Simd.make_f64x2(1.5, 2.5)
+    println(Simd.sum_f64x2(d2))
+    let i2 = Simd.make_i64x2(1000000000000, 2)
+    println(Simd.sum_i64x2(i2))
+    println(Simd.extract_i64x2(Simd.shl_i64x2(Simd.splat_i64x2(1), 40), 0))
+
+    -- t9/t10 (lite): load/store round-trip + FBIP COW sanity. Full
+    -- bounds/COW/residency fixtures are Task 3's (simd_vector_mem.march,
+    -- simd_residency.march, simd_bounds_panic.march) — this is just a
+    -- basic correctness witness now that load/store are implemented.
+    let hay = NativeArray.from_list_u8([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 33, 0, 0, 0, 0])
+    let hv = Simd.load_u8x16(hay, 0)
+    println(Simd.first_set_u8x16(Simd.eq_u8x16(hv, Simd.splat_u8x16(32))))
+    let arr = NativeArray.make_f32(8, 0.0)
+    let shared = arr
+    let sv = Simd.make_f32x4(9.0, 8.0, 7.0, 6.0)
+    let arr2 = Simd.store_f32x4(arr, 2, sv)
+    let back = Simd.load_f32x4(arr2, 2)
+    println([NativeArray.get_f32(shared, 2), NativeArray.get_f32(arr2, 2), Simd.extract_f32x4(back, 0)])
+
+    -- t12: Show/Eq/Hash impls
+    println(show(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)))
+    println(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0) == Simd.make_f32x4(1.0, 2.0, 3.0, 4.0))
+    println(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0) != Simd.splat_f32x4(1.0))
+    println(nan_v == nan_v)
+    println(hash(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)) == hash(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)))
+  end
+end

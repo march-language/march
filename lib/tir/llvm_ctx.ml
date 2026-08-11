@@ -529,11 +529,37 @@ let emit_untag_known_scalar ctx ~raw ~unt (ptr_v : string) : string =
   emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" u r);
   u
 
+(** The 5 SIMD vector LLVM type strings and their runtime `kind` tags (must
+    match `march_simd_alloc`'s kind switch / MARCH_SIMD_TAG's pad-slot
+    convention in runtime/march_runtime.{h,c}: 0=f32x4 1=f64x2 2=i32x4
+    3=i64x2 4=u8x16). *)
+let vec_tys = [ "<4 x float>", 0; "<2 x double>", 1; "<4 x i32>", 2;
+                "<2 x i64>", 3; "<16 x i8>", 4 ]
+let is_vec_ty t = List.mem_assoc t vec_tys
+let simd_kind_of_vec t = List.assoc t vec_tys
+
 (** Coerce value [v] from [from_ty] to [to_ty] if they differ.
     Returns the (possibly new) value string. *)
 let coerce ctx from_ty v to_ty =
   if from_ty = to_ty then v
   else match (from_ty, to_ty) with
+  | (vt, "ptr") when is_vec_ty vt ->
+    (* Vector → erased slot: box into a march_simd_alloc leaf cell (payload at
+       +16, 16-aligned) so RC ops on the erased ptr stay sound — same pattern
+       as the ("double","ptr") float-boxing arm above. *)
+    let b = fresh ctx "vbox" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_simd_alloc(i64 %d)" b (simd_kind_of_vec vt));
+    let pp = fresh ctx "vpay" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" pp b);
+    emit ctx (Printf.sprintf "store %s %s, ptr %s, align 16" vt v pp);
+    b
+  | ("ptr", vt) when is_vec_ty vt ->
+    (* Erased slot → vector: unbox the payload back into a register value. *)
+    let pp = fresh ctx "vpay" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" pp v);
+    let r = fresh ctx "vunbox" in
+    emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 16" r vt pp);
+    r
   | ("ptr", "double") ->
     (* Erased slot → Float: UNBOX the heap float cell (float-boxing, Stage 2).
        A Float crossing an erasure boundary is stored as a `march_float_box`

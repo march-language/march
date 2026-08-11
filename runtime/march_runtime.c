@@ -646,6 +646,30 @@ double march_unbox_float(void *p) {
     return ((march_float_box *)p)->val;
 }
 
+/* ── Boxed SIMD vector (128-bit) ─────────────────────────────────────── */
+
+/* Heap-box a 128-bit SIMD vector for storage in a type-erased (ptr) slot: a
+ * 32-byte leaf cell tagged MARCH_SIMD_TAG with the vector kind in the hdr pad
+ * slot and the 16-byte payload at offset 16 (16-aligned). No interior
+ * pointers, so the ordinary rc==0 free path (march_decrc / march_free) frees
+ * it with no special-case walk — see those functions' tag switches, which
+ * handle MARCH_STRING_TAG/MARCH_RESOURCE_TAG specially but need no case for
+ * MARCH_SIMD_TAG. */
+void *march_simd_alloc(int64_t kind) {
+    void *p = march_alloc(32);
+    march_hdr *h = (march_hdr *)p;
+    h->tag = MARCH_SIMD_TAG;
+    h->pad = (int32_t)kind;
+    return p;
+}
+
+void march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len) {
+    fprintf(stderr,
+        "march: runtime error: simd load/store out of bounds (index %lld, lanes %lld, length %lld)\n",
+        (long long)i, (long long)lanes, (long long)len);
+    exit(1);
+}
+
 int64_t march_compare_string(void *a, void *b) {
     march_string *sa = (march_string *)a;
     march_string *sb = (march_string *)b;

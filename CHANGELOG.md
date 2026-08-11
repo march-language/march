@@ -14,19 +14,21 @@ git log is authoritative for exact commits.
 ### Added
 
 - **New `Simd` module: explicit 128-bit SIMD vector types — `F32x4`,
-  `F64x2`, `I32x4`, `I64x2`, `U8x16` (interpreter path only so far)** —
-  127 lane-wise operations (splat/make/extract/replace/load/store,
-  compare/bitwise/select/scan, plus arithmetic on the float and int
-  families: add/sub/mul/(div for floats)/min/max/(fma/sqrt for
-  floats)/(shl/shr for ints)/sum/hmin/hmax) via `Simd.<op>_<type>`, e.g.
-  `Simd.add_f32x4`, `Simd.load_u8x16`. Lane get/set indices are
-  refinement-typed to the type's lane count. `F32x4`/`F64x2` arithmetic is
-  bit-exact single/double precision (verified against the true-f32-vs-
-  double-then-round distinction); `min`/`max`/`hmin`/`hmax` on floats use
-  minNum/maxNum semantics; integer arithmetic wraps mod 2^w. Each type
-  implements `Show`/`Eq`/`Hash`. `--compile` support (LLVM lowering to
-  native vector instructions) lands in a later change — for now `Simd.*`
-  is interpreter-only.
+  `F64x2`, `I32x4`, `I64x2`, `U8x16`** — 127 lane-wise operations
+  (splat/make/extract/replace/load/store, compare/bitwise/select/scan,
+  plus arithmetic on the float and int families: add/sub/mul/(div for
+  floats)/min/max/(fma/sqrt for floats)/(shl/shr for ints)/sum/hmin/hmax)
+  via `Simd.<op>_<type>`, e.g. `Simd.add_f32x4`, `Simd.load_u8x16`. Lane
+  get/set indices are refinement-typed to the type's lane count.
+  `F32x4`/`F64x2` arithmetic is bit-exact single/double precision (verified
+  against the true-f32-vs-double-then-round distinction); `min`/`max`/
+  `hmin`/`hmax` on floats use minNum/maxNum semantics; integer arithmetic
+  wraps mod 2^w. Each type implements `Show`/`Eq`/`Hash`. `--compile`
+  support now lowers every op — including `load`/`store` (bounds-checked,
+  with an FBIP copy-on-write store matching `NativeArray`'s in-place-vs-copy
+  contract) — to native LLVM vector instructions/intrinsics,
+  register-resident inside a function body (boxed into a 32-byte runtime
+  cell only at call/return/aggregate-field boundaries).
 - **`NativeArray` gained narrow element widths: f32, i32, u8** — both
   interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
   `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,
