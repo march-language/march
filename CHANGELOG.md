@@ -57,6 +57,11 @@ git log is authoritative for exact commits.
 - Actor.call with a timeout no longer busy-polls the scheduler while
   waiting — N pending callers no longer steal CPU from the actor they are
   waiting on.
+- **A late reply from a timed-out `Actor.call` could be delivered as the
+  answer to a later, unrelated call on the same green thread.** Replies are
+  now wrapped in a runtime envelope carrying the correlation id of the call
+  they belong to; a reply whose id doesn't match the call currently waiting
+  is discarded instead of being handed back as that call's result.
 - **JS backend: `==`/`!=` on a non-primitive operand now compares
   structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
   (or an erased type variable that may hold one) lowered to JavaScript `===`,

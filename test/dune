@@ -1067,6 +1067,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_derive_json.expected native_nested_derive_json.out)))
 
+; ── Regression: Actor.call replies must be correlation-checked ──
+; A first call times out (its handler replies late); the caller then issues a
+; second call. Without correlating the reply to the call that's actually
+; waiting, the stale first reply is delivered as the second call's answer.
+; This fixture burns time in the handler so the first call's 1ms deadline
+; expires before the reply lands, then makes a second call and checks it
+; gets the SECOND reply (n=1), not the stale first one (n=0). Needs the real
+; stdlib (List.fold_left, Range), hence (source_tree ../stdlib). Compile
+; natively, run, diff.
+(rule
+ (targets native_actor_call_late_reply native_actor_call_late_reply.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_call_late_reply.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_call_late_reply
+        native/actor_call_late_reply.march)
+   (with-stdout-to native_actor_call_late_reply.out
+        (system "./native_actor_call_late_reply")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_late_reply.expected native_actor_call_late_reply.out)))
+
 ; ── Regression: burst-of-task_spawn must not race the Task object ──
 ; march_task_spawn_thunk initialised the Task's proc-handle/result/done-flag
 ; AFTER march_sched_spawn published the proc, so a work-stealing scheduler

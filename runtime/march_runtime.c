@@ -2911,24 +2911,75 @@ void *march_send(void *actor, void *msg) {
 #define MARCH_SET_TAG(obj, t) (((march_hdr *)(obj))->tag = (int32_t)(t))
 
 /* ── Actor.call / Actor.reply (synchronous messaging) ────────────────── */
+
+/* Correlation-checked replies (actor-system hardening, task 4): a call that
+ * times out leaves its reply-in-flight — the handler may still deliver a
+ * late reply after the caller has moved on to a SECOND call. Without a
+ * correlation id, that late reply lands in the (still-live, per-call-owning)
+ * caller's mailbox and is handed back as the answer to the unrelated second
+ * call. Every reply is now wrapped in an envelope carrying the correlation
+ * id minted for that specific march_actor_call invocation, and the receive
+ * loop discards any envelope whose corr doesn't match the call it belongs to.
+ *
+ * Tag choice: 0x00CA11ED sits below the F19 global ctor-tag floor
+ * (0x01000000 — see the call_tag_base comment above) so it can never collide
+ * with a real user/stdlib constructor tag, and it doesn't collide with the
+ * other reserved sentinel tags either: MARCH_STRING_TAG/-1, MARCH_RESOURCE_TAG/-2,
+ * and MARCH_FLOAT_TAG/-3 (all negative int32, checked as literal != this one)
+ * or MARCH_MIGRATE_TAG (0x4D494752, a different int64-typed protocol tag on
+ * migration messages, not on this struct's int32 header tag field). */
+#define MARCH_CALL_REPLY_TAG 0x00CA11ED
+static _Atomic int64_t g_next_call_corr = 1;
+
+/* Shared unwrap for march_actor_call's receive loops (both the wait-forever
+ * and the deadline-bounded path funnel through here). Returns:
+ *   1  -> matched envelope; *out_payload holds the (ref-owned) reply value
+ *   0  -> stale/mismatched envelope, already discarded — caller should retry
+ *  -1  -> msg was not one of our envelopes (legacy/raw send) — pass through
+ * raw via *out_payload unchanged. */
+static int march_actor_call_unwrap(void *msg, int64_t corr, void **out_payload) {
+    if (IS_HEAP_PTR(msg) && ((march_hdr *)msg)->tag == MARCH_CALL_REPLY_TAG) {
+        int64_t got_corr = MARCH_FIELD(msg, 0);
+        void *payload = (void *)(uintptr_t)MARCH_FIELD(msg, 1);
+        march_decrc(msg);
+        if (got_corr != corr) {
+            march_decrc(payload);   /* stale reply: drop it, keep waiting */
+            return 0;
+        }
+        *out_payload = payload;
+        return 1;
+    }
+    *out_payload = msg;
+    return -1;
+}
+
 /*
- * march_actor_call: synchronous call — builds a wrapped message containing the
- * calling green-thread pointer as the reply channel (field 0), then sends it to
- * the actor and blocks until the actor calls march_actor_reply.
+ * march_actor_call: synchronous call — builds a wrapped message containing a
+ * heap-allocated reply-ref (caller proc + correlation id) as the reply
+ * channel (field 0), then sends it to the actor and blocks until the actor
+ * calls march_actor_reply.
  *
  * Protocol:
  *   1. Read the tag from inner_msg (the zero-arg constructor like GetCount).
- *   2. Build a new heap struct with the same tag + one extra field: the calling
- *      proc pointer (the "reply channel").  The actor handler receives this as
- *      its first parameter (e.g., `on GetCount(reply_to)`).
+ *   2. Mint a correlation id and build the reply-ref; build a new heap struct
+ *      with the same tag + one extra field: the reply-ref.  The actor handler
+ *      receives this reply-ref as its first parameter (e.g.,
+ *      `on GetCount(reply_to)`) and hands it back verbatim to Actor.reply.
  *   3. Send the augmented message to the actor's green thread.
  *   4. Wait for the reply: timeout_ms <= 0 blocks forever via
  *      march_sched_recv(); a positive timeout_ms does a deadline-bounded
- *      yield-poll and returns Err("actor_call: timeout") past the deadline.
+ *      park-with-timeout and returns Err("no reply (timeout or unhandled
+ *      Call)") past the deadline. Any reply whose correlation id doesn't
+ *      match this call's is discarded (see march_actor_call_unwrap above)
+ *      instead of being handed back as this call's answer.
  *   5. Return Ok(reply_value).
  *
  * RC contract: we consume one reference to inner_msg (via march_decrc after
- * reading the tag) and transfer ownership of the new call_msg to the actor.
+ * reading the tag) and transfer ownership of the new call_msg (and the
+ * reply-ref it carries) to the actor. The reply-ref is march-heap-allocated
+ * with rc=1; march_actor_reply reads it and march_decrc's it (on the
+ * envelope path). If the handler never calls Actor.reply, the reply-ref
+ * leaks with the message — same as today's leaked raw result, no new hazard.
  */
 void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     int64_t *a = (int64_t *)actor;
@@ -2978,20 +3029,37 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     if (meta->call_tag_base && msg_tag < 0x01000000)
         msg_tag = (int32_t)(meta->call_tag_base + msg_tag);
 
-    /* Build the augmented call message: same tag, field 0 = caller proc ptr.
+    int64_t corr = atomic_fetch_add_explicit(&g_next_call_corr, 1,
+                                             memory_order_relaxed);
+    /* reply-ref: heap obj, field0 = caller proc, field1 = corr. */
+    void *reply_ref = march_alloc(16 + 16);
+    MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
+    MARCH_FIELD(reply_ref, 0) = (int64_t)(uintptr_t)caller;
+    MARCH_FIELD(reply_ref, 1) = corr;
+
+    /* Build the augmented call message: same tag, field 0 = reply-ref.
      * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
     void *call_msg = march_alloc(24);
     MARCH_SET_TAG(call_msg, msg_tag);
-    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)reply_ref;
 
     march_sched_send(meta->green_thread, call_msg);
 
     if (timeout_ms <= 0) {
-        /* Preserve wait-forever semantics for callers that opt out. */
-        void *result = march_sched_recv();
-        if (result == MARCH_RECV_NO_MSG)
-            return mk_err_cstr("no reply (timeout or unhandled Call)");
-        return mk_ok(result);
+        /* Preserve wait-forever semantics for callers that opt out. Still
+         * loop on a mismatched correlation: a wait-forever call can also
+         * receive a stale envelope left over from an EARLIER timed-out call
+         * on the same green thread. */
+        for (;;) {
+            void *result = march_sched_recv();
+            if (result == MARCH_RECV_NO_MSG)
+                return mk_err_cstr("no reply (timeout or unhandled Call)");
+            void *payload;
+            int rc = march_actor_call_unwrap(result, corr, &payload);
+            if (rc == 0)
+                continue;             /* stale envelope: discarded, keep waiting */
+            return mk_ok(payload);    /* matched envelope, or non-envelope passthrough */
+        }
     }
 
     /* Timed wait: park with a deadline instead of busy yield-polling. The
@@ -3011,16 +3079,32 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * The Err payloads match the interpreter's no-reply message exactly so
      * both backends surface the same value.
      *
-     * Known limitation: on timeout, a late reply still lands in the
-     * caller's mailbox. Safe for per-call task green threads (the thread
-     * exits and sends to dead procs are dropped); a long-lived green thread
-     * mixing Actor.call and raw receive could observe a stale reply after
-     * a timeout. */
+     * On timeout, a late reply CAN still land in the caller's mailbox (we
+     * give up waiting, not the handler up replying) — but it now carries a
+     * correlation id that no longer matches any call this green thread is
+     * waiting on, so a SUBSEQUENT Actor.call on the same thread discards it
+     * via march_actor_call_unwrap above instead of misdelivering it as that
+     * later call's answer. (We don't merge this branch with the wait-forever
+     * one above into a single march_sched_recv_until(INT64_MAX) path: recv_until
+     * registers a timer-heap entry for its deadline, and a deadline of
+     * INT64_MAX would never fire and never get removed — one leaked heap
+     * slot per wait-forever call, unbounded for a call-heavy long-lived
+     * server. Two branches, one shared unwrap helper, is the right split.) */
     int64_t deadline_ms = march_now_ms() + timeout_ms;
     for (;;) {
         void *msg = march_sched_recv_until(deadline_ms);
-        if (msg != MARCH_RECV_NO_MSG)
-            return mk_ok(msg);
+        if (msg != MARCH_RECV_NO_MSG) {
+            void *payload;
+            int rc = march_actor_call_unwrap(msg, corr, &payload);
+            if (rc == 0) {
+                /* stale envelope discarded; deadline may have passed while
+                 * we were draining it, so re-check before looping. */
+                if (march_now_ms() >= deadline_ms)
+                    return mk_err_cstr("no reply (timeout or unhandled Call)");
+                continue;
+            }
+            return mk_ok(payload);
+        }
         if (march_now_ms() >= deadline_ms)
             return mk_err_cstr("no reply (timeout or unhandled Call)");
         /* Woken with an empty mailbox but time remains (spurious, or the
@@ -3032,16 +3116,41 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
 /*
  * march_actor_reply: send a reply back to the caller blocked in actor_call.
  *
- * ref_ptr is the calling green-thread proc pointer that was injected as field 0
- * of the call message.  We cast it back to march_proc * and enqueue result in
- * that proc's mailbox, waking it from march_sched_recv().
+ * ref_ptr is the reply-ref built by march_actor_call: a heap struct with
+ * field0 = caller proc, field1 = correlation id (tag MARCH_CALL_REPLY_TAG).
+ * We wrap result in an envelope carrying that corr and send it to the
+ * caller's mailbox, waking it from march_sched_recv()/march_sched_recv_until().
+ * The caller's unwrap (march_actor_call_unwrap) compares corr against the
+ * one it is waiting on and discards the envelope if they don't match.
+ *
+ * Legacy path: if ref_ptr isn't one of our envelope-tagged reply-refs (e.g.
+ * a raw proc pointer from an older caller, or interpreter-parity code that
+ * still hands march_actor_reply a bare proc), send result directly with no
+ * envelope — preserves old (uncorrelated) behavior for that caller.
  *
  * RC contract: march_actor_reply does NOT incrc result; it transfers the
- * caller's reference (the handler's Perceus instrumentation already owns it).
+ * caller's reference (the handler's Perceus instrumentation already owns
+ * it) into the envelope's field 1. On the envelope path we also consume the
+ * reply-ref's own reference via march_decrc(ref_ptr) — march_actor_call
+ * handed it off to the actor with rc=1 and this is the only place that
+ * reference is ever retired; a handler that never replies simply leaks it
+ * along with the unhandled message, same as an unreplied raw result today.
  */
 void march_actor_reply(void *ref_ptr, void *result) {
-    march_proc *caller = (march_proc *)ref_ptr;
-    march_sched_send(caller, result);
+    if (!IS_HEAP_PTR(ref_ptr)
+            || ((march_hdr *)ref_ptr)->tag != MARCH_CALL_REPLY_TAG) {
+        /* Legacy path: raw proc ptr (interpreter parity / old callers). */
+        march_sched_send((march_proc *)ref_ptr, result);
+        return;
+    }
+    march_proc *caller = (march_proc *)(uintptr_t)MARCH_FIELD(ref_ptr, 0);
+    int64_t corr = MARCH_FIELD(ref_ptr, 1);
+    void *env = march_alloc(16 + 16);
+    MARCH_SET_TAG(env, MARCH_CALL_REPLY_TAG);
+    MARCH_FIELD(env, 0) = corr;
+    MARCH_FIELD(env, 1) = (int64_t)(uintptr_t)result;
+    march_decrc(ref_ptr);
+    march_sched_send(caller, env);
 }
 
 /* ── Float builtins ──────────────────────────────────────────────────── */
