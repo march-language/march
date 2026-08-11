@@ -618,7 +618,7 @@ end
 
 -- ── Main ──────────────────────────────────────────────────────────────────────
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_process : Cap(IO.Process)) do
   let output_dir = match System.env("FORGE_DOC_OUTPUT") do
     None -> "doc"
     Some(d) -> d

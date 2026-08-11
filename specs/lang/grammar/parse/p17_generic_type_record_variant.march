@@ -14,7 +14,7 @@ mod P17GenericTypeRecordVariant do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let b = { value: 42, label: "answer" }
     println(b.value)
     println(b.label)

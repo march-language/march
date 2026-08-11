@@ -8,7 +8,7 @@ mod P05PipeLeftToRightChain do
     x + 1
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- `3 |> double |> inc` only equals 7 if |> is left-associative:
     -- (3 |> double) |> inc == inc(double(3)) == inc(6) == 7.
     -- Right-associative would try double(inc(3)) == double(4) == 8 (moot,

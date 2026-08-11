@@ -26,7 +26,7 @@ mod TwoNodeServer do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen)) do
     let port = 29852
     let fd = match tcp_listen(port) do
       Ok(fd) -> fd

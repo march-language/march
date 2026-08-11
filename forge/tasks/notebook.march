@@ -11,7 +11,7 @@
 --   MARCH_LIB_PATH    set by shim for stdlib access (used automatically)
 --
 -- Architecture: the runner generates a single .march source file with all
--- code cells inside one fn main() do ... end block, with unique sentinel
+-- code cells inside one fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_process : Cap(IO.Process)) do ... end block, with unique sentinel
 -- strings printed before and after each cell's code.  Running that file
 -- once captures all per-cell outputs in one pass.
 

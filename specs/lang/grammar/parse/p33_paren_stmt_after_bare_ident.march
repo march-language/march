@@ -20,7 +20,7 @@ mod P33ParenStmtAfterBareIdent do
     (1, 2)
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     discard("x")
     let _ = pair("y")
     IO.puts("ok")

@@ -29,7 +29,7 @@ mod Main do
       "short"
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let s = "hello-world-this-is-a-long-string-" ++ int_to_string(37)
     let r = both(s, s, 1)
     println(r)

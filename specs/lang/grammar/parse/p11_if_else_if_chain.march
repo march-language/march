@@ -14,7 +14,7 @@ mod P11IfElseIfChain do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(classify(-5))
     println(classify(0))
     println(classify(3))

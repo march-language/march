@@ -8,7 +8,7 @@ mod P22CapabilityDirectives do
     a + b
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(add(2, 3))
   end
 end

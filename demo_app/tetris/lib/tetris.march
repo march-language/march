@@ -482,7 +482,7 @@ mod Tetris do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_clock : Cap(IO.Clock)) : Unit do
     match Js.Dom.find("board") do
       None -> ()
       Some(board_el) ->

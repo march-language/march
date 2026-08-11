@@ -126,7 +126,7 @@ mod Throughput do
 
   -- ── Main ─────────────────────────────────────────────────────────────
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) : Unit do
     let ncpu  = System.cpu_count()
     -- Timing limit: default 2M for compiled binary, 3000 for interpreter.
     -- Compiled:    MARCH_LIMIT=2000000 ./throughput  (or just run -- default is 2M)

@@ -26,7 +26,7 @@ mod Main do
       R(n) -> n
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     linear let r : Res = R(20)
     let a = take(r)
     let c : affine Res = R(22)

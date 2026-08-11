@@ -207,7 +207,7 @@ let wrap_main body =
      with a message naming the missing capability — a visible failure, not a
      silent one, which is why the defensive root declaration is not worth its
      cost here. *)
-  "mod Main do\n  needs IO.Console\n  fn main() do\n    " ^ body ^ "\n  end\nend"
+  "mod Main do\n  needs IO.Console\n  fn main(_cap_console : Cap(IO.Console)) do\n    " ^ body ^ "\n  end\nend"
 
 
 (** Integer literal in range [-100, 100]. *)
@@ -281,7 +281,7 @@ let gen_fn_module : string Gen.t =
          \  fn add_offset(x) do\n\
          \    x + %s\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    add_offset(%s) + add_offset(%s)\n\
          \  end\n\
           end"
@@ -297,7 +297,7 @@ let gen_match_bool_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let b = %s\n\
          \    match b do\n\
          \    | true -> %s\n\
@@ -330,7 +330,7 @@ let gen_adt_module : string Gen.t =
          \    | Square(n) -> n * %d\n\
          \    end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let s = %s\n\
          \    area(s)\n\
          \  end\n\
@@ -361,7 +361,7 @@ let gen_adt3_module : string Gen.t =
          \    | Pair(x, y) -> x + y\n\
          \    end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    sum_data(%s)\n\
          \  end\n\
           end"
@@ -380,7 +380,7 @@ let gen_closure_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let base = %d\n\
          \    let adder = fn x -> x + base + %d\n\
          \    adder(%d)\n\
@@ -402,7 +402,7 @@ let gen_hof_apply_module : string Gen.t =
          \  fn apply(f : Int -> Int, x : Int) : Int do\n\
          \    f(x)\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    apply(fn n -> n * %d, %d)\n\
          \  end\n\
           end"
@@ -421,7 +421,7 @@ let gen_hof_compose_module : string Gen.t =
          \  fn compose(f : Int -> Int, g : Int -> Int, x : Int) : Int do\n\
          \    f(g(x))\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let add%d = fn n -> n + %d\n\
          \    let mul%d = fn n -> n * %d\n\
          \    compose(add%d, mul%d, %d)\n\
@@ -444,7 +444,7 @@ let gen_recursive_module : string Gen.t =
          \  fn fact(n : Int) : Int do\n\
          \    if n <= 1 do 1 else n * fact(n - 1) end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    fact(%d)\n\
          \  end\n\
           end"
@@ -464,7 +464,7 @@ let gen_mutual_fns_module : string Gen.t =
          \  fn triple_sub(a : Int, b : Int) : Int do\n\
          \    (a * 3) - b\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    double_add(%d, %d)\n\
          \  end\n\
           end"
@@ -493,7 +493,7 @@ let gen_tuple_module : string Gen.t =
          \    let (x, _) = t\n\
          \    x\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let t = (%d, %d)\n\
          \    let (a, b) = swap(t)\n\
          \    fst((a, b)) + b\n\
@@ -515,7 +515,7 @@ let gen_tuple_return_module : string Gen.t =
          \  fn make_pair(x : Int, y : Int) : (Int, Int) do\n\
          \    (x + 1, y - 1)\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let r = make_pair(%d, %d)\n\
          \    %s\n\
          \  end\n\
@@ -535,7 +535,7 @@ let gen_string_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let s1 = to_string(%d)\n\
          \    let s2 = to_string(%d)\n\
          \    let s3 = s1 ++ \" + \" ++ s2\n\
@@ -553,7 +553,7 @@ let gen_string_bool_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let cmp = %d > %d\n\
          \    string_length(bool_to_string(cmp))\n\
          \  end\n\
@@ -586,7 +586,7 @@ let gen_list_module : string Gen.t =
          \    | Cons(h, t) -> Cons(h + 1, map_add1(t))\n\
          \    end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let lst = Cons(%d, Cons(%d, Cons(%d, Nil)))\n\
          \    sum(map_add1(lst))\n\
          \  end\n\
@@ -617,7 +617,7 @@ let gen_nested_match_module : string Gen.t =
          \    | Just(Right(x)) -> x + 100\n\
          \    end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    extract(%s)\n\
          \  end\n\
           end"
@@ -672,7 +672,7 @@ let gen_println_int_list_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    println([%s])\n\
          \  end\n\
           end"
@@ -697,7 +697,7 @@ let gen_println_string_list_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    println([%s])\n\
          \  end\n\
           end"
@@ -725,7 +725,7 @@ let gen_println_option_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    println(Some(%d))\n\
          \    println(Some(%d))\n\
          \  end\n\
@@ -755,7 +755,7 @@ let gen_println_nested_list_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    println([%s])\n\
          \  end\n\
           end"
@@ -784,7 +784,7 @@ let gen_println_list_of_options_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    println([%s])\n\
          \  end\n\
           end"
@@ -849,7 +849,7 @@ let gen_derived_method_newtype_int_module : string Gen.t =
          \  needs IO.Console\n\
          \  type Wrap = Wrap(Int)\n\
          \  derive Eq, Ord, Hash for Wrap\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let a = Wrap(%d)\n\
          \    let b = Wrap(%d)\n\
          \    println(bool_to_string(a == b))\n\
@@ -883,7 +883,7 @@ let gen_derived_method_newtype_string_module : string Gen.t =
          \  needs IO.Console\n\
          \  type WrapS = WrapS(String)\n\
          \  derive Eq, Ord, Hash for WrapS\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let a = WrapS(%S)\n\
          \    let b = WrapS(%S)\n\
          \    println(bool_to_string(a == b))\n\
@@ -908,7 +908,7 @@ let gen_derived_method_boxed_module : string Gen.t =
          \  needs IO.Console\n\
          \  type Pair = Pair(Int, Int)\n\
          \  derive Eq, Ord, Hash for Pair\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let a = Pair(%d, %d)\n\
          \    let b = Pair(%d, %d)\n\
          \    println(bool_to_string(a == b))\n\
@@ -937,7 +937,7 @@ let gen_derived_method_enum_module : string Gen.t =
          \  needs IO.Console\n\
          \  type Shape = Circle(Int) | Square(Int)\n\
          \  derive Eq, Ord, Hash for Shape\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let a = %s\n\
          \    let b = %s\n\
          \    println(bool_to_string(a == b))\n\
@@ -975,7 +975,7 @@ let gen_derived_method_record_module : string Gen.t =
          \  needs IO.Console\n\
          \  type Point = { x: Int, y: Int }\n\
          \  derive Eq, Ord, Hash for Point\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let a = { x: %d, y: %d }\n\
          \    let b = { x: %d, y: %d }\n\
          \    println(bool_to_string(a == b))\n\
@@ -1053,7 +1053,7 @@ let gen_record_update_module : string Gen.t =
          "mod Main do\n\
          \  needs IO.Console\n\
          \  type Point = { x: Int, y: Int }\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let p = { x: %d, y: %d }\n\
          \    let q = { p with x: p.x + %d }\n\
          \    println(to_string(q.x + q.y))\n\
@@ -1082,7 +1082,7 @@ let gen_dual_position_borrow_module : string Gen.t =
          \      \"short\"\n\
          \    end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let s = \"hello-world-this-is-a-long-string-\" ++ to_string(%d)\n\
          \    let r = both(s, s, %d)\n\
          \    println(r)\n\
@@ -1110,7 +1110,7 @@ let gen_fbip_same_arity_module : string Gen.t =
          \  pfn mk_result(n : Int) : Result(Int, String) do\n\
          \    if n > 0 do Ok(n) else Err(\"bad\") end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let n = churn(%d)\n\
          \    let dead = mk_result(n)\n\
          \    let q = mk_result(n + %d)\n\
@@ -1144,7 +1144,7 @@ let gen_erased_flow_module : string Gen.t =
          \  fn identity(x : a) : a do\n\
          \    x\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let boxed = Box(identity(%d))\n\
          \    let n = unwrap(boxed)\n\
          \    println(to_string(n + %d))\n\
@@ -2005,7 +2005,7 @@ let prop_adt_match_correct =
          "mod Main do\n\
          \  needs IO.Console\n\
          \  type Tag = TagA | TagB(Int)\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let t = %s\n\
          \    match t do\n\
          \    | TagA    -> 0\n\
@@ -2056,7 +2056,7 @@ let prop_tuple_swap_involution =
          \    let (_, y) = t1\n\
          \    y == b\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let t = (%d, %d)\n\
          \    let swapped_twice = swap(swap(t))\n\
          \    if fst_eq(swapped_twice, %d) do\n\
@@ -2089,7 +2089,7 @@ let prop_closure_captures_correct_value =
          \  fn make_adder(base : Int) : Int -> Int do\n\
          \    fn x -> x + base\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let f = make_adder(%d)\n\
          \    f(%d)\n\
          \  end\n\
@@ -2123,7 +2123,7 @@ let prop_list_sum_correct =
          \    | Cons(h, t) -> h + sum(t)\n\
          \    end\n\
          \  end\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    sum(Cons(%d, Cons(%d, Cons(%d, Nil))))\n\
          \  end\n\
           end"
@@ -2302,7 +2302,7 @@ let prop_oracle_println_arith =
           Printf.sprintf
             "mod Main do\n\
             \  needs IO.Console\n\
-            \  fn main() do\n\
+            \  fn main(_cap_console : Cap(IO.Console)) do\n\
             \    println(to_string(%s))\n\
             \    println(to_string(%s))\n\
             \  end\n\
@@ -2327,7 +2327,7 @@ let prop_oracle_println_closure =
           Printf.sprintf
             "mod Main do\n\
             \  needs IO.Console\n\
-            \  fn main() do\n\
+            \  fn main(_cap_console : Cap(IO.Console)) do\n\
             \    let base = %d\n\
             \    let adder = fn x -> x + base + %d\n\
             \    println(to_string(adder(%d)))\n\
@@ -2369,7 +2369,7 @@ let prop_oracle_println_adt =
             \      Square(n) -> n * 4\n\
             \    end\n\
             \  end\n\
-            \  fn main() do\n\
+            \  fn main(_cap_console : Cap(IO.Console)) do\n\
             \    println(to_string(area(%s)))\n\
             \  end\n\
              end"
@@ -2396,7 +2396,7 @@ let prop_oracle_println_hof =
             \  fn apply(f : Int -> Int, x : Int) : Int do\n\
             \    f(x)\n\
             \  end\n\
-            \  fn main() do\n\
+            \  fn main(_cap_console : Cap(IO.Console)) do\n\
             \    println(to_string(apply(fn n -> n * %d, %d)))\n\
             \  end\n\
              end"
@@ -2420,7 +2420,7 @@ let prop_oracle_println_tuple =
           Printf.sprintf
             "mod Main do\n\
             \  needs IO.Console\n\
-            \  fn main() do\n\
+            \  fn main(_cap_console : Cap(IO.Console)) do\n\
             \    let t = (%d, %d)\n\
             \    let (x, y) = t\n\
             \    println(to_string(x + y))\n\
@@ -2456,7 +2456,7 @@ let prop_oracle_println_list =
             \      Cons(h, t) -> h + sum(t)\n\
             \    end\n\
             \  end\n\
-            \  fn main() do\n\
+            \  fn main(_cap_console : Cap(IO.Console)) do\n\
             \    println(to_string(sum(Cons(%d, Cons(%d, Cons(%d, Nil))))))\n\
             \  end\n\
              end"
@@ -2799,7 +2799,7 @@ let test_record_update_missing_field_on_erased_base_converged () =
   let src =
     "mod Main do\n\
     \  needs IO.Console\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let base = record_from_list([(\"a\", 1)])\n\
     \    let updated = { base with z: 99 }\n\
     \    println(to_string(record_get(updated, \"z\")))\n\
@@ -2956,7 +2956,7 @@ let record_update_converged_unit_tests = [
 let timings_probe_source =
   "mod TimingsProbe do\n\
   \  needs IO.Console\n\
-  \  fn main() do\n\
+  \  fn main(_cap_console : Cap(IO.Console)) do\n\
   \    println(to_string(1 + 1))\n\
   \  end\n\
    end\n"

@@ -19,7 +19,7 @@ mod P28CondSingleLineNoSeparator do
     match do x > 0 -> "pos" end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(classify(1))
   end
 end

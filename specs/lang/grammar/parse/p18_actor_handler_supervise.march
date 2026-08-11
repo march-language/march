@@ -16,7 +16,7 @@ mod P18ActorHandlerSupervise do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let sup = spawn(Supervisor)
     run_until_idle()
     println(mailbox_size(sup))

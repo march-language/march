@@ -89,7 +89,7 @@ mod LoadClient do
       ++ " mem_avail_mb=" ++ String.from_int(nl.mem_avail_mb)
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process)) do
     let args = Process.argv()
     let hostA = nth_str(args, 1, "127.0.0.1")
     let portA = nth_int(args, 2, 29853)

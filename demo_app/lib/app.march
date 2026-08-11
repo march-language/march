@@ -200,7 +200,7 @@ end
 -- main
 -- ---------------------------------------------------------------------------
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console), _cap_mut : Cap(IO.Mut), _cap_netlisten : Cap(IO.NetListen)) do
   println("==============================================")
   println(" DemoApp — Bastion dev dashboard demo")
   println("==============================================")
