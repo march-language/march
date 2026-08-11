@@ -1,4 +1,5 @@
 mod P33ParenStmtAfterBareIdent do
+  needs IO.Console
   -- §7.3 — the two-statement reading of a `(`-led line is NOT limited to a
   -- preceding call's `)` (p24). It applies to ANY value-ending token, and the
   -- bare-identifier case is the one that used to break: `let _ = a` followed by
