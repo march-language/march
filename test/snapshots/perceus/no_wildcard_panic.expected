@@ -1,7 +1,7 @@
 -- types (0) --
 -- fns (2) --
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t3 : Int = let $t2 : Option(Int) = alloc Option.Some(7) in
 unwrap_or_die($t2) in
 println($t3)

@@ -65,7 +65,7 @@ $f1 in
   _ -> panic("non-exhaustive pattern match")
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
 describe($t15) in
 let $rc_2 : () = println($t16) in

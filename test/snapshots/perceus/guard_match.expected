@@ -27,7 +27,7 @@ case $guard8 of
   _ -> call_ptr $jp_clo7()
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t11 : String = classify(5) in
 let $rc_1 : () = println($t11) in
 dec_rc $t11;
