@@ -254,6 +254,7 @@ let test_nested_module_widens_profile () =
   assert_grants_file_write "nested module fn"
     {|
 mod SbxNest do
+  needs IO.FileWrite
   needs IO.Console
   mod Inner do
     needs IO.FileWrite

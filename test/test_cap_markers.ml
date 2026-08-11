@@ -130,6 +130,7 @@ let tests =
 let attrib_inlined_src =
   {|
 mod AttribApp do
+  needs IO.FileRead
   needs IO.Console
   mod Dep do
     needs IO.FileRead
@@ -163,6 +164,7 @@ let test_attributed_to_dep_not_app_despite_inlining () =
 let attrib_stdlib_wrapper_src =
   {|
 mod WrapApp do
+  needs IO.FileRead
   needs IO.Console
   mod Dep do
     needs IO.FileRead
