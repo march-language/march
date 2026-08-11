@@ -125,6 +125,7 @@ let stdlib_file_list = [
   "signal.march";
   "rrb_vec.march";
   "parallel.march";
+  "parse.march";
   "uri.march";
   "forge_nb.march";
   "handle.march";

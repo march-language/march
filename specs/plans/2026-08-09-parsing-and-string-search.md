@@ -161,13 +161,23 @@ type ParseErr = {
   context  : List((String, Int))     -- ("if statement", start_pos) stack
 }
 
-type Reply(a) =
+type ParseReply(a) =
   ROk(a, Int, Int)        -- value, new pos, furthest-failure pos (an Int only)
   | RFail(ParseErr)       -- soft failure: ordered choice may try the next arm
   | RCut(ParseErr)        -- hard failure: a commit point was passed; propagate
 
-type Parser(a) = Parser((String, Int) -> Reply(a))
+type Parser(a) = Parser(String -> Int -> ParseReply(a))
 ```
+
+Two naming notes, both learned from writing the implementation:
+
+- The reply type is `ParseReply`, not the more natural `Reply`, because
+  `channel.march` already declares a `Reply` constructor and the stdlib shares
+  one global namespace.
+- March writes multi-argument function *types* curried (`f : b -> a -> b`) but
+  *calls* them uncurried (`f(x, y)`) — see `sort.march`'s comparator
+  signatures. Hence `String -> Int -> ParseReply(a)` for a function invoked as
+  `f(input, i)`.
 
 Two deliberate asymmetries:
 
@@ -286,7 +296,7 @@ end
 fn expr() : Parser(Expr) do
   alt(
     integer() |> map(fn n -> Lit(n)),
-    between(chr('('), expr(), chr(')'))
+    between(lit("("), expr(), lit(")"))
   )
 end
 ```
@@ -306,9 +316,9 @@ shape this needs — no new syntax, no new language feature, works right now:
 ```march
 fn date() : Parser((Int, Int, Int)) do
   integer(4)
-  |> skip_then(chr('-'))
+  |> skip_then(lit("-"))
   |> and_then(integer(2))
-  |> skip_then(chr('-'))
+  |> skip_then(lit("-"))
   |> and_then(integer(2))
   |> map(fn ((y, m), d) -> (y, m, d))
 end
@@ -325,7 +335,7 @@ ergonomics.
 
 ```march
 -- HYPOTHETICAL — not currently expressible in March:
--- (integer ~> Lit) <|> (chr('(') *> expr <* chr(')'))
+-- (integer ~> Lit) <|> (lit("(") *> expr <* lit(")"))
 ```
 
 Parsec-lineage infix operators (`<|>` choice, `*>` / `<*` sequence-discard,
@@ -372,7 +382,7 @@ fn add_expr() : Parser(Expr) do
   parse do
     let* a  = integer()
     let* _  = ws()
-    let* op = optional(chr('+'))
+    let* op = optional(lit("+"))
     match op do
       Some(_) ->
         let* b = expr()
@@ -719,27 +729,33 @@ for:
   editor squiggles on your test input. This is the feature; the other two are
   convenience.
 
-**Prerequisite, and it is a real blocker — verified 2026-08-09.** March
-string-literal spans cover only the opening quote, not the literal's extent:
-`"localhost"` beginning at column 24 records span 24–25, so slicing by it
-yields a bare `"`. Integer and other literal spans are correct; this is
-specific to strings. The mechanism is visible in `lib/lexer/lexer.mll:121` —
-the main `token` rule matches only `'"'` and then hands off to a separate
-`read_string` lexer entry (`:205`), and each recursive call into that entry
-resets the lexeme start position, so the opening quote's position is lost by
-the time `STRING` is finally returned.
+**Prerequisite — and it was a real blocker. FIXED 2026-08-11.** March
+string-literal spans collapsed to a single column: for `"hello"` at column 0,
+the recorded span was 6–7 — the **closing** quote. (An earlier note recorded
+this as the *opening* quote; measurement says closing, which follows directly
+from the mechanism below.) Integer and other literal spans were always
+correct; this was specific to strings.
 
-Offsetting into a sample string therefore has nothing correct to offset
-*from*, and the squiggle would collapse onto the quote character for every
-probe regardless of where the parse error actually is. Fixing literal spans is
-a hard prerequisite for 8.2's third bullet.
+Mechanism: the main `token` rule in `lib/lexer/lexer.mll` matches only `'"'`
+and hands off to a separate `read_string` sub-rule, which recurses once per
+character or escape. Every re-entry makes ocamllex reset `lex_start_p` to the
+current lexeme, so by the time the closing quote is matched and `STRING` is
+returned, `lex_start_p` points at that closing quote — and menhir builds the
+literal's span from it.
 
-Worth noting *why* this has survived: consumers have consistently worked
-around it rather than fixed it. `forge refactor bundle` hit exactly this —
-rewriting `f("x", 1)` produced a corrupted `a = "` — and the fix there was a
-string-aware comma splitter that avoids trusting spans at all, rather than
-correcting the span. A workaround is the right call for one consumer; it is
-the wrong call for the fourth. This feature should fix the span.
+The fix records the opening quote's position on handoff and restores
+`lex_start_p` in the actions that actually produce a token (`STRING` and
+`INTERP_START`, in both the plain and triple-quoted sub-rules). `Token_filter`
+reads `lex_start_p` immediately after each lexer call, so patching it in the
+action is sufficient to reach the parser. Regression coverage lives in the
+`ast` group of `test/test_compiler.ml`: base case, escapes (source extent ≠
+value length), non-zero start column, and a multi-line triple-quoted literal.
+
+Worth recording *why* this survived so long: consumers worked around it rather
+than fixing it. `forge refactor bundle` hit exactly this — rewriting
+`f("x", 1)` produced a corrupted `a = "` — and the fix there was a
+string-aware comma splitter that avoids trusting spans at all. A workaround is
+the right call for one consumer; it is the wrong call for the fourth.
 
 ### 8.3 Architecture: follow `refine_command.ml`
 

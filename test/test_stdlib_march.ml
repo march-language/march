@@ -173,6 +173,7 @@ let all_stdlib_decls =
     "cluster.march";
     "rrb_vec.march";
     "parallel.march";
+    "parse.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -443,5 +444,9 @@ let () =
     ("dist_supervisor", [
       Alcotest.test_case "DistSupervisor module"
         `Quick (run_stdlib_test "test_dist_supervisor.march" "TestDistSupervisor");
+    ]);
+    ("parse", [
+      Alcotest.test_case "Parse module"
+        `Quick (run_stdlib_test "test_parse.march" "TestParse");
     ]);
   ]

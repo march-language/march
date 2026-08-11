@@ -1,0 +1,301 @@
+-- Parse module: parser combinator core.
+--
+-- Design: specs/plans/2026-08-09-parsing-and-string-search.md
+--
+-- Two commitments shape every type in here:
+--
+--   1. **Byte offsets, not code points.** Position is an Int index into the
+--      input string, and input is inspected with `string_byte_at`, which
+--      returns 0..255 (or -1 past the end) and allocates nothing.  March has
+--      no character literal, so the byte primitive takes an Int code and the
+--      ergonomic primitive is `lit`, which takes a String.
+--
+--   2. **Errors are the product, so the success path must not pay for them.**
+--      `ROk` carries only integers alongside the value — in particular the
+--      furthest offset any sub-parse failed at, which `alt` needs in order to
+--      report the alternative that got deepest rather than the one listed
+--      last.  Expected-sets and context stacks are built only on failure.
+--
+-- Failure is split into two constructors rather than a boolean flag, so that
+-- ordered choice cannot forget to check it:
+--
+--   RFail  soft — `alt` may try the next alternative
+--   RCut   hard — a commit point was passed; propagate, do not backtrack
+--
+-- Functions:
+--   run(Parser(a), String)              -> Result(a, ParseErr)
+--   lit(String)                         -> Parser(String)
+--   and_then(Parser(a), Parser(b))      -> Parser((a, b))
+--   alt(Parser(a), Parser(a))           -> Parser(a)
+--   commit(Parser(a))                   -> Parser(a)
+--   ctx(String, Parser(a))              -> Parser(a)
+--   label(String, Parser(a))            -> Parser(a)
+--
+-- Still to come (plan §3.5-3.6, §4.1): byte/satisfy, many/sep_by in
+-- tail-recursive form, map, skip_then, to_diagnostic, and the recovery
+-- combinators.
+
+mod Parse do
+
+  -- What a parser was looking for at the offset it failed.  `ExpLabel` is the
+  -- human-named class a `label` combinator substitutes for raw token soup.
+  type Expected =
+      ExpLit(String)
+    | ExpLabel(String)
+    | ExpEof
+
+  -- A failure.  `pos` is the furthest byte offset reached, `expected` is the
+  -- merged expected-set AT that offset, and `context` is a stack of
+  -- (name, start_offset) frames pushed by commit points, used to render
+  -- "expected `end` to close the `if` that started at 12:1".
+  type ParseErr = {
+    pos:      Int,
+    expected: List(Expected),
+    context:  List((String, Int))
+  }
+
+  -- ROk carries: value, new position, furthest-failure position so far.
+  type ParseReply(a) =
+      ROk(a, Int, Int)
+    | RFail(ParseErr)
+    | RCut(ParseErr)
+
+  -- A parser is a function from (input, offset) to a ParseReply.  (The design
+  -- doc calls this type `Reply`; it is `ParseReply` here because
+  -- `channel.march` already declares a `Reply` constructor and the stdlib
+  -- shares one namespace.)  The payload type is written curried — March's
+  -- convention for multi-argument function types — but the function is called
+  -- uncurried, as `f(s, i)`.
+  type Parser(a) = Parser(String -> Int -> ParseReply(a))
+
+  doc """
+  Build a failure at `pos` expecting `exp`, with no context frames.
+  """
+  pfn fail_at(pos : Int, exp : Expected) : ParseErr do
+    { pos: pos, expected: Cons(exp, Nil), context: Nil }
+  end
+
+  -- Byte-compare `s[k..n)` against `input[i+k..)`.  Written as a module-level
+  -- tail-recursive helper rather than a local function inside `lit`'s lambda:
+  -- a lambda body is `let`s followed by one expression, so it cannot host a
+  -- local named recursive function.  Tail position keeps it TCO-eligible.
+  pfn lit_matches(input : String, s : String, i : Int, k : Int, n : Int) : Bool do
+    if k >= n do true
+    else
+      if string_byte_at(input, i + k) == string_byte_at(s, k) do
+        lit_matches(input, s, i, k + 1, n)
+      else false end
+    end
+  end
+
+  doc """
+  Run a parser over an input string.
+
+  Both a soft and a hard failure surface as `Err` — the distinction between
+  them matters to `alt` while parsing, not to the caller of `run`.
+  """
+  fn run(p : Parser(a), input : String) : Result(a, ParseErr) do
+    match p do
+      Parser(f) ->
+        match f(input, 0) do
+          ROk(v, _, _) -> Ok(v)
+          RFail(e)     -> Err(e)
+          RCut(e)      -> Err(e)
+        end
+    end
+  end
+
+  doc """
+  Match a literal string at the current offset.
+
+  Compares byte by byte with `string_byte_at`, so nothing is allocated while
+  scanning and a mismatch past the end of the input behaves like any other
+  mismatch (`string_byte_at` returns -1 there, which never equals a byte of
+  the pattern).
+
+  On failure the reported offset is where the literal *started*, not where the
+  bytes diverged: a caller who wrote `lit("ab")` wants to be told that `ab`
+  was expected here, not that `b` was expected one byte along.
+  """
+  fn lit(s : String) : Parser(String) do
+    let n = string_byte_length(s)
+    Parser(fn (input, i) ->
+      if lit_matches(input, s, i, 0, n) do ROk(s, i + n, i)
+      else RFail(fail_at(i, ExpLit(s))) end)
+  end
+
+  -- ── Failure merging (plan §3.2) ──────────────────────────────────────────
+  --
+  -- The single highest-leverage rule for message quality: when ordered choice
+  -- exhausts its alternatives, report the failure that got FURTHEST into the
+  -- input, and when several tie at the same offset, merge their expected-sets.
+  --
+  -- Without this, `alt` reports whichever alternative happened to be listed
+  -- last — the classic "expected expression" at column 0 while the real
+  -- mistake is at column 40.
+  pfn merge_err(a : ParseErr, b : ParseErr) : ParseErr do
+    if a.pos > b.pos do a
+    else
+      if b.pos > a.pos do b
+      else
+        { pos:      a.pos,
+          expected: List.append(a.expected, b.expected),
+          context:  a.context }
+      end
+    end
+  end
+
+  -- The furthest offset any sub-parse has failed at so far.  Threaded through
+  -- SUCCESS replies too (the third field of ROk): a later failure at an
+  -- earlier offset must not shadow an earlier sub-parse's deeper progress.
+  pfn max_int2(a : Int, b : Int) : Int do
+    if a > b do a else b end
+  end
+
+  -- KNOWN LIMITATION of the Int-only success channel.  When `p` succeeds
+  -- having internally failed deeper than the offset at which `q` later fails,
+  -- we know a deeper failure happened (the Int survives) but not what it
+  -- expected — `ROk` deliberately does not carry an expected-set, so that the
+  -- success path allocates nothing.  `and_then` therefore reports `q`'s error,
+  -- which at least has a real expected-set, rather than a bare position with
+  -- nothing to say about it.
+  --
+  -- This is the same trade Parsec-family libraries make.  If it turns out to
+  -- produce a misleading message in practice, the fix is to widen the success
+  -- channel to carry `(pos, expected)` — and to pay for it — rather than to
+  -- paper over it at the `and_then` call site.  Revisit once the JSON/TOML
+  -- rewrite (plan §10 step 2) has real grammars to judge against.
+
+  doc """
+  Run `p`, then `q`, and pair their results.
+
+  A failure in `q` is reported at `q`'s own offset, so the error points at
+  where the input actually diverged rather than at the start of the sequence.
+  A hard failure (`RCut`) from either side propagates without being turned
+  into a soft failure — that is what makes a commit point stick.
+  """
+  fn and_then(p : Parser(a), q : Parser(b)) : Parser((a, b)) do
+    match (p, q) do
+      (Parser(pf), Parser(qf)) ->
+        Parser(fn (input, i) ->
+          match pf(input, i) do
+            RFail(e) -> RFail(e)
+            RCut(e)  -> RCut(e)
+            ROk(x, j, fp) ->
+              match qf(input, j) do
+                RFail(e)      -> RFail(e)
+                RCut(e)       -> RCut(e)
+                ROk(y, k, fq) -> ROk((x, y), k, max_int2(fp, fq))
+              end
+          end)
+    end
+  end
+
+  doc """
+  Ordered choice: try `p`, and only if it fails *softly* try `q`.
+
+  A hard failure from `p` — one raised past a commit point — is propagated
+  rather than swallowed, which is the whole point of committing. When both
+  alternatives fail softly the two errors are merged by `merge_err`, so the
+  reported position is the furthest either one reached.
+  """
+  fn alt(p : Parser(a), q : Parser(a)) : Parser(a) do
+    match (p, q) do
+      (Parser(pf), Parser(qf)) ->
+        Parser(fn (input, i) ->
+          match pf(input, i) do
+            ROk(x, j, fp) -> ROk(x, j, fp)
+            RCut(e)       -> RCut(e)
+            RFail(e1) ->
+              match qf(input, i) do
+                ROk(y, k, fq) -> ROk(y, k, max_int2(fq, e1.pos))
+                RCut(e2)      -> RCut(e2)
+                RFail(e2)     -> RFail(merge_err(e1, e2))
+              end
+          end)
+    end
+  end
+
+  doc """
+  Commit: past this point, failure is a hard parse error rather than a
+  backtrack into the next alternative.
+
+  This is SNOBOL's `FENCE` and Prolog's cut. Without it a malformed `if`
+  statement silently falls through to be parsed as something else, and the
+  error message ends up pointing at the wrong construct entirely.
+
+  A success is passed through untouched; only a soft failure is upgraded.
+  """
+  fn commit(p : Parser(a)) : Parser(a) do
+    match p do
+      Parser(f) ->
+        Parser(fn (input, i) ->
+          match f(input, i) do
+            ROk(x, j, fp) -> ROk(x, j, fp)
+            RFail(e)      -> RCut(e)
+            RCut(e)       -> RCut(e)
+          end)
+    end
+  end
+
+  doc """
+  Name the construct a failure happened inside.
+
+  On a hard failure, pushes `(name, start_offset)` onto the error's context
+  stack. That stack is what turns
+
+      error at 14:3: I was expecting `end`
+
+  into
+
+      error at 14:3: I was expecting `end` to close the `block` that started at 12:1
+
+  Only hard failures carry context: a soft failure is a path not taken, and
+  naming every alternative a parser merely tried would be noise, not context.
+  """
+  fn ctx(name : String, p : Parser(a)) : Parser(a) do
+    match p do
+      Parser(f) ->
+        Parser(fn (input, i) ->
+          match f(input, i) do
+            ROk(x, j, fp) -> ROk(x, j, fp)
+            RFail(e)      -> RFail(e)
+            RCut(e)       ->
+              RCut({ pos:      e.pos,
+                     expected: e.expected,
+                     context:  Cons((name, i), e.context) })
+          end)
+    end
+  end
+
+  doc """
+  Replace a parser's expected-set with one human-named class.
+
+  Raw expected-sets degrade into token soup — "expected `-`, `0`..`9`, `(`, or
+  `fn`" — so every public nonterminal in a grammar should be labelled.
+
+  The rule that keeps labels honest: the substitution happens ONLY when `p`
+  failed **without consuming input**. If `p` got somewhere before failing, its
+  inner error is more specific than the label and is kept, so a label can
+  never hide real progress. Consumption is judged by comparing the failure
+  offset against the offset the parser started at.
+
+  A hard failure is never relabelled either: past a commit point the specific
+  error is the whole point.
+  """
+  fn label(name : String, p : Parser(a)) : Parser(a) do
+    match p do
+      Parser(f) ->
+        Parser(fn (input, i) ->
+          match f(input, i) do
+            ROk(x, j, fp) -> ROk(x, j, fp)
+            RCut(e)       -> RCut(e)
+            RFail(e) ->
+              if e.pos == i do
+                RFail({ pos: i, expected: Cons(ExpLabel(name), Nil), context: e.context })
+              else RFail(e) end
+          end)
+    end
+  end
+
+end

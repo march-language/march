@@ -1,0 +1,197 @@
+-- Tests for the Parse stdlib module (parser combinator core).
+--
+-- Design: specs/plans/2026-08-09-parsing-and-string-search.md
+-- Slice 1 covers `run` + `lit` and the shape of a failure: a ParseErr
+-- carrying the byte offset it failed at and a one-element expected-set.
+
+mod TestParse do
+
+describe "Parse" do
+
+  describe "lit" do
+
+    test "matches a literal prefix" do
+      match Parse.run(Parse.lit("ab"), "ab") do
+        Ok(s)  -> assert (s == "ab")
+        Err(_) -> assert false
+      end
+    end
+
+    test "matches a prefix of a longer input" do
+      match Parse.run(Parse.lit("ab"), "abcd") do
+        Ok(s)  -> assert (s == "ab")
+        Err(_) -> assert false
+      end
+    end
+
+    test "fails at offset 0 when the first byte differs" do
+      match Parse.run(Parse.lit("ab"), "xy") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 0)
+      end
+    end
+
+    test "fails when input runs out mid-literal" do
+      match Parse.run(Parse.lit("abc"), "ab") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 0)
+      end
+    end
+
+    test "failure carries the literal in its expected-set" do
+      match Parse.run(Parse.lit("ab"), "xy") do
+        Ok(_) -> assert false
+        Err(e) ->
+          match e.expected do
+            Cons(ExpLit(s), Nil) -> assert (s == "ab")
+            _                    -> assert false
+          end
+      end
+    end
+
+    test "an empty literal always succeeds without consuming" do
+      match Parse.run(Parse.lit(""), "xy") do
+        Ok(s)  -> assert (s == "")
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
+  describe "and_then" do
+
+    test "sequences two parsers and pairs their results" do
+      let p = Parse.and_then(Parse.lit("ab"), Parse.lit("cd"))
+      match Parse.run(p, "abcd") do
+        Ok((x, y)) -> assert (x == "ab" && y == "cd")
+        Err(_)     -> assert false
+      end
+    end
+
+    test "reports the second parser's offset when it fails" do
+      let p = Parse.and_then(Parse.lit("ab"), Parse.lit("cd"))
+      match Parse.run(p, "abZZ") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 2)
+      end
+    end
+
+  end
+
+  describe "alt" do
+
+    test "takes the first alternative that succeeds" do
+      let p = Parse.alt(Parse.lit("ab"), Parse.lit("xy"))
+      match Parse.run(p, "abc") do
+        Ok(s)  -> assert (s == "ab")
+        Err(_) -> assert false
+      end
+    end
+
+    test "falls through to the second alternative" do
+      let p = Parse.alt(Parse.lit("ab"), Parse.lit("xy"))
+      match Parse.run(p, "xyz") do
+        Ok(s)  -> assert (s == "xy")
+        Err(_) -> assert false
+      end
+    end
+
+    -- The furthest-failure rule (plan §3.2). The first alternative consumes
+    -- "ab" and then fails at offset 2; the second fails immediately at 0.
+    -- Reporting the LAST alternative's error would point at column 0 while
+    -- the real mistake is at 2, which is the classic bad combinator message.
+    test "reports the alternative that got furthest, not the last one" do
+      let deep    = Parse.and_then(Parse.lit("ab"), Parse.lit("cd"))
+      let shallow = Parse.lit("z")
+      match Parse.run(Parse.alt(deep, shallow), "abZZ") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 2)
+      end
+    end
+
+    test "merges the expected-sets of alternatives that tie at one offset" do
+      match Parse.run(Parse.alt(Parse.lit("x"), Parse.lit("y")), "q") do
+        Ok(_) -> assert false
+        Err(e) ->
+          assert (e.pos == 0)
+          assert (List.length(e.expected) == 2)
+      end
+    end
+
+    -- A hard failure must NOT be swallowed by ordered choice: that is the
+    -- entire point of committing. Without this, a malformed `if` silently
+    -- falls through to be parsed as something else (plan §2.2).
+    test "does not try the second alternative after a hard failure" do
+      let committed = Parse.and_then(Parse.lit("ab"), Parse.commit(Parse.lit("cd")))
+      match Parse.run(Parse.alt(committed, Parse.and_then(Parse.lit("ab"), Parse.lit("ZZ"))), "abZZ") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 2)
+      end
+    end
+
+  end
+
+  describe "commit" do
+
+    test "leaves a success untouched" do
+      match Parse.run(Parse.commit(Parse.lit("ab")), "ab") do
+        Ok(s)  -> assert (s == "ab")
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
+  describe "ctx" do
+
+    test "names the construct a committed failure happened inside" do
+      let inner = Parse.commit(Parse.lit("cd"))
+      let p     = Parse.and_then(Parse.lit("ab"), Parse.ctx("block", inner))
+      match Parse.run(p, "abZZ") do
+        Ok(_) -> assert false
+        Err(e) ->
+          match e.context do
+            Cons((name, start), Nil) -> assert (name == "block" && start == 2)
+            _                        -> assert false
+          end
+      end
+    end
+
+  end
+
+  describe "label" do
+
+    -- Raw expected-sets degrade into token soup; a label replaces them with
+    -- one human-named class (plan §3.4).
+    test "replaces the expected-set when the parser consumed nothing" do
+      let p = Parse.label("digit", Parse.alt(Parse.lit("0"), Parse.lit("1")))
+      match Parse.run(p, "z") do
+        Ok(_) -> assert false
+        Err(e) ->
+          match e.expected do
+            Cons(ExpLabel(n), Nil) -> assert (n == "digit")
+            _                      -> assert false
+          end
+      end
+    end
+
+    -- The consumed/not-consumed rule: if the parser got somewhere before
+    -- failing, its specific inner error is more useful than the label, so the
+    -- label must not hide it.
+    test "keeps the inner error when the parser consumed input" do
+      let p = Parse.label("pair", Parse.and_then(Parse.lit("ab"), Parse.lit("cd")))
+      match Parse.run(p, "abZZ") do
+        Ok(_) -> assert false
+        Err(e) ->
+          assert (e.pos == 2)
+          match e.expected do
+            Cons(ExpLit(s), Nil) -> assert (s == "cd")
+            _                    -> assert false
+          end
+      end
+    end
+
+  end
+
+end
+end
