@@ -2427,6 +2427,8 @@ let builtin_bindings : (string * scheme) list =
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));
     ("mailbox_size", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
+    (* Task 6: scheduler observability — raw stat read by index. *)
+    ("sched_stat",   Mono (TArrow (t_int, t_int)));
     (* Phase 4: Actor state introspection — reads a named field from actor state *)
     ("get_actor_field", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_option b))));
     (* Phase 4: Flush the async message queue — runs all pending handlers *)

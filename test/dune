@@ -4603,3 +4603,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/mailbox_depth.expected native_mailbox_depth.out)))
+
+; ── sched_stat builtin + Scheduler module reads real scheduler counters ──
+; (compiled) ────────────────────────────────────────────────────────────
+; march_sched_stat exposes live-proc/spawn/runq/timer counters by index;
+; Scheduler wraps it as stdlib surface. A running compiled program always
+; has >=1 live proc (main itself) and >=1 total spawn, and an unknown index
+; must read 0 (forward-compatible with later-task counters). Compile
+; natively, run, diff stdout.
+(rule
+ (targets native_sched_stats native_sched_stats.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/sched_stats.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_sched_stats
+        native/sched_stats.march)
+   (with-stdout-to native_sched_stats.out
+        (system "./native_sched_stats")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/sched_stats.expected native_sched_stats.out)))

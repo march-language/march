@@ -306,6 +306,20 @@ int          march_sched_send(march_proc *target, void *msg);
  * mbox_lock. Returns 0 if p is NULL. */
 int64_t      march_sched_mbox_count(march_proc *p);
 
+/* ── Cross-file stat counters (indices 3-5 of march_sched_stat) ─────────
+ * Reserved slots bumped from outside march_scheduler.c (march_runtime.c and
+ * later scheduler features) — exposed as a raw array so new counters don't
+ * need new symbols, just a new reserved index. */
+extern _Atomic int64_t march_stat_counters[8];
+#define MARCH_STAT_STACK_FAIL       3
+#define MARCH_STAT_MSGS_DROPPED     4
+#define MARCH_STAT_STACKS_RECYCLED  5
+
+/* Observability: a single raw stat read by index. See the index contract in
+ * march_stat_counters' comment above and stdlib/scheduler.march's `stat`
+ * doc. Unknown indices return 0 (forward-compatible with new counters). */
+int64_t      march_sched_stat(int64_t which);
+
 /* Sentinel returned by march_sched_recv when the process was woken without a
  * message (killed or spurious wakeup).  This is the address of a static C
  * variable — never a valid March heap object or tagged integer.

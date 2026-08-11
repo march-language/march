@@ -207,6 +207,12 @@ static pthread_mutex_t       g_runq_mu   = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic(march_proc *) g_runq_head = NULL;
 static march_proc           *g_runq_tail = NULL;
 
+/* Instantaneous depth of the global run queue, exposed via march_sched_stat
+ * index 2. Bumped alongside the push/pop above; both call sites already hold
+ * g_runq_mu, but the counter is read unlocked by the stat reader so it uses
+ * relaxed atomics rather than plain state. */
+static _Atomic int64_t       g_runq_len  = 0;
+
 static void global_runq_push(march_proc *p) {
     dbg_mark_enqueued(p, "global_runq_push");
     p->next = NULL;
@@ -218,6 +224,7 @@ static void global_runq_push(march_proc *p) {
     }
     g_runq_tail = p;
     pthread_mutex_unlock(&g_runq_mu);
+    atomic_fetch_add_explicit(&g_runq_len, 1, memory_order_relaxed);
 }
 
 static march_proc *global_runq_pop(void) {
@@ -235,8 +242,34 @@ static march_proc *global_runq_pop(void) {
         p->next = NULL;
     }
     pthread_mutex_unlock(&g_runq_mu);
-    if (p) dbg_mark_dequeued(p, "global_runq_pop");
+    if (p) {
+        dbg_mark_dequeued(p, "global_runq_pop");
+        atomic_fetch_sub_explicit(&g_runq_len, 1, memory_order_relaxed);
+    }
     return p;
+}
+
+/* Cross-file stat counters (indices 3-5 bumped from march_runtime.c /
+ * later scheduler features). Exposed raw so new counters don't need new
+ * symbols. See MARCH_STAT_* in march_scheduler.h. */
+_Atomic int64_t march_stat_counters[8];
+
+int64_t march_sched_stat(int64_t which) {
+    switch (which) {
+    case 0: return atomic_load_explicit(&g_live_procs, memory_order_relaxed);
+    case 1: return atomic_load_explicit(&g_next_pid,   memory_order_relaxed);
+    case 2: return atomic_load_explicit(&g_runq_len,   memory_order_relaxed);
+    case 3: case 4: case 5:
+        return atomic_load_explicit(&march_stat_counters[which],
+                                    memory_order_relaxed);
+    case 6: {
+        pthread_mutex_lock(&g_timer_mu);
+        int64_t n = g_timer_len;
+        pthread_mutex_unlock(&g_timer_mu);
+        return n;
+    }
+    default: return 0;
+    }
 }
 
 static _Thread_local march_scheduler *tl_sched = NULL;

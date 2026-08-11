@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Scheduler` stdlib module + `sched_stat` builtin** — runtime observability
+  for the actor/task scheduler: `Scheduler.live_procs()`, `total_spawned()`,
+  `runq_depth()`, `dropped_messages()`, and a raw `stat(i : Int) : Int`
+  escape hatch. Backed by `march_sched_stat(which)` in the C runtime, which
+  reads `g_live_procs`/`g_next_pid`/a new `g_runq_len` counter/the Task 2
+  timer heap length directly; indices 3-5 (stack-alloc failures, dropped
+  messages, recycled stacks) are reserved for later tasks and read 0 until
+  wired up. This is the load-shedding substrate: a supervisor or ingress
+  actor can poll these counters to decide when to shed. The interpreter
+  reports the subset meaningful without the C scheduler (live/spawned actor
+  counts); unknown indices read 0 on both backends.
 - Scheduler timers: green threads can park with a deadline (runtime-internal;
   enables Actor.call deadline waits and supervisor backoff).
 - **`NativeArray` gained narrow element widths: f32, i32, u8** — both

@@ -780,6 +780,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_monitor(ptr %watcher, ptr %target)" };
   { march_name = "mailbox_size"; c_name = Some "march_mailbox_size"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_mailbox_size(ptr %pid)" };
+  { march_name = "sched_stat"; c_name = Some "march_sched_stat"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_sched_stat(i64 %which)" };
   { march_name = "run_until_idle"; c_name = Some "march_run_until_idle"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_run_until_idle()" };
   { march_name = "register_resource"; c_name = Some "march_register_resource"; ret_ty = Some Tir.TUnit;
@@ -1451,6 +1453,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_demonitor";
   PDeclare "march_monitor";
   PDeclare "march_mailbox_size";
+  PDeclare "march_sched_stat";
   PDeclare "march_run_until_idle";
   PDeclare "march_register_resource";
   PDeclare "march_get_cap";

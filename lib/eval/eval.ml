@@ -4088,6 +4088,15 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  ; ("sched_stat", VBuiltin ("sched_stat", function
+        (* No C scheduler in the interpreter; report what's meaningful:
+           0 = live actors, 1 = total actors ever spawned. Everything else
+           (runq depth, dropped/recycled counters, timer heap) has no
+           interpreted analogue, so it reads 0 like an unknown index. *)
+        | [VInt 0] -> VInt (Hashtbl.length actor_registry)
+        | [VInt 1] -> VInt !next_pid
+        | [VInt _] -> VInt 0
+        | _ -> eval_error "sched_stat: expected Int"))
   ; ("actor_get_int", VBuiltin ("actor_get_int", function
         (* Access actor state by field index and return the Int value.
            Mirrors the compiled-mode march_actor_get_int(actor_ptr, index).
