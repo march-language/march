@@ -2973,13 +2973,22 @@ let record_update_converged_unit_tests = [
 
 (** A trivial module that exercises the full compile pipeline (parse through
     llvm-emit) without depending on anything exotic. *)
+(* The probe must be CONTENT-UNIQUE per run. `--compile` is content-addressed
+   (.march/cas/artifacts-v2): compiling a byte-identical program a second time
+   returns the cached artifact and never runs the frontend, so no `[timings]`
+   line is emitted and this test fails — on a warm cache only. That made it
+   pass locally on a cold cache and fail in CI, which restores one. The nonce
+   below gives every run a fresh cache key so the frontend always runs; the
+   test is about timing INSTRUMENTATION, not about cache behaviour. *)
 let timings_probe_source =
+  Printf.sprintf
   "mod TimingsProbe do\n\
   \  needs IO.Console\n\
+  \  -- cache-buster %d-%d\n\
   \  fn main(_cap_console : Cap(IO.Console)) do\n\
   \    println(to_string(1 + 1))\n\
   \  end\n\
-   end\n"
+   end\n" (Unix.getpid ()) (int_of_float (Unix.gettimeofday () *. 1000.))
 
 let test_timings_covers_frontend () =
   match Lazy.force march_bin_opt with
