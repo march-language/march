@@ -1498,6 +1498,7 @@ let test_supervision_task_spawn_link_completes () =
     cancelled or returns an error. *)
 let test_supervision_task_spawn_link_crash_propagates () =
   let env = eval_module {|mod Test do
+  needs IO.Spawn
     actor A do
       state { x : Int }
       init { x: 0 }
@@ -5483,7 +5484,7 @@ let test_compiled_pmap_matches_map () =
     "mod PmapParity do\n\
     \  needs IO.Process\n\
     \  needs IO.Spawn\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) : Unit do\n\
     \    let xs = List.range(0, 2000)\n\
     \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
     \    let flt_ok = List.pfilter(xs, fn x -> x % 2 == 0) == List.filter(xs, fn x -> x % 2 == 0)\n\
@@ -10177,7 +10178,7 @@ let test_compile_succeeds_from_other_cwd () =
   output_string oc
     "mod OtherCwd do\n\
     \  needs IO.Console\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    println(\"hi\")\n\
     \  end\n\
      end\n";
@@ -10263,7 +10264,7 @@ let test_compiled_recursive_closure_capture () =
     \    end\n\
     \    go(1, 0)\n\
     \  end\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    if f(11) == 11 do () else process_exit(1) end\n\
     \  end\n\
      end\n";
@@ -10313,7 +10314,7 @@ let test_compiled_p12_type_preserving_alias () =
   output_string oc
     "mod P12Regress do\n\
     \  needs IO.Process\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    if List.length(List.range(0, 5)) == 5 do () else process_exit(1) end\n\
     \  end\n\
      end\n";
@@ -10343,7 +10344,7 @@ let test_compiled_sortby_heap_capturing_comparator () =
   output_string oc
     "mod SortByRegress do\n\
     \  needs IO.Process\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    let xs = List.range(0, 98)\n\
     \    let data = List.range(0, 5)\n\
     \    let cmp = fn (a : Int, b : Int) ->\n\
@@ -10403,7 +10404,7 @@ let test_compiled_dual_position_owned_borrowed () =
     \      \"short\"\n\
     \    end\n\
     \  end\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let s = \"hello-world-this-is-a-long-string-\" ++ to_string(37)\n\
     \    let r = both(s, s, 1)\n\
     \    println(r)\n\
@@ -10444,7 +10445,7 @@ let test_compiled_file_open_err_is_real_fileerror () =
     "mod FileOpenErrRegress do\n\
     \  needs IO.FileRead\n\
     \  needs IO.Console\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do\n\
     \    match file_open(\"/nonexistent/march_fileopenerr_test_xyz/does/not/exist\") do\n\
     \    Ok(_) -> println(\"unexpected-ok\")\n\
     \    Err(e) -> println(to_string(e))\n\
@@ -10508,7 +10509,7 @@ let test_compiled_fbip_arity_no_overflow () =
     \  pfn mk_holder(n : Int) : Holder(Int, Int, Int, Int, Int) do\n\
     \    if n > 0 do Small(n) else Big(n, n, n, n, n) end\n\
     \  end\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let n = churn(3)\n\
     \    let dead = mk_holder(n)\n\
     \    let q = mk_holder(n + 91)\n\
@@ -10570,7 +10571,7 @@ let test_compiled_actor_niche_msg_run_until_idle_kill () =
     \      state\n\
     \    end\n\
     \  end\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let pid = spawn(Counter)\n\
     \    println(\"alive_before=\" ++ bool_to_string(is_alive(pid)))\n\
     \    send(pid, Inc(10))\n\
@@ -10630,7 +10631,7 @@ let test_compiled_actor_program_exits_without_kill () =
     \      state\n\
     \    end\n\
     \  end\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let pid = spawn(Counter)\n\
     \    send(pid, Inc(7))\n\
     \    send(pid, Probe())\n\
@@ -10701,7 +10702,7 @@ let test_compiled_toml_section_4keys () =
     \      None -> process_exit(1)\n\
     \    end\n\
     \  end\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    let src = \"[package]\\nk1 = \\\"v1\\\"\\nk2 = \\\"v2\\\"\\nk3 = \\\"v3\\\"\\nk4 = \\\"v4\\\"\\n\"\n\
     \    match Toml.parse(src) do\n\
     \      Ok(root) ->\n\
@@ -10766,7 +10767,7 @@ let test_compiled_record_field_poly_mono () =
     \    Some(ct) -> String.concat(\"--\", ct)\n\
     \    end\n\
     \  end\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    let conn = { hdrs : Cons((\"ct\", \"boundaryval\"), Nil) }\n\
     \    if run(conn) == \"--boundaryval\" do () else process_exit(1) end\n\
     \  end\n\
@@ -10831,7 +10832,7 @@ let test_compiled_record_put_large_even_int () =
       \      go2(i - 1, acc + get_i(u, \"a\") + get_i(u, \"b\") + get_i(u, \"c\"))\n\
       \    end\n\
       \  end\n\
-      \  fn main() : Unit do\n\
+      \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
       \    let one = record_put(record_from_list([(\"a\", 1)]), \"a\", 4096)\n\
       \    if get_i(one, \"a\") == 4096 do () else process_exit(1) end\n\
       \    let n = 20000\n\
@@ -10877,7 +10878,7 @@ let test_compiled_hot_reload_dispatch () =
     \    fn b(n : Int) : Int do if n <= 0 do 0 else b(n - 1) + 1 end end\n\
     \    fn a(n : Int) : Int do b(n) end\n\
     \  end\n\
-    \  fn main() do println(if Core.a(5) > 3 do \"dispatch works\" else \"no\" end) end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do println(if Core.a(5) > 3 do \"dispatch works\" else \"no\" end) end\n\
      end\n";
   close_out oc;
   (* Read the whole stdout of a command (trimmed). *)
@@ -10978,7 +10979,7 @@ let hcr_manifest_caps_fixture_src =
   \  mod Pure do\n\
   \    fn add(a : Int, b : Int) : Int do a + b end\n\
   \  end\n\
-  \  fn main() do\n\
+  \  fn main(_cap_console : Cap(IO.Console)) do\n\
   \    Core.logger(\"hi\")\n\
   \    println(Pure.add(2, 3))\n\
   \  end\n\
@@ -11181,7 +11182,7 @@ let hcr_manifest_disjoint_caps_fixture_src =
   \    let _ = file_write(path, \"data\")\n\
   \    0\n\
   \  end\n\
-  \  fn main() do\n\
+  \  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do\n\
   \    println(int_to_string(handle(1)))\n\
   \    println(int_to_string(writer(\"/tmp/march_hcr_disjoint_caps_test.txt\")))\n\
   \  end\n\
@@ -11336,7 +11337,7 @@ let test_string_stats_histogram_exact () =
       \      big(i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
-      \  fn main() do\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
       \    println(to_string(small(0, 100, 0) + big(0, 100, 0)))\n\
       \  end\n\
        end\n"
@@ -11369,7 +11370,7 @@ let test_string_stats_copy_bytes () =
       \      go(buf, i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
-      \  fn main() do\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
       \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
       \    println(to_string(go(buf, 0, 100, 0)))\n\
       \  end\n\
@@ -11403,7 +11404,7 @@ let test_string_stats_copy_bytes_byte_loops () =
       \      go(buf, i + 1, n, acc + String.byte_size(lo))\n\
       \    end\n\
       \  end\n\
-      \  fn main() do\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
       \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
       \    println(to_string(go(buf, 0, 50, 0)))\n\
       \  end\n\
@@ -11421,7 +11422,7 @@ let test_string_stats_copy_bytes_byte_loops () =
 let test_string_stats_off_by_default () =
   with_compiled_program ~tag:"march_strstats_off" ~env_prefix:""
     ~src_text:
-      "mod Off do\n  needs IO.Console\n  fn main() do println(String.repeat(\"x\", 3)) end\nend\n"
+      "mod Off do\n  needs IO.Console\n  fn main(_cap_console : Cap(IO.Console)) do println(String.repeat(\"x\", 3)) end\nend\n"
     (fun err_file ->
        let contents = read_file_contents err_file in
        Alcotest.(check bool) "no stats emitted without the env var" false
@@ -11460,7 +11461,7 @@ let index_of_from_probe_src =
   \    None    -> \"none\"\n\
   \    end\n\
   \  end\n\
-  \  fn main() do\n\
+  \  fn main(_cap_console : Cap(IO.Console)) do\n\
   \    let s = \"a,b,c\"\n\
   \    println(render(String.index_of_from(s, \",\", 0)))\n\
   \    println(render(String.index_of_from(s, \",\", 2)))\n\
@@ -11527,7 +11528,7 @@ let char_from_int_probe_src =
   \      rt(n + 1, acc + good)\n\
   \    end\n\
   \  end\n\
-  \  fn main() do\n\
+  \  fn main(_cap_console : Cap(IO.Console)) do\n\
   \    println(to_string(rt(0, 0)))\n\
   \    println(to_string(char_to_int(char_from_int(256))))\n\
   \    println(to_string(char_to_int(char_from_int(511))))\n\
@@ -11587,7 +11588,7 @@ let search_edge_probe_src =
   \    None    -> \"none\"\n\
   \    end\n\
   \  end\n\
-  \  fn main() do\n\
+  \  fn main(_cap_console : Cap(IO.Console)) do\n\
   \    println(render(String.index_of(\"abcabd\", \"abd\")))\n\
   \    println(render(String.index_of(\"aaaa\", \"aaaa\")))\n\
   \    println(render(String.index_of(\"aaa\", \"aaaa\")))\n\
@@ -11641,7 +11642,7 @@ let test_concat_chain_single_allocation () =
       \      go(a, b, i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
-      \  fn main() do println(to_string(go(\"xx\", \"yy\", 0, 100000, 0))) end\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do println(to_string(go(\"xx\", \"yy\", 0, 100000, 0))) end\n\
        end\n"
     (fun err_file ->
        let allocs = string_stat_of ~stderr_file:err_file "allocs" in
@@ -11668,7 +11669,7 @@ let test_concat_chain_values () =
   let src =
     "mod CatVal do\n\
     \  needs IO.Console\n\
-    \  fn main() do\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
     \    let a = \"a\"\n\
     \    let e = \"\"\n\
     \    println(a ++ a)\n\
@@ -11806,7 +11807,7 @@ let test_compiled_sanitize_clean_exit () =
   output_string oc
     "mod SanExit do\n\
     \  needs IO.Console\n\
-    \  fn main() do println(\"sanitize ok\") end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do println(\"sanitize ok\") end\n\
      end\n";
   close_out oc;
   let bin = Filename.concat tmp "sanexit_bin" in
@@ -11883,7 +11884,7 @@ let test_compiled_io_read_byte () =
     output_string oc
       "mod App do\n\
     \  needs IO.Console\n\
-      \  fn main() do\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
       \    let a = IO.read_byte()\n\
       \    let b = IO.read_byte()\n\
       \    let c = IO.read_byte()\n\
@@ -11937,7 +11938,7 @@ let test_compiled_helper_name_collision () =
     \      if List.length(lst) == 3 do go(i + 1, n) else 1 end\n\
     \    end end\n\
     \  end\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    if go(0, 5) == 0 do () else process_exit(1) end\n\
     \  end\n\
      end\n";
@@ -11977,7 +11978,7 @@ let test_compiled_builtin_first_class_value () =
     \  fn apply1(f : (String) -> Int, s : String) : Int do\n\
     \    f(s)\n\
     \  end\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    if apply1(string_length, \"hello\") == 5 do () else process_exit(1) end\n\
     \  end\n\
      end\n";
@@ -12013,7 +12014,7 @@ let test_compiled_vault_scalar_roundtrip () =
     "mod VaultScalar do\n\
     \  needs IO.Process\n\
     \  needs IO.Mut\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
     \    let t = Vault.new(\"vs_test\")\n\
     \    Vault.set(t, \"b\", true)\n\
     \    Vault.set(t, \"n\", 4242)\n\
@@ -12065,7 +12066,7 @@ let vault_update_src =
   \  fn inc(n) do\n\
   \    n + 1\n\
   \  end\n\
-  \  fn main() : Unit do\n\
+  \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
   \    let t = Vault.new(\"vu_test\")\n\
   \    Vault.set(t, \"n\", 1)\n\
   \    Vault.update(t, \"n\", fn n -> n + 1)\n\
@@ -12139,7 +12140,7 @@ let test_compiled_string_to_int_overflow_is_none () =
     \      None -> false\n\
     \    end\n\
     \  end\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    -- Int.min (-4611686018427387904) has no valid literal spelling: its\n\
     \    -- own magnitude, 4611686018427387904, exceeds the max POSITIVE March\n\
     \    -- literal (4611686018427387903) and the lexer rejects it before the\n\
@@ -12183,7 +12184,7 @@ let test_compiled_aliased_arg_no_double_free () =
   output_string oc
     "mod AliasDup do\n\
     \  needs IO.Process\n\
-    \  fn main() : Unit do\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
     \    let a = BigInt.from_int(7)\n\
     \    let sq = BigInt.mul(a, a)          -- f(x, x): a consumed twice\n\
     \    let s0 = BigInt.from_int(314159265358979)\n\
@@ -12251,10 +12252,11 @@ let test_interp_http_server_idle_client_does_not_block_others () =
     let oc = open_out src in
     output_string oc (Printf.sprintf
       "mod Srv do\n\
+      \  needs IO.NetListen\n\
       \  fn router(conn) do\n\
       \    conn |> HttpServer.text(200, \"hello\")\n\
       \  end\n\
-      \  fn main() do\n\
+      \  fn main(_cap_netlisten : Cap(IO.NetListen)) do\n\
       \    HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
       \    |> HttpServer.listen()\n\
@@ -12397,6 +12399,8 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
     let oc = open_out src in
     output_string oc (Printf.sprintf
       "mod Srv do\n\
+      \  needs IO.NetListen\n\
+      \  needs IO.WebSocket\n\
       \  fn ws_loop(sock) do\n\
       \    match WebSocket.recv(sock) do\n\
       \    TextFrame(m) -> do\n\
@@ -12413,7 +12417,7 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
       \      conn |> HttpServer.text(200, \"hello\")\n\
       \    end\n\
       \  end\n\
-      \  fn main() do\n\
+      \  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_websocket : Cap(IO.WebSocket)) do\n\
       \    HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
       \    |> HttpServer.listen()\n\
