@@ -350,6 +350,21 @@ int64_t march_now_ms(void);
  * possible with either code; callers loop on their own condition. */
 int march_sched_park_self_until(int64_t deadline_ms);
 
+/* Like march_sched_recv, but bounded by a deadline (march_now_ms clock)
+ * instead of blocking forever: holds the mailbox lock across BOTH the
+ * emptiness check and the PROC_PARKED store (same discipline as
+ * march_sched_recv) so a concurrent march_sched_send can never observe this
+ * process as PROC_RUNNING in the gap between the two -- unlike pairing
+ * march_sched_try_recv2 with march_sched_park_self_until, which has exactly
+ * that lost-wakeup window.
+ *
+ * Returns the message pointer on success, or MARCH_RECV_NO_MSG if the
+ * deadline passed OR the process was woken spuriously with an empty
+ * mailbox before the deadline -- callers must re-check march_now_ms()
+ * against their own deadline to tell the two apart and loop if time
+ * remains (same contract as march_sched_park_self_until). */
+void *march_sched_recv_until(int64_t deadline_ms);
+
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);

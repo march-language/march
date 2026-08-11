@@ -1603,6 +1603,83 @@ int march_sched_park_self_until(int64_t deadline_ms) {
                                            : MARCH_PARK_WOKEN;
 }
 
+/* noinline: same migration-barrier rationale as march_sched_recv/
+ * march_sched_park_self_until above — this function contains a
+ * swapcontext-capable call, so no caller may have its TLS reads hoisted
+ * across the switch. */
+__attribute__((noinline))
+void *march_sched_recv_until(int64_t deadline_ms) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p) return MARCH_RECV_NO_MSG;
+
+    /* Hold mbox_lock across BOTH the emptiness check and the PROC_PARKED
+     * store — exactly march_sched_recv's discipline, and the fix for the
+     * bug this primitive replaces: pairing march_sched_try_recv2 (which
+     * takes and releases mbox_lock on its own) with
+     * march_sched_park_self_until (which stores PROC_PARKED with no lock
+     * at all) left a window between the two calls where march_sched_send
+     * could observe this process as PROC_RUNNING — its wake is gated
+     * `if (st == PROC_WAITING || st == PROC_PARKED)` — and skip the wake
+     * entirely, so a reply landing in that window was only ever picked up
+     * when the deadline timer fired. Locking across both steps here closes
+     * that window: march_sched_send cannot observe PROC_RUNNING while
+     * mbox_push has already happened but our PROC_PARKED store has not. */
+    mbox_lock_acquire(p);
+    if (p->mailbox) {
+        void *msg = mbox_pop(p);
+        mbox_lock_release(p);
+        return msg;
+    }
+    if (march_now_ms() >= deadline_ms) {
+        mbox_lock_release(p);
+        return MARCH_RECV_NO_MSG;
+    }
+    if (!atomic_load_explicit(&g_preempt_active, memory_order_acquire)) {
+        /* No timer service running: degrade to plain yield (mirrors
+         * march_sched_park_self_until's fallback) so the caller's
+         * deadline loop still makes progress instead of parking with no
+         * one able to service the timer heap. */
+        mbox_lock_release(p);
+        march_sched_yield();
+        return MARCH_RECV_NO_MSG;
+    }
+
+    /* Register the deadline BEFORE releasing mbox_lock/parking, still
+     * under the lock.
+     *
+     * Lock order: this acquires g_timer_mu (inside timer_heap_push) while
+     * holding mbox_lock — order mbox_lock -> g_timer_mu. The only other
+     * g_timer_mu holder is timer_service (called from preempt_daemon),
+     * which takes g_timer_mu, pops expired entries, UNLOCKS g_timer_mu,
+     * and only then calls march_sched_wake(victim) — march_sched_wake
+     * itself never touches mbox_lock (it only reads/writes target->status
+     * and target->wake_pending and pushes to the global run queue). So no
+     * path ever holds g_timer_mu while trying to acquire mbox_lock; the
+     * reverse order (g_timer_mu -> mbox_lock) never occurs, so this cannot
+     * deadlock against timer_service. */
+    timer_heap_push(deadline_ms, p);
+    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
+    mbox_lock_release(p);
+
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
+    swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    MARCH_ASAN_SWITCH_DONE(p);
+    /* Context is now saved.  The scheduler (sched_loop) transitions us from
+     * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
+     * its side, making it safe for a waker to push us to a deque. */
+
+    mbox_lock_acquire(p);
+    void *msg;
+    if (p->mailbox) {
+        msg = mbox_pop(p);
+    } else {
+        msg = MARCH_RECV_NO_MSG;
+    }
+    mbox_lock_release(p);
+    return msg;
+}
+
 /* SIGUSR1 handler: zero the local reduction counter.  The handler is
  * registered with SA_RESTART so that interruptible syscalls are retried
  * automatically on platforms that support it. */

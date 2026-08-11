@@ -2999,6 +2999,15 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * → march_sched_wake) or lets the timer service fire at the deadline, so
      * a pending timed call no longer consumes a dispatch slot every turn.
      *
+     * march_sched_recv_until (not march_sched_try_recv2 +
+     * march_sched_park_self_until) is deliberate: it holds the mailbox lock
+     * across both the emptiness check and the PROC_PARKED store, closing a
+     * lost-wakeup window where march_sched_send could observe this proc as
+     * still PROC_RUNNING between an unlocked emptiness check and a separate
+     * PROC_PARKED store, and skip the wake — deferring delivery of an
+     * already-arrived reply until the full timeout elapsed. See
+     * march_sched_recv_until's doc comment in march_scheduler.h/.c.
+     *
      * The Err payloads match the interpreter's no-reply message exactly so
      * both backends surface the same value.
      *
@@ -3009,17 +3018,13 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * a timeout. */
     int64_t deadline_ms = march_now_ms() + timeout_ms;
     for (;;) {
-        void *msg = NULL;
-        if (march_sched_try_recv2(&msg)) {
-            if (msg == MARCH_RECV_NO_MSG)
-                return mk_err_cstr("no reply (timeout or unhandled Call)");
+        void *msg = march_sched_recv_until(deadline_ms);
+        if (msg != MARCH_RECV_NO_MSG)
             return mk_ok(msg);
-        }
         if (march_now_ms() >= deadline_ms)
             return mk_err_cstr("no reply (timeout or unhandled Call)");
-        march_sched_park_self_until(deadline_ms);
-        /* Woken (reply arrived → sender's march_sched_send woke us), timer
-         * fired, or spurious — the loop re-checks mailbox then deadline. */
+        /* Woken with an empty mailbox but time remains (spurious, or the
+         * no-preempt-daemon degrade-to-yield path) — loop and try again. */
     }
 }
 
