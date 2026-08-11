@@ -10526,6 +10526,76 @@ let test_stage_d_with_stdlib_prepended () =
     "a prelude-mediated console use still trips the missing-grant error"
     true (has_error_with errors "declares no grant")
 
+(* R1 stage D, the migration half: the diagnostic carries a MECHANICAL fix.
+   Under a hard flip this is the only mitigation code outside this repo gets —
+   the grant is not a judgement call, it is `caps(main)`, which the compiler
+   has already computed by the time it reports the error. Emitting it as a
+   `FReplace` over the parameter list lets `forge fix` apply it. *)
+let stage_d_fix_of src =
+  let ctx = typecheck src in
+  List.fold_left
+    (fun acc (d : March_errors.Errors.diagnostic) ->
+       match acc, d.fix with
+       | Some _, _ -> acc
+       | None, Some (March_errors.Errors.FReplace { text; span }) -> Some (text, span)
+       | None, _ -> None)
+    None
+    (List.rev ctx.March_errors.Errors.diagnostics)
+
+let test_stage_d_emits_replace_fix () =
+  match
+    stage_d_fix_of {|mod StageDFix do
+      needs IO.Console
+      fn main() : () do
+        println("hi")
+      end
+    end|}
+  with
+  | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
+  | Some (text, _) ->
+    Alcotest.(check string)
+      "the fix is the parameter list the compiler computed"
+      "(_cap_console : Cap(IO.Console))" text
+
+let test_stage_d_fix_spans_the_parameter_list () =
+  (* The span must cover `()` and NOTHING else. Replacing the function NAME
+     instead would produce `fn main(_cap_console : Cap(IO.Console))() : ()`,
+     which is why `fn_clause` had to grow a parameter-list span rather than
+     reuse one it already had. *)
+  match
+    stage_d_fix_of {|mod StageDFixSpan do
+      needs IO.Console
+      fn main() : () do
+        println("hi")
+      end
+    end|}
+  with
+  | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
+  | Some (_, span) ->
+    Alcotest.(check int) "fix starts and ends on one line"
+      span.March_ast.Ast.start_line span.March_ast.Ast.end_line;
+    Alcotest.(check int) "the replaced text is exactly `()`" 2
+      (span.March_ast.Ast.end_col - span.March_ast.Ast.start_col)
+
+let test_stage_d_fix_covers_multiple_capabilities () =
+  match
+    stage_d_fix_of {|mod StageDFixMulti do
+      needs IO.Console
+      needs IO.FileWrite
+      fn main() : () do
+        match file_write("/tmp/stage_d_fix", "d") do
+          Ok(_) -> println("ok")
+          Err(_) -> println("e")
+        end
+      end
+    end|}
+  with
+  | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
+  | Some (text, _) ->
+    Alcotest.(check string)
+      "every reached capability appears in the generated parameter list"
+      "(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite))" text
+
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
 (* Helper: run typecheck then the standalone cap_infer pass.
@@ -14396,6 +14466,9 @@ let compiler_suites =
           Alcotest.test_case "parameterless pure main compiles"    `Quick test_parameterless_main_that_is_pure_still_compiles;
           Alcotest.test_case "module without main is not gated"    `Quick test_module_without_main_is_not_gated;
           Alcotest.test_case "real stdlib-prepended shape"         `Quick test_stage_d_with_stdlib_prepended;
+          Alcotest.test_case "diagnostic carries a replace fix"     `Quick test_stage_d_emits_replace_fix;
+          Alcotest.test_case "fix span covers exactly `()`"         `Quick test_stage_d_fix_spans_the_parameter_list;
+          Alcotest.test_case "fix lists every reached capability"   `Quick test_stage_d_fix_covers_multiple_capabilities;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;

@@ -12708,7 +12708,7 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
      [main_site] is found whether or not a grant is present, because stage D
      needs the span to report a MISSING grant — the case where [grants] is
      empty and the program is nonetheless not pure. *)
-  let main_site : (string list * Ast.span) option =
+  let main_site : (string list * Ast.span * Ast.span) option =
     List.find_map
       (function
         | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
@@ -12725,14 +12725,15 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
                     | Ast.FPPat _ -> [])
                  clause.Ast.fc_params
              in
-             Some (List.sort_uniq String.compare grants, clause.Ast.fc_span)
+             Some (List.sort_uniq String.compare grants, clause.Ast.fc_span,
+                   clause.Ast.fc_params_span)
            | [] -> None)
         | _ -> None)
       decls
   in
   let main_grant : (string list * Ast.span) option =
     match main_site with
-    | Some (_ :: _ as grants, span) -> Some (grants, span)
+    | Some ((_ :: _ as grants), span, _) -> Some (grants, span)
     | _ -> None
   in
   let main_closure () =
@@ -12759,7 +12760,7 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
      "outside" routes are handled elsewhere — FFI surfaces as `IO.Foreign`,
      and hot code reload is outside the claim entirely. *)
   (match main_site with
-   | Some ([], span) -> (
+   | Some ([], span, params_span) -> (
      match List.sort_uniq String.compare (main_closure ()) with
      | [] -> ()
      | caps ->
@@ -12781,17 +12782,29 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
                      | Some i -> String.sub c (i + 1) (String.length c - i - 1)
                      | None -> c
                    in
-                   Printf.sprintf "cap_%s : Cap(%s)"
+                   Printf.sprintf "_cap_%s : Cap(%s)"
                      (String.lowercase_ascii leaf) c)
                 named)
          in
-         Err.error env.errors ~span
+         (* The fix is MECHANICAL, not a suggestion: the grant a program must
+            declare IS `caps(main)`, which this check already computed in
+            order to report the error at all. Emitting it as a `FReplace` over
+            the parameter list lets `forge fix` apply it, which under a hard
+            flip is the only migration help code outside this repo gets.
+
+            The span has to be [fc_params_span] specifically — `main`'s NAME
+            span would yield `fn main(…)() : ()`, and the clause span covers
+            the body. That is why `fn_clause` grew the field. *)
+         Err.error_with_fix env.errors ~span
+           ~fix:(Err.FReplace
+                   { span = params_span; text = Printf.sprintf "(%s)" suggested })
            (Printf.sprintf
               "`main` performs IO but declares no grant. The program reaches \
                %s; a `main` with no capability parameter is granted nothing.\n\
                help: declare the grant `main` actually needs —\n\
               \        fn main(%s) : ()\n\
-               or grant everything with `fn main(cap : Cap(IO))`."
+               or grant everything with `fn main(cap : Cap(IO))`.\n\
+               `forge fix` can apply this."
               show_caps suggested))
    | _ -> ());
   match main_grant with

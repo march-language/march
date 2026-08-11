@@ -1148,6 +1148,7 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
       ; fc_guard  = None
       ; fc_body   = body
       ; fc_span   = fn_span
+      ; fc_params_span = fn_span
       }
     in
     { def with fn_clauses = [merged_clause] }
@@ -1255,6 +1256,7 @@ let rec desugar_decl (d : decl) : decl =
         fc_guard  = None;
         fc_body   = result_expr;
         fc_span   = sp;
+        fc_params_span = sp;
       }];
     } in
     DFn (init_fn, sp)
@@ -1310,6 +1312,7 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                    fc_guard = None;
                    fc_body = clause_body;
                    fc_span = m.md_name.span;
+                   fc_params_span = m.md_name.span;
                  }];
                  fn_bounds = [];
                } in
@@ -1347,6 +1350,7 @@ let mk_fn_def name params body : fn_def =
       fc_guard  = None;
       fc_body   = body;
       fc_span   = dummy_span;
+      fc_params_span = dummy_span;
     }] }
 
 (* ── Derive-expansion span uniquification ──────────────────────────────
@@ -1469,7 +1473,8 @@ let respan_fn_def (fd : fn_def) : fn_def =
         { fc_params = List.map respan_fn_param c.fc_params;
           fc_guard  = Option.map respan_expr c.fc_guard;
           fc_body   = respan_expr c.fc_body;
-          fc_span   = fresh_synthetic_span () }) fd.fn_clauses }
+          fc_span   = fresh_synthetic_span ();
+          fc_params_span = fresh_synthetic_span () }) fd.fn_clauses }
 
 (** Uniquify every span inside a derive-generated decl (the decl's own
     top-level span — the derive site — is kept: it is a real user span used
@@ -2652,6 +2657,7 @@ let gen_island_bridges (sp : span) : decl list =
         fc_guard  = None;
         fc_body   = body;
         fc_span   = sp;
+        fc_params_span = sp;
       }] }
   in
   (* update_json(state_json, msg_json) : String
@@ -2808,7 +2814,7 @@ let rec expand_defaults_decl (d : decl) : decl list =
            let all_call_args = req_args @ passed_default_args @ remaining_default_exprs in
            (* Call the full mangled version, not the original name *)
            let body = EApp (mk_var full_mangled, all_call_args, sp) in
-           let short_clause = { fc_params = short_params; fc_guard = None; fc_body = body; fc_span = sp } in
+           let short_clause = { fc_params = short_params; fc_guard = None; fc_body = body; fc_span = sp; fc_params_span = sp } in
            let short_def = { def with fn_clauses = [short_clause]; fn_ret_ty = None;
                                       fn_name = { def.fn_name with txt = mangled_name } } in
            DFn (short_def, sp)

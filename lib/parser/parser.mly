@@ -369,7 +369,7 @@ fn_bound_param:
   | name = lower_name; COLON; t = ty { (name, t) }
 
 fn_decl:
-  | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+  | FN; name = lower_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
@@ -379,12 +379,14 @@ fn_decl:
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
                              fc_body = body;
-                             fc_span = mk_span ($loc) }];
+                             fc_span = mk_span ($loc);
+                             fc_params_span =
+                               mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = [] },
            mk_span ($loc)) }
   | FN; name = lower_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
-    LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+    _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
@@ -394,10 +396,12 @@ fn_decl:
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
                              fc_body = body;
-                             fc_span = mk_span ($loc) }];
+                             fc_span = mk_span ($loc);
+                             fc_params_span =
+                               mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = bounds },
            mk_span ($loc)) }
-  | PFN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+  | PFN; name = lower_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
@@ -407,12 +411,14 @@ fn_decl:
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
                              fc_body = body;
-                             fc_span = mk_span ($loc) }];
+                             fc_span = mk_span ($loc);
+                             fc_params_span =
+                               mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = [] },
            mk_span ($loc)) }
   | PFN; name = lower_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
-    LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+    _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
@@ -422,7 +428,9 @@ fn_decl:
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
                              fc_body = body;
-                             fc_span = mk_span ($loc) }];
+                             fc_span = mk_span ($loc);
+                             fc_params_span =
+                               mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = bounds },
            mk_span ($loc)) }
   | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
@@ -1096,7 +1104,7 @@ block_expr:
         "I was expecting `=` in the let binding here:"
         (Some "let name = expr")
         $startpos($4) }
-  | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+  | FN; name = lower_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); DO; body = block_body; END
     { let simple_params = List.filter_map (function
         | FPNamed fp ->
