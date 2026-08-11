@@ -54,6 +54,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Actor.call with a timeout no longer busy-polls the scheduler while
+  waiting — N pending callers no longer steal CPU from the actor they are
+  waiting on.
 - **JS backend: `==`/`!=` on a non-primitive operand now compares
   structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
   (or an erased type variable that may hold one) lowered to JavaScript `===`,

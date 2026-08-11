@@ -1582,6 +1582,11 @@ static void timer_service(int64_t now_ms) {
 static _Atomic int  g_preempt_active = 0;
 static pthread_t    g_preempt_thread;
 
+/* noinline: same migration-barrier rationale as march_sched_yield above —
+ * this function contains a swapcontext-capable call (march_sched_park_self),
+ * so any caller looping around it (e.g. march_actor_call's deadline loop)
+ * must not have its TLS reads hoisted across the switch by the optimizer. */
+__attribute__((noinline))
 int march_sched_park_self_until(int64_t deadline_ms) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return MARCH_PARK_WOKEN;

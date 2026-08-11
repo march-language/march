@@ -2994,10 +2994,10 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         return mk_ok(result);
     }
 
-    /* Timed wait: poll the mailbox with cooperative yields until the
-     * deadline.  A parked-with-deadline mechanism needs timer support the
-     * scheduler doesn't have; replies are normally immediate, so the yield
-     * loop only spins for the (rare) slow-actor case, bounded by timeout_ms.
+    /* Timed wait: park with a deadline instead of busy yield-polling. The
+     * scheduler wakes us early on reply (march_actor_reply's march_sched_send
+     * → march_sched_wake) or lets the timer service fire at the deadline, so
+     * a pending timed call no longer consumes a dispatch slot every turn.
      *
      * The Err payloads match the interpreter's no-reply message exactly so
      * both backends surface the same value.
@@ -3007,10 +3007,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * exits and sends to dead procs are dropped); a long-lived green thread
      * mixing Actor.call and raw receive could observe a stale reply after
      * a timeout. */
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    int64_t deadline_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000
-                          + timeout_ms;
+    int64_t deadline_ms = march_now_ms() + timeout_ms;
     for (;;) {
         void *msg = NULL;
         if (march_sched_try_recv2(&msg)) {
@@ -3018,11 +3015,11 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
                 return mk_err_cstr("no reply (timeout or unhandled Call)");
             return mk_ok(msg);
         }
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        if (now_ms >= deadline_ms)
+        if (march_now_ms() >= deadline_ms)
             return mk_err_cstr("no reply (timeout or unhandled Call)");
-        march_sched_yield();
+        march_sched_park_self_until(deadline_ms);
+        /* Woken (reply arrived → sender's march_sched_send woke us), timer
+         * fired, or spurious — the loop re-checks mailbox then deadline. */
     }
 }
 
