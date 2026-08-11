@@ -19,7 +19,7 @@ pfn elapsed_ms(t0 : Float, t1 : Float) : Float do
   (t1 -. t0) *. 1000.0
 end
 
-fn main() : Unit do
+fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let n = 5000000
 
   -- sum_f32

@@ -31,7 +31,7 @@
 --     after the narrow-to-i32 store, and visible in the summed output.
 mod NarrowInline do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let f = NativeArray.make_f32(8, 1.5)
     let g = NativeArray.map_f32(f, fn x -> x *. 2.0 +. 1.0)
     println(NativeArray.sum_f32(g))          -- 8 * 4.0 = 32.0
