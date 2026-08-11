@@ -3932,10 +3932,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
-; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — everything except load/store,
-; which is Task 3): same t1-t8/t12 cases as test_stdlib_suite.ml's
-; "simd_vector" interpreter suite, printed to stdout so the compiled binary's
-; output can be diffed byte-for-byte against the interpreter's.
+; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,
+; pulled forward from the original Task 3 split; see llvm_emit.ml's SIMD
+; intercept-arm header comment): same t1-t8/t12 cases as
+; test_stdlib_suite.ml's "simd_vector" interpreter suite plus a minimal
+; load/store leg (t9/t10-lite), printed to stdout so the compiled binary's
+; output can be diffed byte-for-byte against the interpreter's. Task 3's
+; dedicated residency/bounds-panic/full-mem fixtures are separate, still open.
 (rule
  (targets simd_vector_core simd_vector_core.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3952,6 +3955,84 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/simd_vector_core.expected simd_vector_core.out)))
+
+; SIMD-across-actor-messages smoke test (review finding #2's witness attempt):
+; sends an I32x4 to an actor, which extracts a lane and replies with it via
+; Actor.call. NOTE (see march_message.c's copy_value MARCH_SIMD_TAG arm):
+; march_send does NOT currently call march_msg_copy/copy_value anywhere in
+; this runtime (grep confirms zero call sites outside march_message.c
+; itself) — same-process actors share one heap via plain march_alloc, so
+; this fixture does NOT exercise the cross-heap copy fix. It's kept as a
+; general SIMD-through-actor-mailbox correctness smoke test regardless; see
+; the Task 2 report's finding-#2 writeup for the full non-vacuousness check
+; (verified by temporarily disabling the fix — no behavior change).
+(rule
+ (targets simd_actor_msg simd_actor_msg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_actor_msg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_actor_msg
+        native/simd_actor_msg.march)
+   (with-stdout-to simd_actor_msg.out
+        (system "./simd_actor_msg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_actor_msg.expected simd_actor_msg.out)))
+
+; Witness for the march_poly_eq/march_poly_compare MARCH_SIMD_TAG fix
+; (review finding #1): List.member's `y == x` compares two generically-typed
+; (TVar) closure-captured operands, so both arrive boxed `ptr` and the
+; SIMD-vector `==` fast path in llvm_emit.ml (keyed on the emitted LLVM
+; type) does not fire — this exercises march_poly_compare (confirmed via
+; --emit-llvm: `y == x` here compiles to a `call i64 @march_poly_compare`,
+; because F32x4 has no type_def for ensure_adt_eq_fn to synthesize a direct
+; eq function). Verified non-vacuous: temporarily disabling the fix's
+; MARCH_SIMD_TAG arm in march_poly_compare turns line 2 (no content match)
+; from "false" into "true" (see the Task 2 report's finding-#1 writeup).
+(rule
+ (targets simd_poly_eq simd_poly_eq.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_poly_eq.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_poly_eq
+        native/simd_poly_eq.march)
+   (with-stdout-to simd_poly_eq.out
+        (system "./simd_poly_eq")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_poly_eq.expected simd_poly_eq.out)))
+
+; Witness for the march_value_to_string MARCH_SIMD_TAG fix (review finding
+; #3): an `~H` interpolation hole stringifies any non-String/non-IOList
+; value via march_value_to_string (same type-erased path
+; h_sigil_adt_interp.march already pins for user ADTs). Verified
+; non-vacuous: disabling the fix's MARCH_SIMD_TAG arm renders
+; "#&lt;tag:-4&gt;" instead of "F32x4[1., 2., 3., 4.]" (see the Task 2
+; report's finding-#3 writeup).
+(rule
+ (targets simd_to_string simd_to_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_to_string.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_to_string
+        native/simd_to_string.march)
+   (with-stdout-to simd_to_string.out
+        (system "./simd_to_string")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_to_string.expected simd_to_string.out)))
 
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)

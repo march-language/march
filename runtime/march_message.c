@@ -34,6 +34,13 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * circular-include avoidance as MARCH_STRING_TAG above). */
 #define MARCH_FLOAT_TAG   (-3)
 #define MARCH_FLOAT_BOX_SIZE  24u
+/* Boxed-SIMD-vector sentinel (must match march_runtime.h MARCH_SIMD_TAG). A
+ * SIMD box is [rc][tag][pad=kind][16-byte lane payload@16] = 32 bytes; the
+ * payload is raw lane bits (float/double/i32/i64/u8 lanes), NOT pointers —
+ * same hazard as MARCH_FLOAT_TAG above, same fix (copy opaquely). Kept in
+ * sync manually (same circular-include avoidance). */
+#define MARCH_SIMD_TAG    (-4)
+#define MARCH_SIMD_BOX_SIZE   32u
 
 /* Values below one OS page are unboxed scalars (inttoptr-encoded integers). */
 #define IS_HEAP_PTR(p)  ((uintptr_t)(p) >= 4096u)
@@ -169,6 +176,26 @@ static void *copy_value(march_heap_t *dst_heap, void *value, fwd_table *fwd) {
         ((msg_hdr *)nf)->rc = 1;
         fwd_insert(fwd, value, nf);
         return nf;
+    }
+
+    /* Boxed SIMD vector (march_simd_alloc, march_runtime.c): same hazard and
+     * same fix as the float-box arm above — the 16-byte lane payload at
+     * offset 16 is raw bits (float/double/i32/i64/u8 lanes depending on the
+     * `pad` kind byte), not a pointer field. Without this arm the generic
+     * n_fields-based field loop below would IS_HEAP_PTR-sniff the lane bits
+     * (garbage as a pointer) and either skip them silently (if they fail the
+     * heap-pointer guard, which most float/int lane bit patterns will) or —
+     * worse — read MARCH_ALLOC_META off whatever address the lane bits
+     * happen to decode to, on a value that was never n_fields-shaped in the
+     * first place (march_simd_alloc doesn't record alloc_meta the way the
+     * ADT ctor allocator does). Copy the 32-byte cell opaquely, like the
+     * float arm. */
+    if (h->tag == MARCH_SIMD_TAG) {
+        void *nv = march_process_alloc(dst_heap, MARCH_SIMD_BOX_SIZE);
+        memcpy(nv, value, MARCH_SIMD_BOX_SIZE);
+        ((msg_hdr *)nv)->rc = 1;
+        fwd_insert(fwd, value, nv);
+        return nv;
     }
 
     /* Recover field count from alloc_meta. */

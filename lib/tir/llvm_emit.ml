@@ -2896,10 +2896,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
 
   (* ── SIMD vector ops (Task 2) — inline register-resident lowering ────
-     Every `simd_<t>_<op>` builtin except load/store (Task 3, memory
-     traffic) lowers here directly to native LLVM vector instructions/
-     intrinsics instead of a runtime call — see the per-op recipe table in
-     .superpowers/sdd/2026-08-10-simd-vector-types/task-2-brief.md. Args
+     Every `simd_<t>_<op>` builtin, including `load`/`store` (bounds-checked
+     GEP+load / FBIP-COW store — originally scoped to Task 3, pulled forward
+     here because a whole-stdlib compile unconditionally compiles
+     stdlib/simd.march's load/store wrapper bodies, so a "fail if reached"
+     placeholder faulted on every such compile regardless of whether the
+     calling program itself used load/store), lowers here directly to
+     native LLVM vector instructions/intrinsics instead of a runtime call
+     — see the per-op recipe table in
+     .superpowers/sdd/2026-08-10-simd-vector-types/task-2-brief.md (and
+     task-3-brief.md's Step 2 for the load/store recipe specifically). Args
      arrive either already vector/boundary-typed (register-resident, from
      the ELet vector-slot fast path or a prior SIMD op's result) or boxed
      `ptr` (a function parameter or a value that crossed an erasure
@@ -2915,7 +2921,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let (ty, v) = List.nth arg_pairs i in coerce ctx ty v v_ty in
     let scalar_arg i =
       let (ty, v) = List.nth arg_pairs i in coerce ctx ty v boundary_ty in
-    let idx_arg i = snd (List.nth arg_pairs i) in
+    let idx_arg i =
+      let (ty, v) = List.nth arg_pairs i in coerce ctx ty v "i64" in
     let emit_splat_from_elem (e_v : string) : string =
       (* insertelement lane 0, then a zero-mask shufflevector broadcasts it
          to every lane — used by both `splat` and the shl/shr count. *)
@@ -3245,10 +3252,32 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        emit_label ctx ok_lbl;
        let byte_off = fresh ctx "voff" in
        emit ctx (Printf.sprintf "%s = mul i64 %s, %d" byte_off iv elem_size);
+       (* rc==1 fast path — same FBIP contract as native_f32_arr_set, which
+          gates on `IS_HEAP_PTR(arr) && rc == 1`. `arr_v` statically can only
+          ever be a genuine heap array (never a tagged scalar — its March
+          type is NativeF32Arr/etc), but the check is reproduced verbatim
+          (IS_HEAP_PTR = untagged, >= one page, sign bit clear) rather than
+          assumed, matching the C helper's own defensiveness exactly. *)
+       let arr_i = fresh ctx "varri" in
+       emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" arr_i arr_v);
+       let tagbit = fresh ctx "vhtag" in
+       emit ctx (Printf.sprintf "%s = and i64 %s, 1" tagbit arr_i);
+       let not_tagged = fresh ctx "vhnt" in
+       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 0" not_tagged tagbit);
+       let above_page = fresh ctx "vhpg" in
+       emit ctx (Printf.sprintf "%s = icmp uge i64 %s, 4096" above_page arr_i);
+       let positive = fresh ctx "vhpos" in
+       emit ctx (Printf.sprintf "%s = icmp sgt i64 %s, 0" positive arr_i);
+       let heap1 = fresh ctx "vheap" in
+       emit ctx (Printf.sprintf "%s = and i1 %s, %s" heap1 not_tagged above_page);
+       let is_heap = fresh ctx "vheap" in
+       emit ctx (Printf.sprintf "%s = and i1 %s, %s" is_heap heap1 positive);
        let rc = fresh ctx "vrc" in
        emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc arr_v);
+       let rc_uniq = fresh ctx "vrcu" in
+       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" rc_uniq rc);
        let uniq = fresh ctx "vuniq" in
-       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" uniq rc);
+       emit ctx (Printf.sprintf "%s = and i1 %s, %s" uniq is_heap rc_uniq);
        let reuse_lbl = fresh_block ctx "vst_reuse" in
        let fresh_lbl = fresh_block ctx "vst_fresh" in
        let merge_lbl = fresh_block ctx "vst_merge" in
@@ -3300,11 +3329,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         | None -> f.Tir.v_name
     in
     (* Guard against the coerce-catch-all class of bug: every simd_<t>_<op>
-       builtin (except load/store, which explicitly failwith's inside the
-       intercept arm above) must be caught by the [decode_simd_call] guard on
-       the dedicated SIMD arm above and never reach this generic call path —
-       reaching here for one means that arm's pattern/guard let it slip
-       through, which would otherwise silently degrade to an unresolved
+       builtin, including `load`/`store` (real lowerings now, not a
+       deferred failwith — see the intercept arm's header comment above),
+       must be caught by the [decode_simd_call] guard on the dedicated SIMD
+       arm above and never reach this generic call path — reaching here for
+       one means that arm's pattern/guard let it slip through, which would
+       otherwise silently degrade to an unresolved
        `call ptr @simd_..._add(...)` auto-declared extern (or worse, corrupt
        via the ("ptr", scalar) coerce catch-all). Cheap insurance, unreachable
        by construction. *)

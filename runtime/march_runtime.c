@@ -670,6 +670,105 @@ void march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len) {
     exit(1);
 }
 
+/* SIMD vector kind byte (see MARCH_SIMD_TAG's doc comment): 0=f32x4 1=f64x2
+ * 2=i32x4 3=i64x2 4=u8x16, stored in the hdr pad slot. Shared by
+ * [march_poly_eq]/[march_poly_compare] (generic erased-slot compare) below
+ * and any other tag-dispatched consumer that needs to interpret a SIMD
+ * box's 16-byte payload (offset 16) by lane. */
+
+/* Lane-wise equality by kind. Floats use the native `==` operator so a NaN
+ * lane compares unequal (matches the interpreter's OCaml `<>` on VF32x4/
+ * VF64x2 arrays) and +0.0/-0.0 compare equal (IEEE `==`, not bit-identity —
+ * matches [impl Eq(F32x4)]'s per-lane `simd_f32x4_extract(...) ==
+ * simd_f32x4_extract(...)` chain, itself ordinary Float `==`). Integer
+ * kinds compare exactly (a plain memcmp would also work for them, but the
+ * explicit per-lane loop keeps every kind's comparator shaped the same). */
+static int64_t march_simd_eq(void *a, void *b) {
+    int32_t ka = ((march_hdr *)a)->pad, kb = ((march_hdr *)b)->pad;
+    if (ka != kb) return 0;
+    const char *pa = (const char *)a + 16, *pb = (const char *)b + 16;
+    switch (ka) {
+        case 0: { /* f32x4 */
+            float fa[4], fb[4];
+            memcpy(fa, pa, sizeof(fa)); memcpy(fb, pb, sizeof(fb));
+            for (int i = 0; i < 4; i++) if (fa[i] != fb[i]) return 0;
+            return 1;
+        }
+        case 1: { /* f64x2 */
+            double da[2], db[2];
+            memcpy(da, pa, sizeof(da)); memcpy(db, pb, sizeof(db));
+            for (int i = 0; i < 2; i++) if (da[i] != db[i]) return 0;
+            return 1;
+        }
+        case 2: /* i32x4 */
+        case 3: /* i64x2 */
+        case 4: /* u8x16 */
+            return memcmp(pa, pb, 16) == 0 ? 1 : 0;
+        default: return 0;
+    }
+}
+
+/* Ordered lane-wise compare by kind, for [march_poly_compare]'s total-order
+ * contract: different kinds order by kind index (arbitrary but total and
+ * stable); same kind orders lexicographically lane 0..N-1, each lane via
+ * [march_compare_int]/[march_compare_float] (both already used elsewhere in
+ * this file for the same "0 for unordered/equal, else sign of difference"
+ * convention — a NaN lane compares as 0/unordered against everything,
+ * including itself, same degenerate behavior [march_compare_float] already
+ * has for plain boxed floats). */
+static int64_t march_simd_compare(void *a, void *b) {
+    int32_t ka = ((march_hdr *)a)->pad, kb = ((march_hdr *)b)->pad;
+    if (ka != kb) return march_compare_int(ka, kb);
+    const char *pa = (const char *)a + 16, *pb = (const char *)b + 16;
+    switch (ka) {
+        case 0: { /* f32x4 */
+            float fa[4], fb[4];
+            memcpy(fa, pa, sizeof(fa)); memcpy(fb, pb, sizeof(fb));
+            for (int i = 0; i < 4; i++) {
+                int64_t c = march_compare_float((double)fa[i], (double)fb[i]);
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+        case 1: { /* f64x2 */
+            double da[2], db[2];
+            memcpy(da, pa, sizeof(da)); memcpy(db, pb, sizeof(db));
+            for (int i = 0; i < 2; i++) {
+                int64_t c = march_compare_float(da[i], db[i]);
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+        case 2: { /* i32x4 */
+            int32_t ia[4], ib[4];
+            memcpy(ia, pa, sizeof(ia)); memcpy(ib, pb, sizeof(ib));
+            for (int i = 0; i < 4; i++) {
+                int64_t c = march_compare_int(ia[i], ib[i]);
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+        case 3: { /* i64x2 */
+            int64_t ia[2], ib[2];
+            memcpy(ia, pa, sizeof(ia)); memcpy(ib, pb, sizeof(ib));
+            for (int i = 0; i < 2; i++) {
+                int64_t c = march_compare_int(ia[i], ib[i]);
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+        case 4: { /* u8x16 */
+            const uint8_t *ua = (const uint8_t *)pa, *ub = (const uint8_t *)pb;
+            for (int i = 0; i < 16; i++) {
+                int64_t c = march_compare_int((int64_t)ua[i], (int64_t)ub[i]);
+                if (c != 0) return c;
+            }
+            return 0;
+        }
+        default: return 0;
+    }
+}
+
 int64_t march_compare_string(void *a, void *b) {
     march_string *sa = (march_string *)a;
     march_string *sb = (march_string *)b;
@@ -751,6 +850,15 @@ int64_t march_poly_eq(void *a, void *b) {
      * where two distinct raw-float-bit patterns got dereferenced here. */
     if (ta == MARCH_FLOAT_TAG && tb == MARCH_FLOAT_TAG)
         return march_unbox_float(a) == march_unbox_float(b) ? 1 : 0;
+    /* Boxed SIMD vectors (MARCH_SIMD_TAG, march_simd_alloc): compare by lane
+     * VALUE, not box identity — without this arm two distinct boxes holding
+     * the same lanes fell through to the `return 0` default (silently
+     * "not equal" for content that IS equal), and worse, a compiled generic
+     * comparison of two DIFFERENT vectors could read as equal via whatever
+     * the caller's fallback happened to be. See march_simd_eq's doc comment
+     * for the exact lane-compare semantics (NaN != NaN, +0.0 == -0.0). */
+    if (ta == MARCH_SIMD_TAG && tb == MARCH_SIMD_TAG)
+        return march_simd_eq(a, b);
     return 0;
 }
 
@@ -773,6 +881,11 @@ int64_t march_poly_compare(void *a, void *b) {
         return march_compare_float(march_unbox_float(a), march_unbox_float(b));
     if (ta == MARCH_STRING_TAG && tb == MARCH_STRING_TAG)
         return march_compare_string(a, b);
+    /* Boxed SIMD vectors: same rationale as march_poly_eq's arm above — a
+     * lane-wise total order (kind, then lexicographic by lane) instead of
+     * meaningless box-identity comparison. See march_simd_compare. */
+    if (ta == MARCH_SIMD_TAG && tb == MARCH_SIMD_TAG)
+        return march_simd_compare(a, b);
     return 0;  /* structural order needs static type info unavailable here */
 }
 
@@ -4799,6 +4912,67 @@ void *march_pid_of_int(int64_t n) {
 
 /* ── Value pretty-printing ───────────────────────────────────────────── */
 
+/* Render a boxed SIMD vector's Show output for [march_value_to_string]'s
+ * type-erased path — "F32x4[1., 2., 3., 4.]" etc, lane-for-lane identical
+ * to stdlib/simd.march's `impl Show(<Type>)` (`"F32x4[" ++
+ * to_string(extract(v,0)) ++ ", " ++ ... ++ "]"`), so a vector reaching
+ * this generic path (e.g. `show`/`to_string` on an erased/polymorphic
+ * slot) renders the same as a direct `show(v)` call instead of the
+ * previous "#<tag:-4>" placeholder. Reuses [march_float_to_string]'s exact
+ * %.12g-plus-trailing-dot algorithm for float lanes (byte-for-byte the
+ * interpreter's `string_of_float`) and [march_int_to_string]'s %lld for
+ * integer lanes (u8 lanes widen to Int first, matching
+ * `simd_u8x16_extract`'s zero-extend contract). Builds via repeated
+ * [march_string_concat] rather than one big buffer — Show is not a hot
+ * path, and this way every piece (literal, float, int) goes through the
+ * SAME formatting helper the rest of the runtime already uses, so a future
+ * change to float/int formatting can't silently diverge here. */
+static void *march_simd_to_string(void *v) {
+    int32_t kind = ((march_hdr *)v)->pad;
+    const char *pa = (const char *)v + 16;
+    static const char *const names[5] = { "F32x4", "F64x2", "I32x4", "I64x2", "U8x16" };
+    static const int lane_counts[5] = { 4, 2, 4, 2, 16 };
+    if (kind < 0 || kind > 4) {
+        char buf[64];
+        int n = snprintf(buf, sizeof(buf), "#<tag:%d>", (int)MARCH_SIMD_TAG);
+        return march_string_lit(buf, n);
+    }
+    void *acc = march_string_lit(names[kind], (int64_t)strlen(names[kind]));
+    {
+        void *bracket = march_string_lit("[", 1);
+        void *next = march_string_concat(acc, bracket);
+        march_decrc(acc); march_decrc(bracket);
+        acc = next;
+    }
+    int n = lane_counts[kind];
+    for (int i = 0; i < n; i++) {
+        void *piece;
+        switch (kind) {
+            case 0: { float f;    memcpy(&f, pa + (size_t)i * 4, 4); piece = march_float_to_string((double)f); break; }
+            case 1: { double d;   memcpy(&d, pa + (size_t)i * 8, 8); piece = march_float_to_string(d); break; }
+            case 2: { int32_t x;  memcpy(&x, pa + (size_t)i * 4, 4); piece = march_int_to_string((int64_t)x); break; }
+            case 3: { int64_t x;  memcpy(&x, pa + (size_t)i * 8, 8); piece = march_int_to_string(x); break; }
+            default: { uint8_t x; memcpy(&x, pa + (size_t)i, 1);      piece = march_int_to_string((int64_t)x); break; }
+        }
+        void *next = march_string_concat(acc, piece);
+        march_decrc(acc); march_decrc(piece);
+        acc = next;
+        if (i + 1 < n) {
+            void *sep = march_string_lit(", ", 2);
+            next = march_string_concat(acc, sep);
+            march_decrc(acc); march_decrc(sep);
+            acc = next;
+        }
+    }
+    {
+        void *close = march_string_lit("]", 1);
+        void *next = march_string_concat(acc, close);
+        march_decrc(acc); march_decrc(close);
+        acc = next;
+    }
+    return acc;
+}
+
 /* Format a March value as a human-readable string.
    Handles tagged immediates (low bit == 1), actor Pids, and heap objects. */
 void *march_value_to_string(void *v) {
@@ -4828,6 +5002,9 @@ void *march_value_to_string(void *v) {
      * (float-boxing design; also closes a cousin of the to_string-on-erased
      * divergence). */
     if (tag == MARCH_FLOAT_TAG) return march_float_to_string(march_unbox_float(v));
+    /* Boxed SIMD vector in an erased slot: render lane-for-lane like
+       impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
+    if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
     return march_string_lit(buf, n);
