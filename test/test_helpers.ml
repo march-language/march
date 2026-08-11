@@ -1927,6 +1927,13 @@ let native_array_decl = lazy (load_stdlib_file_for_test "native_array.march")
 let eval_with_native_array src =
   eval_with_stdlib [Lazy.force native_array_decl] src
 
+(* ── Simd stdlib tests (127 builtins — F32x4/F64x2/I32x4/I64x2/U8x16) ────── *)
+
+let simd_decl = lazy (load_stdlib_file_for_test "simd.march")
+
+let eval_with_simd src =
+  eval_with_stdlib [Lazy.force native_array_decl; Lazy.force simd_decl] src
+
 (* ── Vault stdlib tests ─────────────────────────────────────────────────── *)
 
 let vault_decl = lazy (load_stdlib_file_for_test "vault.march")

@@ -75,6 +75,13 @@ type value =
   | VNativeF32Arr of float array   (** elements pre-rounded to binary32 *)
   | VNativeI32Arr of int array     (** elements always in [-2^31, 2^31) *)
   | VNativeU8Arr  of int array     (** elements always in [0, 255] *)
+  (* Simd — explicit 128-bit SIMD vector types (F32x4/F64x2/I32x4/I64x2/U8x16). *)
+  | VF32x4 of float array   (** 4 lanes, each pre-rounded to binary32 *)
+  | VF64x2 of float array   (** 2 lanes, native double *)
+  | VI32x4 of int array     (** 4 lanes, each in [-2^31, 2^31) *)
+  | VI64x2 of int64 array   (** 2 lanes, exact 64-bit (OCaml [int] is only
+                                 63-bit -- see the eval.ml Simd section) *)
+  | VU8x16 of int array     (** 16 lanes, each in [0, 255] *)
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
   | VVaultHandle of int                 (** Opaque handle into vault_registry *)
   | VRingBuf of value ring              (** Fixed-capacity mutable circular buffer — single-owner *)
@@ -1576,6 +1583,20 @@ let rec value_to_string v =
     else
       Printf.sprintf "NativeU8Arr(%d)[%s, ...]" n
         (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
+  | VF32x4 a ->
+    let fmt f = let s = string_of_float f in
+                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    "F32x4[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
+  | VF64x2 a ->
+    let fmt f = let s = string_of_float f in
+                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    "F64x2[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
+  | VI32x4 a ->
+    "I32x4[" ^ String.concat ", " (Array.to_list (Array.map string_of_int a)) ^ "]"
+  | VI64x2 a ->
+    "I64x2[" ^ String.concat ", " (Array.to_list (Array.map Int64.to_string a)) ^ "]"
+  | VU8x16 a ->
+    "U8x16[" ^ String.concat ", " (Array.to_list (Array.map string_of_int a)) ^ "]"
   | VTypedArray arr ->
     let elems = Array.to_list arr in
     "[|" ^ String.concat ", " (List.map value_to_string elems) ^ "|]"
@@ -3863,6 +3884,87 @@ let rec show_dispatch (v : value) : string =
 let f32_round (v : float) : float = Int32.float_of_bits (Int32.bits_of_float v)
 let i32_wrap (v : int) : int = Int32.to_int (Int32.of_int v)
 let u8_wrap (v : int) : int = v land 0xff
+
+(* ------------------------------------------------------------------ *)
+(* Simd — explicit 128-bit SIMD vector types (F32x4/F64x2/I32x4/I64x2/U8x16).
+   Fixed-width lane vectors; the interpreter emulates every op bit-exactly
+   against the eventual LLVM lowering (Task 2 of
+   docs/superpowers/plans/2026-08-10-simd-vector-types.md). f32/i32/u8 lane
+   narrowing reuses f32_round/i32_wrap/u8_wrap above; f64x2 lanes are native
+   double (no narrowing). i64x2 lanes are stored as a true [int64 array] --
+   OCaml's native [int] is only 63-bit, so 64-bit two's-complement wrap must
+   go through the [Int64] module, not native [+]/[-]/[*]. KNOWN PARITY EDGE:
+   [extract_i64x2]/[sum_i64x2]/[hmin_i64x2]/[hmax_i64x2] narrow the int64
+   lane back to March's interpreter [VInt] (native 63-bit) via
+   [Int64.to_int], which loses the top bit outside +/-2^62 -- tests for
+   i64x2 stay within that range by construction. *)
+(* ------------------------------------------------------------------ *)
+
+let simd_minnum_f (a : float) (b : float) : float =
+  if a <> a then b else if b <> b then a else Stdlib.min a b
+let simd_maxnum_f (a : float) (b : float) : float =
+  if a <> a then b else if b <> b then a else Stdlib.max a b
+
+let simd_f32_allones : float = Int32.float_of_bits 0xFFFFFFFFl
+let simd_f32_zero : float = 0.0
+let simd_f64_allones : float = Int64.float_of_bits 0xFFFFFFFFFFFFFFFFL
+let simd_f64_zero : float = 0.0
+
+let simd_f32_is_allones (v : float) : bool = Int32.bits_of_float v = 0xFFFFFFFFl
+let simd_f64_is_allones (v : float) : bool = Int64.bits_of_float v = 0xFFFFFFFFFFFFFFFFL
+let simd_f32_is_highbit (v : float) : bool = Int32.bits_of_float v < 0l
+let simd_f64_is_highbit (v : float) : bool = Int64.bits_of_float v < 0L
+
+let simd_f32_and (a : float) (b : float) : float =
+  Int32.float_of_bits (Int32.logand (Int32.bits_of_float a) (Int32.bits_of_float b))
+let simd_f32_or (a : float) (b : float) : float =
+  Int32.float_of_bits (Int32.logor (Int32.bits_of_float a) (Int32.bits_of_float b))
+let simd_f32_xor (a : float) (b : float) : float =
+  Int32.float_of_bits (Int32.logxor (Int32.bits_of_float a) (Int32.bits_of_float b))
+let simd_f32_not (a : float) : float =
+  Int32.float_of_bits (Int32.lognot (Int32.bits_of_float a))
+
+let simd_f64_and (a : float) (b : float) : float =
+  Int64.float_of_bits (Int64.logand (Int64.bits_of_float a) (Int64.bits_of_float b))
+let simd_f64_or (a : float) (b : float) : float =
+  Int64.float_of_bits (Int64.logor (Int64.bits_of_float a) (Int64.bits_of_float b))
+let simd_f64_xor (a : float) (b : float) : float =
+  Int64.float_of_bits (Int64.logxor (Int64.bits_of_float a) (Int64.bits_of_float b))
+let simd_f64_not (a : float) : float =
+  Int64.float_of_bits (Int64.lognot (Int64.bits_of_float a))
+
+let simd_i32_is_highbit (v : int) : bool = v < 0
+let simd_i64_is_highbit (v : int64) : bool = Int64.compare v 0L < 0
+let simd_u8_is_highbit (v : int) : bool = v >= 128
+
+(** Generic mask-driven ops, shared across all five element types
+    (['a] is [float] for f32/f64 lanes, [int] for i32/u8 lanes, [int64] for
+    i64 lanes). *)
+let simd_first_set (is_highbit : 'a -> bool) (arr : 'a array) : int =
+  let n = Array.length arr in
+  let rec go i = if i >= n then -1 else if is_highbit arr.(i) then i else go (i + 1) in
+  go 0
+let simd_any (is_highbit : 'a -> bool) (arr : 'a array) : bool = Array.exists is_highbit arr
+let simd_all (is_highbit : 'a -> bool) (arr : 'a array) : bool = Array.for_all is_highbit arr
+let simd_select (is_allones : 'a -> bool) (mask : 'a array) (a : 'a array) (b : 'a array) : 'a array =
+  Array.init (Array.length mask) (fun i -> if is_allones mask.(i) then a.(i) else b.(i))
+
+(** Sequential (ordered) horizontal fold over lanes 1..n-1, seeded with
+    lane 0 -- matches the compiled side's ordered [llvm.vector.reduce.*]
+    lowering (Task 2), never a tree/associative reduction. *)
+let simd_hfold (op : 'a -> 'a -> 'a) (arr : 'a array) : 'a =
+  let n = Array.length arr in
+  let acc = ref arr.(0) in
+  for i = 1 to n - 1 do acc := op !acc arr.(i) done;
+  !acc
+
+(** Bounds rule (Global Constraints): [0 <= i && i + lanes <= len].
+    Message text mirrors the compiled runtime's
+    [march_simd_bounds_panic] (Task 2/3) minus the "march: runtime error:"
+    process-exit prefix the interpreter doesn't use elsewhere. *)
+let simd_bounds_check (op : string) (i : int) (lanes : int) (len : int) : unit =
+  if i < 0 || i + lanes > len then
+    eval_error "%s: simd load/store out of bounds (index %d, lanes %d, length %d)" op i lanes len
 
 (* ------------------------------------------------------------------ *)
 (* Base environment                                                    *)
@@ -8186,6 +8288,540 @@ let base_env : env =
   ; ("native_u8_to_f32_arr", VBuiltin ("native_u8_to_f32_arr", function
         | [VNativeU8Arr a] -> VNativeF32Arr (Array.map (fun v -> f32_round (float_of_int v)) a)
         | _ -> eval_error "native_u8_to_f32_arr: expected NativeU8Arr"))
+
+  (* ── Simd — explicit 128-bit SIMD vector types (F32x4/F64x2/I32x4/I64x2/U8x16).
+     127 builtins per the op grid in
+     docs/superpowers/plans/2026-08-10-simd-vector-types.md (Global
+     Constraints). Interpreter-path only here; compiled (LLVM) support is a
+     later task. ── *)
+
+  (* ── F32x4 ── *)
+  ; ("simd_f32x4_splat", VBuiltin ("simd_f32x4_splat", function
+        | [VFloat v] -> VF32x4 (Array.make 4 (f32_round v))
+        | _ -> eval_error "simd_f32x4_splat: bad arguments"))
+  ; ("simd_f32x4_make", VBuiltin ("simd_f32x4_make", function
+        | [VFloat v0; VFloat v1; VFloat v2; VFloat v3] -> VF32x4 [| f32_round v0; f32_round v1; f32_round v2; f32_round v3 |]
+        | _ -> eval_error "simd_f32x4_make: bad arguments"))
+  ; ("simd_f32x4_extract", VBuiltin ("simd_f32x4_extract", function
+        | [VF32x4 a; VInt i] ->
+          if i < 0 || i >= 4 then
+            eval_error "simd_f32x4_extract: lane %d out of range (0..3)" i;
+          VFloat a.(i)
+        | _ -> eval_error "simd_f32x4_extract: bad arguments"))
+  ; ("simd_f32x4_replace", VBuiltin ("simd_f32x4_replace", function
+        | [VF32x4 a; VInt i; VFloat x] ->
+          if i < 0 || i >= 4 then
+            eval_error "simd_f32x4_replace: lane %d out of range (0..3)" i;
+          let a' = Array.copy a in
+          a'.(i) <- f32_round x;
+          VF32x4 a'
+        | _ -> eval_error "simd_f32x4_replace: bad arguments"))
+  ; ("simd_f32x4_load", VBuiltin ("simd_f32x4_load", function
+        | [VNativeF32Arr arr; VInt i] ->
+          simd_bounds_check "simd_f32x4_load" i 4 (Array.length arr);
+          VF32x4 (Array.sub arr i 4)
+        | _ -> eval_error "simd_f32x4_load: bad arguments"))
+  ; ("simd_f32x4_store", VBuiltin ("simd_f32x4_store", function
+        | [VNativeF32Arr arr; VInt i; VF32x4 v] ->
+          simd_bounds_check "simd_f32x4_store" i 4 (Array.length arr);
+          let arr' = Array.copy arr in
+          Array.blit v 0 arr' i 4;
+          VNativeF32Arr arr'
+        | _ -> eval_error "simd_f32x4_store: bad arguments"))
+  ; ("simd_f32x4_eq", VBuiltin ("simd_f32x4_eq", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> if a.(i) = b.(i) then simd_f32_allones else simd_f32_zero))
+        | _ -> eval_error "simd_f32x4_eq: bad arguments"))
+  ; ("simd_f32x4_lt", VBuiltin ("simd_f32x4_lt", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> if a.(i) < b.(i) then simd_f32_allones else simd_f32_zero))
+        | _ -> eval_error "simd_f32x4_lt: bad arguments"))
+  ; ("simd_f32x4_gt", VBuiltin ("simd_f32x4_gt", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> if a.(i) > b.(i) then simd_f32_allones else simd_f32_zero))
+        | _ -> eval_error "simd_f32x4_gt: bad arguments"))
+  ; ("simd_f32x4_and", VBuiltin ("simd_f32x4_and", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> simd_f32_and a.(i) b.(i)))
+        | _ -> eval_error "simd_f32x4_and: bad arguments"))
+  ; ("simd_f32x4_or", VBuiltin ("simd_f32x4_or", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> simd_f32_or a.(i) b.(i)))
+        | _ -> eval_error "simd_f32x4_or: bad arguments"))
+  ; ("simd_f32x4_xor", VBuiltin ("simd_f32x4_xor", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> simd_f32_xor a.(i) b.(i)))
+        | _ -> eval_error "simd_f32x4_xor: bad arguments"))
+  ; ("simd_f32x4_not", VBuiltin ("simd_f32x4_not", function
+        | [VF32x4 a] -> VF32x4 (Array.map simd_f32_not a)
+        | _ -> eval_error "simd_f32x4_not: bad arguments"))
+  ; ("simd_f32x4_select", VBuiltin ("simd_f32x4_select", function
+        | [VF32x4 m; VF32x4 a; VF32x4 b] ->
+          VF32x4 (simd_select simd_f32_is_allones m a b)
+        | _ -> eval_error "simd_f32x4_select: bad arguments"))
+  ; ("simd_f32x4_any", VBuiltin ("simd_f32x4_any", function
+        | [VF32x4 a] -> VBool (simd_any simd_f32_is_highbit a)
+        | _ -> eval_error "simd_f32x4_any: bad arguments"))
+  ; ("simd_f32x4_all", VBuiltin ("simd_f32x4_all", function
+        | [VF32x4 a] -> VBool (simd_all simd_f32_is_highbit a)
+        | _ -> eval_error "simd_f32x4_all: bad arguments"))
+  ; ("simd_f32x4_first_set", VBuiltin ("simd_f32x4_first_set", function
+        | [VF32x4 a] -> VInt (simd_first_set simd_f32_is_highbit a)
+        | _ -> eval_error "simd_f32x4_first_set: bad arguments"))
+  ; ("simd_f32x4_add", VBuiltin ("simd_f32x4_add", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> f32_round (a.(i) +. b.(i))))
+        | _ -> eval_error "simd_f32x4_add: bad arguments"))
+  ; ("simd_f32x4_sub", VBuiltin ("simd_f32x4_sub", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> f32_round (a.(i) -. b.(i))))
+        | _ -> eval_error "simd_f32x4_sub: bad arguments"))
+  ; ("simd_f32x4_mul", VBuiltin ("simd_f32x4_mul", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> f32_round (a.(i) *. b.(i))))
+        | _ -> eval_error "simd_f32x4_mul: bad arguments"))
+  ; ("simd_f32x4_div", VBuiltin ("simd_f32x4_div", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> f32_round (a.(i) /. b.(i))))
+        | _ -> eval_error "simd_f32x4_div: bad arguments"))
+  ; ("simd_f32x4_min", VBuiltin ("simd_f32x4_min", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> f32_round (simd_minnum_f a.(i) b.(i))))
+        | _ -> eval_error "simd_f32x4_min: bad arguments"))
+  ; ("simd_f32x4_max", VBuiltin ("simd_f32x4_max", function
+        | [VF32x4 a; VF32x4 b] ->
+          VF32x4 (Array.init 4 (fun i -> f32_round (simd_maxnum_f a.(i) b.(i))))
+        | _ -> eval_error "simd_f32x4_max: bad arguments"))
+  ; ("simd_f32x4_fma", VBuiltin ("simd_f32x4_fma", function
+        | [VF32x4 a; VF32x4 b; VF32x4 c] ->
+          VF32x4 (Array.init 4 (fun i -> f32_round (Float.fma a.(i) b.(i) c.(i))))
+        | _ -> eval_error "simd_f32x4_fma: bad arguments"))
+  ; ("simd_f32x4_sqrt", VBuiltin ("simd_f32x4_sqrt", function
+        | [VF32x4 a] -> VF32x4 (Array.map (fun x -> f32_round (sqrt x)) a)
+        | _ -> eval_error "simd_f32x4_sqrt: bad arguments"))
+  ; ("simd_f32x4_sum", VBuiltin ("simd_f32x4_sum", function
+        | [VF32x4 a] -> VFloat (Array.fold_left (+.) 0.0 a)
+        | _ -> eval_error "simd_f32x4_sum: bad arguments"))
+  ; ("simd_f32x4_hmin", VBuiltin ("simd_f32x4_hmin", function
+        | [VF32x4 a] -> VFloat (simd_hfold simd_minnum_f a)
+        | _ -> eval_error "simd_f32x4_hmin: bad arguments"))
+  ; ("simd_f32x4_hmax", VBuiltin ("simd_f32x4_hmax", function
+        | [VF32x4 a] -> VFloat (simd_hfold simd_maxnum_f a)
+        | _ -> eval_error "simd_f32x4_hmax: bad arguments"))
+
+  (* ── F64x2 ── *)
+  ; ("simd_f64x2_splat", VBuiltin ("simd_f64x2_splat", function
+        | [VFloat v] -> VF64x2 (Array.make 2 v)
+        | _ -> eval_error "simd_f64x2_splat: bad arguments"))
+  ; ("simd_f64x2_make", VBuiltin ("simd_f64x2_make", function
+        | [VFloat v0; VFloat v1] -> VF64x2 [| v0; v1 |]
+        | _ -> eval_error "simd_f64x2_make: bad arguments"))
+  ; ("simd_f64x2_extract", VBuiltin ("simd_f64x2_extract", function
+        | [VF64x2 a; VInt i] ->
+          if i < 0 || i >= 2 then
+            eval_error "simd_f64x2_extract: lane %d out of range (0..1)" i;
+          VFloat a.(i)
+        | _ -> eval_error "simd_f64x2_extract: bad arguments"))
+  ; ("simd_f64x2_replace", VBuiltin ("simd_f64x2_replace", function
+        | [VF64x2 a; VInt i; VFloat x] ->
+          if i < 0 || i >= 2 then
+            eval_error "simd_f64x2_replace: lane %d out of range (0..1)" i;
+          let a' = Array.copy a in
+          a'.(i) <- x;
+          VF64x2 a'
+        | _ -> eval_error "simd_f64x2_replace: bad arguments"))
+  ; ("simd_f64x2_load", VBuiltin ("simd_f64x2_load", function
+        | [VNativeFloatArr arr; VInt i] ->
+          simd_bounds_check "simd_f64x2_load" i 2 (Array.length arr);
+          VF64x2 (Array.sub arr i 2)
+        | _ -> eval_error "simd_f64x2_load: bad arguments"))
+  ; ("simd_f64x2_store", VBuiltin ("simd_f64x2_store", function
+        | [VNativeFloatArr arr; VInt i; VF64x2 v] ->
+          simd_bounds_check "simd_f64x2_store" i 2 (Array.length arr);
+          let arr' = Array.copy arr in
+          Array.blit v 0 arr' i 2;
+          VNativeFloatArr arr'
+        | _ -> eval_error "simd_f64x2_store: bad arguments"))
+  ; ("simd_f64x2_eq", VBuiltin ("simd_f64x2_eq", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> if a.(i) = b.(i) then simd_f64_allones else simd_f64_zero))
+        | _ -> eval_error "simd_f64x2_eq: bad arguments"))
+  ; ("simd_f64x2_lt", VBuiltin ("simd_f64x2_lt", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> if a.(i) < b.(i) then simd_f64_allones else simd_f64_zero))
+        | _ -> eval_error "simd_f64x2_lt: bad arguments"))
+  ; ("simd_f64x2_gt", VBuiltin ("simd_f64x2_gt", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> if a.(i) > b.(i) then simd_f64_allones else simd_f64_zero))
+        | _ -> eval_error "simd_f64x2_gt: bad arguments"))
+  ; ("simd_f64x2_and", VBuiltin ("simd_f64x2_and", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> simd_f64_and a.(i) b.(i)))
+        | _ -> eval_error "simd_f64x2_and: bad arguments"))
+  ; ("simd_f64x2_or", VBuiltin ("simd_f64x2_or", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> simd_f64_or a.(i) b.(i)))
+        | _ -> eval_error "simd_f64x2_or: bad arguments"))
+  ; ("simd_f64x2_xor", VBuiltin ("simd_f64x2_xor", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> simd_f64_xor a.(i) b.(i)))
+        | _ -> eval_error "simd_f64x2_xor: bad arguments"))
+  ; ("simd_f64x2_not", VBuiltin ("simd_f64x2_not", function
+        | [VF64x2 a] -> VF64x2 (Array.map simd_f64_not a)
+        | _ -> eval_error "simd_f64x2_not: bad arguments"))
+  ; ("simd_f64x2_select", VBuiltin ("simd_f64x2_select", function
+        | [VF64x2 m; VF64x2 a; VF64x2 b] ->
+          VF64x2 (simd_select simd_f64_is_allones m a b)
+        | _ -> eval_error "simd_f64x2_select: bad arguments"))
+  ; ("simd_f64x2_any", VBuiltin ("simd_f64x2_any", function
+        | [VF64x2 a] -> VBool (simd_any simd_f64_is_highbit a)
+        | _ -> eval_error "simd_f64x2_any: bad arguments"))
+  ; ("simd_f64x2_all", VBuiltin ("simd_f64x2_all", function
+        | [VF64x2 a] -> VBool (simd_all simd_f64_is_highbit a)
+        | _ -> eval_error "simd_f64x2_all: bad arguments"))
+  ; ("simd_f64x2_first_set", VBuiltin ("simd_f64x2_first_set", function
+        | [VF64x2 a] -> VInt (simd_first_set simd_f64_is_highbit a)
+        | _ -> eval_error "simd_f64x2_first_set: bad arguments"))
+  ; ("simd_f64x2_add", VBuiltin ("simd_f64x2_add", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> a.(i) +. b.(i)))
+        | _ -> eval_error "simd_f64x2_add: bad arguments"))
+  ; ("simd_f64x2_sub", VBuiltin ("simd_f64x2_sub", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> a.(i) -. b.(i)))
+        | _ -> eval_error "simd_f64x2_sub: bad arguments"))
+  ; ("simd_f64x2_mul", VBuiltin ("simd_f64x2_mul", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> a.(i) *. b.(i)))
+        | _ -> eval_error "simd_f64x2_mul: bad arguments"))
+  ; ("simd_f64x2_div", VBuiltin ("simd_f64x2_div", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> a.(i) /. b.(i)))
+        | _ -> eval_error "simd_f64x2_div: bad arguments"))
+  ; ("simd_f64x2_min", VBuiltin ("simd_f64x2_min", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> simd_minnum_f a.(i) b.(i)))
+        | _ -> eval_error "simd_f64x2_min: bad arguments"))
+  ; ("simd_f64x2_max", VBuiltin ("simd_f64x2_max", function
+        | [VF64x2 a; VF64x2 b] ->
+          VF64x2 (Array.init 2 (fun i -> simd_maxnum_f a.(i) b.(i)))
+        | _ -> eval_error "simd_f64x2_max: bad arguments"))
+  ; ("simd_f64x2_fma", VBuiltin ("simd_f64x2_fma", function
+        | [VF64x2 a; VF64x2 b; VF64x2 c] ->
+          VF64x2 (Array.init 2 (fun i -> Float.fma a.(i) b.(i) c.(i)))
+        | _ -> eval_error "simd_f64x2_fma: bad arguments"))
+  ; ("simd_f64x2_sqrt", VBuiltin ("simd_f64x2_sqrt", function
+        | [VF64x2 a] -> VF64x2 (Array.map (fun x -> sqrt x) a)
+        | _ -> eval_error "simd_f64x2_sqrt: bad arguments"))
+  ; ("simd_f64x2_sum", VBuiltin ("simd_f64x2_sum", function
+        | [VF64x2 a] -> VFloat (Array.fold_left (+.) 0.0 a)
+        | _ -> eval_error "simd_f64x2_sum: bad arguments"))
+  ; ("simd_f64x2_hmin", VBuiltin ("simd_f64x2_hmin", function
+        | [VF64x2 a] -> VFloat (simd_hfold simd_minnum_f a)
+        | _ -> eval_error "simd_f64x2_hmin: bad arguments"))
+  ; ("simd_f64x2_hmax", VBuiltin ("simd_f64x2_hmax", function
+        | [VF64x2 a] -> VFloat (simd_hfold simd_maxnum_f a)
+        | _ -> eval_error "simd_f64x2_hmax: bad arguments"))
+
+  (* ── I32x4 ── *)
+  ; ("simd_i32x4_splat", VBuiltin ("simd_i32x4_splat", function
+        | [VInt v] -> VI32x4 (Array.make 4 (i32_wrap v))
+        | _ -> eval_error "simd_i32x4_splat: bad arguments"))
+  ; ("simd_i32x4_make", VBuiltin ("simd_i32x4_make", function
+        | [VInt v0; VInt v1; VInt v2; VInt v3] -> VI32x4 [| i32_wrap v0; i32_wrap v1; i32_wrap v2; i32_wrap v3 |]
+        | _ -> eval_error "simd_i32x4_make: bad arguments"))
+  ; ("simd_i32x4_extract", VBuiltin ("simd_i32x4_extract", function
+        | [VI32x4 a; VInt i] ->
+          if i < 0 || i >= 4 then
+            eval_error "simd_i32x4_extract: lane %d out of range (0..3)" i;
+          VInt a.(i)
+        | _ -> eval_error "simd_i32x4_extract: bad arguments"))
+  ; ("simd_i32x4_replace", VBuiltin ("simd_i32x4_replace", function
+        | [VI32x4 a; VInt i; VInt x] ->
+          if i < 0 || i >= 4 then
+            eval_error "simd_i32x4_replace: lane %d out of range (0..3)" i;
+          let a' = Array.copy a in
+          a'.(i) <- i32_wrap x;
+          VI32x4 a'
+        | _ -> eval_error "simd_i32x4_replace: bad arguments"))
+  ; ("simd_i32x4_load", VBuiltin ("simd_i32x4_load", function
+        | [VNativeI32Arr arr; VInt i] ->
+          simd_bounds_check "simd_i32x4_load" i 4 (Array.length arr);
+          VI32x4 (Array.sub arr i 4)
+        | _ -> eval_error "simd_i32x4_load: bad arguments"))
+  ; ("simd_i32x4_store", VBuiltin ("simd_i32x4_store", function
+        | [VNativeI32Arr arr; VInt i; VI32x4 v] ->
+          simd_bounds_check "simd_i32x4_store" i 4 (Array.length arr);
+          let arr' = Array.copy arr in
+          Array.blit v 0 arr' i 4;
+          VNativeI32Arr arr'
+        | _ -> eval_error "simd_i32x4_store: bad arguments"))
+  ; ("simd_i32x4_eq", VBuiltin ("simd_i32x4_eq", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> if a.(i) = b.(i) then -1 else 0))
+        | _ -> eval_error "simd_i32x4_eq: bad arguments"))
+  ; ("simd_i32x4_lt", VBuiltin ("simd_i32x4_lt", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> if a.(i) < b.(i) then -1 else 0))
+        | _ -> eval_error "simd_i32x4_lt: bad arguments"))
+  ; ("simd_i32x4_gt", VBuiltin ("simd_i32x4_gt", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> if a.(i) > b.(i) then -1 else 0))
+        | _ -> eval_error "simd_i32x4_gt: bad arguments"))
+  ; ("simd_i32x4_and", VBuiltin ("simd_i32x4_and", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> i32_wrap (a.(i) land b.(i))))
+        | _ -> eval_error "simd_i32x4_and: bad arguments"))
+  ; ("simd_i32x4_or", VBuiltin ("simd_i32x4_or", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> i32_wrap (a.(i) lor b.(i))))
+        | _ -> eval_error "simd_i32x4_or: bad arguments"))
+  ; ("simd_i32x4_xor", VBuiltin ("simd_i32x4_xor", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> i32_wrap (a.(i) lxor b.(i))))
+        | _ -> eval_error "simd_i32x4_xor: bad arguments"))
+  ; ("simd_i32x4_not", VBuiltin ("simd_i32x4_not", function
+        | [VI32x4 a] -> VI32x4 (Array.map (fun x -> i32_wrap (lnot x)) a)
+        | _ -> eval_error "simd_i32x4_not: bad arguments"))
+  ; ("simd_i32x4_select", VBuiltin ("simd_i32x4_select", function
+        | [VI32x4 m; VI32x4 a; VI32x4 b] ->
+          VI32x4 (simd_select (fun v -> v = -1) m a b)
+        | _ -> eval_error "simd_i32x4_select: bad arguments"))
+  ; ("simd_i32x4_any", VBuiltin ("simd_i32x4_any", function
+        | [VI32x4 a] -> VBool (simd_any simd_i32_is_highbit a)
+        | _ -> eval_error "simd_i32x4_any: bad arguments"))
+  ; ("simd_i32x4_all", VBuiltin ("simd_i32x4_all", function
+        | [VI32x4 a] -> VBool (simd_all simd_i32_is_highbit a)
+        | _ -> eval_error "simd_i32x4_all: bad arguments"))
+  ; ("simd_i32x4_first_set", VBuiltin ("simd_i32x4_first_set", function
+        | [VI32x4 a] -> VInt (simd_first_set simd_i32_is_highbit a)
+        | _ -> eval_error "simd_i32x4_first_set: bad arguments"))
+  ; ("simd_i32x4_add", VBuiltin ("simd_i32x4_add", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> i32_wrap (a.(i) + b.(i))))
+        | _ -> eval_error "simd_i32x4_add: bad arguments"))
+  ; ("simd_i32x4_sub", VBuiltin ("simd_i32x4_sub", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> i32_wrap (a.(i) - b.(i))))
+        | _ -> eval_error "simd_i32x4_sub: bad arguments"))
+  ; ("simd_i32x4_mul", VBuiltin ("simd_i32x4_mul", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> i32_wrap (a.(i) * b.(i))))
+        | _ -> eval_error "simd_i32x4_mul: bad arguments"))
+  ; ("simd_i32x4_min", VBuiltin ("simd_i32x4_min", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> Stdlib.min a.(i) b.(i)))
+        | _ -> eval_error "simd_i32x4_min: bad arguments"))
+  ; ("simd_i32x4_max", VBuiltin ("simd_i32x4_max", function
+        | [VI32x4 a; VI32x4 b] ->
+          VI32x4 (Array.init 4 (fun i -> Stdlib.max a.(i) b.(i)))
+        | _ -> eval_error "simd_i32x4_max: bad arguments"))
+  ; ("simd_i32x4_shl", VBuiltin ("simd_i32x4_shl", function
+        | [VI32x4 a; VInt n] ->
+          let cnt = n land 31 in
+          VI32x4 (Array.map (fun x -> i32_wrap (x lsl cnt)) a)
+        | _ -> eval_error "simd_i32x4_shl: bad arguments"))
+  ; ("simd_i32x4_shr", VBuiltin ("simd_i32x4_shr", function
+        | [VI32x4 a; VInt n] ->
+          let cnt = n land 31 in
+          VI32x4 (Array.map (fun x -> i32_wrap (x asr cnt)) a)
+        | _ -> eval_error "simd_i32x4_shr: bad arguments"))
+  ; ("simd_i32x4_sum", VBuiltin ("simd_i32x4_sum", function
+        | [VI32x4 a] -> VInt (Array.fold_left (+) 0 a)
+        | _ -> eval_error "simd_i32x4_sum: bad arguments"))
+  ; ("simd_i32x4_hmin", VBuiltin ("simd_i32x4_hmin", function
+        | [VI32x4 a] -> VInt (simd_hfold Stdlib.min a)
+        | _ -> eval_error "simd_i32x4_hmin: bad arguments"))
+  ; ("simd_i32x4_hmax", VBuiltin ("simd_i32x4_hmax", function
+        | [VI32x4 a] -> VInt (simd_hfold Stdlib.max a)
+        | _ -> eval_error "simd_i32x4_hmax: bad arguments"))
+
+  (* ── I64x2 ── *)
+  ; ("simd_i64x2_splat", VBuiltin ("simd_i64x2_splat", function
+        | [VInt v] -> VI64x2 (Array.make 2 (Int64.of_int v))
+        | _ -> eval_error "simd_i64x2_splat: bad arguments"))
+  ; ("simd_i64x2_make", VBuiltin ("simd_i64x2_make", function
+        | [VInt v0; VInt v1] -> VI64x2 [| Int64.of_int v0; Int64.of_int v1 |]
+        | _ -> eval_error "simd_i64x2_make: bad arguments"))
+  ; ("simd_i64x2_extract", VBuiltin ("simd_i64x2_extract", function
+        | [VI64x2 a; VInt i] ->
+          if i < 0 || i >= 2 then
+            eval_error "simd_i64x2_extract: lane %d out of range (0..1)" i;
+          VInt (Int64.to_int a.(i))
+        | _ -> eval_error "simd_i64x2_extract: bad arguments"))
+  ; ("simd_i64x2_replace", VBuiltin ("simd_i64x2_replace", function
+        | [VI64x2 a; VInt i; VInt x] ->
+          if i < 0 || i >= 2 then
+            eval_error "simd_i64x2_replace: lane %d out of range (0..1)" i;
+          let a' = Array.copy a in
+          a'.(i) <- Int64.of_int x;
+          VI64x2 a'
+        | _ -> eval_error "simd_i64x2_replace: bad arguments"))
+  ; ("simd_i64x2_load", VBuiltin ("simd_i64x2_load", function
+        | [VNativeIntArr arr; VInt i] ->
+          simd_bounds_check "simd_i64x2_load" i 2 (Array.length arr);
+          VI64x2 (Array.init 2 (fun k -> Int64.of_int arr.(i + k)))
+        | _ -> eval_error "simd_i64x2_load: bad arguments"))
+  ; ("simd_i64x2_store", VBuiltin ("simd_i64x2_store", function
+        | [VNativeIntArr arr; VInt i; VI64x2 v] ->
+          simd_bounds_check "simd_i64x2_store" i 2 (Array.length arr);
+          let arr' = Array.copy arr in
+          for k = 0 to 2 - 1 do arr'.(i + k) <- Int64.to_int v.(k) done;
+          VNativeIntArr arr'
+        | _ -> eval_error "simd_i64x2_store: bad arguments"))
+  ; ("simd_i64x2_eq", VBuiltin ("simd_i64x2_eq", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> if Int64.equal a.(i) b.(i) then -1L else 0L))
+        | _ -> eval_error "simd_i64x2_eq: bad arguments"))
+  ; ("simd_i64x2_lt", VBuiltin ("simd_i64x2_lt", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> if Int64.compare a.(i) b.(i) < 0 then -1L else 0L))
+        | _ -> eval_error "simd_i64x2_lt: bad arguments"))
+  ; ("simd_i64x2_gt", VBuiltin ("simd_i64x2_gt", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> if Int64.compare a.(i) b.(i) > 0 then -1L else 0L))
+        | _ -> eval_error "simd_i64x2_gt: bad arguments"))
+  ; ("simd_i64x2_and", VBuiltin ("simd_i64x2_and", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> Int64.logand a.(i) b.(i)))
+        | _ -> eval_error "simd_i64x2_and: bad arguments"))
+  ; ("simd_i64x2_or", VBuiltin ("simd_i64x2_or", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> Int64.logor a.(i) b.(i)))
+        | _ -> eval_error "simd_i64x2_or: bad arguments"))
+  ; ("simd_i64x2_xor", VBuiltin ("simd_i64x2_xor", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> Int64.logxor a.(i) b.(i)))
+        | _ -> eval_error "simd_i64x2_xor: bad arguments"))
+  ; ("simd_i64x2_not", VBuiltin ("simd_i64x2_not", function
+        | [VI64x2 a] -> VI64x2 (Array.map Int64.lognot a)
+        | _ -> eval_error "simd_i64x2_not: bad arguments"))
+  ; ("simd_i64x2_select", VBuiltin ("simd_i64x2_select", function
+        | [VI64x2 m; VI64x2 a; VI64x2 b] ->
+          VI64x2 (simd_select (fun v -> Int64.equal v (-1L)) m a b)
+        | _ -> eval_error "simd_i64x2_select: bad arguments"))
+  ; ("simd_i64x2_any", VBuiltin ("simd_i64x2_any", function
+        | [VI64x2 a] -> VBool (simd_any simd_i64_is_highbit a)
+        | _ -> eval_error "simd_i64x2_any: bad arguments"))
+  ; ("simd_i64x2_all", VBuiltin ("simd_i64x2_all", function
+        | [VI64x2 a] -> VBool (simd_all simd_i64_is_highbit a)
+        | _ -> eval_error "simd_i64x2_all: bad arguments"))
+  ; ("simd_i64x2_first_set", VBuiltin ("simd_i64x2_first_set", function
+        | [VI64x2 a] -> VInt (simd_first_set simd_i64_is_highbit a)
+        | _ -> eval_error "simd_i64x2_first_set: bad arguments"))
+  ; ("simd_i64x2_add", VBuiltin ("simd_i64x2_add", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> Int64.add a.(i) b.(i)))
+        | _ -> eval_error "simd_i64x2_add: bad arguments"))
+  ; ("simd_i64x2_sub", VBuiltin ("simd_i64x2_sub", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> Int64.sub a.(i) b.(i)))
+        | _ -> eval_error "simd_i64x2_sub: bad arguments"))
+  ; ("simd_i64x2_mul", VBuiltin ("simd_i64x2_mul", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> Int64.mul a.(i) b.(i)))
+        | _ -> eval_error "simd_i64x2_mul: bad arguments"))
+  ; ("simd_i64x2_min", VBuiltin ("simd_i64x2_min", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> if Int64.compare a.(i) b.(i) <= 0 then a.(i) else b.(i)))
+        | _ -> eval_error "simd_i64x2_min: bad arguments"))
+  ; ("simd_i64x2_max", VBuiltin ("simd_i64x2_max", function
+        | [VI64x2 a; VI64x2 b] ->
+          VI64x2 (Array.init 2 (fun i -> if Int64.compare a.(i) b.(i) >= 0 then a.(i) else b.(i)))
+        | _ -> eval_error "simd_i64x2_max: bad arguments"))
+  ; ("simd_i64x2_shl", VBuiltin ("simd_i64x2_shl", function
+        | [VI64x2 a; VInt n] ->
+          let cnt = n land 63 in
+          VI64x2 (Array.map (fun x -> Int64.shift_left x cnt) a)
+        | _ -> eval_error "simd_i64x2_shl: bad arguments"))
+  ; ("simd_i64x2_shr", VBuiltin ("simd_i64x2_shr", function
+        | [VI64x2 a; VInt n] ->
+          let cnt = n land 63 in
+          VI64x2 (Array.map (fun x -> Int64.shift_right x cnt) a)
+        | _ -> eval_error "simd_i64x2_shr: bad arguments"))
+  ; ("simd_i64x2_sum", VBuiltin ("simd_i64x2_sum", function
+        | [VI64x2 a] -> VInt (Int64.to_int (Array.fold_left Int64.add 0L a))
+        | _ -> eval_error "simd_i64x2_sum: bad arguments"))
+  ; ("simd_i64x2_hmin", VBuiltin ("simd_i64x2_hmin", function
+        | [VI64x2 a] -> VInt (Int64.to_int (simd_hfold (fun x y -> if Int64.compare x y <= 0 then x else y) a))
+        | _ -> eval_error "simd_i64x2_hmin: bad arguments"))
+  ; ("simd_i64x2_hmax", VBuiltin ("simd_i64x2_hmax", function
+        | [VI64x2 a] -> VInt (Int64.to_int (simd_hfold (fun x y -> if Int64.compare x y >= 0 then x else y) a))
+        | _ -> eval_error "simd_i64x2_hmax: bad arguments"))
+
+  (* ── U8x16 ── *)
+  ; ("simd_u8x16_splat", VBuiltin ("simd_u8x16_splat", function
+        | [VInt v] -> VU8x16 (Array.make 16 (u8_wrap v))
+        | _ -> eval_error "simd_u8x16_splat: bad arguments"))
+  ; ("simd_u8x16_make", VBuiltin ("simd_u8x16_make", function
+        | [VInt v0; VInt v1; VInt v2; VInt v3; VInt v4; VInt v5; VInt v6; VInt v7; VInt v8; VInt v9; VInt v10; VInt v11; VInt v12; VInt v13; VInt v14; VInt v15] -> VU8x16 [| u8_wrap v0; u8_wrap v1; u8_wrap v2; u8_wrap v3; u8_wrap v4; u8_wrap v5; u8_wrap v6; u8_wrap v7; u8_wrap v8; u8_wrap v9; u8_wrap v10; u8_wrap v11; u8_wrap v12; u8_wrap v13; u8_wrap v14; u8_wrap v15 |]
+        | _ -> eval_error "simd_u8x16_make: bad arguments"))
+  ; ("simd_u8x16_extract", VBuiltin ("simd_u8x16_extract", function
+        | [VU8x16 a; VInt i] ->
+          if i < 0 || i >= 16 then
+            eval_error "simd_u8x16_extract: lane %d out of range (0..15)" i;
+          VInt a.(i)
+        | _ -> eval_error "simd_u8x16_extract: bad arguments"))
+  ; ("simd_u8x16_replace", VBuiltin ("simd_u8x16_replace", function
+        | [VU8x16 a; VInt i; VInt x] ->
+          if i < 0 || i >= 16 then
+            eval_error "simd_u8x16_replace: lane %d out of range (0..15)" i;
+          let a' = Array.copy a in
+          a'.(i) <- u8_wrap x;
+          VU8x16 a'
+        | _ -> eval_error "simd_u8x16_replace: bad arguments"))
+  ; ("simd_u8x16_load", VBuiltin ("simd_u8x16_load", function
+        | [VNativeU8Arr arr; VInt i] ->
+          simd_bounds_check "simd_u8x16_load" i 16 (Array.length arr);
+          VU8x16 (Array.sub arr i 16)
+        | _ -> eval_error "simd_u8x16_load: bad arguments"))
+  ; ("simd_u8x16_store", VBuiltin ("simd_u8x16_store", function
+        | [VNativeU8Arr arr; VInt i; VU8x16 v] ->
+          simd_bounds_check "simd_u8x16_store" i 16 (Array.length arr);
+          let arr' = Array.copy arr in
+          Array.blit v 0 arr' i 16;
+          VNativeU8Arr arr'
+        | _ -> eval_error "simd_u8x16_store: bad arguments"))
+  ; ("simd_u8x16_eq", VBuiltin ("simd_u8x16_eq", function
+        | [VU8x16 a; VU8x16 b] ->
+          VU8x16 (Array.init 16 (fun i -> if a.(i) = b.(i) then 255 else 0))
+        | _ -> eval_error "simd_u8x16_eq: bad arguments"))
+  ; ("simd_u8x16_lt", VBuiltin ("simd_u8x16_lt", function
+        | [VU8x16 a; VU8x16 b] ->
+          VU8x16 (Array.init 16 (fun i -> if a.(i) < b.(i) then 255 else 0))
+        | _ -> eval_error "simd_u8x16_lt: bad arguments"))
+  ; ("simd_u8x16_gt", VBuiltin ("simd_u8x16_gt", function
+        | [VU8x16 a; VU8x16 b] ->
+          VU8x16 (Array.init 16 (fun i -> if a.(i) > b.(i) then 255 else 0))
+        | _ -> eval_error "simd_u8x16_gt: bad arguments"))
+  ; ("simd_u8x16_and", VBuiltin ("simd_u8x16_and", function
+        | [VU8x16 a; VU8x16 b] ->
+          VU8x16 (Array.init 16 (fun i -> u8_wrap (a.(i) land b.(i))))
+        | _ -> eval_error "simd_u8x16_and: bad arguments"))
+  ; ("simd_u8x16_or", VBuiltin ("simd_u8x16_or", function
+        | [VU8x16 a; VU8x16 b] ->
+          VU8x16 (Array.init 16 (fun i -> u8_wrap (a.(i) lor b.(i))))
+        | _ -> eval_error "simd_u8x16_or: bad arguments"))
+  ; ("simd_u8x16_xor", VBuiltin ("simd_u8x16_xor", function
+        | [VU8x16 a; VU8x16 b] ->
+          VU8x16 (Array.init 16 (fun i -> u8_wrap (a.(i) lxor b.(i))))
+        | _ -> eval_error "simd_u8x16_xor: bad arguments"))
+  ; ("simd_u8x16_not", VBuiltin ("simd_u8x16_not", function
+        | [VU8x16 a] -> VU8x16 (Array.map (fun x -> u8_wrap (lnot x)) a)
+        | _ -> eval_error "simd_u8x16_not: bad arguments"))
+  ; ("simd_u8x16_select", VBuiltin ("simd_u8x16_select", function
+        | [VU8x16 m; VU8x16 a; VU8x16 b] ->
+          VU8x16 (simd_select (fun v -> v = 255) m a b)
+        | _ -> eval_error "simd_u8x16_select: bad arguments"))
+  ; ("simd_u8x16_any", VBuiltin ("simd_u8x16_any", function
+        | [VU8x16 a] -> VBool (simd_any simd_u8_is_highbit a)
+        | _ -> eval_error "simd_u8x16_any: bad arguments"))
+  ; ("simd_u8x16_all", VBuiltin ("simd_u8x16_all", function
+        | [VU8x16 a] -> VBool (simd_all simd_u8_is_highbit a)
+        | _ -> eval_error "simd_u8x16_all: bad arguments"))
+  ; ("simd_u8x16_first_set", VBuiltin ("simd_u8x16_first_set", function
+        | [VU8x16 a] -> VInt (simd_first_set simd_u8_is_highbit a)
+        | _ -> eval_error "simd_u8x16_first_set: bad arguments"))
 
   (* ── TypedArray builtins — contiguous native arrays for columnar DataFrame storage ── *)
   (* typed_array_create(length, default) → TypedArray filled with default value *)

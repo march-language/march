@@ -720,7 +720,9 @@ fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do ... end
 checker cannot bound — the overwhelmingly common case — stays **skipped and
 silent**, exactly as `head(ys)` does for an unknown list. That is not a
 concession, it is the point: a blast-radius sweep taken before the contract
-shipped (all 112 stdlib modules plus the `forgepm`, `bastion`, `conduit` and
+shipped (all 112 stdlib modules <!-- doc-lint:ignore-count: historical snapshot at the
+time this sweep ran (2026-08-04), not a claim about today's stdlib size -->
+plus the `forgepm`, `bastion`, `conduit` and
 `depot` projects) produced **zero** new violations and only new skips. Witnesses
 `accept/t141`, `reject/t142`. That silence is conditional on being outside
 `cap verified`, though: inside a `cap verified` module the same unbindable
