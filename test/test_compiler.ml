@@ -106,6 +106,61 @@ let test_ast_span () =
   let span = March_ast.Ast.dummy_span in
   Alcotest.(check string) "dummy span file" "<none>" span.file
 
+(* String-literal spans must cover the literal's full extent — opening quote
+   through closing quote — not a single quote character.  The read_string
+   sub-lexer resets the lexeme start on every recursive match, so the span
+   menhir computes for STRING collapses to 1 column.  Consumers that slice
+   source by span (refactor tooling, in-sample diagnostics) need the extent. *)
+let test_parse_string_literal_span () =
+  let lexbuf = Lexing.from_string {|"hello"|} in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELit (LitString "hello", sp) ->
+    Alcotest.(check int) "start col at opening quote" 0 sp.start_col;
+    Alcotest.(check int) "end col after closing quote" 7 sp.end_col
+  | _ -> Alcotest.fail "expected ELit(LitString)"
+
+(* Escapes make the literal's source extent longer than its value: "a\nb" is
+   6 source columns but a 3-character string.  The span must track the source. *)
+let test_parse_string_literal_span_escapes () =
+  let lexbuf = Lexing.from_string {|"a\nb"|} in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELit (LitString "a\nb", sp) ->
+    Alcotest.(check int) "start col" 0 sp.start_col;
+    Alcotest.(check int) "end col spans escape source" 6 sp.end_col
+  | _ -> Alcotest.fail "expected ELit(LitString)"
+
+(* A literal that does not start at column 0 — catches a fix that hardcodes
+   the start rather than recording the actual opening-quote position. *)
+let test_parse_string_literal_span_offset () =
+  let lexbuf = Lexing.from_string {|f("hi")|} in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let rec find e =
+    match e with
+    | March_ast.Ast.ELit (March_ast.Ast.LitString "hi", sp) -> Some sp
+    | March_ast.Ast.EApp (_, args, _) -> List.find_map find args
+    | _ -> None
+  in
+  match find expr with
+  | Some sp ->
+    Alcotest.(check int) "start col at opening quote" 2 sp.start_col;
+    Alcotest.(check int) "end col after closing quote" 6 sp.end_col
+  | None -> Alcotest.fail "expected a LitString arg"
+
+(* Triple-quoted strings go through read_triple_string, a separate sub-rule
+   with the same lexeme-start reset.  Spanning lines exercises pos_bol too. *)
+let test_parse_string_literal_span_triple () =
+  let lexbuf = Lexing.from_string "\"\"\"ab\ncd\"\"\"" in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELit (LitString _, sp) ->
+    Alcotest.(check int) "start line" 1 sp.start_line;
+    Alcotest.(check int) "start col at opening delimiter" 0 sp.start_col;
+    Alcotest.(check int) "end line" 2 sp.end_line;
+    Alcotest.(check int) "end col after closing delimiter" 5 sp.end_col
+  | _ -> Alcotest.fail "expected ELit(LitString)"
+
 let test_parse_expr_int () =
   let lexbuf = Lexing.from_string "42" in
   let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
@@ -12804,6 +12859,14 @@ let compiler_suites =
       ( "ast",
         [
           Alcotest.test_case "dummy span" `Quick test_ast_span;
+          Alcotest.test_case "string literal span covers full extent" `Quick
+            test_parse_string_literal_span;
+          Alcotest.test_case "string literal span with escapes" `Quick
+            test_parse_string_literal_span_escapes;
+          Alcotest.test_case "string literal span at nonzero column" `Quick
+            test_parse_string_literal_span_offset;
+          Alcotest.test_case "triple-quoted string literal span" `Quick
+            test_parse_string_literal_span_triple;
         ] );
       ( "parser",
         [

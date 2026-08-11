@@ -39,6 +39,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **String literals now carry their full source span.** A string literal's AST
+  span collapsed to a single column — the closing quote — so anything that
+  sliced source text by span got a lone `"` back whenever the expression was
+  or contained a string. `forge refactor bundle` hit this (rewriting
+  `f("x", 1)` produced a corrupted `a = "`), and diagnostics pointing at a
+  string literal underlined just the quote. The lexer hands off from the main
+  token rule to a recursive `read_string` sub-rule, and each re-entry reset
+  ocamllex's lexeme start; the opening position is now recorded on handoff and
+  restored when the token is produced, for plain and triple-quoted literals
+  and for interpolation starts.
+
 - **A natively compiled program opening a nonexistent file no longer misreads
   the error value's representation.** `file_open`'s `Err` case is typed
   `Result(Int, FileError)`, and the interpreter builds a real `FileError` ADT
