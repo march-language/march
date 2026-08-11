@@ -1801,7 +1801,7 @@ let test_repl_jit_topfn_first_class_value () =
        ] in
        let make_mod e =
          let s = March_ast.Ast.dummy_span in
-         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -1885,7 +1885,7 @@ let test_repl_jit_capture_free_closure_no_leak () =
        ] in
        let make_mod e =
          let s = March_ast.Ast.dummy_span in
-         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -1967,7 +1967,8 @@ let test_repl_jit_stdlib_list_length () =
        let make_stdlib_mod e =
          let s = March_ast.Ast.dummy_span in
          let main_clause = March_ast.Ast.{
-           fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+           fc_params = []; fc_guard = None; fc_body = e; fc_span = s;
+           fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -2121,7 +2122,7 @@ let test_repl_list_literal () =
          ~content_hash ~stdlib_decls ~type_map;
        let make_stdlib_mod e =
          let s = March_ast.Ast.dummy_span in
-         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -2165,7 +2166,7 @@ let test_repl_stdlib_on_list () =
          ~content_hash ~stdlib_decls ~type_map;
        let make_stdlib_mod e =
          let s = March_ast.Ast.dummy_span in
-         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -2273,7 +2274,7 @@ let test_repl_stdlib_chain () =
          ~content_hash ~stdlib_decls ~type_map;
        let make_stdlib_mod e =
          let s = March_ast.Ast.dummy_span in
-         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -2430,7 +2431,7 @@ let test_repl_jit_list_display () =
          ~content_hash ~stdlib_decls ~type_map;
        let make_stdlib_mod e =
          let s = March_ast.Ast.dummy_span in
-         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -2561,7 +2562,8 @@ let test_repl_list_literal_with_bigint () =
        let make_stdlib_mod e =
          let s = March_ast.Ast.dummy_span in
          let clause = March_ast.Ast.{
-           fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+           fc_params = []; fc_guard = None; fc_body = e; fc_span = s;
+           fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
@@ -2626,7 +2628,8 @@ let test_repl_list_literal_with_precompile_bigint () =
        let make_stdlib_mod e =
          let s = March_ast.Ast.dummy_span in
          let clause = March_ast.Ast.{
-           fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+           fc_params = []; fc_guard = None; fc_body = e; fc_span = s;
+           fc_params_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
            fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
