@@ -1,0 +1,39 @@
+-- Spawn+kill 40k actors over the program's lifetime -- past today's
+-- MARCH_MAX_PROCS registry cliff (65536 procs incl. tasks) and the
+-- ~20-30k VMA cliff from leaked 1MiB stack reservations.
+--
+-- Deviation from the brief's sketch: added `needs IO.Console` (required for
+-- println; the brief's sketch omitted it and every capability-gated module
+-- in this repo declares it explicitly).
+mod SpawnChurn do
+  needs IO.Console
+
+  actor Cell do
+    state { v : Int }
+    init  { v: 0 }
+    on Set(n : Int) do { v: n } end
+  end
+
+  fn churn(i, limit) do
+    if i == limit do
+      ()
+    else
+      let pid = spawn(Cell)
+      let _ = send(pid, Set(i))
+      kill(pid)
+      churn(i + 1, limit)
+    end
+  end
+
+  fn main() do
+    churn(0, 40000)
+    run_until_idle()
+    -- prove the node can still spawn and message afterward
+    let pid = spawn(Cell)
+    match send(pid, Set(1)) do
+      Some(_) -> println("post-churn spawn OK")
+      None    -> println("post-churn spawn BROKEN")
+    end
+    run_until_idle()
+  end
+end

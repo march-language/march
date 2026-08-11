@@ -1,0 +1,88 @@
+-- Supervised child crash-loops on Poison, then heals when poison stops.
+-- Gate: process survives, and post-poison the child answers again.
+--
+-- Deviations from the task-1 brief's sketch (corrected against the real
+-- surface — see examples/supervision_strategies.march,
+-- specs/lang/supervision.md, and specs/lang/actors.md's Actor.call section):
+--   - `supervise one_for_one max_restarts 100 window 60 do child = spawn(Fragile) end`
+--     is not the real grammar. The real form is a `supervise do ... end` block
+--     with `strategy <name>`, `max_restarts N within S`, and one
+--     `ActorName field` line per child (see supervisor_one_for_one_restart.march).
+--   - The supervisor's state field is declared/initialized like any other
+--     actor state (`state { child : Int } / init { child: 0 }`); the
+--     supervisor machinery overwrites it with the live child's pid as an Int.
+--   - `get_actor_field` returns `Option(a)`, not `a` directly — brief's
+--     `pid_of_int(get_actor_field(boss, 0))` doesn't typecheck (also the
+--     field selector is the declared field NAME as a String, e.g. "child",
+--     not a positional index).
+--   - The `Ping` handler (the `Actor.call` target) must be declared FIRST in
+--     Fragile so it lands at ctor tag 0 -- Actor.call routes the zero-arg
+--     sentinel to whichever handler occupies tag 0. Declaring `Poison`
+--     first (as in the brief) makes `Actor.call` misroute the `PingReq`
+--     sentinel to the `Poison` handler, which panics on an arity mismatch.
+--     Confirmed by a standalone repro before writing this file.
+--   - The scenario re-fetches the child's current pid from the supervisor
+--     before every poison send, so the burst genuinely crash-loops the
+--     *current* incarnation each time (the brief's version re-sent all 20
+--     Poison messages to the ORIGINAL pid, so only the first one would
+--     land -- the rest silently drop once that pid is dead).
+mod CrashLoop do
+  needs IO.Console
+
+  actor Fragile do
+    state { handled : Int }
+    init  { handled: 0 }
+
+    on Ping(reply_to) do
+      Actor.reply(reply_to, state.handled)
+      { handled: state.handled + 1 }
+    end
+
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  type PingReq = PingReq
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 100 within 60
+      Fragile child
+    end
+  end
+
+  fn current_child(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn poison_loop(boss, n) do
+    if n == 0 do
+      ()
+    else
+      let child = pid_of_int(current_child(boss))
+      send(child, Poison())
+      run_until_idle()
+      poison_loop(boss, n - 1)
+    end
+  end
+
+  fn main() do
+    let boss = spawn(Boss)
+    poison_loop(boss, 20)
+    -- after 20 crash/restart cycles, the CURRENT child incarnation must
+    -- still answer -- the process as a whole must have survived.
+    let healed = pid_of_int(current_child(boss))
+    match Actor.call(healed, PingReq, 5000) do
+      Ok(_)  -> println("self-healed")
+      Err(e) -> println("still dead: " ++ e)
+    end
+  end
+end

@@ -1159,3 +1159,4 @@ to the features it exercises. Quick reference:
 | `HashMap.*` / `Enum.uniq` / `Enum.frequencies` | `hash_map_bench` |
 | `RRB.*` / `Parallel.*` / `task_await_unwrap` i64 | `rrb_bench` |
 | JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |
+| actor / mailbox / scheduler / supervision changes | `scripts/actor-load.sh` (all four scenarios: `fanin`, `churn`, `callstorm`, `crashloop`) |

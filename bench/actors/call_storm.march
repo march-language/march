@@ -1,0 +1,53 @@
+-- 64 concurrent callers, 1 slow-ish target, short timeouts. Gate: bounded
+-- wall time (no congestive spiral) and every call returns (Ok or timeout Err).
+--
+-- Deviations from the task-1 brief's sketch:
+--   - Added `needs IO.Console` and `needs IO.Spawn` (required by println and
+--     Task.async/task_spawn respectively -- see the capability-ceiling check
+--     hit while building fanin_flood.march).
+--   - `Work` is the only handler and Actor.call's sentinel routes to
+--     whichever handler sits at ctor tag 0, so declaring a single handler is
+--     already correct here (no reordering needed, unlike crash_loop.march's
+--     two-handler Fragile actor).
+--   - `List.foldl` does not exist in the stdlib (`stdlib/list.march` only
+--     has `fold_left`/`fold_right`); replaced both call sites.
+mod CallStorm do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Slow do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Work(reply_to) do
+      -- burn some reductions so callers genuinely queue
+      let _ = List.fold_left(Range.to_list(Range.new(0, 2000)), 0, fn (a, b) -> a + b)
+      Actor.reply(reply_to, state.n)
+      { n: state.n + 1 }
+    end
+  end
+
+  type WorkReq = WorkReq
+
+  fn caller(pid, remaining, ok_acc, err_acc) do
+    if remaining == 0 do
+      (ok_acc, err_acc)
+    else
+      match Actor.call(pid, WorkReq, 200) do
+        Ok(_)  -> caller(pid, remaining - 1, ok_acc + 1, err_acc)
+        Err(_) -> caller(pid, remaining - 1, ok_acc, err_acc + 1)
+      end
+    end
+  end
+
+  fn main() do
+    let pid = spawn(Slow)
+    let tasks = List.map(Range.to_list(Range.new(0, 64)), fn _ ->
+      Task.async(fn -> caller(pid, 50, 0, 0)))
+    let results = List.map(tasks, fn t -> Task.await_unwrap(t))
+    let total = List.fold_left(results, 0, fn (acc, r) ->
+      match r do (ok, err) -> acc + ok + err end)
+    println("completed " ++ int_to_string(total) ++ " of 3200")
+    run_until_idle()
+  end
+end
