@@ -812,7 +812,9 @@ git commit -m "stdlib(list): filter/filter_map in natural style; changelog"
 
 **Scope note:** only the *wording* changes here, not the detection. Suppressing the warning entirely would require the typechecker to know TIR-level eligibility, which it does not have — verified: the AST-shaped `Succ(Succ(add_one(k)))` looks transformable but is classified `non-trmc` because of the intervening let. Leave the LSP lint alone; wire it to real eligibility in a separate piece of work.
 
-- [ ] **Step 1: Write the failing test**
+> **UPDATE (2026-08-12): the LSP lint WAS changed, in commit `b64bd3dd`.** Leaving it alone would have had the compiler and the editor give opposite advice on the same line: `lsp/lib/analysis.ml` told the user to rewrite *every* non-tail self-call with an accumulator, including the constructor-wrapped one the typechecker had just stopped flagging that way. `tco_check` already distinguishes the constructor case (it builds a distinct "constructor `X` wraps it" reason string), so the advice could be branched without any TIR-eligibility wiring. The insight is still reported — the stack cost is real whenever TRMC declines the function — and the arithmetic case keeps the old wording.
+
+- [x] **Step 1: Write the failing test**
 
 Add to `test/test_compiler.ml` in the diagnostics section:
 
@@ -846,12 +848,12 @@ This uses the file's existing idiom: `typecheck` (returns an error ctx),
 matching — the same shape as `test_actor_handler_body_io_with_needs_no_warning`
 at `test/test_compiler.ml:3351`. There is no `diagnostics_of` helper.
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `dune build --root . test/run_compiler.exe && ./_build/default/test/run_compiler.exe test error_improvements`
 Expected: FAIL — the current message says "Consider using an accumulator parameter."
 
-- [ ] **Step 3: Reword the non-arithmetic warning**
+- [x] **Step 3: Reword the non-arithmetic warning**
 
 In `lib/typecheck/typecheck.ml`, the `else` branch at ~12060 currently reads:
 
@@ -878,12 +880,12 @@ Replace the message text with:
 
 Leave the *arithmetic* variant (~12053) unchanged — `1 + f(n-1)` is not constructor-wrapped and TRMC can never transform it, so "use an accumulator" is still correct advice there.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `./_build/default/test/run_compiler.exe test error_improvements`
 Expected: PASS.
 
-- [ ] **Step 5: Check the conformance corpora**
+- [x] **Step 5: Check the conformance corpora**
 
 The `@types-check` corpus asserts diagnostic **text** and is CI-only. Run it locally:
 
@@ -892,7 +894,7 @@ dune build --root . @types-check 2>&1 | tail -20; echo "EXIT=$?"
 ```
 Expected: EXIT=0. If a fixture pins the old wording, update the fixture's expected output in the same commit.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/typecheck/typecheck.ml test/test_compiler.ml
