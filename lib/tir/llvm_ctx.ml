@@ -529,11 +529,68 @@ let emit_untag_known_scalar ctx ~raw ~unt (ptr_v : string) : string =
   emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" u r);
   u
 
+(** The 5 SIMD vector LLVM type strings and their runtime `kind` tags (must
+    match `march_simd_alloc`'s kind switch / MARCH_SIMD_TAG's pad-slot
+    convention in runtime/march_runtime.{h,c}: 0=f32x4 1=f64x2 2=i32x4
+    3=i64x2 4=u8x16). *)
+let vec_tys = [ "<4 x float>", 0; "<2 x double>", 1; "<4 x i32>", 2;
+                "<2 x i64>", 3; "<16 x i8>", 4 ]
+let is_vec_ty t = List.mem_assoc t vec_tys
+let simd_kind_of_vec t = List.assoc t vec_tys
+
+(** March-level type-constructor name → LLVM vector type, for the 5 SIMD
+    vector types declared in `stdlib/simd.march` and registered in
+    typecheck.ml's builtin env as [TCon ("F32x4", [])] &c.
+
+    [llvm_ty] deliberately maps these to "ptr" (the feature's "boxed at rest"
+    half of the two-form convention), so this table is the ONLY way a pass
+    that starts from a [Tir.ty] — rather than from an already-emitted vector
+    SSA value — can tell that a slot COULD hold a native vector. Used by
+    [Llvm_toplevel.emit_fn] to give a self-tail-recursive function's
+    vector-typed parameter a native (register-resident) TCO slot; see the
+    "boxed at rest, native in kernels" note there.
+
+    Matched on the SHORT name (after the last '.') so that both the bare
+    `F32x4` spelling and a qualified `Simd.F32x4` resolve — mirroring
+    [Repr]'s short-name classification discipline (see the Bytes/newtype
+    ABI note in memory: classifying by long name silently misses the
+    qualified spelling). *)
+let simd_vec_tcons = [ "F32x4", "<4 x float>"; "F64x2", "<2 x double>";
+                       "I32x4", "<4 x i32>";   "I64x2", "<2 x i64>";
+                       "U8x16", "<16 x i8>" ]
+
+let vec_ty_of_tir (t : Tir.ty) : string option =
+  match t with
+  | Tir.TCon (name, []) ->
+    let short = match String.rindex_opt name '.' with
+      | Some i -> String.sub name (i + 1) (String.length name - i - 1)
+      | None   -> name
+    in
+    List.assoc_opt short simd_vec_tcons
+  | _ -> None
+
 (** Coerce value [v] from [from_ty] to [to_ty] if they differ.
     Returns the (possibly new) value string. *)
 let coerce ctx from_ty v to_ty =
   if from_ty = to_ty then v
   else match (from_ty, to_ty) with
+  | (vt, "ptr") when is_vec_ty vt ->
+    (* Vector → erased slot: box into a march_simd_alloc leaf cell (payload at
+       +16, 16-aligned) so RC ops on the erased ptr stay sound — same pattern
+       as the ("double","ptr") float-boxing arm above. *)
+    let b = fresh ctx "vbox" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_simd_alloc(i64 %d)" b (simd_kind_of_vec vt));
+    let pp = fresh ctx "vpay" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" pp b);
+    emit ctx (Printf.sprintf "store %s %s, ptr %s, align 16" vt v pp);
+    b
+  | ("ptr", vt) when is_vec_ty vt ->
+    (* Erased slot → vector: unbox the payload back into a register value. *)
+    let pp = fresh ctx "vpay" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" pp v);
+    let r = fresh ctx "vunbox" in
+    emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 16" r vt pp);
+    r
   | ("ptr", "double") ->
     (* Erased slot → Float: UNBOX the heap float cell (float-boxing, Stage 2).
        A Float crossing an erasure boundary is stored as a `march_float_box`

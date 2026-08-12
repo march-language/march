@@ -1,0 +1,27 @@
+-- SIMD DYNAMIC lane-index bounds-panic fixture (final review, finding 2).
+--
+-- `extract`/`replace` lower to LLVM extractelement/insertelement, whose
+-- result is `poison` when the index is out of range -- and for
+-- insertelement the poison is the WHOLE vector, not one lane. The
+-- refinement type on Simd.extract_i32x4's index (`{Int | 0 <= _ && _ < 4}`)
+-- is NOT a backstop: an obligation the checker cannot decide is reported as
+-- a HINT and Skipped, not rejected. `lane()` below is deliberately opaque
+-- to the checker, so this compiles and reaches run time with index 6.
+--
+-- Asserted against the COMPILED binary's stderr; the interpreter raises its
+-- own error for the same call ("simd_i32x4_extract: lane 6 out of range
+-- (0..3)"), so this is NOT a byte-for-byte parity fixture -- model is
+-- simd_bounds_panic.march next to it. A statically in-range literal index
+-- must NOT emit this check at all; that half is pinned by the residency
+-- fixture's whole-body IR assertions and by simd_vector_core's literal
+-- extracts staying branch-free.
+mod SimdLanePanic do
+  needs IO.Console
+
+  pfn lane(n : Int) : Int do n + 5 end
+
+  fn main() : () do
+    let v = Simd.make_i32x4(1, 2, 3, 4)
+    println(Simd.extract_i32x4(v, lane(1)))
+  end
+end

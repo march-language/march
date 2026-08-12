@@ -233,6 +233,71 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     let ty = Llvm_ctx.llvm_ty v.Tir.v_ty in
     let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
     let vn = Llvm_ctx.llvm_name v.Tir.v_name in
+    (* Task 4b: a SIMD-vector parameter of a SELF-TAIL-RECURSIVE function gets
+       a NATIVE (register-resident) `<N x T>` slot instead of the default
+       "boxed at rest" `ptr` slot.
+
+       Why only here, and why this is not a general native-vector call ABI:
+       [is_tco] means every self-call in tail position was already rewritten
+       into a back-edge (a `store` into these very slots + `br`), so for those
+       iterations the value never crosses a real LLVM call boundary and needs
+       no erased representation at all.  With a `ptr` slot the back-edge's
+       [coerce]-to-param-type boxes the accumulator through march_simd_alloc on
+       EVERY iteration and the loop immediately unboxes it again — a heap
+       allocation plus a round-trip through memory per step, which is what made
+       a Simd dot product LOSE to the scalar composition it was meant to beat
+       (and leaked one 32-byte cell per iteration, since nothing dec_rc's the
+       slot's previous box).  Making the SLOT native leaves the back-edge's
+       coerce an identity and keeps the accumulator in a vector register.
+
+       The function's SIGNATURE is deliberately untouched (still `ptr`, via
+       llvm_param_ty above): callers keep boxing, so every non-back-edge entry
+       — the initial call, an indirect/closure call, a cross-module call — is
+       unaffected.  That is the whole point of the targeted shape: accumulator
+       loops go fast, everything else stays correct-but-boxed under the one
+       uniform ABI.  The entry prologue below therefore UNBOXES the incoming
+       boxed argument once per call, exactly as the apply-wrapper Float/Int
+       prologues do for their own uniform-ABI params.
+
+       RC: [Rc_types.needs_rc] says true for these TCon types, so Perceus may
+       emit EIncRC/EDecRC on the parameter — but llvm_emit's RC arms are all
+       guarded by `if ty = "ptr"`, and this slot's [var_llvm_ty] is now the
+       vector type, so those ops go inert rather than dec'ing a register
+       vector.  Same guard the existing native-vector ELet slots rely on. *)
+    let native_vec_slot = if is_tco then Llvm_ctx.vec_ty_of_tir v.Tir.v_ty else None in
+    match native_vec_slot with
+    | Some vty ->
+      Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s, align 16" slot vty);
+      (* The incoming argument is BOXED (the signature says ptr and every call
+         site coerces to it); unbox once, here, into the native slot.
+
+         KNOWN LEAK — 32 bytes per CALL, unbounded over a process's lifetime.
+         This unbox does NOT release the incoming box, so one march_simd_alloc
+         cell is leaked per invocation of this function. Measured at +32 bytes
+         per outer call (20M calls => +642MB over an equivalent scalar
+         control), so a long-lived server calling a SIMD kernel per request
+         grows without bound. It is strictly better than what it replaced (the
+         pre-fix code leaked one box per LOOP ITERATION, not per call) but it
+         is NOT fixed, and a reader should not conclude otherwise from the
+         "allocates nothing" framing in the comment above — that is about the
+         loop BODY.
+
+         A naive `march_decrc_local` here would be a use-after-free: a vector
+         argument is USUALLY a fresh temporary produced by the call site's
+         coerce, but it can also be a borrowed reference to a box owned by
+         someone else (e.g. a vector living in an ADT field passed straight
+         in), and freeing that frees out from under the owner. Distinguishing
+         the two needs ownership information (borrow inference / Perceus)
+         that is not available at this point in the backend.
+
+         Tracked with the full measurement and fix direction in
+         specs/todos/2026-08-11-simd-tco-entry-box-leak.md. *)
+      let nv = Llvm_ctx.coerce ctx "ptr" (Printf.sprintf "%%%s.arg" vn) vty in
+      Llvm_ctx.emit ctx
+        (Printf.sprintf "store %s %s, ptr %%%s.addr, align 16" vty nv slot);
+      Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot vty;
+      (v.Tir.v_name, slot, vty)
+    | None ->
     Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
     if is_apply_wrapper && ty = "double" then begin
       (* Float apply-fn param arrives BOXED (uniform ptr ABI, matching the

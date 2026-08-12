@@ -297,6 +297,15 @@ let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
     treated as borrowed by Perceus so they are never freed mid-session. *)
 let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
   let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context m in
+  (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
+     immediately post-lower (pre-mono), and without it a function behaves
+     differently in the REPL than when compiled.  The position matters as much
+     as the call — by defun the stdlib's nested `go` helpers are closures
+     invoked via ECallPtr, so self-recursion is no longer syntactically visible
+     and the transform would silently see nothing.  Gated by the same
+     [Trmc.enabled] ref, and idempotent, so re-lowering an already-transformed
+     module is a no-op. *)
+  let tir = March_tir.Trmc.transform_module tir in
   let iface_methods = March_tir.Lower.get_iface_methods () in
   let tir = March_tir.Mono.monomorphize ~iface_methods tir in
   (* Policy audit — report any Tagged(_, P) violations before defun. *)

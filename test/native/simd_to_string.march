@@ -1,0 +1,14 @@
+-- Witness for the march_value_to_string MARCH_SIMD_TAG fix (2026-08 SIMD
+-- Task 2 review finding #3): an `~H` interpolation hole (`${v}`) stringifies
+-- any value that isn't String/IOList-recognized via march_value_to_string
+-- (the SAME type-erased path test/native/h_sigil_adt_interp.march already
+-- pins for user ADTs) — before the fix, a SIMD vector rendered as
+-- "#<tag:-4>"; after, it renders lane-for-lane like `impl Show(F32x4)`.
+mod SimdToString do
+  needs IO.Console
+
+  fn main() : Unit do
+    let v = Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
+    println(IOList.to_string(~H"<p>${v}</p>"))
+  end
+end

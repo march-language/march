@@ -3931,6 +3931,327 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
+; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
+; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,
+; pulled forward from the original Task 3 split; see llvm_emit.ml's SIMD
+; intercept-arm header comment): same t1-t8/t12 cases as
+; test_stdlib_suite.ml's "simd_vector" interpreter suite plus a minimal
+; load/store leg (t9/t10-lite), printed to stdout so the compiled binary's
+; output can be diffed byte-for-byte against the interpreter's. Task 3's
+; dedicated residency/bounds-panic/full-mem fixtures are separate, still open.
+(rule
+ (targets simd_vector_core simd_vector_core.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_core.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_vector_core
+        native/simd_vector_core.march)
+   (with-stdout-to simd_vector_core.out
+        (system "./simd_vector_core")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_vector_core.expected simd_vector_core.out)))
+
+; SIMD-across-actor-messages smoke test (review finding #2's witness attempt):
+; sends an I32x4 to an actor, which extracts a lane and replies with it via
+; Actor.call. NOTE (see march_message.c's copy_value MARCH_SIMD_TAG arm):
+; march_send does NOT currently call march_msg_copy/copy_value anywhere in
+; this runtime (grep confirms zero call sites outside march_message.c
+; itself) — same-process actors share one heap via plain march_alloc, so
+; this fixture does NOT exercise the cross-heap copy fix. It's kept as a
+; general SIMD-through-actor-mailbox correctness smoke test regardless; see
+; the Task 2 report's finding-#2 writeup for the full non-vacuousness check
+; (verified by temporarily disabling the fix — no behavior change).
+(rule
+ (targets simd_actor_msg simd_actor_msg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_actor_msg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_actor_msg
+        native/simd_actor_msg.march)
+   (with-stdout-to simd_actor_msg.out
+        (system "./simd_actor_msg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_actor_msg.expected simd_actor_msg.out)))
+
+; Witness for the march_poly_eq/march_poly_compare MARCH_SIMD_TAG fix
+; (review finding #1): List.member's `y == x` compares two generically-typed
+; (TVar) closure-captured operands, so both arrive boxed `ptr` and the
+; SIMD-vector `==` fast path in llvm_emit.ml (keyed on the emitted LLVM
+; type) does not fire — this exercises march_poly_compare (confirmed via
+; --emit-llvm: `y == x` here compiles to a `call i64 @march_poly_compare`,
+; because F32x4 has no type_def for ensure_adt_eq_fn to synthesize a direct
+; eq function). Verified non-vacuous: temporarily disabling the fix's
+; MARCH_SIMD_TAG arm in march_poly_compare turns line 2 (no content match)
+; from "false" into "true" (see the Task 2 report's finding-#1 writeup).
+(rule
+ (targets simd_poly_eq simd_poly_eq.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_poly_eq.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_poly_eq
+        native/simd_poly_eq.march)
+   (with-stdout-to simd_poly_eq.out
+        (system "./simd_poly_eq")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_poly_eq.expected simd_poly_eq.out)))
+
+; Witness for the march_value_to_string MARCH_SIMD_TAG fix (review finding
+; #3): an `~H` interpolation hole stringifies any non-String/non-IOList
+; value via march_value_to_string (same type-erased path
+; h_sigil_adt_interp.march already pins for user ADTs). Verified
+; non-vacuous: disabling the fix's MARCH_SIMD_TAG arm renders
+; "#&lt;tag:-4&gt;" instead of "F32x4[1., 2., 3., 4.]" (see the Task 2
+; report's finding-#3 writeup).
+(rule
+ (targets simd_to_string simd_to_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_to_string.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_to_string
+        native/simd_to_string.march)
+   (with-stdout-to simd_to_string.out
+        (system "./simd_to_string")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_to_string.expected simd_to_string.out)))
+
+; Task 3: SIMD memory traffic (load/store) parity fixture -- u8 byte scan
+; (load + eq + first_set) and a store round-trip + FBIP copy-on-write
+; witness (a binding held across the store observes the ORIGINAL array
+; unchanged). .expected is interpreter-produced; compiled must match
+; byte-for-byte.
+(rule
+ (targets simd_vector_mem simd_vector_mem.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_mem.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_vector_mem
+        native/simd_vector_mem.march)
+   (with-stdout-to simd_vector_mem.out
+        (system "./simd_vector_mem")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_vector_mem.expected simd_vector_mem.out)))
+
+; Task 3: SIMD register-residency / escape fixture. `kernel` is a
+; straight-line load/mul/add/sum function -- its compiled body must stay
+; entirely in registers, contributing ZERO march_simd_alloc calls. `escape`
+; stores the loaded vector into a List cell, forcing exactly ONE heap box.
+; Asserted via -emit-llvm, not output diff -- IR shape is the point.
+;
+; `kernel`/`escape` are pure and small, so the default optimizer (Inline,
+; lib/tir/inline.ml) always inlines them into march_main regardless of call
+; count -- there is no separate `define ... @kernel`/`@escape` symbol to
+; scope a grep against post-opt (and building with --no-opt to keep them as
+; symbols would defeat the point: the Simd.* wrapper calls would stay as
+; boxed-ptr calls instead of being inlined down to raw <4 x float> register
+; ops, making a "kernel makes 0 allocs" check vacuous for the wrong reason).
+;
+; A source-order split at the first march_simd_alloc call (an earlier
+; version of this rule) is UNSOUND: the "before the split" half is built by
+; construction from lines that stop at the first march_simd_alloc match, so
+; a "0 allocs in that half" assertion can never fail -- it doesn't test
+; kernel-vs-escape attribution at all, and its sabotage check only ever
+; flipped the always-true threshold, which is guaranteed to fail regardless
+; of whether the split logic means anything (caught in review). The
+; falsifiable version asserts the fixture's only real invariant: march_main
+; contains EXACTLY ONE march_simd_alloc call in total (this fixture has one
+; escape call site; a kernel-side regression that boxes would push the
+; total to 2, an escape-side regression that stops boxing would drop it to
+; 0 -- both directions are caught by a single equality check on the total),
+; strengthened with a presence check for the vector arithmetic itself
+; (`fmul <4 x float>` and `fadd <4 x float>`/`reduce.fadd` both >= 1) so an
+; optimizer that deleted the kernel's body entirely (e.g. DCE'd its unused
+; result) couldn't fake a pass by vacuously satisfying an allocation count
+; with no vector ops behind it.
+(rule
+ (targets simd_residency_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_residency.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/simd_residency.march)
+   (with-stdout-to simd_residency_llvm_check.out
+    (run bash -c
+     "mbody=$(awk '/^define ptr @march_main/{f=1} f{print} f && /^}/{exit}' native/simd_residency.ll); \
+      alloc=$(printf '%s\\n' \"$mbody\" | grep -c march_simd_alloc); \
+      fmul=$(printf '%s\\n' \"$mbody\" | grep -c 'fmul <4 x float>'); \
+      fadd=$(printf '%s\\n' \"$mbody\" | grep -c -E 'fadd <4 x float>|reduce\\.fadd'); \
+      echo \"$alloc $fmul $fadd\"")))))
+
+(rule
+ (alias runtest)
+ (deps simd_residency_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r alloc fmul fadd < simd_residency_llvm_check.out; \
+    test \"$alloc\" -eq 1 -a \"$fmul\" -ge 1 -a \"$fadd\" -ge 1 || { echo \"expected exactly 1 march_simd_alloc total in march_main (this fixture's single escape call site -- a kernel-side box regression pushes this to 2, an escape-side regression that stops boxing drops it to 0), with >=1 fmul <4 x float> and >=1 fadd/reduce.fadd present (found alloc=$alloc fmul=$fmul fadd=$fadd)\" >&2; exit 1; }")))
+
+; Task 3: SIMD load bounds-panic fixture -- i=2, lanes=4, length=5 (i+lanes=6
+; > 5, one past the last legal index i=1). Asserts the COMPILED binary's
+; stderr; the interpreter's panic message has a different prefix (see
+; march_simd_bounds_panic in runtime/march_runtime.c vs. eval.ml's
+; simd_bounds_check), so this is NOT an interpreter-vs-compiled parity
+; fixture -- model is native_arr_map2_inline_length_panic above.
+(rule
+ (targets simd_bounds_panic)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_bounds_panic.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o simd_bounds_panic
+       native/simd_bounds_panic.march)))
+
+(rule
+ (targets simd_bounds_panic.err)
+ (deps simd_bounds_panic)
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to simd_bounds_panic.err
+    (run ./simd_bounds_panic)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_bounds_panic.expected simd_bounds_panic.err)))
+
+; Final review, finding 2: DYNAMIC lane-index bounds panic for extract.
+; extract/replace lower to extractelement/insertelement, which yield
+; `poison` out of range (insertelement poisons the WHOLE vector), so an
+; index the refinement checker cannot decide -- and it Skips what it cannot
+; prove rather than rejecting -- used to produce silent garbage compiled
+; while the interpreter raised a clean error. llvm_emit.ml now emits an
+; icmp+branch to @march_simd_lane_panic whenever the index is not a
+; statically in-range literal; a literal in range still compiles to a bare
+; extractelement with no branch. Asserts the COMPILED binary's stderr (the
+; interpreter's message differs) -- model is simd_bounds_panic above.
+(rule
+ (targets simd_lane_panic)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_lane_panic.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o simd_lane_panic
+       native/simd_lane_panic.march)))
+
+(rule
+ (targets simd_lane_panic.err)
+ (deps simd_lane_panic)
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to simd_lane_panic.err
+    (run ./simd_lane_panic)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_lane_panic.expected simd_lane_panic.err)))
+
+; Task 4b: SIMD vector values crossing march-internal CALL boundaries.
+;
+; Correctness half (defect A): `nested_dot` is a locally-defined recursive
+; `fn` capturing its arrays and threading the vector accumulator as a
+; parameter. defun lifts it to a `go$apply$N` closure wrapper reached by two
+; call sites -- the direct kickoff call and the closure's own indirect
+; self-call -- which must agree on ONE convention for the vector param.
+; They did not: the indirect site boxed (uniform ptr closure ABI) while the
+; direct site passed the raw <4 x float> register, so the callee dereferenced
+; a register vector as a box pointer and segfaulted (exit 139) at every --opt
+; level while the interpreter printed the right answer. .expected is
+; interpreter-produced; compiled must match byte-for-byte.
+(rule
+ (targets simd_nested_closure_acc simd_nested_closure_acc.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_nested_closure_acc.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_nested_closure_acc
+        native/simd_nested_closure_acc.march)
+   (with-stdout-to simd_nested_closure_acc.out
+        (system "./simd_nested_closure_acc")))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/simd_nested_closure_acc.expected simd_nested_closure_acc.out)))
+
+; Residency half (defect B): `simd_acc_go` is the SAME loop as a top-level
+; self-TAIL-recursive helper, so llvm_tco turns its self-call into a
+; back-edge and the accumulator never crosses a real call. Its parameter
+; slot must therefore be a NATIVE `<4 x float>` alloca, not the default
+; "boxed at rest" ptr slot -- with a ptr slot the back-edge's coerce boxed
+; through march_simd_alloc on EVERY iteration (and leaked the previous box,
+; since nothing dec_rc's the slot), which is what made a Simd dot product
+; lose to the scalar composition it was meant to beat.
+;
+; `simd_acc_go` is recursive, so the inliner leaves it as its own `define`
+; symbol and the grep can be scoped to it (unlike simd_residency's kernel,
+; which is inlined into march_main and has to be checked there).
+;
+; The contract is a CONJUNCTION, because neither half is falsifiable alone:
+;   vstore >= 2 -- native `store <4 x float> ... %acc.addr`, one for the
+;     entry unbox and one for the back-edge. This is the load-bearing
+;     assertion: pre-fix the slot was `alloca ptr` so this count was 0.
+;   alloc == 1 -- exactly one march_simd_alloc in the whole function, the
+;     coercion that boxes the accumulator on the RETURN path (the one place
+;     it genuinely does cross a call boundary). Pre-fix this was also 1 (the
+;     per-iteration back-edge box), which is precisely why the alloc count
+;     alone cannot detect the regression and vstore must carry it; alloc==1
+;     is what stops a future change from ADDING boxes back on top.
+;   fma >= 1 -- the vector arithmetic is still there, so an optimizer that
+;     DCE'd the loop body could not vacuously satisfy the counts above.
+(rule
+ (targets simd_nested_closure_acc_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_nested_closure_acc.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/simd_nested_closure_acc.march)
+   (with-stdout-to simd_nested_closure_acc_llvm_check.out
+    (run bash -c
+     "body=$(awk '/^define .*@simd_acc_go\\(/{f=1} f{print} f && /^}/{exit}' native/simd_nested_closure_acc.ll); \
+      alloc=$(printf '%s\\n' \"$body\" | grep -c march_simd_alloc); \
+      vstore=$(printf '%s\\n' \"$body\" | grep -c 'store <4 x float>.*%acc.addr'); \
+      fma=$(printf '%s\\n' \"$body\" | grep -c 'fma\\.v4f32'); \
+      echo \"$alloc $vstore $fma\"")))))
+
+(rule
+ (alias runtest)
+ (deps simd_nested_closure_acc_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r alloc vstore fma < simd_nested_closure_acc_llvm_check.out; \
+    test \"$vstore\" -ge 2 -a \"$alloc\" -eq 1 -a \"$fma\" -ge 1 || { echo \"expected the self-TCO'd simd_acc_go to keep its vector accumulator in a NATIVE slot: >=2 'store <4 x float> ... %acc.addr' (entry unbox + back-edge; 0 means the slot regressed to 'alloca ptr' and the back-edge boxes every iteration), exactly 1 march_simd_alloc (the return-path coercion only), and >=1 fma.v4f32 (body not DCE'd) -- found alloc=$alloc vstore=$vstore fma=$fma\" >&2; exit 1; }")))
+
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
  (deps (file %{exe:../bin/main.exe})
@@ -4519,3 +4840,217 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/h_css_url_context.expected native_h_css_url_context.out)))
+
+
+; ── Previously-unwired test/stdlib/*.march describe/test corpus ──────────
+; 37 of the 94 files in test/stdlib/ had real, substantial describe/test
+; coverage (237 describe blocks) but ran under NO automated runner -- only
+; manually, via `march test test/stdlib/<f>.march`. See
+; specs/progress/2026-08-11-test-stdlib-march-files-not-in-ci.md for the
+; audit that found this and the drift each file had accumulated as a result.
+;
+; Each rule below runs one file's `describe`/`test` blocks through the real
+; `march test` runner, judged by exit code, so a regression here fails
+; `dune runtest` instead of waiting for someone to remember to run the file
+; by hand.
+;
+; Two of the 37 are deliberately NOT included:
+;   - test_island_bridges.march: 7 of its tests fail due to a genuine,
+;     tracked compiler bug (derive Json's `from_json` dispatch is broken
+;     for the auto-generated island-bridge feature in BOTH the interpreted
+;     and compiled paths -- not test-file drift). See
+;     specs/todos/2026-08-12-island-bridge-from-json-broken.md.
+;   - test_properties.march: passes, but its 76 Check.all property runs are
+;     extremely slow under the tree-walking interpreter; wired separately
+;     below under its own alias so it does not block the default `runtest`.
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_actor.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_actor.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_array.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_array.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_bigint.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_bigint.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_bytes.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_bytes.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_check.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_check.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_cli.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_cli.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_csv.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_csv.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_dataframe.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_dataframe.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_datetime.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_datetime.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_decimal.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_decimal.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_derive_json.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_derive_json.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_derive_json_multi.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_derive_json_multi.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_dir.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_dir.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_enum.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_enum.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_file.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_gen.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_gen.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_hamt.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_hamt.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_html.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_html.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_iolist.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_iolist.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_iterable.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_iterable.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_map.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_map.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_math.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_math.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_option.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_option.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_path.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_path.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_plot.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_plot.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_prelude.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_prelude.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_queue.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_queue.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_regex.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_regex.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_result.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_result.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_set.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_set.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sigil.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_sigil.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sort.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_sort.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_string.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_string.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_string_utf8.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_string_utf8.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_task.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_task.march)))
+
+; ── test_properties.march: wired separately, own alias ───────────────────
+; Passes (228/228), but its 76 Check.all property runs (100 samples each,
+; generating/round-tripping nested Msgpack/JSON values through the
+; tree-walking interpreter) are genuinely slow -- a full run took several
+; hours on a machine with ~8 other concurrent compiler sessions contending
+; for CPU, and its true (uncontended) runtime hasn't been measured cleanly.
+; Rather than guess and risk turning `dune runtest` into a multi-hour gate
+; for every PR, this stays on its own alias, run explicitly:
+;   dune build --root . @test/stdlib-march-properties
+; A follow-up should benchmark it uncontended and, if it's actually fast,
+; fold it into the main runtest block above alongside the other 35 files.
+(rule
+ (alias stdlib-march-properties)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_properties.march)))

@@ -1330,12 +1330,14 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
 let codegen_cas_tags () =
   "rtcflags2"
   :: (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
-  (* MARCH_TRMC rewrites eligible functions into destination-passing style, so
-     it changes the emitted binary.  Without this tag a cached non-TRMC
-     artifact silently satisfies a TRMC build and vice versa — which is exactly
-     how the first TRMC benchmark run reported a 0.06s "TRMC off" number that
-     was really the TRMC binary served from the cache. *)
-  @ (if Sys.getenv_opt "MARCH_TRMC" <> None then ["trmc"] else [])
+  (* TRMC rewrites eligible functions into destination-passing style, so it
+     changes the emitted binary.  Without this tag a cached non-TRMC artifact
+     silently satisfies a TRMC build and vice versa — which is exactly how the
+     first TRMC benchmark run reported a 0.06s "TRMC off" number that was
+     really the TRMC binary served from the cache.  Reads the ref, not the env
+     var, so --trmc/--no-trmc are also CAS-distinct; every cas_flags site is
+     inside [compile], which runs after Arg.parse has set it. *)
+  @ (if !March_tir.Trmc.enabled then ["trmc"] else [])
   @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
@@ -2605,7 +2607,7 @@ let compile filename =
        longer syntactically visible.  See
        specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
     March_tir.Trmc.report tir;
-    (* Phase 3 (WIP, gated on MARCH_TRMC=1): destination-passing rewrite of
+    (* Phase 3 (WIP, gated on --trmc / legacy MARCH_TRMC): destination-passing rewrite of
        TRMC-eligible functions.  Off by default — this is a measurement
        vehicle until the RC integration (phase 4) is done. *)
     let tir = March_tir.Trmc.transform_module tir in
@@ -4720,6 +4722,10 @@ let () =
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
     ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
+    ("--trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := true),
+     " Enable tail-recursion-modulo-cons (destination-passing rewrite)");
+    ("--no-trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := false),
+     " Disable tail-recursion-modulo-cons");
     ("--pmap-threshold", Arg.Set_int pmap_threshold, "<N>  List.pmap/pfilter/preduce fall back to sequential below N elements (default 1024)");
     ("--opt",        Arg.Set_int opt_level, "<N>  Optimization level passed to clang (0-3)");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
@@ -4735,6 +4741,11 @@ let () =
     ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
      " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in
+  (* Legacy escape hatch: MARCH_TRMC=1 predates --trmc and is still used by the
+     CI sanitize gate.  Seeded BEFORE Arg.parse so it acts as a DEFAULT — an
+     explicit --trmc or --no-trmc on the command line overrides it either way.
+     (Applying it after parsing would silently clobber --no-trmc.) *)
+  if Sys.getenv_opt "MARCH_TRMC" <> None then March_tir.Trmc.enabled := true;
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;

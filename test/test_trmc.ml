@@ -367,6 +367,119 @@ let test_actor_msg_type_is_refused () =
   Alcotest.(check bool) "actor message type is not transformed"
     true (Trmc.transform_fn fd = None)
 
+(* REPL/JIT must apply the same transform as the compiled path, or a function
+   behaves one way in the REPL and another when compiled.  repl_jit may re-lower
+   a module the driver already transformed, so the transform has to be
+   idempotent — running it twice must not produce a second $dps helper.
+
+   The fixture uses a genuinely ELIGIBLE function: on an empty module both
+   sides are trivially zero and the assertion holds no matter how broken the
+   transform is. *)
+let test_transform_is_idempotent_on_a_transformed_module () =
+  let self = v "f" (Tir.TFn ([list_int], list_int)) in
+  let t = v "t" list_int and h = v "h" Tir.TInt in
+  let body =
+    Tir.ELet (t, Tir.EApp (self, [Tir.AVar (v "xs" list_int)]),
+              Tir.EAlloc (Tir.TCon ("List.Cons", []),
+                          [Tir.AVar h; Tir.AVar t]))
+  in
+  let m = module_of [fn "f" [v "xs" list_int] body] in
+  Trmc.enabled := true;
+  let once = Trmc.transform_module m in
+  let twice = Trmc.transform_module once in
+  Trmc.enabled := false;
+  (* Non-vacuousness: the first pass must actually have added the helper. *)
+  Alcotest.(check int) "first transform adds the $dps helper"
+    2 (List.length once.Tir.tm_fns);
+  Alcotest.(check int) "transforming twice adds nothing further"
+    (List.length once.Tir.tm_fns) (List.length twice.Tir.tm_fns)
+
+(* ── Phase 2: the JS backend ─────────────────────────────────────────────────
+   [Js_emit.emit_tagged_alloc_hole] and the [ESetField] arm had no coverage at
+   all: every other TRMC test goes through Llvm_emit.  JS has no
+   uninitialized-memory hazard to mirror, so a hole is simply a field holding
+   [null] until the fill overwrites it — which means the JS backend can be
+   gated the strong way, by RUNNING the emitted program. *)
+
+let js_of_hole_module () =
+  let (js, _srcmap) = March_tir.Js_emit.emit_module (trmc_hole_module ()) in
+  js
+
+let contains hay sub =
+  let n = String.length sub and m = String.length hay in
+  let rec go i = i + n <= m && (String.sub hay i n = sub || go (i + 1)) in
+  go 0
+
+(* Shape, not just spelling: the allocation must emit the FILLED field and
+   leave the hole as [null], and the fill must be an in-place property write on
+   that same object, sequenced with [undefined] so its value is unit (a bare
+   assignment expression would evaluate to the stored value and silently change
+   the meaning of an ESetField in value position). *)
+let test_js_emits_hole_and_fill () =
+  let js = js_of_hole_module () in
+  Alcotest.(check bool)
+    "allocation fills field 0 and leaves the hole null" true
+    (contains js "{ $: \"Cons\", _0: 42, _1: null }");
+  Alcotest.(check bool)
+    "the fill is a property write sequenced to undefined" true
+    (contains js "(c._1 = n, undefined)")
+
+(* Executing the emitted module proves what a substring cannot: that the hole
+   is allocated, filled, and read back — main() prints the 42 stored in field 0
+   of the cell whose field 1 was a hole.  Skipped (rather than failed) when
+   node or the JS runtime shim is unavailable, exactly as the LLVM tests above
+   skip on a missing verifier; the substring test runs unconditionally, so the
+   JS emission is never left with zero coverage. *)
+let find_js_runtime () =
+  List.find_opt Sys.file_exists
+    [ "runtime/march_runtime.mjs";
+      "../runtime/march_runtime.mjs";
+      "../../runtime/march_runtime.mjs";
+      "../../../runtime/march_runtime.mjs" ]
+
+let copy_file src dst =
+  let ic = open_in_bin src in
+  let n = in_channel_length ic in
+  let buf = really_input_string ic n in
+  close_in ic;
+  let oc = open_out_bin dst in
+  output_string oc buf; close_out oc
+
+let test_js_hole_program_runs_under_node () =
+  let have_node = Sys.command "command -v node > /dev/null 2>&1" = 0 in
+  match (have_node, find_js_runtime ()) with
+  | (false, _) | (_, None) ->
+    (* Announce the skip.  A silent [()] here reports GREEN for a test that
+       never ran, which is how a JS-backend regression would reach main
+       unnoticed on a node-less runner. *)
+    Printf.eprintf
+      "[trmc-js] SKIP: node=%b runtime_shim=%b — hole execution NOT verified\n%!"
+      have_node (find_js_runtime () <> None)
+  | (true, Some runtime) ->
+    let dir = Filename.temp_file "march_trmc_js" "" in
+    Sys.remove dir; Unix.mkdir dir 0o700;
+    let prog = Filename.concat dir "hole.mjs" in
+    let out = Filename.concat dir "out.txt" in
+    let oc = open_out prog in
+    output_string oc (js_of_hole_module ()); close_out oc;
+    copy_file runtime (Filename.concat dir "march_runtime.mjs");
+    let rc =
+      Sys.command (Printf.sprintf "node %s > %s 2>&1"
+                     (Filename.quote prog) (Filename.quote out))
+    in
+    let stdout_txt =
+      let ic = open_in out in
+      let n = in_channel_length ic in
+      let s = really_input_string ic n in
+      close_in ic; s
+    in
+    List.iter Sys.remove [prog; out; Filename.concat dir "march_runtime.mjs"];
+    Unix.rmdir dir;
+    if rc <> 0 then
+      Alcotest.failf "emitted JS failed to run (exit %d):\n%s" rc stdout_txt;
+    Alcotest.(check string) "the filled hole is read back and printed"
+      "42" (String.trim stdout_txt)
+
 let suites = [
   "trmc", [
     Alcotest.test_case "modulo-cons is eligible"        `Quick test_modulo_cons_eligible;
@@ -377,6 +490,7 @@ let suites = [
     Alcotest.test_case "normal nested fn is not a jp"   `Quick test_normal_nested_fn_is_not_a_join_point;
     Alcotest.test_case "intervening use blocks hole"    `Quick test_intervening_let_blocks_when_used;
     Alcotest.test_case "actor msg type refused"          `Quick test_actor_msg_type_is_refused;
+    Alcotest.test_case "transform is idempotent"         `Quick test_transform_is_idempotent_on_a_transformed_module;
   ];
   "trmc-ir", [
     Alcotest.test_case "alloc-hole emits verifiable IR"  `Quick test_alloc_hole_emits_verifiable_ir;
@@ -386,5 +500,9 @@ let suites = [
     Alcotest.test_case "nodes survive the pass pipeline"  `Quick test_nodes_survive_pass_pipeline;
     Alcotest.test_case "post-pipeline IR verifies"        `Quick test_pipeline_output_still_verifies;
     Alcotest.test_case "ESetField is an ownership move"   `Quick test_setfield_is_an_ownership_move;
+  ];
+  "trmc-js", [
+    Alcotest.test_case "js emits hole and fill"           `Quick test_js_emits_hole_and_fill;
+    Alcotest.test_case "emitted js runs under node"       `Quick test_js_hole_program_runs_under_node;
   ]
 ]
