@@ -298,6 +298,54 @@ describe "Parse" do
 
   end
 
+  describe "fence" do
+
+    -- The mirror of "alt does not try the second alternative after a hard
+    -- failure": `fence` scopes the commit, so a sibling can still be tried.
+    test "downgrades a hard failure so alt can continue" do
+      let committed = Parse.and_then(Parse.lit("ab"), Parse.commit(Parse.lit("cd")))
+      let fallback  = Parse.and_then(Parse.lit("ab"), Parse.lit("ZZ"))
+      match Parse.run(Parse.alt(Parse.fence(committed), fallback), "abZZ") do
+        Ok((_, y)) -> assert (y == "ZZ")
+        Err(_)     -> assert false
+      end
+    end
+
+  end
+
+  describe "recover" do
+
+    test "yields Ok and consumes normally when the parser succeeds" do
+      match Parse.run(Parse.recover(Parse.lit("ok"), Parse.lit(";")), "ok") do
+        Ok(Ok(s)) -> assert (s == "ok")
+        _         -> assert false
+      end
+    end
+
+    test "yields Err and resynchronizes past the sync parser" do
+      let p = Parse.and_then(Parse.recover(Parse.lit("ok"), Parse.lit(";")),
+                             Parse.lit("rest"))
+      match Parse.run(p, "BAD;rest") do
+        Ok((Err(e), tail)) -> assert (e.pos == 0 && tail == "rest")
+        _                  -> assert false
+      end
+    end
+
+    -- The point of §3.6: one pass, several errors, plus a partial result —
+    -- rather than stopping at the first problem.
+    test "collects several errors from a single pass" do
+      let items = Parse.many(Parse.recover(Parse.lit("ok"), Parse.lit(";")))
+      match Parse.run(items, "ok;BAD;ok") do
+        Ok(xs) ->
+          assert (List.length(xs) == 4)
+          assert (List.length(List.filter(xs, fn r -> Result.is_err(r))) == 2)
+          assert (List.length(List.filter(xs, fn r -> Result.is_ok(r))) == 2)
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
   describe "render" do
 
     test "reports 1-based line and column, not a byte offset" do

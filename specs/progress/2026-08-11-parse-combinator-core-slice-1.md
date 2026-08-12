@@ -1,8 +1,8 @@
 # `[P2]` `Parse`: parser combinator core
 
-**Status:** Landed (2026-08-11). Covers most of
-`specs/plans/2026-08-09-parsing-and-string-search.md` §10 step 1; the
-recovery combinators (§3.6) and the golden error corpus (§3.7) remain.
+**Status:** Landed (2026-08-11/12). Covers plan
+`specs/plans/2026-08-09-parsing-and-string-search.md` §10 step 1 except the
+golden error corpus (§3.7).
 
 New stdlib module `stdlib/parse.march`, registered in
 `lib/modules/stdlib_manifest.ml` and exercised by `test/stdlib/test_parse.march`
@@ -23,7 +23,7 @@ type Parser(a) = Parser(String -> Int -> ParseReply(a))
 Primitives: `lit`, `byte`, `byte_if`, `eof`, `pure`.
 Sequencing: `and_then`, `skip_then`, `skip_first`, `map`.
 Choice: `alt`. Repetition: `many`, `many1`, `sep_by`, `sep_by1`.
-Error control: `commit`, `ctx`, `label`. Running: `run`.
+Error control: `commit`, `ctx`, `label`, `fence`, `recover`. Running: `run`.
 Rendering: `render`, `line_col`.
 
 Both asymmetries the plan argued for are real in the code:
@@ -67,6 +67,8 @@ green:
 | `commit` returns `RFail` instead of `RCut` | commit blocks alt |
 | `many` swallows `RCut` instead of propagating | many propagates cut |
 | `line_col` stops counting newlines | render reports 2:3 |
+| `recover` does not resync (returns the same offset) | recover resyncs + collects several errors |
+| `fence` does not downgrade `RCut` | fence lets alt continue |
 
 The commit test is built so a broken `commit` yields `Ok`, not a different
 error: its second alternative *would* succeed on the input, so swallowing the
@@ -148,14 +150,45 @@ Two guards worth naming, both pinned by tests:
   inside an item has been passed the item was not optional, and stopping
   quietly would turn a real error into a short parse.
 
+## Recovery (§3.6), and a design change from the plan
+
+The plan imagined the driver threading a `List(ParseErr)` alongside the AST —
+a side channel in every reply. That is not needed. Making the recovered error
+a **value** gives the same result for free:
+
+```march
+recover(p, sync) : Parser(Result(a, ParseErr))
+```
+
+`many(recover(item, sync))` then yields `List(Result(item, ParseErr))` — the
+partial AST and the complete error list in one structure, with no change to
+`ParseReply` and no extra plumbing in any other combinator. `fence(p)`
+downgrades a hard failure to a soft one so one construct's `commit` cannot
+abort a sibling.
+
+Termination is the interesting part: at end of input `p` fails and `skip_to`
+cannot advance, so `recover` succeeds without consuming and `many`'s
+zero-width guard stops the loop. The two guards depend on each other.
+
+**A usage subtlety worth knowing, found by running it.** Resync skips *past*
+the sync match, so a separator the item parser does not own gets tried as an
+item and fails there too. On `"ok;BAD;ok;ALSOBAD"`:
+
+| Grammar | Errors reported |
+|---|---|
+| `many(recover(lit("ok"), lit(";")))` | 4 |
+| item consumes its own trailing separator | 2 |
+
+Both are "correct"; only the second reports what a reader would call the
+mistakes. Documented on `recover` itself, since it is the kind of thing that
+otherwise gets discovered as "the library is noisy".
+
 ## Next
 
-The recovery combinators (§3.6) — `recover(p, sync, default)` and `fence(p)` —
-so a driver can collect several errors from one pass instead of stopping at
-the first. Then the golden error corpus (§3.7), which is the actual acceptance
-bar for step 1.
+The golden error corpus (§3.7) — the actual acceptance bar for step 1: a set
+of malformed inputs with expected *rendered* diagnostics, so message quality
+regressions fail a test instead of being noticed by a user.
 
-Separately, an OCaml-side `to_diagnostic` that renders a `ParseErr` into
-`lib/errors/errors.ml`'s type would make library and compiler diagnostics
-indistinguishable and give LSP integration for free — that is what §8's
-editor probes want.
+Separately, an OCaml-side renderer from `ParseErr` into `lib/errors/errors.ml`
+would make library and compiler diagnostics indistinguishable and give LSP
+integration for free — that is what §8's editor probes want.
