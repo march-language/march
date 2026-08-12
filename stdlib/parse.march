@@ -23,9 +23,9 @@
 --   RCut   hard — a commit point was passed; propagate, do not backtrack
 --
 -- Primitives:      lit, byte, byte_if, eof, pure
--- Sequencing:      and_then, skip_then, skip_first, map
+-- Sequencing:      and_then, skip_then, skip_first, map, flat_map
 -- Choice:          alt
--- Repetition:      many, many1, sep_by, sep_by1
+-- Repetition:      many, many1, repeat, sep_by, sep_by1
 -- Error control:   commit, ctx, label, fence, recover
 -- Running:         run
 -- Rendering:       render, line_col
@@ -176,6 +176,21 @@ mod Parse do
     end
   end
 
+  -- `repeat`'s loop. Counts DOWN rather than checking a zero-width guard like
+  -- `many_go`: a fixed count terminates on its own, and a zero-width `p` here
+  -- should still produce `n` results rather than stopping early.
+  pfn repeat_go(f : String -> Int -> ParseReply(a), input : String, i : Int,
+                n : Int, acc : List(a), furthest : Int) : ParseReply(List(a)) do
+    if n <= 0 do ROk(List.reverse(acc), i, furthest)
+    else
+      match f(input, i) do
+        ROk(x, j, fp) -> repeat_go(f, input, j, n - 1, Cons(x, acc), max_int2(furthest, fp))
+        RFail(e)      -> RFail(e)
+        RCut(e)       -> RCut(e)
+      end
+    end
+  end
+
   -- KNOWN LIMITATION of the Int-only success channel.  When `p` succeeds
   -- having internally failed deeper than the offset at which `q` later fails,
   -- we know a deeper failure happened (the Int survives) but not what it
@@ -296,6 +311,55 @@ mod Parse do
             RFail(e)      -> RFail(e)
             RCut(e)       -> RCut(e)
           end)
+    end
+  end
+
+  doc """
+  Sequence, where what to parse next DEPENDS on what was just parsed.
+
+  This is the one combinator `map`, `and_then` and `alt` cannot replace
+  between them. They all fix the shape of the rest of the parse in advance;
+  `flat_map` chooses it from a value. Length-prefixed data, indentation
+  sensitivity, and version negotiation all need exactly this — which is the
+  formal difference between applicative and monadic sequencing, and the reason
+  a grammar DSL built only on `/`, `*` and `?` cannot express them.
+
+      -- a digit says how many items follow
+      flat_map(digit(), fn n -> repeat(item(), n))
+
+  The furthest-failure position is threaded through both halves, so an error
+  in the dependent parser still competes correctly inside an `alt`.
+  """
+  fn flat_map(p : Parser(a), f : a -> Parser(b)) : Parser(b) do
+    match p do
+      Parser(pf) ->
+        Parser(fn (input, i) ->
+          match pf(input, i) do
+            RFail(e) -> RFail(e)
+            RCut(e)  -> RCut(e)
+            ROk(x, j, fp) ->
+              match f(x) do
+                Parser(qf) ->
+                  match qf(input, j) do
+                    RFail(e)      -> RFail(e)
+                    RCut(e)       -> RCut(e)
+                    ROk(y, k, fq) -> ROk(y, k, max_int2(fp, fq))
+                  end
+              end
+          end)
+    end
+  end
+
+  doc """
+  Exactly `n` occurrences of `p`, failing if there are fewer.
+
+  Unlike `many`, a shortfall is an error rather than a shorter list: `n` came
+  from somewhere — usually a length prefix — so falling short means the input
+  disagrees with itself.
+  """
+  fn repeat(p : Parser(a), n : Int) : Parser(List(a)) do
+    match p do
+      Parser(pf) -> Parser(fn (input, i) -> repeat_go(pf, input, i, n, Nil, i))
     end
   end
 

@@ -298,6 +298,66 @@ describe "Parse" do
 
   end
 
+  describe "flat_map" do
+
+    -- The combinator that `map`/`and_then`/`alt` cannot replace: what to parse
+    -- next DEPENDS on what was just parsed. Here a leading digit says how many
+    -- items follow — length-prefixed data, the shape most wire protocols have.
+    test "chooses the next parser from the previous result" do
+      let counted =
+        Parse.flat_map(Parse.byte_if("a digit", fn b -> b >= 48 && b <= 57),
+                       fn d -> Parse.repeat(Parse.lit("x"), d - 48))
+      match Parse.run(counted, "3xxx") do
+        Ok(xs) -> assert (List.length(xs) == 3)
+        Err(_) -> assert false
+      end
+    end
+
+    test "reports the dependent parser's own failure" do
+      let counted =
+        Parse.flat_map(Parse.byte_if("a digit", fn b -> b >= 48 && b <= 57),
+                       fn d -> Parse.repeat(Parse.lit("x"), d - 48))
+      match Parse.run(counted, "3xy") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 2)
+      end
+    end
+
+    test "propagates a failure in the first parser without running the second" do
+      let counted = Parse.flat_map(Parse.lit("n"), fn _ -> Parse.lit("y"))
+      match Parse.run(counted, "zz") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 0)
+      end
+    end
+
+  end
+
+  describe "repeat" do
+
+    test "parses exactly n occurrences" do
+      match Parse.run(Parse.repeat(Parse.lit("a"), 3), "aaaa") do
+        Ok(xs) -> assert (List.length(xs) == 3)
+        Err(_) -> assert false
+      end
+    end
+
+    test "fails when there are fewer than n" do
+      match Parse.run(Parse.repeat(Parse.lit("a"), 3), "aa") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 2)
+      end
+    end
+
+    test "zero occurrences succeeds without consuming" do
+      match Parse.run(Parse.repeat(Parse.lit("a"), 0), "aaa") do
+        Ok(xs) -> assert (List.length(xs) == 0)
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
   describe "fence" do
 
     -- The mirror of "alt does not try the second alternative after a hard
