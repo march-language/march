@@ -1,0 +1,203 @@
+-- SIMD validation kernels: dot product (f32) and delimiter scanner (u8),
+-- each run as an explicit-Simd leg against a scalar/composed baseline, plus
+-- an fma_f32x4 interpreted-vs-compiled parity leg.
+--
+-- This is the Task 4 validation bench for the SIMD vector types feature
+-- (specs/plans/2026-08-10-simd-vector-types): it exists to prove the
+-- register-residency work from Tasks 1-3 pays off on realistic kernels, not
+-- just on the micro-fixtures in test/native/simd_*.march.
+--
+-- dot_simd vs dot_composed: dot_composed builds a full N-element intermediate
+-- array via NativeArray.map2_f32 before reducing it with sum_f32 -- at
+-- N=5,000,000 that's a 20MB allocation (5M * 4 bytes) it never needed.
+-- dot_simd folds multiply-add directly into a single F32x4 accumulator with
+-- zero intermediate array, so it should measurably beat dot_composed by
+-- eliminating that allocation and its write/read traffic, on top of doing
+-- the same FMA work in vector registers instead of one scalar multiply +
+-- one scalar add per pair.
+--
+-- scan_simd vs scan_scalar: scan_simd walks a 16MB NativeU8Arr 16 bytes at a
+-- time (load_u8x16/eq_u8x16/first_set_u8x16), scan_scalar walks it one byte
+-- at a time via get_u8. This is the classic memchr-style workload SIMD is
+-- built for, so the plan's bar is scan_simd >= 4x scan_scalar.
+--
+-- Data generation (array construction, needle placement) is NOT part of any
+-- timed region -- only the kernel call itself is, exactly as in
+-- bench/simd_f32.march.
+mod SimdKernels do
+  needs IO.Console
+  needs IO.Clock
+
+  pfn elapsed_ms(t0 : Float, t1 : Float) : Float do
+    (t1 -. t0) *. 1000.0
+  end
+
+  -- ── dot product ──────────────────────────────────────────────
+  --
+  -- dot_loop is a TOP-LEVEL pfn, not a locally-nested `fn` closure, because
+  -- of a compiled-only codegen bug discovered while writing this bench: a
+  -- recursive fn nested inside another function, threading a Simd-vector
+  -- value as one of its own parameters, segfaults when compiled (correct
+  -- interpreted) -- the direct call that kicks off the loop and the
+  -- indirect self-recursive call inside the closure disagree on whether the
+  -- vector accumulator is boxed or register-resident. See
+  -- specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md
+  -- for the minimal repro and IR evidence. A top-level fn's self-calls are
+  -- direct calls only (no closure indirection), which sidesteps the bug.
+  pfn dot_loop(a, b, i : Int, limit : Int, acc) do
+    if i >= limit do acc
+    else
+      let va = Simd.load_f32x4(a, i)
+      let vb = Simd.load_f32x4(b, i)
+      dot_loop(a, b, i + 4, limit, Simd.fma_f32x4(va, vb, acc))
+    end
+  end
+
+  pfn dot_tail(a, b, i : Int, n : Int, acc : Float) : Float do
+    if i >= n do acc
+    else dot_tail(a, b, i + 1, n, acc +. NativeArray.get_f32(a, i) *. NativeArray.get_f32(b, i))
+    end
+  end
+
+  doc "Dot product via an F32x4 FMA accumulator, index loop by 4, scalar tail."
+  fn dot_simd(a, b) : Float do
+    let n = NativeArray.length_f32(a)
+    let lanes = 4
+    let limit = n - (n % lanes)
+    let acc = dot_loop(a, b, 0, limit, Simd.splat_f32x4(0.0))
+    let vector_sum = Simd.sum_f32x4(acc)
+    dot_tail(a, b, limit, n, vector_sum)
+  end
+
+  doc "Dot product via map2_f32 (materializes an N-element intermediate) + sum_f32."
+  fn dot_composed(a, b) : Float do
+    let combined = NativeArray.map2_f32(a, b, fn (x, y) -> x *. y)
+    NativeArray.sum_f32(combined)
+  end
+
+  -- ── delimiter scanner ────────────────────────────────────────
+
+  doc "Index of the first byte equal to [needle] in [hay], or -1. 16-lane U8x16 stride, scalar tail."
+  fn scan_simd(hay, needle : Int) : Int do
+    let n = NativeArray.length_u8(hay)
+    let lanes = 16
+    let limit = n - (n % lanes)
+    let target = Simd.splat_u8x16(needle)
+    fn go(i) do
+      if i >= limit do -1
+      else
+        let v = Simd.load_u8x16(hay, i)
+        let hit = Simd.first_set_u8x16(Simd.eq_u8x16(v, target))
+        if hit >= 0 do i + hit
+        else go(i + lanes)
+        end
+      end
+    end
+    let vector_hit = go(0)
+    if vector_hit >= 0 do vector_hit
+    else
+      fn tail(i) do
+        if i >= n do -1
+        else if NativeArray.get_u8(hay, i) == needle do i
+        else tail(i + 1)
+        end
+        end
+      end
+      tail(limit)
+    end
+  end
+
+  doc "Index of the first byte equal to [needle] in [hay], or -1. Byte-at-a-time scalar loop."
+  fn scan_scalar(hay, needle : Int) : Int do
+    let n = NativeArray.length_u8(hay)
+    fn go(i) do
+      if i >= n do -1
+      else if NativeArray.get_u8(hay, i) == needle do i
+      else go(i + 1)
+      end
+      end
+    end
+    go(0)
+  end
+
+  -- ── fma_f32x4 interpreted-vs-compiled parity leg ────────────
+  --
+  -- A deterministic LCG (the repo's standard `(seed*1664525+1013904223) %
+  -- modulus` generator, see bench/heapsort.march etc.) drives N pseudo-random
+  -- f32 triples through fma_f32x4, extracting lane 0 each time and folding
+  -- into a running checksum. Interpreter fma is `f32_round(Float.fma a b c)`
+  -- (double FMA then round to binary32); compiled emits `llvm.fma.v4f32`
+  -- directly. Comparing PARITY_CHECKSUM between `march file.march` (eval)
+  -- and the --compile binary is the parity evidence for that discrepancy --
+  -- if they diverge, this leg's job is to report the FIRST diverging triple.
+
+  pfn lcg_next(seed : Int) : Int do
+    (seed * 1664525 + 1013904223) % 2147483647
+  end
+
+  -- Map an LCG draw (0..2147483646) to a small f32-ish float in [-8.0, 8.0).
+  pfn to_small_float(seed : Int) : Float do
+    (int_to_float(seed % 16000) /. 1000.0) -. 8.0
+  end
+
+  fn fma_parity_checksum(n : Int) : Float do
+    fn go(i, seed, acc) do
+      if i >= n do acc
+      else
+        let s1 = lcg_next(seed)
+        let s2 = lcg_next(s1)
+        let s3 = lcg_next(s2)
+        let a = to_small_float(s1)
+        let b = to_small_float(s2)
+        let c = to_small_float(s3)
+        let v = Simd.fma_f32x4(Simd.splat_f32x4(a), Simd.splat_f32x4(b), Simd.splat_f32x4(c))
+        let lane0 = Simd.extract_f32x4(v, 0)
+        go(i + 1, s3, acc +. lane0)
+      end
+    end
+    go(0, 12345, 0.0)
+  end
+
+  fn main() : Unit do
+    let n = 5000000
+
+    -- dot_simd vs dot_composed
+    let a = NativeArray.make_f32(n, 1.0000001)
+    let b = NativeArray.make_f32(n, 2.0000003)
+
+    let t0s = unix_time(())
+    let ds = dot_simd(a, b)
+    let t1s = unix_time(())
+    println("DOT_SIMD_RESULT " ++ float_to_string(ds))
+    println("DOT_SIMD_TIME_MS " ++ float_to_string(elapsed_ms(t0s, t1s)))
+
+    let t0c = unix_time(())
+    let dc = dot_composed(a, b)
+    let t1c = unix_time(())
+    println("DOT_COMPOSED_RESULT " ++ float_to_string(dc))
+    println("DOT_COMPOSED_TIME_MS " ++ float_to_string(elapsed_ms(t0c, t1c)))
+
+    -- scan_simd vs scan_scalar
+    let hay_len = 16000000
+    let needle_offset = 12345678
+    let hay0 = NativeArray.make_u8(hay_len, 65)
+    let hay = NativeArray.set_u8(hay0, needle_offset, 200)
+
+    let t0ss = unix_time(())
+    let idx_simd = scan_simd(hay, 200)
+    let t1ss = unix_time(())
+    println("SCAN_SIMD_RESULT " ++ int_to_string(idx_simd))
+    println("SCAN_SIMD_TIME_MS " ++ float_to_string(elapsed_ms(t0ss, t1ss)))
+
+    let t0sc = unix_time(())
+    let idx_scalar = scan_scalar(hay, 200)
+    let t1sc = unix_time(())
+    println("SCAN_SCALAR_RESULT " ++ int_to_string(idx_scalar))
+    println("SCAN_SCALAR_TIME_MS " ++ float_to_string(elapsed_ms(t0sc, t1sc)))
+
+    -- fma_f32x4 interpreted-vs-compiled parity checksum
+    let checksum = fma_parity_checksum(200000)
+    println("PARITY_CHECKSUM " ++ float_to_string(checksum))
+  end
+
+end

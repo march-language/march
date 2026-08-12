@@ -28,7 +28,16 @@ git log is authoritative for exact commits.
   with an FBIP copy-on-write store matching `NativeArray`'s in-place-vs-copy
   contract) — to native LLVM vector instructions/intrinsics,
   register-resident inside a function body (boxed into a 32-byte runtime
-  cell only at call/return/aggregate-field boundaries).
+  cell only at call/return/aggregate-field boundaries). Known limitation:
+  threading a vector value as the accumulator of a recursive/self-tail-
+  called loop (the natural shape for a dot-product-style horizontal
+  reduction) still boxes on every iteration when compiled, and a locally-
+  nested `fn` doing the same segfaults outright — see
+  `specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`
+  and the `simd-kernels` section of `bench/RESULTS.md` for the repro,
+  root cause, and measured cost. Straight-line load/op/store chains and
+  index-only recursive loops (no vector-typed loop parameter) are
+  unaffected and register-resident as designed.
 - **`NativeArray` gained narrow element widths: f32, i32, u8** — both
   interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
   `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,

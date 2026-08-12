@@ -913,4 +913,42 @@ describe "pivot" do
   end
 end
 
+-- ── col_native_min_max: 7-element (non-lane-multiple) pin ──────────────────
+--
+-- SIMD kernels (see bench/simd_kernels.march and
+-- specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md)
+-- operate in lane-width strides (2 for i64x2/f64x2, matching NativeIntArr/
+-- NativeFloatArr's element width), so a length-7 column exercises the
+-- scalar-tail path a lane-multiple length never would. col_native_min_max
+-- currently stays on the native_{int,float}_arr_min/max C builtins rather
+-- than a Simd fast path (see bench/RESULTS.md's simd-kernels section for
+-- why: a probe of the equivalent Simd-accumulator loop measured ~35x
+-- SLOWER than the existing tight C reduction, due to a heap allocation on
+-- every loop iteration -- a compiled-only residency gap, not specific to
+-- DataFrame). This test pins the correct min/max regardless of which
+-- implementation is behind it.
+describe "col_native_min_max" do
+  test "Int column, length 7 (non-lane-multiple): min/max" do
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([3, -7, 2, 9, -1, 4, 8]))])
+    match DataFrame.col_native_min_max(df, "x") do
+    Err(_) -> assert false
+    Ok((mn, mx)) -> do
+      assert (mn == -7.0)
+      assert (mx == 9.0)
+      end
+    end
+  end
+
+  test "Float column, length 7 (non-lane-multiple): min/max" do
+    let df = DataFrame.make_df([FloatCol("x", native_float_arr_from_list([3.0, -7.0, 2.0, 9.0, -1.0, 4.0, 8.0]))])
+    match DataFrame.col_native_min_max(df, "x") do
+    Err(_) -> assert false
+    Ok((mn, mx)) -> do
+      assert (mn == -7.0)
+      assert (mx == 9.0)
+      end
+    end
+  end
+end
+
 end -- mod TestDataFrame
