@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Exponential supervisor restart backoff with jitter (runtime-internal)** —
+  a supervised child that crashes repeatedly no longer gets respawned
+  immediately every time: from the second consecutive crash of the same
+  child slot onward, the restart is delayed by
+  `min(5000, 25 << min(streak-1, 7))` ms `±25%` jitter (streak resets once
+  the child survives a full `supervisor_window_secs` window), running on a
+  dedicated green thread so the crashing actor's own scheduler thread is
+  never blocked. The first crash of a slot still restarts synchronously
+  with zero delay, matching prior behavior exactly. `MARCH_SUP_TRACE=1`
+  prints `march: supervisor backoff child=<idx> streak=<n> delay_ms=<d>` to
+  stderr for observability. Also fixes a related scheduler gap:
+  `march_sched_wait_idle` (`run_until_idle()`) could return "idle" while a
+  green thread was still parked on a real timer (only actor-mailbox waits
+  were recognized as busy), which the new delayed-restart thread exposed.
 - **Bounded actor mailboxes with overflow policies (runtime-internal)** —
   `march_sched_set_mbox_limit(proc, limit, policy)` caps a process's mailbox
   at `limit` messages under `MARCH_MBOX_DROP_NEW` (reject the incoming

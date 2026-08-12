@@ -1780,6 +1780,16 @@ typedef struct {
     int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
                                   state fields; this child's Int-encoded pid lives at
                                   ((int64_t*)supervisor)[4 + word_idx] */
+    /* Task 16: exponential restart backoff. Zeroed at registration
+     * (march_actor_register_child — sup_children grows via realloc, which
+     * does NOT zero new memory, so these two fields are set explicitly
+     * there). Both are only ever touched from march_supervisor_notify,
+     * which Task 16 serializes with g_supervise_mu — see that function's
+     * comment for the concurrent-crash race this closes. */
+    int32_t crash_streak;     /* consecutive crashes without surviving a full
+                                  supervisor_window_secs window */
+    int64_t last_crash_ms;    /* march_now_ms() at the most recent crash; 0
+                                  means "never crashed yet" */
 } march_sup_child;
 
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
@@ -2634,16 +2644,130 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
     }
 }
 
-static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
+/* Task 16: serializes march_supervisor_notify's body (including the
+ * delayed-restart body run later on a dedicated green thread). Supervision
+ * is control-plane — restarts are rare relative to steady-state message
+ * traffic — so a single global mutex here is deliberately simple rather
+ * than per-supervisor.
+ *
+ * PRE-EXISTING HAZARD this closes (was never safe before Task 16 either):
+ * do_actor_death calls march_supervisor_notify with NO lock held (confirmed
+ * by reading do_actor_death above: fields[3]=0 and the monitor/cleanup work
+ * all happen unsynchronized, and do_actor_death can run on the crashing
+ * actor's own scheduler thread via the crash trap in actor_green_thread, OR
+ * on any foreign thread via march_kill from an evloop). Two children of the
+ * SAME supervisor crashing concurrently on different threads used to be able
+ * to run march_supervisor_notify (and therefore march_restart_budget_ok's
+ * sup_restart_ts realloc, and the *_restart functions' sup_children/
+ * supervisor-state writes) concurrently — a racing realloc on the same
+ * sup_restart_ts pointer is heap corruption. Task 16 adds child->crash_streak
+ * / last_crash_ms writes to that same unsynchronized surface, so closing the
+ * race is in scope here rather than deferred.
+ *
+ * Lock ordering: g_supervise_mu is OUTER, g_tbl_mu is INNER. Everything
+ * reachable from inside march_supervisor_notify's g_supervise_mu section
+ * (march_respawn_child -> find_meta_by_pid_index, which is lock-free per
+ * Task 15; find_or_create_meta, which takes g_tbl_mu) only ever takes
+ * g_tbl_mu, never g_supervise_mu, so there is no inversion. march_spawn
+ * (called from march_respawn_child) allocs and registers the new actor but
+ * runs no user code synchronously — the spawned actor's own body only runs
+ * later on its own green thread — so there is no re-entrant call back into
+ * march_supervisor_notify while g_supervise_mu is held. */
+static pthread_mutex_t g_supervise_mu = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    void   *supervisor;
+    int     child_idx;
+    int     strategy;       /* 0/1/2 — mirrors supervisor_strategy */
+    int64_t not_before_ms;
+} march_delayed_restart;
+
+/* Runs on its own dedicated green thread (spawned by march_supervisor_notify
+ * below), never on the crashing actor's scheduler thread. Parks until the
+ * backoff deadline, then re-validates the supervisor is still alive before
+ * running the (possibly budget-gated) restart strategy. */
+static void delayed_restart_thread(void *arg) {
+    march_delayed_restart *dr = (march_delayed_restart *)arg;
+    while (march_now_ms() < dr->not_before_ms)
+        march_sched_park_self_until(dr->not_before_ms);
+    void *supervisor = dr->supervisor;
+    int child_idx = dr->child_idx, strategy = dr->strategy;
+    free(dr);
+    if (!march_is_alive(supervisor)) return;   /* supervisor died meanwhile */
     march_actor_meta *sup_meta = find_meta(supervisor);
     if (!sup_meta) return;
-    int child_idx = crashed_meta->sup_child_index;
-    switch (sup_meta->supervisor_strategy) {
+    pthread_mutex_lock(&g_supervise_mu);
+    switch (strategy) {
         case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
         case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
         case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
         default: break;
     }
+    pthread_mutex_unlock(&g_supervise_mu);
+}
+
+/* Task 16: exponential backoff with jitter on repeat crashes of the same
+ * child slot. The FIRST crash of a slot (crash_streak becomes 1) keeps the
+ * pre-Task-16 synchronous, zero-delay restart exactly — this is what keeps
+ * every existing supervision golden (examples/supervision_strategies.march,
+ * the native supervision tests) byte-identical, since they each crash a
+ * given child once. Only a REPEAT crash (streak > 1) takes the delayed
+ * green-thread path, delaying the whole batch (one_for_all/rest_for_one
+ * included) by the crashed child's streak delay. */
+static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
+    pthread_mutex_lock(&g_supervise_mu);
+    march_actor_meta *sup_meta = find_meta(supervisor);
+    if (!sup_meta) { pthread_mutex_unlock(&g_supervise_mu); return; }
+    int child_idx = crashed_meta->sup_child_index;
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) {
+        pthread_mutex_unlock(&g_supervise_mu);
+        return;
+    }
+    march_sup_child *child = &sup_meta->sup_children[child_idx];
+
+    int64_t now = march_now_ms();
+    int64_t window_ms = (int64_t)sup_meta->supervisor_window_secs * 1000;
+    if (child->last_crash_ms != 0 && now - child->last_crash_ms > window_ms)
+        child->crash_streak = 0;           /* survived a full window: healed */
+    child->crash_streak++;
+    child->last_crash_ms = now;
+
+    int64_t delay = 0;
+    if (child->crash_streak > 1) {
+        int shift = child->crash_streak > 8 ? 7 : child->crash_streak - 1;
+        delay = 25LL << shift;             /* 50,100,...,3200 */
+        if (delay > 5000) delay = 5000;
+        /* ±25% jitter, seeded off a process-wide counter — Math.random is
+         * not available here and rand() is process-global anyway; a weak
+         * LCG is plenty for de-synchronizing a crash-storm's retries. */
+        static _Atomic uint32_t jitter_seed = 0x9E3779B9u;
+        uint32_t s = atomic_fetch_add_explicit(&jitter_seed, 0x9E3779B9u,
+                                               memory_order_relaxed);
+        s ^= s >> 16; s *= 0x45d9f3bu; s ^= s >> 16;
+        delay += (int64_t)(s % (uint32_t)(delay / 2 + 1)) - delay / 4;
+    }
+    if (getenv("MARCH_SUP_TRACE"))
+        fprintf(stderr, "march: supervisor backoff child=%d streak=%d delay_ms=%lld\n",
+                child_idx, child->crash_streak, (long long)delay);
+
+    if (delay == 0) {
+        switch (sup_meta->supervisor_strategy) { /* today's immediate path */
+            case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
+            case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
+            case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
+            default: break;
+        }
+        pthread_mutex_unlock(&g_supervise_mu);
+        return;
+    }
+    pthread_mutex_unlock(&g_supervise_mu);
+    march_delayed_restart *dr = malloc(sizeof *dr);
+    if (!dr) return;
+    dr->supervisor = supervisor;
+    dr->child_idx = child_idx;
+    dr->strategy = sup_meta->supervisor_strategy;
+    dr->not_before_ms = now + delay;
+    march_sched_spawn(delayed_restart_thread, dr);
 }
 
 /* Mark `actor` dead, run its cleanup callbacks and monitor Down-notifications,
@@ -5046,6 +5170,8 @@ void march_actor_register_child(void *supervisor, void *child,
                                       (size_t)(idx + 1) * sizeof(march_sup_child));
     sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
+    sup_meta->sup_children[idx].crash_streak = 0;
+    sup_meta->sup_children[idx].last_crash_ms = 0;
     sup_meta->sup_num_children = idx + 1;
 }
 

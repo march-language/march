@@ -1649,7 +1649,29 @@ void march_sched_wait_idle(void) {
             }
         }
         pthread_mutex_unlock(&g_registry_mu);
-        if (!busy) return;
+        if (!busy) {
+            /* Task 16: a proc parked on a real timer (march_sched_park_self_
+             * until — e.g. the supervisor's delayed-restart green thread)
+             * transitions PROC_PARKED -> PROC_WAITING the moment sched_loop's
+             * dispatch loop observes it (see the post-swapcontext PROC_PARKED
+             * branch above), with no pending mailbox message to trip the
+             * `st == PROC_WAITING && mbox_count > 0` busy check above. Such a
+             * proc is invisible to the registry scan even though it is
+             * guaranteed to wake and do more work once its deadline passes —
+             * so without this check, wait_idle would return "idle" while a
+             * restart (or any future timer-based wait) is still pending,
+             * breaking the "returns only once the system is quiescent"
+             * contract documented below. g_timer_heap is the definitive,
+             * always-global (not per-scheduler-thread) record of every proc
+             * currently parked on a deadline; a non-empty heap means the
+             * system is not actually idle yet. Locked independently of
+             * g_registry_mu (never nested with it elsewhere in this file),
+             * so there is no new lock-ordering hazard. */
+            pthread_mutex_lock(&g_timer_mu);
+            int64_t timers_pending = g_timer_len;
+            pthread_mutex_unlock(&g_timer_mu);
+            if (timers_pending == 0) return;
+        }
         /* Still busy after yielding: the procs we wait on are runnable only on
          * other (possibly CPU-starved) scheduler threads, or are PARKED/WAITING
          * and not locally runnable — so march_sched_yield() returned with
