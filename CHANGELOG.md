@@ -41,6 +41,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **The structural-recursion warning no longer prescribes an accumulator for
+  constructor-wrapped recursion.** For a body like `Succ(bump(k))`, TRMC
+  compiles the recursion into a loop, so the old "uses O(depth) stack space"
+  phrasing was misleading. The warning now says the stack cost *may* apply and
+  that a recursive call in direct constructor-argument position becomes a loop.
+  The arithmetic variant (`1 + f(n - 1)`), which TRMC cannot transform, still
+  recommends an accumulator parameter. Detection is unchanged.
 - **The capability ceiling is now on by default.** `march --compile` fails the
   build if any module's emitted code uses a capability that module does not
   declare in `needs` — including a stdlib-mediated use (`File.read`), which no
