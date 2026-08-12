@@ -2923,6 +2923,41 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let (ty, v) = List.nth arg_pairs i in coerce ctx ty v boundary_ty in
     let idx_arg i =
       let (ty, v) = List.nth arg_pairs i in coerce ctx ty v "i64" in
+    (* Lane-index bounds check for extract/replace. A bare
+       extractelement/insertelement with an out-of-range index is `poison`
+       in LLVM — and for insertelement the poison is the WHOLE result
+       vector, not one lane — so an OOB dynamic lane index silently
+       produced garbage while the interpreter raised a clean error. The
+       refinement checker is NOT a backstop: an obligation it cannot prove
+       is silently Skipped. So gate on the same icmp+branch+panic pattern
+       load/store use (below), against @march_simd_lane_panic (rule:
+       0 <= i < lanes; the load/store triple would misdescribe it).
+
+       A STATICALLY in-range literal index — the refinement-typed common
+       case, e.g. `Simd.extract_f32x4(v, 0)` after inlining — skips the
+       branch entirely and emits exactly what it did before. *)
+    let static_lane_in_range (i : int) : bool =
+      match List.nth args i with
+      | Tir.ALit (March_ast.Ast.LitInt n) -> n >= 0 && n < sty.s_lanes
+      | _ -> false
+    in
+    let check_lane_idx (argi : int) (iv : string) : unit =
+      if not (static_lane_in_range argi) then begin
+        let ok1 = fresh ctx "vlok" in
+        emit ctx (Printf.sprintf "%s = icmp sge i64 %s, 0" ok1 iv);
+        let ok2 = fresh ctx "vlok" in
+        emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %d" ok2 iv sty.s_lanes);
+        let ok = fresh ctx "vlok" in
+        emit ctx (Printf.sprintf "%s = and i1 %s, %s" ok ok1 ok2);
+        let panic_lbl = fresh_block ctx "vln_panic" in
+        let ok_lbl = fresh_block ctx "vln_ok" in
+        emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" ok ok_lbl panic_lbl);
+        emit_label ctx panic_lbl;
+        emit ctx (Printf.sprintf "call void @march_simd_lane_panic(i64 %s, i64 %d)" iv sty.s_lanes);
+        emit_term ctx "unreachable";
+        emit_label ctx ok_lbl
+      end
+    in
     let emit_splat_from_elem (e_v : string) : string =
       (* insertelement lane 0, then a zero-mask shufflevector broadcasts it
          to every lane — used by both `splat` and the shl/shr count. *)
@@ -2966,11 +3001,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        (v_ty, !cur)
      | "extract" ->
        let vv = vec_arg 0 and iv = idx_arg 1 in
+       check_lane_idx 1 iv;
        let ev = fresh ctx "vext" in
        emit ctx (Printf.sprintf "%s = extractelement %s %s, i64 %s" ev v_ty vv iv);
        (boundary_ty, simd_widen ctx sty ev)
      | "replace" ->
        let vv = vec_arg 0 and iv = idx_arg 1 in
+       check_lane_idx 1 iv;
        let ev = simd_narrow ctx sty (scalar_arg 2) in
        let r = fresh ctx "vrep" in
        emit ctx (Printf.sprintf "%s = insertelement %s %s, %s %s, i64 %s" r v_ty vv sty.s_elem ev iv);
@@ -3001,6 +3038,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        emit ctx (Printf.sprintf "%s = call %s @%s(%s %s, %s %s)" r v_ty name v_ty av v_ty bv);
        (v_ty, r)
      | "fma" ->
+       (* f32x4: llvm.fma.v4f32 is a SINGLE binary32-fused rounding, whereas
+          the interpreter (eval.ml's simd_f32x4_fma) computes a binary64
+          Float.fma and then rounds to binary32 — a double rounding. Not
+          formally the same operation; no divergence observed over the
+          parity leg, but a last-ulp difference is not ruled out. See
+          specs/todos/2026-08-12-simd-fma-rounding-parity.md.
+          f64x2 has no such asymmetry. *)
        let av = vec_arg 0 and bv = vec_arg 1 and cv = vec_arg 2 in
        let name = Printf.sprintf "llvm.fma.%s" (simd_intrinsic_suffix sty) in
        ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "%s @%s(%s, %s, %s)" v_ty name v_ty v_ty v_ty);

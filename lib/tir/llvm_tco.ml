@@ -406,7 +406,15 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
   Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca i64" tag_slot);
   Llvm_ctx.emit ctx (Printf.sprintf "store i64 %%__tag__.arg, ptr %%%s.addr" tag_slot);
 
-  (* Alloca each parameter slot and store the incoming arg. *)
+  (* Alloca each parameter slot and store the incoming arg.
+
+     SIMD note: a vector-typed parameter threaded through a MUTUAL-recursion
+     group keeps its uniform boxed `ptr` slot here (llvm_ty of the vector
+     type), unlike emit_fn's self-TCO path which promotes it to a raw
+     <N x T> register slot. That is correct, just unaccelerated: the group
+     boxes/unboxes the vector on every call, exactly as it did before the
+     self-TCO residency optimization landed. Recorded in
+     docs/simd-vectorization.md's "Known limits"; no todo. *)
   let fn_param_slots : (string * (string * string * string) list) list =
     List.map (fun fn ->
       let slots = List.map (fun (v : Tir.var) ->

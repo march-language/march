@@ -422,7 +422,12 @@ N=2,000 (both `-263.688627893`, exact bit-for-bit match printed by
 `SCAN_SIMD_RESULT` values at the full N=5,000,000/16,000,000 scale also
 matched exactly between interpreted and compiled runs (`10000001.`,
 `10000002.3842`, `12345678` respectively) — **no divergence observed**, so
-no STOP-for-coordination was triggered on that leg.
+no STOP-for-coordination was triggered on that leg. The comparison is at
+checksum granularity only: the leg prints a summed total, not per-triple
+values, so it evidences agreement in aggregate and would not localize (or,
+in principle, notice two cancelling last-ulp) divergences. The formal
+question is tracked in
+`specs/todos/2026-08-12-simd-fma-rounding-parity.md`.
 
 ## DataFrame Min/Max: not migrated
 

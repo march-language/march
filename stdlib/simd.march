@@ -10,6 +10,11 @@
 -- sum accumulates sequentially (f32x4/f64x2 in double, i32x4/i64x2 in i64).
 --
 -- Lane order: lane 0 is the first make_* argument / lowest-addressed on load.
+--
+-- Mask convention: select/any/all/first_set all read a lane's HIGH BIT (its
+-- sign bit), matching hardware blend/movemask. eq/lt/gt still produce
+-- canonical all-ones/all-zero lanes, which read the same either way; a
+-- hand-rolled non-canonical mask lane follows the high-bit rule.
 mod Simd do
 
   -- ── F32x4 ──────────────────────────────────────────────
@@ -39,7 +44,7 @@ mod Simd do
   fn xor_f32x4(a, b) do simd_f32x4_xor(a, b) end
   doc "Per-lane bitwise complement."
   fn not_f32x4(v) do simd_f32x4_not(v) end
-  doc "Per-lane: [mask]'s lane all-ones selects [a]'s lane, else [b]'s lane."
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
   fn select_f32x4(mask, a, b) do simd_f32x4_select(mask, a, b) end
   doc "True if any lane's high bit is set (interprets [v] as a mask)."
   fn any_f32x4(v) do simd_f32x4_any(v) end
@@ -97,7 +102,7 @@ mod Simd do
   fn xor_f64x2(a, b) do simd_f64x2_xor(a, b) end
   doc "Per-lane bitwise complement."
   fn not_f64x2(v) do simd_f64x2_not(v) end
-  doc "Per-lane: [mask]'s lane all-ones selects [a]'s lane, else [b]'s lane."
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
   fn select_f64x2(mask, a, b) do simd_f64x2_select(mask, a, b) end
   doc "True if any lane's high bit is set (interprets [v] as a mask)."
   fn any_f64x2(v) do simd_f64x2_any(v) end
@@ -155,7 +160,7 @@ mod Simd do
   fn xor_i32x4(a, b) do simd_i32x4_xor(a, b) end
   doc "Per-lane bitwise complement."
   fn not_i32x4(v) do simd_i32x4_not(v) end
-  doc "Per-lane: [mask]'s lane all-ones selects [a]'s lane, else [b]'s lane."
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
   fn select_i32x4(mask, a, b) do simd_i32x4_select(mask, a, b) end
   doc "True if any lane's high bit is set (interprets [v] as a mask)."
   fn any_i32x4(v) do simd_i32x4_any(v) end
@@ -211,7 +216,7 @@ mod Simd do
   fn xor_i64x2(a, b) do simd_i64x2_xor(a, b) end
   doc "Per-lane bitwise complement."
   fn not_i64x2(v) do simd_i64x2_not(v) end
-  doc "Per-lane: [mask]'s lane all-ones selects [a]'s lane, else [b]'s lane."
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
   fn select_i64x2(mask, a, b) do simd_i64x2_select(mask, a, b) end
   doc "True if any lane's high bit is set (interprets [v] as a mask)."
   fn any_i64x2(v) do simd_i64x2_any(v) end
@@ -267,7 +272,7 @@ mod Simd do
   fn xor_u8x16(a, b) do simd_u8x16_xor(a, b) end
   doc "Per-lane bitwise complement."
   fn not_u8x16(v) do simd_u8x16_not(v) end
-  doc "Per-lane: [mask]'s lane all-ones selects [a]'s lane, else [b]'s lane."
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
   fn select_u8x16(mask, a, b) do simd_u8x16_select(mask, a, b) end
   doc "True if any lane's high bit is set (interprets [v] as a mask)."
   fn any_u8x16(v) do simd_u8x16_any(v) end

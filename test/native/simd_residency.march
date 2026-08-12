@@ -10,12 +10,22 @@
 -- to scope a grep against, and running with --no-opt to keep them as
 -- separate functions would defeat the point of the test (the wrapper
 -- Simd.* calls would stay as boxed-ptr calls instead of being inlined down
--- to raw <4 x float> register ops). Instead test/dune scopes the grep by
--- SOURCE ORDER within march_main's inlined body: everything before the
--- first march_simd_alloc call is kernel's contribution (must contain the
--- vector fadd and zero allocs), everything from the first march_simd_alloc
--- call onward is escape's (must contain exactly one alloc for this fixture's
--- single escape call site).
+-- to raw <4 x float> register ops). A source-order split of march_main's
+-- body (kernel's contribution before the first alloc, escape's after) was
+-- tried and abandoned -- inlining does not preserve source order well
+-- enough to anchor a grep on. What test/dune actually asserts is
+-- WHOLE-BODY TOTALS over march_main's inlined body:
+--
+--   * exactly ONE march_simd_alloc -- this fixture's single escape call
+--     site. A kernel-side boxing regression pushes it to 2; an escape-side
+--     regression that stops boxing drops it to 0.
+--   * at least one `fmul <4 x float>` and at least one
+--     `fadd <4 x float>`/`reduce.fadd` -- so an optimizer that deleted the
+--     kernel's body outright could not fake a pass by satisfying the alloc
+--     count with no vector arithmetic behind it.
+--
+-- The totals are what distinguishes the two regressions; nothing here
+-- depends on which half of the body an instruction landed in.
 mod SimdResidency do
   needs IO.Console
 

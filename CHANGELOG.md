@@ -19,10 +19,21 @@ git log is authoritative for exact commits.
   plus arithmetic on the float and int families: add/sub/mul/(div for
   floats)/min/max/(fma/sqrt for floats)/(shl/shr for ints)/sum/hmin/hmax)
   via `Simd.<op>_<type>`, e.g. `Simd.add_f32x4`, `Simd.load_u8x16`. Lane
-  get/set indices are refinement-typed to the type's lane count.
+  get/set indices are refinement-typed to the type's lane count, and an
+  index the refinement checker cannot decide is bounds-checked at run time
+  (`load`/`store` against the array length, `extract`/`replace` against the
+  lane count) rather than silently producing garbage. `select`, `any`,
+  `all`, and `first_set` all read a lane's **high bit**, identically
+  interpreted and compiled — the canonical all-ones masks `eq`/`lt`/`gt`
+  produce are unaffected; a hand-rolled non-canonical mask follows the
+  high-bit rule.
   `F32x4`/`F64x2` arithmetic is bit-exact single/double precision (verified
-  against the true-f32-vs-double-then-round distinction, including a true
-  fused `fma`); `min`/`max`/`hmin`/`hmax` on floats use minNum/maxNum
+  against the true-f32-vs-double-then-round distinction) and `fma` is a
+  true fused multiply-add on both paths (for `f32x4` the interpreter's is a
+  binary64 fusion rounded to binary32 — no divergence observed, formal
+  equivalence tracked in
+  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`);
+  `min`/`max`/`hmin`/`hmax` on floats use minNum/maxNum
   semantics; integer arithmetic wraps mod 2^w. Each type implements
   `Show`/`Eq`/`Hash` (lane-wise; a NaN lane is unequal to itself, matching
   IEEE 754). Width is fixed at 128 bits on every target — identical

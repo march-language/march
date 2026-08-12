@@ -1,5 +1,16 @@
 # SIMD vector types — Task 4: validation kernels + DataFrame Min/Max decision
 
+> **SUPERSEDED IN PART by Task 4b (commit `08c02ebb`).** Everything below is
+> preserved as the record of Task 4 as it stood. Two things it reports as
+> open have since been fixed: the nested-closure vector-accumulator
+> **segfault** and the **per-iteration boxing** cost of the hoisted
+> workaround. Its item file has moved to
+> `specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`
+> (pointers below updated). Consequently the kernel timings quoted here are
+> pre-fix and no longer current — **`bench/RESULTS.md` is the authority for
+> current numbers**, and the "Next step" section's premise is already
+> discharged.
+
 Task 4 of `docs/superpowers/plans/2026-08-10-simd-vector-types.md`
 (gitignored; ledger at `.superpowers/sdd/2026-08-10-simd-vector-types/`,
 `task-4-brief.md`/`task-4-report.md`). Follows Task 1 (interpreter path,
@@ -22,7 +33,7 @@ Task 3 fixtures.
   block: 7-element (non-lane-multiple) `Int` and `Float` columns, pinning
   `(-7, 9)`. Runs via `march test test/stdlib/test_dataframe.march` (220
   tests total in that file, all passing).
-- **`specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`**
+- **`specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`**
   — new open item, filed per the plan's "if a bar fails, STOP and report
   with IR evidence" protocol, documenting a compiled-only codegen gap
   discovered while writing the dot-product kernel (see below).
@@ -56,7 +67,7 @@ Task 3 fixtures.
   or register-resident. `bench/simd_kernels.march` works around this by
   hoisting the loop to a top-level `pfn` (which avoids the crash but still
   pays the per-iteration boxing cost above). Full repro + IR:
-  `specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`.
+  `specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`.
 - **DataFrame Min/Max probe**: `native_int_arr_min` (existing C loop) vs. an
   equivalent `Simd.min_i64x2`-accumulator loop over the same shape, both
   over a 5,000,000-element `NativeIntArr`: 1.35ms vs. 46.80ms — ~35x
@@ -78,7 +89,7 @@ Task 3 fixtures.
 ## Next step (not part of this task)
 
 Whoever next touches compiled `Simd` closures/residency should read
-`specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`
+`specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`
 first — it has a minimal repro, the full `--emit-llvm` IR for both the
 segfault and the boxing-cost variant, and a concrete suggested fix
 direction. Once that's closed, DataFrame Min/Max migration is worth

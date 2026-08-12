@@ -4140,6 +4140,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/simd_bounds_panic.expected simd_bounds_panic.err)))
 
+; Final review, finding 2: DYNAMIC lane-index bounds panic for extract.
+; extract/replace lower to extractelement/insertelement, which yield
+; `poison` out of range (insertelement poisons the WHOLE vector), so an
+; index the refinement checker cannot decide -- and it Skips what it cannot
+; prove rather than rejecting -- used to produce silent garbage compiled
+; while the interpreter raised a clean error. llvm_emit.ml now emits an
+; icmp+branch to @march_simd_lane_panic whenever the index is not a
+; statically in-range literal; a literal in range still compiles to a bare
+; extractelement with no branch. Asserts the COMPILED binary's stderr (the
+; interpreter's message differs) -- model is simd_bounds_panic above.
+(rule
+ (targets simd_lane_panic)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_lane_panic.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o simd_lane_panic
+       native/simd_lane_panic.march)))
+
+(rule
+ (targets simd_lane_panic.err)
+ (deps simd_lane_panic)
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to simd_lane_panic.err
+    (run ./simd_lane_panic)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_lane_panic.expected simd_lane_panic.err)))
+
 ; Task 4b: SIMD vector values crossing march-internal CALL boundaries.
 ;
 ; Correctness half (defect A): `nested_dot` is a locally-defined recursive

@@ -130,6 +130,7 @@ double  march_unbox_float(void *p);
 void   *march_simd_alloc(int64_t kind);
 /* Report an out-of-bounds SIMD load/store index and terminate. Noreturn. */
 void    march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len);
+void    march_simd_lane_panic(int64_t i, int64_t lanes);
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
 
 /* Polymorphic containers store scalars via tagged integers: the low bit of the

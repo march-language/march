@@ -125,3 +125,11 @@ now either shipped or tracked in their own dated `specs/todos/` entries:
 March index-loop overhead, not SIMD-specific) and
 `specs/todos/2026-08-11-simd-tco-entry-box-leak.md` (per-call box leak in
 the TCO entry prologue). Nothing else remains open on this plan.
+
+**Op-surface deviation.** The spec's prose carried a rough "~90 operations"
+estimate; what shipped is **127**. The estimate was never normative — the
+per-type op grid in the plan's Global Constraints is, and 127 is exactly
+what that grid enumerates once every family is instantiated across all five
+types (float-only `div`/`fma`/`sqrt` and integer-only `shl`/`shr` make the
+per-type counts uneven). No op outside the grid was added and none was
+dropped; only the informal headline number was off.

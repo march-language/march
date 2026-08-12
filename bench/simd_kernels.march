@@ -139,8 +139,15 @@ mod SimdKernels do
   -- into a running checksum. Interpreter fma is `f32_round(Float.fma a b c)`
   -- (double FMA then round to binary32); compiled emits `llvm.fma.v4f32`
   -- directly. Comparing PARITY_CHECKSUM between `march file.march` (eval)
-  -- and the --compile binary is the parity evidence for that discrepancy --
-  -- if they diverge, this leg's job is to report the FIRST diverging triple.
+  -- and the --compile binary is the parity evidence for that discrepancy.
+  --
+  -- The leg is LANE-BLIND on purpose: it prints only the summed checksum,
+  -- so a divergence shows up as two different totals and says nothing about
+  -- WHICH triple diverged (and, in principle, two opposite-signed last-ulp
+  -- differences could cancel within the sum). Localizing a divergence means
+  -- bisecting N by hand. Accepted as-is; see
+  -- specs/todos/2026-08-12-simd-fma-rounding-parity.md, which asks for a
+  -- targeted rounding-boundary fixture rather than more machinery here.
 
   pfn lcg_next(seed : Int) : Int do
     (seed * 1664525 + 1013904223) % 2147483647

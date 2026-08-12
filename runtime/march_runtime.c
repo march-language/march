@@ -670,6 +670,20 @@ void march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len) {
     exit(1);
 }
 
+/* Lane-index panic for extract/replace with a DYNAMIC index the refinement
+ * checker could not prove in range (an unprovable obligation is silently
+ * Skipped, so it is not a backstop). Separate from
+ * march_simd_bounds_panic because the load/store message's (index, lanes,
+ * length) triple would describe the wrong rule here: the lane rule is
+ * simply 0 <= i < lanes. The interpreter raises its own error for the
+ * same case (eval.ml's simd_*_extract/replace arms). */
+void march_simd_lane_panic(int64_t i, int64_t lanes) {
+    fprintf(stderr,
+        "march: runtime error: simd lane index out of bounds (index %lld, lanes %lld)\n",
+        (long long)i, (long long)lanes);
+    exit(1);
+}
+
 /* SIMD vector kind byte (see MARCH_SIMD_TAG's doc comment): 0=f32x4 1=f64x2
  * 2=i32x4 3=i64x2 4=u8x16, stored in the hdr pad slot. Shared by
  * [march_poly_eq]/[march_poly_compare] (generic erased-slot compare) below

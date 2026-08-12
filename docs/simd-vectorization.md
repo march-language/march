@@ -201,7 +201,12 @@ Each type gets the same op families, named `Simd.<op>_<type>`, e.g.
 - **Compare/bitwise/select:** `eq`, `lt`, `gt` (mask results — all-ones lane
   where true, zero otherwise), `and`, `or`, `xor`, `not`, `select`
   (mask-driven per-lane choice between two vectors), plus mask-consuming
-  scans: `any`, `all`, `first_set`.
+  scans: `any`, `all`, `first_set`. All four mask consumers read a lane's
+  **high bit** (its sign bit): in `select`, a lane whose high bit is set
+  picks `a`, otherwise `b`. The canonical all-ones/all-zero lanes that
+  `eq`/`lt`/`gt` produce read identically under any convention; the high-bit
+  rule is what a hand-rolled non-canonical mask (say a lane of `0xFFFFFFFE`)
+  follows, and it is the same rule interpreted and compiled.
 - **Arithmetic:** `add`, `sub`, `mul`, `min`, `max`, `sum` (horizontal,
   accumulated sequentially — float families in double, int families in
   `i64`), `hmin`, `hmax`; float families additionally get `div`, `fma`
@@ -212,8 +217,13 @@ Each type gets the same op families, named `Simd.<op>_<type>`, e.g.
 That is 127 operations total across the five types. Lane get/set indices
 (`extract`, `replace`, `load`/`store` offsets) are refinement-typed to the
 type's lane count, so an out-of-range literal index is a compile-time
-refinement-check failure rather than a runtime panic; a dynamic index still
-gets the runtime bounds check. Each type implements `Show`, `Eq`, and `Hash`.
+refinement-check failure rather than a runtime panic. An index the
+refinement checker cannot decide is *not* rejected (March reports only
+definite failures), so every such index is bounds-checked at run time and
+panics out of range — `load`/`store` against the array length, `extract`/
+`replace` against the lane count. A statically in-range literal lane index
+skips the check and compiles to a bare `extractelement`/`insertelement`.
+Each type implements `Show`, `Eq`, and `Hash`.
 
 **Boundary rule**, matching `NativeArray`'s narrow-width contract: lane
 get/set traffics in widened `Int`/`Float`; integer narrowing on store wraps
@@ -328,9 +338,14 @@ feature needs to replace.
   every call, same as before the TCO optimization landed.
 - **`fma` is a true fused multiply-add** (`llvm.fma.v4f32`/`v2f64`, one
   rounding) — it can differ from a separate multiply followed by an add in
-  the last ulp. The interpreter emulates the same fused semantics (double
-  FMA then round to the element width), so interpreted/compiled results
-  match; the caveat is only against a *non*-fused reference computation.
+  the last ulp. For `f64x2` the interpreter runs the identical operation
+  (OCaml's `Float.fma`, binary64-fused). For `f32x4` it does *not*: the
+  interpreter computes a binary64 fused multiply-add and then rounds the
+  result to binary32 (a double rounding), while the compiled path is a
+  single binary32-fused rounding. These are formally different operations
+  and a last-ulp divergence is not ruled out; none has been observed over
+  the parity fixtures. Tracked in
+  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`.
 - **`i64x2` interpreter parity edge:** lane values beyond ±2^62 lose their
   top bit under the interpreter only, because OCaml's native `int` is
   63-bit. Compiled `i64x2` uses a true 64-bit lane and has no such limit.

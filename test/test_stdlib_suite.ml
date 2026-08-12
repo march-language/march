@@ -12874,6 +12874,53 @@ let test_simd_compare_masks () =
   Alcotest.(check (list int)) "select picks a's lane where mask true, else b's"
     [100; 200; 100; 200] (List.map vint (vlist (call_fn env "sel" [])))
 
+(* t14: NON-CANONICAL mask convention — select/any/all/first_set all read a
+   lane's HIGH BIT (its sign bit), not "the lane is all-ones". t8 above can't
+   distinguish the two: eq/lt/gt only ever produce canonical all-ones/zero
+   lanes, which read the same either way. A hand-rolled mask can: -2 has its
+   high bit set but is NOT all-ones, and 1 is nonzero with its high bit
+   clear. The compiled path (llvm_emit.ml's mask_cond: bitcast to the
+   integer vector, `icmp slt ... zeroinitializer`) has always been high-bit,
+   so this pins the interpreter to the same rule; the byte-for-byte
+   interpreted-vs-compiled witness is the matching leg of
+   test/native/simd_vector_core.march. *)
+let test_simd_noncanonical_mask () =
+  let env = eval_with_simd {|mod Test do
+    fn sel() do
+      let m = Simd.make_i32x4(-2, 0, 1, -1)
+      let s = Simd.select_i32x4(m, Simd.splat_i32x4(10), Simd.splat_i32x4(20))
+      [Simd.extract_i32x4(s, 0), Simd.extract_i32x4(s, 1),
+       Simd.extract_i32x4(s, 2), Simd.extract_i32x4(s, 3)]
+    end
+    fn scans() do
+      let m = Simd.make_i32x4(-2, 0, 1, -1)
+      [Simd.any_i32x4(m), Simd.all_i32x4(m)]
+    end
+    fn first() do
+      Simd.first_set_i32x4(Simd.make_i32x4(-2, 0, 1, -1))
+    end
+    fn selu() do
+      let m = Simd.make_u8x16(254, 0, 1, 255, 128, 127, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+      let s = Simd.select_u8x16(m, Simd.splat_u8x16(3), Simd.splat_u8x16(9))
+      [Simd.extract_u8x16(s, 0), Simd.extract_u8x16(s, 4), Simd.extract_u8x16(s, 5)]
+    end
+    fn self32() do
+      let m = Simd.make_f32x4(0.0 -. 1.5, 1.5, 0.0 -. 1.5, 1.5)
+      let s = Simd.select_f32x4(m, Simd.splat_f32x4(1.0), Simd.splat_f32x4(2.0))
+      [Simd.extract_f32x4(s, 0), Simd.extract_f32x4(s, 1)]
+    end
+  end|} in
+  Alcotest.(check (list int)) "high-bit lanes (-2, -1) pick a; 0 and 1 pick b"
+    [10; 20; 20; 10] (List.map vint (vlist (call_fn env "sel" [])));
+  Alcotest.(check (list bool)) "any/all over a non-canonical mask"
+    [true; false] (List.map vbool (vlist (call_fn env "scans" [])));
+  Alcotest.(check int) "first_set finds lane 0 (-2, high bit set)" 0
+    (vint (call_fn env "first" []));
+  Alcotest.(check (list int)) "u8: 254 and 128 pick a; 127 picks b"
+    [3; 3; 9] (List.map vint (vlist (call_fn env "selu" [])));
+  Alcotest.(check (list (float 0.0))) "f32: sign-bit lane picks a"
+    [1.0; 2.0] (List.map vfloat (vlist (call_fn env "self32" [])))
+
 (* t9: u8 byte scan — find a byte value's index via eq + first_set *)
 let test_simd_u8_byte_scan () =
   let env = eval_with_simd {|mod Test do
@@ -13776,6 +13823,7 @@ let stdlib_suites =
         Alcotest.test_case "t11 load bounds panic"             `Quick test_simd_load_bounds_panic;
         Alcotest.test_case "t12 Show/Eq/Hash"                  `Quick test_simd_show_eq_hash;
         Alcotest.test_case "t13 actor sendability"             `Quick test_simd_actor_sendable;
+        Alcotest.test_case "t14 non-canonical mask = high bit" `Quick test_simd_noncanonical_mask;
       ]);
       ("vault stdlib", [
         Alcotest.test_case "set and get"                  `Quick test_vault_set_get;

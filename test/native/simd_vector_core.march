@@ -108,5 +108,32 @@ mod Main do
     println(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0) != Simd.splat_f32x4(1.0))
     println(nan_v == nan_v)
     println(hash(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)) == hash(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)))
+
+    -- NON-CANONICAL mask parity (final review, finding 1). select/any/all/
+    -- first_set all read a lane's HIGH BIT. The canonical all-ones/all-zero
+    -- lanes that eq/lt/gt produce read the same under either convention, so
+    -- they cannot tell the two apart -- only a hand-rolled mask can. -2 has
+    -- its high bit set but is NOT all-ones; 1 is nonzero but has its high
+    -- bit clear. Under an "all-ones" reading, lane 0 would pick b; under the
+    -- high-bit reading it picks a. Interpreted and compiled must agree.
+    let ncm = Simd.make_i32x4(-2, 0, 1, -1)
+    println(show(Simd.select_i32x4(ncm, Simd.splat_i32x4(10), Simd.splat_i32x4(20))))
+    println(Simd.any_i32x4(ncm))
+    println(Simd.all_i32x4(ncm))
+    println(Simd.first_set_i32x4(ncm))
+    let ncm64 = Simd.make_i64x2(-2, 1)
+    println(show(Simd.select_i64x2(ncm64, Simd.splat_i64x2(10), Simd.splat_i64x2(20))))
+    -- u8x16: 254 (high bit set, not 255) vs 127 (nonzero, high bit clear).
+    let ncmu = Simd.make_u8x16(254, 0, 1, 255, 128, 127, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    let selu = Simd.select_u8x16(ncmu, Simd.splat_u8x16(3), Simd.splat_u8x16(9))
+    println(Simd.extract_u8x16(selu, 0))
+    println(Simd.extract_u8x16(selu, 4))
+    println(Simd.extract_u8x16(selu, 5))
+    println(Simd.first_set_u8x16(ncmu))
+    -- f32x4: a float mask lane built from a non-all-ones negative bit
+    -- pattern -- -1.5 has its sign bit set, 1.5 does not.
+    let ncmf = Simd.make_f32x4(0.0 -. 1.5, 1.5, 0.0 -. 1.5, 1.5)
+    println(show(Simd.select_f32x4(ncmf, Simd.splat_f32x4(1.0), Simd.splat_f32x4(2.0))))
+    println(Simd.first_set_f32x4(ncmf))
   end
 end

@@ -12266,6 +12266,7 @@ declare double @march_unbox_float(ptr %p)
 declare i64  @march_poly_compare(ptr %a, ptr %b)
 declare ptr  @march_simd_alloc(i64 %kind)
 declare void @march_simd_bounds_panic(i64 %i, i64 %lanes, i64 %len)
+declare void @march_simd_lane_panic(i64 %i, i64 %lanes)
 |}
 
 let golden_preamble_native_net_io : string = {|
@@ -12497,6 +12498,7 @@ declare double @march_unbox_float(ptr %p)
 declare i64  @march_poly_compare(ptr %a, ptr %b)
 declare ptr  @march_simd_alloc(i64 %kind)
 declare void @march_simd_bounds_panic(i64 %i, i64 %lanes, i64 %len)
+declare void @march_simd_lane_panic(i64 %i, i64 %lanes)
 |}
 
 (** Reassemble the historical preamble text for a given (is_wasm, repl)

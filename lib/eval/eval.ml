@@ -3910,8 +3910,8 @@ let simd_f32_zero : float = 0.0
 let simd_f64_allones : float = Int64.float_of_bits 0xFFFFFFFFFFFFFFFFL
 let simd_f64_zero : float = 0.0
 
-let simd_f32_is_allones (v : float) : bool = Int32.bits_of_float v = 0xFFFFFFFFl
-let simd_f64_is_allones (v : float) : bool = Int64.bits_of_float v = 0xFFFFFFFFFFFFFFFFL
+(* Mask predicate — HIGH BIT, uniformly across select/any/all/first_set and
+   across both backends. See [simd_select]'s doc comment below. *)
 let simd_f32_is_highbit (v : float) : bool = Int32.bits_of_float v < 0l
 let simd_f64_is_highbit (v : float) : bool = Int64.bits_of_float v < 0L
 
@@ -3946,8 +3946,17 @@ let simd_first_set (is_highbit : 'a -> bool) (arr : 'a array) : int =
   go 0
 let simd_any (is_highbit : 'a -> bool) (arr : 'a array) : bool = Array.exists is_highbit arr
 let simd_all (is_highbit : 'a -> bool) (arr : 'a array) : bool = Array.for_all is_highbit arr
-let simd_select (is_allones : 'a -> bool) (mask : 'a array) (a : 'a array) (b : 'a array) : 'a array =
-  Array.init (Array.length mask) (fun i -> if is_allones mask.(i) then a.(i) else b.(i))
+(* [select] uses the SAME high-bit predicate as [any]/[all]/[first_set],
+    which is also what the compiled path does (llvm_emit.ml's [mask_cond]:
+    bitcast to the integer vector, then `icmp slt ... zeroinitializer`) and
+    what every SIMD ISA's blend instruction does. A canonical mask — the
+    all-ones/all-zero lanes produced by [eq]/[lt]/[gt] — reads identically
+    under either convention; a hand-rolled NON-canonical mask lane (e.g.
+    0xFFFFFFFE) only agrees if both sides test the high bit, so interpreted
+    and compiled would diverge if this tested all-ones. Pinned by the
+    non-canonical-mask leg of test/native/simd_vector_core.march. *)
+let simd_select (is_highbit : 'a -> bool) (mask : 'a array) (a : 'a array) (b : 'a array) : 'a array =
+  Array.init (Array.length mask) (fun i -> if is_highbit mask.(i) then a.(i) else b.(i))
 
 (** Sequential (ordered) horizontal fold over lanes 1..n-1, seeded with
     lane 0 -- matches the compiled side's ordered [llvm.vector.reduce.*]
@@ -8357,7 +8366,7 @@ let base_env : env =
         | _ -> eval_error "simd_f32x4_not: bad arguments"))
   ; ("simd_f32x4_select", VBuiltin ("simd_f32x4_select", function
         | [VF32x4 m; VF32x4 a; VF32x4 b] ->
-          VF32x4 (simd_select simd_f32_is_allones m a b)
+          VF32x4 (simd_select simd_f32_is_highbit m a b)
         | _ -> eval_error "simd_f32x4_select: bad arguments"))
   ; ("simd_f32x4_any", VBuiltin ("simd_f32x4_any", function
         | [VF32x4 a] -> VBool (simd_any simd_f32_is_highbit a)
@@ -8392,6 +8401,14 @@ let base_env : env =
         | [VF32x4 a; VF32x4 b] ->
           VF32x4 (Array.init 4 (fun i -> f32_round (simd_maxnum_f a.(i) b.(i))))
         | _ -> eval_error "simd_f32x4_max: bad arguments"))
+  (* f32x4 fma is NOT formally identical to the compiled path: this is a
+     binary64 fused multiply-add rounded to binary32 (double rounding),
+     while llvm_emit.ml lowers to llvm.fma.v4f32 (a single binary32-fused
+     rounding). No divergence has been observed over the parity leg, but
+     the two operations are different roundings and could differ in the
+     last ulp. Open question + closure conditions:
+     specs/todos/2026-08-12-simd-fma-rounding-parity.md.
+     f64x2 below has no such asymmetry (Float.fma IS binary64-fused). *)
   ; ("simd_f32x4_fma", VBuiltin ("simd_f32x4_fma", function
         | [VF32x4 a; VF32x4 b; VF32x4 c] ->
           VF32x4 (Array.init 4 (fun i -> f32_round (Float.fma a.(i) b.(i) c.(i))))
@@ -8471,7 +8488,7 @@ let base_env : env =
         | _ -> eval_error "simd_f64x2_not: bad arguments"))
   ; ("simd_f64x2_select", VBuiltin ("simd_f64x2_select", function
         | [VF64x2 m; VF64x2 a; VF64x2 b] ->
-          VF64x2 (simd_select simd_f64_is_allones m a b)
+          VF64x2 (simd_select simd_f64_is_highbit m a b)
         | _ -> eval_error "simd_f64x2_select: bad arguments"))
   ; ("simd_f64x2_any", VBuiltin ("simd_f64x2_any", function
         | [VF64x2 a] -> VBool (simd_any simd_f64_is_highbit a)
@@ -8585,7 +8602,7 @@ let base_env : env =
         | _ -> eval_error "simd_i32x4_not: bad arguments"))
   ; ("simd_i32x4_select", VBuiltin ("simd_i32x4_select", function
         | [VI32x4 m; VI32x4 a; VI32x4 b] ->
-          VI32x4 (simd_select (fun v -> v = -1) m a b)
+          VI32x4 (simd_select simd_i32_is_highbit m a b)
         | _ -> eval_error "simd_i32x4_select: bad arguments"))
   ; ("simd_i32x4_any", VBuiltin ("simd_i32x4_any", function
         | [VI32x4 a] -> VBool (simd_any simd_i32_is_highbit a)
@@ -8698,7 +8715,7 @@ let base_env : env =
         | _ -> eval_error "simd_i64x2_not: bad arguments"))
   ; ("simd_i64x2_select", VBuiltin ("simd_i64x2_select", function
         | [VI64x2 m; VI64x2 a; VI64x2 b] ->
-          VI64x2 (simd_select (fun v -> Int64.equal v (-1L)) m a b)
+          VI64x2 (simd_select simd_i64_is_highbit m a b)
         | _ -> eval_error "simd_i64x2_select: bad arguments"))
   ; ("simd_i64x2_any", VBuiltin ("simd_i64x2_any", function
         | [VI64x2 a] -> VBool (simd_any simd_i64_is_highbit a)
@@ -8811,7 +8828,7 @@ let base_env : env =
         | _ -> eval_error "simd_u8x16_not: bad arguments"))
   ; ("simd_u8x16_select", VBuiltin ("simd_u8x16_select", function
         | [VU8x16 m; VU8x16 a; VU8x16 b] ->
-          VU8x16 (simd_select (fun v -> v = 255) m a b)
+          VU8x16 (simd_select simd_u8_is_highbit m a b)
         | _ -> eval_error "simd_u8x16_select: bad arguments"))
   ; ("simd_u8x16_any", VBuiltin ("simd_u8x16_any", function
         | [VU8x16 a] -> VBool (simd_any simd_u8_is_highbit a)
