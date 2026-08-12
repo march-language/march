@@ -367,6 +367,33 @@ let test_actor_msg_type_is_refused () =
   Alcotest.(check bool) "actor message type is not transformed"
     true (Trmc.transform_fn fd = None)
 
+(* REPL/JIT must apply the same transform as the compiled path, or a function
+   behaves one way in the REPL and another when compiled.  repl_jit may re-lower
+   a module the driver already transformed, so the transform has to be
+   idempotent — running it twice must not produce a second $dps helper.
+
+   The fixture uses a genuinely ELIGIBLE function: on an empty module both
+   sides are trivially zero and the assertion holds no matter how broken the
+   transform is. *)
+let test_transform_is_idempotent_on_a_transformed_module () =
+  let self = v "f" (Tir.TFn ([list_int], list_int)) in
+  let t = v "t" list_int and h = v "h" Tir.TInt in
+  let body =
+    Tir.ELet (t, Tir.EApp (self, [Tir.AVar (v "xs" list_int)]),
+              Tir.EAlloc (Tir.TCon ("List.Cons", []),
+                          [Tir.AVar h; Tir.AVar t]))
+  in
+  let m = module_of [fn "f" [v "xs" list_int] body] in
+  Trmc.enabled := true;
+  let once = Trmc.transform_module m in
+  let twice = Trmc.transform_module once in
+  Trmc.enabled := false;
+  (* Non-vacuousness: the first pass must actually have added the helper. *)
+  Alcotest.(check int) "first transform adds the $dps helper"
+    2 (List.length once.Tir.tm_fns);
+  Alcotest.(check int) "transforming twice adds nothing further"
+    (List.length once.Tir.tm_fns) (List.length twice.Tir.tm_fns)
+
 let suites = [
   "trmc", [
     Alcotest.test_case "modulo-cons is eligible"        `Quick test_modulo_cons_eligible;
@@ -377,6 +404,7 @@ let suites = [
     Alcotest.test_case "normal nested fn is not a jp"   `Quick test_normal_nested_fn_is_not_a_join_point;
     Alcotest.test_case "intervening use blocks hole"    `Quick test_intervening_let_blocks_when_used;
     Alcotest.test_case "actor msg type refused"          `Quick test_actor_msg_type_is_refused;
+    Alcotest.test_case "transform is idempotent"         `Quick test_transform_is_idempotent_on_a_transformed_module;
   ];
   "trmc-ir", [
     Alcotest.test_case "alloc-hole emits verifiable IR"  `Quick test_alloc_hole_emits_verifiable_ir;
