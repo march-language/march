@@ -33,7 +33,7 @@ fn flood(pid, k) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let pid = spawn(Slow)
   Actor.set_queue_limit(pid, 8, 1)   -- drop_new
   flood(pid, 5000)

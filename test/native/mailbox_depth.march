@@ -14,7 +14,7 @@ fn flood(pid, k) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let pid = spawn(Sink)
   flood(pid, 100)
   run_until_idle()
