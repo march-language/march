@@ -314,8 +314,9 @@ let report (m : Tir.tir_module) : unit =
    constructor loop writes the same field.  See the Phase 2 note in
    specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md.
 
-   GATED on MARCH_TRMC=1 — this is a work-in-progress measurement vehicle, not
-   yet a default pipeline stage. *)
+   GATED on [enabled] (set by --trmc, or by the legacy MARCH_TRMC env var) —
+   this is a work-in-progress measurement vehicle, not yet a default pipeline
+   stage. *)
 
 let trmc_ctr = ref 0
 
@@ -440,9 +441,15 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
   | Mixed, _ -> decline "mixed"
   | _ -> None
 
-(** Apply TRMC across a module.  Gated on MARCH_TRMC=1. *)
+(** Whether the destination-passing transform runs.  A [ref] rather than an
+    env-var read so the driver owns the decision and a CLI flag can set it;
+    [bin/main.ml] is the only writer.  Default OFF until the default flips
+    (see specs/plans/2026-08-10-trmc-on-by-default.md Task 10). *)
+let enabled : bool ref = ref false
+
+(** Apply TRMC across a module.  Gated on [enabled] (see [--trmc]). *)
 let transform_module (m : Tir.tir_module) : Tir.tir_module =
-  if Sys.getenv_opt "MARCH_TRMC" = None then m
+  if not !enabled then m
   else begin
     let report = Sys.getenv_opt "MARCH_TRMC_REPORT" <> None in
     let out = List.concat_map (fun fn ->
