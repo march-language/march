@@ -664,6 +664,26 @@ git commit -m "test(trmc): cover the JS backend's hole allocation and fill"
 
 **This is the task that makes the default worth flipping.** Today `List.map`/`filter`/`filter_map`/`append`/`flat_map` are accumulator+`reverse` and classify `already-tail`, so TRMC never sees them.
 
+> **ORDERING CORRECTION (2026-08-12): run this task AFTER Task 10, not before.**
+> Natural style is not tail-recursive; it depends on TRMC to become a loop.
+> Measured on a 500k-element list, natural-style `map`:
+>
+> | | result |
+> |---|---|
+> | interpreter | prints `500000` |
+> | compiled `--no-trmc` | **exit 138 — stack overflow** |
+> | compiled `--trmc` | prints `500000` |
+>
+> Landing this while the default is still OFF ships a `List.map` that crashes
+> on long lists for every user who does not pass `--trmc`. The default must
+> already be on. The interpreter is unaffected (it handles 500k fine), so the
+> hazard is specific to the compiled backend.
+>
+> **Consequence to decide before landing:** after this task `--no-trmc` is no
+> longer a safe escape hatch — it will stack-overflow on stdlib `List.map`
+> over a long list. Either drop the flag, or document it as a debugging-only
+> switch that is unsound against the natural-style stdlib.
+
 **Files:**
 - Modify: `stdlib/list.march`
 - Modify: `CHANGELOG.md`
