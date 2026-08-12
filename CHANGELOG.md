@@ -127,6 +127,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **String literals now carry their full source span.** A string literal's AST
+  span collapsed to a single column — the closing quote — so anything that
+  sliced source text by span got a lone `"` back whenever the expression was
+  or contained a string. `forge refactor bundle` hit this (rewriting
+  `f("x", 1)` produced a corrupted `a = "`), and diagnostics pointing at a
+  string literal underlined just the quote. The lexer hands off from the main
+  token rule to a recursive `read_string` sub-rule, and each re-entry reset
+  ocamllex's lexeme start; the opening position is now recorded on handoff and
+  restored when the token is produced, for plain and triple-quoted literals
+  and for interpolation starts.
+
 - **Compiled `if`/`match` expressions returning `Float` no longer leak a heap
   box on every evaluation.** The result-merge path for case/match codegen
   boxes each branch's value into a uniform pointer slot; for `Float` branches

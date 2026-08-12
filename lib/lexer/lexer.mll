@@ -12,6 +12,29 @@ let interp_depth = ref 0
 (* Whether the current interpolation is inside a triple-quoted string. *)
 let interp_triple = ref false
 
+(** Start position of the string literal currently being read.
+
+    A string is lexed by handing off from the main [token] rule to the
+    [read_string] / [read_triple_string] sub-rules, which then recurse once per
+    character or escape.  Every re-entry into a rule makes ocamllex reset
+    [lex_start_p] to the current lexeme, so by the time the closing quote is
+    matched and [STRING] is returned, [lex_start_p] points at the *closing*
+    quote — a 1-column span.  Menhir builds [ELit (LitString _, span)] from
+    that, so slicing source text by a string literal's span yielded a lone
+    quote character.
+
+    We record the opening quote's position on handoff and restore it in the
+    actions that actually produce a token, so the span covers the whole
+    literal.  [Token_filter] reads [lex_start_p] immediately after each lexer
+    call, so patching it in the action is enough for the value to reach the
+    parser. *)
+let string_start_p = ref Lexing.dummy_pos
+
+(* Restore the opening-quote position recorded at handoff, then yield [tok]. *)
+let with_string_start lexbuf tok =
+  lexbuf.Lexing.lex_start_p <- !string_start_p;
+  tok
+
 let keyword_table = Hashtbl.create 32
 let () =
   List.iter
@@ -117,8 +140,10 @@ rule token = parse
            Some "March integers are 63-bit; use a smaller literal or parse at \
                  runtime with string_to_int.",
            Lexing.lexeme_start_p lexbuf)) }
-  | "\"\"\""      { read_triple_string (Buffer.create 64) lexbuf }
-  | '"'           { read_string (Buffer.create 16) lexbuf }
+  | "\"\"\""      { string_start_p := Lexing.lexeme_start_p lexbuf;
+                    read_triple_string (Buffer.create 64) lexbuf }
+  | '"'           { string_start_p := Lexing.lexeme_start_p lexbuf;
+                    read_string (Buffer.create 16) lexbuf }
   | ':' (atom_name as a) { ATOM a }
   | '('           { LPAREN }
   | ')'           { RPAREN }
@@ -203,12 +228,12 @@ and block_comment depth = parse
   | _             { block_comment depth lexbuf }
 
 and read_string buf = parse
-  | '"'           { STRING (Buffer.contents buf) }
+  | '"'           { with_string_start lexbuf (STRING (Buffer.contents buf)) }
   | "${"          {
       (* Begin a string interpolation: emit INTERP_START carrying the prefix *)
       interp_depth := 1;
       interp_triple := false;
-      INTERP_START (Buffer.contents buf)
+      with_string_start lexbuf (INTERP_START (Buffer.contents buf))
     }
   | "\\n"         { Buffer.add_char buf '\n'; read_string buf lexbuf }
   | "\\t"         { Buffer.add_char buf '\t'; read_string buf lexbuf }
@@ -230,11 +255,11 @@ and read_string buf = parse
 (** Resume reading a string literal after the closing `}` of an interpolation. *)
 (** Triple-quoted string: """..."""  — interpolation and newlines preserved. *)
 and read_triple_string buf = parse
-  | "\"\"\""      { STRING (Buffer.contents buf) }
+  | "\"\"\""      { with_string_start lexbuf (STRING (Buffer.contents buf)) }
   | "${"          {
       interp_depth := 1;
       interp_triple := true;
-      INTERP_START (Buffer.contents buf)
+      with_string_start lexbuf (INTERP_START (Buffer.contents buf))
     }
   | "\\$"         { Buffer.add_char buf '$'; read_triple_string buf lexbuf }
   | newline       { Lexing.new_line lexbuf; Buffer.add_char buf '\n'; read_triple_string buf lexbuf }
