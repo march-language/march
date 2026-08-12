@@ -295,9 +295,12 @@ git log is authoritative for exact commits.
   is safe — the reader just doesn't see the newest pids yet. Old arrays are
   intentionally leaked on growth (same discipline as retired procs), and
   since capacity doubles, growth produces O(log N) leaked arrays total, not
-  one per pid. Separately, `march_spawn` now emits a one-shot stderr warning
-  (pointing at `Scheduler.stat(3)`) when the green thread's stack allocation
-  or `getcontext` fails, instead of silently returning an actor that drops
+  one per pid. A failed growth allocation now aborts loudly with a
+  `march_sched: out of memory (registry alloc)` message instead of the old
+  fixed-size array's silent pid-lifetime cliff. Separately, `march_spawn`
+  now emits a one-shot stderr warning (pointing at `Scheduler.stat(3)`) when
+  the green thread's stack allocation or `getcontext` fails, instead of
+  silently returning an actor that drops
   every message sent to it; both failure paths now also bump
   `MARCH_STAT_STACK_FAIL`.
 - **A burst of >4096 spawns or yields from one scheduler thread silently

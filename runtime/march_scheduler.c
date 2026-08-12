@@ -1980,7 +1980,7 @@ int march_sched_send(march_proc *target, void *msg) {
                 mbox_lock_release(target);
                 atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
                                           1, memory_order_relaxed);
-                march_mbox_dispose(msg);          /* Task 14 dtor; counts-only until then */
+                march_mbox_dispose(msg);          /* disposed via the registered dtor (see march_sched_set_msg_dtor's contract) */
                 free(node);
                 return MARCH_SEND_DROPPED;
             case MARCH_MBOX_DROP_OLD: {
@@ -2061,6 +2061,38 @@ int march_sched_send(march_proc *target, void *msg) {
             }
             default: break;
             }
+        }
+        /* Reap-vs-push recheck, taken immediately before the push below,
+         * under the SAME mbox_lock the PROC_DEAD reap branch holds for its
+         * entire drain: the top-of-loop DEAD check above only rules out a
+         * target that was ALREADY dead when this iteration started -- a
+         * concurrent reap can still transition target to PROC_DEAD and run
+         * its one-time drain in the window between that check and this
+         * lock acquire. The reap drains the mailbox exactly once; a push
+         * that lands after that drain would never be popped and would leak
+         * the payload forever. Because status=PROC_DEAD is a release store
+         * made (by the same OS thread, in program order) before the reap's
+         * drain critical section, and that critical section's unlock is a
+         * release that synchronizes-with this acquire, any push that loses
+         * the race to acquire this lock after the drain is guaranteed to
+         * observe PROC_DEAD here -- so this recheck and the top-of-loop
+         * check together cover every interleaving; there is no remaining
+         * window. */
+        if (atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD) {
+            mbox_lock_release(target);
+            free(node);
+            /* DROP_OLD may have already evicted a message on THIS iteration
+             * before we discovered target died -- that eviction is real and
+             * unrelated to the recheck outcome, so it still must be
+             * disposed (same "after unlock" rule as the ordinary success
+             * path below). msg itself is NOT disposed here: MARCH_SEND_DEAD
+             * means "did not enqueue", and per march_sched_send's contract
+             * the caller disposes msg on that return, same as the
+             * top-of-loop DEAD return above. */
+            if (evicted_old) {
+                march_mbox_dispose(evicted_old);
+            }
+            return MARCH_SEND_DEAD;
         }
         mbox_push_node(target, node);
         march_proc_status st = atomic_load_explicit(&target->status, memory_order_acquire);
