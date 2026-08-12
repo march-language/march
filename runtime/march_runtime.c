@@ -1871,11 +1871,26 @@ typedef struct march_actor_meta {
      * not yet run, cleared by delayed_restart_thread immediately before it
      * runs the strategy. While set, a DIFFERENT child of this supervisor
      * crashing (whether its own first crash or a repeat) must not schedule
-     * or run another batch restart — the pending one already covers every
-     * child, including this newly-crashed one, once it fires. Never touched
-     * for one_for_one (a dead slot can't re-crash, so there's nothing to
-     * double-restart). Zeroed by calloc at meta creation. */
+     * or run another batch restart — the pending one is widened (see
+     * pending_min_child_idx below) to cover every child that crashed during
+     * the pending window, including this newly-crashed one, once it fires.
+     * Never touched for one_for_one (a dead slot can't re-crash, so there's
+     * nothing to double-restart). Zeroed by calloc at meta creation. */
     int                          delayed_batch_pending;
+    /* Task 16 fix-up (review round 2): the lowest sup_children index among
+     * all crashes that occurred while a batch restart was pending —
+     * initialized to the index that CLAIMED delayed_batch_pending, then
+     * lowered (never raised) by every crash that arrives while it's set.
+     * one_for_all ignores this (it always restarts every child regardless
+     * of index); rest_for_one's restart window is [child_idx, n), so a
+     * lower-index intervening crash MUST widen the eventual restart down to
+     * its own index or that child is silently skipped by the batch
+     * restart's index range and, since a dead slot never crashes again on
+     * its own, stays dead forever. Read (and reset) by delayed_restart_
+     * thread under the same leaf-lock section that clears
+     * delayed_batch_pending, immediately before running the strategy.
+     * Meaningless while delayed_batch_pending is 0; zeroed by calloc. */
+    int                          pending_min_child_idx;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta.
@@ -2730,13 +2745,41 @@ typedef struct {
  * backoff deadline, then re-validates the supervisor is still alive before
  * running the (possibly budget-gated) restart strategy.
  *
- * Critical 1/2 fix-up: g_supervise_mu is taken ONLY for the brief
- * pending-flag clear/liveness-recheck below, released BEFORE the strategy
- * call — never held across march_one_for_one_restart/march_one_for_all_
- * restart/march_rest_for_one_restart, which run March closures
- * (march_respawn_child's spawn_clo) and can call do_actor_death (budget
- * exhaustion, one_for_all's sibling kills) — see g_supervise_mu's
- * leaf-lock contract above march_restart_budget_ok. */
+ * Critical 1/2 fix-up: g_supervise_mu is never held across
+ * march_one_for_one_restart/march_one_for_all_restart/march_rest_for_one_
+ * restart, which run March closures (march_respawn_child's spawn_clo) and
+ * can call do_actor_death (budget exhaustion, one_for_all's sibling kills)
+ * — see g_supervise_mu's leaf-lock contract above march_restart_budget_ok.
+ *
+ * Review round 3 fix-up (found while validating round 2's widening fix,
+ * under MARCH_NUM_SCHEDULERS>1 — this codebase's default, true OS-thread
+ * parallelism across actors): an earlier version of this function cleared
+ * delayed_batch_pending BEFORE calling the strategy, then called it with
+ * the lock released. That opened a real window: a DIFFERENT child crashing
+ * on another OS thread, between the clear and the strategy call actually
+ * finishing, would see delayed_batch_pending already 0 and — for a
+ * first-time (streak==1) crash — take the synchronous immediate-restart
+ * path itself, launching a SECOND, fully concurrent, unsynchronized
+ * march_one_for_all_restart/march_rest_for_one_restart racing this one.
+ * Reproduced directly: an intervening lower-index rest_for_one crash inside
+ * this window corrupted supervisor state badly enough to crash the whole
+ * process with an uncaught panic (confirmed by re-running under
+ * MARCH_NUM_SCHEDULERS=1, which serializes all green threads onto one OS
+ * thread and made the race — and the crash — disappear every time).
+ *
+ * Fixed by keeping delayed_batch_pending SET for the entire in-flight
+ * duration of the strategy call (batch strategies only), not just up to
+ * the moment it starts, and looping: after each strategy call returns,
+ * re-check whether sup_meta->pending_min_child_idx was widened (lowered)
+ * by a crash that arrived WHILE the strategy was running (it can only
+ * arrive as a widen, never as a competing restart, because the flag never
+ * went false during that window) — if so, that child was not covered by
+ * the pass that just ran, so loop and restart again (no additional delay:
+ * the point of backoff is per-crash pacing, already served by the original
+ * park). Only once a pass completes with no further widening is the flag
+ * finally cleared. one_for_one needs none of this — a dead slot cannot
+ * crash again, so there is only ever the one child_idx to restart, no
+ * pending flag, and no race to close. */
 static void delayed_restart_thread(void *arg) {
     march_delayed_restart *dr = (march_delayed_restart *)arg;
     while (march_now_ms() < dr->not_before_ms)
@@ -2748,29 +2791,42 @@ static void delayed_restart_thread(void *arg) {
     march_actor_meta *sup_meta = find_meta(supervisor);
     if (!sup_meta) return;
 
-    /* Minor 1 (TOCTOU): march_is_alive was already checked above, but that
-     * check happened before we ever touched g_supervise_mu — the supervisor
-     * can die in the window between that check and here. Re-check under the
-     * lock, atomically with the flag clear, so we never clear
-     * delayed_batch_pending (Important 2) for a supervisor we're about to
-     * skip anyway, and never fall through to a stale/dead supervisor. */
-    pthread_mutex_lock(&g_supervise_mu);
-    int alive = march_is_alive(supervisor);
-    if (alive && (strategy == 1 || strategy == 2))
-        /* Important 2: clear the pending-batch claim BEFORE running the
-         * strategy (not after) — a crash that arrives WHILE the strategy
-         * runs must be free to schedule its own new delayed batch restart
-         * rather than being silently swallowed by a flag this thread is
-         * about to make stale anyway. */
-        sup_meta->delayed_batch_pending = 0;
-    pthread_mutex_unlock(&g_supervise_mu);
-    if (!alive) return;
+    if (strategy == 0) {
+        if (!march_is_alive(supervisor)) return;   /* Minor 1 TOCTOU recheck */
+        march_one_for_one_restart(supervisor, sup_meta, child_idx);
+        return;
+    }
 
-    switch (strategy) {
-        case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
-        case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
-        case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
-        default: break;
+    for (;;) {
+        /* Minor 1 (TOCTOU): re-check liveness on every pass, not just the
+         * first — the supervisor can die while an earlier pass's strategy
+         * call was running. */
+        pthread_mutex_lock(&g_supervise_mu);
+        int alive = march_is_alive(supervisor);
+        int idx = sup_meta->pending_min_child_idx;
+        pthread_mutex_unlock(&g_supervise_mu);
+        if (!alive) return;
+
+        switch (strategy) {
+            case 1: march_one_for_all_restart(supervisor, sup_meta, idx); break;
+            case 2: march_rest_for_one_restart(supervisor, sup_meta, idx); break;
+            default: return;
+        }
+
+        /* delayed_batch_pending is STILL SET here — any crash that arrived
+         * while the strategy call above was running saw it set and could
+         * only widen pending_min_child_idx (never lower than 0, never
+         * higher — see march_supervisor_notify), never start a competing
+         * restart of its own. If it's now lower than the idx we just used,
+         * that child wasn't covered by this pass; loop and cover it. */
+        pthread_mutex_lock(&g_supervise_mu);
+        if (sup_meta->pending_min_child_idx < idx) {
+            pthread_mutex_unlock(&g_supervise_mu);
+            continue;
+        }
+        sup_meta->delayed_batch_pending = 0;
+        pthread_mutex_unlock(&g_supervise_mu);
+        return;
     }
 }
 
@@ -2790,9 +2846,19 @@ static void delayed_restart_thread(void *arg) {
  * intervening synchronous (first-crash) restart for child B would let the
  * later-firing one re-kill the freshly-respawned children from the earlier
  * one and double-charge the restart budget. An intervening crash (of
- * either child) while a batch restart is pending simply waits: the pending
- * restart already covers every child once it fires. one_for_one is exempt
- * — a dead slot cannot crash again, so there is no batch to double. */
+ * either child) while a batch restart is pending simply waits — for
+ * one_for_all the pending restart already covers every child regardless.
+ * For rest_for_one that is NOT automatically true: its restart window is
+ * [child_idx, n), so an intervening crash of a LOWER-index sibling would be
+ * silently outside that window and left dead forever (nothing else will
+ * ever crash it again to trigger a fresh restart). sup_meta->
+ * pending_min_child_idx tracks the lowest index that crashed during the
+ * pending window (seeded from the index that claimed the flag, then only
+ * ever lowered) and delayed_restart_thread uses it — not the original
+ * claimant's own index — as the child_idx it hands to the strategy, so the
+ * eventual restart widens down to cover every child that crashed in the
+ * window. one_for_one is exempt from all of this — a dead slot cannot
+ * crash again, so there is no batch to double and no widening needed. */
 static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
     march_actor_meta *sup_meta = find_meta(supervisor);
     if (!sup_meta) return;
@@ -2821,8 +2887,17 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
     streak = child->crash_streak;
     skip_due_to_pending = is_batch && sup_meta->delayed_batch_pending;
     claimed_batch = 0;
-    if (is_batch && streak > 1 && !skip_due_to_pending) {
+    if (skip_due_to_pending) {
+        /* Review round 2 fix: this crash is being dropped (no restart of
+         * its own — the pending batch restart will cover it), but for
+         * rest_for_one that pending restart's window only reaches down to
+         * pending_min_child_idx. Widen it (never narrow) so this child
+         * isn't left outside the eventual restart's [idx, n) range. */
+        if (child_idx < sup_meta->pending_min_child_idx)
+            sup_meta->pending_min_child_idx = child_idx;
+    } else if (is_batch && streak > 1) {
         sup_meta->delayed_batch_pending = 1;
+        sup_meta->pending_min_child_idx = child_idx;
         claimed_batch = 1;
     }
     pthread_mutex_unlock(&g_supervise_mu);
@@ -2863,15 +2938,38 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
         if (getenv("MARCH_SUP_TRACE"))
             fprintf(stderr,
                     "march: supervisor backoff child=%d streak=%d delay_ms=%lld"
-                    " -- malloc failed, restart ABANDONED\n",
-                    child_idx, streak, (long long)delay);
+                    " -- malloc failed, restart ABANDONED%s\n",
+                    child_idx, streak, (long long)delay,
+                    claimed_batch
+                        ? " (any lower-index siblings that crashed and were"
+                          " skipped while this batch restart was pending are"
+                          " dropped along with it -- they stay dead until a"
+                          " future crash schedules a new restart covering"
+                          " their index)"
+                        : "");
         /* Minor 2 aside: if this crash claimed delayed_batch_pending above
          * but the restart never actually gets scheduled, nothing would ever
          * clear the flag (delayed_restart_thread, the only clearer, never
          * runs) — every future crash of this supervisor's other children
          * would see skip_due_to_pending forever and the supervisor would
          * stop healing entirely. Roll the claim back so a later crash can
-         * retry. */
+         * retry.
+         *
+         * Low (review round 2): between this crash claiming
+         * delayed_batch_pending (in the earlier, now-released critical
+         * section) and this rollback, some OTHER child could have crashed,
+         * observed skip_due_to_pending, been dropped (no restart of its
+         * own), and widened pending_min_child_idx down to its index — all
+         * on the assumption that THIS crash's now-failing restart would
+         * cover it. Rolling back loses that widening along with the flag,
+         * so that child is stranded dead until some later crash (of any
+         * child, anywhere at or below its index) schedules a fresh restart.
+         * Under sustained OOM this is already a supervisor in serious
+         * trouble; a full fix would mean re-deriving and re-dispatching for
+         * every child crashed during the doomed window, which is not a
+         * one-line change — documented here and in the trace above rather
+         * than implemented, since OOM-at-malloc(sizeof(a few words)) is an
+         * extreme, already-degraded scenario. */
         if (claimed_batch) {
             pthread_mutex_lock(&g_supervise_mu);
             sup_meta->delayed_batch_pending = 0;
