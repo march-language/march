@@ -462,7 +462,10 @@ The new test `test/stdlib/test_dataframe.march` "col_native_min_max"
 describe block (7-element, non-lane-multiple column, both `Int` and `Float`)
 pins the existing (unmigrated) implementation's correctness so a future
 migration attempt — once the residency gap above is fixed — has a regression
-net from day one.
+net from day one. **Caveat (found 2026-08-11):** that file is not wired into
+any automated runner — it passes, but only when run by hand with `march test
+test/stdlib/test_dataframe.march`. It is one of 37 such files; see
+`specs/todos/2026-08-11-test-stdlib-march-files-not-in-ci.md`.
 
 ---
 

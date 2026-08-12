@@ -269,7 +269,29 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     | Some vty ->
       Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s, align 16" slot vty);
       (* The incoming argument is BOXED (the signature says ptr and every call
-         site coerces to it); unbox once, here, into the native slot. *)
+         site coerces to it); unbox once, here, into the native slot.
+
+         KNOWN LEAK — 32 bytes per CALL, unbounded over a process's lifetime.
+         This unbox does NOT release the incoming box, so one march_simd_alloc
+         cell is leaked per invocation of this function. Measured at +32 bytes
+         per outer call (20M calls => +642MB over an equivalent scalar
+         control), so a long-lived server calling a SIMD kernel per request
+         grows without bound. It is strictly better than what it replaced (the
+         pre-fix code leaked one box per LOOP ITERATION, not per call) but it
+         is NOT fixed, and a reader should not conclude otherwise from the
+         "allocates nothing" framing in the comment above — that is about the
+         loop BODY.
+
+         A naive `march_decrc_local` here would be a use-after-free: a vector
+         argument is USUALLY a fresh temporary produced by the call site's
+         coerce, but it can also be a borrowed reference to a box owned by
+         someone else (e.g. a vector living in an ADT field passed straight
+         in), and freeing that frees out from under the owner. Distinguishing
+         the two needs ownership information (borrow inference / Perceus)
+         that is not available at this point in the backend.
+
+         Tracked with the full measurement and fix direction in
+         specs/todos/2026-08-11-simd-tco-entry-box-leak.md. *)
       let nv = Llvm_ctx.coerce ctx "ptr" (Printf.sprintf "%%%s.arg" vn) vty in
       Llvm_ctx.emit ctx
         (Printf.sprintf "store %s %s, ptr %%%s.addr, align 16" vty nv slot);
