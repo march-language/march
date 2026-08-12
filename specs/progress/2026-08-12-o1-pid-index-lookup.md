@@ -96,3 +96,55 @@ behavior, which (as above) was always vacuous since `pid_index` is unique.
   time. The fix's value is asymptotic (bounded lookup cost regardless of
   total actor count ever spawned in the process), not a measured win at
   this scale.
+
+## Fix-up: actor heap-address reuse corrupted the pididx chains
+
+A follow-up review caught a Critical bug in the fix above: `march_spawn`'s
+`find_or_create_meta(actor)` matches by raw pointer, and march-heap objects
+are plain `malloc`/`free` — a dead actor's freed address can be reused by a
+new actor (kill/respawn churn, exactly the crashloop shape, makes
+same-size reuse likely). `find_or_create_meta` then returns the DEAD
+incarnation's meta; the original patch overwrote its `pid_index` and
+called `pididx_insert` on it a SECOND time. `g_pididx_tbl` is insert-only
+(readers walk it lock-free assuming a node is linked exactly once); a
+second insert overwrites `pididx_next`, silently splicing the meta's old
+bucket chain into its new bucket's tail — any lock-free walker of the old
+bucket wanders into the new bucket instead of stopping, and repeated reuse
+could even close a cycle, hanging `find_meta_by_pid_index`. The OLD O(n)
+scan was immune (it re-walked `g_actor_tbl` and compared the field fresh
+every call, no linking involved).
+
+Fix: added `int pididx_linked` to `march_actor_meta`, set the first time a
+meta is linked into `g_pididx_tbl`. `march_spawn` now does
+reuse-detection + `pid_index` assignment + the pididx publish inside one
+`g_tbl_mu` critical section; `pididx_insert` was split into a `_locked`
+core so the sequence is atomic. When `find_or_create_meta` hands back an
+already-linked (stale) meta, `replace_stale_meta_locked(actor, stale)`
+allocates a FRESH meta for the new incarnation, copies over
+`dispatch_name_id`/`call_tag_base` (the only two fields compiled code can
+write onto a not-yet-spawned meta, via `march_actor_set_dispatch_id`/
+`march_actor_set_call_base`, both of which always run before `march_spawn`
+per their own existing comments), and PREPENDS it to the actor's
+`g_actor_tbl` bucket without unlinking the stale meta — `g_actor_tbl`
+stays insert-only, `find_meta` returns the fresh meta first (shadowing the
+stale one) for every future lookup. The stale meta's `green_thread` was
+already `NULL` (release-stored on both of `actor_green_thread`'s exit
+paths, before `do_actor_death` — which is what makes the freed address
+eligible for reuse in the first place), so any reader still reaching the
+stale meta during the shadow window sees "no green thread" and returns
+`None`, matching pre-existing already-dead-actor behavior.
+
+Also fixed: a stale comment at `g_actor_tbl`'s declaration still listed
+`find_meta_by_pid_index` among the walkers that take `g_tbl_mu` (no longer
+true — it's lock-free since this task).
+
+Full detail (including the `pid_index==0` pre-spawn-window closure
+argument, the `test_scheduler_churn.c` grep evidence for the no-re-init
+claim, and the fanin-flake investigation) is in
+`.superpowers/sdd/2026-08-11-actor-system-hardening/task-15-report.md`.
+
+Re-verification: `dune build --root . bin/main.exe`; `scripts/run-tests.sh
+-q` (58 stdlib tests, green); `dune build @test/runtest --root . --force`
+(849 compiler + 572 codegen tests, green); `bash scripts/actor-load.sh
+crashloop` x5 (all PASS, 152-213ms); `bash scripts/actor-load.sh` (full
+harness) x2 (all four scenarios PASS both times).

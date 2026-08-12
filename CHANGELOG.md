@@ -188,7 +188,13 @@ git log is authoritative for exact commits.
   formally-racy plain (non-atomic, unlocked) write to `meta->pid_index` in
   `march_spawn` against unsynchronized cross-thread reads in
   `march_get_cap`, `march_send_checked`, and Pid `Show` formatting —
-  `pid_index` is now `_Atomic`.
+  `pid_index` is now `_Atomic`. The new side table correctly handles
+  actor heap-address reuse (a dead actor's freed address handed to a new
+  actor, likely under kill/respawn churn): `march_spawn` detects when
+  `find_or_create_meta` returned an already-linked (stale) meta and
+  allocates a fresh one for the new incarnation rather than re-linking the
+  stale one, which would have corrupted the insert-only side table's
+  chains.
 
 ### Fixed
 

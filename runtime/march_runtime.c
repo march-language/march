@@ -1808,6 +1808,19 @@ typedef struct march_actor_meta {
      * before the pid becomes observable elsewhere in practice; _Atomic with
      * relaxed ops closes that gap for free. */
     _Atomic int64_t             pid_index;
+    /* Set under g_tbl_mu the first (and only) time this meta is linked into
+     * g_pididx_tbl (see pididx_insert / march_spawn). g_pididx_tbl is
+     * insert-only, so a meta may be linked into it AT MOST ONCE ever — a
+     * second pididx_insert on an already-linked meta would overwrite its
+     * pididx_next, silently splicing two buckets' chains together (a
+     * lock-free walker of the first bucket would wander into the second
+     * bucket's tail; repeated occurrences could even close a cycle and
+     * hang find_meta_by_pid_index). march_spawn checks this flag to detect
+     * actor heap-address reuse (a dead actor's meta being handed back by
+     * find_or_create_meta for a NEW actor at the same freed address) and
+     * allocates a fresh meta instead of re-linking the stale one — see the
+     * Task 15 fix-up commit message for the full argument. */
+    int                          pididx_linked;
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
     _Atomic int64_t             down_count;   /* Down messages received (watcher side) */
@@ -1851,8 +1864,9 @@ typedef struct march_actor_meta {
  * reader that acquire-loads a bucket head and walks tbl_next needs no lock:
  * every node it can reach was fully constructed before the release store
  * that published it (tbl_next is written before the head pointer is
- * swung). Only find_meta takes this lock-free path; every other chain
- * walker (find_or_create_meta as writer, find_meta_by_pid_index, the
+ * swung). find_meta takes this lock-free path; so (since Task 15) does
+ * find_meta_by_pid_index, over the separate g_pididx_tbl chain below. Every
+ * OTHER chain walker (find_or_create_meta as writer, the
  * broadcast_migrate snapshot loop, demonitor, unlink, the monitor sweep)
  * still takes g_tbl_mu because they also touch mutable per-meta fields
  * (monitor_head, supervisor, ...) that are not lock-free. */
@@ -1877,13 +1891,16 @@ static _Atomic int64_t g_next_pid_index = 0;
 #define MARCH_PIDIDX_BUCKETS 256
 static _Atomic(march_actor_meta *) g_pididx_tbl[MARCH_PIDIDX_BUCKETS];
 
-static void pididx_insert(march_actor_meta *m) {
+/* Links `m` into g_pididx_tbl. Caller must hold g_tbl_mu, and must call
+ * this AT MOST ONCE per meta — see march_actor_meta's pididx_linked field
+ * comment for why a second call corrupts the table. march_spawn is the
+ * only caller, and enforces the once-only invariant by checking/setting
+ * pididx_linked itself under the same lock acquisition. */
+static void pididx_insert_locked(march_actor_meta *m) {
     int64_t pid_index = atomic_load_explicit(&m->pid_index, memory_order_relaxed);
     unsigned b = (unsigned)(pid_index % MARCH_PIDIDX_BUCKETS);
-    pthread_mutex_lock(&g_tbl_mu);
     m->pididx_next = atomic_load_explicit(&g_pididx_tbl[b], memory_order_relaxed);
     atomic_store_explicit(&g_pididx_tbl[b], m, memory_order_release);
-    pthread_mutex_unlock(&g_tbl_mu);
 }
 
 /* Sequential monitor ref counter. */
@@ -2214,6 +2231,72 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     m->tbl_next = atomic_load_explicit(&g_actor_tbl[b], memory_order_relaxed);
     atomic_store_explicit(&g_actor_tbl[b], m, memory_order_release);
     pthread_mutex_unlock(&g_tbl_mu);
+    return m;
+}
+
+/* Task 15 fix: actor heap addresses can be reused after a dead actor's meta
+ * has already been linked into g_pididx_tbl — march-heap objects are plain
+ * malloc/free, and a kill/respawn churn loop (exactly the crashloop shape)
+ * makes same-size reuse likely. find_or_create_meta matches purely by
+ * pointer, so it can hand back a DEAD incarnation's meta for a brand-new
+ * actor born at the same freed address. g_pididx_tbl is insert-only — a
+ * meta may be linked into it at MOST ONCE, ever (see pididx_linked) — so
+ * reusing that stale meta directly and calling pididx_insert_locked on it
+ * again would silently splice two pididx buckets' chains together (a
+ * lock-free walker of the first bucket wanders into the second bucket's
+ * tail; repeated reuse across enough respawns could even close a cycle and
+ * hang find_meta_by_pid_index forever). The old O(n) scan never had this
+ * problem — it walked g_actor_tbl and compared the field, finding
+ * whichever meta the pointer currently mapped to with whatever pid_index
+ * it currently held, no linking involved.
+ *
+ * Fix: give the new incarnation a FRESH meta instead of re-linking the
+ * stale one, and PREPEND it to actor's g_actor_tbl bucket — never
+ * unlinking the stale meta, so g_actor_tbl's own insert-only invariant
+ * (Task 10) is preserved end to end. find_meta always returns the FIRST
+ * match walking from a bucket's head, so the fresh meta immediately
+ * shadows the stale one for every future actor-pointer lookup (find_meta,
+ * find_or_create_meta, march_send, march_actor_call, ...).
+ *
+ * Safety during the shadow window: any lock-free reader still mid-walk
+ * from an acquire-load taken just before this prepend can still reach the
+ * stale meta. That's fine — the stale meta's green_thread was already
+ * release-stored NULL when its actor died (actor_green_thread clears it on
+ * BOTH the normal-exit and the crash-trap path, before do_actor_death ever
+ * runs, and do_actor_death is what lets the actor's memory become
+ * eligible for the free+reuse this function is guarding against), so a
+ * march_send/march_actor_call routed via the stale meta during any overlap
+ * sees "no green thread" and returns None — identical to how any other
+ * already-dead actor behaves. march_actor_set_dispatch_id and
+ * march_actor_set_call_base run in the compiled lowering immediately after
+ * the actor record's alloc, before march_spawn (see their own comments);
+ * both resolve their meta by actor pointer via find_or_create_meta, so for
+ * THIS incarnation they land on `stale` (the only meta the pointer
+ * resolved to at the time they ran) — carry those two fields forward so
+ * the fresh meta doesn't lose them. No other field needs carrying: every
+ * other march_actor_meta field compiled code can set before march_spawn
+ * goes through one of those same two setters or through march_spawn
+ * itself.
+ *
+ * Caller must hold g_tbl_mu (march_spawn is the only caller, inside the
+ * same locked section that checks/sets pididx_linked and calls
+ * pididx_insert_locked, so the whole reuse-detection-and-replace sequence
+ * is atomic). */
+static march_actor_meta *replace_stale_meta_locked(void *actor,
+                                                     march_actor_meta *stale) {
+    unsigned int b = actor_bucket(actor);
+    march_actor_meta *m = (march_actor_meta *)calloc(1, sizeof(march_actor_meta));
+    if (!m) { fputs("march: out of memory (actor meta)\n", stderr); exit(1); }
+    m->actor = actor;
+    atomic_init(&m->down_count, 0);
+    atomic_init(&m->green_thread, NULL);
+    atomic_init(&m->pid_index, 0);
+    m->dispatch_name_id = stale->dispatch_name_id;
+    m->call_tag_base    = stale->call_tag_base;
+    /* tbl_next written before the release store, matching
+     * find_or_create_meta's publication discipline above. */
+    m->tbl_next = atomic_load_explicit(&g_actor_tbl[b], memory_order_relaxed);
+    atomic_store_explicit(&g_actor_tbl[b], m, memory_order_release);
     return m;
 }
 
@@ -2694,14 +2777,25 @@ static void march_actor_msg_dispose(void *msg) {
  *   march_spawn($raw)            -- returns $raw */
 void *march_spawn(void *actor) {
     march_actor_meta *meta = find_or_create_meta(actor);
+    /* Task 15 fix: one locked section does reuse-detection, pid_index
+     * assignment, and the pididx_tbl publish together, so nothing else can
+     * observe `meta` between the pididx_linked check and the insert. See
+     * replace_stale_meta_locked's comment for why the check is needed at
+     * all (actor heap-address reuse after a dead actor's meta was already
+     * linked into g_pididx_tbl) and pididx_linked's field comment for why a
+     * second link on the same meta would corrupt the table. */
+    pthread_mutex_lock(&g_tbl_mu);
+    if (meta->pididx_linked) meta = replace_stale_meta_locked(actor, meta);
     int64_t pid_index = atomic_fetch_add_explicit(&g_next_pid_index, 1,
                                                 memory_order_relaxed);
     atomic_store_explicit(&meta->pid_index, pid_index, memory_order_relaxed);
-    /* Task 15: publish this meta into the pid_index -> meta table now that
-     * pid_index is assigned. Must run AFTER the store above (pididx_insert
-     * reads meta->pid_index to pick the bucket) and BEFORE the green thread
-     * starts, matching find_or_create_meta's existing "insert" discipline. */
-    pididx_insert(meta);
+    meta->pididx_linked = 1;
+    /* Publish this meta into the pid_index -> meta table now that
+     * pid_index is assigned (pididx_insert_locked reads meta->pid_index to
+     * pick the bucket) and before the green thread starts, matching
+     * find_or_create_meta's existing "insert" discipline. */
+    pididx_insert_locked(meta);
+    pthread_mutex_unlock(&g_tbl_mu);
     /* Initialize scheduler lazily. */
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
