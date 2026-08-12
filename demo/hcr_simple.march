@@ -13,6 +13,7 @@
 mod App do
   needs IO.Console
   needs IO.NetListen
+  needs IO.Process
 
   mod Compute do
     fn square(n : Int) : Int do n * n end

@@ -12,6 +12,8 @@
 mod App do
   needs IO.Console
   needs IO.NetListen
+  needs IO.NetConnect
+  needs IO.Process
 
   mod Server do
     fn square(n : Int) : Int do n * n end

@@ -21,6 +21,7 @@ mod TwoNodeRpc do
   needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
+  needs IO.NetConnect
 
   -- ── Registered function ─────────────────────────────────────────────────────
 

@@ -10,6 +10,8 @@
 --   ./hcr_client <host> <port> [n]
 mod HcrClient do
   needs IO.Console
+  needs IO.NetConnect
+  needs IO.Process
 
   mod Server do
     pfn square(n : Int) : Int do n * n end

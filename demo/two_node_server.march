@@ -1,6 +1,7 @@
 mod TwoNodeServer do
   needs IO.Console
   needs IO.NetListen
+  needs IO.NetConnect
 
   fn square(n : Int) : Int do n * n end
 

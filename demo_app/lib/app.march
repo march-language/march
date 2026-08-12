@@ -13,6 +13,8 @@
 
 mod DemoApp do
   needs IO.Console
+  needs IO.Mut
+  needs IO.NetListen
 
 -- ---------------------------------------------------------------------------
 -- Pre-populate DevStats for the dashboard demo
