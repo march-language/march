@@ -11051,6 +11051,32 @@ let test_compiled_iolist_deep_flatten_parity () =
     ~expected:"25000\n25000"
     ()
 
+(** Float `!=` on NaN: the interpreter implements float `!=` via OCaml's
+    polymorphic `<>`, under which `nan <> nan` is `true`. The compiled
+    backend used LLVM `fcmp one` (ordered-and-not-equal, IEEE 754 semantics)
+    for `!=`, which is `false` whenever either operand is NaN — a
+    interp/compiled divergence. Fixed by using `fcmp une`
+    (unordered-or-not-equal), which matches `<>`: true whenever the operands
+    differ OR either is NaN. `string_to_float("nan")` is used to produce a
+    NaN without hitting the checked-div-by-zero abort that `0.0 /. 0.0`
+    triggers on both backends. *)
+let test_compiled_float_nan_neq_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_float_nan_neq"
+    ~src:"mod FloatNanNeqParity do\n\
+    \  needs IO.Console\n\
+         \  fn main() do\n\
+         \    let x = match string_to_float(\"nan\") do\n\
+         \      Some(v) -> v\n\
+         \      None -> 0.0\n\
+         \    end\n\
+         \    println(x != x)\n\
+         \    println(x != 1.0)\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\ntrue"
+    ()
+
 (** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
     the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
     left the outer binding's literal mapping (`x -> 10`) in scope when the
@@ -14213,6 +14239,8 @@ let codegen_suites =
             test_compiled_deque_pop_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
             test_compiled_let_shadowing_parity;
+          Alcotest.test_case "compiled float NaN `!=` parity (une vs one)" `Quick
+            test_compiled_float_nan_neq_parity;
           Alcotest.test_case "compiled entry-module self-qualification parity" `Quick
             test_compiled_entry_self_qual_parity;
           Alcotest.test_case "compiled entry-module nested self-qualification parity" `Quick

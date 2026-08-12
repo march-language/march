@@ -52,6 +52,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `!=` on NaN floats now matches the interpreter.** The native
+  backend lowered float `!=` to LLVM `fcmp one` (ordered-and-not-equal),
+  which per IEEE 754 is `false` whenever either operand is NaN — but the
+  interpreter implements `!=` via OCaml's polymorphic `<>`, under which
+  `nan <> nan` is `true`. `nan != nan` printed `false` compiled and `true`
+  interpreted. Now uses `fcmp une` (unordered-or-not-equal), matching `<>`
+  semantics on both backends.
+
 - **JS backend: `==`/`!=` on a non-primitive operand now compares
   structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
   (or an erased type variable that may hold one) lowered to JavaScript `===`,
