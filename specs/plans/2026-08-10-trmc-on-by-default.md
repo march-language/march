@@ -916,7 +916,7 @@ Only after Tasks 1-9 are merged and CI is green on all of them.
 - Consumes: everything above.
 - Produces: `Trmc.enabled` defaults to `true`; `--no-trmc` is the escape hatch.
 
-- [ ] **Step 1: Flip the ref**
+- [x] **Step 1: Flip the ref**
 
 In `lib/tir/trmc.ml`, change:
 
@@ -932,7 +932,7 @@ let enabled : bool ref = ref true
 
 and update the doc comment's final sentence to read: `Default ON since 2026-08-10; --no-trmc disables it.`
 
-- [ ] **Step 2: Full suite, both directions**
+- [x] **Step 2: Full suite, both directions**
 
 ```bash
 scripts/run-tests.sh
@@ -948,7 +948,9 @@ rm -rf .march/cas/artifacts-v2
 ```
 Expected: prints `239988000`.
 
-- [ ] **Step 3: Regenerate TIR snapshots**
+- [x] **Step 3: Regenerate TIR snapshots**
+
+> **CORRECTION (2026-08-12): no golden could move, and that was itself the bug.** `test/test_snapshots.ml` composed `Lower → Mono → Defun → Perceus` and never called `Trmc.transform_module`, so a default pipeline stage had zero snapshot coverage. Wiring the pass in was not sufficient either — no corpus program was TRMC-eligible, so it ran over nothing. Commit `d4fea259` does all three: adds the pass at its real position (post-lower/pre-mono), adds `test/snapshots/src/trmc_modulo_cons.march`, and fixes the process-global `trmc_ctr` that made emitted names depend on run order (caught by the suite's own double-run determinism case the moment an eligible fixture existed).
 
 The default-on transform changes emitted TIR for eligible functions, so the goldens legitimately move:
 
@@ -959,7 +961,7 @@ git diff test/snapshots/ | head -60
 
 **Review the diff — it is the code-review artifact.** Expect `alloc_hole` / `reuse_hole` / `$dst.N <-` lines to appear in producer-shaped fixtures and nowhere else. If an unrelated fixture moved, stop and find out why.
 
-- [ ] **Step 4: Benchmark sweep**
+- [x] **Step 4: Benchmark sweep**
 
 ```bash
 rm -rf .march/cas/artifacts-v2
@@ -970,14 +972,14 @@ done
 ```
 Expected: `list_producers` markedly faster than the Task 2 baseline; the others within noise.
 
-- [ ] **Step 5: Drop the now-redundant CI leg**
+- [x] **Step 5: Drop the now-redundant CI leg**
 
 In `.github/workflows/ci.yml`, remove the "Test suite with TRMC enabled" step
 added in Task 1 Step 4 — with the default on, the ordinary `test` job covers it.
 Keep both `sanitize.sh` legs: the explicit `MARCH_TRMC=1` leg is now redundant
 with the default, so delete that one too and leave the original.
 
-- [ ] **Step 6: Changelog and specs**
+- [x] **Step 6: Changelog and specs**
 
 In `CHANGELOG.md` under `## [Unreleased]` → `### Changed`:
 
@@ -995,7 +997,7 @@ git mv specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md specs/progress/
 
 and append a closing section to that file recording the final benchmark numbers from Step 4.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/tir/trmc.ml CHANGELOG.md test/snapshots .github/workflows/ci.yml
@@ -1003,7 +1005,7 @@ git add specs/progress/2026-08-07-trmc-tail-recursion-modulo-cons.md
 git commit -m "tir(trmc): enable tail-recursion-modulo-cons by default"
 ```
 
-- [ ] **Step 8: Watch CI**
+- [x] **Step 8: Watch CI**
 
 Both `sanitize-gate` legs, `test`, `conformance`, `property-tests` and `cross-linux-oracle` must be green. The sanitize gate is the one that matters most: it is the only memory-safety evidence this feature has.
 
