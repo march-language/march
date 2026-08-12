@@ -180,6 +180,15 @@ git log is authoritative for exact commits.
   holding `g_tbl_mu` for the lookup. Combined with the `green_thread`
   atomicity fix above, per-message sends no longer contend with concurrent
   spawns/lookups on other actors.
+- **`find_meta_by_pid_index` (supervisor-restart Pid→actor lookup) is now
+  O(1) instead of O(total actors ever spawned).** A new insert-only
+  `pid_index -> meta` side table (same lock-free-read discipline as the
+  actor-pointer table above) replaces the old full scan of every actor-table
+  bucket taken under the global table lock. Also closes a pre-existing,
+  formally-racy plain (non-atomic, unlocked) write to `meta->pid_index` in
+  `march_spawn` against unsynchronized cross-thread reads in
+  `march_get_cap`, `march_send_checked`, and Pid `Show` formatting —
+  `pid_index` is now `_Atomic`.
 
 ### Fixed
 

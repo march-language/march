@@ -1793,8 +1793,21 @@ typedef struct march_actor_meta {
      * load on every read — see the Task 10 commit message for the full
      * site table. */
     _Atomic(march_proc *)      green_thread;  /* Green thread running this actor's loop */
-    struct march_actor_meta    *tbl_next;   /* Hash-table chain                */
-    int64_t                     pid_index;  /* Sequential spawn index for Pid(n) display */
+    struct march_actor_meta    *tbl_next;   /* Hash-table chain (by actor ptr) */
+    struct march_actor_meta    *pididx_next; /* Hash-table chain (by pid_index) */
+    /* Sequential spawn index for Pid(n) display. _Atomic: written once by
+     * march_spawn (before the meta is reachable via g_pididx_tbl, and
+     * before any other actor could hold a Pid/Cap referencing it — March's
+     * spawn is synchronous and returns only after this write), but read by
+     * OTHER actors' threads through foreign-meta paths that don't go
+     * through the pididx table's release/acquire pair (march_get_cap,
+     * march_send_checked's cap check, march_value_to_string's Pid(n)
+     * display) — see the Task 15 commit message's pid_index reader audit.
+     * Plain read/write of that field by a different thread than the writer
+     * is a data race (formally UB) even though the write always happens
+     * before the pid becomes observable elsewhere in practice; _Atomic with
+     * relaxed ops closes that gap for free. */
+    _Atomic int64_t             pid_index;
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
     _Atomic int64_t             down_count;   /* Down messages received (watcher side) */
@@ -1848,6 +1861,30 @@ static pthread_mutex_t    g_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Sequential Pid index counter: each spawned actor gets a unique integer. */
 static _Atomic int64_t g_next_pid_index = 0;
+
+/* Task 15: pid_index -> meta side table. Same insert-only, lock-free-read
+ * discipline as g_actor_tbl above: metas are never unlinked or freed, so a
+ * reader that acquire-loads a bucket head and walks pididx_next needs no
+ * lock — every node it reaches was fully published (pididx_next written,
+ * then the head swung with a release store) before it became visible.
+ * Inserted once, by march_spawn, immediately after meta->pid_index is
+ * assigned — see pididx_insert. pid_index is unique (drawn from
+ * g_next_pid_index, an atomic counter), so unlike g_actor_tbl's
+ * actor-pointer chains (which can in principle alias) this table never has
+ * duplicate keys; the old linear-scan implementation's "last match wins
+ * when duplicates exist" behavior was therefore always equivalent to
+ * first-match, which is what the O(1) lookup below returns. */
+#define MARCH_PIDIDX_BUCKETS 256
+static _Atomic(march_actor_meta *) g_pididx_tbl[MARCH_PIDIDX_BUCKETS];
+
+static void pididx_insert(march_actor_meta *m) {
+    int64_t pid_index = atomic_load_explicit(&m->pid_index, memory_order_relaxed);
+    unsigned b = (unsigned)(pid_index % MARCH_PIDIDX_BUCKETS);
+    pthread_mutex_lock(&g_tbl_mu);
+    m->pididx_next = atomic_load_explicit(&g_pididx_tbl[b], memory_order_relaxed);
+    atomic_store_explicit(&g_pididx_tbl[b], m, memory_order_release);
+    pthread_mutex_unlock(&g_tbl_mu);
+}
 
 /* Sequential monitor ref counter. */
 static _Atomic int64_t g_next_monitor_ref = 0;
@@ -2184,20 +2221,26 @@ static march_actor_meta *find_or_create_meta(void *actor) {
  * code below: locate an actor's meta entry by its sequential spawn index —
  * the value a compiled Int field uses to encode a Pid (see
  * march_actor_register_child). Returns NULL if no actor was ever assigned
- * this index. */
+ * this index.
+ *
+ * O(1) via g_pididx_tbl (Task 15) instead of the old O(total actors) scan
+ * over every g_actor_tbl bucket. Lock-free: acquire-load the bucket head
+ * and walk pididx_next (see g_pididx_tbl's comment for why that's safe).
+ * The pid_index field itself only needs a relaxed load here: every meta
+ * reachable via this chain was inserted by pididx_insert AFTER its
+ * pid_index write (same thread, program order), and the chain's
+ * release/acquire pair already orders that write before this read —
+ * pid_index being _Atomic is for the OTHER (non-pididx) reader sites, not
+ * this one. */
 static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *m = NULL;
-    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
-        march_actor_meta *cur = g_actor_tbl[i];
-        while (cur) {
-            if (cur->pid_index == pid_index) { m = cur; break; }
-            cur = cur->tbl_next;
-        }
-        if (m) break;
+    unsigned b = (unsigned)(pid_index % MARCH_PIDIDX_BUCKETS);
+    for (march_actor_meta *m = atomic_load_explicit(&g_pididx_tbl[b],
+                                                     memory_order_acquire);
+         m; m = m->pididx_next) {
+        if (atomic_load_explicit(&m->pid_index, memory_order_relaxed) == pid_index)
+            return m;
     }
-    pthread_mutex_unlock(&g_tbl_mu);
-    return m;
+    return NULL;
 }
 
 /* ── Actor green thread loop ─────────────────────────────────────── */
@@ -2430,7 +2473,8 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     new_meta->supervisor = supervisor;
     new_meta->sup_child_index = child_idx;
     new_meta->epoch = inherited_epoch;
-    ((int64_t *)supervisor)[4 + child->word_idx] = new_meta->pid_index;
+    ((int64_t *)supervisor)[4 + child->word_idx] =
+        atomic_load_explicit(&new_meta->pid_index, memory_order_relaxed);
     return new_child;
 }
 
@@ -2575,7 +2619,8 @@ static void do_actor_death(void *actor) {
 
     /* Fire MONITOR_FIRE to any remote (cross-node) watchers of this pid. */
     if (meta) {
-        march_dist_monitor_fire_pid(meta->pid_index,
+        march_dist_monitor_fire_pid(
+            atomic_load_explicit(&meta->pid_index, memory_order_relaxed),
                                      MARCH_DIST_REASON_NORMAL, NULL);
     }
 
@@ -2649,8 +2694,14 @@ static void march_actor_msg_dispose(void *msg) {
  *   march_spawn($raw)            -- returns $raw */
 void *march_spawn(void *actor) {
     march_actor_meta *meta = find_or_create_meta(actor);
-    meta->pid_index = atomic_fetch_add_explicit(&g_next_pid_index, 1,
+    int64_t pid_index = atomic_fetch_add_explicit(&g_next_pid_index, 1,
                                                 memory_order_relaxed);
+    atomic_store_explicit(&meta->pid_index, pid_index, memory_order_relaxed);
+    /* Task 15: publish this meta into the pid_index -> meta table now that
+     * pid_index is assigned. Must run AFTER the store above (pididx_insert
+     * reads meta->pid_index to pick the bucket) and BEFORE the green thread
+     * starts, matching find_or_create_meta's existing "insert" discipline. */
+    pididx_insert(meta);
     /* Initialize scheduler lazily. */
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
@@ -4908,7 +4959,8 @@ void march_actor_register_child(void *supervisor, void *child,
  * to represent a just-spawned child's Pid (see march_pid_of_int for the
  * reverse direction). */
 int64_t march_pid_index_of(void *actor) {
-    return find_or_create_meta(actor)->pid_index;
+    return atomic_load_explicit(&find_or_create_meta(actor)->pid_index,
+                                 memory_order_relaxed);
 }
 
 /* monitor: establish a monitor link from watcher to target.
@@ -5052,7 +5104,7 @@ void *march_get_cap(void *pid) {
     void *cap = march_alloc(40);
     int64_t *w = (int64_t *)cap;
     w[2] = (int64_t)(uintptr_t)pid;
-    w[3] = meta->pid_index;
+    w[3] = atomic_load_explicit(&meta->pid_index, memory_order_relaxed);
     w[4] = meta->epoch;
     return cap;
 }
@@ -5157,7 +5209,9 @@ int64_t march_send_checked(void *cap, void *msg) {
         return march_atom_of_name("error");
     }
     march_actor_meta *meta = find_meta(actor);
-    if (!meta || meta->pid_index != pidx || meta->epoch != epoch
+    if (!meta ||
+        atomic_load_explicit(&meta->pid_index, memory_order_relaxed) != pidx ||
+        meta->epoch != epoch
         || !march_is_alive(actor)) {
         march_decrc(msg);
         return march_atom_of_name("error");
@@ -5270,7 +5324,9 @@ void *march_value_to_string(void *v) {
     march_actor_meta *meta = find_meta(v);
     if (meta) {
         char buf[64];
-        int n = snprintf(buf, sizeof(buf), "Pid(%lld)", (long long)meta->pid_index);
+        int n = snprintf(buf, sizeof(buf), "Pid(%lld)",
+                          (long long)atomic_load_explicit(&meta->pid_index,
+                                                            memory_order_relaxed));
         return march_string_lit(buf, n);
     }
     march_hdr *h = (march_hdr *)v;
