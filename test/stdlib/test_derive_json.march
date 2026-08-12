@@ -5,6 +5,14 @@ mod TestDeriveJson do
   derive Eq for Color
   derive Json for Color
 
+  -- `from_json` is a bare name that each `derive Json` in this module
+  -- rebinds — see specs/2026-07-31-json-from-json-dispatch-design.md.
+  -- Capture Color's decode results here, right after Color's own derive
+  -- and before Shape/User's derive Json shadow the name.
+  let color_roundtrip_red   = from_json(to_json(Red))
+  let color_roundtrip_green = from_json(to_json(Green))
+  let color_roundtrip_blue  = from_json(to_json(Blue))
+
   describe "derive Json for enum variants" do
     test "to_json for Red" do
       let j = to_json(Red)
@@ -20,9 +28,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip Red" do
-      let j = to_json(Red)
-      let result = from_json(j)
-      match result do
+      match color_roundtrip_red do
       Ok(c) -> assert (c == Red)
       Err(e) -> do
         println("Error: " ++ Json.decode_error_to_string(e))
@@ -32,9 +38,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip Green" do
-      let j = to_json(Green)
-      let result = from_json(j)
-      match result do
+      match color_roundtrip_green do
       Ok(c) -> assert (c == Green)
       Err(e) -> do
         println("Error: " ++ Json.decode_error_to_string(e))
@@ -44,9 +48,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip Blue" do
-      let j = to_json(Blue)
-      let result = from_json(j)
-      match result do
+      match color_roundtrip_blue do
       Ok(c) -> assert (c == Blue)
       Err(e) -> do
         println("Error: " ++ Json.decode_error_to_string(e))
@@ -60,6 +62,13 @@ mod TestDeriveJson do
   type Shape = Circle(Int) | Rect(Int, Int) | Empty
   derive Eq for Shape
   derive Json for Shape
+
+  -- Same from_json-shadowing workaround as Color above: capture Shape's
+  -- decode results right after Shape's own derive Json.
+  let shape_roundtrip_circle = from_json(to_json(Circle(10)))
+  let shape_roundtrip_rect   = from_json(to_json(Rect(3, 4)))
+  let shape_roundtrip_empty  = from_json(to_json(Empty))
+  let shape_missing_args     = from_json(Json.encode_object([("tag", Json.encode_string("Circle"))]))
 
   describe "derive Json for variants with args" do
     test "to_json for Circle" do
@@ -84,10 +93,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip Circle" do
-      let s = Circle(10)
-      let j = to_json(s)
-      let result = from_json(j)
-      match result do
+      match shape_roundtrip_circle do
       Ok(s2) -> assert (s2 == Circle(10))
       Err(e) -> do
         println("Error: " ++ Json.decode_error_to_string(e))
@@ -97,10 +103,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip Rect" do
-      let s = Rect(3, 4)
-      let j = to_json(s)
-      let result = from_json(j)
-      match result do
+      match shape_roundtrip_rect do
       Ok(s2) -> assert (s2 == Rect(3, 4))
       Err(e) -> do
         println("Error: " ++ Json.decode_error_to_string(e))
@@ -110,9 +113,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip Empty" do
-      let j = to_json(Empty)
-      let result = from_json(j)
-      match result do
+      match shape_roundtrip_empty do
       Ok(s2) -> assert (s2 == Empty)
       Err(e) -> do
         println("Error: " ++ Json.decode_error_to_string(e))
@@ -123,9 +124,7 @@ mod TestDeriveJson do
 
     test "from_json error for missing args" do
       -- Circle expects an Int arg at key "0", but we don't provide it
-      let j = Json.encode_object([("tag", Json.encode_string("Circle"))])
-      let result = from_json(j)
-      match result do
+      match shape_missing_args do
       Err(_) -> assert (true)
       Ok(_) -> assert (false)
       end
@@ -137,6 +136,17 @@ mod TestDeriveJson do
   derive Eq for User
   derive Json for User
 
+  -- Same from_json-shadowing workaround: User is the last type to derive
+  -- Json in this module, so bare from_json now stays bound to User's
+  -- decoder for the rest of the file — capture results here for clarity
+  -- and consistency with Color/Shape above.
+  let user_roundtrip    = from_json(to_json({ name: "Alice", age: 30, active: true }))
+  let user_wrong_types  = from_json(Json.encode_object([
+                            ("name", Json.encode_int(42)),
+                            ("age", Json.encode_string("not a number")),
+                            ("active", Json.encode_string("not a bool"))
+                          ]))
+
   describe "derive Json for records" do
     test "to_json for User" do
       let j = to_json({ name: "Alice", age: 30, active: true })
@@ -147,10 +157,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip User" do
-      let u = { name: "Alice", age: 30, active: true }
-      let j = to_json(u)
-      let result = from_json(j)
-      match result do
+      match user_roundtrip do
       Ok(u2) -> do
         assert (u2.name == "Alice")
         assert (u2.age == 30)
@@ -164,13 +171,7 @@ mod TestDeriveJson do
     end
 
     test "from_json error for wrong types" do
-      let j = Json.encode_object([
-        ("name", Json.encode_int(42)),
-        ("age", Json.encode_string("not a number")),
-        ("active", Json.encode_string("not a bool"))
-      ])
-      let result = from_json(j)
-      match result do
+      match user_wrong_types do
       Err(_) -> assert (true)
       Ok(_) -> assert (false)
       end

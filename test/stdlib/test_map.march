@@ -138,13 +138,13 @@ end
 describe "fold" do
   test "fold sums all values" do
     let m = Map.insert(Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp), 3, 30, int_cmp)
-    let s = Map.fold(0, m, fn acc -> fn _k -> fn v -> acc + v)
+    let s = Map.fold(m, 0, fn (acc, _k, v) -> acc + v)
     assert (s == 60)
   end
 
   test "fold counts keys" do
     let m = Map.insert(Map.insert(Map.empty(), 1, "a", int_cmp), 2, "b", int_cmp)
-    let c = Map.fold(0, m, fn acc -> fn _k -> fn _v -> acc + 1)
+    let c = Map.fold(m, 0, fn (acc, _k, _v) -> acc + 1)
     assert (c == 2)
   end
 end

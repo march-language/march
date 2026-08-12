@@ -4519,3 +4519,217 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/h_css_url_context.expected native_h_css_url_context.out)))
+
+
+; ── Previously-unwired test/stdlib/*.march describe/test corpus ──────────
+; 37 of the 94 files in test/stdlib/ had real, substantial describe/test
+; coverage (237 describe blocks) but ran under NO automated runner -- only
+; manually, via `march test test/stdlib/<f>.march`. See
+; specs/progress/2026-08-11-test-stdlib-march-files-not-in-ci.md for the
+; audit that found this and the drift each file had accumulated as a result.
+;
+; Each rule below runs one file's `describe`/`test` blocks through the real
+; `march test` runner, judged by exit code, so a regression here fails
+; `dune runtest` instead of waiting for someone to remember to run the file
+; by hand.
+;
+; Two of the 37 are deliberately NOT included:
+;   - test_island_bridges.march: 7 of its tests fail due to a genuine,
+;     tracked compiler bug (derive Json's `from_json` dispatch is broken
+;     for the auto-generated island-bridge feature in BOTH the interpreted
+;     and compiled paths -- not test-file drift). See
+;     specs/todos/2026-08-12-island-bridge-from-json-broken.md.
+;   - test_properties.march: passes, but its 76 Check.all property runs are
+;     extremely slow under the tree-walking interpreter; wired separately
+;     below under its own alias so it does not block the default `runtest`.
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_actor.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_actor.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_array.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_array.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_bigint.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_bigint.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_bytes.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_bytes.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_check.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_check.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_cli.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_cli.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_csv.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_csv.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_dataframe.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_dataframe.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_datetime.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_datetime.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_decimal.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_decimal.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_derive_json.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_derive_json.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_derive_json_multi.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_derive_json_multi.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_dir.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_dir.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_enum.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_enum.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_file.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_gen.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_gen.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_hamt.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_hamt.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_html.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_html.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_iolist.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_iolist.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_iterable.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_iterable.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_map.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_map.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_math.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_math.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_option.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_option.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_path.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_path.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_plot.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_plot.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_prelude.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_prelude.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_queue.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_queue.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_regex.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_regex.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_result.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_result.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_set.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_set.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sigil.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_sigil.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sort.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_sort.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_string.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_string.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_string_utf8.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_string_utf8.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_task.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_task.march)))
+
+; ── test_properties.march: wired separately, own alias ───────────────────
+; Passes (228/228), but its 76 Check.all property runs (100 samples each,
+; generating/round-tripping nested Msgpack/JSON values through the
+; tree-walking interpreter) are genuinely slow -- a full run took several
+; hours on a machine with ~8 other concurrent compiler sessions contending
+; for CPU, and its true (uncontended) runtime hasn't been measured cleanly.
+; Rather than guess and risk turning `dune runtest` into a multi-hour gate
+; for every PR, this stays on its own alias, run explicitly:
+;   dune build --root . @test/stdlib-march-properties
+; A follow-up should benchmark it uncontended and, if it's actually fast,
+; fold it into the main runtest block above alongside the other 35 files.
+(rule
+ (alias stdlib-march-properties)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_properties.march)))

@@ -224,13 +224,13 @@ end
 describe "fold" do
   test "fold sums all elements" do
     let s = set_of(Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil))))))
-    let sum = Set.fold(0, s, fn (acc, x) -> acc + x)
+    let sum = Set.fold(s, 0, fn (acc, x) -> acc + x)
     assert (sum == 15)
   end
 
   test "fold counts elements" do
     let s = set_of(Cons(10, Cons(20, Cons(30, Nil))))
-    let c = Set.fold(0, s, fn (acc, _x) -> acc + 1)
+    let c = Set.fold(s, 0, fn (acc, _x) -> acc + 1)
     assert (c == 3)
   end
 end

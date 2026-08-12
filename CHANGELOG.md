@@ -296,6 +296,12 @@ git log is authoritative for exact commits.
   unaffected. Fixed by routing all three through the same `Project.dep_root_dir`
   resolver `forge deps` already uses.
 
+### Documentation
+
+- **`Set.fold`'s doc comment now matches its actual (uncurried) callback
+  convention.** It claimed the callback is curried (`f(acc)(elem)`); the
+  implementation has always called it uncurried (`f(acc, elem)`), same as
+  `Map.fold`/`Hamt.fold`/`Enum.fold`.
 
 ### Changed
 
