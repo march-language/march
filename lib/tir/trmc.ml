@@ -401,10 +401,19 @@ let crosses_actor_boundary (ty : Tir.ty) : bool =
     Tir_names.is_actor_msg_name name || Tir_names.is_actor_struct_name name
   | _ -> false
 
-(** [Some (f', f_dps)] when [fn] is transformable. *)
-let transform_fn (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
+(** [Some (f', f_dps)] when [fn] is transformable.
+
+    [on_decline] receives the reason whenever the answer is [None] and the
+    function looked transformable to the ANALYSIS.  It exists so the report in
+    [transform_module] can name the specific refusal without re-deriving this
+    ladder — two copies of it would drift, and a skip line that says only
+    "eligible" tells you a gap exists but not which one. *)
+let transform_fn ?(on_decline = fun (_ : string) -> ())
+      (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
   let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
-  if crosses_actor_boundary fn.Tir.fn_ret_ty then None
+  let decline reason = on_decline reason; None in
+  if crosses_actor_boundary fn.Tir.fn_ret_ty then
+    decline "actor-boundary-return"
   else
   match verdict_of r, r.r_modcons with
   | Eligible, [ (_ctor, hole) ] ->
@@ -427,16 +436,31 @@ let transform_fn (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
       { fn with Tir.fn_body = seed_entry ~self:fn.Tir.fn_name ~dps fn.Tir.fn_body }
     in
     Some (entry, helper)
+  | Eligible, sites -> decline (Printf.sprintf "multi-site(%d)" (List.length sites))
+  | Mixed, _ -> decline "mixed"
   | _ -> None
 
 (** Apply TRMC across a module.  Gated on MARCH_TRMC=1. *)
 let transform_module (m : Tir.tir_module) : Tir.tir_module =
   if Sys.getenv_opt "MARCH_TRMC" = None then m
   else begin
+    let report = Sys.getenv_opt "MARCH_TRMC_REPORT" <> None in
     let out = List.concat_map (fun fn ->
-      match transform_fn fn with
+      (* No silent caps: a function the ANALYSIS considers transformable but
+         the TRANSFORM declines is a coverage gap, and it must be visible in
+         the report rather than inferred from a missing TRMCXFORM line.  The
+         reason comes from transform_fn itself so the two cannot drift. *)
+      let on_decline reason =
+        if report then begin
+          let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
+          Printf.eprintf "TRMCSKIP\t%s\t%s\t%s\tmodcons=%d other=%d\n%!"
+            fn.Tir.fn_name reason (string_of_verdict (verdict_of r))
+            (List.length r.r_modcons) r.r_other
+        end
+      in
+      match transform_fn ~on_decline fn with
       | Some (entry, helper) ->
-        if Sys.getenv_opt "MARCH_TRMC_REPORT" <> None then
+        if report then
           Printf.eprintf "TRMCXFORM\t%s -> %s\n%!" fn.Tir.fn_name helper.Tir.fn_name;
         [entry; helper]
       | None -> [fn]
