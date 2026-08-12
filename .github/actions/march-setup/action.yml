@@ -45,24 +45,10 @@ runs:
           # libblake3-dev is not available in Ubuntu 24.04; build from source
           git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
           cd /tmp/blake3/c
-          # AVX-512 is deliberately DISABLED here while we investigate an
-          # intermittent SIGSEGV seen only on ubuntu-24.04 CI runners (never
-          # on macOS/arm64, linux/aarch64 containers, or emulated linux/amd64
-          # containers). BLAKE3 is on the hot path of every compile (it hashes
-          # content for the CAS), and this build config is the one variable
-          # that differs between CI and every environment where the crash
-          # does not reproduce. BLAKE3's AVX-512 dispatch is gated on CPUID
-          # plus an XCR0 ZMM-state check, and GitHub's runner fleet is
-          # CPU-heterogeneous, so a mis-detected ZMM state is a plausible
-          # fault source. This is a hypothesis test, not a settled fix:
-          # SSE2/SSE4.1/AVX2 stay enabled, only AVX-512 is dropped. If the
-          # SIGSEGVs stop, revisit and make this permanent with a note; if
-          # they continue, BLAKE3 is exonerated, revert this, and keep
-          # looking elsewhere.
-          gcc -O2 -shared -fPIC -DBLAKE3_NO_AVX512 -o libblake3.so \
+          gcc -O2 -shared -fPIC -o libblake3.so \
             blake3.c blake3_dispatch.c blake3_portable.c \
             blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-            blake3_avx2_x86-64_unix.S
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
           sudo cp libblake3.so /usr/local/lib/libblake3.so
           sudo cp blake3.h /usr/local/include/blake3.h
           sudo ldconfig
