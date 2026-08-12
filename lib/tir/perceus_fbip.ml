@@ -82,6 +82,21 @@ let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
       && same_arity dec_v.Tir.v_ty (List.length args)
       && not (args_alias_reuse dec_v args) ->
     Some (Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest))
+  (* TRMC hole allocation in tail position — the same pairing as EAlloc, but
+     the cell keeps a hole.  This is what makes TRMC and reuse compose: without
+     it a TRMC'd loop allocates a fresh cell per iteration where the untransformed
+     version reused the scrutinee's, which measured 3.5x SLOWER than not
+     transforming at all.  [arity] counts the hole, so it is |filled| + 1. *)
+  | Tir.EAllocHole (None, ty, filled, hole)
+    when same_arity dec_v.Tir.v_ty (List.length filled + 1)
+      && not (args_alias_reuse dec_v filled) ->
+    Some (Tir.EAllocHole (Some (Tir.AVar dec_v), ty, filled, hole))
+  | Tir.ELet (result, Tir.EAllocHole (None, ty, filled, hole), rest)
+    when same_arity dec_v.Tir.v_ty (List.length filled + 1)
+      && not (args_alias_reuse dec_v filled) ->
+    Some (Tir.ELet (result,
+                    Tir.EAllocHole (Some (Tir.AVar dec_v), ty, filled, hole),
+                    rest))
   (* dec_v not used in rhs — safe to sink past this binding *)
   | Tir.ELet (v, rhs, inner)
     when not (Perceus_liveness.name_free_in dec_v.Tir.v_name rhs) ->
@@ -121,6 +136,14 @@ let rec fbip_expr (e : Tir.expr) : Tir.expr =
       && not (args_alias_reuse dec_v args) ->
     let rest' = fbip_expr rest in
     Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest')
+  (* Same pairing for the ELet-bound hole allocation reached directly. *)
+  | Tir.ELet (_dead_v, Tir.EDecRC (Tir.AVar dec_v),
+              Tir.ELet (result, Tir.EAllocHole (None, ty, filled, hole), rest))
+    when same_arity dec_v.Tir.v_ty (List.length filled + 1)
+      && not (args_alias_reuse dec_v filled) ->
+    let rest' = fbip_expr rest in
+    Tir.ELet (result,
+              Tir.EAllocHole (Some (Tir.AVar dec_v), ty, filled, hole), rest')
   (* ESeq(EDecRC v, body): try to sink the decrc to be adjacent to an
      EAlloc of matching shape anywhere down the let-chain. *)
   | Tir.ESeq (Tir.EDecRC (Tir.AVar dec_v), body) ->

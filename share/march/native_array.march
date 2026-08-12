@@ -5,18 +5,49 @@
 -- it cache-friendly for sequential scan patterns and enables tight inner loops
 -- for sum, map, and fold operations.
 --
--- P10 vectorization target: native_float_arr_sum and native_float_arr_map
--- emit tight for-loops that LLVM can auto-vectorize to AVX2 when the program
--- is compiled with --compile and -mavx2.  In the interpreter path these
--- builtins bypass the generic evaluator entirely, giving 5-10x speedup over
--- the PVec Array for numeric-only workloads.
+-- Compiled (--compile) vectorization, in practice:
+--   - sum_int / sum_float: both auto-vectorize under clang -O2 (NEON on
+--     arm64, SSE4.2+ on x86-64) — sum_float needed a scoped
+--     `#pragma clang fp reassociate(on)` in the runtime C loop, since
+--     strict IEEE 754 float semantics otherwise block the reduction from
+--     vectorizing at all.
+--   - map_int with a non-capturing or single-capture lambda: the compiler
+--     inlines the callback directly into the loop instead of dispatching
+--     through a closure pointer, which lets clang's own inliner and
+--     vectorizer see through it — arithmetic-heavy bodies (`fn x -> x*x+1`,
+--     `fn x -> x + captured`) compile to real SIMD instructions. A closure
+--     reused elsewhere, or one with more than one captured variable, still
+--     works correctly but falls back to the slower closure-dispatch path.
+--   - map_float: correct and (for capturing/non-capturing alike) gets the
+--     same closure-inlining treatment as map_int. Float crossing a
+--     closure-call boundary is normally heap-boxed (march_alloc_float),
+--     which blocks vectorization — but when the callback's signature is
+--     concretely all-Float (no generic type variable), the compiler clones
+--     the inlined callback under natural double params/return with zero
+--     boxing, and the loop DOES vectorize (real NEON/SSE, confirmed via
+--     -emit-llvm). A callback whose signature is still generic at this
+--     point falls back to the boxed (correct, non-vectorized) path. See
+--     specs/optimizations.md P10 "Float-boxing Stage 4, Option B" and
+--     specs/plans/2026-07-13-float-boxing-design.md.
+--   - fold_int / fold_float have no compiled implementation yet — calling
+--     them from a --compile build will fail to link. Use sum/map or a
+--     manual index loop until this lands.
+--   - map2_int / map2_float (two-array zip-with, e.g. for column-column
+--     arithmetic) get the identical closure-inlining/vectorization treatment
+--     map_int/map_float do above — same eligibility bar, same unboxed clone
+--     for a concrete-Float callback. Verified ~47x faster than the pre-fix
+--     boxed closure-call path on a 5M-element benchmark; see
+--     docs/simd-benchmarks.md's "Fix history: map2".
 --
--- Two opaque element types are supported:
---   NativeIntArr   — wraps int array
---   NativeFloatArr — wraps float array
---
--- Note: these are interpreter-path builtins.  The --compile (LLVM) path
--- support is tracked in specs/optimizations.md P10.
+-- Five opaque element types are supported:
+--   NativeIntArr   — wraps int array (i64)
+--   NativeFloatArr — wraps float array (f64)
+--   NativeF32Arr   — narrow float array (f32); stores round to nearest-even
+--   NativeI32Arr   — narrow int array (i32); stores truncate mod 2^32
+--   NativeU8Arr    — narrow int array (u8); stores truncate mod 2^8
+-- Narrow-width stores never trap; loads widen exactly (u8 zero-extends,
+-- i32 sign-extends). See docs/simd-vectorization.md's "Narrow element
+-- widths" section for the full boundary rule and benchmarks.
 --
 -- Usage:
 --   let arr = NativeArray.make_float(1000, 0.0)
@@ -25,98 +56,332 @@
 
 mod NativeArray do
 
--- ── Int arrays ─────────────────────────────────────────────────────────────
+  -- ── Int arrays ─────────────────────────────────────────────────────────────
 
-doc "Create a new integer array of [n] elements, each initialised to [fill]."
-fn make_int(n : Int, fill : Int) do
-  native_int_arr_make(n, fill)
-end
+  doc "Create a new integer array of [n] elements, each initialised to [fill]."
+  fn make_int(n : {Int | _ >= 0}, fill : Int) do
+    native_int_arr_make(n, fill)
+  end
 
-doc "Return the number of elements in [arr]."
-fn length_int(arr) do
-  native_int_arr_length(arr)
-end
+  doc "Return the number of elements in [arr]."
+  fn length_int(arr) do
+    native_int_arr_length(arr)
+  end
 
-doc "Return the element at index [i] (0-based). Panics if out of bounds."
-fn get_int(arr, i : Int) do
-  native_int_arr_get(arr, i)
-end
+  doc "Return the element at index [i] (0-based). Panics if out of bounds."
+  fn get_int(arr, i : Int) do
+    native_int_arr_get(arr, i)
+  end
 
-doc "Return a new array with element [i] replaced by [v]. O(n)."
-fn set_int(arr, i : Int, v : Int) do
-  native_int_arr_set(arr, i, v)
-end
+  doc "Return a new array with element [i] replaced by [v]. O(n)."
+  fn set_int(arr, i : Int, v : Int) do
+    native_int_arr_set(arr, i, v)
+  end
 
-doc "Sum all elements. O(n) tight loop."
-fn sum_int(arr) : Int do
-  native_int_arr_sum(arr)
-end
+  doc "Sum all elements. O(n) tight loop."
+  fn sum_int(arr) : Int do
+    native_int_arr_sum(arr)
+  end
 
-doc "Apply [f] to every element, returning a new NativeIntArr. O(n)."
-fn map_int(arr, f) do
-  native_int_arr_map(arr, f)
-end
+  doc "Apply [f] to every element, returning a new NativeIntArr. O(n)."
+  fn map_int(arr, f) do
+    native_int_arr_map(arr, f)
+  end
 
-doc "Left fold over all elements. [f(acc, elem) = new_acc]. O(n)."
-fn fold_int(acc, arr, f) do
-  native_int_arr_fold(acc, arr, f)
-end
+  doc """
+  Apply [f] elementwise to two same-length arrays, returning a new
+  NativeIntArr. `f(a_elem, b_elem) = out_elem`. Panics if the arrays
+  differ in length. O(n).
+  """
+  fn map2_int(arr1, arr2, f) do
+    native_int_arr_map2(arr1, arr2, f)
+  end
 
-doc "Build a NativeIntArr from a List(Int). O(n)."
-fn from_list_int(lst) do
-  native_int_arr_from_list(lst)
-end
+  doc "Widen every element to Float, returning a new NativeFloatArr. O(n)."
+  fn to_float_arr(arr) do
+    native_int_arr_to_float_arr(arr)
+  end
 
-doc "Convert a NativeIntArr to a List(Int). O(n)."
-fn to_list_int(arr) do
-  native_int_arr_to_list(arr)
-end
+  doc """
+  Left fold over all elements.  Argument order: collection first, init
+  second, callback last (uncurried-collection convention).  Callback
+  `f(acc, elem) = new_acc`.  O(n).
+  """
+  fn fold_int(arr, acc, f) do
+    native_int_arr_fold(acc, arr, f)
+  end
 
--- ── Float arrays ────────────────────────────────────────────────────────────
+  doc "Build a NativeIntArr from a List(Int). O(n)."
+  fn from_list_int(lst) do
+    native_int_arr_from_list(lst)
+  end
 
-doc "Create a new float array of [n] elements, each initialised to [fill]."
-fn make_float(n : Int, fill : Float) do
-  native_float_arr_make(n, fill)
-end
+  doc "Convert a NativeIntArr to a List(Int). O(n)."
+  fn to_list_int(arr) do
+    native_int_arr_to_list(arr)
+  end
 
-doc "Return the number of elements in [arr]."
-fn length_float(arr) do
-  native_float_arr_length(arr)
-end
+  -- ── Float arrays ────────────────────────────────────────────────────────────
 
-doc "Return the element at index [i] (0-based). Panics if out of bounds."
-fn get_float(arr, i : Int) do
-  native_float_arr_get(arr, i)
-end
+  doc "Create a new float array of [n] elements, each initialised to [fill]."
+  fn make_float(n : {Int | _ >= 0}, fill : Float) do
+    native_float_arr_make(n, fill)
+  end
 
-doc "Return a new array with element [i] replaced by [v]. O(n)."
-fn set_float(arr, i : Int, v : Float) do
-  native_float_arr_set(arr, i, v)
-end
+  doc "Return the number of elements in [arr]."
+  fn length_float(arr) do
+    native_float_arr_length(arr)
+  end
 
-doc "Sum all elements. O(n) tight loop."
-fn sum_float(arr) : Float do
-  native_float_arr_sum(arr)
-end
+  doc "Return the element at index [i] (0-based). Panics if out of bounds."
+  fn get_float(arr, i : Int) do
+    native_float_arr_get(arr, i)
+  end
 
-doc "Apply [f] to every element, returning a new NativeFloatArr. O(n)."
-fn map_float(arr, f) do
-  native_float_arr_map(arr, f)
-end
+  doc "Return a new array with element [i] replaced by [v]. O(n)."
+  fn set_float(arr, i : Int, v : Float) do
+    native_float_arr_set(arr, i, v)
+  end
 
-doc "Left fold over all elements. [f(acc, elem) = new_acc]. O(n)."
-fn fold_float(acc, arr, f) do
-  native_float_arr_fold(acc, arr, f)
-end
+  doc "Sum all elements. O(n) tight loop."
+  fn sum_float(arr) : Float do
+    native_float_arr_sum(arr)
+  end
 
-doc "Build a NativeFloatArr from a List(Float). O(n)."
-fn from_list_float(lst) do
-  native_float_arr_from_list(lst)
-end
+  doc "Apply [f] to every element, returning a new NativeFloatArr. O(n)."
+  fn map_float(arr, f) do
+    native_float_arr_map(arr, f)
+  end
 
-doc "Convert a NativeFloatArr to a List(Float). O(n)."
-fn to_list_float(arr) do
-  native_float_arr_to_list(arr)
-end
+  doc """
+  Apply [f] elementwise to two same-length arrays, returning a new
+  NativeFloatArr. `f(a_elem, b_elem) = out_elem`. Panics if the arrays
+  differ in length. O(n).
+  """
+  fn map2_float(arr1, arr2, f) do
+    native_float_arr_map2(arr1, arr2, f)
+  end
+
+  doc """
+  Left fold over all elements.  Argument order: collection first, init
+  second, callback last (uncurried-collection convention).  Callback
+  `f(acc, elem) = new_acc`.  O(n).
+  """
+  fn fold_float(arr, acc, f) do
+    native_float_arr_fold(acc, arr, f)
+  end
+
+  doc "Build a NativeFloatArr from a List(Float). O(n)."
+  fn from_list_float(lst) do
+    native_float_arr_from_list(lst)
+  end
+
+  doc "Convert a NativeFloatArr to a List(Float). O(n)."
+  fn to_list_float(arr) do
+    native_float_arr_to_list(arr)
+  end
+
+  -- ── Narrow widths (f32 / i32 / u8) ──────────────────────────────────────────
+  --
+  -- Boundary rule (never traps): integer stores wrap mod 2^w two's-complement;
+  -- float stores round to nearest-even binary32; loads widen exactly (u8
+  -- zero-extends to 0..255, i32 sign-extends). sum_i32/sum_u8 accumulate in
+  -- Int (i64); sum_f32 accumulates in Float (double) over already-rounded
+  -- elements.
+
+  -- f32
+
+  doc "Create a new f32 array of [n] elements, each initialised to [fill] rounded to binary32."
+  fn make_f32(n : {Int | _ >= 0}, fill : Float) do
+    native_f32_arr_make(n, fill)
+  end
+
+  doc "Return the number of elements in [arr]."
+  fn length_f32(arr) do
+    native_f32_arr_length(arr)
+  end
+
+  doc "Return the element at index [i] (0-based), widened to Float. Panics if out of bounds."
+  fn get_f32(arr, i : Int) do
+    native_f32_arr_get(arr, i)
+  end
+
+  doc "Set element [i] to [v] rounded to binary32 (nearest-even). Never traps."
+  fn set_f32(arr, i : Int, v : Float) do
+    native_f32_arr_set(arr, i, v)
+  end
+
+  doc "Sum all elements as a double accumulation over pre-rounded binary32 elements. O(n) tight loop."
+  fn sum_f32(arr) : Float do
+    native_f32_arr_sum(arr)
+  end
+
+  doc "Apply [f] to every element (widened Float in, rounded to binary32 out), returning a new NativeF32Arr. O(n)."
+  fn map_f32(arr, f) do
+    native_f32_arr_map(arr, f)
+  end
+
+  doc """
+  Apply [f] elementwise to two same-length arrays, returning a new
+  NativeF32Arr. `f(a_elem, b_elem) = out_elem`, rounded to binary32.
+  Panics if the arrays differ in length. O(n).
+  """
+  fn map2_f32(arr1, arr2, f) do
+    native_f32_arr_map2(arr1, arr2, f)
+  end
+
+  doc "Build a NativeF32Arr from a List(Float), rounding each element to binary32. O(n)."
+  fn from_list_f32(lst) do
+    native_f32_arr_from_list(lst)
+  end
+
+  doc "Convert a NativeF32Arr to a List(Float) (exact widen). O(n)."
+  fn to_list_f32(arr) do
+    native_f32_arr_to_list(arr)
+  end
+
+  -- i32
+
+  doc "Create a new i32 array of [n] elements, each initialised to [fill] wrapped to i32."
+  fn make_i32(n : {Int | _ >= 0}, fill : Int) do
+    native_i32_arr_make(n, fill)
+  end
+
+  doc "Return the number of elements in [arr]."
+  fn length_i32(arr) do
+    native_i32_arr_length(arr)
+  end
+
+  doc "Return the element at index [i] (0-based), sign-extended to Int. Panics if out of bounds."
+  fn get_i32(arr, i : Int) do
+    native_i32_arr_get(arr, i)
+  end
+
+  doc "Set element [i] to [v] wrapped mod 2^32 two's-complement. Never traps."
+  fn set_i32(arr, i : Int, v : Int) do
+    native_i32_arr_set(arr, i, v)
+  end
+
+  doc "Sum all elements, accumulated in Int (i64). O(n) tight loop."
+  fn sum_i32(arr) : Int do
+    native_i32_arr_sum(arr)
+  end
+
+  doc "Apply [f] to every element (sign-extended Int in, wrapped to i32 out), returning a new NativeI32Arr. O(n)."
+  fn map_i32(arr, f) do
+    native_i32_arr_map(arr, f)
+  end
+
+  doc """
+  Apply [f] elementwise to two same-length arrays, returning a new
+  NativeI32Arr. `f(a_elem, b_elem) = out_elem`, wrapped to i32.
+  Panics if the arrays differ in length. O(n).
+  """
+  fn map2_i32(arr1, arr2, f) do
+    native_i32_arr_map2(arr1, arr2, f)
+  end
+
+  doc "Build a NativeI32Arr from a List(Int), wrapping each element to i32. O(n)."
+  fn from_list_i32(lst) do
+    native_i32_arr_from_list(lst)
+  end
+
+  doc "Convert a NativeI32Arr to a List(Int) (exact widen). O(n)."
+  fn to_list_i32(arr) do
+    native_i32_arr_to_list(arr)
+  end
+
+  -- u8
+
+  doc "Create a new u8 array of [n] elements, each initialised to [fill] wrapped to u8."
+  fn make_u8(n : {Int | _ >= 0}, fill : Int) do
+    native_u8_arr_make(n, fill)
+  end
+
+  doc "Return the number of elements in [arr]."
+  fn length_u8(arr) do
+    native_u8_arr_length(arr)
+  end
+
+  doc "Return the element at index [i] (0-based), zero-extended to Int (0..255). Panics if out of bounds."
+  fn get_u8(arr, i : Int) do
+    native_u8_arr_get(arr, i)
+  end
+
+  doc "Set element [i] to [v] wrapped mod 256. Never traps."
+  fn set_u8(arr, i : Int, v : Int) do
+    native_u8_arr_set(arr, i, v)
+  end
+
+  doc "Sum all elements, accumulated in Int (i64). O(n) tight loop."
+  fn sum_u8(arr) : Int do
+    native_u8_arr_sum(arr)
+  end
+
+  doc "Apply [f] to every element (zero-extended Int in, wrapped to u8 out), returning a new NativeU8Arr. O(n)."
+  fn map_u8(arr, f) do
+    native_u8_arr_map(arr, f)
+  end
+
+  doc """
+  Apply [f] elementwise to two same-length arrays, returning a new
+  NativeU8Arr. `f(a_elem, b_elem) = out_elem`, wrapped mod 256.
+  Panics if the arrays differ in length. O(n).
+  """
+  fn map2_u8(arr1, arr2, f) do
+    native_u8_arr_map2(arr1, arr2, f)
+  end
+
+  doc "Build a NativeU8Arr from a List(Int), wrapping each element mod 256. O(n)."
+  fn from_list_u8(lst) do
+    native_u8_arr_from_list(lst)
+  end
+
+  doc "Convert a NativeU8Arr to a List(Int) (exact zero-extend). O(n)."
+  fn to_list_u8(arr) do
+    native_u8_arr_to_list(arr)
+  end
+
+  -- Conversions
+
+  doc "Narrow a NativeFloatArr to a NativeF32Arr, rounding each element to binary32 (nearest-even). O(n)."
+  fn float_to_f32_arr(arr) do
+    native_float_to_f32_arr(arr)
+  end
+
+  doc "Widen a NativeF32Arr to NativeFloatArr (exact). O(n)."
+  fn f32_to_float_arr(arr) do
+    native_f32_to_float_arr(arr)
+  end
+
+  doc "Narrow a NativeIntArr to NativeI32Arr, wrapping each element mod 2^32 two's-complement. O(n)."
+  fn int_to_i32_arr(arr) do
+    native_int_to_i32_arr(arr)
+  end
+
+  doc "Widen a NativeI32Arr to NativeIntArr (exact sign-extend). O(n)."
+  fn i32_to_int_arr(arr) do
+    native_i32_to_int_arr(arr)
+  end
+
+  doc "Narrow a NativeIntArr to NativeU8Arr, wrapping each element mod 256. O(n)."
+  fn int_to_u8_arr(arr) do
+    native_int_to_u8_arr(arr)
+  end
+
+  doc "Widen a NativeU8Arr to NativeIntArr (exact zero-extend). O(n)."
+  fn u8_to_int_arr(arr) do
+    native_u8_to_int_arr(arr)
+  end
+
+  doc "Convert a NativeI32Arr to NativeF32Arr, rounding each element to binary32 (nearest-even). O(n)."
+  fn i32_to_f32_arr(arr) do
+    native_i32_to_f32_arr(arr)
+  end
+
+  doc "Convert a NativeU8Arr to NativeF32Arr, rounding each element to binary32 (nearest-even). O(n)."
+  fn u8_to_f32_arr(arr) do
+    native_u8_to_f32_arr(arr)
+  end
 
 end

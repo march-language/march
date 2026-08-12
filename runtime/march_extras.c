@@ -222,59 +222,45 @@ static void b64_decode_init(void) {
 
 /* ── Bytes(List(Int)) helpers ─────────────────────────────────────────── */
 
-/* Create a Cons(int, tail) list node.  Transfers ownership of tail.
- * The Int payload is pre-tagged with (n<<1)|1: under the uniform low-bit
- * integer tagging scheme, compiled code emits `ashr #1` when extracting an
- * Int field from a generic constructor slot, so a raw value would be halved
- * on untag.  (Same convention as make_int_cons in march_http.c.) */
-static void *int_cons(int64_t n, void *tail) {
-    void *node = march_alloc(16 + 16);   /* hdr(16) + i64(8) + ptr(8) */
-    *(int32_t *)((char *)node + 8)  = 1; /* tag = 1 = Cons */
-    *(int64_t *)((char *)node + 16) = (n << 1) | 1;
-    *(void **)((char *)node + 24)   = tail;
-    return node;
-}
-
-/* Create a Bytes(list) wrapper.  Transfers ownership of list. */
-static void *bytes_wrap(void *list) {
+/* Create a Bytes(payload) wrapper.  Transfers ownership of payload.
+ * The wrapper cell layout is unchanged from the Bytes(List(Int)) era — a
+ * one-field boxed ADT cell with field 0 at offset 16 — only the payload's
+ * type changed, from a cons spine to a march_string.  Keeping the cell is
+ * deliberate: lib/tir/repr.ml, llvm_case.ml and drop.ml all encode
+ * assumptions about this shape.  See
+ * specs/plans/2026-08-10-array-backed-bytes-design.md. */
+static void *bytes_wrap(void *payload) {
     void *b = march_alloc(16 + 8);       /* hdr(16) + ptr(8) */
     /* tag stays 0 = Bytes ctor */
-    *(void **)((char *)b + 16) = list;
+    *(void **)((char *)b + 16) = payload;
     return b;
 }
 
-/* Build a Bytes(List(Int)) from raw bytes.  Returns owned reference. */
+/* Build a Bytes from raw bytes.  Returns owned reference.
+ *
+ * This used to allocate one ~32-byte cons cell PER BYTE, so a 12 MB
+ * march_gzip_decode allocated ~12M cells (hundreds of MB) before any March
+ * code ran.  march_string_lit is one allocation and one memcpy. */
 static void *bytes_from_raw(const uint8_t *data, size_t len) {
-    void *list = march_alloc(16); /* Nil: tag=0, rc=1 */
-    for (ssize_t i = (ssize_t)len - 1; i >= 0; i--)
-        list = int_cons((int64_t)data[i], list);
-    return bytes_wrap(list);
+    return bytes_wrap(march_string_lit((const char *)data, (int64_t)len));
 }
 
-/* Extract raw bytes from a Bytes(List(Int)) value. Returns malloc'd buffer,
- * sets *out_len. Caller must free. */
+/* Extract raw bytes from a Bytes value. Returns malloc'd buffer, sets
+ * *out_len. Caller must free.
+ *
+ * The payload is already contiguous, so this is a single memcpy where it used
+ * to be two full spine walks (one to count, one to copy).  The copy is kept
+ * rather than borrowing march_string::data directly because every caller here
+ * free()s the result and several mutate it in place; a borrowing variant is a
+ * separate, larger change to those call sites. */
 static uint8_t *bytes_to_raw(void *bytes_val, size_t *out_len) {
-    /* Bytes(list): field 0 at offset 16 is the list pointer */
-    void *list = *(void **)((char *)bytes_val + 16);
-    /* Count entries first */
-    size_t n = 0;
-    void *p = list;
-    while (p) {
-        int32_t tag = *(int32_t *)((char *)p + 8);
-        if (tag == 0) break; /* Nil */
-        n++;
-        p = *(void **)((char *)p + 24);
-    }
+    /* Bytes(payload): field 0 at offset 16 is the march_string. */
+    march_string *ms = *(march_string **)((char *)bytes_val + 16);
+    size_t n = ms ? (size_t)ms->len : 0;
     uint8_t *buf = malloc(n > 0 ? n : 1);
+    if (!buf) { *out_len = 0; return NULL; }
+    if (n > 0) memcpy(buf, ms->data, n);
     *out_len = n;
-    p = list; size_t i = 0;
-    while (p && i < n) {
-        int32_t tag = *(int32_t *)((char *)p + 8);
-        if (tag == 0) break;
-        /* Untag the Int payload: generic ctor slots store (n<<1)|1. */
-        buf[i++] = (uint8_t)((*(int64_t *)((char *)p + 16) >> 1) & 0xFF);
-        p = *(void **)((char *)p + 24);
-    }
     return buf;
 }
 

@@ -72,6 +72,9 @@ type value =
   | VMultiarity of (int * value) list   (** Arity-dispatched fn: [(arity, closure)] sorted ascending *)
   | VNativeIntArr   of int array        (** Flat OCaml int array — fast numeric loops *)
   | VNativeFloatArr of float array      (** Flat OCaml float array — fast numeric loops *)
+  | VNativeF32Arr of float array   (** elements pre-rounded to binary32 *)
+  | VNativeI32Arr of int array     (** elements always in [-2^31, 2^31) *)
+  | VNativeU8Arr  of int array     (** elements always in [0, 255] *)
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
   | VVaultHandle of int                 (** Opaque handle into vault_registry *)
   | VRingBuf of value ring              (** Fixed-capacity mutable circular buffer — single-owner *)
@@ -1550,6 +1553,29 @@ let rec value_to_string v =
     else
       Printf.sprintf "NativeFloatArr(%d)[%s, ...]" n
         (String.concat ", " (List.init 4 (fun i -> fmt a.(i))))
+  | VNativeF32Arr a ->
+    let n = Array.length a in
+    let fmt f = let s = string_of_float f in
+                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    if n <= 8 then
+      "NativeF32Arr[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
+    else
+      Printf.sprintf "NativeF32Arr(%d)[%s, ...]" n
+        (String.concat ", " (List.init 4 (fun i -> fmt a.(i))))
+  | VNativeI32Arr a ->
+    let n = Array.length a in
+    if n <= 8 then
+      "NativeI32Arr[" ^ String.concat ", " (Array.to_list (Array.map string_of_int a)) ^ "]"
+    else
+      Printf.sprintf "NativeI32Arr(%d)[%s, ...]" n
+        (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
+  | VNativeU8Arr a ->
+    let n = Array.length a in
+    if n <= 8 then
+      "NativeU8Arr[" ^ String.concat ", " (Array.to_list (Array.map string_of_int a)) ^ "]"
+    else
+      Printf.sprintf "NativeU8Arr(%d)[%s, ...]" n
+        (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
   | VTypedArray arr ->
     let elems = Array.to_list arr in
     "[|" ^ String.concat ", " (List.map value_to_string elems) ^ "|]"
@@ -2939,26 +2965,28 @@ external caml_march_zstd_decode    : string -> string        = "caml_march_zstd_
 external caml_march_brotli_encode  : string -> int -> int -> string = "caml_march_brotli_encode"
 external caml_march_brotli_decode  : string -> string        = "caml_march_brotli_decode"
 
-(** Convert an OCaml raw string to a March Bytes(List(Int)) value. *)
+(** Convert an OCaml raw string to a March Bytes value.
+
+    [type Bytes = Bytes(String)] — the payload is the raw byte buffer itself,
+    so this is a wrap rather than the per-byte cons spine it used to build.
+    See specs/plans/2026-08-10-array-backed-bytes-design.md. *)
 let march_bytes_of_string (s : string) : value =
-  let n = String.length s in
-  let lst = ref (VCon ("Nil", [])) in
-  for i = n - 1 downto 0 do
-    lst := VCon ("Cons", [VInt (Char.code s.[i]); !lst])
-  done;
-  VCon ("Bytes", [!lst])
+  VCon ("Bytes", [VString s])
 
 (** Extract raw bytes from a March value (String or Bytes). *)
 let march_val_to_raw (v : value) : (string, string) result =
   match v with
   | VString s -> Ok s
+  | VCon ("Bytes", [VString s]) -> Ok s
+  (* Tolerate the legacy cons-spine payload: an FFI shim or a serialized value
+     produced before the representation change can still reach here. *)
   | VCon ("Bytes", [lst]) ->
     let buf = Buffer.create 16 in
     let rec go = function
       | VCon ("Nil", []) -> Ok ()
       | VCon ("Cons", [VInt b; rest]) ->
         Buffer.add_char buf (Char.chr (b land 0xFF)); go rest
-      | _ -> Error "Bytes: expected list of Int"
+      | _ -> Error "Bytes: expected String payload"
     in
     (match go lst with Ok () -> Ok (Buffer.contents buf) | Error e -> Error e)
   | _ -> Error (Printf.sprintf "expected String or Bytes, got %s" (value_to_string v))
@@ -3825,6 +3853,16 @@ let rec show_dispatch (v : value) : string =
            | other     -> value_to_string other)
         | None -> value_to_string v)
      | None -> value_to_string v)
+
+(* ------------------------------------------------------------------ *)
+(* NativeArray narrow-width helpers (f32/i32/u8) — P10 narrow types.
+   Boundary rule: integer stores wrap mod 2^w two's-complement; float
+   stores round to nearest-even binary32.  Never trap. *)
+(* ------------------------------------------------------------------ *)
+
+let f32_round (v : float) : float = Int32.float_of_bits (Int32.bits_of_float v)
+let i32_wrap (v : int) : int = Int32.to_int (Int32.of_int v)
+let u8_wrap (v : int) : int = v land 0xff
 
 (* ------------------------------------------------------------------ *)
 (* Base environment                                                    *)
@@ -5602,14 +5640,10 @@ let base_env : env =
           let sock = (Obj.magic fd : Unix.file_descr) in
           let buf = Bytes.create n in
           let rec loop off =
-            if off >= n then begin
-              (* Build March Bytes(List(Int)) value: Bytes(Cons(b0, Cons(b1, ... Nil))) *)
-              let lst = ref (VCon ("Nil", [])) in
-              for i = n - 1 downto 0 do
-                lst := VCon ("Cons", [VInt (Char.code (Bytes.get buf i)); !lst])
-              done;
-              VCon ("Ok", [VCon ("Bytes", [!lst])])
-            end else
+            if off >= n then
+              (* Bytes is Bytes(String): the received buffer IS the payload. *)
+              VCon ("Ok", [VCon ("Bytes", [VString (Bytes.to_string buf)])])
+            else
               (try
                  let got = Unix.recv sock buf off (n - off) [] in
                  if got = 0 then VCon ("Err", [VString "connection closed"])
@@ -7913,6 +7947,245 @@ let base_env : env =
           Array.fold_right (fun x acc -> VCon ("Cons", [VFloat x; acc]))
             a (VCon ("Nil", []))
         | _ -> eval_error "native_float_arr_to_list: expected NativeFloatArr"))
+
+  (* ── Narrow-width NativeArray families — f32 / i32 / u8 (P10 narrow types).
+     Boundary rule: integer stores wrap mod 2^w two's-complement; float
+     stores round to nearest-even binary32; loads widen exactly (element
+     representation is already the widened form, so get/to_list/sum read
+     back plain — no widening work needed).  Never trap. *)
+  (* f32 *)
+  ; ("native_f32_arr_make", VBuiltin ("native_f32_arr_make", function
+        | [VInt n; VFloat init] ->
+          if n < 0 then eval_error "native_f32_arr_make: negative size %d" n;
+          VNativeF32Arr (Array.make n (f32_round init))
+        | _ -> eval_error "native_f32_arr_make: expected (Int, Float)"))
+  ; ("native_f32_arr_length", VBuiltin ("native_f32_arr_length", function
+        | [VNativeF32Arr a] -> VInt (Array.length a)
+        | _ -> eval_error "native_f32_arr_length: expected NativeF32Arr"))
+  ; ("native_f32_arr_get", VBuiltin ("native_f32_arr_get", function
+        | [VNativeF32Arr a; VInt i] ->
+          if i < 0 || i >= Array.length a then
+            eval_error "native_f32_arr_get: index %d out of bounds (len=%d)" i (Array.length a);
+          VFloat a.(i)
+        | _ -> eval_error "native_f32_arr_get: expected (NativeF32Arr, Int)"))
+  ; ("native_f32_arr_set", VBuiltin ("native_f32_arr_set", function
+        | [VNativeF32Arr a; VInt i; VFloat v] ->
+          let n = Array.length a in
+          if i < 0 || i >= n then
+            eval_error "native_f32_arr_set: index %d out of bounds (len=%d)" i n;
+          let a' = Array.copy a in
+          a'.(i) <- f32_round v;
+          VNativeF32Arr a'
+        | _ -> eval_error "native_f32_arr_set: expected (NativeF32Arr, Int, Float)"))
+  ; ("native_f32_arr_sum", VBuiltin ("native_f32_arr_sum", function
+        | [VNativeF32Arr a] -> VFloat (Array.fold_left (+.) 0.0 a)
+        | _ -> eval_error "native_f32_arr_sum: expected NativeF32Arr"))
+  ; ("native_f32_arr_map", VBuiltin ("native_f32_arr_map", function
+        | [VNativeF32Arr a; f] ->
+          let n = Array.length a in
+          let b = Array.make n 0.0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VFloat a.(i)] with
+             | VFloat v -> b.(i) <- f32_round v
+             | v -> eval_error "native_f32_arr_map: function returned non-Float: %s"
+                      (value_to_string v))
+          done;
+          VNativeF32Arr b
+        | _ -> eval_error "native_f32_arr_map: expected (NativeF32Arr, fn)"))
+  ; ("native_f32_arr_map2", VBuiltin ("native_f32_arr_map2", function
+        | [VNativeF32Arr a; VNativeF32Arr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_f32_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0.0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VFloat a.(i); VFloat b.(i)] with
+             | VFloat v -> out.(i) <- f32_round v
+             | v -> eval_error "native_f32_arr_map2: function returned non-Float: %s"
+                      (value_to_string v))
+          done;
+          VNativeF32Arr out
+        | _ -> eval_error "native_f32_arr_map2: expected (NativeF32Arr, NativeF32Arr, fn)"))
+  ; ("native_f32_arr_from_list", VBuiltin ("native_f32_arr_from_list", function
+        | [lst] ->
+          let rec to_ocaml_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VFloat h; t]) -> h :: to_ocaml_list t
+            | v -> eval_error "native_f32_arr_from_list: expected List(Float), got %s"
+                     (value_to_string v)
+          in
+          VNativeF32Arr (Array.of_list (List.map f32_round (to_ocaml_list lst)))
+        | _ -> eval_error "native_f32_arr_from_list: expected List(Float)"))
+  ; ("native_f32_arr_to_list", VBuiltin ("native_f32_arr_to_list", function
+        | [VNativeF32Arr a] ->
+          Array.fold_right (fun x acc -> VCon ("Cons", [VFloat x; acc]))
+            a (VCon ("Nil", []))
+        | _ -> eval_error "native_f32_arr_to_list: expected NativeF32Arr"))
+
+  (* i32 *)
+  ; ("native_i32_arr_make", VBuiltin ("native_i32_arr_make", function
+        | [VInt n; VInt init] ->
+          if n < 0 then eval_error "native_i32_arr_make: negative size %d" n;
+          VNativeI32Arr (Array.make n (i32_wrap init))
+        | _ -> eval_error "native_i32_arr_make: expected (Int, Int)"))
+  ; ("native_i32_arr_length", VBuiltin ("native_i32_arr_length", function
+        | [VNativeI32Arr a] -> VInt (Array.length a)
+        | _ -> eval_error "native_i32_arr_length: expected NativeI32Arr"))
+  ; ("native_i32_arr_get", VBuiltin ("native_i32_arr_get", function
+        | [VNativeI32Arr a; VInt i] ->
+          if i < 0 || i >= Array.length a then
+            eval_error "native_i32_arr_get: index %d out of bounds (len=%d)" i (Array.length a);
+          VInt a.(i)
+        | _ -> eval_error "native_i32_arr_get: expected (NativeI32Arr, Int)"))
+  ; ("native_i32_arr_set", VBuiltin ("native_i32_arr_set", function
+        | [VNativeI32Arr a; VInt i; VInt v] ->
+          let n = Array.length a in
+          if i < 0 || i >= n then
+            eval_error "native_i32_arr_set: index %d out of bounds (len=%d)" i n;
+          let a' = Array.copy a in
+          a'.(i) <- i32_wrap v;
+          VNativeI32Arr a'
+        | _ -> eval_error "native_i32_arr_set: expected (NativeI32Arr, Int, Int)"))
+  ; ("native_i32_arr_sum", VBuiltin ("native_i32_arr_sum", function
+        | [VNativeI32Arr a] -> VInt (Array.fold_left (+) 0 a)
+        | _ -> eval_error "native_i32_arr_sum: expected NativeI32Arr"))
+  ; ("native_i32_arr_map", VBuiltin ("native_i32_arr_map", function
+        | [VNativeI32Arr a; f] ->
+          let n = Array.length a in
+          let b = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i)] with
+             | VInt v -> b.(i) <- i32_wrap v
+             | v -> eval_error "native_i32_arr_map: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeI32Arr b
+        | _ -> eval_error "native_i32_arr_map: expected (NativeI32Arr, fn)"))
+  ; ("native_i32_arr_map2", VBuiltin ("native_i32_arr_map2", function
+        | [VNativeI32Arr a; VNativeI32Arr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_i32_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i); VInt b.(i)] with
+             | VInt v -> out.(i) <- i32_wrap v
+             | v -> eval_error "native_i32_arr_map2: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeI32Arr out
+        | _ -> eval_error "native_i32_arr_map2: expected (NativeI32Arr, NativeI32Arr, fn)"))
+  ; ("native_i32_arr_from_list", VBuiltin ("native_i32_arr_from_list", function
+        | [lst] ->
+          let rec to_ocaml_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VInt h; t]) -> h :: to_ocaml_list t
+            | v -> eval_error "native_i32_arr_from_list: expected List(Int), got %s"
+                     (value_to_string v)
+          in
+          VNativeI32Arr (Array.of_list (List.map i32_wrap (to_ocaml_list lst)))
+        | _ -> eval_error "native_i32_arr_from_list: expected List(Int)"))
+  ; ("native_i32_arr_to_list", VBuiltin ("native_i32_arr_to_list", function
+        | [VNativeI32Arr a] ->
+          Array.fold_right (fun x acc -> VCon ("Cons", [VInt x; acc]))
+            a (VCon ("Nil", []))
+        | _ -> eval_error "native_i32_arr_to_list: expected NativeI32Arr"))
+
+  (* u8 *)
+  ; ("native_u8_arr_make", VBuiltin ("native_u8_arr_make", function
+        | [VInt n; VInt init] ->
+          if n < 0 then eval_error "native_u8_arr_make: negative size %d" n;
+          VNativeU8Arr (Array.make n (u8_wrap init))
+        | _ -> eval_error "native_u8_arr_make: expected (Int, Int)"))
+  ; ("native_u8_arr_length", VBuiltin ("native_u8_arr_length", function
+        | [VNativeU8Arr a] -> VInt (Array.length a)
+        | _ -> eval_error "native_u8_arr_length: expected NativeU8Arr"))
+  ; ("native_u8_arr_get", VBuiltin ("native_u8_arr_get", function
+        | [VNativeU8Arr a; VInt i] ->
+          if i < 0 || i >= Array.length a then
+            eval_error "native_u8_arr_get: index %d out of bounds (len=%d)" i (Array.length a);
+          VInt a.(i)
+        | _ -> eval_error "native_u8_arr_get: expected (NativeU8Arr, Int)"))
+  ; ("native_u8_arr_set", VBuiltin ("native_u8_arr_set", function
+        | [VNativeU8Arr a; VInt i; VInt v] ->
+          let n = Array.length a in
+          if i < 0 || i >= n then
+            eval_error "native_u8_arr_set: index %d out of bounds (len=%d)" i n;
+          let a' = Array.copy a in
+          a'.(i) <- u8_wrap v;
+          VNativeU8Arr a'
+        | _ -> eval_error "native_u8_arr_set: expected (NativeU8Arr, Int, Int)"))
+  ; ("native_u8_arr_sum", VBuiltin ("native_u8_arr_sum", function
+        | [VNativeU8Arr a] -> VInt (Array.fold_left (+) 0 a)
+        | _ -> eval_error "native_u8_arr_sum: expected NativeU8Arr"))
+  ; ("native_u8_arr_map", VBuiltin ("native_u8_arr_map", function
+        | [VNativeU8Arr a; f] ->
+          let n = Array.length a in
+          let b = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i)] with
+             | VInt v -> b.(i) <- u8_wrap v
+             | v -> eval_error "native_u8_arr_map: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeU8Arr b
+        | _ -> eval_error "native_u8_arr_map: expected (NativeU8Arr, fn)"))
+  ; ("native_u8_arr_map2", VBuiltin ("native_u8_arr_map2", function
+        | [VNativeU8Arr a; VNativeU8Arr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_u8_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i); VInt b.(i)] with
+             | VInt v -> out.(i) <- u8_wrap v
+             | v -> eval_error "native_u8_arr_map2: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeU8Arr out
+        | _ -> eval_error "native_u8_arr_map2: expected (NativeU8Arr, NativeU8Arr, fn)"))
+  ; ("native_u8_arr_from_list", VBuiltin ("native_u8_arr_from_list", function
+        | [lst] ->
+          let rec to_ocaml_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VInt h; t]) -> h :: to_ocaml_list t
+            | v -> eval_error "native_u8_arr_from_list: expected List(Int), got %s"
+                     (value_to_string v)
+          in
+          VNativeU8Arr (Array.of_list (List.map u8_wrap (to_ocaml_list lst)))
+        | _ -> eval_error "native_u8_arr_from_list: expected List(Int)"))
+  ; ("native_u8_arr_to_list", VBuiltin ("native_u8_arr_to_list", function
+        | [VNativeU8Arr a] ->
+          Array.fold_right (fun x acc -> VCon ("Cons", [VInt x; acc]))
+            a (VCon ("Nil", []))
+        | _ -> eval_error "native_u8_arr_to_list: expected NativeU8Arr"))
+
+  (* Conversions — Array.map one-liners; destination narrowing applied,
+     widening directions copy verbatim. *)
+  ; ("native_float_to_f32_arr", VBuiltin ("native_float_to_f32_arr", function
+        | [VNativeFloatArr a] -> VNativeF32Arr (Array.map f32_round a)
+        | _ -> eval_error "native_float_to_f32_arr: expected NativeFloatArr"))
+  ; ("native_f32_to_float_arr", VBuiltin ("native_f32_to_float_arr", function
+        | [VNativeF32Arr a] -> VNativeFloatArr (Array.copy a)
+        | _ -> eval_error "native_f32_to_float_arr: expected NativeF32Arr"))
+  ; ("native_int_to_i32_arr", VBuiltin ("native_int_to_i32_arr", function
+        | [VNativeIntArr a] -> VNativeI32Arr (Array.map i32_wrap a)
+        | _ -> eval_error "native_int_to_i32_arr: expected NativeIntArr"))
+  ; ("native_i32_to_int_arr", VBuiltin ("native_i32_to_int_arr", function
+        | [VNativeI32Arr a] -> VNativeIntArr (Array.copy a)
+        | _ -> eval_error "native_i32_to_int_arr: expected NativeI32Arr"))
+  ; ("native_int_to_u8_arr", VBuiltin ("native_int_to_u8_arr", function
+        | [VNativeIntArr a] -> VNativeU8Arr (Array.map u8_wrap a)
+        | _ -> eval_error "native_int_to_u8_arr: expected NativeIntArr"))
+  ; ("native_u8_to_int_arr", VBuiltin ("native_u8_to_int_arr", function
+        | [VNativeU8Arr a] -> VNativeIntArr (Array.copy a)
+        | _ -> eval_error "native_u8_to_int_arr: expected NativeU8Arr"))
+  ; ("native_i32_to_f32_arr", VBuiltin ("native_i32_to_f32_arr", function
+        | [VNativeI32Arr a] -> VNativeF32Arr (Array.map (fun v -> f32_round (float_of_int v)) a)
+        | _ -> eval_error "native_i32_to_f32_arr: expected NativeI32Arr"))
+  ; ("native_u8_to_f32_arr", VBuiltin ("native_u8_to_f32_arr", function
+        | [VNativeU8Arr a] -> VNativeF32Arr (Array.map (fun v -> f32_round (float_of_int v)) a)
+        | _ -> eval_error "native_u8_to_f32_arr: expected NativeU8Arr"))
 
   (* ── TypedArray builtins — contiguous native arrays for columnar DataFrame storage ── *)
   (* typed_array_create(length, default) → TypedArray filled with default value *)

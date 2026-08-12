@@ -145,7 +145,9 @@ let rec calls_name (name : string) (e : Tir.expr) : bool =
   | Tir.EIncRC a | Tir.EDecRC a
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> atom_is a
   | Tir.EReuse (a, _, atoms) -> atom_is a || List.exists atom_is atoms
-  | Tir.EAllocHole (_, atoms, _) -> List.exists atom_is atoms
+  | Tir.EAllocHole (tok, _, atoms, _) ->
+    (match tok with Some a -> atom_is a | None -> false)
+    || List.exists atom_is atoms
   | Tir.ESetField (o, _, v) -> atom_is o || atom_is v
 
 (** Collect the self-call sites of [self] in [e].
@@ -288,4 +290,156 @@ let report (m : Tir.tir_module) : unit =
       Printf.eprintf "\t%s=%d" k (Option.value ~default:0 (Hashtbl.find_opt counts k)))
       ["eligible"; "mixed"; "non-trmc"; "already-tail"];
     Printf.eprintf "\n%!"
+  end
+
+(* ── Phase 3: the destination-passing transformation ──────────────────────────
+
+   For an [Eligible] function with exactly one modulo-cons site, build a helper
+   whose recursive call is a genuine TAIL call, so [Llvm_tco] turns it into a
+   loop:
+
+     fn f(ps) = .. let t = f(as) in Ctor(.., t, ..) ..
+
+   becomes
+
+     fn f(ps)      = .. let c = allochole Ctor(.., _, ..) in f$dps(as, c); c ..
+     fn f$dps(ps, dst) = .. let c = allochole Ctor(.., _, ..) in
+                            dst.hole <- c;
+                            f$dps(as, c)              <- tail call
+                         .. and every OTHER tail expression E becomes
+                            let r = E in dst.hole <- r
+
+   [dst] is the parent CELL, not an interior pointer: the hole index is baked
+   into the helper, which is sound because every iteration of a single-
+   constructor loop writes the same field.  See the Phase 2 note in
+   specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md.
+
+   GATED on MARCH_TRMC=1 — this is a work-in-progress measurement vehicle, not
+   yet a default pipeline stage. *)
+
+let trmc_ctr = ref 0
+
+let fresh_var (ty : Tir.ty) : Tir.var =
+  incr trmc_ctr;
+  { Tir.v_name = Printf.sprintf "$trmc%d" !trmc_ctr; v_ty = ty; v_lin = Tir.Unr }
+
+(** The continuation of a modulo-cons call, when it is a DIRECT [EAlloc].
+
+    v1 deliberately refuses intervening lets.  Those bindings are evaluated
+    after the recursive call in the original but would have to move BEFORE it
+    in destination-passing style, and while the eligibility check guarantees
+    they do not read the call's result, it does not guarantee they are pure —
+    so reordering them could move a side effect across the call. *)
+let modcons_alloc (v : string) (k : Tir.expr)
+    : (Tir.ty * Tir.atom list * int) option =
+  match k with
+  | Tir.EAlloc ((Tir.TCon _) as ty, atoms) ->
+    (match sole_atom_index v atoms with
+     | Some i ->
+       let filled = List.filteri (fun j _ -> j <> i) atoms in
+       Some (ty, filled, i)
+     | None -> None)
+  | _ -> None
+
+(** Rewrite the tail positions of a helper body so every result is WRITTEN into
+    [dst]'s hole instead of returned. *)
+let rec returnify ~(self : string) ~(dps : Tir.var) ~(dst : Tir.var)
+    ~(hole : int) ~(ret_ty : Tir.ty) (e : Tir.expr) : Tir.expr =
+  let store_tail tail =
+    let r = fresh_var ret_ty in
+    Tir.ELet (r, tail, Tir.ESetField (Tir.AVar dst, hole, Tir.AVar r))
+  in
+  let recur = returnify ~self ~dps ~dst ~hole ~ret_ty in
+  match e with
+  | Tir.ELet (bv, Tir.EApp (f, args), k)
+    when String.equal f.Tir.v_name self && not (calls_name self k) ->
+    (match modcons_alloc bv.Tir.v_name k with
+     | Some (alloc_ty, filled, i) ->
+       let c = fresh_var alloc_ty in
+       Tir.ELet (c, Tir.EAllocHole (None, alloc_ty, filled, i),
+         Tir.ESeq (Tir.ESetField (Tir.AVar dst, hole, Tir.AVar c),
+                   Tir.EApp (dps, args @ [Tir.AVar c])))
+     | None -> store_tail e)
+  | Tir.ELet (bv, rhs, k) -> Tir.ELet (bv, rhs, recur k)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, recur e2)
+  | Tir.ECase (a, branches, default) ->
+    Tir.ECase (a,
+      List.map (fun br -> { br with Tir.br_body = recur br.Tir.br_body }) branches,
+      Option.map recur default)
+  | _ -> store_tail e
+
+(** Rewrite the ORIGINAL function: allocate the cell, hand it to the helper,
+    return it. *)
+let rec seed_entry ~(self : string) ~(dps : Tir.var) (e : Tir.expr) : Tir.expr =
+  let recur = seed_entry ~self ~dps in
+  match e with
+  | Tir.ELet (bv, Tir.EApp (f, args), k)
+    when String.equal f.Tir.v_name self && not (calls_name self k) ->
+    (match modcons_alloc bv.Tir.v_name k with
+     | Some (alloc_ty, filled, i) ->
+       let c = fresh_var alloc_ty in
+       Tir.ELet (c, Tir.EAllocHole (None, alloc_ty, filled, i),
+         Tir.ESeq (Tir.EApp (dps, args @ [Tir.AVar c]),
+                   Tir.EAtom (Tir.AVar c)))
+     | None -> e)
+  | Tir.ELet (bv, rhs, k) -> Tir.ELet (bv, rhs, recur k)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, recur e2)
+  | Tir.ECase (a, branches, default) ->
+    Tir.ECase (a,
+      List.map (fun br -> { br with Tir.br_body = recur br.Tir.br_body }) branches,
+      Option.map recur default)
+  | _ -> e
+
+(** True when [ty] names a type that can cross an actor boundary, and so must
+    never be rewritten: the hole-fill is a plain non-atomic store, safe only
+    while the cell is thread-local.  Both checks are STRUCTURAL — a name-suffix
+    guess here was previously found to false-positive on a user type called
+    [Tree_Actor] (see [Repr.is_actor_struct_type]). *)
+let crosses_actor_boundary (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TCon (name, _) ->
+    Tir_names.is_actor_msg_name name || Tir_names.is_actor_struct_name name
+  | _ -> false
+
+(** [Some (f', f_dps)] when [fn] is transformable. *)
+let transform_fn (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
+  let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
+  if crosses_actor_boundary fn.Tir.fn_ret_ty then None
+  else
+  match verdict_of r, r.r_modcons with
+  | Eligible, [ (_ctor, hole) ] ->
+    let dps_name = fn.Tir.fn_name ^ "$dps" in
+    let dst = { Tir.v_name = "$dst"; v_ty = fn.Tir.fn_ret_ty; v_lin = Tir.Unr } in
+    let dps_ty =
+      Tir.TFn (List.map (fun (p : Tir.var) -> p.Tir.v_ty)
+                 (fn.Tir.fn_params @ [dst]), Tir.TUnit)
+    in
+    let dps = { Tir.v_name = dps_name; v_ty = dps_ty; v_lin = Tir.Unr } in
+    let helper =
+      { Tir.fn_name = dps_name;
+        fn_params = fn.Tir.fn_params @ [dst];
+        fn_ret_ty = Tir.TUnit;
+        fn_body = returnify ~self:fn.Tir.fn_name ~dps ~dst ~hole
+                    ~ret_ty:fn.Tir.fn_ret_ty fn.Tir.fn_body;
+        fn_kind = Tir.FnNormal }
+    in
+    let entry =
+      { fn with Tir.fn_body = seed_entry ~self:fn.Tir.fn_name ~dps fn.Tir.fn_body }
+    in
+    Some (entry, helper)
+  | _ -> None
+
+(** Apply TRMC across a module.  Gated on MARCH_TRMC=1. *)
+let transform_module (m : Tir.tir_module) : Tir.tir_module =
+  if Sys.getenv_opt "MARCH_TRMC" = None then m
+  else begin
+    let out = List.concat_map (fun fn ->
+      match transform_fn fn with
+      | Some (entry, helper) ->
+        if Sys.getenv_opt "MARCH_TRMC_REPORT" <> None then
+          Printf.eprintf "TRMCXFORM\t%s -> %s\n%!" fn.Tir.fn_name helper.Tir.fn_name;
+        [entry; helper]
+      | None -> [fn]
+    ) m.Tir.tm_fns in
+    { m with Tir.tm_fns = out }
   end

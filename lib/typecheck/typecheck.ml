@@ -1943,6 +1943,61 @@ let builtin_cap_table : (string * string) list = [
   ("tls_peer_cn",           "IO.NetConnect.TLS");
 ]
 
+(** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
+    [PatVar]s) — exactly the set that wins real name resolution over a global
+    builtin of the same bare name at this module's scope (verified:
+    interpreted and compiled, a module-level `fn`/`let` of the same name is
+    what actually runs, never the builtin).
+
+    Every capability-inference pass below is a raw SYNTACTIC scan
+    ([March_ast.Calls.names_and_name_spans]) matching a call's NAME against
+    [builtin_cap_table]/a derived banned-set, with no resolution awareness.
+    Before this existed, EVERY one of them treated an ordinary function named
+    `file_read`, `random_bytes`, `dns_resolve`, … — or a `cap pure`/
+    `cap deterministic` module's own same-named helper — as a call to the
+    capability-bearing builtin of that name, and (since Check 1b's severity
+    flip, 2026-08-06) that is a hard, default-on compile ERROR demanding a
+    capability the program never uses (specs/2026-08-09-cap-loose-ends-plan.md,
+    Tier 0).
+
+    Deliberately NOT extended to nested-module names (already immune — a
+    nested module's qualified TIR/AST name, e.g. "Lib.file_read", never
+    string-matches a bare table key) or to a parameter/local `let` shadowing
+    a builtin WITHIN a function body (a real, rarer residual gap needing
+    actual scope-aware resolution these AST-level passes don't have — filed
+    as a follow-up, not blocking this fix).
+
+    ONE shared implementation rather than one per call site: this codebase
+    has repeatedly been bitten by near-duplicate capability walks drifting
+    apart (the "two-tables-drift" pattern) — [check_module_needs],
+    [check_pure_module] and [check_deterministic_module] all consult this,
+    rather than each re-deriving its own notion of "locally declared". *)
+let locally_declared_names_of (decls : Ast.decl list) : (string, unit) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  List.iter (function
+      (* STDLIB-SPAN declarations must NOT count as "locally declared":
+         prelude is unwrapped into the ENTRY module's OWN flat [decls] list
+         (see [check_module_needs]'s dedup-first-span comment, and
+         [own_caps_of_this_module]'s identical trap), so without this filter
+         prelude's `println`/`print`/etc. — sitting in the SAME [decls] this
+         function scans for the entry module — were themselves treated as
+         "locally declared", shadowing every entry-module call to `println`.
+         Measured: a program with NO `needs` at all calling bare `println`
+         WRONGLY TYPECHECKED (a corpus regression,
+         reject/t40_migrate_state_does_io.march, caught by the corpus sweep
+         after the naive first version of this function shipped — the OCaml
+         unit tests for the shadowing fix all used the bare, no-stdlib
+         [typecheck] helper and could not have caught it). *)
+      | Ast.DFn (def, sp) when not (span_is_stdlib sp) ->
+        Hashtbl.replace tbl def.Ast.fn_name.Ast.txt ()
+      | Ast.DLet (_, b, sp) when not (span_is_stdlib sp) ->
+        (match b.Ast.bind_pat with
+         | Ast.PatVar n -> Hashtbl.replace tbl n.Ast.txt ()
+         | _ -> ())
+      | _ -> ())
+    decls;
+  tbl
+
 (** [cap_subsumes parent child] — true if [parent] is an ancestor of (or equal to) [child].
     E.g., cap_subsumes "IO" "IO.FileRead" = true.
     See [March_caps.Cap_lattice.cap_subsumes]. *)
@@ -2752,6 +2807,97 @@ let builtin_bindings : (string * scheme) list =
     ("native_float_arr_filter_mask",
        Mono (TArrow (TCon ("NativeFloatArr", []),
              TArrow (TCon ("TypedArray", [t_bool]), TCon ("NativeFloatArr", [])))));
+    (* Narrow-width NativeArray families — f32/i32/u8 (P10 narrow types).
+       Opaque 0-arity types, same shape as NativeIntArr/NativeFloatArr above.
+       Interpreter-path only; compiled (LLVM/runtime) support is a later task.
+       No alloc_raw / fold / min / max / sumsq_dev / filter_mask for these
+       widths -- only the 9-op family + conversions. *)
+    (* f32 *)
+    ("native_f32_arr_make",
+       Mono (TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", [])))));
+    ("native_f32_arr_length",
+       Mono (TArrow (TCon ("NativeF32Arr", []), t_int)));
+    ("native_f32_arr_get",
+       Mono (TArrow (TCon ("NativeF32Arr", []), TArrow (t_int, t_float))));
+    ("native_f32_arr_set",
+       Mono (TArrow (TCon ("NativeF32Arr", []),
+             TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", []))))));
+    ("native_f32_arr_sum",
+       Mono (TArrow (TCon ("NativeF32Arr", []), t_float)));
+    ("native_f32_arr_map",
+       Mono (TArrow (TCon ("NativeF32Arr", []),
+             TArrow (TArrow (t_float, t_float), TCon ("NativeF32Arr", [])))));
+    ("native_f32_arr_map2",
+       Mono (TArrow (TCon ("NativeF32Arr", []),
+             TArrow (TCon ("NativeF32Arr", []),
+             TArrow (TArrow (t_float, TArrow (t_float, t_float)), TCon ("NativeF32Arr", []))))));
+    ("native_f32_arr_from_list",
+       Mono (TArrow (t_list t_float, TCon ("NativeF32Arr", []))));
+    ("native_f32_arr_to_list",
+       Mono (TArrow (TCon ("NativeF32Arr", []), t_list t_float)));
+    (* i32 *)
+    ("native_i32_arr_make",
+       Mono (TArrow (t_int, TArrow (t_int, TCon ("NativeI32Arr", [])))));
+    ("native_i32_arr_length",
+       Mono (TArrow (TCon ("NativeI32Arr", []), t_int)));
+    ("native_i32_arr_get",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TArrow (t_int, t_int))));
+    ("native_i32_arr_set",
+       Mono (TArrow (TCon ("NativeI32Arr", []),
+             TArrow (t_int, TArrow (t_int, TCon ("NativeI32Arr", []))))));
+    ("native_i32_arr_sum",
+       Mono (TArrow (TCon ("NativeI32Arr", []), t_int)));
+    ("native_i32_arr_map",
+       Mono (TArrow (TCon ("NativeI32Arr", []),
+             TArrow (TArrow (t_int, t_int), TCon ("NativeI32Arr", [])))));
+    ("native_i32_arr_map2",
+       Mono (TArrow (TCon ("NativeI32Arr", []),
+             TArrow (TCon ("NativeI32Arr", []),
+             TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeI32Arr", []))))));
+    ("native_i32_arr_from_list",
+       Mono (TArrow (t_list t_int, TCon ("NativeI32Arr", []))));
+    ("native_i32_arr_to_list",
+       Mono (TArrow (TCon ("NativeI32Arr", []), t_list t_int)));
+    (* u8 *)
+    ("native_u8_arr_make",
+       Mono (TArrow (t_int, TArrow (t_int, TCon ("NativeU8Arr", [])))));
+    ("native_u8_arr_length",
+       Mono (TArrow (TCon ("NativeU8Arr", []), t_int)));
+    ("native_u8_arr_get",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TArrow (t_int, t_int))));
+    ("native_u8_arr_set",
+       Mono (TArrow (TCon ("NativeU8Arr", []),
+             TArrow (t_int, TArrow (t_int, TCon ("NativeU8Arr", []))))));
+    ("native_u8_arr_sum",
+       Mono (TArrow (TCon ("NativeU8Arr", []), t_int)));
+    ("native_u8_arr_map",
+       Mono (TArrow (TCon ("NativeU8Arr", []),
+             TArrow (TArrow (t_int, t_int), TCon ("NativeU8Arr", [])))));
+    ("native_u8_arr_map2",
+       Mono (TArrow (TCon ("NativeU8Arr", []),
+             TArrow (TCon ("NativeU8Arr", []),
+             TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeU8Arr", []))))));
+    ("native_u8_arr_from_list",
+       Mono (TArrow (t_list t_int, TCon ("NativeU8Arr", []))));
+    ("native_u8_arr_to_list",
+       Mono (TArrow (TCon ("NativeU8Arr", []), t_list t_int)));
+    (* Conversions *)
+    ("native_float_to_f32_arr",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TCon ("NativeF32Arr", []))));
+    ("native_f32_to_float_arr",
+       Mono (TArrow (TCon ("NativeF32Arr", []), TCon ("NativeFloatArr", []))));
+    ("native_int_to_i32_arr",
+       Mono (TArrow (TCon ("NativeIntArr", []), TCon ("NativeI32Arr", []))));
+    ("native_i32_to_int_arr",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TCon ("NativeIntArr", []))));
+    ("native_int_to_u8_arr",
+       Mono (TArrow (TCon ("NativeIntArr", []), TCon ("NativeU8Arr", []))));
+    ("native_u8_to_int_arr",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("NativeIntArr", []))));
+    ("native_i32_to_f32_arr",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TCon ("NativeF32Arr", []))));
+    ("native_u8_to_f32_arr",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("NativeF32Arr", []))));
     (* TypedArray builtins — contiguous native arrays for columnar DataFrame storage *)
     ("typed_array_create",   poly1 (fun a ->
         TArrow (t_int, TArrow (a, TCon ("TypedArray", [a])))));
@@ -2890,7 +3036,8 @@ let builtin_types : (string * int) list =
     (* RingBuf — mutable fixed-capacity circular buffer (non-sendable) *)
     ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
-    ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
+    ("NativeIntArr",   0); ("NativeFloatArr", 0);
+    ("NativeF32Arr",   0); ("NativeI32Arr",   0); ("NativeU8Arr", 0); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
@@ -5073,13 +5220,16 @@ let offer_unrefined_error env span (r : session_ty ref) op =
 
 (** Type constructor names that cannot appear in actor message payloads.
     These types carry mutable state that must remain owned by a single actor.
-    NativeIntArr/NativeFloatArr are NativeArray's real backing types -- the
-    NativeArray stdlib module (stdlib/native_array.march) is a function
-    namespace over these two opaque 0-arity constructors, not a type of its
-    own, so "NativeArray" itself would be a silent no-op entry here (see
-    where native_int_arr_make/native_float_arr_make are registered, this
+    NativeIntArr/NativeFloatArr/NativeF32Arr/NativeI32Arr/NativeU8Arr are
+    NativeArray's real backing types -- the NativeArray stdlib module
+    (stdlib/native_array.march) is a function namespace over these opaque
+    0-arity constructors, not a type of its own, so "NativeArray" itself
+    would be a silent no-op entry here (see where
+    native_int_arr_make/native_float_arr_make are registered, this
     file, around the NativeArray builtins section). *)
-let non_sendable_types = ["RingBuf"; "NativeIntArr"; "NativeFloatArr"]
+let non_sendable_types =
+  ["RingBuf"; "NativeIntArr"; "NativeFloatArr";
+   "NativeF32Arr"; "NativeI32Arr"; "NativeU8Arr"]
 
 (** [check_sendable errors span ty] walks [ty] and emits an error for every
     non-sendable type constructor it finds. Called from the [ECon] arm on
@@ -8387,6 +8537,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []
   ) decls in
+  (* See [locally_declared_names_of] for why a raw call-name match against
+     [builtin_cap_table] must first check for module-local shadowing. *)
+  let locally_declared_names = locally_declared_names_of decls in
+  let cap_of_builtin_call (name : string) : string option =
+    if Hashtbl.mem locally_declared_names name then None
+    else List.assoc_opt name builtin_cap_table
+  in
   (* Per-function inferred IO-capability closure (Phase5C-A.2): attributes the
      same cap data the checks below already compute to the owning function and
      records it into [env.cap_closures] for a later hot-deploy
@@ -8587,7 +8744,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      lost, not to start warning about forms that never warned. *)
   let builtin_caps_of_expr (e : Ast.expr) : string list =
     List.filter_map
-      (fun (call_name, _) -> List.assoc_opt call_name builtin_cap_table)
+      (fun (call_name, _) -> cap_of_builtin_call call_name)
       (March_ast.Calls.names_and_name_spans e)
   in
   let default_param_exprs (c : Ast.fn_clause) : Ast.expr list =
@@ -8779,7 +8936,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       List.iter (fun (h : Ast.actor_handler) ->
           let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
           let body_caps = List.filter_map (fun (call_name, _) ->
-              List.assoc_opt call_name builtin_cap_table
+              cap_of_builtin_call call_name
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
           record_fn_caps fn_qname body_caps;
           record_fn_refs fn_qname
@@ -8909,7 +9066,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       in
       List.iter (fun body ->
           List.iter (fun (builtin, path, sp) ->
-              match List.assoc_opt builtin builtin_cap_table with
+              match cap_of_builtin_call builtin with
               | None -> ()
               | Some cap ->
                 (* Scopes declared for this capability, or for anything that
@@ -8953,7 +9110,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | Ast.DFn (def, _) ->
         let per_clause = List.map (fun clause ->
           List.filter_map (fun (call_name, call_span) ->
-            match List.assoc_opt call_name builtin_cap_table with
+            match cap_of_builtin_call call_name with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
           ) (March_ast.Calls.names_and_name_spans clause.Ast.fc_body)
@@ -8994,7 +9151,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
-          match List.assoc_opt call_name builtin_cap_table with
+          match cap_of_builtin_call call_name with
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
         ) (March_ast.Calls.names_and_name_spans b.Ast.bind_expr)
@@ -9009,7 +9166,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | Ast.DActor (_, _, actor, _) ->
         List.concat_map (fun (h : Ast.actor_handler) ->
             List.filter_map (fun (call_name, call_span) ->
-              match List.assoc_opt call_name builtin_cap_table with
+              match cap_of_builtin_call call_name with
               | Some cap_name -> Some (cap_name, call_span)
               | None -> None
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body)
@@ -9095,7 +9252,12 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | None -> false
     in
     if not covered && not self_declared then
-      Err.error_with_fix env.errors ~span:sp
+      (* [~code] tags this diagnostic with the exact missing capability so
+         that a presentation-layer consumer (bin/main.ml) can recognise when
+         [Cap_infer]'s call-site hint at the SAME span is reporting the same
+         fact, without either pass having to know about the other — see
+         specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
+      Err.error_with_fix env.errors ~span:sp ~code:("cap_needs:" ^ cap_path)
         ~fix:(Err.FInsert {
           after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
           text = "  needs " ^ cap_path })
@@ -10609,13 +10771,18 @@ let pure_suggestion : string =
 
 let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let mod_name = env.current_module in
+  (* See [locally_declared_names_of]: a `cap pure` module's own function
+     sharing a builtin's name (e.g. its own `random_bytes`) is not a call to
+     that builtin. *)
+  let locally_declared_names = locally_declared_names_of decls in
   List.iter (fun d ->
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
         let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
-          if StringSet.mem name pure_banned then
+          if StringSet.mem name pure_banned
+             && not (Hashtbl.mem locally_declared_names name) then
             Err.error errors ~span:site_span
               (Printf.sprintf
                  "`%s` in `mod %s` (declared `cap pure`) calls `%s`, which has side effects.\n\n%s"
@@ -10674,13 +10841,17 @@ let deterministic_suggestion : string =
 
 let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let mod_name = env.current_module in
+  (* See [locally_declared_names_of]: same shadowing guard as
+     [check_pure_module]. *)
+  let locally_declared_names = locally_declared_names_of decls in
   List.iter (fun d ->
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
         let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
         List.iter (fun (name, site_span) ->
-          if StringSet.mem name deterministic_banned then
+          if StringSet.mem name deterministic_banned
+             && not (Hashtbl.mem locally_declared_names name) then
             Err.error errors ~span:site_span
               (Printf.sprintf
                  "`%s` in `mod %s` (declared `cap deterministic`) calls `%s`, \
@@ -12138,11 +12309,18 @@ let scrutinee_is_param_or_smaller (params : StringSet.t) (smaller : StringSet.t)
     for its extent, so a call to a shadowing local is not misattributed to the
     same-named recursive function. *)
 let rec check_tail_position
+    ?(display = fun (n : string) -> n)
     (errors : Err.ctx)
     (recursive_names : StringSet.t)
     (fn_name : string)
     (fn_params : StringSet.t)
     (body : Ast.expr) : unit =
+  (* [recursive_names] is in the post-desugar CALL-SITE namespace, which inside
+     a nested `mod` carries a qualifying prefix the author never typed
+     (`Inner.boom` for a source that says `boom`).  [display] maps a matched
+     call-site name back to the bare name, so the diagnostic quotes the program
+     rather than the desugarer's rewrite.  Defaults to the identity for the
+     inner-`fn` recursion below, whose names are local and never qualified. *)
   (* [smaller] accumulates variables known to be structurally smaller than a
      function parameter (introduced by pattern-matching on a parameter). *)
   let rec chk in_tail (names : StringSet.t) (smaller : StringSet.t) ctx expr =
@@ -12162,7 +12340,7 @@ let rec check_tail_position
                "Function `%s`: recursive call to `%s` is not in tail position \
                 (%s).\n\
                 Hint: Consider using an accumulator parameter."
-               fn_name fn.txt ctx)
+               fn_name (display fn.txt) ctx)
         else begin
           (* Structural recursion: warn but allow — distinguish arithmetic
              reductions (n-1, n-2) from pattern-bound sub-components. *)
@@ -12312,8 +12490,57 @@ let rec check_tail_position
   chk true recursive_names StringSet.empty "" body
 
 (** Run tail-call enforcement for all [DFn] declarations in [decls]
-    (at a single scope level).  Recurses into [DMod] sub-modules. *)
-let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) : unit =
+    (at a single scope level).  Recurses into [DMod] sub-modules.
+
+    [mod_path] is the accumulated dotted path of the enclosing [DMod]s, with a
+    trailing dot ("" at the top level, then "Inner.", then "Outer.Inner.").
+    [file_mod] is the name of the module this file declares.
+
+    ── Why a PATH is needed at all ──────────────────────────────────────────
+
+    This pass runs AFTER desugaring, and desugaring rewrites call sites into a
+    different namespace than the one declarations live in.
+    [Desugar.qualify_module_refs] rewrites bare intra-module CALL SITES inside
+    every nested [DMod] to [Prefix.name] ([EVar "boom"] -> [EVar "Inner.boom"]),
+    and deliberately leaves the DECLARATION name alone.  Building [fn_names]
+    from the bare [def.fn_name.txt] therefore searched a post-desugar body for a
+    pre-desugar name: [collect_direct_fn_calls] matched nothing, [is_recursive]
+    came out false, and the function was never checked.  Everything this pass
+    rejects at the top level was silently accepted one [mod] deeper, at any
+    depth — and the [DMod] recursion below, which looks like it covers nested
+    modules, ran and found nothing.
+
+    The top level of the ENTRY file hid this: [qualify_module_refs] seeds
+    [entry_prefix = ""] and only rewrites inside [DMod] NODES, and the parser
+    splits a file's sole top-level [mod] into [mod_name]/[mod_decls] — so a
+    top-level [DFn] is never qualified and never mismatched.
+
+    ── Why TWO candidate prefixes ───────────────────────────────────────────
+
+    A name declared here can be referenced under either of two conventions, and
+    which one applies is a property of the FILE, not of this declaration list:
+
+    - [mod_path] — the entry file's convention.  [desugar_module] passes
+      [~entry_prefix:""] when [is_entry], so the accumulation starts empty.
+    - [file_mod ^ "." ^ mod_path] — the non-entry convention.  A dependency
+      file is desugared with [~entry_prefix:(mod_name ^ ".")], so a nested
+      module inside stdlib's [Helper] qualifies to ["Helper.Inner."], not
+      ["Inner."].
+
+    Typecheck is not told which one it is looking at, so it accepts both.  This
+    costs nothing in precision: a file is one or the other, so the inapplicable
+    candidate simply never occurs in any body.
+
+    At the TOP level ([mod_path = ""]) the second candidate is [file_mod ^ "."],
+    which additionally catches a hand-written SELF-QUALIFIED call in a non-entry
+    module ([Helper.boom] inside [mod Helper]) — [strip_entry_self_qual]
+    normalises that away only for the entry file, so in a dependency it survives
+    to here and was a second, nesting-free instance of the same blind spot.
+    Recognising it cannot misfire: inside [mod Helper], [Helper.boom] is
+    unambiguously this module's [boom]. *)
+let rec enforce_tail_calls_in_decls
+    ?(mod_path = "") ~(file_mod : string)
+    (errors : Err.ctx) (decls : Ast.decl list) : unit =
   (* Names declared in an [extern] block at this level.  An extern has no
      body, so it can never recurse; a bare call to one must not be resolved
      against a same-named ordinary function (the entry module's decls include
@@ -12328,22 +12555,49 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
       | _ -> acc
     ) StringSet.empty decls
   in
-  (* Collect function names at this level *)
-  let fn_names =
+  (* Collect function names at this level, BARE — the namespace declarations
+     and diagnostics live in, and the one the call graph is keyed by. *)
+  let bare_fn_names =
     List.fold_left (fun acc d ->
       match d with
       | Ast.DFn (def, _) -> StringSet.add def.fn_name.txt acc
       | _ -> acc
     ) StringSet.empty decls
   in
-  let fn_names = StringSet.diff fn_names extern_names in
+  (* Extern names are subtracted BARE, before qualification: an extern is never
+     qualified at a call site either ([qualify_level] passes [~externs:false]),
+     so the two sets are comparable only here. *)
+  let bare_fn_names = StringSet.diff bare_fn_names extern_names in
+  (* The two conventions a name declared here can be referenced under — see
+     this function's doc comment. *)
+  let prefixes = [ mod_path; file_mod ^ "." ^ mod_path ] in
+  (* [call_names] is the CALL-SITE namespace (what [collect_direct_fn_calls]
+     and [check_tail_position] match [EVar]s against); [to_bare] maps back, so
+     the graph, the SCCs and the diagnostics all stay in the bare namespace. *)
+  let to_bare = Hashtbl.create 16 in
+  let call_names =
+    StringSet.fold (fun bare acc ->
+      List.fold_left (fun acc p ->
+        let qualified = p ^ bare in
+        Hashtbl.replace to_bare qualified bare;
+        StringSet.add qualified acc
+      ) acc prefixes
+    ) bare_fn_names StringSet.empty
+  in
+  (* Callees of [body], as BARE local names. *)
+  let bare_calls_in body =
+    StringSet.fold (fun called acc ->
+      match Hashtbl.find_opt to_bare called with
+      | Some bare -> StringSet.add bare acc
+      | None -> acc
+    ) (collect_direct_fn_calls call_names body) StringSet.empty
+  in
   (* Build call graph *)
   let adj = List.filter_map (function
     | Ast.DFn (def, _) ->
       (match def.fn_clauses with
        | [clause] ->
-         Some (def.fn_name.txt,
-               collect_direct_fn_calls fn_names clause.Ast.fc_body)
+         Some (def.fn_name.txt, bare_calls_in clause.Ast.fc_body)
        | _ -> None)
     | _ -> None
   ) decls in
@@ -12367,7 +12621,14 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
            StringSet.mem def.fn_name.txt direct
          in
          if is_recursive && not (List.mem "no_warn_recursion" def.fn_attrs) then begin
-           let rec_set = List.fold_right StringSet.add scc StringSet.empty in
+           (* [check_tail_position] matches [EVar]s, so the recursive-name set
+              has to be in the CALL-SITE namespace, not the bare one. *)
+           let rec_set =
+             List.fold_left (fun acc bare ->
+               List.fold_left (fun acc p -> StringSet.add (p ^ bare) acc)
+                 acc prefixes
+             ) StringSet.empty scc
+           in
            let fn_params =
              List.fold_left (fun acc p ->
                match p with
@@ -12376,11 +12637,15 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
                | Ast.FPPat pat -> StringSet.union acc (collect_pattern_vars pat)
              ) StringSet.empty clause.Ast.fc_params
            in
-           check_tail_position errors rec_set def.fn_name.txt fn_params clause.Ast.fc_body
+           let display n =
+             match Hashtbl.find_opt to_bare n with Some b -> b | None -> n in
+           check_tail_position ~display errors rec_set def.fn_name.txt fn_params
+             clause.Ast.fc_body
          end
        | _ -> ())
-    | Ast.DMod (_, _, inner_decls, _) ->
-      enforce_tail_calls_in_decls errors inner_decls
+    | Ast.DMod (name, _, inner_decls, _) ->
+      enforce_tail_calls_in_decls
+        ~mod_path:(mod_path ^ name.txt ^ ".") ~file_mod errors inner_decls
     | _ -> ()
   ) decls
 
@@ -12943,7 +13208,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
-  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
+  enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map, final_env)
 
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
@@ -13184,7 +13449,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   last_with_env_final := final_env;
   (* Pass 3: tail-call enforcement *)
-  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
+  enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map)
 
 (** Like [check_module_with_env] but also returns the final typing env.

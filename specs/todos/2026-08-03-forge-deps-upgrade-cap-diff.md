@@ -1,5 +1,5 @@
 **STATUS 2026-08-04: shipped as `forge audit` (#167), with `--inferred` (#169+)** — see
-`specs/todos/2026-08-04-cap-deps-followups.md` for what remains (toolchain
+`specs/todos/2026-08-04-dependency-cap-audit-followups.md` for what remains (toolchain
 version check, speed, wiring into `forge add`/`outdated`). Implemented against
 a local reviewed baseline rather than the registry, which turned out not to be
 required: dependencies arrive as source, so forge computes their capability

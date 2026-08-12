@@ -401,7 +401,7 @@ let rec count_tir_nodes (e : March_tir.Tir.expr) =
   | EField _ | EUpdate _          -> 1
   | EIncRC _ | EDecRC _ | EAtomicIncRC _ | EAtomicDecRC _ | EFree _ -> 1
   | EReuse (_, _, args)           -> 1 + List.length args
-  | EAllocHole (_, args, _)       -> 1 + List.length args
+  | EAllocHole (_, _, args, _)    -> 1 + List.length args
   | ESetField _                   -> 1
 
 (** Check whether a function body calls itself (direct recursion check). *)

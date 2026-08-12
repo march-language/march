@@ -1126,6 +1126,10 @@ void march_sched_yield(void) {
      * on a different OS thread than the one that called this function. */
 }
 
+/* Grace iterations before march_sched_wait_idle backs off to a 1ms poll, so a
+ * genuinely-idle wait stops pegging a core (mirrors SCHED_WAKE_SPIN_GRACE). */
+#define WAIT_IDLE_SPIN_GRACE 4096
+
 void march_sched_wait_idle(void) {
     if (!tl_sched || !tl_sched->current) return;
     /* `self` is a proc pointer (stable across migrations); it is captured
@@ -1136,6 +1140,7 @@ void march_sched_wait_idle(void) {
      * barrier comment on march_sched_yield — this loop is exactly where
      * that miscompilation caused the multi-scheduler stack corruption). */
     march_proc *self = tl_sched->current;
+    int64_t spins = 0;   /* a local (stack, not TLS) — migration-safe */
     for (;;) {
         /* Give every other runnable proc a turn before checking. */
         march_sched_yield();
@@ -1157,6 +1162,21 @@ void march_sched_wait_idle(void) {
         }
         pthread_mutex_unlock(&g_registry_mu);
         if (!busy) return;
+        /* Still busy after yielding: the procs we wait on are runnable only on
+         * other (possibly CPU-starved) scheduler threads, or are PARKED/WAITING
+         * and not locally runnable — so march_sched_yield() returned with
+         * nothing else to run here, and re-dispatched THIS proc immediately
+         * (sched_loop's own idle-sleep never fires because we stay runnable).
+         * That tight yield->scan loop pegs a core under oversubscription. After
+         * a grace period, back off to a 1ms poll (the cadence sched_loop and
+         * march_sched_wake already use). No timeout: this still returns only
+         * once the system is quiescent, preserving wait-forever semantics. */
+        if (spins < WAIT_IDLE_SPIN_GRACE) {
+            spins++;
+        } else {
+            struct timespec ts = { 0, 1000000 }; /* 1ms */
+            nanosleep(&ts, NULL);
+        }
     }
 }
 

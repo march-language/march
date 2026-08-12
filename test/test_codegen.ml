@@ -8415,6 +8415,38 @@ let test_native_float_arr_ir () =
   Alcotest.(check bool) "float make call returns ptr" true
     (ir_contains ir "= call ptr @native_float_arr_make")
 
+(** native narrow-width (f32/i32/u8) builtins must appear in the LLVM preamble
+    and generate correct call instructions: i64 return for int-family get/sum,
+    double for f32 get/sum, ptr for make/map/conversions. *)
+let test_native_narrow_arr_ir () =
+  let ir = emit_actor_ir {|mod Test do
+    fn make_u8_arr(n : Int, fill : Int) : NativeU8Arr do
+      native_u8_arr_make(n, fill)
+    end
+    fn get_u8_elem(arr : NativeU8Arr, i : Int) : Int do
+      native_u8_arr_get(arr, i)
+    end
+    fn sum_i32_arr(arr : NativeI32Arr) : Int do
+      native_i32_arr_sum(arr)
+    end
+    fn map_f32_arr(arr : NativeF32Arr, f : Float -> Float) : NativeF32Arr do
+      native_f32_arr_map(arr, f)
+    end
+    fn to_u8(arr : NativeIntArr) : NativeU8Arr do
+      native_int_to_u8_arr(arr)
+    end
+  end|} in
+  Alcotest.(check bool) "native_u8_arr_make declared" true
+    (ir_contains ir "declare ptr    @native_u8_arr_make");
+  Alcotest.(check bool) "native_u8_arr_get call returns i64" true
+    (ir_contains ir "= call i64 @native_u8_arr_get");
+  Alcotest.(check bool) "native_i32_arr_sum call returns i64" true
+    (ir_contains ir "= call i64 @native_i32_arr_sum");
+  Alcotest.(check bool) "native_f32_arr_map declared" true
+    (ir_contains ir "@native_f32_arr_map");
+  Alcotest.(check bool) "native_int_to_u8_arr declared" true
+    (ir_contains ir "@native_int_to_u8_arr")
+
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
 let test_cancel_token_new () =
@@ -11019,6 +11051,32 @@ let test_compiled_iolist_deep_flatten_parity () =
     ~expected:"25000\n25000"
     ()
 
+(** Float `!=` on NaN: the interpreter implements float `!=` via OCaml's
+    polymorphic `<>`, under which `nan <> nan` is `true`. The compiled
+    backend used LLVM `fcmp one` (ordered-and-not-equal, IEEE 754 semantics)
+    for `!=`, which is `false` whenever either operand is NaN — a
+    interp/compiled divergence. Fixed by using `fcmp une`
+    (unordered-or-not-equal), which matches `<>`: true whenever the operands
+    differ OR either is NaN. `string_to_float("nan")` is used to produce a
+    NaN without hitting the checked-div-by-zero abort that `0.0 /. 0.0`
+    triggers on both backends. *)
+let test_compiled_float_nan_neq_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_float_nan_neq"
+    ~src:"mod FloatNanNeqParity do\n\
+    \  needs IO.Console\n\
+         \  fn main() do\n\
+         \    let x = match string_to_float(\"nan\") do\n\
+         \      Some(v) -> v\n\
+         \      None -> 0.0\n\
+         \    end\n\
+         \    println(x != x)\n\
+         \    println(x != 1.0)\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\ntrue"
+    ()
+
 (** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
     the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
     left the outer binding's literal mapping (`x -> 10`) in scope when the
@@ -11834,6 +11892,36 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
 
+(** Bug: a variant field typed as an OPAQUE builtin type constructor (no
+    March-level `type` declaration exists for it — e.g. `Task(a)`) makes
+    [ensure_adt_eq_fn] return [None] for that field's own type. The `==`
+    operator's per-ctor field-compare arm for [TCon _ | TTuple _ | TRecord _]
+    then fell back to raw pointer-identity (ptrtoint + icmp eq) instead of
+    [march_poly_eq] — the runtime-shape-dispatched comparator the sibling
+    [TVar] arm (ten lines below in [llvm_eq.ml]) already uses for exactly
+    this "no eq fn derivable" situation. Two distinct heap cells with
+    identical content would then compare unequal.
+    `Task(Int)` gives a clean repro: `Holder` itself has a `type`
+    declaration (resolvable), but its field type `Task(Int)` does not (Task
+    is a compiler-builtin type constructor never declared in March source) —
+    and two non-nullary single-field ctors keep this off the Newtype/Niche
+    shortcuts, landing in the general ctor-table codegen path where the bug
+    lives. This only checks the emitted IR (no execution needed — the bug is
+    in which comparator gets *called*, not runtime behavior of Task itself). *)
+let test_eq_operator_opaque_ctor_field_uses_poly_eq () =
+  let ir = emit_actor_ir {|mod EqOpaqueCtorField do
+  needs IO.Console
+  type Holder = HA(Task(Int)) | HB(Task(Int))
+  derive Eq for Holder
+  fn main() : Unit do
+    let t = task_spawn(fn n -> n)
+    println(bool_to_string(HA(t) == HA(t)))
+  end
+end|} in
+  Alcotest.(check bool)
+    "opaque ctor field falls back to march_poly_eq, not pointer identity"
+    true (ir_contains ir "call i64 @march_poly_eq")
+
 (** Cross-module ambiguous-constructor resolution (compiled-only regression).
 
     `Msgpack.Value` and `Json.JsonValue` (both stdlib) share the bare constructor
@@ -12305,6 +12393,45 @@ declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)
 declare ptr    @native_int_arr_alloc_raw(i64 %len)
 declare ptr    @native_float_arr_alloc_raw(i64 %len)
 declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
+; Narrow native arrays (f32/i32/u8)
+declare ptr    @native_f32_arr_make(i64 %len, double %def)
+declare i64    @native_f32_arr_length(ptr %arr)
+declare double @native_f32_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)
+declare double @native_f32_arr_sum(ptr %arr)
+declare ptr    @native_f32_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_f32_arr_map2(ptr %a, ptr %b, ptr %f)
+declare ptr    @native_f32_arr_from_list(ptr %lst)
+declare ptr    @native_f32_arr_to_list(ptr %arr)
+declare ptr    @native_i32_arr_make(i64 %len, i64 %def)
+declare i64    @native_i32_arr_length(ptr %arr)
+declare i64    @native_i32_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)
+declare i64    @native_i32_arr_sum(ptr %arr)
+declare ptr    @native_i32_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_i32_arr_map2(ptr %a, ptr %b, ptr %f)
+declare ptr    @native_i32_arr_from_list(ptr %lst)
+declare ptr    @native_i32_arr_to_list(ptr %arr)
+declare ptr    @native_u8_arr_make(i64 %len, i64 %def)
+declare i64    @native_u8_arr_length(ptr %arr)
+declare i64    @native_u8_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)
+declare i64    @native_u8_arr_sum(ptr %arr)
+declare ptr    @native_u8_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_u8_arr_map2(ptr %a, ptr %b, ptr %f)
+declare ptr    @native_u8_arr_from_list(ptr %lst)
+declare ptr    @native_u8_arr_to_list(ptr %arr)
+declare ptr    @native_float_to_f32_arr(ptr %arr)
+declare ptr    @native_f32_to_float_arr(ptr %arr)
+declare ptr    @native_int_to_i32_arr(ptr %arr)
+declare ptr    @native_i32_to_int_arr(ptr %arr)
+declare ptr    @native_int_to_u8_arr(ptr %arr)
+declare ptr    @native_u8_to_int_arr(ptr %arr)
+declare ptr    @native_i32_to_f32_arr(ptr %arr)
+declare ptr    @native_u8_to_f32_arr(ptr %arr)
+declare ptr    @native_f32_arr_alloc_raw(i64 %len)
+declare ptr    @native_i32_arr_alloc_raw(i64 %len)
+declare ptr    @native_u8_arr_alloc_raw(i64 %len)
 ; RingBuf builtins — mutable fixed-capacity circular buffer
 declare ptr    @ring_buf_make(i64 %cap)
 declare void   @ring_buf_push(ptr %rb, ptr %x)
@@ -13946,6 +14073,7 @@ let codegen_suites =
         [
           Alcotest.test_case "int arr IR"   `Quick (with_reset test_native_int_arr_ir);
           Alcotest.test_case "float arr IR" `Quick (with_reset test_native_float_arr_ir);
+          Alcotest.test_case "narrow arr IR" `Quick (with_reset test_native_narrow_arr_ir);
         ] );
       ( "tasks",
         [
@@ -14141,6 +14269,8 @@ let codegen_suites =
             test_compiled_deque_pop_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
             test_compiled_let_shadowing_parity;
+          Alcotest.test_case "compiled float NaN `!=` parity (une vs one)" `Quick
+            test_compiled_float_nan_neq_parity;
           Alcotest.test_case "compiled entry-module self-qualification parity" `Quick
             test_compiled_entry_self_qual_parity;
           Alcotest.test_case "compiled entry-module nested self-qualification parity" `Quick
@@ -14205,6 +14335,8 @@ let codegen_suites =
             test_newtype_eq_operator_boxed_payload_compiled;
           Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
             test_newtype_eq_operator_generic_payload_compiled;
+          Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
+            test_eq_operator_opaque_ctor_field_uses_poly_eq;
         ] );
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick

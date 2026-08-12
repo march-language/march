@@ -9637,6 +9637,145 @@ let test_cap_propagation_still_warns_unrelated () =
   Alcotest.(check bool) "unrelated needs IO.Console still warns when unused" true
     (has_warning_with ctx "unused capability")
 
+(* ── A module-level declaration SHADOWING a builtin name is not a call to
+   that builtin ─────────────────────────────────────────────────────────────
+   specs/2026-08-09-cap-loose-ends-plan.md, Tier 0.
+
+   Every capability scan below the typechecker's actual name resolution is a
+   raw SYNTACTIC walk (`March_ast.Calls.names_and_name_spans`) matching a call
+   NAME against a table.  March lets a module-level `fn`/`let` shadow a
+   builtin of the same bare name, and shadowing wins real name resolution —
+   verified separately (interpreted AND compiled) that `fn file_read(x) =
+   x + 100` then `file_read(1)` in the SAME module returns 101, never
+   reaching the real builtin — so before this fix EVERY one of these scans
+   treated an ordinary user function named `file_read`, `random_bytes`,
+   `dns_resolve`, … as a call to the capability-bearing builtin of the same
+   name.  This escalated from a wrong WARNING to a hard, default-on ERROR
+   when Check 1b's severity flipped (2026-08-06): a project cannot name a
+   function `file_read` without an unfixable-looking compile failure
+   demanding a capability the program never uses. *)
+let test_module_fn_shadowing_builtin_is_not_a_cap_use () =
+  let ctx = typecheck {|mod ShadowFn do
+    needs IO.Console
+    fn file_read(x : Int) : Int do
+      x + 100
+    end
+    fn main() : () do
+      println(int_to_string(file_read(1)))
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a module fn named `file_read` is not a call to the builtin" false
+    (has_errors ctx)
+
+let test_module_let_shadowing_builtin_is_not_a_cap_use () =
+  (* Must be a let-bound CALLABLE, and must actually be CALLED — a bare
+     value reference (`let x = 7`, referenced without `(...)`) never enters
+     [March_ast.Calls.names_and_name_spans] in the first place, so it would
+     pass trivially before the fix too and prove nothing about the DLet
+     branch of the shadow set. *)
+  let ctx = typecheck {|mod ShadowLet do
+    needs IO.Console
+    let random_bytes = fn n -> n * 2
+    fn main() : () do
+      println(int_to_string(random_bytes(3)))
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a module-level `let random_bytes = fn ...` is not a call to the builtin"
+    false (has_errors ctx)
+
+(* The witness that motivated the original (too-narrow) runtime-symbol-naming
+   todo: `dns_resolve` specifically. Its C symbol is unprefixed, but that
+   turned out to be irrelevant to THIS bug — the false positive fires at the
+   typecheck-level AST scan, long before any C symbol is involved. *)
+let test_dns_resolve_shadow_witness () =
+  let ctx = typecheck {|mod ShadowDns do
+    needs IO.Console
+    fn dns_resolve(x : Int) : Int do
+      x + 1
+    end
+    fn main() : () do
+      println(int_to_string(dns_resolve(1)))
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a module fn named `dns_resolve` is not a call to the builtin" false
+    (has_errors ctx)
+
+(* Guard against the trivial wrong fix ("just never match"): an UNSHADOWED
+   call to a real capability-bearing builtin must still be caught. Without
+   this, the shadow-set check above could regress into always returning
+   `None` and pass every accept test above by checking nothing. *)
+let test_unshadowed_builtin_call_still_requires_needs () =
+  let ctx = typecheck {|mod NoShadow do
+    fn main() : () do
+      let _ = file_read("/tmp/x")
+      ()
+    end
+  end|} in
+  Alcotest.(check bool)
+    "an actual (unshadowed) file_read call still requires needs IO.FileRead"
+    true (has_error_with ctx "IO.FileRead")
+
+(* The same bug, same fix, in `march caps` (the inferred-capability
+   extractor feeding `forge audit --inferred` and the `--cap-sandbox`
+   profile) — a SEPARATE code path (`own_caps_of_this_module` /
+   `fn_own_capability_closures`) sharing the same root cause via
+   `builtin_caps_of_expr`. Unlike the diagnostic above, this one fails
+   OPPOSITE: it silently OVER-reports a capability the program does not use,
+   which would over-grant a `--cap-sandbox` profile rather than reject a
+   build. *)
+let test_shadowed_builtin_not_in_inferred_caps () =
+  let m = parse_and_desugar {|mod ShadowInferred do
+    needs IO.FileRead
+    fn file_read(x : Int) : Int do
+      x + 100
+    end
+    fn use_it() : Int do
+      file_read(1)
+    end
+  end|} in
+  let (_errors, _type_map, env) = March_typecheck.Typecheck.check_module_core m in
+  let own = March_typecheck.Typecheck.fn_own_capability_closures env in
+  let all_caps = List.concat_map snd own in
+  Alcotest.(check bool)
+    "a shadowed builtin contributes no capability to the inferred set" false
+    (List.mem "IO.FileRead" all_caps)
+
+(* And the module-level `cap pure`/`cap deterministic` invariants, which walk
+   the identical call-name list independently
+   ([check_pure_module]/[check_deterministic_module]) and had the identical
+   gap: a `cap pure` module defining its own `random_bytes` was rejected as
+   impure for calling a function it, itself, wrote. *)
+let test_pure_module_shadowing_builtin_is_not_impure () =
+  let ctx = typecheck {|mod ShadowPure do
+    cap pure
+    fn random_bytes(n : Int) : Int do
+      n * 2
+    end
+    fn compute() : Int do
+      random_bytes(3)
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a `cap pure` module's own `random_bytes` fn is not an impurity" false
+    (has_errors ctx)
+
+let test_deterministic_module_shadowing_builtin_is_not_flagged () =
+  let ctx = typecheck {|mod ShadowDeterministic do
+    cap deterministic
+    fn unix_time() : Int do
+      42
+    end
+    fn compute() : Int do
+      unix_time()
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a `cap deterministic` module's own `unix_time` fn is not non-determinism"
+    false (has_errors ctx)
+
 (* A `needs` satisfied only through a STDLIB call must not warn as unused.
    Found 2026-08-08, minutes after the ceiling became the default, on the first
    file it forced a migration of (golden g43): the ceiling — emitted-code
@@ -9665,6 +9804,45 @@ let with_stdlib_registered name k =
   March_typecheck.Typecheck.stdlib_source_files := candidates @ saved;
   Fun.protect ~finally:(fun () ->
     March_typecheck.Typecheck.stdlib_source_files := saved) k
+
+(* THE decisive shadow-set test: prelude's OWN declarations are prepended
+   into the ENTRY module's decl list (bin/main.ml, the real pipeline every
+   compile/check goes through) — so a shadow-set built naively from "this
+   module's decls" without excluding stdlib spans finds prelude's `println`
+   sitting right there and treats EVERY entry-module call to `println` as
+   shadowed. Regression found via the corpus sweep after the Tier 0 fix
+   landed: `specs/lang/types/reject/t40_migrate_state_does_io.march` started
+   wrongly typechecking. Reduced: a program with NO `needs` at all calling
+   `println` must still be rejected — the single most basic capability check
+   in the whole system, so this is the test that would have caught the
+   regression before it reached the corpus. *)
+let test_prelude_println_still_requires_needs () =
+  with_stdlib_registered "prelude.march" (fun () ->
+    (* [load_stdlib_file_for_test] wraps the file as a [DMod "Prelude"] (so a
+       test can address its names as `Prelude.foo`) — but prelude is NOT
+       wrapped that way in the real pipeline: bin/main.ml unwraps it directly
+       into the entry module's OWN flat decl list ("prelude is unwrapped into
+       GLOBAL scope"), which is precisely what let `println` sit alongside
+       `Main`'s own decls in the list [locally_declared_names_of] scans.
+       Un-wrap the [DMod] here to reproduce that flat shape, or this test
+       exercises a DIFFERENT, non-reproducing structure. *)
+    let prelude_inner_decls =
+      match load_stdlib_file_for_test "prelude.march" with
+      | March_ast.Ast.DMod (_, _, inner, _) -> inner
+      | _ -> Alcotest.fail "load_stdlib_file_for_test did not return a DMod"
+    in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "Main"; span = dummy_span };
+      mod_decls = prelude_inner_decls @ (parse_and_desugar {|mod Main do
+        fn main() : () do
+          println("hi")
+        end
+      end|}).March_ast.Ast.mod_decls;
+    } in
+    let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+    Alcotest.(check bool)
+      "an undeclared println is still rejected with the prelude prepended"
+      true (has_errors errors))
 
 let test_stdlib_mediated_needs_is_not_unused () =
   with_stdlib_registered "datetime.march" (fun () ->
@@ -9881,6 +10059,33 @@ let cap_hint_messages src =
       if d.March_errors.Errors.severity = March_errors.Errors.Hint
       then Some d.March_errors.Errors.message else None)
     ctx.March_errors.Errors.diagnostics
+
+(* [cap_infer] independently duplicates the same "syntactic call-name matches
+   a builtin name" pattern (its own [cap_table]/[cap_of_call], "mirrors
+   builtin_cap_table in typecheck.ml" per its own header comment) and so has
+   the identical shadowing bug — confirmed live even AFTER the typecheck-side
+   fix: a module defining its own `file_read` still drew the HINT
+   "call to `file_read` requires `needs IO.FileRead`" although the ERROR
+   Check 1b used to also produce is gone. specs/2026-08-09-cap-loose-ends-plan.md,
+   Tier 0. *)
+let string_contains ~needle haystack =
+  let nl = String.length needle and hl = String.length haystack in
+  let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
+let test_cap_infer_shadowed_builtin_no_hint () =
+  let hints = cap_hint_messages {|mod ShadowInferHint do
+    fn file_read(x : Int) : Int do
+      x + 100
+    end
+    fn main() : () do
+      let _ = file_read(1)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool)
+    "no hint for a module's own file_read fn" true
+    (not (List.exists (string_contains ~needle:"file_read") hints))
 
 let test_cap_chain_from_main () =
   let hints = cap_hint_messages {|mod CapChain do
@@ -11913,6 +12118,209 @@ let test_tce_real_mutual_recursion_still_errors () =
   Alcotest.(check bool) "genuine mutual recursion still reported"
     true (has_error_with ctx "not in tail position")
 
+(* ── Pass 3 inside a nested `mod` ────────────────────────────────────────────
+
+   `enforce_tail_calls_in_decls` recurses into `DMod`, so Pass 3 *runs* at every
+   nesting level — but it found nothing there, because it was comparing two
+   different namespaces.  `Desugar.qualify_module_refs` rewrites bare
+   intra-module CALL SITES inside every nested `DMod` to `Prefix.name`
+   (`EVar "boom"` -> `EVar "Inner.boom"`), and deliberately leaves the
+   DECLARATION name alone.  Pass 3 then built `fn_names` from the bare
+   `def.fn_name.txt`, so `collect_direct_fn_calls` searched a post-desugar body
+   for a pre-desugar name, matched nothing, and concluded the function was not
+   recursive at all.
+
+   The entry module was unaffected and hid this: `qualify_module_refs` seeds
+   `entry_prefix = ""` and only rewrites inside `DMod` NODES, and the parser
+   splits a file's sole top-level `mod` into `mod_name`/`mod_decls` — so the
+   entry level has no prefix to mismatch.
+
+   Everything Pass 3 rejects at top level was therefore silently accepted one
+   `mod` deeper. *)
+
+let test_tce_nested_mod_non_tail_recursion_errors () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn boom(n : Int) : Int do
+        if n == 0 do 0 else boom(n + 1) + 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "non-tail recursion inside a nested mod is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_mutual_recursion_errors () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn even(n : Int) : Int do
+        if n == 0 do 1 else 1 + odd(n) end
+      end
+      fn odd(n : Int) : Int do
+        if n == 0 do 0 else even(n) end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "mutual recursion inside a nested mod is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_doubly_nested_mod_non_tail_recursion_errors () =
+  (* The prefix ACCUMULATES (`Outer.Inner.`), so a fix that only strips one
+     level would still miss this. *)
+  let ctx = typecheck {|mod T do
+    mod Outer do
+      mod Inner do
+        fn boom(n : Int) : Int do
+          if n == 0 do 0 else boom(n + 1) + 1 end
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "non-tail recursion two mods deep is reported"
+    true (has_error_with ctx "not in tail position")
+
+(* Controls: the fix must not over-correct.  Each of these is a shape Pass 3
+   deliberately allows at top level, and must keep allowing one mod deeper. *)
+
+let test_tce_nested_mod_structural_recursion_no_error () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn fact(n : Int) : Int do
+        if n <= 1 do 1 else fact(n - 1) * n end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "structural recursion inside a nested mod: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_tail_recursion_no_error () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn count(n : Int, acc : Int) : Int do
+        if n == 0 do acc else count(n - 1, acc + 1) end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "tail recursion inside a nested mod: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_no_warn_recursion_opts_out () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      @[no_warn_recursion]
+      fn boom(n : Int) : Int do
+        if n == 0 do 0 else boom(n + 1) + 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "`no_warn_recursion` still opts out inside a nested mod"
+    false (has_error_with ctx "not in tail position")
+
+(* A DEPENDENCY file is desugared with [~is_entry:false], which changes two
+   things at once: [strip_entry_self_qual] does NOT run (so a hand-written
+   self-qualified call survives verbatim), and [qualify_module_refs] is seeded
+   with [~entry_prefix:(mod_name ^ ".")] (so a nested module qualifies to
+   "Helper.Inner.", not "Inner.").  Both were blind spots, and the second one
+   is why this pass accepts BOTH candidate prefixes at every level. *)
+let typecheck_non_entry src =
+  let m = March_desugar.Desugar.desugar_module ~is_entry:false (parse_module src) in
+  let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+  errors
+
+let test_tce_non_entry_self_qualified_call_errors () =
+  (* No nesting at all — `Helper.boom` inside `mod Helper` is this module's own
+     `boom`, but the call site carries a prefix the declaration does not. *)
+  let ctx = typecheck_non_entry {|mod Helper do
+    fn boom(n : Int) : Int do
+      if n == 0 do 0 else Helper.boom(n + 1) + 1 end
+    end
+  end|} in
+  Alcotest.(check bool) "self-qualified call in a dependency module is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_non_entry_nested_mod_errors () =
+  (* Prefix here is "Helper.Inner.", so a fix that accumulated only the nested
+     names would still miss this. *)
+  let ctx = typecheck_non_entry {|mod Helper do
+    mod Inner do
+      fn boom(n : Int) : Int do
+        if n == 0 do 0 else boom(n + 1) + 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested mod inside a dependency module is reported"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_non_entry_structural_recursion_no_error () =
+  let ctx = typecheck_non_entry {|mod Helper do
+    mod Inner do
+      fn fact(n : Int) : Int do
+        if n <= 1 do 1 else fact(n - 1) * n end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "structural recursion in a dependency module: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_local_shadow_no_false_recursion () =
+  (* The shadowing discipline must survive the namespace change.  `Desugar`
+     already declines to qualify a call to a shadowed name (`make_qualifier`
+     tracks `bound`), so the call site stays bare `go` while the declaration
+     is `Inner.go` — the two must not be conflated back together. *)
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn helper(n : Int) : Int do
+        fn go(k : Int, acc : Int) : Int do
+          if k == 0 do acc else go(k - 1, acc + 1) end
+        end
+        go(n, 0)
+      end
+      fn go(m : Int) : Int do
+        if helper(m) == 0 do 0 else 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "local helper shadowing a nested-mod fn: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_let_lambda_shadow_no_false_recursion () =
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn helper(n : Int) : Int do
+        let go = fn k -> k + 1
+        go(n)
+      end
+      fn go(m : Int) : Int do
+        if helper(m) == 0 do 0 else 1 end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "let-bound lambda shadowing a nested-mod fn: no error"
+    false (has_error_with ctx "not in tail position")
+
+let test_tce_nested_mod_arm_bound_shadow_no_false_recursion () =
+  (* The sharpest of the three.  `f`/`g` really ARE mutually recursive here, so
+     the SCC is genuine and `f` really is checked — only the arm-bound `g` must
+     not be mistaken for the module's `g`.  At top level `check_tail_position`
+     retires the arm binder itself; inside a nested `mod` the recursive-name set
+     is qualified (`Inner.g`), so that retirement is a no-op and the property
+     rests entirely on `Desugar.make_qualifier` having declined to qualify the
+     shadowed call.  This test is what proves it does. *)
+  let ctx = typecheck {|mod T do
+    mod Inner do
+      fn f(n : Int) : Int do
+        match Some(fn x -> x + 1) do
+          Some(g) -> g(n) + 1
+          None -> g(n)
+        end
+      end
+      fn g(n : Int) : Int do
+        if n == 0 do 0 else f(n - 1) end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "arm-bound name shadowing a nested-mod SCC member: no error"
+    false (has_error_with ctx "not in tail position")
+
 (* ── collect_direct_names: the inner pattern walk must be exhaustive ─────── *)
 
 (* `collect_direct_names`' inner pattern walk feeds `strip_entry_self_qual`. Its
@@ -13451,6 +13859,17 @@ let compiler_suites =
           Alcotest.test_case "a cap reached only via a default argument"             `Quick test_transitive_cap_via_default_argument;
           Alcotest.test_case "an import reaching a cap through a module let requires it" `Quick test_import_through_module_let_still_requires;
         ] );
+      ( "cap_shadow", [
+          Alcotest.test_case "module fn shadowing a builtin is not a cap use"   `Quick test_module_fn_shadowing_builtin_is_not_a_cap_use;
+          Alcotest.test_case "module let shadowing a builtin is not a cap use"  `Quick test_module_let_shadowing_builtin_is_not_a_cap_use;
+          Alcotest.test_case "dns_resolve shadow witness"                      `Quick test_dns_resolve_shadow_witness;
+          Alcotest.test_case "unshadowed builtin call still requires needs"    `Quick test_unshadowed_builtin_call_still_requires_needs;
+          Alcotest.test_case "shadowed builtin not in inferred caps"           `Quick test_shadowed_builtin_not_in_inferred_caps;
+          Alcotest.test_case "cap pure: shadowing builtin is not impure"       `Quick test_pure_module_shadowing_builtin_is_not_impure;
+          Alcotest.test_case "cap deterministic: shadowing builtin not flagged" `Quick test_deterministic_module_shadowing_builtin_is_not_flagged;
+          Alcotest.test_case "cap_infer: shadowed builtin draws no hint"        `Quick test_cap_infer_shadowed_builtin_no_hint;
+          Alcotest.test_case "prelude println still requires needs"            `Quick test_prelude_println_still_requires_needs;
+        ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
@@ -13630,6 +14049,18 @@ let compiler_suites =
           Alcotest.test_case "match-arm name shadowing an SCC member: no error"     `Quick test_tce_arm_bound_name_shadows_scc_member;
           Alcotest.test_case "genuine non-tail self-recursion: still errors"        `Quick test_tce_real_non_tail_recursion_still_errors;
           Alcotest.test_case "genuine mutual recursion: still errors"               `Quick test_tce_real_mutual_recursion_still_errors;
+          Alcotest.test_case "nested mod, non-tail self-recursion: errors"          `Quick test_tce_nested_mod_non_tail_recursion_errors;
+          Alcotest.test_case "nested mod, mutual recursion: errors"                 `Quick test_tce_nested_mod_mutual_recursion_errors;
+          Alcotest.test_case "doubly-nested mod, non-tail recursion: errors"        `Quick test_tce_doubly_nested_mod_non_tail_recursion_errors;
+          Alcotest.test_case "nested mod, structural recursion: no error"           `Quick test_tce_nested_mod_structural_recursion_no_error;
+          Alcotest.test_case "nested mod, tail recursion: no error"                 `Quick test_tce_nested_mod_tail_recursion_no_error;
+          Alcotest.test_case "nested mod, `no_warn_recursion`: no error"            `Quick test_tce_nested_mod_no_warn_recursion_opts_out;
+          Alcotest.test_case "nested mod, local shadow: no error"                   `Quick test_tce_nested_mod_local_shadow_no_false_recursion;
+          Alcotest.test_case "nested mod, let-lambda shadow: no error"              `Quick test_tce_nested_mod_let_lambda_shadow_no_false_recursion;
+          Alcotest.test_case "nested mod, arm-bound shadow in a real SCC: no error" `Quick test_tce_nested_mod_arm_bound_shadow_no_false_recursion;
+          Alcotest.test_case "dependency mod, self-qualified call: errors"          `Quick test_tce_non_entry_self_qualified_call_errors;
+          Alcotest.test_case "dependency mod, nested mod: errors"                   `Quick test_tce_non_entry_nested_mod_errors;
+          Alcotest.test_case "dependency mod, structural recursion: no error"       `Quick test_tce_non_entry_structural_recursion_no_error;
         ] );
   ]
 

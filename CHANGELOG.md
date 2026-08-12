@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`NativeArray` gained narrow element widths: f32, i32, u8** — both
+  interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
+  `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,
+  plus 8 conversions like `NativeArray.int_to_u8_arr`. Integer stores wrap mod
+  2^w two's-complement, float stores round to nearest-even binary32, and
+  loads widen exactly; operations never trap. `map_f32`/`map2_f32`/`sum_f32`
+  get the same inline-loop vectorization treatment as the existing f64 path
+  (confirmed `<4 x float>` NEON codegen); halving the element width to f32
+  measured ~2.0-2.4x faster than f64 at N=5M (sum 0.49ms vs 1.19ms, map
+  2.27ms vs 4.54ms, map2 2.67ms vs 6.40ms; see `bench/RESULTS.md`).
+  `fold_i32`/`fold_u8`/`fold_f32` do not exist yet (interpreted or compiled)
+  — they'll be added once the existing `fold_int`/`fold_float` compiled-
+  linkage gap closes.
 - **`main`'s capability parameter is now the program's grant — the first
   check that says no rather than "declare it".**
   `fn main(cap : Cap(IO.Console))` makes a machine-checked claim: the whole
@@ -49,6 +62,62 @@ git log is authoritative for exact commits.
   ocamllex's lexeme start; the opening position is now recorded on handoff and
   restored when the token is produced, for plain and triple-quoted literals
   and for interpolation starts.
+
+- **Compiled `==` on a variant/tuple/record field of a type with no `type`
+  declaration now compares by content, not by pointer.** A ctor field typed
+  as a compiler-builtin type constructor (e.g. `Task`, `Pid`, `WorkPool`) —
+  or, on branches carrying SIMD vector types, `F32x4`/`F64x2`/`I32x4`/
+  `I64x2`/`U8x16` — has no derivable structural-equality function, and the
+  codegen fell back to raw pointer identity instead of the runtime
+  polymorphic comparator, so two distinct-but-content-identical values for
+  such a field compared unequal. Now falls back to `march_poly_eq`, matching
+  the existing generic (`TVar`) field arm.
+
+- **Compiled `!=` on NaN floats now matches the interpreter.** The native
+  backend lowered float `!=` to LLVM `fcmp one` (ordered-and-not-equal),
+  which per IEEE 754 is `false` whenever either operand is NaN — but the
+  interpreter implements `!=` via OCaml's polymorphic `<>`, under which
+  `nan <> nan` is `true`. `nan != nan` printed `false` compiled and `true`
+  interpreted. Now uses `fcmp une` (unordered-or-not-equal), matching `<>`
+  semantics on both backends.
+
+- **JS backend: `==`/`!=` on a non-primitive operand now compares
+  structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
+  (or an erased type variable that may hold one) lowered to JavaScript `===`,
+  i.e. reference equality — so `x == Some(Ctor)` on two distinct-but-equal heap
+  values was always `false`. Such comparisons now go through a deep structural
+  equality helper (matching the native backend); primitive-vs-primitive
+  comparisons still use fast `===`/`!==`.
+- **JS backend: a multi-head function with a literal-integer argument pattern
+  no longer infinite-loops.** `fn f(xs, 0) … / fn f(xs, n) …` compiled with
+  `--target js` emitted a `switch` on a value whose tag was `undefined`, so the
+  base case was dead and the function recursed forever. The literal-tag case
+  now lowers the same way the native backend does.
+- **Scheduler busy-spins back off instead of pegging a core.** Three
+  unbounded scheduler spin-waits (`march_sched_wake`'s parked-process wait,
+  `task_wait_done`'s in-scheduler branch, and `march_sched_wait_idle`) now spin
+  briefly and then sleep, so a stalled wait under heavy host oversubscription no
+  longer holds a CPU at ~100%. Wait-forever semantics are unchanged.
+- **A function or `let` named after a capability-bearing builtin (`file_read`,
+  `random_bytes`, `dns_resolve`, …) no longer falsely requires that
+  capability.** Every capability scan matched a call by NAME alone, with no
+  awareness that a module-level declaration shadows a builtin of the same
+  name — and shadowing wins real name resolution, so the program never
+  touched the capability it was accused of needing. Since the capability
+  ceiling's severity flip this was a hard, default-on compile error with no
+  workaround short of renaming the function; it is now silent, and an
+  actual (unshadowed) builtin call is still caught correctly. The inferred
+  capability set (`march caps`, feeding `forge audit --inferred` and the
+  `--cap-sandbox` profile) had the identical bug in the opposite direction —
+  silently over-reporting a capability never used — also fixed.
+- **A missing-capability violation no longer prints two overlapping
+  diagnostics at the same source location.** Both the typechecker's own
+  `needs`-coverage check and the separate capability-inference pass anchor
+  at the exact call site and were repeating each other's "add `needs X`"
+  sentence almost verbatim. The hint now shows only what the error doesn't
+  already say — the call chain from `main` down to the offending call — and
+  is omitted entirely when there is no chain to show (a library with no
+  `main`, or a violation already inside `main`).
 
 - **A natively compiled program opening a nonexistent file no longer misreads
   the error value's representation.** `file_open`'s `Err` case is typed
@@ -236,6 +305,17 @@ git log is authoritative for exact commits.
   Sigils without interpolation are unchanged. Nothing is known to break: across
   the compiler, bastion, forgepm, conduit, depot and march_doc there are six
   uses of these sigils, all in the compiler's own tests, and none with a hole.
+
+- **`forge audit`, `forge licenses`, and `forge tree` now find git/registry
+  dependencies that `forge deps` actually installed.** All three reimplemented
+  their own dependency-directory lookup as `<project_root>/.march/cas/deps/<name>`,
+  but `forge deps` installs git and registry dependencies under
+  `$HOME/.march/cas/deps/<name>` — a global, cross-project location. A
+  just-installed git or registry dependency was therefore always reported as
+  "not installed" (`forge audit`), with blank version/license (`forge
+  licenses`), or as a childless leaf (`forge tree`). Path dependencies were
+  unaffected. Fixed by routing all three through the same `Project.dep_root_dir`
+  resolver `forge deps` already uses.
 
 
 ### Changed

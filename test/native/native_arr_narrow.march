@@ -1,0 +1,69 @@
+-- Compiled/interpreted parity fixture for narrow native array element widths
+-- (f32/i32/u8). Reproduces, in a single file with printed output, the same
+-- cases asserted by the interpreter-path unit tests in
+-- test/test_stdlib_suite.ml's "native_array_narrow" suite (t1-t6):
+--   t1: u8 wrap-on-store + zero-extend-on-load
+--   t2: i32 wrap-on-store, both signs
+--   t3: f32 round-on-store, exact-widen-on-load
+--   t4: u8 sum accumulates wide (not mod 256)
+--   t5: map/map2/from_list/to_list round-trips for u8/i32/f32
+--   t6: width conversions (float<->f32, int<->i32, int<->u8, i32/u8->f32->float)
+mod Main do
+  needs IO.Console
+  fn main() : () do
+    -- t1: u8 wrap on store, zero-extend on load
+    let a = NativeArray.make_u8(3, 0)
+    let a = NativeArray.set_u8(a, 0, 300)
+    let a = NativeArray.set_u8(a, 1, -1)
+    let a = NativeArray.set_u8(a, 2, 256)
+    println([NativeArray.get_u8(a, 0), NativeArray.get_u8(a, 1), NativeArray.get_u8(a, 2)])
+
+    -- t2: i32 wrap both signs
+    let b = NativeArray.make_i32(3, 0)
+    let b = NativeArray.set_i32(b, 0, 4294967296)
+    let b = NativeArray.set_i32(b, 1, 2147483648)
+    let b = NativeArray.set_i32(b, 2, 2147483647)
+    println([NativeArray.get_i32(b, 0), NativeArray.get_i32(b, 1), NativeArray.get_i32(b, 2)])
+
+    -- t3: f32 store rounds, load widens exactly
+    let c = NativeArray.make_f32(1, 0.0)
+    let c = NativeArray.set_f32(c, 0, 0.1)
+    println(NativeArray.get_f32(c, 0))
+
+    -- t4: u8 sum accumulates in Int, not mod 256
+    let d = NativeArray.make_u8(300, 255)
+    println(NativeArray.sum_u8(d))
+
+    -- t5: map/map2/from_list/to_list round-trips
+    let u = NativeArray.from_list_u8([100, 250])
+    let u2 = NativeArray.map_u8(u, fn x -> x * 2)
+    println(NativeArray.to_list_u8(u2))
+
+    let i32a = NativeArray.from_list_i32([1, 2])
+    let i32b = NativeArray.from_list_i32([5, 6])
+    println(NativeArray.to_list_i32(NativeArray.map2_i32(i32a, i32b, fn (x, y) -> x + y)))
+
+    let f32a = NativeArray.from_list_f32([1.0, 2.0])
+    println(NativeArray.to_list_f32(NativeArray.map_f32(f32a, fn x -> x +. 1.5)))
+
+    -- t6: width conversions
+    let ii = NativeArray.from_list_int([1, 2])
+    println(NativeArray.to_list_i32(NativeArray.int_to_i32_arr(ii)))
+
+    let big = NativeArray.from_list_int([300])
+    println(NativeArray.to_list_u8(NativeArray.int_to_u8_arr(big)))
+
+    let ff = NativeArray.from_list_float([1.5, 2.5])
+    println(NativeArray.to_list_f32(NativeArray.float_to_f32_arr(ff)))
+
+    let cc = NativeArray.from_list_i32([3])
+    println(NativeArray.to_list_float(NativeArray.f32_to_float_arr(NativeArray.i32_to_f32_arr(cc))))
+
+    -- i32_to_int_arr / u8_to_int_arr round-trips
+    let dd = NativeArray.from_list_i32([-7, 2000000000])
+    println(NativeArray.to_list_int(NativeArray.i32_to_int_arr(dd)))
+
+    let ee = NativeArray.from_list_int([300, -1])
+    println(NativeArray.to_list_int(NativeArray.u8_to_int_arr(NativeArray.int_to_u8_arr(ee))))
+  end
+end

@@ -537,13 +537,30 @@ and emit_val_impl ctx expr =
 
   | Tir.EApp (f, args) ->
     let name = f.Tir.v_name in
+    (* Operands `==`/`!=` compares STRUCTURALLY iff both are primitive (JS `===`
+       is correct for Int/Float/Bool/String/Atom); on any non-primitive operand
+       (ADT/tuple/record, or an erased TVar) JS `===` is reference equality and
+       gives wrong answers (e.g. `x == Some(Ctor)` was always false). Route those
+       through march_deep_eq, mirroring native's ensure_adt_eq_fn / march_poly_eq. *)
+    let is_prim_eq_ty = function
+      | Tir.TBool | Tir.TInt | Tir.TFloat | Tir.TString | Tir.TCon ("Atom", []) -> true
+      | _ -> false in
     begin match inline_binop name with
     | Some op when List.length args = 2 ->
-      emit ctx "(";
-      emit_atom ctx (List.nth args 0);
-      emit ctx (" " ^ op ^ " ");
-      emit_atom ctx (List.nth args 1);
-      emit ctx ")"
+      (match op, args with
+       | ("===" | "!=="), [a; b]
+         when not (is_prim_eq_ty (atom_ty a) && is_prim_eq_ty (atom_ty b)) ->
+         use_runtime ctx "march_deep_eq";
+         if op = "!==" then emit ctx "(!";
+         emit ctx "march_deep_eq(";
+         emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")";
+         if op = "!==" then emit ctx ")"
+       | _ ->
+         emit ctx "(";
+         emit_atom ctx (List.nth args 0);
+         emit ctx (" " ^ op ^ " ");
+         emit_atom ctx (List.nth args 1);
+         emit ctx ")")
     | _ ->
       begin match name, args with
       | ("neg_int" | "neg_float" | "negate" | "-" | "-."), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
@@ -730,7 +747,7 @@ and emit_val_impl ctx expr =
   (* EReuse(old, ty, args): Perceus reuses old's memory — in GC'd JS just alloc fresh *)
   | Tir.EReuse (_, ty, args) -> emit_tagged_alloc ctx ty args
 
-  | Tir.EAllocHole (ty, args, hole) -> emit_tagged_alloc_hole ctx ty args hole
+  | Tir.EAllocHole (_, ty, args, hole) -> emit_tagged_alloc_hole ctx ty args hole
 
   (* TRMC hole fill: an in-place property write, sequenced with [undefined] so
      the expression's value is unit rather than the assigned value. *)
@@ -947,7 +964,21 @@ and emit_case_impl ctx result_var expr =
           | None -> emit_stmts ctx d)
        | None -> ())
     end else
-    if is_literal_scrutinee_ty s_ty then begin
+    (* Also take the literal if/else path when the scrutinee's static type is
+       ERASED (a TVar-typed tuple-field / ctor-payload binder — e.g. the `n` in a
+       desugared multi-head fn `match (cells, n) do (cells, 0) -> … | (cells, n)
+       -> …`) but every branch tag is an immediate literal (Int/Bool/Atom).
+       Otherwise we emit `switch (n.$) { case "0": … }` on a raw number, whose
+       `.$` is `undefined`, so the base case is dead and the fn infinite-loops.
+       Mirrors the native backend's all_imm_lit_tags (llvm_case.ml). *)
+    let all_imm_lit_tags =
+      branches <> [] &&
+      List.for_all (fun br ->
+        let t = br.Tir.br_tag in
+        t = "true" || t = "false" || int_of_string_opt t <> None
+        || (String.length t > 0 && t.[0] = ':')) branches
+    in
+    if is_literal_scrutinee_ty s_ty || all_imm_lit_tags then begin
       (* Literal/bool: if/else chain *)
       List.iteri (fun i br ->
         if i = 0 then (emit_indent ctx; emit ctx "if (")

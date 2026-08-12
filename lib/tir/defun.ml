@@ -151,6 +151,20 @@ let builtin_names : StringSet.t =
       "native_float_arr_length"; "native_float_arr_from_list"; "native_float_arr_to_list";
       "native_float_arr_map"; "native_float_arr_map2"; "native_float_arr_fold"; "native_float_arr_sum";
       "native_float_arr_min"; "native_float_arr_max"; "native_float_arr_sumsq_dev";
+      (* Narrow-width native array builtins — f32/i32/u8 (P10 narrow types) *)
+      "native_f32_arr_make"; "native_f32_arr_get"; "native_f32_arr_set";
+      "native_f32_arr_length"; "native_f32_arr_from_list"; "native_f32_arr_to_list";
+      "native_f32_arr_map"; "native_f32_arr_map2"; "native_f32_arr_sum";
+      "native_i32_arr_make"; "native_i32_arr_get"; "native_i32_arr_set";
+      "native_i32_arr_length"; "native_i32_arr_from_list"; "native_i32_arr_to_list";
+      "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_sum";
+      "native_u8_arr_make"; "native_u8_arr_get"; "native_u8_arr_set";
+      "native_u8_arr_length"; "native_u8_arr_from_list"; "native_u8_arr_to_list";
+      "native_u8_arr_map"; "native_u8_arr_map2"; "native_u8_arr_sum";
+      "native_float_to_f32_arr"; "native_f32_to_float_arr";
+      "native_int_to_i32_arr"; "native_i32_to_int_arr";
+      "native_int_to_u8_arr"; "native_u8_to_int_arr";
+      "native_i32_to_f32_arr"; "native_u8_to_f32_arr";
       (* RingBuf builtins — mutable fixed-capacity circular buffer *)
       "ring_buf_make"; "ring_buf_push"; "ring_buf_pop"; "ring_buf_get";
       "ring_buf_peek_oldest"; "ring_buf_peek_newest"; "ring_buf_size";
@@ -267,8 +281,10 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
     | Tir.EUpdate (a, fields) ->
       fv_atom a bound;
       List.iter (fun (_, a) -> fv_atom a bound) fields
-    | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args)
-    | Tir.EAllocHole (_, args, _) ->
+    | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) ->
+      List.iter (fun a -> fv_atom a bound) args
+    | Tir.EAllocHole (tok, _, args, _) ->
+      Option.iter (fun a -> fv_atom a bound) tok;
       List.iter (fun a -> fv_atom a bound) args
     | Tir.ESetField (o, _, v) -> fv_atom o bound; fv_atom v bound
     | Tir.EFree a -> fv_atom a bound

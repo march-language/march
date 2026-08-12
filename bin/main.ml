@@ -13,6 +13,78 @@ let severity_word (sev : March_errors.Errors.severity) : string =
   | March_errors.Errors.Warning -> "warning"
   | March_errors.Errors.Hint -> "hint"
 
+(* [find_substring ~needle haystack] returns the index of the first
+   occurrence of [needle] in [haystack], or [None]. Small local helper so
+   [dedupe_cap_hints] below doesn't reach for a regex library over one fixed
+   marker string. *)
+let find_substring ~needle haystack =
+  let nl = String.length needle and hl = String.length haystack in
+  let rec go i =
+    if i + nl > hl then None
+    else if String.sub haystack i nl = needle then Some i
+    else go (i + 1)
+  in
+  if nl = 0 then Some 0 else go 0
+
+(* Presentation-only de-duplication of the capability diagnostics: the
+   typechecker's Check 1b (lib/typecheck/typecheck.ml, an Error) and
+   Cap_infer's call-site hint (lib/refinecheck/cap_infer.ml, a Hint) both
+   fire at the exact same span for the exact same missing capability once
+   Cap_infer's call-chain work landed — see
+   specs/progress/2026-08-10-capability-diagnostic-duplication.md. Their
+   "add `needs X`" clauses are now byte-for-byte redundant, but the hint's
+   trailing "reached from `main`: …" chain is genuinely new information the
+   error doesn't carry. So: when a Hint tagged `cap_needs:<cap>` shares its
+   span with an Error/Warning tagged with the same code, trim the hint down
+   to just the chain (dropping the now-redundant prefix); when there is no
+   chain to show, drop the hint entirely rather than print a sentence that
+   says nothing the error hasn't already said.
+
+   Both passes are tagged via the `code` field (not by re-parsing each
+   other's prose) specifically so this stays robust to independent wording
+   changes on either side; the chain suffix is split off via
+   [Cap_infer.chain_marker], the one constant Cap_infer exports for this
+   purpose, rather than by guessing at hint phrasing here.
+
+   This is deliberately scoped to THIS file: it changes only what the
+   combined single-file compiler pipeline renders. [Cap_infer.check_module]
+   itself is untouched and keeps emitting the hint's full text
+   unconditionally — its direct-call unit tests in test/test_compiler.ml
+   pin exactly that standalone contract for any caller (e.g. tooling that
+   runs Cap_infer without this file's Check 1b) that invokes it without
+   going through this pipeline. *)
+let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
+    : March_errors.Errors.diagnostic list =
+  let module E = March_errors.Errors in
+  let cap_needs_code (d : E.diagnostic) =
+    match d.E.code with
+    | Some c when String.length c > 10 && String.sub c 0 10 = "cap_needs:" -> Some c
+    | _ -> None
+  in
+  let strong_codes =
+    List.filter_map (fun (d : E.diagnostic) ->
+        match d.E.severity, cap_needs_code d with
+        | (E.Error | E.Warning), Some code -> Some (d.E.span, code)
+        | _ -> None)
+      diags
+  in
+  List.filter_map
+    (fun (d : E.diagnostic) ->
+       match d.E.severity, cap_needs_code d with
+       | E.Hint, Some code when List.mem (d.E.span, code) strong_codes ->
+         let marker = March_refinecheck.Cap_infer.chain_marker in
+         (match find_substring ~needle:marker d.E.message with
+          | Some i ->
+            let chain_start = i + String.length marker in
+            let chain =
+              String.sub d.E.message chain_start
+                (String.length d.E.message - chain_start)
+            in
+            Some { d with E.message = "reached from `main`: " ^ chain }
+          | None -> None)
+       | _ -> Some d)
+    diags
+
 let b64_decode_pubkey b64 =
   let tbl = Array.make 256 (-1) in
   let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" in
@@ -1258,6 +1330,12 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
 let codegen_cas_tags () =
   "rtcflags2"
   :: (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
+  (* MARCH_TRMC rewrites eligible functions into destination-passing style, so
+     it changes the emitted binary.  Without this tag a cached non-TRMC
+     artifact silently satisfies a TRMC build and vice versa — which is exactly
+     how the first TRMC benchmark run reported a 0.06s "TRMC off" number that
+     was really the TRMC binary served from the cache. *)
+  @ (if Sys.getenv_opt "MARCH_TRMC" <> None then ["trmc"] else [])
   @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
@@ -2192,7 +2270,12 @@ let compile filename =
      "User" means any file loaded as user code: the entry file AND modules
      resolved from the source dir / MARCH_LIB_PATH.  Filtering by entry
      filename alone silently compiled ill-typed imported modules. *)
-  let diags = March_errors.Errors.sorted errors in
+  (* [dedupe_cap_hints]: trims/drops Cap_infer's call-site hint when Check 1b
+     already reported the identical missing capability at the identical
+     span — see its doc comment above. Applied here, once, so every
+     downstream consumer of [diags] (human-readable printing below,
+     --check-json, --emit-core-ast) sees the same de-duplicated set. *)
+  let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
   let is_user_file (d : March_errors.Errors.diagnostic) =
     let f = d.span.March_ast.Ast.file in
     f = filename || f = "" || f = "<unknown>" || List.mem f user_files
@@ -2522,6 +2605,10 @@ let compile filename =
        longer syntactically visible.  See
        specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
     March_tir.Trmc.report tir;
+    (* Phase 3 (WIP, gated on MARCH_TRMC=1): destination-passing rewrite of
+       TRMC-eligible functions.  Off by default — this is a measurement
+       vehicle until the RC integration (phase 4) is done. *)
+    let tir = March_tir.Trmc.transform_module tir in
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
        by lower_actor for every actor definition. Only collected when both
@@ -3793,7 +3880,9 @@ let compile filename =
             | EReuse (a, _, args) ->
               scan_atom caller a;
               List.iter (scan_atom caller) args
-            | EAllocHole (_, args, _) -> List.iter (scan_atom caller) args
+            | EAllocHole (tok, _, args, _) ->
+              Option.iter (scan_atom caller) tok;
+              List.iter (scan_atom caller) args
             | ESetField (o, _, v) -> scan_atom caller o; scan_atom caller v
           and scan_atom _caller _a = ()
           in

@@ -8184,15 +8184,9 @@ let test_crypto_hmac () =
 
 let test_crypto_random_bytes () =
   let env = eval_with_crypto {|mod Test do
-    pfn count(xs, n) do
-      match xs do
-      Nil -> n
-      Cons(_, t) -> count(t, n + 1)
-      end
-    end
     fn f() do
       let b = Crypto.random_bytes(16)
-      match b do Bytes(xs) -> count(xs, 0) end
+      Bytes.length(b)
     end
   end|} in
   Alcotest.(check int) "random_bytes returns 16 bytes" 16
@@ -8267,7 +8261,7 @@ let test_compress_parse_ok () =
 let test_gzip_encode_returns_bytes () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(104, Cons(101, Cons(108, Cons(108, Cons(111, Nil))))))
+      let b = Bytes.from_list([104, 101, 108, 108, 111])
       match Compress.Gzip.encode(b) do
       Ok(compressed) -> 1
       Err(_) -> 0
@@ -8279,20 +8273,12 @@ let test_gzip_encode_returns_bytes () =
 let test_gzip_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(104, Cons(101, Cons(108, Cons(108, Cons(111, Nil))))))
+      let original = Bytes.from_list([104, 101, 108, 108, 111])
       match Compress.Gzip.encode(original) do
       Ok(compressed) ->
         match Compress.Gzip.decode(compressed) do
@@ -8308,11 +8294,11 @@ let test_gzip_roundtrip () =
 let test_gzip_empty () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Nil)
+      let b = Bytes.empty()
       match Compress.Gzip.encode(b) do
       Ok(compressed) ->
         match Compress.Gzip.decode(compressed) do
-        Ok(Bytes(Nil)) -> 1
+        Ok(back) -> if Bytes.is_empty(back) do 1 else 0 end
         _ -> 0
         end
       Err(_) -> 0
@@ -8324,7 +8310,7 @@ let test_gzip_empty () =
 let test_gzip_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Gzip.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8341,19 +8327,10 @@ let test_gzip_compressed_smaller () =
       else make_bytes(n - 1, val, Cons(val, acc)) end
     end
     pfn byte_length(b) do
-      match b do
-      Bytes(xs) ->
-        fn go(ys, n) do
-          match ys do
-          Nil -> n
-          Cons(_, t) -> go(t, n + 1)
-          end
-        end
-        go(xs, 0)
-      end
+      Bytes.length(b)
     end
     fn f() do
-      let b = Bytes(make_bytes(100, 65, Nil))
+      let b = Bytes.from_list(make_bytes(100, 65, Nil))
       match Compress.Gzip.encode(b) do
       Ok(compressed) -> byte_length(compressed)
       Err(_) -> 999
@@ -8367,7 +8344,7 @@ let test_gzip_compressed_smaller () =
 let test_gzip_level_explicit () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      let b = Bytes.from_list([65, 66, 67])
       match Compress.Gzip.encode_level(b, Gzip.BestSpeed) do
       Ok(_) -> 1
       Err(_) -> 0
@@ -8381,20 +8358,12 @@ let test_gzip_level_explicit () =
 let test_deflate_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(100, Cons(101, Cons(102, Nil))))
+      let original = Bytes.from_list([100, 101, 102])
       match Compress.Deflate.encode(original) do
       Ok(compressed) ->
         match Compress.Deflate.decode(compressed) do
@@ -8410,11 +8379,11 @@ let test_deflate_roundtrip () =
 let test_deflate_empty () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Nil)
+      let b = Bytes.empty()
       match Compress.Deflate.encode(b) do
       Ok(compressed) ->
         match Compress.Deflate.decode(compressed) do
-        Ok(Bytes(Nil)) -> 1
+        Ok(back) -> if Bytes.is_empty(back) do 1 else 0 end
         _ -> 0
         end
       Err(_) -> 0
@@ -8428,20 +8397,12 @@ let test_deflate_empty () =
 let test_zstd_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(122, Cons(115, Cons(116, Cons(100, Nil)))))
+      let original = Bytes.from_list([122, 115, 116, 100])
       match Compress.Zstd.encode(original) do
       Ok(compressed) ->
         match Compress.Zstd.decode(compressed) do
@@ -8457,7 +8418,7 @@ let test_zstd_roundtrip () =
 let test_zstd_level_best () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(65, Cons(66, Nil)))
+      let b = Bytes.from_list([65, 66])
       match Compress.Zstd.encode_level(b, Zstd.Best) do
       Ok(_) -> 1
       Err(_) -> 0
@@ -8471,20 +8432,12 @@ let test_zstd_level_best () =
 let test_brotli_roundtrip () =
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(98, Cons(114, Cons(111, Cons(116, Cons(108, Cons(105, Nil)))))))
+      let original = Bytes.from_list([98, 114, 111, 116, 108, 105])
       match Compress.Brotli.encode(original) do
       Ok(compressed) ->
         match Compress.Brotli.decode(compressed) do
@@ -8500,7 +8453,7 @@ let test_brotli_roundtrip () =
 let test_brotli_mode_text () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let b = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      let b = Bytes.from_list([65, 66, 67])
       match Compress.Brotli.encode_mode(b, Brotli.Text, Brotli.Level(4)) do
       Ok(_) -> 1
       Err(_) -> 0
@@ -8573,11 +8526,11 @@ let test_gzip_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Gzip.encode(b) do
         Ok(compressed) ->
           match Compress.Gzip.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8591,11 +8544,11 @@ let test_deflate_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Deflate.encode(b) do
         Ok(compressed) ->
           match Compress.Deflate.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8609,11 +8562,11 @@ let test_zstd_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Zstd.encode(b) do
         Ok(compressed) ->
           match Compress.Zstd.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8627,11 +8580,11 @@ let test_brotli_roundtrip_property () =
   let env = eval_with_compress_and_check {|mod Test do
     fn f() do
       Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
-        let b = Bytes(byte_list)
+        let b = Bytes.from_list(byte_list)
         match Compress.Brotli.encode(b) do
         Ok(compressed) ->
           match Compress.Brotli.decode(compressed) do
-          Ok(Bytes(restored)) -> restored == byte_list
+          Ok(restored) -> Bytes.to_list(restored) == byte_list
           Err(_) -> false
           end
         Err(_) -> false
@@ -8659,10 +8612,10 @@ let test_gzip_compression_shrinks_repetitive () =
     end
     fn f() do
       Check.all(Gen.int(0, 255), fn v ->
-        let bytes_200 = Bytes(replicate(200, v))
+        let bytes_200 = Bytes.from_list(replicate(200, v))
         match Compress.Gzip.encode(bytes_200) do
-        Ok(Bytes(compressed_list)) ->
-          list_length(compressed_list) < 200
+        Ok(compressed) ->
+          Bytes.length(compressed) < 200
         Err(_) -> false
         end
       )
@@ -8690,7 +8643,7 @@ let test_accept_encoding_trims_spaces () =
 let test_deflate_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Deflate.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8702,7 +8655,7 @@ let test_deflate_decode_invalid () =
 let test_zstd_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Zstd.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8714,7 +8667,7 @@ let test_zstd_decode_invalid () =
 let test_brotli_decode_invalid () =
   let env = eval_with_compress {|mod Test do
     fn f() do
-      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      let garbage = Bytes.from_list([1, 2, 3])
       match Compress.Brotli.decode(garbage) do
       Ok(_)  -> 0
       Err(_) -> 1
@@ -8727,20 +8680,12 @@ let test_zstd_fast_negative_level () =
   (* Zstd.Fast(-1) uses a zstd negative level (ultra-fast). Must round-trip. *)
   let env = eval_with_compress {|mod Test do
     pfn bytes_eq(a, b) do
-      match (a, b) do
-      (Bytes(xs), Bytes(ys)) ->
-        fn go(ps, qs) do
-          match (ps, qs) do
-          (Nil, Nil) -> true
-          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
-          _ -> false
-          end
-        end
-        go(xs, ys)
-      end
+      -- Compare through the public API: Bytes' payload is a String buffer,
+      -- not a cons spine.
+      Bytes.to_string(a) == Bytes.to_string(b)
     end
     fn f() do
-      let original = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      let original = Bytes.from_list([65, 66, 67])
       match Compress.Zstd.encode_level(original, Zstd.Fast(-1)) do
       Ok(compressed) ->
         match Compress.Zstd.decode(compressed) do
@@ -10327,7 +10272,7 @@ let test_compiled_recursive_closure_capture () =
   match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
           ~main_exe ~bin ~src () with
   | `Skipped -> ()  (* legitimate, counted skip: no clang on PATH *)
-  | `Failed (_rc, output)
+  | `Failed (_rc, output, _cmd)
     when ir_contains output "Monomorphization limit reached" ->
     (* REGRESSION GUARD: this used to be a documented skip while the
        "Monomorphization limit reached: List.fold_left > 512 specializations"
@@ -10340,7 +10285,7 @@ let test_compiled_recursive_closure_capture () =
     Alcotest.failf
       "compile_march: the Monomorphization-limit ICE (fn_arities scope-blind \
        arity poisoning) has REGRESSED for %s:\n%s" src output
-  | `Failed (rc, output) ->
+  | `Failed (rc, output, _cmd) ->
     Alcotest.failf
       "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
        PATH, so this is a real compiler failure, not an environment gap):\n%s"
@@ -12658,6 +12603,143 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
         true ws_still_works)
   end
 
+(* ── NativeArray narrow element types (f32/i32/u8) — interpreter path ──────
+   Boundary rule (never traps): integer stores wrap mod 2^w two's-complement;
+   float stores round to nearest-even binary32; loads widen exactly.
+   sum_i32/sum_u8 accumulate in Int (i64); sum_f32 accumulates in Float
+   (double) over already-rounded elements. *)
+
+let vfloat = function March_eval.Eval.VFloat f -> f | _ -> failwith "expected VFloat"
+
+(* u8: wrap on store, zero-extend on load *)
+let test_native_u8_wrap_and_zero_extend () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_u8(3, 0)
+      let a = NativeArray.set_u8(a, 0, 300)   -- 300 mod 256 = 44
+      let a = NativeArray.set_u8(a, 1, -1)    -- wraps to 255
+      let a = NativeArray.set_u8(a, 2, 256)   -- wraps to 0
+      [NativeArray.get_u8(a, 0), NativeArray.get_u8(a, 1), NativeArray.get_u8(a, 2)]
+    end
+  end|} in
+  Alcotest.(check (list int)) "u8 wrap + zero-extend loads" [44; 255; 0]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* i32: wrap both signs *)
+let test_native_i32_wrap_both_signs () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_i32(3, 0)
+      let a = NativeArray.set_i32(a, 0, 4294967296)   -- 2^32 wraps to 0
+      let a = NativeArray.set_i32(a, 1, 2147483648)   -- 2^31 wraps negative
+      let a = NativeArray.set_i32(a, 2, 2147483647)   -- max, exact
+      [NativeArray.get_i32(a, 0), NativeArray.get_i32(a, 1), NativeArray.get_i32(a, 2)]
+    end
+  end|} in
+  Alcotest.(check (list int)) "i32 wrap both signs" [0; -2147483648; 2147483647]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* f32: rounds on store, widens exactly on load.
+   0.1 rounded to binary32 then widened is 0.10000000149011612. *)
+let test_native_f32_round_trip () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_f32(1, 0.0)
+      let a = NativeArray.set_f32(a, 0, 0.1)
+      NativeArray.get_f32(a, 0)
+    end
+  end|} in
+  Alcotest.(check (float 0.0)) "f32 store rounds, load widens exactly"
+    0.10000000149011612 (vfloat (call_fn env "f" []))
+
+(* u8 sum accumulates wide: 300 elements of 255 = 76500, far past one byte *)
+let test_native_u8_sum_wide_accumulate () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let a = NativeArray.make_u8(300, 255)
+      NativeArray.sum_u8(a)
+    end
+  end|} in
+  Alcotest.(check int) "u8 sum accumulates in Int, not mod 256" 76500
+    (vint (call_fn env "f" []))
+
+(* map/from_list/to_list round-trip for u8; map result wraps *)
+let test_native_u8_from_list_map_to_list () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let u = NativeArray.from_list_u8([100, 250])
+      let u2 = NativeArray.map_u8(u, fn x -> x * 2)   -- 200, 500 wraps to 244
+      NativeArray.to_list_u8(u2)
+    end
+  end|} in
+  Alcotest.(check (list int)) "u8 map wraps on overflow" [200; 244]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* map2/from_list/to_list round-trip for i32 *)
+let test_native_i32_from_list_map2_to_list () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let i = NativeArray.from_list_i32([1, 2])
+      let j = NativeArray.from_list_i32([5, 6])
+      NativeArray.to_list_i32(NativeArray.map2_i32(i, j, fn (a, b) -> a + b))
+    end
+  end|} in
+  Alcotest.(check (list int)) "i32 map2 elementwise add" [6; 8]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+(* map/from_list/to_list round-trip for f32 *)
+let test_native_f32_from_list_map_to_list () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let f_ = NativeArray.from_list_f32([1.0, 2.0])
+      NativeArray.to_list_f32(NativeArray.map_f32(f_, fn x -> x +. 1.5))
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0))) "f32 map adds 1.5" [2.5; 3.5]
+    (List.map vfloat (vlist (call_fn env "f" [])))
+
+(* Conversions — widening directions are exact, narrowing directions
+   round/wrap. *)
+let test_native_int_to_i32_arr_conversion () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let i = NativeArray.from_list_int([1, 2])
+      NativeArray.to_list_i32(NativeArray.int_to_i32_arr(i))
+    end
+  end|} in
+  Alcotest.(check (list int)) "int_to_i32_arr exact for in-range values" [1; 2]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_native_int_to_u8_arr_conversion_wraps () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let big = NativeArray.from_list_int([300])
+      NativeArray.to_list_u8(NativeArray.int_to_u8_arr(big))
+    end
+  end|} in
+  Alcotest.(check (list int)) "int_to_u8_arr wraps mod 256" [44]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_native_float_to_f32_arr_conversion () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let f_ = NativeArray.from_list_float([1.5, 2.5])
+      NativeArray.to_list_f32(NativeArray.float_to_f32_arr(f_))
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0))) "float_to_f32_arr exact for values with exact binary32 reprs"
+    [1.5; 2.5] (List.map vfloat (vlist (call_fn env "f" [])))
+
+let test_native_i32_to_f32_to_float_arr_conversion () =
+  let env = eval_with_native_array {|mod Test do
+    fn f() do
+      let c = NativeArray.from_list_i32([3])
+      NativeArray.to_list_float(NativeArray.f32_to_float_arr(NativeArray.i32_to_f32_arr(c)))
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0))) "i32_to_f32_arr then f32_to_float_arr round-trips exactly"
+    [3.0] (List.map vfloat (vlist (call_fn env "f" [])))
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -13418,6 +13500,19 @@ let stdlib_suites =
         Alcotest.test_case "empty filter"                   `Quick test_df_empty_filter;
         Alcotest.test_case "single row"                     `Quick test_df_single_row;
         Alcotest.test_case "drop_nulls"                     `Quick test_df_drop_nulls;
+      ]);
+      ("native_array_narrow", [
+        Alcotest.test_case "u8 wrap + zero-extend loads"        `Quick test_native_u8_wrap_and_zero_extend;
+        Alcotest.test_case "i32 wrap both signs"                `Quick test_native_i32_wrap_both_signs;
+        Alcotest.test_case "f32 store rounds, load widens"      `Quick test_native_f32_round_trip;
+        Alcotest.test_case "u8 sum accumulates wide"            `Quick test_native_u8_sum_wide_accumulate;
+        Alcotest.test_case "u8 from_list/map/to_list wraps"     `Quick test_native_u8_from_list_map_to_list;
+        Alcotest.test_case "i32 from_list/map2/to_list"         `Quick test_native_i32_from_list_map2_to_list;
+        Alcotest.test_case "f32 from_list/map/to_list"          `Quick test_native_f32_from_list_map_to_list;
+        Alcotest.test_case "int_to_i32_arr conversion"          `Quick test_native_int_to_i32_arr_conversion;
+        Alcotest.test_case "int_to_u8_arr conversion wraps"     `Quick test_native_int_to_u8_arr_conversion_wraps;
+        Alcotest.test_case "float_to_f32_arr conversion"        `Quick test_native_float_to_f32_arr_conversion;
+        Alcotest.test_case "i32_to_f32_arr then f32_to_float_arr" `Quick test_native_i32_to_f32_to_float_arr_conversion;
       ]);
       ("vault stdlib", [
         Alcotest.test_case "set and get"                  `Quick test_vault_set_get;

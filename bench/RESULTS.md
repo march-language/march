@@ -213,6 +213,103 @@ the full before/after writeup.
 
 ---
 
+## simd-f32(5M) — narrow (4-byte) NativeArray element width vs. f64
+
+Added 2026-08-10 alongside `NativeArray.make_f32`/`map_f32`/`map2_f32`/`sum_f32`
+(narrow `f32` element storage — half the width of the `f64`/`Float` element
+storage used by every other `simd-*` benchmark on this page). `bench/simd_f32.march`
+runs the same three shapes as `simd-sum`/`simd-map`/`simd-map2` — `sum`,
+`map(fn x -> x *. 2.0 +. 1.0)`, `map2(fn (x, y) -> x +. y)` — at the same N=5M,
+self-timed the same way (data generation excluded from the timed region; see
+the section above). Unlike this page's other tables, this one is **March-only,
+same-box, same-build, f32 vs. f64** — the point isn't a cross-language
+comparison, it's whether halving the element width and doubling the SIMD lane
+count actually pays off. Absolute ms are not a regression baseline across
+machine/load states; the f32/f64 *ratio* measured in the same run is what
+matters. As a sanity check only, the f64 legs below were re-run from the same
+build as the existing simd-sum/simd-map/simd-map2 control: they came in
+somewhat *faster* than that historical table (e.g. sum's 0.91 ms min and
+map's 4.43 ms min/4.54 ms median both fall below every corresponding
+historical figure), plausibly compiler improvements landed since those rows
+were recorded and/or ordinary run-to-run variance — not evidence of a
+regression either way. That gap doesn't affect the load-bearing comparison
+here, which is the same-run f32-vs-f64 ratio, not the historical table.
+
+Methodology: 6 timed samples per operation (two 3-run round-robins, one
+`f32, f64-sum, f64-map, f64-map2` ordered and one reversed, to cancel the
+~25%-on-first-timed-variant warmup bias documented earlier on this page —
+neither f32 nor f64 was consistently first). Machine was shared with other
+active sessions during this run (load average ~11.6-13.4/13.0-13.4/16.6-17.1
+over 1/5/15 min, including one long-running pegged process from an unrelated
+worktree) — flat, elevated background load, not a burst, so it should scale
+both f32 and f64 runs roughly equally rather than favor either.
+
+| simd-f32 sum(5M)  | Median  | Min     | Max     |
+|--------------------|---------|---------|---------|
+| f32 (NativeArray)  | 0.49 ms | 0.48 ms | 0.67 ms |
+| f64 (NativeArray)  | 1.19 ms | 0.91 ms | 1.34 ms |
+
+| simd-f32 map(5M)   | Median  | Min     | Max     |
+|--------------------|---------|---------|---------|
+| f32 (NativeArray)  | 2.27 ms | 2.25 ms | 3.42 ms |
+| f64 (NativeArray)  | 4.54 ms | 4.43 ms | 5.12 ms |
+
+| simd-f32 map2(5M)  | Median  | Min     | Max     |
+|--------------------|---------|---------|---------|
+| f32 (NativeArray)  | 2.67 ms | 2.17 ms | 5.96 ms |
+| f64 (NativeArray)  | 6.40 ms | 5.98 ms | 8.21 ms |
+
+**f32 is meaningfully faster across all three shapes** — sum ~2.4x, map ~2.0x
+(right at the theoretical 2x-lanes ceiling), map2 ~2.4x — consistent with the
+map/map2 inline-loop vectorization pass firing for the f32 entry points the
+same way it already does for `map_float` (and, after the map2 fix documented
+above, `map2_float`). The one outlier is `map2`'s max (5.96 ms, from the very
+first sample of the very first round, where f32 happened to occupy the
+first-timed-variant slot) — every other f32 map2 sample clustered at
+2.17-3.11 ms, so this reads as the known warmup effect rather than a real
+f32 regression; it is the reason this run used two opposite orderings rather
+than one.
+
+### Cross-language f32: March vs. NumPy (2026-08-10, post-merge re-run)
+
+A second run after the narrow-widths work merged (PR #246), this time
+including NumPy at BOTH element widths — the original `simd-*` NumPy rows on
+this page are float64 (`np.arange(n) / 100.0` yields float64), so the new
+`bench/python/simd_{sum,map,map2}_numpy_f32.py` variants (explicit
+`.astype(np.float32)`, float32 scalar operands) exist to make the f32
+comparison like-for-like. Same protocol as every table on this page: each
+sample is one fresh process invocation, self-timed around the op only.
+
+Methodology: March legs are medians of 10 samples (five interleaved
+round-robins, alternating f64-first/f32-first orderings); NumPy legs are
+medians of 5 one-shot invocations interleaved with them. Machine shared with
+~6 long-lived pegged background processes from unrelated sessions (load
+average ~9.5 on 14 cores, stable — not burst load); the f64 March control
+came in at or slightly below the historical rows above, validating the run.
+
+| N=5M, medians (ms) | March f64 | March f32 | NumPy f64 | NumPy f32 |
+|--------------------|-----------|-----------|-----------|-----------|
+| sum                | 1.02      | **0.40**  | 0.70      | 0.74      |
+| map (x*2+1)        | 3.69      | **1.81**  | 1.58      | 2.05      |
+| map2 (a+b)         | 4.90      | **1.85**  | 1.18      | 1.76      |
+
+March f32/f64 ratios in this run: sum 2.5x, map 2.0x, map2 2.6x —
+consistent with the table above. Like-for-like at f32, **March beats NumPy
+on sum (1.8x) and map (~13%), and ties it on map2 (~5%)** — the
+pre-narrow-widths 4x map2 gap (6.4 ms vs 1.6 ms) is gone.
+
+One protocol-dependent oddity, recorded so nobody "fixes" it later: in this
+one-shot-per-process protocol NumPy's f32 legs measure consistently *slower*
+than its f64 legs (5/5 rounds for map and map2), while a warm in-process
+`timeit` loop on the same arrays shows the expected f32 advantage (map
+~1.43 ms vs ~2.20 ms). The one-shot numbers include first-touch/cold-cache
+effects that evidently hit NumPy's f32 kernels harder; March's one-shot
+numbers include the same cold-start effects and still show the full f32 win.
+Cross-protocol numbers are not comparable — every figure in the table above
+is one-shot, matching the rest of this page.
+
+---
+
 ## Where March wins and trails
 
 **Wins:** FBIP-shaped workloads (tree-transform) — in-place reuse under
