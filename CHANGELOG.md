@@ -108,6 +108,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Dead green-thread stacks are recycled instead of leaked — spawn-churn
+  workloads no longer exhaust address space.** Every dead proc used to leak
+  its ~1MiB+guard mmap stack reservation forever; dying procs now return
+  their reservation to a free-list that new spawns draw from first, capping
+  live reservations near the concurrency level instead of growing 1:1 with
+  total-procs-ever-spawned. Disabled under ASan builds (which keep leaking,
+  as before) since ASan's fake-stack fiber tracking assumes a stack address
+  range is never reused by a different fiber.
 - **An actor's `green_thread` field was written at spawn without holding the
   actor-table lock, racing any concurrent reader (`march_send`,
   `march_actor_call`, `mailbox_size`, `set_mbox_limit`).** The field is now

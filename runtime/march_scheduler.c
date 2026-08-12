@@ -353,6 +353,103 @@ static void *stack_alloc_lazy(size_t *alloc_size, void **mmap_base_out) {
     return usable_start;   /* initial stack_base (bottom of usable region) */
 }
 
+/* ── Stack free-list (Task 12: recycle reservations on proc death) ─────
+ *
+ * Every dead proc used to leak its ~1MiB+guard mmap reservation forever
+ * (see the "Deliberately NOT munmap ... / free(p)" comment on the PROC_DEAD
+ * reap branch below for why the march_proc STRUCT still must leak). The
+ * STACK mapping does not share that constraint: nothing outside the dead
+ * proc's own execution ever dereferences its stack memory.
+ *
+ * Safety argument (also referenced from the PROC_DEAD reap branch):
+ * after sched_loop observes PROC_DEAD for a reaped proc, that proc's stack
+ * can never be touched again. The proc never runs again — PROC_DEAD is
+ * terminal, and the dispatch CAS's DEAD→RUNNING exception applies only to
+ * march_task_cancel_by_id's pre-completion store, which cannot occur after
+ * the trampoline's own DEAD store because the proc has already exited by
+ * then. Stale cross-thread readers of a leaked march_proc (march_actor_meta
+ * .green_thread etc.) only ever touch p->status / p->pid / mailbox fields —
+ * never the stack pointers or the mapped memory itself. The SIGSEGV handler
+ * reads `s->current->stack_*` — only for the RUNNING proc on the handling
+ * thread, so it can never observe a proc whose stack was just retired (a
+ * proc must be RUNNING to fault on its own stack, and RUNNING procs are not
+ * reaped). The MARCH_DEBUG fatal walker reads `q->stack_mmap_base` with no
+ * lock; we NULL it before returning the mapping to the free-list, and the
+ * walker already skips NULL entries (`if (!q || !q->stack_mmap_base)
+ * continue;`), so a walker racing the retire either sees the old mapping
+ * (still valid — mprotect/madvise below don't run until the pointer has
+ * been claimed by a new spawn) or sees NULL and skips it.
+ *
+ * Reservations are uniform (MARCH_STACK_MAX + one guard page), so a plain
+ * LIFO free-list suffices — no need to track per-entry sizes. Nodes are a
+ * small malloc'd struct (one alloc per churn event, not per message), kept
+ * deliberately separate from the mmap'd stack memory itself so we never
+ * need to make any part of a PROT_NONE-by-default reservation temporarily
+ * readable just to link it into a list. */
+typedef struct stack_free_node {
+    void *mmap_base;
+    struct stack_free_node *next;
+} stack_free_node;
+static pthread_mutex_t  g_stack_free_mu = PTHREAD_MUTEX_INITIALIZER;
+static stack_free_node *g_stack_free = NULL;
+
+/* Pop a reservation off the free-list and re-arm it to the initial state
+ * (guard page + PROT_NONE growable body + top MARCH_STACK_INITIAL
+ * committed), exactly as stack_alloc_lazy would hand out a fresh one.
+ * Returns NULL if the free-list is empty (caller falls back to a fresh
+ * mmap via stack_alloc_lazy) or if re-arming fails (rare; we then munmap
+ * the bad reservation outright rather than leave it half-configured on
+ * the free-list). */
+static void *stack_reuse(size_t *alloc_size, void **mmap_base_out) {
+    pthread_mutex_lock(&g_stack_free_mu);
+    stack_free_node *n = g_stack_free;
+    if (n) g_stack_free = n->next;
+    pthread_mutex_unlock(&g_stack_free_mu);
+    if (!n) return NULL;
+
+    void *mem = n->mmap_base;
+    free(n);
+
+    size_t page  = g_page_size;
+    size_t total = MARCH_STACK_MAX + page;
+    /* Re-protect the whole range PROT_NONE, then re-commit the top
+     * MARCH_STACK_INITIAL window — mirrors stack_alloc_lazy's fresh-mmap
+     * layout exactly, so nothing downstream can tell a recycled stack from
+     * a new one. */
+    if (mprotect(mem, total, PROT_NONE) != 0
+            || mprotect((char *)mem + MARCH_STACK_MAX, MARCH_STACK_INITIAL,
+                        PROT_READ | PROT_WRITE) != 0) {
+        munmap(mem, total);
+        return NULL;                      /* fall back to a fresh mmap */
+    }
+#ifdef MADV_FREE
+    /* Advise the kernel it may reclaim the physical pages backing the
+     * previous occupant's (now PROT_NONE) stack body immediately, rather
+     * than waiting for memory pressure — the whole point of recycling is
+     * to keep resident memory bounded under churn, not just VMA count. */
+    madvise((char *)mem + page, MARCH_STACK_MAX - page, MADV_FREE);
+#endif
+    *alloc_size    = total;
+    *mmap_base_out = mem;
+    return (char *)mem + MARCH_STACK_MAX;
+}
+
+/* Return a dead proc's stack reservation to the free-list for reuse by a
+ * future spawn. Never called under MARCH_ASAN_BUILD — see the call site. */
+static void stack_retire(void *mmap_base) {
+    stack_free_node *n = (stack_free_node *)malloc(sizeof *n);
+    if (!n) {
+        /* Can't record it on the free-list; don't leak the mapping either. */
+        munmap(mmap_base, MARCH_STACK_MAX + g_page_size);
+        return;
+    }
+    n->mmap_base = mmap_base;
+    pthread_mutex_lock(&g_stack_free_mu);
+    n->next = g_stack_free;
+    g_stack_free = n;
+    pthread_mutex_unlock(&g_stack_free_mu);
+}
+
 /* ── SIGSEGV handler for lazy stack growth ───────────────────────────── */
 
 /*
@@ -807,6 +904,15 @@ void march_sched_init(void) {
     g_proc_count = 0;
     g_timer_len = 0;   /* keep the heap allocation; the mutex is static */
 
+    /* g_stack_free (Task 12) is deliberately NOT reset here. Its entries are
+     * mmap reservations, which are process-wide OS state — a re-init (e.g.
+     * a C test harness calling march_sched_init() a second time in the same
+     * process, as test_scheduler_churn.c's reuse phase does) runs in the
+     * SAME address space, so a still-mapped reservation from before the
+     * re-init is exactly as valid and reusable as one retired moments ago.
+     * Clearing the list here would only turn already-reusable mappings back
+     * into leaks with no safety benefit. */
+
     g_num_scheds = MARCH_NUM_SCHEDULERS > 0 ? MARCH_NUM_SCHEDULERS : 1;
     /* Runtime override: MARCH_NUM_SCHEDULERS=N caps the number of OS scheduler
      * threads, clamped to [1, compile-time max].  Setting it to 1 serializes
@@ -858,8 +964,24 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
 
     /* Allocate the stack: reserve MARCH_STACK_MAX virtual memory, make only
      * the top MARCH_STACK_INITIAL bytes read/write initially.  The rest grows
-     * on demand via the SIGSEGV handler. */
-    p->stack_base = stack_alloc_lazy(&p->stack_alloc, &p->stack_mmap_base);
+     * on demand via the SIGSEGV handler.
+     *
+     * Prefer recycling a retired reservation from the free-list (Task 12) —
+     * under spawn-churn workloads this keeps live VMA/RSS bounded near the
+     * concurrency level instead of growing 1:1 with total-procs-ever-
+     * spawned. Not under MARCH_ASAN_BUILD: ASan's fake-stack machinery
+     * tracks per-fiber shadow state keyed by the stack's address range, and
+     * handing that same range to a new, unrelated fiber right after a prior
+     * one used it is exactly the kind of reuse ASan's fiber annotation
+     * assumes doesn't happen — so ASan builds always take the fresh-mmap
+     * path and keep leaking, same as before this task (the leak is
+     * bounded and diagnostic builds are not the workload this fixes). */
+    p->stack_base = NULL;
+#ifndef MARCH_ASAN_BUILD
+    p->stack_base = stack_reuse(&p->stack_alloc, &p->stack_mmap_base);
+#endif
+    if (!p->stack_base)
+        p->stack_base = stack_alloc_lazy(&p->stack_alloc, &p->stack_mmap_base);
     if (!p->stack_base) {
         fputs("march_sched: failed to allocate process stack\n", stderr);
         free(p);
@@ -1166,6 +1288,32 @@ static void sched_loop(march_scheduler *sched) {
                 dead_w = dead_next;
             }
             mbox_lock_release(p);
+            /* Recycle the STACK reservation (Task 12) — the proc STRUCT
+             * itself still leaks; see the "Deliberately NOT munmap ...
+             * / free(p)" comment immediately below for why that part is
+             * unchanged (Task 2's timers and cross-thread actor-meta
+             * readers depend on `p` staying valid forever). The stack
+             * mapping has no such reader: see the safety argument on the
+             * stack free-list definitions above (stack_reuse/stack_retire)
+             * for the full case that nothing can touch a dead proc's stack
+             * after this point. Not under MARCH_ASAN_BUILD — see the
+             * comment at the stack_reuse call site in sched_spawn_common.
+             *
+             * After this point p->stack_mmap_base is NULL (so the
+             * MARCH_DEBUG fatal walker, which reads it with no lock, skips
+             * this proc) and p's ucontext/stack_base are stale/garbage;
+             * both are fine because a DEAD proc is never dispatched or
+             * grown again. */
+#ifndef MARCH_ASAN_BUILD
+            if (p->stack_mmap_base) {
+                stack_retire(p->stack_mmap_base);
+                p->stack_mmap_base = NULL;
+                p->stack_base      = NULL;
+                atomic_fetch_add_explicit(
+                    &march_stat_counters[MARCH_STAT_STACKS_RECYCLED], 1,
+                    memory_order_relaxed);
+            }
+#endif
             /* Deliberately NOT munmap(p->stack_mmap_base, ...) / free(p) here.
              *
              * march_actor_meta.green_thread (march_runtime.c) holds a

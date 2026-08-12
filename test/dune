@@ -159,6 +159,26 @@
  (deps    (file test_scheduler_mbox_runner))
  (action  (run ./test_scheduler_mbox_runner)))
 
+; ── C scheduler stack-recycling / churn test (Task 12) ───────────────────
+; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer/mbox
+; rules above: churns 3000+100 procs through spawn->run->death and asserts
+; via march_stat_counters[MARCH_STAT_STACKS_RECYCLED] that dead stacks are
+; recycled instead of leaked.
+(rule
+ (targets test_scheduler_churn_runner)
+ (deps    test_scheduler_churn.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_churn.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_churn_runner))
+ (action  (run ./test_scheduler_churn_runner)))
+
 ; ── HCR versioned dispatch table unit test ───────────────────────────────
 (rule
  (targets test_dispatch_runner)
