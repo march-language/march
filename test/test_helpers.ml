@@ -810,13 +810,67 @@ let march_project_root () =
 
 (** Run a shell command, returning (exit_code, combined_stdout_stderr).
     Used to capture the March compiler's own diagnostic output so a real
-    compile failure can be reported with the actual error, not swallowed. *)
+    compile failure can be reported with the actual error, not swallowed.
+
+    CORRECTION (superseding the previous version of this comment): the
+    previous comment here claimed rc=255 could never be evidence of a signal
+    kill, reasoning about what a shell's own exit status would be after a
+    signal death. That reasoning does not describe what this function
+    actually observed: it used [Sys.command], whose OCaml runtime does its
+    own [wait]/[waitpid] on the child and collapses EVERY signal death
+    (SIGKILL, SIGSEGV, SIGABRT, anything) to the single value 255, with the
+    real signal number discarded entirely (verified empirically:
+    [Sys.command "kill -9 $$"] and [Sys.command "kill -11 $$"] both return
+    255). So a real CI failure — `march --compile` reporting rc=255 with
+    completely empty captured output — was, contrary to the old comment,
+    fully consistent with "the compiler was killed by a signal", and there
+    was no way to tell SIGKILL (OOM killer / external kill — a resource
+    problem) from SIGSEGV (a genuine crash) apart. Losing that distinction
+    cost a full debugging cycle.
+
+    Fix: use [Unix.system], which returns a [Unix.process_status] that keeps
+    exited vs. signaled vs. stopped distinct, and a signal death is now
+    reported in the returned output (appended, clearly marked) rather than
+    silently thrown away. The [int] half of the return value still reports
+    255 for a signal death (preserving the historical value so any existing
+    rc=255 comparisons keep working) — the actual signal number lives only
+    in the appended output line, so read it there, not from the int. *)
 let run_capture cmd =
   let tmp = Filename.temp_file "march_test_capture" ".txt" in
-  let rc = Sys.command (Printf.sprintf "( %s ) >%s 2>&1" cmd (Filename.quote tmp)) in
+  let status =
+    Unix.system (Printf.sprintf "( %s ) >%s 2>&1" cmd (Filename.quote tmp))
+  in
   let output = read_file_contents tmp in
   (try Sys.remove tmp with Sys_error _ -> ());
-  (rc, output)
+  (* [n] here is OCaml's own PORTABLE signal encoding (see [Sys.sigkill] etc.
+     in the stdlib), NOT the raw OS signal number — verified empirically:
+     on this machine [Sys.sigkill = -7], [Sys.sigsegv = -10],
+     [Sys.sigabrt = -1], not 9/11/6. Match against the [Sys.sig*] constants
+     rather than hardcoding 9/11/6, but still report the familiar OS number
+     in the message since that's what a reader recognizes. *)
+  let describe_signal n =
+    if n = Sys.sigkill then "SIGKILL (OS signal 9) — OOM killer or an external kill; a resource problem"
+    else if n = Sys.sigsegv then "SIGSEGV (OS signal 11) — a genuine crash inside the process"
+    else if n = Sys.sigabrt then "SIGABRT (OS signal 6)"
+    else Printf.sprintf "OCaml signal code %d (see Sys.sig* for the mapping)" n
+  in
+  match status with
+  | Unix.WEXITED rc -> (rc, output)
+  | Unix.WSIGNALED n ->
+    let note =
+      Printf.sprintf
+        "\n[run_capture] *** PROCESS KILLED BY SIGNAL *** %s\n\
+         (Sys.command/`sh -c` would have collapsed this to a bare rc=255 \
+         with the signal number discarded — see the comment above \
+         run_capture in test/test_helpers.ml)\n"
+        (describe_signal n)
+    in
+    (255, output ^ note)
+  | Unix.WSTOPPED n ->
+    let note =
+      Printf.sprintf "\n[run_capture] *** PROCESS STOPPED BY SIGNAL %d ***\n" n
+    in
+    (255, output ^ note)
 
 (** Like [compile_march] but never calls [Alcotest.fail]/[Alcotest.skip]
     itself — returns the raw outcome so a caller can inspect a real
@@ -837,7 +891,7 @@ let compile_march_raw ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src 
     record_jit_skip (Printf.sprintf "no clang on PATH (compiling %s)" src);
     `Skipped
   end else
-    `Failed (rc, output)
+    `Failed (rc, output, cmd)
 
 (** Compile [src] with `main_exe --compile [extra_args] -o bin src`
     (optionally prefixed with extra env/cd via [cmd_prefix]; [extra_args]
@@ -851,11 +905,38 @@ let compile_march ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
   match compile_march_raw ~cmd_prefix ~extra_args ~main_exe ~bin ~src () with
   | `Ok bin -> `Ok bin
   | `Skipped -> `Skipped
-  | `Failed (rc, output) ->
-    Alcotest.failf
-      "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
-       PATH, so this is a real compiler failure, not an environment gap):\n%s"
-      rc src output
+  | `Failed (rc, output, cmd) ->
+    if output <> "" then
+      Alcotest.failf
+        "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
+         PATH, so this is a real compiler failure, not an environment gap):\n%s"
+        rc src output
+    else
+      (* Empty captured output despite redirecting both stdout and stderr
+         means the failing stage died before writing anything we could
+         catch (or its output never reached the redirected fd at all) — the
+         plain rc/src message above tells us nothing in that case, so dump
+         everything needed to reproduce by hand: the exact command line,
+         the full source of the (small, generated) program that failed to
+         compile, and the MARCH_TRMC value this test process actually saw,
+         since that's the variable under suspicion for the nondeterministic
+         ubuntu-24.04 rc=255/empty-output failure this is meant to debug. *)
+      let src_contents =
+        try read_file_contents src
+        with Sys_error e -> Printf.sprintf "<could not read %s: %s>" src e
+      in
+      Alcotest.failf
+        "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
+         PATH, so this is a real compiler failure, not an environment gap):\n\
+         <empty captured output>\n\
+         command: %s\n\
+         MARCH_TRMC=%s\n\
+         --- source (%s) ---\n\
+         %s\n\
+         --- end source ---"
+        rc src cmd
+        (match Sys.getenv_opt "MARCH_TRMC" with Some v -> v | None -> "<unset>")
+        src src_contents
 
 (** Like [compile_march], but calls [Alcotest.fail] directly instead of
     returning a variant — for the common case where the caller has no
