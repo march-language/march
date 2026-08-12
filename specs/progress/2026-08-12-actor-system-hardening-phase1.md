@@ -127,7 +127,8 @@ through Tasks 14-16 and this close-out task's fixture fix.
 - **Task 16 — supervisor backoff.** Exponential backoff with jitter on
   repeat crashes of the same child slot: first crash restarts immediately
   (unchanged from pre-plan behavior); a streak > 1 delays
-  `min(5000, 25 << min(streak-1, 7))` ms ± 25% jitter, running on a
+  `25 << min(streak-1, 7)` ms (50, 100, ... capped at 3200ms pre-jitter —
+  the shift saturates at 7) ± 25% jitter (observed max ~4000ms), running on a
   dedicated green thread. Three review rounds fixed 2 Critical bugs
   (`g_supervise_mu` self-deadlock via `do_actor_death` re-entry; a mutex
   held across `swapcontext`) and 2 Important bugs (a ghost-timer blocking

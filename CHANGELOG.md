@@ -44,7 +44,9 @@ git log is authoritative for exact commits.
   a supervised child that crashes repeatedly no longer gets respawned
   immediately every time: from the second consecutive crash of the same
   child slot onward, the restart is delayed by
-  `min(5000, 25 << min(streak-1, 7))` ms `±25%` jitter (streak resets once
+  `25 << min(streak-1, 7)` ms — 50, 100, 200, ... capped at 3200ms
+  pre-jitter (the shift saturates at 7) — `±25%` jitter on top (observed
+  max ~4000ms) (streak resets once
   the child survives a full `supervisor_window_secs` window), running on a
   dedicated green thread so the crashing actor's own scheduler thread is
   never blocked. The first crash of a slot still restarts synchronously
