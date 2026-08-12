@@ -16,7 +16,11 @@ straight to LLVM's auto-vectorizer, so they run as real SIMD instructions
 
 This page covers what actually vectorizes today, how to write code that
 triggers it, and the known gaps — this is a fast path you opt into for
-numeric hot loops, not the default representation for numeric data.
+numeric hot loops, not the default representation for numeric data. It also
+covers the explicit `Simd` module (five 128-bit vector types you construct
+and operate on directly, see [below](#explicit-simd--the-simd-module)) —
+guaranteed vector codegen rather than a `NativeArray` loop the optimizer may
+or may not vectorize.
 
 ```march
 let arr = NativeArray.make_float(1_000_000, 0.0)
@@ -167,6 +171,197 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
   version. Nothing above changes program *behavior*; a callback that doesn't
   qualify for inlining, or a loop clang declines to vectorize, still produces
   identical results, just via a scalar loop.
+
+## Explicit SIMD — the `Simd` module
+
+Everything above is the compiler deciding whether a `NativeArray` loop
+qualifies for auto-vectorization — you write plain scalar code and it may or
+may not compile to a vector instruction, depending on the callback shape and
+what `clang -O2` chooses to do. `Simd` is the opposite trade: a fixed set of
+128-bit vector types you construct and operate on explicitly, so the vector
+lowering is **guaranteed**, not opportunistic.
+
+### Types and operations
+
+Five vector types, each holding a fixed number of lanes in a 128-bit value:
+
+| Type     | Lanes | Element      |
+|----------|-------|--------------|
+| `F32x4`  | 4     | `Float` (binary32, stored widened) |
+| `F64x2`  | 2     | `Float` (binary64) |
+| `I32x4`  | 4     | `Int` (32-bit, wraps mod 2^32) |
+| `I64x2`  | 2     | `Int` (64-bit, wraps mod 2^64) |
+| `U8x16`  | 16    | `Int` (0..255, zero-extended) |
+
+Each type gets the same op families, named `Simd.<op>_<type>`, e.g.
+`Simd.add_f32x4`, `Simd.load_u8x16`, `Simd.hmax_i32x4`:
+
+- **Construction/access:** `splat`, `make` (one arg per lane), `extract`,
+  `replace`, `load` (from a matching `NativeArray`), `store`.
+- **Compare/bitwise/select:** `eq`, `lt`, `gt` (mask results — all-ones lane
+  where true, zero otherwise), `and`, `or`, `xor`, `not`, `select`
+  (mask-driven per-lane choice between two vectors), plus mask-consuming
+  scans: `any`, `all`, `first_set`. All four mask consumers read a lane's
+  **high bit** (its sign bit): in `select`, a lane whose high bit is set
+  picks `a`, otherwise `b`. The canonical all-ones/all-zero lanes that
+  `eq`/`lt`/`gt` produce read identically under any convention; the high-bit
+  rule is what a hand-rolled non-canonical mask (say a lane of `0xFFFFFFFE`)
+  follows, and it is the same rule interpreted and compiled.
+- **Arithmetic:** `add`, `sub`, `mul`, `min`, `max`, `sum` (horizontal,
+  accumulated sequentially — float families in double, int families in
+  `i64`), `hmin`, `hmax`; float families additionally get `div`, `fma`
+  (true fused multiply-add, one rounding — can differ from a separate
+  multiply-then-add in the last ulp) and `sqrt`; integer families
+  additionally get `shl`/`shr`.
+
+That is 127 operations total across the five types. Lane get/set indices
+(`extract`, `replace`, `load`/`store` offsets) are refinement-typed to the
+type's lane count, so an out-of-range literal index is a compile-time
+refinement-check failure rather than a runtime panic. An index the
+refinement checker cannot decide is *not* rejected (March reports only
+definite failures), so every such index is bounds-checked at run time and
+panics out of range — `load`/`store` against the array length, `extract`/
+`replace` against the lane count. A statically in-range literal lane index
+skips the check and compiles to a bare `extractelement`/`insertelement`.
+Each type implements `Show`, `Eq`, and `Hash`.
+
+**Boundary rule**, matching `NativeArray`'s narrow-width contract: lane
+get/set traffics in widened `Int`/`Float`; integer narrowing on store wraps
+mod 2^w two's-complement; `f32` narrowing rounds to nearest-even; `u8` loads
+zero-extend, `i32` loads sign-extend. `min`/`max`/`hmin`/`hmax` on floats use
+minNum/maxNum semantics (a NaN operand loses to the other; both-NaN is NaN).
+None of this ever traps on out-of-range *values* — only out-of-range
+**indices** panic. Lane 0 is the first `make_*` argument / the
+lowest-addressed element on `load`.
+
+```march
+let a = Simd.load_f32x4(arr, 0)
+let b = Simd.splat_f32x4(2.0)
+let doubled = Simd.mul_f32x4(a, b)
+let total = Simd.sum_f32x4(doubled)
+```
+
+### The register-residency contract
+
+`--compile` lowers every `Simd` op — including `load`/`store` — to native
+LLVM vector instructions/intrinsics (`<4 x float>`, `llvm.fma.v4f32`, etc.),
+not a scalar loop standing in for one. A vector value is **register-resident**
+inside a function body and boxed into a 32-byte runtime cell only at the
+boundaries where it has to cross one: a call, a return, or a store into an
+aggregate field. Two shapes are guaranteed allocation-free (confirmed via
+`--emit-llvm`, pinned by fixtures):
+
+1. A **straight-line kernel** — construct, operate, consume, all within one
+   function body with no intervening call that takes the vector as an
+   argument.
+2. A **self-tail-recursive accumulator loop** — the natural shape for a
+   dot-product-style horizontal reduction, where the vector is threaded as
+   the function's own parameter across each recursive call. The accumulator
+   stays in a vector register across iterations; the loop body allocates
+   nothing.
+
+`store_*` follows `NativeArray`'s FBIP contract: an in-place update when the
+array isn't shared, a copy-on-write when it is.
+
+### The honest performance story
+
+Guaranteed vector codegen is not automatically a performance win over the
+implicit path above — it depends on the shape of the computation:
+
+| Kernel (N=5M `f32` / 16MB `u8`)                      | Result |
+|-------------------------------------------------------|--------|
+| `u8` delimiter scan: `Simd` vs. scalar March loop      | **~11.5x** faster |
+| Dot product loop framework, held constant: `Simd` vs. scalar March index loop (same elementwise/reduce shape, no library calls either side) | **4.0x** faster |
+| Dot product: hand-written `Simd` accumulator loop vs. `NativeArray.map2_f32` + `sum_f32` composition | `Simd` loop **~3.9x slower** (10.0 ms vs. 2.55 ms) |
+
+The scanner and the loop-framework comparison are `Simd` doing exactly what
+it is for — cross-lane, register-resident vector work beating a scalar loop
+by close to the lane-count ratio. The third row looks like a regression but
+isn't one: it is not a SIMD cost at all. `NativeArray.map2_f32`/`sum_f32`
+each compile to a single call into a tight C runtime loop; a hand-written
+March index loop — `Simd`-accumulated or not — pays per-iteration overhead
+that has nothing to do with vectors (a preemption check, a stack
+save/restore, RC bookkeeping on locals, an unhoisted length call). That
+overhead is tracked as its own item, general to every hand-written
+`NativeArray` index loop:
+`specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`.
+
+**Recommendation:** for a simple elementwise-then-reduce pipeline (map,
+then sum; map2, then reduce), reach for `NativeArray.map`/`map2`/`sum`
+first — they already compile to the tight C loop and currently beat a
+hand-rolled `Simd` loop doing the same computation. Reach for `Simd`
+directly when you need something `NativeArray`'s builtin ops don't express:
+cross-lane structure (masks, `select`, comparisons feeding a scan),
+fused multi-op kernels (e.g. `fma` in one instruction), or byte-level
+scanning, where `Simd` is a clear win.
+
+`DataFrame`'s `Min`/`Max` aggregation was evaluated against a `Simd`-based
+migration and deliberately **not** migrated: a probe measured a
+`Simd.min_i64x2`/`max_i64x2` accumulator loop at ~8.2x slower than the
+existing `native_int_arr_min`/`native_float_arr_min` C reduction, for the
+same index-loop-overhead reason above. Note the ceiling here is lower even
+once that overhead is fixed — `i64x2`/`f64x2` are only 2 lanes wide (vs. 4
+for the `f32x4`/`i32x4`/`u8x16` families used in the scanner/dot-product
+comparisons), so a Min/Max migration is a re-open condition on the index-
+loop-overhead fix, not a closed door. See `bench/RESULTS.md`'s
+`simd-kernels` section for full methodology and numbers.
+
+### Fixed 128-bit width
+
+`Simd` is fixed at 128 bits on every target, rather than a portable/
+scalable width that adapts to the host's widest vector unit (AVX2/AVX-512
+on some x86-64 hosts, SVE on some arm64 hosts). That was a deliberate
+choice, not an oversight: 128 bits is the width every target this compiles
+to actually has — NEON on arm64, SSE2 baseline on x86-64, and it aligns
+with WASM-SIMD's 128-bit vectors — so a `Simd` program has **identical
+semantics on every target**, interpreted or compiled, with no runtime
+feature detection and no "may run at a different width depending on the
+machine that built it" caveat. It also keeps interpreter/native parity
+testing tractable: one lane count per type, not a matrix over host vector
+widths. A portable/scalable width is a plausible future layer on top of
+this (e.g. a `Simd.wide_*` variant sized at compile time to the host), but
+it is additive — this fixed-128 module is not something a portable-width
+feature needs to replace.
+
+### Known limitations
+
+- **TCO-entry box leak:** a self-tail-recursive function's vector
+  accumulator leaks one 32-byte box per **call** (not per loop iteration —
+  the loop body itself, per the register-residency contract above, is
+  allocation-free). Bounded and harmless for a program that calls such a
+  kernel a handful of times; unbounded for a long-lived process calling one
+  per request or tick. See
+  `specs/todos/2026-08-11-simd-tco-entry-box-leak.md`.
+- **Mutual-recursion accumulators stay boxed.** The register-residency
+  optimization above covers self-tail-recursion only; a vector threaded
+  through a mutual-recursion group is still correct but boxes/unboxes on
+  every call, same as before the TCO optimization landed.
+- **`fma` is a true fused multiply-add** (`llvm.fma.v4f32`/`v2f64`, one
+  rounding) — it can differ from a separate multiply followed by an add in
+  the last ulp. For `f64x2` the interpreter runs the identical operation
+  (OCaml's `Float.fma`, binary64-fused). For `f32x4` it does *not*: the
+  interpreter computes a binary64 fused multiply-add and then rounds the
+  result to binary32 (a double rounding), while the compiled path is a
+  single binary32-fused rounding. These are formally different operations
+  and a last-ulp divergence is not ruled out; none has been observed over
+  the parity fixtures. Tracked in
+  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`.
+- **`i64x2` interpreter parity edge:** lane values beyond ±2^62 lose their
+  top bit under the interpreter only, because OCaml's native `int` is
+  63-bit. Compiled `i64x2` uses a true 64-bit lane and has no such limit.
+  Tests are confined to ±2^62 to avoid asserting on the divergent range.
+- **`==`/`show` under a polymorphic context fall back to generic runtime
+  helpers**, not the static `Eq`/`Show` impl. At a statically-known vector
+  type, `==` dispatches the type's `Eq` impl (lane-wise, NaN lanes unequal)
+  and `show` renders per-lane. Under an erased type variable (a generic
+  function that never specializes the vector type), both instead go
+  through the same pointer-identity/opaque-tag runtime helpers `NativeArray`
+  already has this caveat with — not specific to `Simd`.
+- **Not supported on the JavaScript target.** Fixed 128-bit SIMD has no JS
+  lowering; compiling any `Simd.*` call with `--target js` fails the build
+  with a diagnostic naming the builtin, rather than emitting a call that
+  throws `ReferenceError` at runtime. Use `NativeArray`'s `map`/`map2`/`sum`
+  for numeric hot loops on that target instead.
 
 ## See also
 

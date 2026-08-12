@@ -1381,6 +1381,13 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
          code to avoid full 63-bit values (e.g. stdlib Random uses a 32-bit\n\
          core for exactly this reason), or build a native/wasm target."
         name
+    | _ when String.length name >= 5 && String.sub name 0 5 = "simd_" ->
+      Printf.sprintf
+        "error: `%s` is a Simd vector builtin; the Simd module is not\n\
+         supported on the JavaScript target (fixed 128-bit SIMD has no JS\n\
+         lowering). Build a native/wasm target, or use NativeArray's\n\
+         map/map2/sum, which do compile on JS."
+        name
     | _ ->
       Printf.sprintf
         "error: builtin `%s` has no JavaScript-target implementation.\n\
