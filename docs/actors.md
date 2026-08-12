@@ -175,10 +175,12 @@ Use capabilities when you hold a reference across an actor restart boundary and 
 
 ## Request-Reply That Works Compiled
 
-Before reaching for the `Actor.call` convenience below — whose *return value* is
-interpreter-only today — know the pattern that works on **both** backends: pass a reply
-address and get the answer back as an ordinary message. It's built entirely from `send`,
-which behaves identically interpreted and compiled.
+`Actor.call` (below) now works correctly on both backends — its return value bug was
+fixed 2026-07-22. This lower-level pattern — pass a reply address and get the answer back
+as an ordinary message — is still worth knowing: it's built entirely from `send`, which
+behaves identically interpreted and compiled, and it's the right choice when a handler
+needs to reply to more than one caller or reply asynchronously outside the call/timeout
+protocol.
 
 The requester includes its own `Pid` (from `self()`) in the message; the handler replies
 with a plain `send` to that address:
@@ -192,17 +194,12 @@ end
 
 The caller — itself an actor, or the top-level process — handles the `Answer(...)` reply
 in its own `on` clause (this is the same reply-address idea as [`self()`](#actor-identity-self)).
-Prefer this whenever a compiled binary needs to see the result; reach for `Actor.call`
-only under the interpreter, where its return value is reliable.
+`Actor.call` (below) covers the common single-request/single-reply case on both backends;
+reach for this pattern instead when you need more flexibility than a one-shot call.
 
 ---
 
 ## Synchronous Request-Reply via `Actor.call`
-
-> **Interpreter-only convenience.** `Actor.call` is a nicer synchronous wrapper, but its
-> *return value* is unreliable when compiled (see the known-bug note at the end of this
-> section). For a compiled binary, use [Request-Reply That Works
-> Compiled](#request-reply-that-works-compiled) above instead.
 
 The `Actor` module provides a synchronous call pattern. You pass a **zero-arg
 sentinel constructor** as the call message; its tag selects which handler receives
@@ -238,7 +235,7 @@ fn main() do
 end
 ```
 
-This program prints `count = 1` under the interpreter. `Actor.call(pid, sentinel,
+This program prints `count = 1` on both backends. `Actor.call(pid, sentinel,
 timeout_ms)` reads the tag from the zero-arg `sentinel`, builds an augmented message
 (same tag, with the caller in field 0), and routes it to the handler at that tag.
 That handler receives the caller as its first argument and must call
@@ -256,12 +253,13 @@ Two consequences of the tag-selects-the-handler rule:
 There is no `Call` wrapper constructor, and the call handler takes exactly one argument
 (the reply channel).
 
-> **Known bug: `Actor.call` returns the wrong value when compiled.** The example above is
-> correct under the interpreter, but a compiled binary currently prints the wrong count —
-> the compiled return path hands back a raw tagged integer instead of untagging it first.
-> Timeouts themselves are enforced correctly on both backends. Until this is fixed, treat
-> `Actor.call`'s *return value* as interpreter-only and prefer `send` + a reply message if
-> you need a compiled binary to see the right answer.
+> **Timeout and correlation semantics (compiled).** `timeout_ms` is enforced via a
+> deadline-bounded park — the caller's green thread parks on the scheduler rather than
+> busy-polling, and wakes either on reply delivery or at the deadline. Every reply is
+> wrapped with the correlation id minted for that specific call; a reply that arrives
+> after its call has already timed out (or that belongs to some earlier call) is detected
+> by its stale correlation id and discarded instead of being handed back as the answer to
+> an unrelated later call. `timeout_ms <= 0` waits forever.
 
 `Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
 
@@ -509,6 +507,61 @@ Rules of thumb:
 
 ---
 
+## Mailbox Limits and Backpressure
+
+By default an actor's mailbox is unbounded — a producer that outruns its consumer grows
+the mailbox without limit. `Actor.set_queue_limit(pid, limit, policy)` bounds it:
+
+```march
+Actor.set_queue_limit(pid, 1000, 3)   -- cap at 1000, block_sender policy
+```
+
+`policy` is one of:
+
+| Value | Policy | Behavior when the mailbox is full |
+|-------|--------|------------------------------------|
+| `0` | unbounded (default) | never rejects |
+| `1` | `drop_new` | the incoming message is discarded |
+| `2` | `drop_old` | the oldest queued message is evicted to make room |
+| `3` | `block_sender` | the sender parks until space frees up (compiled backend only) |
+
+Dropped messages (policies `1`/`2`) are counted in `Scheduler.dropped_messages()`. The
+interpreter's single-threaded eager scheduler cannot park a sender without deadlocking, so
+it treats policy `3` the same as `0` (unbounded).
+
+Under a drop policy, a dropped `Actor.call` request or its reply is indistinguishable from
+a lost reply at the caller — both surface as a timeout `Err` from `Actor.call`. Callers
+that rely on `Actor.call` against a bounded actor should prefer the `block_sender` policy
+(`3`) instead, so no request or reply is ever silently discarded.
+
+---
+
+## Scheduler Observability
+
+The `Scheduler` module exposes runtime counters for load-shedding decisions — a
+supervisor or ingress actor can poll them to decide when to shed:
+
+```march
+if Scheduler.live_procs() > 10000 do
+  println("shedding: too many live actors")
+else
+  dispatch_work()
+end
+```
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `Scheduler.live_procs()` | `Int` | Green-thread processes currently alive (actors + tasks + main) |
+| `Scheduler.total_spawned()` | `Int` | Processes ever spawned over the program lifetime |
+| `Scheduler.runq_depth()` | `Int` | Cross-thread global run-queue depth (instantaneous) |
+| `Scheduler.dropped_messages()` | `Int` | Messages dropped by bounded-mailbox overflow policies |
+| `Scheduler.stat(i)` | `Int` | Raw stat by index (`0`=live procs, `1`=total spawned, `2`=runq depth, `3`=stack-alloc failures, `4`=dropped messages, `5`=stacks recycled, `6`=pending timers; unknown index reads `0`) |
+
+The interpreted backend reports the subset that's meaningful without the C scheduler
+(live actor count); everything else reads `0` on both backends rather than erroring.
+
+---
+
 ## Builtins Reference
 
 Backends: **both** = works the same interpreted and compiled; **interpreter-only** = correct
@@ -529,6 +582,7 @@ under the interpreter, but broken or unreliable compiled today.
 | `get_actor_field(pid, name)` | `→ Option(a)` | interpreter-only | Read an actor's state field from outside — crashes compiled |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
+| `Actor.set_queue_limit(pid, limit, policy)` | `→ ()` | both (policy `3` is compiled-only; interpreted treats it as unbounded) | Bound an actor's mailbox — see [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure) |
 
 ---
 
