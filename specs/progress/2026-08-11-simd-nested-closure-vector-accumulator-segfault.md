@@ -112,3 +112,100 @@ convention it already uses correctly. Add a `test/native/simd_residency.march`
 (or a new fixture) case: a locally-defined recursive `fn` threading a vector
 accumulator, asserted both for correctness (compiled output matches
 interpreted) and, once fixed, for the box-count residency contract.
+
+---
+
+## RESOLVED 2026-08-11 (Task 4b)
+
+Both the segfault and the per-iteration boxing it was filed alongside are
+fixed. Commit: `fix(simd): vector params across closure kickoff/self-call ABI
++ native TCO accumulator slots`.
+
+### The segfault (this file's subject)
+
+The hypothesis above was **confirmed verbatim against the IR** — the direct
+kickoff call emitted
+`call ptr @go$apply$3552(ptr %ld123, ptr %cv127, <4 x float> %ld124)` against a
+definition taking `ptr %acc.arg`.
+
+The mechanism, though, is narrower and more boring than "residency lowering
+treats the first call as residency-eligible". Nothing SIMD-aware was involved
+at all. `llvm_emit.ml`'s **Boundary B** — the direct-call-to-an-apply-fn arm
+that `known_call` produces when it rewrites a non-escaping `ECallPtr` into
+`EApp(go$apply$N, ...)` — remaps arguments to the uniform ptr closure ABI with
+this test:
+
+```ocaml
+if ty = "i64" || ty = "double" then coerce ctx ty v "ptr" ...
+```
+
+That is a hard-coded list of the two *then-known* non-ptr representations,
+applied to the argument's **actual emitted LLVM type**. A `<4 x float>` is
+neither, so it fell through the `else` branch and was passed verbatim. The
+sibling **indirect** path (the closure-struct dispatch arm) does not have this
+bug because it derives its argument types from the callee's **declared**
+parameter types (all `ptr` — `llvm_ty` maps the SIMD `TCon`s to `ptr` by
+design), so it boxed correctly. Two paths, two different sources of truth for
+the same ABI.
+
+Fix: add `|| is_vec_ty ty` to the Boundary B test, so a vector argument boxes
+through `march_simd_alloc` exactly as a Float boxes through
+`march_alloc_float`. One uniform ptr ABI, both call sites, no exceptions. Task
+3's register-residency work is untouched — it was never implicated.
+
+Verified: the repro compiles and prints `dot_simd=72.` at `--opt 0`, `1` and
+`2`, matching the interpreter.
+
+### The per-iteration boxing (the sibling defect)
+
+The same file's benchmark half — a *top-level* self-tail-recursive helper
+threading a vector accumulator — was boxing on every iteration. Root cause was
+independent of the above: `Llvm_toplevel.emit_fn` types every parameter alloca
+with `llvm_ty`, which is `ptr` for these types, so the TCO **back-edge**'s
+coerce-to-param-type re-boxed the accumulator each time round the loop (and,
+per the IR, nothing `dec_rc`s the slot's previous box, so the boxes
+accumulated rather than being reused).
+
+Fix: when a function `is_tco`, a parameter whose TIR type is one of the five
+SIMD vector `TCon`s gets a **native `<N x T>` alloca** instead. The entry
+prologue unboxes the (still boxed, still `ptr`) incoming argument once per
+call; the back-edge's coerce is then an identity and the accumulator stays in
+a vector register. The function **signature is deliberately unchanged**, so
+every non-back-edge caller is unaffected — this is a loop-local
+representation choice, not a new cross-call vector ABI.
+
+Measured on `bench/simd_kernels.march` (5M f32 dot product): `dot_simd`
+29.22 ms → **10.01 ms**, a 2.9x improvement, and the loop body's
+`march_simd_alloc` count went 1-per-iteration → **0**.
+
+### Test coverage added
+
+`test/native/simd_nested_closure_acc.march` (+ `.expected` + two `test/dune`
+rules) covers both shapes in one fixture — exactly the gap this file
+identified in `simd_residency.march`:
+- `nested_dot` (the nested-closure shape): compiled output diffed against
+  interpreter output.
+- `simd_acc_go` (the self-TCO shape): an `--emit-llvm` grep asserting the
+  accumulator slot is native. The contract is a conjunction
+  (`vstore >= 2 && alloc == 1 && fma >= 1`) because the allocation count alone
+  is *not* falsifiable here — it was 1 before the fix (the per-iteration box)
+  and is 1 after (the return-path box). The `store <4 x float> ... %acc.addr`
+  count is what actually discriminates: 0 before, 2 after.
+
+### Not fixed, and deliberately so
+
+`dot_simd` still does **not** beat `dot_composed` (10.01 ms vs 2.55 ms), so the
+Task 4 validation bar remains unmet. That is now a *different* problem, and it
+is not about vectors: a hand-written March index loop emits, per iteration, a
+volatile preemption load, `llvm.stacksave`/`stackrestore`, two
+`march_incrc_local` calls and two `native_f32_arr_length` bounds-check calls,
+plus body allocas outside the entry block that `mem2reg` cannot promote —
+while `dot_composed` is a single call into a tight C runtime loop. An
+attribution probe holding the loop framework constant measured the SIMD loop
+at **4.0x faster than the equivalent scalar March index loop** (9.89 ms vs
+39.95 ms), which is the SIMD lowering doing its job; the residual gap is
+March-loop overhead. Filed as
+`specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`.
+
+Mutual-TCO groups (`Llvm_tco.emit_mutual_tco_group`) still use `ptr` slots for
+vector params — correct, just not accelerated. Only self-TCO was in scope.

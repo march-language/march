@@ -28,16 +28,10 @@ git log is authoritative for exact commits.
   with an FBIP copy-on-write store matching `NativeArray`'s in-place-vs-copy
   contract) — to native LLVM vector instructions/intrinsics,
   register-resident inside a function body (boxed into a 32-byte runtime
-  cell only at call/return/aggregate-field boundaries). Known limitation:
-  threading a vector value as the accumulator of a recursive/self-tail-
-  called loop (the natural shape for a dot-product-style horizontal
-  reduction) still boxes on every iteration when compiled, and a locally-
-  nested `fn` doing the same segfaults outright — see
-  `specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`
-  and the `simd-kernels` section of `bench/RESULTS.md` for the repro,
-  root cause, and measured cost. Straight-line load/op/store chains and
-  index-only recursive loops (no vector-typed loop parameter) are
-  unaffected and register-resident as designed.
+  cell only at call/return/aggregate-field boundaries). Threading a vector
+  value as the accumulator of a self-tail-recursive loop — the natural shape
+  for a dot-product-style horizontal reduction — keeps the accumulator in a
+  vector register across iterations, so the loop body allocates nothing.
 - **`NativeArray` gained narrow element widths: f32, i32, u8** — both
   interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
   `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,
@@ -77,6 +71,27 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Simd`: a locally-nested recursive `fn` taking a vector parameter no
+  longer segfaults when compiled.** The natural March idiom for a SIMD
+  accumulator loop — a `fn` defined inside another function, capturing its
+  arrays and threading the vector accumulator as its own parameter —
+  compiled to a program that crashed with exit 139 at every `--opt` level
+  while the interpreter produced the right answer. The closure's two call
+  sites disagreed about the vector parameter: the indirect self-call boxed
+  it (the uniform pointer closure ABI) while the direct call that kicks the
+  loop off passed the raw vector register, so the callee dereferenced a
+  register value as a heap pointer. Both call sites now box, as `Float`
+  parameters already did.
+- **`Simd`: a self-tail-recursive loop no longer heap-allocates on every
+  iteration to carry a vector accumulator.** A vector-typed parameter of a
+  self-tail-recursive function now lives in a vector register across
+  iterations instead of being boxed and immediately unboxed each time round
+  the loop (which also accumulated one 32-byte cell per iteration). A 5M-
+  element `f32` dot product went from 29.2 ms to 10.0 ms, and its loop body
+  now contains zero allocations. Note this does **not** yet make an explicit
+  `Simd` dot product beat the `map2_f32`+`sum_f32` composition — the
+  remaining gap is general per-iteration overhead in hand-written March
+  index loops, tracked in `specs/todos/`.
 - **JS backend: `==`/`!=` on a non-primitive operand now compares
   structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
   (or an erased type variable that may hold one) lowered to JavaScript `===`,

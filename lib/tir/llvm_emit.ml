@@ -3343,13 +3343,37 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* Boundary B: a direct call to an apply fn (known_call rewrote a
        non-escaping ECallPtr into EApp(apply_fn, ...)) must pass every scalar
        arg through the uniform ptr closure ABI — tag Int/Bool via (n<<1)|1,
-       box Float via march_alloc_float — because the apply fn's params are now
-       `ptr` (Task 4).  Ordinary top-level direct calls keep their concrete
-       ABI, so guard the remap on is_apply_fn. *)
+       box Float via march_alloc_float, box a SIMD vector via march_simd_alloc
+       — because the apply fn's params are now `ptr` (Task 4).  Ordinary
+       top-level direct calls keep their concrete ABI, so guard the remap on
+       is_apply_fn.
+
+       The vector case (Task 4b) is the SAME defect the Float case documents,
+       one representation later.  A locally-defined recursive `fn` threading a
+       SIMD accumulator is reached by TWO call sites that must agree: this
+       direct kickoff call (known_call rewrote the first, non-escaping
+       ECallPtr into EApp(go$apply$N, ...)) and the closure's own indirect
+       self-call through the fn-pointer field.  The indirect path derives its
+       argument types from the callee's DECLARED params (all `ptr`) and so
+       boxes correctly; this direct path derives them from each argument's
+       ACTUAL emitted type, which for a vector-typed accumulator is the native
+       `<4 x float>` register value (the register-residency form).  Without
+       the remap the call read
+         call ptr @go$apply$N(ptr %clo, ptr %i, <4 x float> %acc)
+       against a definition taking `ptr %acc.arg`, so the callee dereferenced
+       a register vector as a box pointer: SEGFAULT at every --opt level
+       (specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-
+       segfault.md).  The uniform ptr ABI is not optional here — the same
+       compiled body serves both call sites — so vectors box at this boundary
+       exactly like Floats do.  Keeping a vector NATIVE across a call would
+       require a whole cross-call vector ABI; the fast path for the shape that
+       actually matters (a self-tail-recursive accumulator) is instead the
+       native TCO slot in [Llvm_toplevel.emit_fn], which never crosses a real
+       call at all. *)
     let arg_strs =
       if is_apply_fn resolved_name then
         List.map (fun (ty, v) ->
-          if ty = "i64" || ty = "double" then
+          if ty = "i64" || ty = "double" || is_vec_ty ty then
             let v' = coerce ctx ty v "ptr" in "ptr " ^ v'
           else ty ^ " " ^ v) arg_pairs
       else

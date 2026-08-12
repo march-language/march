@@ -34,16 +34,27 @@ mod SimdKernels do
 
   -- ── dot product ──────────────────────────────────────────────
   --
-  -- dot_loop is a TOP-LEVEL pfn, not a locally-nested `fn` closure, because
-  -- of a compiled-only codegen bug discovered while writing this bench: a
-  -- recursive fn nested inside another function, threading a Simd-vector
-  -- value as one of its own parameters, segfaults when compiled (correct
-  -- interpreted) -- the direct call that kicks off the loop and the
-  -- indirect self-recursive call inside the closure disagree on whether the
-  -- vector accumulator is boxed or register-resident. See
-  -- specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md
-  -- for the minimal repro and IR evidence. A top-level fn's self-calls are
-  -- direct calls only (no closure indirection), which sidesteps the bug.
+  -- dot_loop is a TOP-LEVEL pfn, not a locally-nested `fn` closure, and that
+  -- is now a PERFORMANCE choice rather than a correctness workaround.
+  --
+  -- It started as a workaround: a recursive fn nested inside another
+  -- function, threading a Simd-vector value as one of its own parameters,
+  -- used to segfault when compiled (correct interpreted) because the direct
+  -- call that kicks off the loop and the indirect self-recursive call inside
+  -- the closure disagreed on whether the vector accumulator was boxed or
+  -- register-resident. That is fixed -- both call sites now box, one uniform
+  -- closure ABI (see
+  -- specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md)
+  -- -- so the nested form compiles and runs correctly today.
+  --
+  -- The top-level form is kept because it is the FAST one: a top-level
+  -- self-TAIL-recursive fn is turned into a loop by llvm_tco, and its
+  -- vector-typed parameter gets a native <4 x float> slot, so the
+  -- accumulator stays in a register across iterations and the loop body
+  -- allocates nothing. The nested-closure form is correct but boxed: its
+  -- self-call is an indirect closure call, a real call boundary, so the
+  -- accumulator round-trips through march_simd_alloc every iteration.
+  -- test/native/simd_nested_closure_acc.march pins both shapes.
   pfn dot_loop(a, b, i : Int, limit : Int, acc) do
     if i >= limit do acc
     else

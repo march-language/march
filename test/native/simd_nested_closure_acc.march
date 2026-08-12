@@ -1,0 +1,74 @@
+-- SIMD vector values crossing march-internal CALL boundaries (Task 4b).
+-- Two shapes that both thread a vector ACCUMULATOR through a recursive
+-- function, one boxed-and-correct, one native-and-fast:
+--
+--   `nested_dot` -- the natural March idiom: a locally-defined recursive
+--   `fn go` capturing `a`/`b`/`n` and taking the accumulator as a
+--   parameter. defun lifts it to a `go$apply$N` closure wrapper reached by
+--   TWO call sites -- the direct kickoff call and the closure's own
+--   indirect self-call -- which MUST agree on one calling convention for
+--   the vector param. They did not: the indirect site boxed (the uniform
+--   ptr closure ABI) while the direct site passed the raw <4 x float>
+--   register, so the callee dereferenced a register vector as a box
+--   pointer and SEGFAULTED (exit 139) at every --opt level while the
+--   interpreter printed the right answer. Correctness fixture: compiled
+--   output must match the interpreter byte-for-byte.
+--
+--   `tco_dot` / `simd_acc_go` -- the same loop written as a top-level
+--   self-TAIL-recursive helper. Here the accumulator never crosses a real
+--   call at all (llvm_tco turns the self-call into a back-edge), so its
+--   parameter slot is a NATIVE vector alloca and the loop body allocates
+--   nothing. test/dune asserts that IR shape directly; before the fix the
+--   back-edge boxed through march_simd_alloc on every single iteration.
+--
+-- Both functions are recursive, so the inliner leaves `simd_acc_go` as its
+-- own `define` symbol for the residency grep to scope against.
+mod SimdNestedClosureAcc do
+  needs IO.Console
+
+  -- Nested-closure accumulator (defect A): correctness only. `go` captures
+  -- a, b and n; the vector accumulator crosses the closure ABI boxed.
+  fn nested_dot(a, b) : Float do
+    let n = NativeArray.length_f32(a)
+    fn go(i, acc) do
+      if i >= n do acc
+      else
+        let va = Simd.load_f32x4(a, i)
+        let vb = Simd.load_f32x4(b, i)
+        go(i + 4, Simd.fma_f32x4(va, vb, acc))
+      end
+    end
+    Simd.sum_f32x4(go(0, Simd.splat_f32x4(0.0)))
+  end
+
+  -- Top-level self-tail-recursive accumulator (defect B): the shape the
+  -- native TCO slot targets. Threads a, b and n explicitly so the self-call
+  -- is a true tail call to its own name.
+  pfn simd_acc_go(a, b, i : Int, n : Int, acc) do
+    if i >= n do acc
+    else
+      let va = Simd.load_f32x4(a, i)
+      let vb = Simd.load_f32x4(b, i)
+      simd_acc_go(a, b, i + 4, n, Simd.fma_f32x4(va, vb, acc))
+    end
+  end
+
+  fn tco_dot(a, b) : Float do
+    let n = NativeArray.length_f32(a)
+    Simd.sum_f32x4(simd_acc_go(a, b, 0, n, Simd.splat_f32x4(0.0)))
+  end
+
+  fn main() : () do
+    let a = NativeArray.from_list_f32([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+    let b = NativeArray.from_list_f32([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+    println("nested_dot=" ++ float_to_string(nested_dot(a, b)))
+    println("tco_dot=" ++ float_to_string(tco_dot(a, b)))
+    -- A longer run: exercises many back-edge iterations, so a back-edge
+    -- that regressed to per-iteration boxing would still be caught here as
+    -- a correctness/leak signal rather than only in the IR grep.
+    let big = NativeArray.from_list_f32(List.map(List.range(0, 64), fn i -> int_to_float(i)))
+    let ones = NativeArray.from_list_f32(List.map(List.range(0, 64), fn _ -> 1.0))
+    println("nested_big=" ++ float_to_string(nested_dot(big, ones)))
+    println("tco_big=" ++ float_to_string(tco_dot(big, ones)))
+  end
+end

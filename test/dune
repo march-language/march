@@ -4140,6 +4140,86 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/simd_bounds_panic.expected simd_bounds_panic.err)))
 
+; Task 4b: SIMD vector values crossing march-internal CALL boundaries.
+;
+; Correctness half (defect A): `nested_dot` is a locally-defined recursive
+; `fn` capturing its arrays and threading the vector accumulator as a
+; parameter. defun lifts it to a `go$apply$N` closure wrapper reached by two
+; call sites -- the direct kickoff call and the closure's own indirect
+; self-call -- which must agree on ONE convention for the vector param.
+; They did not: the indirect site boxed (uniform ptr closure ABI) while the
+; direct site passed the raw <4 x float> register, so the callee dereferenced
+; a register vector as a box pointer and segfaulted (exit 139) at every --opt
+; level while the interpreter printed the right answer. .expected is
+; interpreter-produced; compiled must match byte-for-byte.
+(rule
+ (targets simd_nested_closure_acc simd_nested_closure_acc.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_nested_closure_acc.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_nested_closure_acc
+        native/simd_nested_closure_acc.march)
+   (with-stdout-to simd_nested_closure_acc.out
+        (system "./simd_nested_closure_acc")))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/simd_nested_closure_acc.expected simd_nested_closure_acc.out)))
+
+; Residency half (defect B): `simd_acc_go` is the SAME loop as a top-level
+; self-TAIL-recursive helper, so llvm_tco turns its self-call into a
+; back-edge and the accumulator never crosses a real call. Its parameter
+; slot must therefore be a NATIVE `<4 x float>` alloca, not the default
+; "boxed at rest" ptr slot -- with a ptr slot the back-edge's coerce boxed
+; through march_simd_alloc on EVERY iteration (and leaked the previous box,
+; since nothing dec_rc's the slot), which is what made a Simd dot product
+; lose to the scalar composition it was meant to beat.
+;
+; `simd_acc_go` is recursive, so the inliner leaves it as its own `define`
+; symbol and the grep can be scoped to it (unlike simd_residency's kernel,
+; which is inlined into march_main and has to be checked there).
+;
+; The contract is a CONJUNCTION, because neither half is falsifiable alone:
+;   vstore >= 2 -- native `store <4 x float> ... %acc.addr`, one for the
+;     entry unbox and one for the back-edge. This is the load-bearing
+;     assertion: pre-fix the slot was `alloca ptr` so this count was 0.
+;   alloc == 1 -- exactly one march_simd_alloc in the whole function, the
+;     coercion that boxes the accumulator on the RETURN path (the one place
+;     it genuinely does cross a call boundary). Pre-fix this was also 1 (the
+;     per-iteration back-edge box), which is precisely why the alloc count
+;     alone cannot detect the regression and vstore must carry it; alloc==1
+;     is what stops a future change from ADDING boxes back on top.
+;   fma >= 1 -- the vector arithmetic is still there, so an optimizer that
+;     DCE'd the loop body could not vacuously satisfy the counts above.
+(rule
+ (targets simd_nested_closure_acc_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_nested_closure_acc.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/simd_nested_closure_acc.march)
+   (with-stdout-to simd_nested_closure_acc_llvm_check.out
+    (run bash -c
+     "body=$(awk '/^define .*@simd_acc_go\\(/{f=1} f{print} f && /^}/{exit}' native/simd_nested_closure_acc.ll); \
+      alloc=$(printf '%s\\n' \"$body\" | grep -c march_simd_alloc); \
+      vstore=$(printf '%s\\n' \"$body\" | grep -c 'store <4 x float>.*%acc.addr'); \
+      fma=$(printf '%s\\n' \"$body\" | grep -c 'fma\\.v4f32'); \
+      echo \"$alloc $vstore $fma\"")))))
+
+(rule
+ (alias runtest)
+ (deps simd_nested_closure_acc_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r alloc vstore fma < simd_nested_closure_acc_llvm_check.out; \
+    test \"$vstore\" -ge 2 -a \"$alloc\" -eq 1 -a \"$fma\" -ge 1 || { echo \"expected the self-TCO'd simd_acc_go to keep its vector accumulator in a NATIVE slot: >=2 'store <4 x float> ... %acc.addr' (entry unbox + back-edge; 0 means the slot regressed to 'alloca ptr' and the back-edge boxes every iteration), exactly 1 march_simd_alloc (the return-path coercion only), and >=1 fma.v4f32 (body not DCE'd) -- found alloc=$alloc vstore=$vstore fma=$fma\" >&2; exit 1; }")))
+
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
  (deps (file %{exe:../bin/main.exe})

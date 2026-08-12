@@ -337,10 +337,18 @@ so the comparisons below are treated as reliable despite non-idle load; they
 are same-run, same-process comparisons only, not compared against any
 historical baseline.
 
-| dot(5M f32), ms | Median | Min   | Max   |
-|-----------------|--------|-------|-------|
-| dot_simd        | 29.22  | 28.15 | 31.34 |
-| dot_composed    | 2.71   | 2.50  | 3.60  |
+**Refreshed 2026-08-11 after the Task 4b vector-ABI fix** (see "dot_simd fix
+note" below); the pre-fix `dot_simd` column is kept for comparison. Same
+methodology, 5 interleaved rounds; load state at the refresh: shared machine,
+one concurrent `run-tests.sh` from another worktree, `uptime` load averages
+~11.0/11.6/12.0 throughout (elevated, not idle, and comparable to the original
+run's ~11.7-14.7). Per-leg coefficient of variation stayed under 2%.
+
+| dot(5M f32), ms      | Median | Min   | Max   |
+|----------------------|--------|-------|-------|
+| dot_simd (post-fix)  | 10.01  | 9.96  | 10.13 |
+| dot_simd (pre-fix)   | 29.22  | 28.15 | 31.34 |
+| dot_composed         | 2.55   | 2.40  | 2.72  |
 
 | scan(16MB u8), ms | Median | Min    | Max    |
 |-------------------|--------|--------|--------|
@@ -354,34 +362,53 @@ plan expected, and `--emit-llvm` confirms `scan_simd`'s loop never touches
 recursive call — see root cause below — it's consumed immediately by
 `first_set_u8x16` within the same iteration).
 
-**dot_simd FAILS its "beats dot_composed" bar**: it is ~10.8x *slower*, not
-faster. Per the plan's own contingency ("if a bar fails: STOP, emit the
-kernel's LLVM, and report with the IR evidence — most likely cause: boxing
-in the loop"), `--emit-llvm` was captured and confirms exactly that
-diagnosis: `dot_loop`'s compiled body allocates a fresh `F32x4` box
-(`march_simd_alloc`) on **every one of the ~1.25M loop iterations** to pass
-the running accumulator into the next recursive call, even though `dot_loop`
-is a plain top-level `pfn`, not a closure. A parallel probe
-(`native_int_arr_min` vs. an equivalent `Simd.min_i64x2`-accumulator loop
-over a 5M-element `NativeIntArr`, same shape) measured the `Simd` version at
-**~35x slower** than the existing tight C reduction loop for exactly this
-reason — this is why `stdlib/dataframe.march`'s Min/Max aggregation was
-**not** migrated to a `Simd` fast path (see below).
+**dot_simd fix note (2026-08-11, Task 4b).** The original run had `dot_simd`
+at ~10.8x *slower* than `dot_composed`. Per the plan's contingency ("if a bar
+fails: STOP, emit the kernel's LLVM, and report with the IR evidence — most
+likely cause: boxing in the loop"), `--emit-llvm` confirmed exactly that:
+`dot_loop`'s body allocated a fresh `F32x4` box (`march_simd_alloc`) on every
+one of the ~1.25M iterations to pass the accumulator into the next call, even
+though `dot_loop` is a plain top-level `pfn`. It was a slot-typing bug, not a
+closure bug: `Llvm_toplevel.emit_fn` types every parameter alloca with
+`llvm_ty`, which is `ptr` for the SIMD types, so the TCO **back-edge**'s
+coerce-to-param-type re-boxed the accumulator each time round the loop. (The
+IR also shows nothing `dec_rc`ing the slot's previous box, so those boxes
+accumulated.)
 
-Root cause and a second, more severe finding (a segfault, not just a
-slowdown, for the same accumulator-loop shape when it's a *locally-nested*
-closure rather than a top-level function) are filed at
-`specs/todos/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`
-with a minimal repro and the full `--emit-llvm` IR evidence — both point at
-the same gap: Task 3's residency work covers straight-line load/op/store
-chains and a single-escape allocation count
-(`test/native/simd_residency.march`), but never a vector value threaded as
-the accumulator of a recursive/self-tail-called loop, which is exactly the
-shape a dot-product or any horizontal-reduction kernel needs. `bench/simd_kernels.march`'s
-`dot_simd` keeps the plan's intended algorithm (index loop by 4, `fma`
-accumulate into an `F32x4`, final `sum_f32x4` + scalar tail) so the
-regression stays visible for whoever picks up that follow-on work, rather
-than being designed away.
+That is fixed — a self-tail-recursive function's vector-typed parameter now
+gets a native `<N x T>` TCO slot, unboxed once in the entry prologue, with the
+function's signature left `ptr` so no caller is affected. The loop body's
+`march_simd_alloc` count is now **0** and `dot_simd` went **29.22 ms → 10.01
+ms (2.9x)**. See
+`specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-segfault.md`
+— which also records the more severe sibling finding it was filed for, a
+*segfault* (not just a slowdown) when the same accumulator loop is written as
+a locally-nested closure, caused by the direct kickoff call and the indirect
+self-call disagreeing on whether the vector param was boxed. Both are now
+pinned by `test/native/simd_nested_closure_acc.march`.
+
+**dot_simd still FAILS its "beats dot_composed" bar** — 10.01 ms vs 2.55 ms,
+~3.9x slower. The remaining gap is *not* about vectors, and an attribution
+probe holding the loop framework constant proves it: the SIMD index loop is
+**4.0x faster than the equivalent scalar March index loop** (9.89 ms vs 39.95
+ms over the same 5M pairs), which is the vector lowering doing its job. What
+`dot_composed` really wins on is that it is a single call into a tight C
+runtime pipeline, while any hand-written March index loop pays, per iteration,
+a volatile preemption load, `llvm.stacksave`/`stackrestore`, two
+`march_incrc_local` calls and two `native_f32_arr_length` bounds-check calls,
+plus body allocas outside the entry block that `mem2reg` cannot promote. That
+is general March loop-codegen overhead affecting every NativeArray index loop,
+with its own blast radius and benchmark matrix, so it was left out of the
+vector-ABI fix and filed separately as
+`specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`. As
+before, `dot_simd` keeps the plan's intended algorithm rather than being
+designed away, so the bar stays visible.
+
+| 5M f32 dot, loop framework held constant | ms    |
+|------------------------------------------|-------|
+| SIMD index loop (4 lanes/iter)            | 9.89  |
+| scalar index loop (1 elem/iter)           | 39.95 |
+| `map2_f32` + `sum_f32` (one C call)       | 2.34  |
 
 **fma_f32x4 parity leg**: `fma_parity_checksum` drives a deterministic LCG
 (`(seed*1664525+1013904223) % 2147483647`, the repo's standard generator)
@@ -403,15 +430,30 @@ Per the plan's guidance ("ONLY migrate if DataFrame tests stay green AND the
 bench shows non-regression; otherwise leave it and record why"):
 `stdlib/dataframe.march`'s `col_native_min_max` **stays on the
 `native_{int,float}_arr_min`/`_max` C builtins** rather than moving to a
-`Simd.load_i64x2`/`hmin_i64x2`/`hmax_i64x2` (or `f64x2`) loop. The dot-product
-kernel above already demonstrates the blocking mechanism — a
-`Simd`-accumulator loop pays a heap allocation on every iteration when the
-value is threaded through a recursive/self-tail call — and a direct probe of
+`Simd.load_i64x2`/`hmin_i64x2`/`hmax_i64x2` (or `f64x2`) loop.
+
+*Original finding (2026-08-11, before the Task 4b fix — superseded by the
+re-probe below, kept for the reasoning trail):* the dot-product kernel above
+demonstrated the blocking mechanism — a `Simd`-accumulator loop paid a heap
+allocation on every iteration when the value was threaded through a
+recursive/self-tail call — and a direct probe of
 the DataFrame-shaped workload confirms it transfers: `native_int_arr_min`
 over a 5,000,000-element `NativeIntArr` took **1.35 ms**; the equivalent
 `Simd.min_i64x2`-accumulator loop (same algorithm shape as `dot_simd`,
 2-lane stride) took **46.80 ms** — **~35x slower**, not a non-regression by
-any margin. `i64x2`/`f64x2` are also only 2 lanes wide (vs. 4 for
+any margin.
+
+**Re-probed 2026-08-11 after the Task 4b fix — the verdict is unchanged.**
+The per-iteration boxing is gone, and the probe improved by 4.3x, but it is
+still nowhere near non-regressing: `native_int_arr_min` **1.26 ms** vs. the
+`Simd.min_i64x2` loop **10.38 ms** — **~8.2x slower** (was ~35x). Per the
+plan's rule ("ONLY migrate if ... the bench shows non-regression"), Min/Max
+**stays on the C builtins**. The residual gap is the general March
+index-loop overhead documented under simd-kernels above
+(`specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`), so
+this question should be re-opened if and when that is fixed — but note that
+even then the ceiling here is low, because `i64x2`/`f64x2` are only 2 lanes
+wide (vs. 4 for
 `f32x4`/`i32x4`), so even with register residency fixed, the lane-count
 ceiling on a win here is much lower than the `f32`/`u8` kernels above; the
 existing C loops are already simple, tight, auto-vectorizable reductions
