@@ -354,11 +354,22 @@ void         march_sched_set_mbox_limit(march_proc *p, int64_t limit,
                                         march_mbox_policy policy);
 
 /* Register the disposer called for a message dropped by mailbox-overflow
- * policies (DROP_NEW's rejected message, DROP_OLD's evicted message). The
- * full runtime (march_runtime.c) registers a real march_decrc-based dtor in
- * Task 14; until then, or in the standalone scheduler unit tests that link
- * march_scheduler.c alone, dropped messages are leaked-with-count (see
- * MARCH_STAT_MSGS_DROPPED) rather than freed — the default is a no-op. */
+ * policies (DROP_NEW's rejected message, DROP_OLD's evicted message) and for
+ * every message still queued in a dead proc's mailbox at reap time. The full
+ * runtime (march_runtime.c) registers a real march_decrc-based dtor (Task
+ * 14); until then, or in the standalone scheduler unit tests that link
+ * march_scheduler.c alone, dropped/orphaned messages are leaked-with-count
+ * (see MARCH_STAT_MSGS_DROPPED) rather than freed — the default is a no-op.
+ *
+ * Re-entrancy contract: the dtor MAY re-enter scheduler send/recv paths; it
+ * is never called with any scheduler lock held. This is load-bearing, not a
+ * nicety — march_decrc's free path can invoke an arbitrary FFI-registered C
+ * dtor (march_run_resource_dtor), and a dtor that sends a message or
+ * otherwise touches a mailbox on cleanup would deadlock (or, on a
+ * non-reentrant spinlock, corrupt state) if it were called while this
+ * module's own mbox_lock were held. Every call site collects the message(s)
+ * to dispose under the lock, releases the lock, and only then invokes the
+ * dtor. */
 void         march_sched_set_msg_dtor(void (*fn)(void *));
 
 /* Return the current mailbox depth (number of undelivered messages) for a

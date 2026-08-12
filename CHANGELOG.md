@@ -108,6 +108,30 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Killing (or crashing) a busy actor no longer leaks its queued mailbox.**
+  Undelivered messages sitting in a dead process's mailbox were never
+  disposed — `sched_loop`'s `PROC_DEAD` reap branch freed the mailbox
+  *nodes* but not the message payloads they pointed at, so every message
+  still in flight to an actor that died before receiving it leaked for the
+  life of the program. The reap branch now drains the mailbox and disposes
+  each message via the same disposer hook Task 7 introduced for
+  overflow-dropped messages (`march_sched_set_msg_dtor`); the runtime
+  registers a real dtor (`free()` for the malloc'd hot-reload migrate
+  message, `march_decrc` for everything else) at scheduler init. To keep
+  this safe under a dtor that itself calls back into the scheduler (e.g. an
+  FFI resource cleanup that sends a message), both this reap-time drain and
+  `MARCH_MBOX_DROP_OLD`'s existing evicted-message dispose now collect the
+  message(s) under the mailbox lock and only invoke the dtor after releasing
+  it — `march_sched_set_msg_dtor`'s contract now says explicitly that the
+  dtor may re-enter scheduler send/recv paths and is never called with any
+  scheduler lock held.
+- **Supervisor restart-budget windows are now immune to wall-clock steps.**
+  `march_restart_budget_ok` timestamped each restart with `gettimeofday`
+  (wall-clock), so an NTP correction or manual clock change could jump the
+  window backward (restart budget never refills) or forward (recent
+  restarts silently age out of the window early, letting a crash loop
+  through the budget meant to stop it). It now uses `march_now_ms()`
+  (`CLOCK_MONOTONIC`), which cannot be stepped by wall-clock adjustments.
 - **The process registry no longer has a fixed 65536-pid lifetime cliff, and
   a green thread that fails to spawn now warns loudly instead of dropping
   an actor's messages silently.** `march_sched_find`, `wake_idle_daemons`,

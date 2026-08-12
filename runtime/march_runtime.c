@@ -2228,9 +2228,15 @@ static void actor_green_thread(void *arg) {
  * otherwise. Mirrors the identical window-check inlined in all three of
  * eval.ml's one_for_one_restart / one_for_all_restart / rest_for_one_restart. */
 static int march_restart_budget_ok(march_actor_meta *sup_meta) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    double now = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    /* Task 14: march_now_ms() is CLOCK_MONOTONIC-backed (see its definition
+     * in march_scheduler.c), unlike gettimeofday's wall clock, which an NTP
+     * step or manual clock change can jump backward or forward — either
+     * direction corrupts this budget: a backward step makes `now -
+     * sup_restart_ts[i]` go negative (never prunes old entries, so the
+     * budget can never refill), and a forward step silently discards recent
+     * restarts as "outside the window" too early, letting a crash loop
+     * through the budget it exists to stop. */
+    double now = (double)march_now_ms() / 1000.0;
     double window = (double)sup_meta->supervisor_window_secs;
     int kept = 0;
     for (int i = 0; i < sup_meta->sup_restart_len; i++) {
@@ -2448,6 +2454,44 @@ int64_t march_is_alive(void *actor) {
     return ((int64_t *)actor)[3];
 }
 
+/* Dispose an undelivered/overflow-dropped/orphaned actor message. Registered
+ * with the scheduler (march_sched_set_msg_dtor) below, at scheduler
+ * lazy-init time, so it is called for: MARCH_MBOX_DROP_NEW's rejected
+ * message, MARCH_MBOX_DROP_OLD's evicted message, and every message still
+ * queued in a proc's mailbox when the scheduler reaps it dead.
+ *
+ * Two message shapes exist, matching actor_green_thread's receive loop
+ * (which performs the identical discrimination — see its Phase 5 comment,
+ * just above where it checks `((int64_t *)msg)[1] == MARCH_MIGRATE_TAG`):
+ *   - the malloc'd migrate control message (march_migrate_msg_t): a
+ *     standard 16-byte march object header shape (rc at word 0, tag at
+ *     word 1) but allocated with malloc(), not march-heap-allocated, so it
+ *     must be freed with free(), never march_decrc. MARCH_MIGRATE_TAG
+ *     (0x4D494752, "MIGR") is chosen far outside the range of real ADT
+ *     constructor tags (typically < 1000 — see its definition in
+ *     march_runtime.h), so an ordinary march-heap value's tag word can
+ *     never collide with it in practice, the same assumption the receive
+ *     loop already relies on.
+ *   - everything else: an ordinary march-heap value (or a tagged
+ *     immediate, which IS_HEAP_PTR rejects, making march_decrc's own
+ *     IS_HEAP_PTR guard a safe no-op for it) — disposed via march_decrc.
+ *
+ * Deliberately narrower than the receive loop's full gate: the receive loop
+ * additionally requires `meta->dispatch_name_id` (only hot-reload actors
+ * ever receive migrate messages — march_actor_broadcast_migrate only
+ * targets them), but this dtor is actor-agnostic (the scheduler calls it
+ * with only the message pointer, no actor context) and migrate messages are
+ * never sent to non-hot-reload actors in the first place, so omitting that
+ * gate here does not admit any message the receive loop's gate would have
+ * rejected. */
+static void march_actor_msg_dispose(void *msg) {
+    if (IS_HEAP_PTR(msg) && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+        free(msg);
+        return;
+    }
+    march_decrc(msg);
+}
+
 /* Register an actor with the scheduler and return it unchanged.
  * Called from generated ActorName_spawn() wrappers:
  *   let $raw = ActorName_spawn()
@@ -2462,6 +2506,14 @@ void *march_spawn(void *actor) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* Task 14: give the scheduler a real disposer for messages it never
+         * delivers (mailbox-overflow drops, and every message still queued
+         * in a proc's mailbox when it is reaped dead) instead of leaking
+         * them. See march_actor_msg_dispose's own comment for the two
+         * message shapes it discriminates between, and the re-entrancy
+         * contract on march_sched_set_msg_dtor for why the scheduler always
+         * calls this with no scheduler lock held. */
+        march_sched_set_msg_dtor(march_actor_msg_dispose);
     }
     /* Daemon: an actor recv loop parks forever unless killed; it must not
      * keep the scheduler (and thus the process) alive once main and all

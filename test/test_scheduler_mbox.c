@@ -139,6 +139,47 @@ static void test_block_spurious_wake_while_linked(void) {
      * this regression guards against. */
 }
 
+/* ── Task 14: dead-actor mailbox drain ────────────────────────────────
+ *
+ * Runs march_sched_run() to actual completion (its own init/run pair, like
+ * the live-scheduler segments above), because it needs sched_loop itself to
+ * observe and reap this proc's death -- unlike the deterministic
+ * never-run segments below, which never call march_sched_run() at all.
+ *
+ * Determinism argument (verified against the actual PROC_DEAD reap branch
+ * in march_scheduler.c's sched_loop): all 7 sends happen BEFORE
+ * march_sched_run() is ever called, while `victim` is
+ * RUNNABLE-but-never-dispatched -- so every send lands in the mailbox via
+ * the ordinary mbox_push_node path (target is neither DEAD nor at its
+ * (unbounded, default) mbox_limit), with no race against the proc's death.
+ * Once march_sched_run() starts, sched_loop dispatches `victim` for the
+ * first time; die_immediately() returns immediately without ever calling
+ * march_sched_recv(), so the actor itself never drains any of the 7
+ * messages -- the proc transitions straight from RUNNING to PROC_DEAD with
+ * all 7 still queued. sched_loop's PROC_DEAD branch then reaps it
+ * synchronously on the same scheduler-thread call that dispatched it: wake
+ * any mbox_send_waiters (none registered here -- nothing blocked on this
+ * mailbox), collect every queued message under the lock, release the lock,
+ * and dispose each one via the registered dtor (this test's
+ * counting_dtor) -- see march_scheduler.c's PROC_DEAD branch. That reap
+ * happens before march_sched_run() can return (shutdown was requested and
+ * `victim` was the only non-daemon proc), so g_disposed is fully counted
+ * by the time we get past march_sched_run() here. */
+static _Atomic int g_disposed = 0;
+static void counting_dtor(void *msg) { (void)msg; atomic_fetch_add(&g_disposed, 1); }
+static void die_immediately(void *arg) { (void)arg; }
+
+static void test_dead_reap_drain(void) {
+    march_sched_init();
+    march_sched_set_msg_dtor(counting_dtor);
+    march_proc *victim = march_sched_spawn(die_immediately, NULL);
+    for (int i = 0; i < 7; i++) march_sched_send(victim, (void *)0x1);
+    march_sched_request_shutdown();
+    march_sched_run();
+    assert(atomic_load(&g_disposed) >= 7);
+    march_sched_set_msg_dtor(NULL);  /* don't leak into the segments below */
+}
+
 /* Default mailbox (mbox_limit == 0, MARCH_MBOX_UNBOUNDED) never rejects. */
 static void test_unbounded_default(void) {
     march_proc *u = march_sched_spawn_daemon(nop, NULL);
@@ -208,6 +249,7 @@ int main(void) {
 
     test_block_live_scheduler();
     test_block_spurious_wake_while_linked();
+    test_dead_reap_drain();
 
     march_sched_init();
 

@@ -785,6 +785,11 @@ static void *mbox_pop(march_proc *p) {
     return msg;
 }
 
+/* Forward declaration: the registered message disposer (defined further
+ * down, alongside march_sched_set_msg_dtor) is needed by sched_loop's
+ * PROC_DEAD reap branch, which appears earlier in this file. */
+static void march_mbox_dispose(void *msg);
+
 /* ── Task 8: MARCH_MBOX_BLOCK sender-parking helpers ────────────────────
  *
  * Called by every receive-side call site (march_sched_recv,
@@ -1384,6 +1389,49 @@ static void sched_loop(march_scheduler *sched) {
                 dead_w = dead_next;
             }
             mbox_lock_release(p);
+            /* Task 14: dispose every message still queued in this proc's
+             * mailbox -- it will never be received now that p is DEAD, and
+             * without this the queue leaks (mailbox nodes are already freed
+             * by mbox_pop; only the payloads leak) for the lifetime of the
+             * program.
+             *
+             * Collect-then-dispose, NOT dispose-under-lock: march_mbox_dispose
+             * can re-enter this module (see the re-entrancy contract on
+             * march_sched_set_msg_dtor) -- the registered runtime dtor is
+             * march_decrc, whose free path can run an arbitrary
+             * FFI-registered C dtor (march_run_resource_dtor), and a dtor
+             * that sends on cleanup would spin forever on p->mbox_lock if we
+             * were still holding it. So: pop every message under the lock
+             * into a local list (mbox_pop already fully unlinks each node,
+             * so holding the msg outside the lock is safe), release the
+             * lock, THEN dispose each one.
+             *
+             * This drain happens BEFORE the stack retire below to keep proc
+             * teardown logically grouped (wake senders -> drain queue ->
+             * retire stack); mailbox nodes are heap allocations independent
+             * of the proc's stack mapping, so the two have no ordering
+             * dependency on each other. */
+            {
+                struct march_drain_node { void *msg; struct march_drain_node *next; };
+                struct march_drain_node *drained = NULL;
+                mbox_lock_acquire(p);
+                for (;;) {
+                    void *m = mbox_pop(p);
+                    if (!m) break;
+                    struct march_drain_node *dn = malloc(sizeof(*dn));
+                    if (!dn) { fputs("march_sched: OOM (mbox drain)\n", stderr); abort(); }
+                    dn->msg = m;
+                    dn->next = drained;
+                    drained = dn;
+                }
+                mbox_lock_release(p);
+                while (drained) {
+                    struct march_drain_node *next = drained->next;
+                    march_mbox_dispose(drained->msg);
+                    free(drained);
+                    drained = next;
+                }
+            }
             /* Recycle the STACK reservation (Task 12) — the proc STRUCT
              * itself still leaks; see the "Deliberately NOT munmap ...
              * / free(p)" comment immediately below for why that part is
@@ -1851,6 +1899,12 @@ int march_sched_send(march_proc *target, void *msg) {
      * and BLOCK's dead-during-registration recheck); reused on BLOCK's
      * park-retry loop. */
     march_mbox_node *node = mbox_node_new(msg);
+    /* DROP_OLD's evicted message: unlinked under the lock (mbox_pop already
+     * detaches its node), but disposed AFTER mbox_lock_release below -- see
+     * the re-entrancy contract on march_sched_set_msg_dtor. Declared here,
+     * outside the loop, because the evicting iteration falls through to the
+     * shared push/release/wake epilogue rather than looping again. */
+    void *evicted_old = NULL;
 
     /* Loop instead of the brief's literal `return march_sched_send(...)`
      * recursive retry: BLOCK's park/wake cycle can repeat an unbounded
@@ -1880,12 +1934,16 @@ int march_sched_send(march_proc *target, void *msg) {
                 free(node);
                 return MARCH_SEND_DROPPED;
             case MARCH_MBOX_DROP_OLD: {
-                void *old = mbox_pop(target);     /* evict head, then fall through */
+                evicted_old = mbox_pop(target);   /* evict head, then fall through */
                 atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
                                           1, memory_order_relaxed);
-                /* dispose OUTSIDE the lock is nicer but old is fully unlinked;
-                 * dispose here is safe: march_mbox_dispose never re-enters mbox. */
-                march_mbox_dispose(old);
+                /* `old` is fully unlinked by mbox_pop, so holding it outside
+                 * the lock is safe -- but it MUST be disposed outside the
+                 * lock, not here: march_mbox_dispose can re-enter this
+                 * module (see the re-entrancy contract on
+                 * march_sched_set_msg_dtor). Dispose after
+                 * mbox_lock_release below, once mbox_push_node/wake have
+                 * run. */
                 break;
             }
             case MARCH_MBOX_BLOCK: {
@@ -1959,6 +2017,12 @@ int march_sched_send(march_proc *target, void *msg) {
         mbox_lock_release(target);
         if (st == PROC_WAITING || st == PROC_PARKED) {
             march_sched_wake(target);
+        }
+        /* DROP_OLD's evicted message (if any): disposed here, after the
+         * lock is released and the wake has fired, per the re-entrancy
+         * contract on march_sched_set_msg_dtor. */
+        if (evicted_old) {
+            march_mbox_dispose(evicted_old);
         }
         return MARCH_SEND_OK;
     }
