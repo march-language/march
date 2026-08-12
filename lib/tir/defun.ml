@@ -165,6 +165,58 @@ let builtin_names : StringSet.t =
       "native_int_to_i32_arr"; "native_i32_to_int_arr";
       "native_int_to_u8_arr"; "native_u8_to_int_arr";
       "native_i32_to_f32_arr"; "native_u8_to_f32_arr";
+      (* Simd builtins — explicit 128-bit SIMD vector types
+         (F32x4/F64x2/I32x4/I64x2/U8x16). 127 names per the op grid in
+         docs/superpowers/plans/2026-08-10-simd-vector-types.md. *)
+      (* f32x4 *)
+      "simd_f32x4_splat"; "simd_f32x4_make"; "simd_f32x4_extract";
+      "simd_f32x4_replace"; "simd_f32x4_load"; "simd_f32x4_store";
+      "simd_f32x4_eq"; "simd_f32x4_lt"; "simd_f32x4_gt";
+      "simd_f32x4_and"; "simd_f32x4_or"; "simd_f32x4_xor";
+      "simd_f32x4_not"; "simd_f32x4_select"; "simd_f32x4_any";
+      "simd_f32x4_all"; "simd_f32x4_first_set"; "simd_f32x4_add";
+      "simd_f32x4_sub"; "simd_f32x4_mul"; "simd_f32x4_div";
+      "simd_f32x4_min"; "simd_f32x4_max"; "simd_f32x4_fma";
+      "simd_f32x4_sqrt"; "simd_f32x4_sum"; "simd_f32x4_hmin";
+      "simd_f32x4_hmax";
+      (* f64x2 *)
+      "simd_f64x2_splat"; "simd_f64x2_make"; "simd_f64x2_extract";
+      "simd_f64x2_replace"; "simd_f64x2_load"; "simd_f64x2_store";
+      "simd_f64x2_eq"; "simd_f64x2_lt"; "simd_f64x2_gt";
+      "simd_f64x2_and"; "simd_f64x2_or"; "simd_f64x2_xor";
+      "simd_f64x2_not"; "simd_f64x2_select"; "simd_f64x2_any";
+      "simd_f64x2_all"; "simd_f64x2_first_set"; "simd_f64x2_add";
+      "simd_f64x2_sub"; "simd_f64x2_mul"; "simd_f64x2_div";
+      "simd_f64x2_min"; "simd_f64x2_max"; "simd_f64x2_fma";
+      "simd_f64x2_sqrt"; "simd_f64x2_sum"; "simd_f64x2_hmin";
+      "simd_f64x2_hmax";
+      (* i32x4 *)
+      "simd_i32x4_splat"; "simd_i32x4_make"; "simd_i32x4_extract";
+      "simd_i32x4_replace"; "simd_i32x4_load"; "simd_i32x4_store";
+      "simd_i32x4_eq"; "simd_i32x4_lt"; "simd_i32x4_gt";
+      "simd_i32x4_and"; "simd_i32x4_or"; "simd_i32x4_xor";
+      "simd_i32x4_not"; "simd_i32x4_select"; "simd_i32x4_any";
+      "simd_i32x4_all"; "simd_i32x4_first_set"; "simd_i32x4_add";
+      "simd_i32x4_sub"; "simd_i32x4_mul"; "simd_i32x4_min";
+      "simd_i32x4_max"; "simd_i32x4_shl"; "simd_i32x4_shr";
+      "simd_i32x4_sum"; "simd_i32x4_hmin"; "simd_i32x4_hmax";
+      (* i64x2 *)
+      "simd_i64x2_splat"; "simd_i64x2_make"; "simd_i64x2_extract";
+      "simd_i64x2_replace"; "simd_i64x2_load"; "simd_i64x2_store";
+      "simd_i64x2_eq"; "simd_i64x2_lt"; "simd_i64x2_gt";
+      "simd_i64x2_and"; "simd_i64x2_or"; "simd_i64x2_xor";
+      "simd_i64x2_not"; "simd_i64x2_select"; "simd_i64x2_any";
+      "simd_i64x2_all"; "simd_i64x2_first_set"; "simd_i64x2_add";
+      "simd_i64x2_sub"; "simd_i64x2_mul"; "simd_i64x2_min";
+      "simd_i64x2_max"; "simd_i64x2_shl"; "simd_i64x2_shr";
+      "simd_i64x2_sum"; "simd_i64x2_hmin"; "simd_i64x2_hmax";
+      (* u8x16 *)
+      "simd_u8x16_splat"; "simd_u8x16_make"; "simd_u8x16_extract";
+      "simd_u8x16_replace"; "simd_u8x16_load"; "simd_u8x16_store";
+      "simd_u8x16_eq"; "simd_u8x16_lt"; "simd_u8x16_gt";
+      "simd_u8x16_and"; "simd_u8x16_or"; "simd_u8x16_xor";
+      "simd_u8x16_not"; "simd_u8x16_select"; "simd_u8x16_any";
+      "simd_u8x16_all"; "simd_u8x16_first_set";
       (* RingBuf builtins — mutable fixed-capacity circular buffer *)
       "ring_buf_make"; "ring_buf_push"; "ring_buf_pop"; "ring_buf_get";
       "ring_buf_peek_oldest"; "ring_buf_peek_newest"; "ring_buf_size";

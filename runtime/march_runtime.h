@@ -120,6 +120,17 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; double val; } march_float
 void   *march_alloc_float(double v);
 /* Read the double out of a boxed Float. Undefined if [p] is not a float box. */
 double  march_unbox_float(void *p);
+
+/* 128-bit SIMD vector box: march_hdr(16) + 16-byte payload = 32 bytes,
+ * payload 16-aligned. kind lives in the hdr pad slot (byte offset 12):
+ * 0=f32x4 1=f64x2 2=i32x4 3=i64x2 4=u8x16. Leaf cell — no interior
+ * pointers, freed by the ordinary rc==0 path with no walk. */
+#define MARCH_SIMD_TAG ((int32_t)-4)
+/* Allocate a 32-byte SIMD vector box (rc=1, tag=MARCH_SIMD_TAG, kind in pad). */
+void   *march_simd_alloc(int64_t kind);
+/* Report an out-of-bounds SIMD load/store index and terminate. Noreturn. */
+void    march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len);
+void    march_simd_lane_panic(int64_t i, int64_t lanes);
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
 
 /* Polymorphic containers store scalars via tagged integers: the low bit of the

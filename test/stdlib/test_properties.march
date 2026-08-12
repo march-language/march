@@ -854,8 +854,9 @@ mod TestProperties do
                      fn (acc, v) -> List.append(acc, Msgpack.encode(v)))
         match Msgpack.decode_all(bs) do
         Ok(decoded) ->
-          List.length(decoded) == List.length(vals) &&
-          List.all(List.zip(decoded, vals), fn p -> match p do (a, b) -> a == b end)
+          let same_length = List.length(decoded) == List.length(vals)
+          let same_values = List.all(List.zip(decoded, vals), fn p -> match p do (a, b) -> a == b end)
+          same_length && same_values
         Err(_)      -> false
         end
       )

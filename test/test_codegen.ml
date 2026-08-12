@@ -81,6 +81,25 @@ let test_js_pipeline_dom_event_key_reaches_output () =
   | Error errs ->
     Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
 
+let test_js_pipeline_simd_builtin_rejected () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn main() : Unit do
+      let v = Simd.splat_f32x4(1.0)
+      let _ = v
+      ()
+    end
+  end|}
+  with
+  | Ok _ -> Alcotest.fail "expected a JS-target rejection, got Ok"
+  | Error errs ->
+    Alcotest.(check bool) "message names the Simd module and fixed-128 reason" true
+      (List.exists (fun e ->
+         Test_helpers.contains "simd_f32x4_splat" e
+         && Test_helpers.contains "Simd" e
+         && Test_helpers.contains "128-bit" e) errs)
+
 (* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
 
 let test_tir_names_tuple_tag () =
@@ -8447,6 +8466,26 @@ let test_native_narrow_arr_ir () =
   Alcotest.(check bool) "native_int_to_u8_arr declared" true
     (ir_contains ir "@native_int_to_u8_arr")
 
+(** SIMD vector ops (Task 2) must lower to native LLVM vector instructions —
+    inline `fadd`/`llvm.vector.reduce.fadd`, never a runtime call — and must
+    NOT auto-declare/call `@simd_f32x4_add` (the coerce-catch-all class of
+    regression this task's hard-fail guard exists to catch). *)
+let test_simd_vector_ir () =
+  let ir = emit_actor_ir {|mod Test do
+    fn f() : Float do
+      let a = simd_f32x4_make(1.0, 2.0, 3.0, 4.0)
+      let b = simd_f32x4_make(5.0, 6.0, 7.0, 8.0)
+      let c = simd_f32x4_add(a, b)
+      simd_f32x4_sum(c)
+    end
+  end|} in
+  Alcotest.(check bool) "add lowers to native fadd on the vector type" true
+    (ir_contains ir "fadd <4 x float>");
+  Alcotest.(check bool) "sum lowers to the ordered vector-reduce intrinsic" true
+    (ir_contains ir "llvm.vector.reduce.fadd");
+  Alcotest.(check bool) "no runtime-call fallthrough for simd_f32x4_add" false
+    (ir_contains ir "call ptr @simd_f32x4_add")
+
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
 let test_cancel_token_new () =
@@ -12281,6 +12320,9 @@ declare void @march_signal_raise_self(i64 %code)
 declare ptr  @march_alloc_float(double %v)
 declare double @march_unbox_float(ptr %p)
 declare i64  @march_poly_compare(ptr %a, ptr %b)
+declare ptr  @march_simd_alloc(i64 %kind)
+declare void @march_simd_bounds_panic(i64 %i, i64 %lanes, i64 %len)
+declare void @march_simd_lane_panic(i64 %i, i64 %lanes)
 |}
 
 let golden_preamble_native_net_io : string = {|
@@ -12512,6 +12554,9 @@ declare void @march_signal_raise_self(i64 %code)
 declare ptr  @march_alloc_float(double %v)
 declare double @march_unbox_float(ptr %p)
 declare i64  @march_poly_compare(ptr %a, ptr %b)
+declare ptr  @march_simd_alloc(i64 %kind)
+declare void @march_simd_bounds_panic(i64 %i, i64 %lanes, i64 %len)
+declare void @march_simd_lane_panic(i64 %i, i64 %lanes)
 |}
 
 (** Reassemble the historical preamble text for a given (is_wasm, repl)
@@ -14076,6 +14121,7 @@ let codegen_suites =
           Alcotest.test_case "int arr IR"   `Quick (with_reset test_native_int_arr_ir);
           Alcotest.test_case "float arr IR" `Quick (with_reset test_native_float_arr_ir);
           Alcotest.test_case "narrow arr IR" `Quick (with_reset test_native_narrow_arr_ir);
+          Alcotest.test_case "simd vector IR" `Quick (with_reset test_simd_vector_ir);
         ] );
       ( "tasks",
         [
@@ -14397,6 +14443,7 @@ let codegen_suites =
           Alcotest.test_case "typecheck error surfaces"      `Quick test_js_pipeline_typecheck_error_surfaces;
           Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
           Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
+          Alcotest.test_case "simd builtin rejected"         `Quick test_js_pipeline_simd_builtin_rejected;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

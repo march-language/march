@@ -37,30 +37,31 @@ let test_cli_symbols_json () =
   Alcotest.(check bool) "lists function g" true (has_sub out "\"g\"");
   Alcotest.(check bool) "reports a kind" true (has_sub out "\"kind\"")
 
-(* Extract the first `"character":N` integer that appears AFTER the first
-   `"start"` key in [json]. Returns None if absent. *)
-let first_start_character json =
-  match
-    (let ls = String.length json in
-     let rec find_from i needle =
-       let ln = String.length needle in
-       if i + ln > ls then None
-       else if String.sub json i ln = needle then Some i
-       else find_from (i + 1) needle
-     in
-     match find_from 0 "\"start\"" with
-     | None -> None
-     | Some s ->
-       match find_from s "\"character\":" with
-       | None -> None
+(* Extract every `"character":N` that follows a `"start"` key, in order. *)
+let start_characters json =
+  let ls = String.length json in
+  let rec find_from i needle =
+    let ln = String.length needle in
+    if i + ln > ls then None
+    else if String.sub json i ln = needle then Some i
+    else find_from (i + 1) needle
+  in
+  let rec go i acc =
+    match find_from i "\"start\"" with
+    | None -> List.rev acc
+    | Some s ->
+      (match find_from s "\"character\":" with
+       | None -> List.rev acc
        | Some c ->
          let j = ref (c + String.length "\"character\":") in
          let b = Buffer.create 4 in
          while !j < ls && json.[!j] >= '0' && json.[!j] <= '9' do
            Buffer.add_char b json.[!j]; incr j
          done;
-         (try Some (int_of_string (Buffer.contents b)) with _ -> None))
-  with x -> x
+         let v = try Some (int_of_string (Buffer.contents b)) with _ -> None in
+         go !j (match v with Some v -> v :: acc | None -> acc))
+  in
+  go 0 []
 
 (* A line with leading multi-byte chars shifts byte columns past UTF-16
    columns. The diagnostic on `true` (a Bool/Int mismatch) must report the
@@ -70,18 +71,31 @@ let test_cli_diagnostics_utf16_columns () =
   let src = "mod M do\n  fn f() : Int do \"\xc3\xa9\xc3\xa9\xc3\xa9\" ++ true end\nend\n" in
   let out = run ["query"; "diagnostics"; "t.march"] ~src in
   Alcotest.(check bool) "has diagnostics" true (has_sub out "\"diagnostics\"");
-  (* Line: `  fn f() : Int do "ééé" ++ true end`
-     The first diagnostic (return-type mismatch) spans `"ééé" ++ true`, starting
-     at the opening quote. The three `é` precede it but each is 2 bytes / 1
-     UTF-16 unit, so the byte start col is 25 while the UTF-16 start col is 22.
-     Asserting 22 proves Query.diagnostics remapped byte->UTF-16 (a raw byte
-     column would be 25). *)
-  (match first_start_character out with
-   | None -> Alcotest.fail "expected a diagnostic with a start character"
-   | Some col ->
-     Alcotest.(check int)
-       "first diagnostic start char is the UTF-16 column (22), not byte col 25"
-       22 col)
+  (* Two diagnostics land on line 2:
+
+       #1 return-type mismatch, spanning the whole `"..." ++ true` expression
+          from the OPENING quote -> byte col 18. Nothing multi-byte precedes
+          it, so its UTF-16 col is also 18: it cannot witness remapping.
+       #2 the `Bool` operand, starting at `true` -> byte col 30. The three
+          multi-byte chars DO precede it (2 bytes / 1 UTF-16 unit each), so
+          its UTF-16 col is 27.
+
+     #2 is therefore the one that proves Query.diagnostics remaps byte->UTF-16:
+     a raw byte column would report 30.
+
+     This assertion used to read 22 off diagnostic #1, which only worked
+     because a string literal's span started at its CLOSING quote (byte 25 ->
+     UTF-16 22). That was a compiler bug; now that spans cover the whole
+     literal, #1 begins before the multi-byte characters and distinguishes
+     nothing. *)
+  match start_characters out with
+  | first :: second :: _ ->
+    Alcotest.(check int)
+      "diagnostic #1 starts at the opening quote (byte 18 = UTF-16 18)" 18 first;
+    Alcotest.(check int)
+      "diagnostic #2 start char is the UTF-16 column (27), not byte col 30"
+      27 second
+  | _ -> Alcotest.fail "expected two diagnostics with start characters"
 
 let test_cli_unknown_query_is_error () =
   let out = run ["query"; "bogus"; "t.march"] ~src:"mod M do\nend\n" in

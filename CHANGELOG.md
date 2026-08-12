@@ -55,6 +55,74 @@ git log is authoritative for exact commits.
   counts); unknown indices read 0 on both backends.
 - Scheduler timers: green threads can park with a deadline (runtime-internal;
   enables Actor.call deadline waits and supervisor backoff).
+- **New `Simd` module: explicit 128-bit SIMD vector types — `F32x4`,
+  `F64x2`, `I32x4`, `I64x2`, `U8x16`** — 127 lane-wise operations
+  (splat/make/extract/replace/load/store, compare/bitwise/select/scan,
+  plus arithmetic on the float and int families: add/sub/mul/(div for
+  floats)/min/max/(fma/sqrt for floats)/(shl/shr for ints)/sum/hmin/hmax)
+  via `Simd.<op>_<type>`, e.g. `Simd.add_f32x4`, `Simd.load_u8x16`. Lane
+  get/set indices are refinement-typed to the type's lane count, and an
+  index the refinement checker cannot decide is bounds-checked at run time
+  (`load`/`store` against the array length, `extract`/`replace` against the
+  lane count) rather than silently producing garbage. `select`, `any`,
+  `all`, and `first_set` all read a lane's **high bit**, identically
+  interpreted and compiled — the canonical all-ones masks `eq`/`lt`/`gt`
+  produce are unaffected; a hand-rolled non-canonical mask follows the
+  high-bit rule.
+  `F32x4`/`F64x2` arithmetic is bit-exact single/double precision (verified
+  against the true-f32-vs-double-then-round distinction) and `fma` is a
+  true fused multiply-add on both paths (for `f32x4` the interpreter's is a
+  binary64 fusion rounded to binary32 — no divergence observed, formal
+  equivalence tracked in
+  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`);
+  `min`/`max`/`hmin`/`hmax` on floats use minNum/maxNum
+  semantics; integer arithmetic wraps mod 2^w. Each type implements
+  `Show`/`Eq`/`Hash` (lane-wise; a NaN lane is unequal to itself, matching
+  IEEE 754). Width is fixed at 128 bits on every target — identical
+  semantics everywhere, a stable interpreter/native parity surface, and a
+  NEON/SSE2/WASM-SIMD baseline that every target it runs on supports without
+  runtime feature detection; a portable/scalable width is a possible future
+  layer on top, not a redesign of this one.
+
+  `--compile` lowers every op — including `load`/`store` (bounds-checked,
+  with an FBIP copy-on-write store matching `NativeArray`'s in-place-vs-copy
+  contract) — to native LLVM vector instructions/intrinsics, and a straight-
+  line kernel or a self-tail-recursive accumulator loop keeps the vector in
+  a register for the whole loop body (zero `march_simd_alloc` calls,
+  confirmed via `--emit-llvm` and pinned by fixtures). On a 16MB `u8`
+  delimiter scan this measured **~11.5x** faster than a scalar March byte
+  loop; holding the loop shape constant, a `Simd` accumulator loop measured
+  **4.0x** faster than the equivalent scalar-element March loop. That said,
+  for a simple elementwise-then-reduce shape, composing `NativeArray`'s
+  `map2_f32` + `sum_f32` (2.55 ms at N=5M) currently beats a hand-written
+  `Simd` accumulator loop for the same computation (10.0 ms, ~3.9x) — the gap is
+  general March index-loop overhead (per-iteration preemption check, a
+  stack save/restore, RC bookkeeping, an unhoisted length call — tracked in
+  `specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`), not
+  a cost of SIMD itself. Use `NativeArray.map`/`map2`/`sum` for simple
+  elementwise pipelines; reach for `Simd` when you need cross-lane structure
+  — scanning, masks, `select`, or a fused multi-op kernel — or byte-level
+  scanning specifically. `DataFrame`'s `Min`/`Max` deliberately stayed on
+  the existing C reduction rather than migrating to `Simd`: a probe measured
+  it ~8.2x slower, for the same index-loop-overhead reason, plus the 2-lane
+  width of `i64x2`/`f64x2` caps the ceiling even after that overhead is
+  fixed (see `bench/RESULTS.md`'s simd-kernels section).
+
+  Known limitations: a self-tail-recursive vector accumulator leaks one
+  32-byte box per **call** (not per iteration — the loop body itself is
+  allocation-free), unbounded for a long-lived process
+  (`specs/todos/2026-08-11-simd-tco-entry-box-leak.md`); mutual-recursion
+  accumulator groups still box the vector on every iteration (correct, just
+  not accelerated); `i64x2` lane values beyond ±2^62 lose their top bit
+  under the **interpreter only** (OCaml's 63-bit boxed int), a parity edge
+  confined to that range; and `==`/`show` under a polymorphic/erased-type-
+  variable context fall back to the generic runtime helpers rather than the
+  static `Eq`/`Show` impl (lane-wise comparison, NaN lanes unequal) — the
+  same caveat `NativeArray` already has. The `Simd` module is not supported
+  on the JavaScript target (fixed 128-bit SIMD has no JS lowering);
+  compiling a `Simd.*` call with `--target js` now fails with a message
+  naming the builtin, rather than emitting a call that throws
+  `ReferenceError` at runtime.
 - **`NativeArray` gained narrow element widths: f32, i32, u8** — both
   interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
   `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,
@@ -89,6 +157,13 @@ git log is authoritative for exact commits.
   Nodes are freed on paths that do not enqueue (early DEAD return, DROP_NEW
   policy, dead-during-registration race), matching mbox_pop's existing free
   discipline.
+- **The structural-recursion warning no longer prescribes an accumulator for
+  constructor-wrapped recursion.** For a body like `Succ(bump(k))`, TRMC
+  compiles the recursion into a loop, so the old "uses O(depth) stack space"
+  phrasing was misleading. The warning now says the stack cost *may* apply and
+  that a recursive call in direct constructor-argument position becomes a loop.
+  The arithmetic variant (`1 + f(n - 1)`), which TRMC cannot transform, still
+  recommends an accumulator parameter. Detection is unchanged.
 - **The capability ceiling is now on by default.** `march --compile` fails the
   build if any module's emitted code uses a capability that module does not
   declare in `needs` — including a stdlib-mediated use (`File.read`), which no
@@ -189,6 +264,27 @@ git log is authoritative for exact commits.
   now wrapped in a runtime envelope carrying the correlation id of the call
   they belong to; a reply whose id doesn't match the call currently waiting
   is discarded instead of being handed back as that call's result.
+- **String literals now carry their full source span.** A string literal's AST
+  span collapsed to a single column — the closing quote — so anything that
+  sliced source text by span got a lone `"` back whenever the expression was
+  or contained a string. `forge refactor bundle` hit this (rewriting
+  `f("x", 1)` produced a corrupted `a = "`), and diagnostics pointing at a
+  string literal underlined just the quote. The lexer hands off from the main
+  token rule to a recursive `read_string` sub-rule, and each re-entry reset
+  ocamllex's lexeme start; the opening position is now recorded on handoff and
+  restored when the token is produced, for plain and triple-quoted literals
+  and for interpolation starts.
+
+- **Compiled `if`/`match` expressions returning `Float` no longer leak a heap
+  box on every evaluation.** The result-merge path for case/match codegen
+  boxes each branch's value into a uniform pointer slot; for `Float` branches
+  this is a real heap allocation (`march_alloc_float`), and nothing freed it
+  after unboxing — any `if`/`match` producing a `Float`, called in a hot loop
+  or recursive helper, leaked ~32 bytes per call (measured: a Float
+  accumulator called 20M times peaked at ~645MB RSS instead of a flat
+  ~1.9MB). Fixed for the case/match merge path; two related sites (closure/
+  Task-trampoline float returns, apply-wrapper float params) remain open —
+  see `specs/todos/2026-08-12-float-boxing-trampoline-apply-wrapper-leak.md`.
 - **Compiled `==` on a variant/tuple/record field of a type with no `type`
   declaration now compares by content, not by pointer.** A ctor field typed
   as a compiler-builtin type constructor (e.g. `Task`, `Pid`, `WorkPool`) —
@@ -443,6 +539,12 @@ git log is authoritative for exact commits.
   unaffected. Fixed by routing all three through the same `Project.dep_root_dir`
   resolver `forge deps` already uses.
 
+### Documentation
+
+- **`Set.fold`'s doc comment now matches its actual (uncurried) callback
+  convention.** It claimed the callback is curried (`f(acc)(elem)`); the
+  implementation has always called it uncurried (`f(acc, elem)`), same as
+  `Map.fold`/`Hamt.fold`/`Enum.fold`.
 
 ### Changed
 

@@ -2999,6 +2999,144 @@ let builtin_bindings : (string * scheme) list =
     ("remote_check",  Mono (TArrow (t_string, TArrow (t_string, t_int))));
     ("remote_invoke", Mono (TArrow (t_string, TArrow (TCon ("List", [t_int]),
                         TCon ("Option", [TCon ("Result", [TCon ("List", [t_int]); t_string])])))));
+    (* Simd -- explicit 128-bit SIMD vector types (F32x4/F64x2/I32x4/I64x2/U8x16).
+       127 builtins per the op grid in
+       docs/superpowers/plans/2026-08-10-simd-vector-types.md (Global Constraints).
+       Interpreter-path only here; compiled (LLVM) support is a later task.
+       simd_<t>_<op> naming; stdlib Simd module wraps as <op>_<t> with refinement-typed
+       lane indices. *)
+    (* f32x4 *)
+    ("simd_f32x4_splat", Mono (TArrow (t_float, TCon ("F32x4", []))));
+    ("simd_f32x4_make", Mono (TArrow (t_float, TArrow (t_float, TArrow (t_float, TArrow (t_float, TCon ("F32x4", [])))))));
+    ("simd_f32x4_extract", Mono (TArrow (TCon ("F32x4", []), TArrow (t_int, t_float))));
+    ("simd_f32x4_replace", Mono (TArrow (TCon ("F32x4", []), TArrow (t_int, TArrow (t_float, TCon ("F32x4", []))))));
+    ("simd_f32x4_load", Mono (TArrow (TCon ("NativeF32Arr", []), TArrow (t_int, TCon ("F32x4", [])))));
+    ("simd_f32x4_store", Mono (TArrow (TCon ("NativeF32Arr", []), TArrow (t_int, TArrow (TCon ("F32x4", []), TCon ("NativeF32Arr", []))))));
+    ("simd_f32x4_eq", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_lt", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_gt", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_and", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_or", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_xor", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_not", Mono (TArrow (TCon ("F32x4", []), TCon ("F32x4", []))));
+    ("simd_f32x4_select", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", []))))));
+    ("simd_f32x4_any", Mono (TArrow (TCon ("F32x4", []), t_bool)));
+    ("simd_f32x4_all", Mono (TArrow (TCon ("F32x4", []), t_bool)));
+    ("simd_f32x4_first_set", Mono (TArrow (TCon ("F32x4", []), t_int)));
+    ("simd_f32x4_add", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_sub", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_mul", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_div", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_min", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_max", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", [])))));
+    ("simd_f32x4_fma", Mono (TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TArrow (TCon ("F32x4", []), TCon ("F32x4", []))))));
+    ("simd_f32x4_sqrt", Mono (TArrow (TCon ("F32x4", []), TCon ("F32x4", []))));
+    ("simd_f32x4_sum", Mono (TArrow (TCon ("F32x4", []), t_float)));
+    ("simd_f32x4_hmin", Mono (TArrow (TCon ("F32x4", []), t_float)));
+    ("simd_f32x4_hmax", Mono (TArrow (TCon ("F32x4", []), t_float)));
+    (* f64x2 *)
+    ("simd_f64x2_splat", Mono (TArrow (t_float, TCon ("F64x2", []))));
+    ("simd_f64x2_make", Mono (TArrow (t_float, TArrow (t_float, TCon ("F64x2", [])))));
+    ("simd_f64x2_extract", Mono (TArrow (TCon ("F64x2", []), TArrow (t_int, t_float))));
+    ("simd_f64x2_replace", Mono (TArrow (TCon ("F64x2", []), TArrow (t_int, TArrow (t_float, TCon ("F64x2", []))))));
+    ("simd_f64x2_load", Mono (TArrow (TCon ("NativeFloatArr", []), TArrow (t_int, TCon ("F64x2", [])))));
+    ("simd_f64x2_store", Mono (TArrow (TCon ("NativeFloatArr", []), TArrow (t_int, TArrow (TCon ("F64x2", []), TCon ("NativeFloatArr", []))))));
+    ("simd_f64x2_eq", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_lt", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_gt", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_and", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_or", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_xor", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_not", Mono (TArrow (TCon ("F64x2", []), TCon ("F64x2", []))));
+    ("simd_f64x2_select", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", []))))));
+    ("simd_f64x2_any", Mono (TArrow (TCon ("F64x2", []), t_bool)));
+    ("simd_f64x2_all", Mono (TArrow (TCon ("F64x2", []), t_bool)));
+    ("simd_f64x2_first_set", Mono (TArrow (TCon ("F64x2", []), t_int)));
+    ("simd_f64x2_add", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_sub", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_mul", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_div", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_min", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_max", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", [])))));
+    ("simd_f64x2_fma", Mono (TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TArrow (TCon ("F64x2", []), TCon ("F64x2", []))))));
+    ("simd_f64x2_sqrt", Mono (TArrow (TCon ("F64x2", []), TCon ("F64x2", []))));
+    ("simd_f64x2_sum", Mono (TArrow (TCon ("F64x2", []), t_float)));
+    ("simd_f64x2_hmin", Mono (TArrow (TCon ("F64x2", []), t_float)));
+    ("simd_f64x2_hmax", Mono (TArrow (TCon ("F64x2", []), t_float)));
+    (* i32x4 *)
+    ("simd_i32x4_splat", Mono (TArrow (t_int, TCon ("I32x4", []))));
+    ("simd_i32x4_make", Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TCon ("I32x4", [])))))));
+    ("simd_i32x4_extract", Mono (TArrow (TCon ("I32x4", []), TArrow (t_int, t_int))));
+    ("simd_i32x4_replace", Mono (TArrow (TCon ("I32x4", []), TArrow (t_int, TArrow (t_int, TCon ("I32x4", []))))));
+    ("simd_i32x4_load", Mono (TArrow (TCon ("NativeI32Arr", []), TArrow (t_int, TCon ("I32x4", [])))));
+    ("simd_i32x4_store", Mono (TArrow (TCon ("NativeI32Arr", []), TArrow (t_int, TArrow (TCon ("I32x4", []), TCon ("NativeI32Arr", []))))));
+    ("simd_i32x4_eq", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_lt", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_gt", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_and", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_or", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_xor", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_not", Mono (TArrow (TCon ("I32x4", []), TCon ("I32x4", []))));
+    ("simd_i32x4_select", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", []))))));
+    ("simd_i32x4_any", Mono (TArrow (TCon ("I32x4", []), t_bool)));
+    ("simd_i32x4_all", Mono (TArrow (TCon ("I32x4", []), t_bool)));
+    ("simd_i32x4_first_set", Mono (TArrow (TCon ("I32x4", []), t_int)));
+    ("simd_i32x4_add", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_sub", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_mul", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_min", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_max", Mono (TArrow (TCon ("I32x4", []), TArrow (TCon ("I32x4", []), TCon ("I32x4", [])))));
+    ("simd_i32x4_shl", Mono (TArrow (TCon ("I32x4", []), TArrow (t_int, TCon ("I32x4", [])))));
+    ("simd_i32x4_shr", Mono (TArrow (TCon ("I32x4", []), TArrow (t_int, TCon ("I32x4", [])))));
+    ("simd_i32x4_sum", Mono (TArrow (TCon ("I32x4", []), t_int)));
+    ("simd_i32x4_hmin", Mono (TArrow (TCon ("I32x4", []), t_int)));
+    ("simd_i32x4_hmax", Mono (TArrow (TCon ("I32x4", []), t_int)));
+    (* i64x2 *)
+    ("simd_i64x2_splat", Mono (TArrow (t_int, TCon ("I64x2", []))));
+    ("simd_i64x2_make", Mono (TArrow (t_int, TArrow (t_int, TCon ("I64x2", [])))));
+    ("simd_i64x2_extract", Mono (TArrow (TCon ("I64x2", []), TArrow (t_int, t_int))));
+    ("simd_i64x2_replace", Mono (TArrow (TCon ("I64x2", []), TArrow (t_int, TArrow (t_int, TCon ("I64x2", []))))));
+    ("simd_i64x2_load", Mono (TArrow (TCon ("NativeIntArr", []), TArrow (t_int, TCon ("I64x2", [])))));
+    ("simd_i64x2_store", Mono (TArrow (TCon ("NativeIntArr", []), TArrow (t_int, TArrow (TCon ("I64x2", []), TCon ("NativeIntArr", []))))));
+    ("simd_i64x2_eq", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_lt", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_gt", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_and", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_or", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_xor", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_not", Mono (TArrow (TCon ("I64x2", []), TCon ("I64x2", []))));
+    ("simd_i64x2_select", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", []))))));
+    ("simd_i64x2_any", Mono (TArrow (TCon ("I64x2", []), t_bool)));
+    ("simd_i64x2_all", Mono (TArrow (TCon ("I64x2", []), t_bool)));
+    ("simd_i64x2_first_set", Mono (TArrow (TCon ("I64x2", []), t_int)));
+    ("simd_i64x2_add", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_sub", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_mul", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_min", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_max", Mono (TArrow (TCon ("I64x2", []), TArrow (TCon ("I64x2", []), TCon ("I64x2", [])))));
+    ("simd_i64x2_shl", Mono (TArrow (TCon ("I64x2", []), TArrow (t_int, TCon ("I64x2", [])))));
+    ("simd_i64x2_shr", Mono (TArrow (TCon ("I64x2", []), TArrow (t_int, TCon ("I64x2", [])))));
+    ("simd_i64x2_sum", Mono (TArrow (TCon ("I64x2", []), t_int)));
+    ("simd_i64x2_hmin", Mono (TArrow (TCon ("I64x2", []), t_int)));
+    ("simd_i64x2_hmax", Mono (TArrow (TCon ("I64x2", []), t_int)));
+    (* u8x16 *)
+    ("simd_u8x16_splat", Mono (TArrow (t_int, TCon ("U8x16", []))));
+    ("simd_u8x16_make", Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TCon ("U8x16", [])))))))))))))))))));
+    ("simd_u8x16_extract", Mono (TArrow (TCon ("U8x16", []), TArrow (t_int, t_int))));
+    ("simd_u8x16_replace", Mono (TArrow (TCon ("U8x16", []), TArrow (t_int, TArrow (t_int, TCon ("U8x16", []))))));
+    ("simd_u8x16_load", Mono (TArrow (TCon ("NativeU8Arr", []), TArrow (t_int, TCon ("U8x16", [])))));
+    ("simd_u8x16_store", Mono (TArrow (TCon ("NativeU8Arr", []), TArrow (t_int, TArrow (TCon ("U8x16", []), TCon ("NativeU8Arr", []))))));
+    ("simd_u8x16_eq", Mono (TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TCon ("U8x16", [])))));
+    ("simd_u8x16_lt", Mono (TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TCon ("U8x16", [])))));
+    ("simd_u8x16_gt", Mono (TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TCon ("U8x16", [])))));
+    ("simd_u8x16_and", Mono (TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TCon ("U8x16", [])))));
+    ("simd_u8x16_or", Mono (TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TCon ("U8x16", [])))));
+    ("simd_u8x16_xor", Mono (TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TCon ("U8x16", [])))));
+    ("simd_u8x16_not", Mono (TArrow (TCon ("U8x16", []), TCon ("U8x16", []))));
+    ("simd_u8x16_select", Mono (TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TArrow (TCon ("U8x16", []), TCon ("U8x16", []))))));
+    ("simd_u8x16_any", Mono (TArrow (TCon ("U8x16", []), t_bool)));
+    ("simd_u8x16_all", Mono (TArrow (TCon ("U8x16", []), t_bool)));
+    ("simd_u8x16_first_set", Mono (TArrow (TCon ("U8x16", []), t_int)));
   ]
 
 (** Builtins declared with a bare (non-[TArrow]) scheme that must NOT be
@@ -3041,7 +3179,10 @@ let builtin_types : (string * int) list =
     ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
     ("NativeIntArr",   0); ("NativeFloatArr", 0);
-    ("NativeF32Arr",   0); ("NativeI32Arr",   0); ("NativeU8Arr", 0); ]
+    ("NativeF32Arr",   0); ("NativeI32Arr",   0); ("NativeU8Arr", 0);
+    (* Simd — explicit 128-bit SIMD vector types (F32x4/F64x2/I32x4/I64x2/U8x16).
+       All arity 0, sendable (NOT added to non_sendable_types below). *)
+    ("F32x4", 0); ("F64x2", 0); ("I32x4", 0); ("I64x2", 0); ("U8x16", 0); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
@@ -12368,8 +12509,9 @@ let rec check_tail_position
             Err.warning errors ~span:sp
               (Printf.sprintf
                  "Warning: function `%s` is structurally recursive but not \
-                  tail-recursive. This is safe for bounded input but uses \
-                  O(depth) stack space."
+                  tail-recursive. This is safe for bounded input but may use \
+                  O(depth) stack space; when the recursive call is the direct \
+                  argument of a constructor, the compiler turns it into a loop."
                  fn_name)
         end
       end;

@@ -106,6 +106,61 @@ let test_ast_span () =
   let span = March_ast.Ast.dummy_span in
   Alcotest.(check string) "dummy span file" "<none>" span.file
 
+(* String-literal spans must cover the literal's full extent — opening quote
+   through closing quote — not a single quote character.  The read_string
+   sub-lexer resets the lexeme start on every recursive match, so the span
+   menhir computes for STRING collapses to 1 column.  Consumers that slice
+   source by span (refactor tooling, in-sample diagnostics) need the extent. *)
+let test_parse_string_literal_span () =
+  let lexbuf = Lexing.from_string {|"hello"|} in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELit (LitString "hello", sp) ->
+    Alcotest.(check int) "start col at opening quote" 0 sp.start_col;
+    Alcotest.(check int) "end col after closing quote" 7 sp.end_col
+  | _ -> Alcotest.fail "expected ELit(LitString)"
+
+(* Escapes make the literal's source extent longer than its value: "a\nb" is
+   6 source columns but a 3-character string.  The span must track the source. *)
+let test_parse_string_literal_span_escapes () =
+  let lexbuf = Lexing.from_string {|"a\nb"|} in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELit (LitString "a\nb", sp) ->
+    Alcotest.(check int) "start col" 0 sp.start_col;
+    Alcotest.(check int) "end col spans escape source" 6 sp.end_col
+  | _ -> Alcotest.fail "expected ELit(LitString)"
+
+(* A literal that does not start at column 0 — catches a fix that hardcodes
+   the start rather than recording the actual opening-quote position. *)
+let test_parse_string_literal_span_offset () =
+  let lexbuf = Lexing.from_string {|f("hi")|} in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let rec find e =
+    match e with
+    | March_ast.Ast.ELit (March_ast.Ast.LitString "hi", sp) -> Some sp
+    | March_ast.Ast.EApp (_, args, _) -> List.find_map find args
+    | _ -> None
+  in
+  match find expr with
+  | Some sp ->
+    Alcotest.(check int) "start col at opening quote" 2 sp.start_col;
+    Alcotest.(check int) "end col after closing quote" 6 sp.end_col
+  | None -> Alcotest.fail "expected a LitString arg"
+
+(* Triple-quoted strings go through read_triple_string, a separate sub-rule
+   with the same lexeme-start reset.  Spanning lines exercises pos_bol too. *)
+let test_parse_string_literal_span_triple () =
+  let lexbuf = Lexing.from_string "\"\"\"ab\ncd\"\"\"" in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELit (LitString _, sp) ->
+    Alcotest.(check int) "start line" 1 sp.start_line;
+    Alcotest.(check int) "start col at opening delimiter" 0 sp.start_col;
+    Alcotest.(check int) "end line" 2 sp.end_line;
+    Alcotest.(check int) "end col after closing delimiter" 5 sp.end_col
+  | _ -> Alcotest.fail "expected ELit(LitString)"
+
 let test_parse_expr_int () =
   let lexbuf = Lexing.from_string "42" in
   let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
@@ -3375,6 +3430,36 @@ let test_actor_handler_body_io_with_needs_no_warning () =
   Alcotest.(check bool)
     "actor handler body IO with needs declared: no missing-needs warning"
     false has_warning
+
+(* TRMC (Task 9): constructor-wrapped structural recursion — `Succ(bump(k))` —
+   is compiled into a loop by TRMC, so the warning must NOT prescribe an
+   accumulator parameter, and must say the compiler handles this shape.
+   The detection itself is unchanged: the warning still fires (the typechecker
+   has no TIR-level eligibility information), only the wording moved. *)
+let test_structural_recursion_warning_does_not_prescribe_accumulator () =
+  let ctx = typecheck {|mod W do
+  type Nat = Zero | Succ(Nat)
+  fn bump(n : Nat) : Nat do
+    match n do
+    Zero    -> Zero
+    Succ(k) -> Succ(bump(k))
+    end
+  end
+end|} in
+  let diags = March_errors.Errors.sorted ctx in
+  let mentions sub =
+    List.exists (fun d ->
+      let m = d.March_errors.Errors.message in
+      (try ignore (Str.search_forward (Str.regexp_string sub) m 0); true
+       with Not_found -> false)
+    ) diags
+  in
+  Alcotest.(check bool)
+    "constructor-wrapped recursion is not told to use an accumulator"
+    false (mentions "accumulator parameter");
+  Alcotest.(check bool)
+    "constructor-wrapped recursion is told the compiler loops it"
+    true (mentions "turns it into a loop")
 
 (* ── Cap(IO.NetListen) body-scan enforcement (item 1380) ─────────────────
    tcp_listen / tcp_accept / http_server_listen are classified IO.NetListen in
@@ -11709,7 +11794,13 @@ let assert_stdlib_file_typechecks_cleanly name =
    specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md *)
 let stdlib_dir_for_test () =
   let candidates = [ "stdlib"; "../../../stdlib"; "../../stdlib" ] in
-  match List.find_opt Sys.file_exists candidates with
+  (* A candidate must contain a real stdlib module, not just any directory
+     named "stdlib" -- dune mirrors test/stdlib/*.march (the test corpus,
+     unrelated files also literally named "stdlib" one level up) into the
+     build tree whenever a runtest rule depends on one, and a bare
+     [Sys.file_exists d] check picks that up as a false positive. *)
+  let looks_like_real_stdlib d = Sys.file_exists (Filename.concat d "list.march") in
+  match List.find_opt looks_like_real_stdlib candidates with
   | Some d -> d
   | None ->
     Alcotest.failf "cannot find the stdlib directory (searched: %s)"
@@ -13212,6 +13303,14 @@ let compiler_suites =
       ( "ast",
         [
           Alcotest.test_case "dummy span" `Quick test_ast_span;
+          Alcotest.test_case "string literal span covers full extent" `Quick
+            test_parse_string_literal_span;
+          Alcotest.test_case "string literal span with escapes" `Quick
+            test_parse_string_literal_span_escapes;
+          Alcotest.test_case "string literal span at nonzero column" `Quick
+            test_parse_string_literal_span_offset;
+          Alcotest.test_case "triple-quoted string literal span" `Quick
+            test_parse_string_literal_span_triple;
         ] );
       ( "parser",
         [
@@ -13847,6 +13946,7 @@ let compiler_suites =
           Alcotest.test_case "negative param: x < 0 → r < 0, r <= -1"      `Quick test_return_infer_negative_param;
         ] );
       ( "error_improvements", [
+          Alcotest.test_case "structural recursion warning: no accumulator advice" `Quick test_structural_recursion_warning_does_not_prescribe_accumulator;
           Alcotest.test_case "#1 label rendered in render_diagnostic"       `Quick test_label_rendered_in_output;
           Alcotest.test_case "#2 if-branch type mismatch has label"         `Quick test_if_branch_mismatch_has_label;
           Alcotest.test_case "#2 match-arm type mismatch has label"         `Quick test_match_arm_mismatch_has_label;

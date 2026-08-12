@@ -12740,6 +12740,301 @@ let test_native_i32_to_f32_to_float_arr_conversion () =
   Alcotest.(check (list (float 0.0))) "i32_to_f32_arr then f32_to_float_arr round-trips exactly"
     [3.0] (List.map vfloat (vlist (call_fn env "f" [])))
 
+(* ── Simd — explicit 128-bit SIMD vector types (interpreter path) ──────────
+   127 builtins (F32x4/F64x2/I32x4/I64x2/U8x16) per
+   docs/superpowers/plans/2026-08-10-simd-vector-types.md. Modeled on the
+   native_array_narrow group above. *)
+
+(* t1: lane order + extract — make then extract each lane. *)
+let test_simd_make_extract_lane_order () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let v = Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
+      [Simd.extract_f32x4(v, 0), Simd.extract_f32x4(v, 3)]
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0))) "lane 0 = first arg, lane 3 = last arg"
+    [1.0; 4.0] (List.map vfloat (vlist (call_fn env "f" [])))
+
+(* t2: splat + replace *)
+let test_simd_splat_replace () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let v = Simd.replace_i32x4(Simd.splat_i32x4(7), 2, 9)
+      [Simd.extract_i32x4(v, 2), Simd.extract_i32x4(v, 1)]
+    end
+  end|} in
+  Alcotest.(check (list int)) "replaced lane = 9, other lanes still 7"
+    [9; 7] (List.map vint (vlist (call_fn env "f" [])))
+
+(* t3: wrap on ingest (splat narrows like set does) *)
+let test_simd_splat_wraps () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      Simd.extract_u8x16(Simd.splat_u8x16(300), 0)
+    end
+    fn g() do
+      Simd.extract_i32x4(Simd.splat_i32x4(4294967296), 0)
+    end
+  end|} in
+  Alcotest.(check int) "u8 splat wraps: 300 mod 256 = 44" 44 (vint (call_fn env "f" []));
+  Alcotest.(check int) "i32 splat wraps: 2^32 wraps to 0" 0 (vint (call_fn env "g" []))
+
+(* t4: f32 single rounding — the arithmetic case distinguishes true f32 from
+   phase-A-style double-arithmetic-then-round-once. *)
+let test_simd_f32_single_rounding () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      Simd.extract_f32x4(Simd.splat_f32x4(0.1), 0)
+    end
+    fn g() do
+      let a = Simd.splat_f32x4(16777216.0)
+      let b = Simd.splat_f32x4(1.0)
+      Simd.extract_f32x4(Simd.add_f32x4(a, b), 0)
+    end
+  end|} in
+  Alcotest.(check (float 0.0)) "0.1 rounded to binary32, widened exactly"
+    0.10000000149011612 (vfloat (call_fn env "f" []));
+  Alcotest.(check (float 0.0))
+    "true f32 add: 2^24 + 1 rounds back to 2^24 (single rounding)"
+    16777216.0 (vfloat (call_fn env "g" []))
+
+(* t5: int lane arithmetic wraps *)
+let test_simd_i32_add_wraps () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let v = Simd.add_i32x4(Simd.splat_i32x4(2147483647), Simd.splat_i32x4(1))
+      Simd.extract_i32x4(v, 0)
+    end
+  end|} in
+  Alcotest.(check int) "i32 add wraps: INT32_MAX + 1 = INT32_MIN"
+    (-2147483648) (vint (call_fn env "f" []))
+
+(* t6: minNum NaN rule *)
+let test_simd_min_nan_rule () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let n = Simd.splat_f32x4(float_nan())
+      Simd.extract_f32x4(Simd.min_f32x4(n, Simd.splat_f32x4(2.0)), 0)
+    end
+    fn g() do
+      let n = Simd.splat_f32x4(float_nan())
+      let m = Simd.min_f32x4(n, n)
+      let x = Simd.extract_f32x4(m, 0)
+      x != x
+    end
+  end|} in
+  Alcotest.(check (float 0.0)) "minNum(NaN, 2.0) = 2.0 (NaN loses to the other operand)"
+    2.0 (vfloat (call_fn env "f" []));
+  Alcotest.(check bool) "minNum(NaN, NaN) = NaN" true (vbool (call_fn env "g" []))
+
+(* t7: sum/hmin/hmax — sequential double accumulation, computed here in OCaml
+   (not by hand) so the expected constant is provably the same fold. *)
+let test_simd_sum_sequential () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      Simd.sum_f32x4(Simd.make_f32x4(0.1, 0.2, 0.3, 0.4))
+    end
+    fn g() do
+      Simd.sum_i32x4(Simd.splat_i32x4(2000000000))
+    end
+  end|} in
+  let open March_eval.Eval in
+  let w0 = f32_round 0.1 and w1 = f32_round 0.2 and w2 = f32_round 0.3 and w3 = f32_round 0.4 in
+  let expected = ((0.0 +. w0) +. w1) +. w2 +. w3 in
+  Alcotest.(check (float 0.0)) "sum_f32x4 = sequential double accumulate of rounded lanes"
+    expected (vfloat (call_fn env "f" []));
+  Alcotest.(check int) "sum_i32x4 accumulates in i64 (no 32-bit wrap)"
+    8000000000 (vint (call_fn env "g" []))
+
+(* t8: compares/masks *)
+let test_simd_compare_masks () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let m = Simd.gt_i32x4(Simd.make_i32x4(5, 1, 7, 0), Simd.splat_i32x4(3))
+      [Simd.any_i32x4(m), Simd.all_i32x4(m)]
+    end
+    fn g() do
+      Simd.first_set_i32x4(Simd.gt_i32x4(Simd.make_i32x4(5, 1, 7, 0), Simd.splat_i32x4(3)))
+    end
+    fn h() do
+      Simd.first_set_i32x4(Simd.eq_i32x4(Simd.splat_i32x4(1), Simd.splat_i32x4(2)))
+    end
+    fn sel() do
+      let m = Simd.gt_i32x4(Simd.make_i32x4(5, 1, 7, 0), Simd.splat_i32x4(3))
+      let s = Simd.select_i32x4(m, Simd.splat_i32x4(100), Simd.splat_i32x4(200))
+      [Simd.extract_i32x4(s, 0), Simd.extract_i32x4(s, 1),
+       Simd.extract_i32x4(s, 2), Simd.extract_i32x4(s, 3)]
+    end
+  end|} in
+  Alcotest.(check (list bool)) "any/all over {T,F,T,F} mask"
+    [true; false] (List.map vbool (vlist (call_fn env "f" [])));
+  Alcotest.(check int) "first_set finds lane 0" 0 (vint (call_fn env "g" []));
+  Alcotest.(check int) "first_set on all-false mask = -1" (-1) (vint (call_fn env "h" []));
+  Alcotest.(check (list int)) "select picks a's lane where mask true, else b's"
+    [100; 200; 100; 200] (List.map vint (vlist (call_fn env "sel" [])))
+
+(* t14: NON-CANONICAL mask convention — select/any/all/first_set all read a
+   lane's HIGH BIT (its sign bit), not "the lane is all-ones". t8 above can't
+   distinguish the two: eq/lt/gt only ever produce canonical all-ones/zero
+   lanes, which read the same either way. A hand-rolled mask can: -2 has its
+   high bit set but is NOT all-ones, and 1 is nonzero with its high bit
+   clear. The compiled path (llvm_emit.ml's mask_cond: bitcast to the
+   integer vector, `icmp slt ... zeroinitializer`) has always been high-bit,
+   so this pins the interpreter to the same rule; the byte-for-byte
+   interpreted-vs-compiled witness is the matching leg of
+   test/native/simd_vector_core.march. *)
+let test_simd_noncanonical_mask () =
+  let env = eval_with_simd {|mod Test do
+    fn sel() do
+      let m = Simd.make_i32x4(-2, 0, 1, -1)
+      let s = Simd.select_i32x4(m, Simd.splat_i32x4(10), Simd.splat_i32x4(20))
+      [Simd.extract_i32x4(s, 0), Simd.extract_i32x4(s, 1),
+       Simd.extract_i32x4(s, 2), Simd.extract_i32x4(s, 3)]
+    end
+    fn scans() do
+      let m = Simd.make_i32x4(-2, 0, 1, -1)
+      [Simd.any_i32x4(m), Simd.all_i32x4(m)]
+    end
+    fn first() do
+      Simd.first_set_i32x4(Simd.make_i32x4(-2, 0, 1, -1))
+    end
+    fn selu() do
+      let m = Simd.make_u8x16(254, 0, 1, 255, 128, 127, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+      let s = Simd.select_u8x16(m, Simd.splat_u8x16(3), Simd.splat_u8x16(9))
+      [Simd.extract_u8x16(s, 0), Simd.extract_u8x16(s, 4), Simd.extract_u8x16(s, 5)]
+    end
+    fn self32() do
+      let m = Simd.make_f32x4(0.0 -. 1.5, 1.5, 0.0 -. 1.5, 1.5)
+      let s = Simd.select_f32x4(m, Simd.splat_f32x4(1.0), Simd.splat_f32x4(2.0))
+      [Simd.extract_f32x4(s, 0), Simd.extract_f32x4(s, 1)]
+    end
+  end|} in
+  Alcotest.(check (list int)) "high-bit lanes (-2, -1) pick a; 0 and 1 pick b"
+    [10; 20; 20; 10] (List.map vint (vlist (call_fn env "sel" [])));
+  Alcotest.(check (list bool)) "any/all over a non-canonical mask"
+    [true; false] (List.map vbool (vlist (call_fn env "scans" [])));
+  Alcotest.(check int) "first_set finds lane 0 (-2, high bit set)" 0
+    (vint (call_fn env "first" []));
+  Alcotest.(check (list int)) "u8: 254 and 128 pick a; 127 picks b"
+    [3; 3; 9] (List.map vint (vlist (call_fn env "selu" [])));
+  Alcotest.(check (list (float 0.0))) "f32: sign-bit lane picks a"
+    [1.0; 2.0] (List.map vfloat (vlist (call_fn env "self32" [])))
+
+(* t9: u8 byte scan — find a byte value's index via eq + first_set *)
+let test_simd_u8_byte_scan () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let hay = NativeArray.from_list_u8([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 33, 0, 0, 0, 0])
+      let v = Simd.load_u8x16(hay, 0)
+      Simd.first_set_u8x16(Simd.eq_u8x16(v, Simd.splat_u8x16(32)))
+    end
+  end|} in
+  Alcotest.(check int) "first_set finds the space at index 5" 5 (vint (call_fn env "f" []))
+
+(* t10: load/store round-trip + FBIP COW — the source array is unaffected
+   when a binding to it is held across the store. *)
+let test_simd_load_store_roundtrip_cow () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let arr = NativeArray.make_f32(8, 0.0)
+      let shared = arr
+      let v = Simd.make_f32x4(9.0, 8.0, 7.0, 6.0)
+      let arr2 = Simd.store_f32x4(arr, 2, v)
+      let back = Simd.load_f32x4(arr2, 2)
+      [NativeArray.get_f32(shared, 2), NativeArray.get_f32(arr2, 2), Simd.extract_f32x4(back, 0)]
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0)))
+    "original array unchanged when shared; stored copy and load-back agree"
+    [0.0; 9.0; 9.0] (List.map vfloat (vlist (call_fn env "f" [])))
+
+(* t11: bounds — last legal index is the largest i with i+lanes <= len;
+   one past that panics. *)
+let test_simd_load_bounds_panic () =
+  let env = eval_with_simd {|mod Test do
+    fn legal() do
+      let arr = NativeArray.make_f32(5, 0.0)
+      Simd.extract_f32x4(Simd.load_f32x4(arr, 1), 0)
+    end
+    fn illegal() do
+      let arr = NativeArray.make_f32(5, 0.0)
+      Simd.extract_f32x4(Simd.load_f32x4(arr, 2), 0)
+    end
+  end|} in
+  Alcotest.(check (float 0.0)) "load at i=1 is legal (1+4<=5)" 0.0 (vfloat (call_fn env "legal" []));
+  (try
+     ignore (call_fn env "illegal" []);
+     Alcotest.fail "load at i=2 should panic (2+4=6 > 5)"
+   with March_eval.Eval.Eval_error msg ->
+     Alcotest.(check bool) "bounds panic names index/lanes/length"
+       true
+       (let sub = "simd load/store out of bounds (index 2, lanes 4, length 5)" in
+        let re = Str.regexp_string sub in
+        try ignore (Str.search_forward re msg 0); true with Not_found -> false))
+
+(* t12: Show/Eq/Hash impls *)
+let test_simd_show_eq_hash () =
+  let env = eval_with_simd {|mod Test do
+    fn show_it() do
+      show(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0))
+    end
+    fn eq_same() do
+      Simd.make_f32x4(1.0, 2.0, 3.0, 4.0) == Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
+    end
+    fn eq_diff() do
+      Simd.make_f32x4(1.0, 2.0, 3.0, 4.0) != Simd.splat_f32x4(1.0)
+    end
+    fn eq_nan() do
+      let n = Simd.splat_f32x4(float_nan())
+      n == n
+    end
+    fn hash_eq() do
+      hash(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)) == hash(Simd.make_f32x4(1.0, 2.0, 3.0, 4.0))
+    end
+  end|} in
+  (* Pin the exact rendering rather than assume "F32x4[1.0, ...]" — verified
+     live: to_string(1.0) in this interpreter renders "1." (eval.ml's
+     [string_of_float], not the Show-impl float formatter). *)
+  Alcotest.(check string) "show renders all four lanes"
+    "F32x4[1., 2., 3., 4.]" (vstr (call_fn env "show_it" []));
+  Alcotest.(check bool) "eq: equal lanes" true (vbool (call_fn env "eq_same" []));
+  Alcotest.(check bool) "eq: different lanes" true (vbool (call_fn env "eq_diff" []));
+  Alcotest.(check bool) "eq: a NaN lane makes eq false" false (vbool (call_fn env "eq_nan" []));
+  Alcotest.(check bool) "hash(a) = hash(b) when a == b" true (vbool (call_fn env "hash_eq" []))
+
+(* t13: sendability — I32x4 crosses an actor message boundary. *)
+let test_simd_actor_sendable () =
+  let env = eval_with_simd {|mod Test do
+    actor Worker do
+      state { last : Int }
+      init { last: 0 }
+      on Extract(v : I32x4) do
+        { last: Simd.extract_i32x4(v, 1) }
+      end
+    end
+
+    fn f() do
+      let pid = spawn(Worker)
+      let v = Simd.make_i32x4(10, 20, 30, 40)
+      send(pid, Extract(v))
+      run_until_idle()
+      pid
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let state = match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst -> inst.March_eval.Eval.ai_state
+    | None -> failwith "actor not found" in
+  Alcotest.(check int) "I32x4 sent as an actor message payload; lane 1 extracted = 20" 20
+    (match state with
+     | March_eval.Eval.VRecord fields ->
+       (match List.assoc_opt "last" fields with
+        | Some (March_eval.Eval.VInt n) -> n
+        | _ -> -1)
+     | _ -> -1)
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -13513,6 +13808,22 @@ let stdlib_suites =
         Alcotest.test_case "int_to_u8_arr conversion wraps"     `Quick test_native_int_to_u8_arr_conversion_wraps;
         Alcotest.test_case "float_to_f32_arr conversion"        `Quick test_native_float_to_f32_arr_conversion;
         Alcotest.test_case "i32_to_f32_arr then f32_to_float_arr" `Quick test_native_i32_to_f32_to_float_arr_conversion;
+      ]);
+      ("simd_vector", [
+        Alcotest.test_case "t1 make/extract lane order"       `Quick test_simd_make_extract_lane_order;
+        Alcotest.test_case "t2 splat/replace"                 `Quick test_simd_splat_replace;
+        Alcotest.test_case "t3 splat wraps on ingest"          `Quick test_simd_splat_wraps;
+        Alcotest.test_case "t4 f32 single rounding"            `Quick test_simd_f32_single_rounding;
+        Alcotest.test_case "t5 i32 add wraps"                  `Quick test_simd_i32_add_wraps;
+        Alcotest.test_case "t6 minNum NaN rule"                `Quick test_simd_min_nan_rule;
+        Alcotest.test_case "t7 sum sequential accumulate"      `Quick test_simd_sum_sequential;
+        Alcotest.test_case "t8 compares/masks/select"          `Quick test_simd_compare_masks;
+        Alcotest.test_case "t9 u8 byte scan"                   `Quick test_simd_u8_byte_scan;
+        Alcotest.test_case "t10 load/store round-trip + COW"   `Quick test_simd_load_store_roundtrip_cow;
+        Alcotest.test_case "t11 load bounds panic"             `Quick test_simd_load_bounds_panic;
+        Alcotest.test_case "t12 Show/Eq/Hash"                  `Quick test_simd_show_eq_hash;
+        Alcotest.test_case "t13 actor sendability"             `Quick test_simd_actor_sendable;
+        Alcotest.test_case "t14 non-canonical mask = high bit" `Quick test_simd_noncanonical_mask;
       ]);
       ("vault stdlib", [
         Alcotest.test_case "set and get"                  `Quick test_vault_set_get;
