@@ -260,9 +260,9 @@ implicit path above — it depends on the shape of the computation:
 
 | Kernel (N=5M `f32` / 16MB `u8`)                      | Result |
 |-------------------------------------------------------|--------|
-| `u8` delimiter scan: `Simd` vs. scalar March loop      | **11.7x** faster |
+| `u8` delimiter scan: `Simd` vs. scalar March loop      | **~11.5x** faster |
 | Dot product loop framework, held constant: `Simd` vs. scalar March index loop (same elementwise/reduce shape, no library calls either side) | **4.0x** faster |
-| Dot product: hand-written `Simd` accumulator loop vs. `NativeArray.map2_f32` + `sum_f32` composition | `Simd` loop **4x slower** (10.0 ms vs. 2.3 ms) |
+| Dot product: hand-written `Simd` accumulator loop vs. `NativeArray.map2_f32` + `sum_f32` composition | `Simd` loop **~3.9x slower** (10.0 ms vs. 2.55 ms) |
 
 The scanner and the loop-framework comparison are `Simd` doing exactly what
 it is for — cross-lane, register-resident vector work beating a scalar loop

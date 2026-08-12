@@ -37,12 +37,12 @@ git log is authoritative for exact commits.
   line kernel or a self-tail-recursive accumulator loop keeps the vector in
   a register for the whole loop body (zero `march_simd_alloc` calls,
   confirmed via `--emit-llvm` and pinned by fixtures). On a 16MB `u8`
-  delimiter scan this measured **11.7x** faster than a scalar March byte
+  delimiter scan this measured **~11.5x** faster than a scalar March byte
   loop; holding the loop shape constant, a `Simd` accumulator loop measured
   **4.0x** faster than the equivalent scalar-element March loop. That said,
   for a simple elementwise-then-reduce shape, composing `NativeArray`'s
-  `map2_f32` + `sum_f32` (2.3 ms at N=5M) currently beats a hand-written
-  `Simd` accumulator loop for the same computation (10.0 ms) — the gap is
+  `map2_f32` + `sum_f32` (2.55 ms at N=5M) currently beats a hand-written
+  `Simd` accumulator loop for the same computation (10.0 ms, ~3.9x) — the gap is
   general March index-loop overhead (per-iteration preemption check, a
   stack save/restore, RC bookkeeping, an unhoisted length call — tracked in
   `specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`), not

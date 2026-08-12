@@ -1,4 +1,4 @@
-# Simd vector types — compiled path (Tasks 3–5)
+# Simd vector types — compiled path (Tasks 3–5) — DONE
 
 Task 1 (interpreter path) and Task 2 (compiled core — runtime box, `coerce`
 vector arms, register-resident inline op lowerings for every op INCLUDING
@@ -23,7 +23,8 @@ remaining work from `docs/superpowers/plans/2026-08-10-simd-vector-types.md`
   verified this ad hoc, not wired into `test/dune`).
 - **Task 4 — done** (`specs/progress/2026-08-11-simd-vector-types-task4-validation-kernels.md`).
   `bench/simd_kernels.march` landed with the dot product and u8 delimiter
-  scanner legs; the scanner beat its ≥4x bar (~11.7x) but the dot product
+  scanner legs; the scanner beat its ≥4x bar (~11.5x, `bench/RESULTS.md`'s
+  own pairing: 221.32 / 19.28 ≈ 11.48) but the dot product
   failed its "beats the composed baseline" bar (~10.8x slower) due to a
   compiled-only gap in how vector values cross call boundaries — which also
   produced an outright segfault for the closure-nested variant of the same
@@ -75,3 +76,52 @@ the locally-nested-closure shapes — now compile and run correctly too. The
 remaining open items are performance and a per-call leak, not correctness:
 `specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md` and
 `specs/todos/2026-08-11-simd-tco-entry-box-leak.md`.
+
+## Task 5 — done (this file's completion)
+
+JS-target rejection, docs, changelog, and bookkeeping, closing out the plan:
+
+- **JS-target rejection**: `lib/tir/js_emit.ml`'s `unmapped_msgs` mapper
+  (~L1371-1393) gained a family case that prefix-matches any unmapped
+  builtin named `simd_*` (every `Simd` builtin uses that prefix) and reports
+  a dedicated message naming the builtin and the fixed-128-bit-has-no-JS-
+  lowering reason, instead of the generic "no JavaScript-target
+  implementation" message every other unmapped builtin gets. TDD: the new
+  `test/test_codegen.ml` `js_pipeline` case ("simd builtin rejected") was
+  written first against `Simd.splat_f32x4`, confirmed red against the
+  generic message, then went green after the family-match arm landed.
+- **`docs/simd-vectorization.md`**: new "Explicit SIMD — the `Simd` module"
+  section — the five types and 127 ops (op-family table), the boundary
+  rule, the register-residency contract (straight-line kernels and
+  self-tail-recursive accumulator loops are allocation-free), the honest
+  benchmark table (scanner ~11.5x, loop-framework-held-constant 4.0x, but
+  `Simd` dot product still ~3.9x *slower* than the `NativeArray.map2_f32`+
+  `sum_f32` composition — attributed to general March index-loop overhead,
+  not a SIMD cost, with a usage recommendation), the fixed-128-bit-width
+  rationale (parity, NEON/SSE2/WASM-SIMD baseline, portable-width as a
+  future additive layer), and the known-limitations list (TCO-entry
+  per-call box leak, unaccelerated mutual-recursion accumulators, true-fma
+  ulp difference, i64x2 interpreter-only parity edge above ±2^62,
+  polymorphic-context `==`/`show` fallback, JS-target unsupported).
+- **`CHANGELOG.md`**: the three fragmentary `Simd` bullets from Tasks 1-4
+  (one `Added` entry for the module + two separate `Fixed` entries for the
+  Task 4b closure-ABI and TCO-residency fixes) consolidated into one
+  coherent `Added` entry under `[Unreleased]`, folding in the performance
+  story and the new JS-rejection behavior rather than leaving four
+  fragments a reader has to reassemble.
+- **`docs/pagefind`** regenerated via `scripts/gen-docs-search-index.sh`;
+  `--check` exits 0.
+- Other doc pages referencing `Simd` were checked
+  (`grep -rl "Simd" specs/lang specs/features docs --include='*.md'`):
+  `specs/lang/types/INDEX.md` only references `Simd` in the context of its
+  refinement-type reject/accept fixture list (lane-index bounds tests,
+  unrelated to this task's scope) and needed no change; the two
+  `docs/superpowers/` plan/design files are gitignored planning artifacts,
+  not served docs.
+
+All items from `docs/superpowers/plans/2026-08-10-simd-vector-types.md` are
+now either shipped or tracked in their own dated `specs/todos/` entries:
+`specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md` (general
+March index-loop overhead, not SIMD-specific) and
+`specs/todos/2026-08-11-simd-tco-entry-box-leak.md` (per-call box leak in
+the TCO entry prologue). Nothing else remains open on this plan.
