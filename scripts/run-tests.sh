@@ -115,7 +115,15 @@ echo "==> dune build"
 # only test/*.exe does not refresh them — a stale copy has shown up as an
 # undefined-symbol link error and as a --cap-sandbox binary with no embedded
 # profile, neither of which is a real March bug. See the rule in test/dune.
-BUILD_TARGETS=("@test/stage-source-trees")
+# bin/main.exe is a BUILD TARGET, not just a dependency of the runners: many
+# tests shell out to the real compiler (native-compile fixtures, the LLVM IR
+# validity gate, the capability-ceiling CLI tests), and dune does not rebuild
+# it as a side effect of building test/*.exe. A stale one is served from the
+# shared cache and fails as a bogus source-level error — twice observed:
+# `unknown option '--no-cap-strict'` for a flag that was in bin/main.ml, and
+# "I cannot find `I32x4`" for a stdlib type whose module was in the manifest.
+# Neither looks like a stale binary; both cost a real debugging detour.
+BUILD_TARGETS=("@test/stage-source-trees" "bin/main.exe")
 for r in "${RUNNERS[@]}"; do
   BUILD_TARGETS+=("test/${r}.exe")
 done
