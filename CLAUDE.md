@@ -55,13 +55,18 @@ scripts/run-tests.sh                   # full suite (~17s)
 scripts/run-tests.sh -q                # quick only, skips Slow tests (~2s)
 scripts/run-tests.sh compiler eval     # subset by name
 scripts/run-tests.sh -q stdlib         # quick subset
+scripts/run-tests.sh stdlib_march      # the .march test files under test/stdlib/
+
+# Suites: compiler, eval, codegen, stdlib, stdlib_march. An unknown name is a
+# hard error listing the known suites, not a confusing dune build failure.
 
 # 2. Direct binary invocation (no dune RPC at execution time)
-dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run_stdlib.exe
+dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run_stdlib.exe test/test_stdlib_march.exe
 ./_build/default/test/run_compiler.exe -e
 ./_build/default/test/run_eval.exe -e
 ./_build/default/test/run_codegen.exe -e
 ./_build/default/test/run_stdlib.exe -e
+./_build/default/test/test_stdlib_march.exe -e
 
 # 3. Standard dune flags for one-off runs
 dune runtest --no-buffer   # real-time output (lines appear as they're written)

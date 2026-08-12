@@ -6,10 +6,15 @@
 # runner with `timeout` so a single hung test can't block the whole suite.
 #
 # Usage:
-#   scripts/run-tests.sh                 # full suite (~17s)
-#   scripts/run-tests.sh -q              # quick only — skip Slow tests (~2s)
-#   scripts/run-tests.sh compiler eval   # run a subset by name
-#   scripts/run-tests.sh -q stdlib       # quick subset
+#   scripts/run-tests.sh                     # full suite (~17s)
+#   scripts/run-tests.sh -q                  # quick only — skip Slow tests (~2s)
+#   scripts/run-tests.sh compiler eval       # run a subset by name
+#   scripts/run-tests.sh -q stdlib           # quick subset
+#   scripts/run-tests.sh stdlib_march        # the .march stdlib test files
+#
+# Suites: compiler, eval, codegen, stdlib, stdlib_march.  The first four are
+# test/run_<name>.exe; stdlib_march is test/test_stdlib_march.exe, which runs
+# the .march test files under test/stdlib/.
 #
 # Slow tests skipped by -q: repl_compiler_parity (JIT parity, ~5s),
 #   compiled adversarial regressions (~5s), pbkdf2 key derivation (~3s).
@@ -37,16 +42,41 @@ elif command -v gtimeout &>/dev/null; then
 else
   TIMEOUT_CMD=""  # no timeout available; runs unbounded
 fi
-ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib)
+# Every alcotest executable in test/ that carries tests.  test_stdlib_march is
+# NOT named run_* — it is a separate (test ...) stanza whose groups (the .march
+# stdlib test files under test/stdlib/, and the distributed-OTP groups) exist
+# nowhere else.  It was missing from this list, so a group registered there
+# never ran under this script no matter which subset argument was passed, and a
+# fully green run said nothing about it.  `dune runtest` did cover it, which is
+# exactly why the gap was easy to miss locally.
+ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march)
 QUICK_FLAG=""
+
+# Map a suite name to its executable.  Accepts the bare name ("compiler",
+# "stdlib_march"), or the exact exe name ("run_compiler").  An unknown name is
+# a hard error: it used to build test/run_<typo>.exe and fail inside dune with
+# a confusing "don't know how to build" instead of naming the mistake.
+resolve_runner() {
+  local arg="$1" r
+  for r in "${ALL_RUNNERS[@]}"; do
+    if [[ "$r" == "$arg" || "$r" == "run_${arg}" || "$r" == "test_${arg}" ]]; then
+      echo "$r"; return 0
+    fi
+  done
+  return 1
+}
 
 # Parse flags and suite names
 RUNNERS=()
 for arg in "$@"; do
   if [[ "$arg" == "-q" ]]; then
     QUICK_FLAG="-q"
+  elif runner=$(resolve_runner "$arg"); then
+    RUNNERS+=("$runner")
   else
-    RUNNERS+=("run_${arg}")
+    echo "unknown suite: ${arg}" >&2
+    echo "known suites: ${ALL_RUNNERS[*]}" >&2
+    exit 2
   fi
 done
 [[ ${#RUNNERS[@]} -eq 0 ]] && RUNNERS=("${ALL_RUNNERS[@]}")
