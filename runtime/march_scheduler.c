@@ -602,11 +602,15 @@ static inline void mbox_lock_release(march_proc *p) {
 
 /* ── Mailbox helpers (FIFO) ──────────────────────────────────────────── */
 
-static void mbox_push(march_proc *p, void *msg) {
-    march_mbox_node *node = (march_mbox_node *)malloc(sizeof(march_mbox_node));
+static march_mbox_node *mbox_node_new(void *msg) {
+    march_mbox_node *node = malloc(sizeof(march_mbox_node));
     if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); abort(); }
-    node->msg  = msg;
+    node->msg = msg;
     node->next = NULL;
+    return node;
+}
+
+static void mbox_push_node(march_proc *p, march_mbox_node *node) {
     if (p->mbox_tail) {
         p->mbox_tail->next = node;
     } else {
@@ -1594,6 +1598,13 @@ static int mbox_block_register_and_park(march_proc *target) {
 }
 
 int march_sched_send(march_proc *target, void *msg) {
+    /* Allocate the mailbox node ONCE before the retry loop and lock
+     * acquisition, off the spinlock hot path. The node is freed on every
+     * path that does not enqueue it (top-of-function DEAD return, DROP_NEW,
+     * and BLOCK's dead-during-registration recheck); reused on BLOCK's
+     * park-retry loop. */
+    march_mbox_node *node = mbox_node_new(msg);
+
     /* Loop instead of the brief's literal `return march_sched_send(...)`
      * recursive retry: BLOCK's park/wake cycle can repeat an unbounded
      * number of times under sustained backpressure (or a spurious wake --
@@ -1606,8 +1617,10 @@ int march_sched_send(march_proc *target, void *msg) {
      * BLOCK paths. Deviation from the brief's literal snippet; behavior is
      * identical. */
     for (;;) {
-        if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD)
+        if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD) {
+            free(node);
             return MARCH_SEND_DEAD;
+        }
         mbox_lock_acquire(target);
         if (target->mbox_limit > 0
                 && march_sched_mbox_count(target) >= target->mbox_limit) {
@@ -1617,6 +1630,7 @@ int march_sched_send(march_proc *target, void *msg) {
                 atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
                                           1, memory_order_relaxed);
                 march_mbox_dispose(msg);          /* Task 14 dtor; counts-only until then */
+                free(node);
                 return MARCH_SEND_DROPPED;
             case MARCH_MBOX_DROP_OLD: {
                 void *old = mbox_pop(target);     /* evict head, then fall through */
@@ -1684,13 +1698,16 @@ int march_sched_send(march_proc *target, void *msg) {
                  * migration. mbox_lock is ALWAYS released by the callee
                  * before it returns, on every path. */
                 int r = mbox_block_register_and_park(target);
-                if (r == MARCH_SEND_DEAD) return MARCH_SEND_DEAD;
+                if (r == MARCH_SEND_DEAD) {
+                    free(node);
+                    return MARCH_SEND_DEAD;
+                }
                 continue;   /* retry from the top */
             }
             default: break;
             }
         }
-        mbox_push(target, msg);
+        mbox_push_node(target, node);
         march_proc_status st = atomic_load_explicit(&target->status, memory_order_acquire);
         mbox_lock_release(target);
         if (st == PROC_WAITING || st == PROC_PARKED) {

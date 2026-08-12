@@ -83,6 +83,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Mailbox node allocation moved outside the mbox spinlock.** `march_sched_send`
+  now allocates the mailbox node before acquiring the lock and reuses it across
+  retry loops (BLOCK policy), reducing contention on the spinlock hot path.
+  Nodes are freed on paths that do not enqueue (early DEAD return, DROP_NEW
+  policy, dead-during-registration race), matching mbox_pop's existing free
+  discipline.
 - **The capability ceiling is now on by default.** `march --compile` fails the
   build if any module's emitted code uses a capability that module does not
   declare in `needs` — including a stdlib-mediated use (`File.read`), which no
