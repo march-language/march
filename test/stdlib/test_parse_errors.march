@@ -1,0 +1,114 @@
+-- Golden error corpus for the Parse module (plan §3.7).
+--
+-- Message quality regresses silently unless it is pinned. Every case below
+-- fixes the EXACT rendered diagnostic for one malformed input, so a change in
+-- wording, position, or context fails a test instead of reaching a user.
+--
+-- This is deliberately a table of expected STRINGS rather than a
+-- regenerate-from-output snapshot: a diagnostic that changed should have to be
+-- re-read and consciously accepted, not bulk-refreshed. When a message here
+-- changes, the question to answer is "is the new one better?", and that is a
+-- judgement, not a diff.
+--
+-- The grammar is a miniature config format, chosen because it exercises every
+-- error feature at once: labels, commit points, context frames, ordered choice
+-- with furthest-failure merging, end-of-input, and recovery.
+--
+--   config := entry* eof
+--   entry  := key "=" value ";"          -- committed after the key
+--   key    := "name" | "port" | "host"
+--   value  := "42" | "\"x\""
+
+mod TestParseErrors do
+
+  pfn key() : Parse.Parser(String) do
+    Parse.label("a key",
+      Parse.alt(Parse.lit("name"),
+        Parse.alt(Parse.lit("port"), Parse.lit("host"))))
+  end
+
+  pfn value() : Parse.Parser(String) do
+    Parse.label("a value", Parse.alt(Parse.lit("42"), Parse.lit("\"x\"")))
+  end
+
+  -- Committing after the key is what makes a malformed entry report itself
+  -- rather than being silently skipped as "not an entry".
+  pfn entry() : Parse.Parser((String, String)) do
+    Parse.ctx("entry",
+      Parse.and_then(key(),
+        Parse.commit(
+          Parse.skip_first(Parse.lit("="),
+            Parse.skip_then(value(), Parse.lit(";"))))))
+  end
+
+  -- Assert the rendered diagnostic for an input that must fail.
+  -- Panics with BOTH strings on mismatch: `assert (a == b)` reports only
+  -- "condition was false", which is useless when the whole point is the text.
+  pfn expect_error(p : Parse.Parser(a), input : String, want : String) : Unit do
+    match Parse.run(p, input) do
+      Ok(_) -> panic("expected a parse error for input " ++ input)
+      Err(e) ->
+        let got = Parse.render(input, e)
+        if got == want do ()
+        else
+          panic("wrong diagnostic for input " ++ input
+                ++ "\n  want: " ++ want
+                ++ "\n  got:  " ++ got)
+        end
+    end
+  end
+
+describe "Parse error messages" do
+
+  describe "labels" do
+
+    test "an unknown key names the class, not the alternatives" do
+      expect_error(entry(), "bogus=42;", "1:1: I was expecting a key")
+    end
+
+    test "a bad value names the class and the enclosing entry" do
+      expect_error(entry(), "port=bad;",
+        "1:6: I was expecting a value in the entry that started at 1:1")
+    end
+
+  end
+
+  describe "commit and context" do
+
+    test "a missing separator is reported where it is missing" do
+      expect_error(entry(), "port 42;",
+        "1:5: I was expecting `=` in the entry that started at 1:1")
+    end
+
+    test "a missing terminator is reported at end of input" do
+      expect_error(entry(), "port=42",
+        "1:8: I was expecting `;` in the entry that started at 1:1")
+    end
+
+  end
+
+  describe "end of input" do
+
+    test "trailing garbage after a complete parse is reported" do
+      let config = Parse.skip_then(Parse.many(entry()), Parse.eof())
+      expect_error(config, "port=42;!!!", "1:9: I was expecting end of input")
+    end
+
+  end
+
+  describe "recovery collects several errors from one pass" do
+
+    test "each bad entry is reported, and the good ones still parse" do
+      let items = Parse.many(Parse.recover(entry(), Parse.lit(";")))
+      match Parse.run(items, "port=42;bad=42;host=\"x\";") do
+        Ok(xs) ->
+          assert (List.length(xs) == 3)
+          assert (List.length(List.filter(xs, fn r -> Result.is_err(r))) == 1)
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
+end
+end
