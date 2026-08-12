@@ -5,7 +5,7 @@
     particular [test_join_point_tail_call], which pins the bug the first
     version of the walk had (a tail call inside a lowered match's join point
     reported as unreachable). See
-    specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
+    specs/progress/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
 
 open March_tir
 
@@ -384,10 +384,14 @@ let test_transform_is_idempotent_on_a_transformed_module () =
                           [Tir.AVar h; Tir.AVar t]))
   in
   let m = module_of [fn "f" [v "xs" list_int] body] in
+  (* Save/restore rather than assign a literal: the default is ON since
+     2026-08-10, so restoring `false` here would silently disable TRMC for every
+     test that runs after this one in the same binary. *)
+  let saved = !Trmc.enabled in
   Trmc.enabled := true;
   let once = Trmc.transform_module m in
   let twice = Trmc.transform_module once in
-  Trmc.enabled := false;
+  Trmc.enabled := saved;
   (* Non-vacuousness: the first pass must actually have added the helper. *)
   Alcotest.(check int) "first transform adds the $dps helper"
     2 (List.length once.Tir.tm_fns);

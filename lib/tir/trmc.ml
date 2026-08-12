@@ -1,10 +1,11 @@
-(** TRMC (tail-recursion-modulo-cons) eligibility analysis — Phase 1.
+(** TRMC (tail-recursion-modulo-cons): eligibility analysis and the
+    destination-passing rewrite.  ON by default since 2026-08-10; [--no-trmc]
+    disables it.
 
-    ANALYSIS ONLY: this module never rewrites the TIR.  It classifies every
-    self-recursive call in the module so we can measure how much TRMC would
-    actually buy before paying for the transformation (two new [Tir.expr]
-    nodes and the RC integration).  See
-    [specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md] for the staged
+    [report] is the analysis half (classify every self-recursive call in the
+    module; gated on MARCH_TRMC_REPORT).  [transform_module] is the rewrite
+    half, gated on [enabled].  See
+    [specs/progress/2026-08-07-trmc-tail-recursion-modulo-cons.md] for the staged
     plan and [Lorenzen & Leijen, ICFP'22] §2.4.1 for the technique.
 
     A call is *modulo-cons* when it sits in tail position bound to a temporary
@@ -312,11 +313,9 @@ let report (m : Tir.tir_module) : unit =
    [dst] is the parent CELL, not an interior pointer: the hole index is baked
    into the helper, which is sound because every iteration of a single-
    constructor loop writes the same field.  See the Phase 2 note in
-   specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md.
+   specs/progress/2026-08-07-trmc-tail-recursion-modulo-cons.md.
 
-   GATED on [enabled] (set by --trmc, or by the legacy MARCH_TRMC env var) —
-   this is a work-in-progress measurement vehicle, not yet a default pipeline
-   stage. *)
+   GATED on [enabled].  Default ON since 2026-08-10; --no-trmc disables it. *)
 
 let trmc_ctr = ref 0
 
@@ -443,9 +442,9 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
 
 (** Whether the destination-passing transform runs.  A [ref] rather than an
     env-var read so the driver owns the decision and a CLI flag can set it;
-    [bin/main.ml] is the only writer.  Default OFF until the default flips
-    (see specs/plans/2026-08-10-trmc-on-by-default.md Task 10). *)
-let enabled : bool ref = ref false
+    [bin/main.ml] is the only writer.  Default ON since 2026-08-10; --no-trmc
+    disables it. *)
+let enabled : bool ref = ref true
 
 (** Apply TRMC across a module.  Gated on [enabled] (see [--trmc]). *)
 let transform_module (m : Tir.tir_module) : Tir.tir_module =

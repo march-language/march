@@ -41,6 +41,10 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Tail-recursion-modulo-cons is now on by default.** A recursive call that is
+  the direct argument of a constructor in tail position compiles to a loop that
+  allocates the cell up front and fills its hole in place, instead of consuming
+  O(depth) stack. `--no-trmc` disables it.
 - **The structural-recursion warning no longer prescribes an accumulator for
   constructor-wrapped recursion.** For a body like `Succ(bump(k))`, TRMC
   compiles the recursion into a loop, so the old "uses O(depth) stack space"

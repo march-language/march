@@ -2605,11 +2605,10 @@ let compile filename =
        MARCH_TRMC_REPORT).  Must run here: by tir-perceus the stdlib's nested
        `go` helpers are closures invoked via ECallPtr, so self-recursion is no
        longer syntactically visible.  See
-       specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
+       specs/progress/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
     March_tir.Trmc.report tir;
-    (* Phase 3 (WIP, gated on --trmc / legacy MARCH_TRMC): destination-passing rewrite of
-       TRMC-eligible functions.  Off by default — this is a measurement
-       vehicle until the RC integration (phase 4) is done. *)
+    (* Phase 3: destination-passing rewrite of TRMC-eligible functions.
+       ON by default since 2026-08-10; --no-trmc disables it. *)
     let tir = March_tir.Trmc.transform_module tir in
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
@@ -4723,9 +4722,9 @@ let () =
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
     ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
     ("--trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := true),
-     " Enable tail-recursion-modulo-cons (destination-passing rewrite)");
+     " Enable tail-recursion-modulo-cons (destination-passing rewrite; on by default)");
     ("--no-trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := false),
-     " Disable tail-recursion-modulo-cons");
+     " Disable tail-recursion-modulo-cons (on by default)");
     ("--pmap-threshold", Arg.Set_int pmap_threshold, "<N>  List.pmap/pfilter/preduce fall back to sequential below N elements (default 1024)");
     ("--opt",        Arg.Set_int opt_level, "<N>  Optimization level passed to clang (0-3)");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");

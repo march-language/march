@@ -518,3 +518,76 @@ Recommend proceeding to Phase 2, with Phase 6 explicitly gated behind it.
 - Mutual TRMC? `Llvm_tco` has a mutual-TCO group emitter; out of scope for v1.
 - Does the hole-write need to be atomic for actor-shared values? v1 should refuse
   TRMC on any type that can cross an actor boundary rather than answer this.
+
+---
+
+## Closed 2026-08-12 — default flipped ON
+
+`Trmc.enabled` now defaults to `true` (`lib/tir/trmc.ml`); `--no-trmc` is the
+escape hatch and `--trmc` is kept as a no-op for callers that predate the flip.
+The legacy `MARCH_TRMC=1` env seed is also kept and is now a no-op.
+
+### Benchmark sweep at the flip (same box, same build, cold CAS)
+
+Compiled `--compile --opt 2`; three runs each, runs 2-3 reported (the first pays
+~25% warmup). "off" is a same-box control compiled with `--no-trmc` from the
+identical compiler.
+
+| benchmark      | default (TRMC on) | control (`--no-trmc`) |
+|----------------|-------------------|-----------------------|
+| list_producers | 0.59, 0.59 s      | 0.58, 0.58 s          |
+| tree_transform | 0.64, 0.62 s      | 0.60, 0.61 s          |
+| list_ops       | 0.06, 0.06 s      | 0.06, 0.06 s          |
+| binary_trees   | 0.26, 0.26 s      | 0.26, 0.26 s          |
+
+`tree_transform`'s apparent 3-4% gap was machine noise, not a regression: an
+interleaved 5x A/B of the same two binaries gave ON = 0.60 0.60 0.61 0.61 0.61
+and OFF = 0.60 0.60 0.60 0.61 0.61 — identical. **No regression on any of the
+four.**
+
+`list_producers` is deliberately flat here, and that is the expected result:
+`stdlib/list.march`'s `map`/`filter`/`filter_map` are still accumulator-style
+(classified `already-tail`), so TRMC has nothing to transform on that hot path.
+The speedup measured in the earlier phases arrives when the stdlib is rewritten
+to natural style.
+
+### What shipped
+
+- Destination-passing rewrite of single-constructor, single-site TRMC-eligible
+  functions, run post-lower / pre-mono.
+- `EAllocHole` / `ESetField` TIR nodes, with Perceus, borrow, escape, purity,
+  FBIP-reuse, LLVM and JS backends all taught about them.
+- `--no-trmc`, and a `trmc` tag in `codegen_cas_tags ()` so the CAS cannot serve
+  a binary from the other mode.
+- Refusal on actor-crossing types (the hole-fill is a non-atomic store) and on
+  erased-repr constructors (no real heap cell to hole).
+- Diagnostics: the structural-recursion warning and the LSP perf lint no longer
+  steer users away from constructor-wrapped recursion.
+
+### What was declined
+
+- Multi-layer constructor nesting (the paper's §2.4 rebalancing case) — v1 is a
+  single constructor.
+- Mutual TRMC — `Llvm_tco` has a mutual-TCO group emitter, but wiring TRMC
+  through it is out of scope for v1.
+- Multi-site and `Mixed` functions — declined with a recorded reason rather than
+  partially transformed.
+- Atomic hole-fill for actor-shared values — refused the types instead of
+  answering the question.
+
+### STILL OUTSTANDING
+
+**The stdlib rewrite to natural style has NOT been done.** `stdlib/list.march`
+remains accumulator-style, so the headline list-producer win is not yet
+collected. That is tracked as Task 8 of
+`specs/plans/2026-08-10-trmc-on-by-default.md` and is deliberately sequenced
+after this flip. This file is filed under `progress/` because the *compiler*
+side is complete and shipping by default — not because the whole TRMC program
+is finished.
+
+### CI
+
+The `trmc-suite` job and the `MARCH_TRMC=1` sanitize leg were both removed: with
+the default on, the ordinary `test` job and the single remaining ASAN leg cover
+the exact configuration those forced. `specs/lang/golden/sanitize.sh` no longer
+labels an unset `MARCH_TRMC` as `trmc=off`, which would now be a lie.

@@ -34,10 +34,11 @@ fi
 export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"
 export MARCH_STDLIB="${MARCH_STDLIB:-$root/stdlib}"
 
-# TRMC mode is inherited from the environment so the caller can run this
-# script twice — once per mode — and get separately attributable output.
-# Without the label a failure in one mode is indistinguishable from the other.
-mode_label="trmc=${MARCH_TRMC:-off}"
+# TRMC is ON by default in the compiler since 2026-08-10, so an unset
+# MARCH_TRMC no longer means "off" — label it "default" rather than asserting a
+# mode this script cannot actually observe. MARCH_TRMC=1 is still honoured (and
+# still a no-op) for callers that predate the flip.
+if [ -n "${MARCH_TRMC:-}" ]; then mode_label="trmc=forced-on"; else mode_label="trmc=default"; fi
 echo "=== golden sanitize ($mode_label) ==="
 
 pass=0; fail=0

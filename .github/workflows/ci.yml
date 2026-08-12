@@ -338,6 +338,11 @@ jobs:
         timeout-minutes: 12
         uses: ./.github/actions/march-setup
 
+      # TRMC is ON by default since 2026-08-10, so this single leg is the
+      # memory-safety evidence for the destination-passing rewrite. The former
+      # second leg (MARCH_TRMC=1) and the standalone `trmc-suite` job both
+      # forced a mode that is now the default — pure duplication of this step
+      # and of the ordinary `test` job respectively, so both were removed.
       - name: Golden corpus AddressSanitizer gate (RC/UAF guard)
         timeout-minutes: 15
         run: |
@@ -346,44 +351,6 @@ jobs:
           dune build bin/main.exe
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
-
-      - name: Golden corpus AddressSanitizer gate — TRMC enabled
-        timeout-minutes: 15
-        run: |
-          eval $(opam env)
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            MARCH_TRMC=1 ./specs/lang/golden/sanitize.sh
-
-  # Runs the full test suite with MARCH_TRMC=1 on its own fresh runner. It used to be
-  # a third phase inside sanitize-gate, but that confounded resource exhaustion (two
-  # ASAN sweeps already run on that runner) with the TRMC variable itself — failures
-  # were flaky/non-reproducible. A clean runner isolates whether TRMC is the cause.
-  trmc-suite:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up toolchain
-        timeout-minutes: 12
-        uses: ./.github/actions/march-setup
-
-      # This job was split out of sanitize-gate (see comment above), where the
-      # build was implicit — inherited from an earlier step in that job. Standalone,
-      # nothing builds the compiler first, so it needs its own Build step.
-      - name: Build
-        timeout-minutes: 10
-        run: |
-          eval $(opam env)
-          dune shutdown 2>/dev/null || true
-          dune build bin/main.exe
-
-      - name: Test suite with TRMC enabled
-        timeout-minutes: 35
-        # Cold build + full test suite (~20 min of tests) with TRMC enabled.
-        run: |
-          eval $(opam env)
-          MARCH_TRMC=1 ./scripts/run-tests.sh
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and all 8 property-oracle shards below each used to
