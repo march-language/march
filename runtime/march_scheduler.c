@@ -627,6 +627,47 @@ static void *mbox_pop(march_proc *p) {
     return msg;
 }
 
+/* ── Task 8: MARCH_MBOX_BLOCK sender-parking helpers ────────────────────
+ *
+ * Called by every receive-side call site (march_sched_recv,
+ * march_sched_try_recv, march_sched_try_recv2, march_sched_recv_until)
+ * immediately after a successful mbox_pop, still under p's own mbox_lock.
+ * If that pop just crossed the BLOCK policy's low-water mark (depth <=
+ * limit/2), unlinks and returns the ENTIRE waiter list so the caller can
+ * wake all of them AFTER releasing mbox_lock -- waking while still holding
+ * the lock would make march_sched_wake's PROC_PARKED spin-wait run while
+ * blocking whoever needs this same lock next; not a deadlock (mbox_lock
+ * and wake don't nest the other way), just needless serialization.
+ *
+ * Wake-ALL, not wake-one: every woken waiter re-enters march_sched_send's
+ * retry loop and re-checks capacity there, re-parking if the mailbox
+ * filled back up before it got scheduled. The resulting thundering herd is
+ * bounded by the waiter count, which is simpler than a single-handoff
+ * protocol (design locked in the task-8 brief). */
+static march_proc *mbox_take_waiters_if_low(march_proc *p) {
+    if (p->mbox_send_waiters
+            && (p->mbox_limit == 0
+                || march_sched_mbox_count(p) <= p->mbox_limit / 2)) {
+        march_proc *w = p->mbox_send_waiters;
+        p->mbox_send_waiters = NULL;
+        return w;
+    }
+    return NULL;
+}
+
+/* Wake every proc in a waiter list returned by mbox_take_waiters_if_low (or
+ * drained directly from a dead target's mbox_send_waiters by sched_loop's
+ * PROC_DEAD reap branch). Must be called AFTER releasing the mbox_lock that
+ * guarded the list -- see the comment above. */
+static void mbox_wake_waiters(march_proc *waiters) {
+    for (march_proc *w = waiters; w; ) {
+        march_proc *next = w->send_wait_next;
+        w->send_wait_next = NULL;
+        march_sched_wake(w);
+        w = next;
+    }
+}
+
 /* ── Trampoline ───────────────────────────────────────────────────────── */
 
 /* makecontext() accepts only int-sized variadic arguments.  We split the
@@ -1018,6 +1059,22 @@ static void sched_loop(march_scheduler *sched) {
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
             if (!p->is_daemon)
                 atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
+            /* Task 8: wake any senders parked under MARCH_MBOX_BLOCK
+             * waiting for THIS proc's mailbox to drain below low-water --
+             * it never will now, since p just died. Same lock-then-wake
+             * pattern as mbox_take_waiters_if_low / mbox_wake_waiters
+             * (the receive-side drain wake): take the whole list under
+             * p's own mbox_lock, release, then wake outside the lock. This
+             * is also the release half of the dead-during-registration
+             * race closed by the recheck in march_sched_send's
+             * MARCH_MBOX_BLOCK case -- see the comment there for the full
+             * happens-before argument (this release pairs with that
+             * acquire). */
+            mbox_lock_acquire(p);
+            march_proc *dead_send_waiters = p->mbox_send_waiters;
+            p->mbox_send_waiters = NULL;
+            mbox_lock_release(p);
+            mbox_wake_waiters(dead_send_waiters);
             /* Deliberately NOT munmap(p->stack_mmap_base, ...) / free(p) here.
              *
              * march_actor_meta.green_thread (march_runtime.c) holds a
@@ -1320,38 +1377,160 @@ void march_sched_set_mbox_limit(march_proc *p, int64_t limit,
     mbox_lock_release(p);
 }
 
-int march_sched_send(march_proc *target, void *msg) {
-    if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD)
+/* Register the CURRENT green thread as a MARCH_MBOX_BLOCK sender-waiter on
+ * `target` (already locked by the caller; this releases the lock) and park
+ * until woken. Returns MARCH_SEND_OK if the caller should retry the send
+ * (capacity may have opened up, or this was a spurious/permit wake -- the
+ * caller's own retry loop re-checks), or MARCH_SEND_DEAD if target died
+ * before or during registration.
+ *
+ * NOINLINE: migration barrier -- same class of hazard as march_sched_recv /
+ * march_sched_recv_until, but the fix has to live HERE, not on
+ * march_sched_park_self. Marking park_self itself noinline (an earlier,
+ * INSUFFICIENT attempt at this fix, caught by the Task 8 stress loop) only
+ * stops the compiler from merging its OWN internal tl_sched read into a
+ * caller across inlining -- it does nothing about a read of tl_sched that
+ * lives in the CALLER's own loop body, like `self = tl_sched->current`
+ * used to, directly inside march_sched_send's retry loop. Nothing IN
+ * march_sched_send (or in park_self, seen whole by the optimizer even
+ * un-inlined) ever WRITES tl_sched -- that write happens only in
+ * sched_loop, on a different OS thread, invisible to this translation
+ * unit's dataflow for this function -- so clang -O2 is free to treat
+ * tl_sched as loop-invariant for the ENTIRE march_sched_send activation
+ * and hoist `self`'s read out of the `for (;;)` loop ENTIRELY, reusing the
+ * PRE-migration thread's stale scheduler/proc pointer on every later
+ * iteration. Confirmed by a minimal standalone ucontext+pthread reproducer
+ * (a _Thread_local read stuck at its first-resolved value across repeated
+ * cross-thread swapcontext resumes, while pthread_self() correctly tracked
+ * the real thread) and by the Task 8 stress loop still deadlocking with
+ * park_self alone marked noinline. The fix that actually works follows the
+ * SAME discipline march_sched_recv/recv_until already use for their own
+ * loops (march_sched_wait_idle calling march_sched_yield in a loop is the
+ * original instance of this exact bug, see march_sched_yield's own
+ * noinline comment): put the tl_sched READ inside a dedicated noinline
+ * function that the loop calls FRESH every iteration, so every iteration
+ * is a real, opaque call boundary the optimizer cannot hoist a TLS read
+ * across. */
+__attribute__((noinline))
+static int mbox_block_register_and_park(march_proc *target) {
+    march_proc *self = tl_sched ? tl_sched->current : NULL;
+    if (!self) {
+        /* Foreign thread (evloop etc.): cannot park a green thread that
+         * doesn't exist. Sleep-poll at the scheduler's own idle cadence;
+         * bounded by the receiver draining. */
+        mbox_lock_release(target);
+        struct timespec ts = { 0, 1000000 }; /* 1ms */
+        nanosleep(&ts, NULL);
+        return MARCH_SEND_OK;   /* caller retries unconditionally */
+    }
+
+    /* Dead-during-registration race (lost-wakeup audit): the PROC_DEAD reap
+     * branch in sched_loop takes THIS SAME mbox_lock to drain and wake
+     * target->mbox_send_waiters once, when target dies. Two cases:
+     *
+     *  (A) target dies AFTER we register below: reap acquires the lock
+     *      after us, finds us already published in the waiter list
+     *      (registration happened under the lock, same as mbox_pop's
+     *      drain-side wake), and calls march_sched_wake(self) -- the
+     *      wake_pending permit makes our imminent park return immediately.
+     *      Ordinary case; no special handling needed.
+     *
+     *  (B) target died and was ALREADY reaped before we even reach this
+     *      lock acquire: reap ran once, found an empty (or different)
+     *      waiter list, and will never run again for this target
+     *      (PROC_DEAD is terminal). If we blindly registered here, we'd
+     *      park with no one left to ever wake us -- a genuine lost
+     *      wakeup, NOT covered by the wake_pending permit (there is no
+     *      wake left to arrive).
+     *
+     *  The recheck below closes (B): mbox_lock_acquire (by our caller)
+     *  uses memory_order_acquire and the reap branch's mbox_lock_release
+     *  uses memory_order_release, so if reap's critical section already
+     *  ran and released the lock before we acquired it, this acquire
+     *  synchronizes-with that release. Transitively, it also observes
+     *  target's status=PROC_DEAD store, which happened in program order
+     *  on target's own green thread (proc_trampoline) strictly BEFORE the
+     *  swap back to the scheduler that triggers the reap -- so by the
+     *  time we hold the lock, if reap already ran, we are guaranteed to
+     *  see PROC_DEAD here rather than a stale "alive" read. We bail out
+     *  instead of registering. */
+    if (atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD) {
+        mbox_lock_release(target);
         return MARCH_SEND_DEAD;
-    mbox_lock_acquire(target);
-    if (target->mbox_limit > 0
-            && march_sched_mbox_count(target) >= target->mbox_limit) {
-        switch (target->mbox_policy) {
-        case MARCH_MBOX_DROP_NEW:
-            mbox_lock_release(target);
-            atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
-                                      1, memory_order_relaxed);
-            march_mbox_dispose(msg);          /* Task 14 dtor; counts-only until then */
-            return MARCH_SEND_DROPPED;
-        case MARCH_MBOX_DROP_OLD: {
-            void *old = mbox_pop(target);     /* evict head, then fall through */
-            atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
-                                      1, memory_order_relaxed);
-            /* dispose OUTSIDE the lock is nicer but old is fully unlinked;
-             * dispose here is safe: march_mbox_dispose never re-enters mbox. */
-            march_mbox_dispose(old);
-            break;
-        }
-        default: break;                        /* MARCH_MBOX_BLOCK: Task 8 */
-        }
     }
-    mbox_push(target, msg);
-    march_proc_status st = atomic_load_explicit(&target->status, memory_order_acquire);
+
+    /* Register as waiter, release lock, park. A parked sender can also be
+     * woken by an unrelated source (e.g. a stale timer entry from an
+     * earlier march_sched_recv_until on this same proc firing late) --
+     * that's just a spurious wake, tolerated because the caller's retry
+     * loop re-checks capacity (and DEAD-ness) from scratch rather than
+     * assuming the wake means "room now". */
+    self->send_wait_next = target->mbox_send_waiters;
+    target->mbox_send_waiters = self;
     mbox_lock_release(target);
-    if (st == PROC_WAITING || st == PROC_PARKED) {
-        march_sched_wake(target);
+    march_sched_park_self();
+    return MARCH_SEND_OK;   /* caller retries unconditionally */
+}
+
+int march_sched_send(march_proc *target, void *msg) {
+    /* Loop instead of the brief's literal `return march_sched_send(...)`
+     * recursive retry: BLOCK's park/wake cycle can repeat an unbounded
+     * number of times under sustained backpressure (or a spurious wake --
+     * see the loop-tolerance note on the MARCH_MBOX_BLOCK case below), and
+     * while every retry site here IS a tail call, C gives no TCO guarantee.
+     * A green thread's initial stack is only MARCH_STACK_INITIAL (4 KiB);
+     * an unbounded recursion depth on a pathological sender herd risks
+     * exhausting it. `continue` re-enters this loop at the top instead,
+     * for both the green-thread (parked) and foreign-thread (sleep-polled)
+     * BLOCK paths. Deviation from the brief's literal snippet; behavior is
+     * identical. */
+    for (;;) {
+        if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD)
+            return MARCH_SEND_DEAD;
+        mbox_lock_acquire(target);
+        if (target->mbox_limit > 0
+                && march_sched_mbox_count(target) >= target->mbox_limit) {
+            switch (target->mbox_policy) {
+            case MARCH_MBOX_DROP_NEW:
+                mbox_lock_release(target);
+                atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
+                                          1, memory_order_relaxed);
+                march_mbox_dispose(msg);          /* Task 14 dtor; counts-only until then */
+                return MARCH_SEND_DROPPED;
+            case MARCH_MBOX_DROP_OLD: {
+                void *old = mbox_pop(target);     /* evict head, then fall through */
+                atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_MSGS_DROPPED],
+                                          1, memory_order_relaxed);
+                /* dispose OUTSIDE the lock is nicer but old is fully unlinked;
+                 * dispose here is safe: march_mbox_dispose never re-enters mbox. */
+                march_mbox_dispose(old);
+                break;
+            }
+            case MARCH_MBOX_BLOCK: {
+                /* Registration, the dead-during-registration race, and the
+                 * park itself all live in a dedicated NOINLINE helper --
+                 * see mbox_block_register_and_park's own comment for why
+                 * that split is load-bearing (not just style): the
+                 * tl_sched read has to happen inside a function this loop
+                 * calls fresh every iteration, or the optimizer can hoist
+                 * it out of the loop entirely across the swapcontext
+                 * migration. mbox_lock is ALWAYS released by the callee
+                 * before it returns, on every path. */
+                int r = mbox_block_register_and_park(target);
+                if (r == MARCH_SEND_DEAD) return MARCH_SEND_DEAD;
+                continue;   /* retry from the top */
+            }
+            default: break;
+            }
+        }
+        mbox_push(target, msg);
+        march_proc_status st = atomic_load_explicit(&target->status, memory_order_acquire);
+        mbox_lock_release(target);
+        if (st == PROC_WAITING || st == PROC_PARKED) {
+            march_sched_wake(target);
+        }
+        return MARCH_SEND_OK;
     }
-    return MARCH_SEND_OK;
 }
 
 int64_t march_sched_mbox_count(march_proc *p) {
@@ -1384,7 +1563,9 @@ void *march_sched_recv(void) {
     mbox_lock_acquire(p);
     if (p->mailbox) {
         void *msg = mbox_pop(p);
+        march_proc *waiters = mbox_take_waiters_if_low(p);
         mbox_lock_release(p);
+        mbox_wake_waiters(waiters);
         return msg;
     }
     /* PROC_PARKED: we're about to call swapcontext but haven't yet saved our
@@ -1408,12 +1589,15 @@ void *march_sched_recv(void) {
      * (the actor was woken for a reason other than a new message, e.g. kill). */
     mbox_lock_acquire(p);
     void *msg;
+    march_proc *waiters = NULL;
     if (p->mailbox) {
         msg = mbox_pop(p);
+        waiters = mbox_take_waiters_if_low(p);
     } else {
         msg = MARCH_RECV_NO_MSG;
     }
     mbox_lock_release(p);
+    mbox_wake_waiters(waiters);
     return msg;
 }
 
@@ -1421,8 +1605,14 @@ void *march_sched_try_recv(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return NULL;
     mbox_lock_acquire(p);
-    void *msg = mbox_pop(p);
+    march_proc *waiters = NULL;
+    void *msg = NULL;
+    if (p->mailbox) {
+        msg = mbox_pop(p);
+        waiters = mbox_take_waiters_if_low(p);
+    }
     mbox_lock_release(p);
+    mbox_wake_waiters(waiters);
     return msg;
 }
 
@@ -1435,7 +1625,9 @@ int march_sched_try_recv2(void **out) {
         return 0;
     }
     *out = mbox_pop(p);
+    march_proc *waiters = mbox_take_waiters_if_low(p);
     mbox_lock_release(p);
+    mbox_wake_waiters(waiters);
     return 1;
 }
 
@@ -1525,7 +1717,24 @@ void march_sched_wake(march_proc *target) {
 /* Park the calling green thread until woken.  See the header doc comment
  * for the contract; this mirrors march_sched_recv's park sequence (status
  * PARKED, swapcontext to the owning scheduler) minus the mailbox lock,
- * which recv needs and this generic version does not. */
+ * which recv needs and this generic version does not.
+ *
+ * NOINLINE, for consistency with every other swapcontext-capable primitive
+ * in this file (march_sched_recv, march_sched_recv_until, march_yield) --
+ * but note this alone is NOT what fixes Task 8's migration hazard.
+ * march_sched_park_self's OWN body only reads tl_sched ONCE, before its
+ * swapcontext call, exactly like its siblings; that read was never the
+ * problem. The problem (see mbox_block_register_and_park's comment for the
+ * full story, including how this was diagnosed) was a tl_sched read living
+ * in a CALLER's own loop body, re-executed after calling this function --
+ * marking THIS function noinline does nothing about that, since the read
+ * that gets hoisted isn't inside here. This attribute is added because
+ * march_sched_park_self was the one swapcontext-capable park primitive in
+ * this file not already marked noinline (its only pre-Task-8 caller,
+ * march_sched_park_self_until, never re-reads tl_sched after calling it,
+ * so the gap was latent and harmless there), and there is no reason to
+ * leave it as the odd one out now that a second caller exists. */
+__attribute__((noinline))
 void march_sched_park_self(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return; /* not running inside the scheduler: nothing to park */
@@ -1711,7 +1920,9 @@ void *march_sched_recv_until(int64_t deadline_ms) {
     mbox_lock_acquire(p);
     if (p->mailbox) {
         void *msg = mbox_pop(p);
+        march_proc *waiters = mbox_take_waiters_if_low(p);
         mbox_lock_release(p);
+        mbox_wake_waiters(waiters);
         return msg;
     }
     if (march_now_ms() >= deadline_ms) {
@@ -1755,12 +1966,15 @@ void *march_sched_recv_until(int64_t deadline_ms) {
 
     mbox_lock_acquire(p);
     void *msg;
+    march_proc *waiters = NULL;
     if (p->mailbox) {
         msg = mbox_pop(p);
+        waiters = mbox_take_waiters_if_low(p);
     } else {
         msg = MARCH_RECV_NO_MSG;
     }
     mbox_lock_release(p);
+    mbox_wake_waiters(waiters);
     return msg;
 }
 

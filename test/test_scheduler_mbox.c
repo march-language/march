@@ -1,21 +1,69 @@
 /* test_scheduler_mbox.c — bounded mailbox capacity + overflow policies.
  *
- * Deterministic by construction: every segment spawns daemon procs and sends
- * to them WITHOUT ever running the scheduler (march_sched_run is never
- * called), so nothing drains a mailbox out from under an assertion and
- * message ordering within a single mbox_push/mbox_pop stream is exactly the
- * FIFO the test relies on.
+ * test_block_live_scheduler() (Task 8: MARCH_MBOX_BLOCK) runs FIRST, in its
+ * own march_sched_init()/march_sched_run() pair, because it needs a real
+ * scheduler actually draining the mailbox to unpark blocked senders.
  *
- * Segments are split into their own functions, each independently
- * assert-clean, so a future live-scheduler segment (Task 8: MARCH_MBOX_BLOCK
- * parks the sender until the scheduler drains the mailbox) can be PREPENDED
- * to main() without disturbing these deterministic ones. */
+ * Every segment AFTER it is deterministic by construction: each spawns
+ * daemon procs and sends to them WITHOUT ever running the scheduler
+ * (march_sched_run is never called again), so nothing drains a mailbox out
+ * from under an assertion and message ordering within a single
+ * mbox_push/mbox_pop stream is exactly the FIFO the test relies on. They
+ * start from a FRESH march_sched_init() so the live-scheduler segment above
+ * cannot leave any state behind that would affect them. */
 
 #include "march_scheduler.h"
 #include <assert.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
 static void nop(void *arg) { (void)arg; }
+
+/* ── MARCH_MBOX_BLOCK: live-scheduler blocking scenario ─────────────────
+ *
+ * Unlike the deterministic segments below (never-run scheduler), this one
+ * actually spins up the scheduler and drives it to quiescence, since the
+ * whole point of MARCH_MBOX_BLOCK is senders parking on a real green
+ * thread and being woken by a real receiver drain. Runs FIRST, in its own
+ * march_sched_init()/march_sched_run() pair, so the deterministic segments
+ * that follow can each start from a fresh scheduler exactly as before. */
+#define N_MSGS 2000
+static _Atomic int64_t g_received = 0, g_send_ok = 0;
+static _Atomic int64_t g_peak_depth = 0;
+static march_proc *g_bounded_rx = NULL;
+
+static void rx_loop(void *arg) {
+    (void)arg;
+    for (int i = 0; i < N_MSGS; i++) {
+        void *m = march_sched_recv();
+        if (m == MARCH_RECV_NO_MSG) return;
+        atomic_fetch_add(&g_received, 1);
+    }
+}
+
+static void tx_loop(void *arg) {
+    (void)arg;
+    for (int i = 0; i < N_MSGS / 2; i++) {
+        int64_t d = march_sched_mbox_count(g_bounded_rx);
+        int64_t pk = atomic_load(&g_peak_depth);
+        while (d > pk && !atomic_compare_exchange_weak(&g_peak_depth, &pk, d)) {}
+        if (march_sched_send(g_bounded_rx, (void *)0x1) == MARCH_SEND_OK)
+            atomic_fetch_add(&g_send_ok, 1);
+    }
+}
+
+static void test_block_live_scheduler(void) {
+    march_sched_init();
+    g_bounded_rx = march_sched_spawn(rx_loop, NULL);
+    march_sched_set_mbox_limit(g_bounded_rx, 16, MARCH_MBOX_BLOCK);
+    march_sched_spawn(tx_loop, NULL);
+    march_sched_spawn(tx_loop, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    assert(atomic_load(&g_send_ok) == N_MSGS);       /* nothing dropped */
+    assert(atomic_load(&g_received) == N_MSGS);       /* everything arrived */
+    assert(atomic_load(&g_peak_depth) <= 16 + 2);     /* bound held (small racy slack) */
+}
 
 /* Default mailbox (mbox_limit == 0, MARCH_MBOX_UNBOUNDED) never rejects. */
 static void test_unbounded_default(void) {
@@ -72,6 +120,8 @@ static void test_dead_target_unaffected(void) {
 }
 
 int main(void) {
+    test_block_live_scheduler();
+
     march_sched_init();
 
     test_unbounded_default();

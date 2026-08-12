@@ -24,9 +24,11 @@ git log is authoritative for exact commits.
   `Scheduler.dropped_messages()`, Task 6) and is handed to a disposer hook
   registered via `march_sched_set_msg_dtor` (a real March-value dtor lands in
   Task 14; until then dropped messages are leaked-with-count).
-  `MARCH_MBOX_BLOCK` is defined but not yet implemented (Task 8: park the
-  sender). No stdlib/language surface yet — this is the C substrate a later
-  task will expose.
+  `MARCH_MBOX_BLOCK` (Task 8) parks a green-thread sender until the target's
+  mailbox drains below the low-water mark (`limit/2`), guaranteeing delivery
+  (`MARCH_SEND_OK`) unless the target dies while blocked (`MARCH_SEND_DEAD`);
+  a foreign-thread sender sleep-polls instead of parking. No stdlib/language
+  surface yet — this is the C substrate a later task will expose.
 - **`Scheduler` stdlib module + `sched_stat` builtin** — runtime observability
   for the actor/task scheduler: `Scheduler.live_procs()`, `total_spawned()`,
   `runq_depth()`, `dropped_messages()`, and a raw `stat(i : Int) : Int`

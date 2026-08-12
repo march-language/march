@@ -170,6 +170,25 @@ typedef struct march_proc {
                                                  mbox_limit above; calloc zero-inits to
                                                  MARCH_MBOX_UNBOUNDED (=0). */
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
+    struct march_proc         *mbox_send_waiters; /* Task 8 (MARCH_MBOX_BLOCK): intrusive
+                                                 singly-linked list of sender procs parked
+                                                 on THIS proc's full mailbox, threaded
+                                                 through send_wait_next below. Read/written
+                                                 only under this proc's own mbox_lock (both
+                                                 by senders registering in march_sched_send
+                                                 and by the receive-side drain-wake in
+                                                 mbox_take_waiters_if_low / the PROC_DEAD
+                                                 reap branch in sched_loop). calloc
+                                                 zero-inits to NULL. */
+    struct march_proc         *send_wait_next;     /* Intrusive link for the above list on
+                                                 THIS proc when IT is a parked sender
+                                                 waiting on some OTHER proc's mailbox.
+                                                 Deliberately NOT p->next (the global-runq
+                                                 link) -- a blocked sender gets pushed to
+                                                 the runq by march_sched_wake while still
+                                                 linked into the target's waiter list, so
+                                                 sharing one field would corrupt both
+                                                 lists. */
     /* Wake permit (LockSupport/park-unpark style).  march_sched_wake deposits
      * one BEFORE it inspects `status`; march_sched_park_self consumes one
      * INSTEAD of parking.  Closes the wake-while-RUNNING window in lock-free
