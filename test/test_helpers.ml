@@ -1170,6 +1170,8 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_epoch         = 0;
   ai_resources     = [];
   ai_linear_values = [];    (* Phase 6b *)
+  ai_mbox_limit    = 0;     (* Task 9: unbounded by default *)
+  ai_mbox_policy   = 0;
 }
 
 let mk_var name ty = { March_tir.Tir.v_name = name; v_ty = ty; v_lin = March_tir.Tir.Unr }

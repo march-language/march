@@ -4652,3 +4652,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/sched_stats.expected native_sched_stats.out)))
+
+; ── Task 9: Actor.set_queue_limit — bounded mailboxes with drop policies ──
+; (compiled) ────────────────────────────────────────────────────────────
+; A slow actor with a drop_new mailbox limit of 8 is flooded with 5000
+; messages via a fast (main-thread) sender while the actor drains slowly.
+; Some messages must be dropped (Scheduler.dropped_messages() > 0), and the
+; number the actor actually processed must never exceed the number sent.
+; Uses List/Range/Actor/Scheduler stdlib modules, hence source_tree ../stdlib.
+(rule
+ (targets native_mailbox_bounded native_mailbox_bounded.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/mailbox_bounded.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mailbox_bounded
+        native/mailbox_bounded.march)
+   (with-stdout-to native_mailbox_bounded.out
+        (system "./native_mailbox_bounded")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mailbox_bounded.expected native_mailbox_bounded.out)))

@@ -4688,6 +4688,20 @@ int64_t march_mailbox_size(void *pid) {
                                         memory_order_relaxed);
 }
 
+/* actor_set_mailbox_limit: bind a mailbox capacity + overflow policy to the
+   green thread backing this actor. limit <= 0 means unbounded; policy is a
+   march_mbox_policy value (0 unbounded, 1 drop_new, 2 drop_old, 3 block).
+   No-op if the actor has no meta entry or no running green thread yet. */
+void march_actor_set_mbox_limit(void *actor, int64_t limit, int64_t policy) {
+    if (!IS_HEAP_PTR(actor)) return;
+    march_actor_meta *meta = find_meta(actor);
+    if (!meta) return;
+    pthread_mutex_lock(&g_tbl_mu);
+    march_proc *gt = meta->green_thread;
+    pthread_mutex_unlock(&g_tbl_mu);
+    if (gt) march_sched_set_mbox_limit(gt, limit, (march_mbox_policy)policy);
+}
+
 /* run_until_idle: flush the async message queue.
  *
  * Compiled main() runs as a green thread inside the scheduler

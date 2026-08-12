@@ -91,7 +91,7 @@ let builtin_names : StringSet.t =
       (* Capability builtins *)
       "cap_narrow"; "root_cap"; "mint_cap";
       (* Monitor/supervision builtins *)
-      "demonitor"; "monitor"; "mailbox_size"; "sched_stat";
+      "demonitor"; "monitor"; "mailbox_size"; "sched_stat"; "actor_set_mailbox_limit";
       "run_until_idle"; "register_resource"; "get_cap";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "get_actor_field";

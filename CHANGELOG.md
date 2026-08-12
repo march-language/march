@@ -29,6 +29,19 @@ git log is authoritative for exact commits.
   (`MARCH_SEND_OK`) unless the target dies while blocked (`MARCH_SEND_DEAD`);
   a foreign-thread sender sleep-polls instead of parking. No stdlib/language
   surface yet — this is the C substrate a later task will expose.
+- **`Actor.set_queue_limit(pid, limit, policy)`** — the March-facing surface
+  for bounded mailboxes: bind a mailbox capacity and overflow policy
+  (`0` unbounded, `1` drop_new, `2` drop_old, `3` block_sender) to a running
+  actor. Backed by a new `actor_set_mailbox_limit` builtin and the
+  `march_actor_set_mbox_limit` runtime bridge (pid → green thread →
+  `march_sched_set_mbox_limit`); dropped messages are counted in
+  `Scheduler.dropped_messages()`. The interpreter supports drop_new/drop_old
+  at its own mailbox enqueue point but treats block (`3`) as unbounded — its
+  single-threaded eager scheduler cannot park a sender without deadlocking.
+  Under a drop policy, a dropped `Actor.call` request or reply is
+  indistinguishable from a lost reply at the caller (surfaces as a timeout);
+  callers relying on `Actor.call` against a bounded actor should prefer the
+  block policy.
 - **`Scheduler` stdlib module + `sched_stat` builtin** — runtime observability
   for the actor/task scheduler: `Scheduler.live_procs()`, `total_spawned()`,
   `runq_depth()`, `dropped_messages()`, and a raw `stat(i : Int) : Int`

@@ -42,6 +42,10 @@ mod FaninFlood do
 
   fn main() do
     let pid = spawn(Sink)
+    -- Task 9: bound the mailbox with the block policy — senders park instead
+    -- of growing the queue unboundedly, so RSS stays flat under fan-in load
+    -- while every message is still guaranteed delivery (no drops).
+    Actor.set_queue_limit(pid, 1024, 3)
     let msgs_per_producer = 50000
     let producers = List.map(Range.to_list(Range.new(0, 8)), fn _ ->
       Task.async(fn ->
