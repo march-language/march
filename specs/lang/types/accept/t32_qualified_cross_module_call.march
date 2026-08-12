@@ -11,7 +11,7 @@ mod Main do
     fn double(n : Int) : Int do n * 2 end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(A.double(21)))
   end
 end

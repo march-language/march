@@ -152,6 +152,7 @@ let rec remap_fn_clause tbl (fc : Ast.fn_clause) : Ast.fn_clause =
     fc_guard = Option.map (remap_expr tbl) fc.fc_guard;
     fc_body = remap_expr tbl fc.fc_body;
     fc_span = remap_span tbl fc.fc_span;
+    fc_params_span = remap_span tbl fc.fc_params_span;
   }
 
 and remap_fn_param tbl = function

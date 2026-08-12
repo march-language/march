@@ -15,7 +15,7 @@ mod P02MatchMultiExprArms do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(area(Circle(3)))
     println(area(Square(4)))
   end

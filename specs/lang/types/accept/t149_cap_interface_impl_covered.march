@@ -36,7 +36,7 @@ mod CoveredIfaceImpl do
     grant_stub()
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("every capability named here is declared")
   end
 end

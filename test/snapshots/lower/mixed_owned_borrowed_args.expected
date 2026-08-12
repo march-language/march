@@ -8,7 +8,7 @@ case $t1 of
   _ -> borrowed
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let s : String = "shared" in
 let $t2 : String = both(s, s, 1) in
 println($t2)

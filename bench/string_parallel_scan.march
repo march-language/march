@@ -73,7 +73,7 @@ pfn run_at(buf : String, workers : Int) : Int do
   hits
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
   -- One "QQ" per 10-byte unit gives a predictable, chunk-count-independent
   -- hit total: 4_000_000 hits per pass, 4 passes = 16_000_000.
   let buf = String.repeat("abcdefQQhi", buffer_units())

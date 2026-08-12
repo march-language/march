@@ -34,7 +34,7 @@ mod Main do
     result
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let (cc, sc) = Chan.new(Echo)
     println(int_to_string(run(cc, sc)))
   end

@@ -26,7 +26,7 @@ mod Main do
   -- others. This golden now includes the disjoint-key `VectorClock.compare`
   -- case that used to be excluded (below) -- the full CRDT/lattice core is
   -- unconditionally byte-identical and crash-free, not scoped around a bug.
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- Grow-only counter: a join-semilattice. Merge is commutative + idempotent.
     let a = CRDT.GCounter.add(CRDT.GCounter.increment(CRDT.GCounter.new(), "n1"), "n1", 4)  -- n1 -> 5
     let b = CRDT.GCounter.increment(CRDT.GCounter.new(), "n2")                                -- n2 -> 1

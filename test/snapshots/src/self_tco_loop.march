@@ -10,7 +10,7 @@ mod SelfTcoLoop do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(sum_to(5, 0))
   end
 end

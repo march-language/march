@@ -87,7 +87,7 @@ let pure_src =
   {|
 mod PureStripApp do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println(int_to_string(1 + 1))
   end
 end
@@ -103,7 +103,7 @@ mod ClosureStripApp do
     f(p)
   end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match apply1(fn p -> file_read(p), "/etc/hosts") do
       Ok(_)  -> println("ok")
       Err(_) -> println("err")
@@ -243,7 +243,7 @@ let sb_net_src =
 mod SbNetApp do
   needs IO.Console
   needs IO.NetListen
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) : () do
     match tcp_listen(19097) do
       Ok(_)  -> println("BOUND")
       Err(_) -> println("BIND-FAILED")

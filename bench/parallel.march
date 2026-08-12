@@ -56,7 +56,7 @@ pfn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
   end
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   -- depth-24 tree: 2^24 leaves, ~537 MB of nodes
   -- threshold 10: parallel down to 1024 tasks, then sequential
   let t     = make(24)

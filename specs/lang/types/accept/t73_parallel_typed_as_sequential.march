@@ -7,7 +7,8 @@
 -- witnessed by golden g43.
 mod Main do
   needs IO.Console
-  fn main() do
+  needs IO.Spawn
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
     let xs = List.range(1, 10)
     let sq = List.pmap(xs, fn x -> x * x)
     let m  = List.map(xs, fn x -> x * x)

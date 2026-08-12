@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- Whole-number Floats must render identically interpreted and compiled.
     -- The reference (eval.ml string_of_float) emits a bare trailing dot: 1.0 -> "1."
     println(float_to_string(1.0))

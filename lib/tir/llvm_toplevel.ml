@@ -1218,11 +1218,25 @@ let emit_module ~emit_expr
           let spawn_target, thunk_def =
             if main_arity = 0 then (Printf.sprintf "@%s" mangled, "")
             else
+              (* R1 stage D: `main` may take ANY NUMBER of capability
+                 parameters, so the thunk supplies one erased null PER
+                 parameter.  Hardcoding a single `ptr null` here (as this did
+                 before stage D) reproduces the original SIGBUS class the
+                 thunk exists to prevent — the callee reads arguments that
+                 were never pushed.  Must stay in step with lib/eval/eval.ml's
+                 `main` invocation, which supplies the same count of [VUnit];
+                 test_codegen's [main_cap_adapter] group runs BOTH backends at
+                 0/1/2/3 parameters precisely because a divergence between
+                 them is invisible to either one alone. *)
+              let erased_args =
+                String.concat ", "
+                  (List.init main_arity (fun _ -> "ptr null"))
+              in
               ("@march_main_entry_thunk",
                Printf.sprintf
                  "\ndefine private void @march_main_entry_thunk() {\nentry:\n\
-                    call void @%s(ptr null)\n\
-                    ret void\n}\n" mangled)
+                    call void @%s(%s)\n\
+                    ret void\n}\n" mangled erased_args)
           in
           Buffer.add_string out
             (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\

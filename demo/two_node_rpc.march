@@ -21,6 +21,7 @@ mod TwoNodeRpc do
   needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
+  needs IO.NetConnect
 
   -- ── Registered function ─────────────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ mod TwoNodeRpc do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn)) do
     let port = 29852
 
     -- Start node-b in a background task.

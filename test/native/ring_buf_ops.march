@@ -51,7 +51,7 @@ mod Main do
     println("str newest=" ++ show_opt_str(RingBuf.peek_newest(rb)))
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     ints()
     strs()
   end

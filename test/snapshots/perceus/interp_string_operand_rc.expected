@@ -9,7 +9,7 @@ fn interp(s : String) : String =
   string_concat3("a", s, "b")
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t1 : String = interp("x") in
 let $rc_2 : () = println($t1) in
 dec_rc $t1;

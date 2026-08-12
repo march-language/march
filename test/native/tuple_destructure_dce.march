@@ -6,7 +6,7 @@ mod Main do
     a + b
   end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println(sum_pair(3, 4))
     println(sum_pair(100, -37))
   end

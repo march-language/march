@@ -11,7 +11,7 @@ mod Test do
     fn make_sample(n: Int): Sample = "ffi_codec2_make"
     fn describe_sample(s: Sample): String = "ffi_codec2_describe"
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(describe_sample(make_sample(3)))   -- avg=1.5/flag=yes/data=10,20,30
     println(describe_sample(make_sample(0)))   -- avg=none/flag=no/data=
   end

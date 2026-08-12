@@ -31,7 +31,7 @@ fn check(name, cond) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let failures =
     check("module A shared-ctor dispatch", DcLibA.say() == "from-A")
     + check("module B shared-ctor dispatch", DcLibB.say() == "from-B")

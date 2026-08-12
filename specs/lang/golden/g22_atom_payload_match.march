@@ -4,7 +4,7 @@ mod Main do
     "error: " ++ msg
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let result = :error("disk full")
     match result do
       :ok -> println("no error")

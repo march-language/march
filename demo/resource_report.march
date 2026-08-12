@@ -6,7 +6,7 @@ mod ResourceReport do
 
   needs IO.Clock
 
-  fn main() do
+  fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) do
     let nl = ClusterLoad.local("this-node", float_to_int(unix_time(()) *. 1000.0))
     println("=== node resources ===")
     println("cpu_count       = " ++ String.from_int(nl.cpu_count))

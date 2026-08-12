@@ -24,7 +24,7 @@
 -- covered in test/test_stdlib_suite.ml instead.
 mod HTagHardening do
   needs IO.Console
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let body = IOList.from_string("x")
 
     -- Ordinary attribute: unchanged from before the fix.

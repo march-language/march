@@ -17,7 +17,7 @@
 -- the oracle test (interpreter vs compiled) catches any regression.
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- 1. Fully static template — must NOT render empty.
     println(IOList.to_string(~H"<p>HHH</p>"))
     -- 2. String interpolation — must HTML-escape.

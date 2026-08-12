@@ -11,6 +11,9 @@
 
 mod CsvServer do
   needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.NetListen
 
 pfn save_csv(body) do
   let path = "/tmp/march_csv_input.csv"
@@ -131,7 +134,7 @@ pfn router(conn) do
   end
 end
 
-pfn main() do
+pfn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_netlisten : Cap(IO.NetListen)) do
   println("CSV server starting on port 9876 ...")
   HttpServer.new(9876)
   |> HttpServer.plug(router)

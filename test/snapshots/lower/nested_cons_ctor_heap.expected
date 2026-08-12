@@ -527,7 +527,7 @@ let $t438 : '_ = alloc Nil() in
 go(xs, ys, $t438)
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let rows : List(Row) = let $t4 : Row = let $t3 : List(Int) = let $t2 : List(Int) = let $t1 : List(Int) = alloc List.Nil(Int)() in
 alloc List.Cons(2, $t1) in
 alloc List.Cons(1, $t2) in

@@ -22,7 +22,7 @@ mod Main do
   -- associative, so differing chunk counts can reorder the additions and change
   -- the last bit -- it is not backend-portable and must not be golden-compared
   -- (finding P1, specs/todos.md).
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
     let xs = List.range(1, 200)
     -- List.pmap is order-preserving: identical to List.map element-for-element.
     let a = List.pmap(xs, fn x -> x * x)

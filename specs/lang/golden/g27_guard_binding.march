@@ -11,7 +11,7 @@ mod Main do
       P(a, b) -> b - a
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(diff(P(4, 4))))
     println(int_to_string(diff(P(3, 10))))
   end

@@ -156,7 +156,7 @@ mod StrategyDemo do
     println("writer alive: " ++ bool_to_string(is_alive(pid_of_int(w2))))
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("=== Supervision Strategies Demo ===")
 
     demo_one_for_one()

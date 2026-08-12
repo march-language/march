@@ -7,7 +7,7 @@ mod Main do
   fn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
   fn apply_twice(f : Int -> Int, n : Int) : Int do apply_it(f, apply_it(f, n)) end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     -- same fn materialized twice, both used
     println(apply_it(double, 5) + apply_it(double, 7))
     -- two distinct fns must not share one global

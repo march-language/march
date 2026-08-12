@@ -26,7 +26,7 @@ mod Main do
       _     -> "zero"
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(sign(42))
     println(sign(-7))
     println(sign(0))

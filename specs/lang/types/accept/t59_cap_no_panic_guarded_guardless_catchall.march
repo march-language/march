@@ -22,7 +22,7 @@ mod GuardOk do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(classify(Some(5))))
     println(int_to_string(classify(Some(-3))))
     println(int_to_string(classify(None)))

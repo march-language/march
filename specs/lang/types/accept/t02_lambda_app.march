@@ -1,7 +1,7 @@
 mod M do
   needs IO.Console
   fn apply(f : Int -> Int, x : Int) : Int do f(x) end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let inc = fn x -> x + 1
     println(int_to_string(apply(inc, 10)))
   end

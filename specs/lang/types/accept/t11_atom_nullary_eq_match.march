@@ -15,7 +15,7 @@ mod M do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(bool_to_string(is_ok(status())))
     println(describe(status()))
     println(describe(:nope))

@@ -15,7 +15,7 @@ mod JsFfiRaises do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(shown(parseNum("42")))
     println(shown(parseNum("bad")))
   end

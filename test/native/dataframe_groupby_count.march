@@ -9,7 +9,7 @@
 -- as an empty list -> 0 builders -> DataFrame(Nil) -> row_count 0.
 mod Main do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     let cats = Cons("a", Cons("b", Cons("a", Cons("b", Cons("a", Nil)))))
     let ids  = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
     let df = DataFrame.make_df(Cons(IntCol("id", native_int_arr_from_list(ids)),

@@ -2,7 +2,7 @@
 record Point { x : Int, y : Int }
 -- fns (2) --
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let p : { x : Int, y : Int } = { x = 1, y = 2 } in
 let moved : { x : Int, y : Int } = move_right(p) in
 let $t3 : Int = moved.x in

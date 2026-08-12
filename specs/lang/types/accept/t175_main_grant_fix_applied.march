@@ -1,0 +1,24 @@
+mod Main do
+  -- R1 stage D (2026-08-10): the exact output of applying the compiler's own
+  -- `forge fix` payload to a program that declared no grant.
+  --
+  -- The grant here was not chosen by a human — it is `caps(main)`, computed
+  -- by the check that reported the error and emitted verbatim as a replace
+  -- over `main`'s parameter list. This fixture is the round-trip witness: if
+  -- the generated text ever stops being valid March (a reserved word, an
+  -- unbalanced paren, a capability name the lattice does not know), this file
+  -- is what fails.
+  --
+  -- The `_` prefixes are part of the generated text, not tidying: a migrated
+  -- `main` does not use its capabilities, and without them the fix would
+  -- trade a capability error for an unused-parameter warning.
+  needs IO.Console
+  needs IO.FileWrite
+
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+    match file_write("/tmp/t175_out", "d") do
+      Ok(_)  -> println("ok")
+      Err(_) -> println("e")
+    end
+  end
+end

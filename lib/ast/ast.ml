@@ -240,6 +240,23 @@ and fn_clause = {
   fc_guard : expr option;       (** Optional guard: when expr *)
   fc_body : expr;
   fc_span : span;
+  fc_params_span : span;
+  (** The parameter list INCLUDING its parentheses — `()` for a nullary
+      clause, `(a, b)` otherwise.
+
+      Exists so a diagnostic can offer a mechanical fix that REWRITES the
+      parameter list. R1 stage D needs exactly this: it tells a program which
+      capabilities its `main` must be granted, and the fix has to turn `()`
+      into `(_cap_console : Cap(IO.Console))`. No pre-existing span could
+      express that — [fc_span] covers the whole clause (body included) and
+      [fn_name.span] covers only the name, so replacing the latter would
+      produce `fn main(…)() : ()`.
+
+      For a clause SYNTHESIZED by desugar (default-argument expansion,
+      derive, multi-head merging) there are no source parentheses to point
+      at, and this is set to the clause's own [fc_span]. Such a clause is
+      never the target of a parameter-list fix — the fix is only ever offered
+      for a `main` the user wrote. *)
 }
 
 (** Function parameters can be patterns (for head matching) or named params. *)

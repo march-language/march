@@ -11,7 +11,7 @@ alloc Option.Some(h)
   _ -> panic("non-exhaustive pattern match")
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t9 : Option(Int) = let $t8 : List(Int) = let $t7 : List(Int) = alloc List.Nil(Int)() in
 alloc List.Cons(3, $t7) in
 head_opt($t8) in

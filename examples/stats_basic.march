@@ -102,7 +102,7 @@ fn demo_safe() do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   demo_descriptive()
   demo_bivariate()
   demo_regression()

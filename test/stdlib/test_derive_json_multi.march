@@ -14,7 +14,7 @@ mod TestMultiJson do
   derive Eq for Shape
   derive Json for Shape
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- All three should work in the same module
     let p = { x: 42, y: 99 }
     let pj = to_json(p)

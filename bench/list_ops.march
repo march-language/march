@@ -63,7 +63,7 @@ pfn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
   end
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let n     = 1000000
   let xs    = irange(1, n)
   let ys    = imap(xs, fn x -> x * 2)

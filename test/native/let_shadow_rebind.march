@@ -14,7 +14,7 @@ mod Main do
     x
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let x = 5
     let x = x + 1
     println(int_to_string(x))

@@ -29,7 +29,7 @@ pfn make_float_list(n : Int) : List(Float) do
   go(n - 1, Nil)
 end
 
-fn main() : Unit do
+fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let n = 5000000
   let arr = NativeArray.from_list_float(make_float_list(n))
   let t0 = unix_time(())

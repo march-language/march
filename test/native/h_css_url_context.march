@@ -17,7 +17,7 @@
 -- Compiled/interpreted golden diff.
 mod CssUrl do
   needs IO.Console
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     -- legitimate URLs must survive intact
     let a = "/img/logo.png"
     println("rel-attr : " ++ IOList.to_string(~H"<div style=\"background:url(${a})\">x</div>"))

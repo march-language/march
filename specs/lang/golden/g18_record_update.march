@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let base = { x: 1, y: 2 }
     let updated = { base with x: 100 }
     println(int_to_string(base.x))

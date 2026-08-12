@@ -41,7 +41,7 @@ mod ZeroArgClosureDefault do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let conn0 = Conn("", Nil)
     let conn1 = assign(conn0, "_csrf_token", "SECRET")
     let inner = fn () -> "INNER"

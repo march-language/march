@@ -32,7 +32,7 @@ mod SchedStress do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     let n_batches = 250
     let batch_size = 1000
     let total = n_batches * batch_size

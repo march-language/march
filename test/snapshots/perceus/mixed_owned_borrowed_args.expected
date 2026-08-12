@@ -9,7 +9,7 @@ case $t1 of
 borrowed
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let s : String = "shared" in
 let $t2 : String = inc_rc s;
 both(s, s, 1) in

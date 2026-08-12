@@ -20,7 +20,7 @@ mod LetTupleDestructure do
     (b, 2.5)
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     -- function-returned (Int, Int): both fields must untag
     let (s, t) = ret_ii(5)
     println("ii=" ++ int_to_string(s) ++ "," ++ int_to_string(t))

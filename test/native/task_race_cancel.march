@@ -11,7 +11,7 @@
 mod Main do
   needs IO.Console
   needs IO.Spawn
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : () do
     let a = Task.async(fn () -> 1)
     let b = Task.async(fn () -> 2)
     match Task.race(Cons(a, Cons(b, Nil))) do

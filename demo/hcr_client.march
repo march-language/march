@@ -10,6 +10,8 @@
 --   ./hcr_client <host> <port> [n]
 mod HcrClient do
   needs IO.Console
+  needs IO.NetConnect
+  needs IO.Process
 
   mod Server do
     pfn square(n : Int) : Int do n * n end
@@ -40,7 +42,7 @@ mod HcrClient do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process)) do
     let args  = Process.argv()
     let host  = nth_str(args, 1, "127.0.0.1")
     let port  = nth_int(args, 2, 29852)

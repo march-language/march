@@ -1,0 +1,23 @@
+mod Main do
+  -- R1 stage D accept witness (2026-08-10) — and the capability that had to
+  -- ship WITH the flip rather than after it.
+  --
+  -- Before stage D, `main` could hold exactly ONE capability, so a program
+  -- needing both console and file-write could not state a narrow grant at
+  -- all: it had to widen to `Cap(IO)`. Requiring a grant without fixing that
+  -- would have pushed ~30% of real programs to the root capability and earned
+  -- a WEAKER guarantee than the ambient default it replaced.
+  --
+  -- The grant is now the UNION over `main`'s capability parameters — the same
+  -- rule stage C already applied to ordinary functions. Reject companion t176
+  -- is this file with the parameters removed.
+  needs IO.Console
+  needs IO.FileWrite
+
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+    match file_write("/tmp/t176_out", "d") do
+      Ok(_)  -> println("ok")
+      Err(_) -> println("e")
+    end
+  end
+end

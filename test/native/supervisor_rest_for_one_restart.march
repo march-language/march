@@ -30,7 +30,7 @@ mod SupervisorRestForOneRestart do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let sup = spawn(Sup)
     let r1 = child_int(sup, "reader")
     let p1 = child_int(sup, "parser")

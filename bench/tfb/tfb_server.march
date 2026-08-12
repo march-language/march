@@ -46,7 +46,7 @@ mod TfbServer do
     end
   end
 
-  fn main() do
+  fn main(_cap_netlisten : Cap(IO.NetListen)) do
     HttpServer.new(8080)
     |> HttpServer.plug(router)
     |> HttpServer.listen()

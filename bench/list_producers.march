@@ -11,7 +11,7 @@ mod ListProducers do
     if k <= 0 do xs else repeat_n(step(xs), k - 1) end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let xs = List.range(1, 20000)
     let ys = repeat_n(xs, 2000)
     println(List.sum_int(ys))

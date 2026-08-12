@@ -414,7 +414,7 @@ pfn run_fetch() do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_random : Cap(IO.Random)) do
   match Env.get("FORGE_ACTION", "publish") do
   "retire" -> run_retire()
   "fetch"  -> run_fetch()

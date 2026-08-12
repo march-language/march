@@ -45,7 +45,7 @@ fn consume_loop(s, n) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let seed = "z"
   -- 1 000 iterations: keeps the interpreter fast while still exercising
   -- the wrapped-call code path under both interpretation and native compile.

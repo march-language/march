@@ -35,7 +35,7 @@ mod M do
   fn opaque_id(n : Int) : Int do n end
   fn shady(n : Int) : {Int | _ < n} do opaque_id(n) end
   fn takepos(k : {Int | _ >= 0}) : Int do k end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(takepos(shady(0))))
   end
 end

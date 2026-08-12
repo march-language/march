@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let nested = ((1, 2), (3, 4))
     match nested do
       ((a, b), (c, d)) -> println(int_to_string(a + b + c + d))

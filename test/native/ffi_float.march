@@ -5,6 +5,7 @@
 mod Test do
   needs IO.Console
   needs Ffi
+  needs IO.Foreign
   extern "rt" : Cap(Ffi) do
     raises fn fdiv(a: Float, b: Float): Result(Float, String) = "ffi_raise_fdiv"
     fn maybe_half(x: Float): Option(Float) = "ffi_maybe_half"
@@ -28,7 +29,7 @@ mod Test do
       None    -> "none"
     end
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(shown(fdiv(7.0, 2.0)))         -- Ok(3.5)        -> ok 3.5
     println(shown(fdiv(1.0, 0.0)))         -- raised          -> div by zero
     println(show_half(maybe_half(9.0)))    -- Some(4.5)       -> some 4.5
