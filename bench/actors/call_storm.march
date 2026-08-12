@@ -40,7 +40,7 @@ mod CallStorm do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
     let pid = spawn(Slow)
     let tasks = List.map(Range.to_list(Range.new(0, 64)), fn _ ->
       Task.async(fn -> caller(pid, 50, 0, 0)))

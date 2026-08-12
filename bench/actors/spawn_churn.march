@@ -25,7 +25,7 @@ mod SpawnChurn do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     churn(0, 40000)
     run_until_idle()
     -- prove the node can still spawn and message afterward

@@ -74,7 +74,7 @@ mod CrashLoop do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let boss = spawn(Boss)
     poison_loop(boss, 20)
     -- after 20 crash/restart cycles, the CURRENT child incarnation must
