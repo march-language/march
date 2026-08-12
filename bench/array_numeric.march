@@ -142,7 +142,7 @@ end
 
 -- ── Main ───────────────────────────────────────────────────────────────────
 
-fn main() : Unit do
+fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let n = 100000
   println("P10 Array Numeric Benchmark  (n = " ++ int_to_string(n) ++ ")")
   println("Generating data...")

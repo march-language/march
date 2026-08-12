@@ -140,7 +140,7 @@ end
 
 -- ─── Main ────────────────────────────────────────────────────────────────────
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   -- Section 1: basic trace + :diff demo
   println("--- sum_to(5) = " ++ String.from_int(sum_to(5)))
 

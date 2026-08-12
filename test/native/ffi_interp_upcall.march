@@ -13,7 +13,7 @@ mod Test do
     fn count_matching(pred: (Int) -> Bool, n: Int): Int = "ffi_count_matching"
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(apply1(fn n -> n * 2, 21)))
     println(int_to_string(count_matching(fn n -> n % 2 == 0, 10)))
   end

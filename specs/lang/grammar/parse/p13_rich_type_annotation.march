@@ -13,7 +13,7 @@ mod P13RichTypeAnnotation do
     step(pair)
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let maker = fn scale ->
       fn pair ->
         let (a, b) = pair

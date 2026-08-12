@@ -13,7 +13,7 @@ mod Test do
       None -> "none"
     end
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(shown(maybe(7)))     -- Some(7) -> 7
     println(shown(maybe(0 - 1))) -- None    -> none
   end

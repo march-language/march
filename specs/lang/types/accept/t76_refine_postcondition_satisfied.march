@@ -10,7 +10,7 @@ mod M do
   fn good(n : Int) : {Int | _ >= 0} do
     if n >= 0 do n else 0 end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(good(-3)))
   end
 end

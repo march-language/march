@@ -580,7 +580,7 @@ let check_fn ~root errctx (fd : A.fn_def) : unit =
 let check_body ~root errctx (params : A.fn_param list) (body : A.expr) : unit =
   check_clause ~root errctx
     { A.fc_params = params; A.fc_guard = None; A.fc_body = body;
-      A.fc_span = A.dummy_span }
+      A.fc_span = A.dummy_span; A.fc_params_span = A.dummy_span }
 
 (* ── Module-level walk ──────────────────────────────────────────────────── *)
 

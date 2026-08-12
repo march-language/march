@@ -10,7 +10,7 @@ mod M do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(describe(5))
     println(describe(50))
   end

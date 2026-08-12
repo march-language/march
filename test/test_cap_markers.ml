@@ -45,7 +45,7 @@ let file_src =
 mod MarkerFileApp do
   needs IO.Console
   needs IO.FileRead
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/hosts") do
       Ok(_) -> println("ok")
       Err(_) -> println("err")
@@ -58,7 +58,7 @@ let pure_src =
   {|
 mod MarkerPureApp do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println("hi")
   end
 end
@@ -96,7 +96,7 @@ mod MarkerDirectPassApp do
     f(p)
   end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     match apply1(file_read, "/etc/hosts") do
       Ok(_)  -> println("ok")
       Err(_) -> println("err")
@@ -130,6 +130,7 @@ let tests =
 let attrib_inlined_src =
   {|
 mod AttribApp do
+  needs IO.FileRead
   needs IO.Console
   mod Dep do
     needs IO.FileRead
@@ -140,7 +141,7 @@ mod AttribApp do
       end
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.slurp("/etc/hosts"))
   end
 end
@@ -163,6 +164,7 @@ let test_attributed_to_dep_not_app_despite_inlining () =
 let attrib_stdlib_wrapper_src =
   {|
 mod WrapApp do
+  needs IO.FileRead
   needs IO.Console
   mod Dep do
     needs IO.FileRead
@@ -173,7 +175,7 @@ mod WrapApp do
       end
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.slurp("/etc/hosts"))
   end
 end
@@ -207,7 +209,7 @@ mod PartialApp do
       end
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println(Int.to_string(Dep.add(2, 3)))
   end
 end

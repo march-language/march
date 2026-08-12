@@ -16,7 +16,7 @@ mod UnitCallbackZeroArg do
     cb()
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     run_twice(fn -> println("a"))
     let g = fn -> println("b")
     g()

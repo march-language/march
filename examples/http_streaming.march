@@ -11,7 +11,7 @@ mod HttpStreaming do
   needs IO.Console
   needs IO.NetConnect
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect)) do
   let client = HttpClient.new_client()
   let client = HttpClient.add_request_step(client, "defaults",
     HttpClient.step_default_headers)

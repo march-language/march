@@ -17,7 +17,7 @@ mod AtomCtorField do
     if got == want do println("ok " ++ label) else println("BAD " ++ label) end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     check("put", get(mk(:put)), :put)
     check("post", get(mk(:post)), :post)
     check("get", get(mk(:get)), :get)

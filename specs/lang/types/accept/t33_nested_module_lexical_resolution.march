@@ -17,7 +17,7 @@ mod Main do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(A.Inner.call_secret()))
   end
 end

@@ -8,7 +8,7 @@
 -- Inline.Text (0), so the first-variant match silently missed → "MISS".
 mod XModCtorCollision do
   needs IO.Console
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let out =
       match Inl.one("hi") do
       Cons(Inline.Text(s), Nil) -> "text:" ++ s

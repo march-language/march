@@ -1,6 +1,6 @@
 mod P03AdditiveLeftAssoc do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- 10 - 3 - 2 only equals 5 under LEFT-associative `-`: (10 - 3) - 2 = 5.
     -- Right-associative would give 10 - (3 - 2) = 9. This is a value-witness
     -- of expr_add's left recursion (parser.mly expr_add: `expr_add MINUS

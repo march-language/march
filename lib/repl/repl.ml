@@ -226,6 +226,7 @@ let wrap_expr_as_module
     fc_guard = None;
     fc_body = e;
     fc_span = s;
+    fc_params_span = s;
   } in
   let main_def = {
     March_ast.Ast.fn_name = { txt = "main"; span = s };

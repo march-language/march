@@ -1200,7 +1200,7 @@ let emit_llvm_ir_to_file ~main_exe ~src () : [ `Ok of string | `Failed of int * 
 (** Wrap a desugared expression as `fn main() -> e` in a minimal module. *)
 let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
   let s = March_ast.Ast.dummy_span in
-  let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+  let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
   let fn_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public;
@@ -1216,7 +1216,7 @@ let parse_repl src =
 (** Test: `let x = 21` on line 1, then `x + 21` on line 2 should give 42. *)
 let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
   let s = March_ast.Ast.dummy_span in
-  let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+  let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s; fc_params_span = s } in
   let main_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;

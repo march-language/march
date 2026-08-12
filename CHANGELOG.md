@@ -11,6 +11,33 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: a program that performs IO must declare the grant it performs
+  it under.** `fn main()` with no capability parameter is now granted
+  *nothing*, so reaching any capability from it is a compile error naming the
+  exact grant the program needs — previously a parameterless `main` was
+  ambient and could do anything. This is what makes "a March program cannot
+  perform IO without declaring its authority" true rather than
+  aspirational; before it, the honest claim was only "a program that *states*
+  its grant cannot exceed it".
+  A `main` that performs no IO is unaffected. Migration is one line and you do
+  not have to write it: the error prints the exact signature, and carries a
+  machine-applicable fix, so `forge fix` rewrites `fn main()` into
+  `fn main(_cap_console : Cap(IO.Console))` for you. The grant is not a
+  suggestion — it is the set of capabilities the compiler already proved the
+  program reaches. (Sandbox ladder R1 stage D.)
+- **`main` may now hold several capabilities**, e.g.
+  `fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn))`; the
+  grant is their union. Previously it could hold exactly one, so a program
+  needing two narrow capabilities had to widen to `Cap(IO)`. Shipped
+  alongside the change above deliberately: without it, requiring a grant
+  would have pushed roughly a third of real programs to the root capability
+  and earned a weaker guarantee than the ambient default it replaced.
+  Relatedly, `IO.Foreign` under a narrow grant is now refused only when the
+  grant does not cover it — an explicit `Cap(IO.Foreign)` parameter is an
+  honest grant of the unbounded thing.
+
 ### Added
 
 - **Exponential supervisor restart backoff with jitter (runtime-internal)** —
@@ -69,6 +96,19 @@ git log is authoritative for exact commits.
   counts); unknown indices read 0 on both backends.
 - Scheduler timers: green threads can park with a deadline (runtime-internal;
   enables Actor.call deadline waits and supervisor backoff).
+- **Capability grants now compose per function, not just per program.**
+  Any function that takes a concrete capability parameter is checked against
+  it: `fn log(cap : Cap(IO.Console), msg : String)` may reach nothing beyond
+  the console, transitively, through helpers and the stdlib alike — and,
+  unlike the whole-program grant, it is checked wherever the function is
+  declared, so a library's bound holds without the application opting in.
+  Rows are inferred; nothing is written in source and no printed type
+  changes. A higher-order function that invokes a callback it was GIVEN still
+  certifies (whoever supplies the callback is charged for it), while a
+  function that invokes a value with no traceable origin is refused under a
+  narrow grant rather than certified — the same stance already taken on
+  `IO.Foreign`. Violations name the chain that reaches the capability.
+  (Sandbox ladder R1 stage C.)
 - **New `Simd` module: explicit 128-bit SIMD vector types — `F32x4`,
   `F64x2`, `I32x4`, `I64x2`, `U8x16`** — 127 lane-wise operations
   (splat/make/extract/replace/load/store, compare/bitwise/select/scan,

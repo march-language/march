@@ -34,9 +34,14 @@ typedef enum {
 
 /* ── Per-connection read buffer ───────────────────────────────────────── */
 
-/* Size of the inline read buffer per connection.  64 KB is enough for many
- * pipelined GET requests in a single recv() call. */
+/* Initial per-connection read buffer.  64 KB is enough for many pipelined GET
+ * requests in a single recv() call; it GROWS on demand (doubling) for requests
+ * with larger bodies — see march_recv_nonblocking. */
 #define CONN_READ_BUF_SIZE (64 * 1024)
+
+/* Hard ceiling on one buffered request.  Matches MAX_REQ_SIZE in march_http.c
+ * so the two servers refuse the same things. */
+#define CONN_READ_BUF_MAX  (32 * 1024 * 1024)
 
 /* ── Per-connection state ─────────────────────────────────────────────── */
 
@@ -50,7 +55,13 @@ struct conn_state {
     int           keep_alive;
 
     /* ── Read state ─────────────────────────────────────────────────── */
-    char          rbuf[CONN_READ_BUF_SIZE];
+    /* Heap-allocated and grown on demand, NOT inline: the event loop is
+     * edge-triggered, so a full buffer that cannot be grown is a permanent
+     * stall — no further readable event is delivered for data already sitting
+     * in the socket, and the connection hangs until the peer gives up.
+     * Retained across free-list reuse so a busy connection allocates once. */
+    char         *rbuf;                  /* NULL until the first read */
+    size_t        rbuf_cap;              /* allocated bytes */
     size_t        rbuf_len;              /* valid bytes in rbuf */
 
     /* ── Write state ────────────────────────────────────────────────── */

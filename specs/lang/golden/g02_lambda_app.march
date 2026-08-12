@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let f = fn x -> x + 1
     println(int_to_string(f(10)))
   end

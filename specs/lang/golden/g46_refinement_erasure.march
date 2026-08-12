@@ -21,7 +21,7 @@ mod Main do
     if n >= 0 do n else 0 end
   end
   fn take_n(n : {Int | _ >= 0}) : Int do n * 2 end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(take_n(clamp_nonneg(5))))
     println(int_to_string(take_n(clamp_nonneg(-7))))
     println("done")

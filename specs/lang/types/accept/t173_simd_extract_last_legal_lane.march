@@ -6,7 +6,7 @@
 -- so both calls typecheck and the refinement obligation discharges.
 mod M do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let v = Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
     let u = Simd.splat_u8x16(7)
     println(to_string(Simd.extract_f32x4(v, 3)))

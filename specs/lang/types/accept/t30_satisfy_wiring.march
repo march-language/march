@@ -19,7 +19,7 @@ mod M do
 
   satisfy Named for Person
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(name(Person("Ada")))
   end
 end

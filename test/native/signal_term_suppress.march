@@ -6,7 +6,7 @@
 mod Main do
   needs IO.Console
   needs IO.Signal
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal)) do
     Signal.watch(Signal.Term, fn -> println("term handler"))
     println("before term")
     Signal.raise(Signal.Term)

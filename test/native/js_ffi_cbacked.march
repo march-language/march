@@ -9,7 +9,7 @@ mod JsFfiCbacked do
     fn dbl(n: Int) : Int = "ffi_test_dbl"
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(dbl(21)))
   end
 end

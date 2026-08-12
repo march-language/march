@@ -5,13 +5,17 @@ mod Main do
   -- param production mirroring LINEAR) and is tracked affine — used at most
   -- once. The type-modifier form `c : affine Cap` (t66) still works too.
   -- See core-march-types.md §2.9.1.
-  type Cap = C(Int)
-  fn use_cap(affine c : Cap) : Int do
+  -- NB: this fixture used to name its own type `Cap`. R1 stage D requires
+  -- `main` to declare a grant, and a module that shadows `Cap` cannot spell
+  -- one — `Cap(IO.Console)` resolves to the local 0-argument type. Renamed
+  -- to `Box`; the affine-parameter property under test is unaffected.
+  type Box = C(Int)
+  fn use_cap(affine c : Box) : Int do
     match c do
       C(n) -> n
     end
   end
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println(int_to_string(use_cap(C(5))))
   end
 end

@@ -11,7 +11,7 @@
 mod SimdPolyEq do
   needs IO.Console
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let xs = [Simd.make_f32x4(1.0, 2.0, 3.0, 4.0), Simd.splat_f32x4(1.0)]
     -- Content-equal to the 2nd element via a FRESH box (splat_f32x4 called
     -- again — a different heap allocation, same lanes).

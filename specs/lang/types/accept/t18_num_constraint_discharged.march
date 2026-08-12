@@ -1,6 +1,6 @@
 mod M do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(1 + 2))
     println(float_to_string(1.0 +. 2.0))
   end

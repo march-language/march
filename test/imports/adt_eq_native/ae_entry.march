@@ -20,7 +20,7 @@ fn check(name, cond) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let failures =
     check("nested ctor equal",
           AeLib.AeWrap(AeLib.mk_box(1, "x")) == AeLib.AeWrap(AeLib.mk_box(1, "x")))

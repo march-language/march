@@ -16,7 +16,7 @@ mod P10MatchMultiExprArmsThreeWay do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(area(Circle(3)))
     println(area(Square(4)))
     println(area(Triangle(5, 6)))

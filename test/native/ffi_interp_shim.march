@@ -12,7 +12,7 @@ mod Test do
     fn shim_strlen(s: String): Int = "shim_strlen"
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(shim_add(3, 4)))
     println(int_to_string(shim_mul(6, 7)))
     println(int_to_string(shim_strlen("hello")))

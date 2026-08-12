@@ -23,7 +23,7 @@ mod Main do
 
   fn use_site(s : Cfg.Site) : String do Cfg.site_title(s) end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let s = Cfg.default()
     println(use_site(s))
   end

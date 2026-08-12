@@ -10,7 +10,7 @@ mod M do
   needs IO.Console
   fn takepos(k : {Int | _ >= 0}) : Int do k end
   fn below(n : Int) : {Int | _ < n} do n - 1 end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(takepos(below(10))))
   end
 end

@@ -20,7 +20,7 @@ mod NewtypeCounter do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let c = Counter(41)
     println(int_to_string(unwrap(bump(c))))
   end

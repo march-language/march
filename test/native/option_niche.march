@@ -18,7 +18,7 @@ fn greet(name : Option(String)) : String do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   match safe_div(10, 2) do
     Some(n) -> println(int_to_string(n))
     None -> println("none")

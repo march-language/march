@@ -10,7 +10,7 @@ mod CapErr do
     make_token()
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_random : Cap(IO.Random)) do
     println(issue())
   end
 

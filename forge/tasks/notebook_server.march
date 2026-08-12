@@ -19,6 +19,20 @@
 --     {"type":"server_output","index":N,"content":"...","running":true/false}
 --     {"type":"server_error","index":N,"message":"..."}
 
+
+  needs IO.Console
+
+  needs IO.FileRead
+
+  needs IO.FileWrite
+
+  needs IO.Mut
+
+  needs IO.NetListen
+
+  needs IO.Process
+
+  needs IO.WebSocket
 mod ForgeNotebookServer do
 
 -- ── String helpers ────────────────────────────────────────────────────────────
@@ -1079,7 +1093,7 @@ end
 
 -- ── Main entry point ──────────────────────────────────────────────────────────
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_mut : Cap(IO.Mut), _cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process), _cap_websocket : Cap(IO.WebSocket)) do
   let nb_path = match System.env("FORGE_NB_INPUT") do
     Some(p) -> p
     None    ->

@@ -22,7 +22,7 @@ mod Main do
   needs IO.Mut
   use Vault
 
-  fn main() do
+  fn main(_cap_mut : Cap(IO.Mut)) do
     let _ = Vault.new("t")
     ()
   end

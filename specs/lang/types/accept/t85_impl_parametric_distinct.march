@@ -14,7 +14,7 @@ mod M do
   impl Descr(Bag(a)) do
     fn descr(_self) do "bag" end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(descr(Box(1)))
     println(descr(Bag("x")))
   end

@@ -14,7 +14,7 @@ mod RpcHashLive do
       Ok(_) -> Ok(Msgpack.encode(Msgpack.array(List.map(probe(0), fn x -> Msgpack.int(x)))))
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let (_s, i) = remote_ref_hashes("RpcHashLive", "probe")
     println(i)
   end

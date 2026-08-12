@@ -12,7 +12,7 @@ mod Main do
 
   fn make_adder(k : Int) : Int -> Int do fn x -> x + k end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     -- a capture-free lambda used repeatedly across a loop: every call site
     -- materializes `fn x -> x * 2` anew, and all of them must reference the
     -- same immortal static closure without corrupting each other's results

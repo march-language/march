@@ -5,7 +5,7 @@ mod RefineErr2 do
     n / d
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(safe_div(100, 0)))
   end
 

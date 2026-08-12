@@ -16,7 +16,7 @@ mod Main do
   fn add3(N(a), N(b), N(c)) do a + b + c end
   fn mix(N(a), b) do a + b end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println(bool_to_string(eq2(N(1), N(2))))
     println(bool_to_string(eq2(N(3), N(3))))
     println(int_to_string(add3(N(1), N(2), N(3))))

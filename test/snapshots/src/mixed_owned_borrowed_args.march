@@ -11,7 +11,7 @@ mod MixedOwnedBorrowedArgs do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let s = "shared"
     println(both(s, s, 1))
   end

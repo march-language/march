@@ -10,7 +10,7 @@
 --   t6: width conversions (float<->f32, int<->i32, int<->u8, i32/u8->f32->float)
 mod Main do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     -- t1: u8 wrap on store, zero-extend on load
     let a = NativeArray.make_u8(3, 0)
     let a = NativeArray.set_u8(a, 0, 300)

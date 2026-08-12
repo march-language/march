@@ -7,7 +7,7 @@
 -- VectorClock.compare crashes COMPILED on disjoint clocks, finding C1.)
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let a = CRDT.GCounter.increment(CRDT.GCounter.new(), "n1")
     let b = CRDT.GCounter.increment(CRDT.GCounter.new(), "n2")
     let m = CRDT.GCounter.merge(a, b)

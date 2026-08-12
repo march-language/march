@@ -17,6 +17,10 @@
 -- `stdlib_member_defs_ok`'s `A.DExtern` arm deleted, this program is rejected
 -- with a FALSE `refinement violation: ... (e.g. len(ys) = 0)` on `head(ys)`.
 mod App do
+  -- R1 stage D: `main`'s `Cap(IO.Foreign)` grant is a direct use in THIS
+  -- module, so App declares it too — the nested `mod List`'s own `needs`
+  -- covers the extern block, not the outer signature.
+  needs IO.Foreign
   mod List do
     needs IO.Foreign
 
@@ -31,5 +35,5 @@ mod App do
     if List.length(ys) == 0 do head(ys) else ys end
   end
 
-  fn main() : List(Int) do go([1]) end
+  fn main(_cap_foreign : Cap(IO.Foreign)) : List(Int) do go([1]) end
 end

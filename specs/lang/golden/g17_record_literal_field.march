@@ -4,7 +4,7 @@ mod Main do
     println(label)
     v
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let r = { x: trace("eval-x", 1), y: trace("eval-y", 2) }
     println(int_to_string(r.x))
     println(int_to_string(r.y))

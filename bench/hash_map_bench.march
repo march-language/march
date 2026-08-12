@@ -89,7 +89,7 @@ end
 
 -- ── Main ───────────────────────────────────────────────────────────────────
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   let scales = [10000, 50000, 100000]
 
   println("=== HashMap raw put/get ===")

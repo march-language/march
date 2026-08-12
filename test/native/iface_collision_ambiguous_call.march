@@ -27,7 +27,7 @@ mod Top do
     end
     fn mk() do TB end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(speak(NA.mk()))
     println(speak(NB.mk()))
   end

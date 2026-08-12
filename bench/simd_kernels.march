@@ -176,7 +176,7 @@ mod SimdKernels do
     go(0, 12345, 0.0)
   end
 
-  fn main() : Unit do
+  fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
     let n = 5000000
 
     -- dot_simd vs dot_composed

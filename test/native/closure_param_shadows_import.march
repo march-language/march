@@ -35,7 +35,7 @@ fn scan_lam(b) do
   step(0) + step(1)
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let b = Bytes.from_list([1, 2, 3, 0])
   match scan_block(b, 0) do
   (sum, stop) -> do

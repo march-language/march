@@ -8,7 +8,7 @@
 -- and a pattern variable shadowing an outer local inside a match arm.
 mod JsLetShadowing do
   needs IO.Console
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let x = 10
     let x = x + 5
     let x = x * 2

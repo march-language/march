@@ -11,7 +11,7 @@ mod Main do
       Wrap((k, Non)) -> k
     end
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(total(Wrap((3, Som(4))))))
     println(int_to_string(total(Wrap((9, Non)))))
   end

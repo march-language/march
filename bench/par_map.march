@@ -90,7 +90,7 @@ pfn par_map_sum(xs : List(Int), chunk_size : Int) : Int do
   par_map_inner(xs, chunk_size, Nil, chunk_size)
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   -- 10K elements, 1000 per chunk = 10 tasks
   -- (100K overflows the C stack in compiled mode until TCO is improved)
   let n = 10000

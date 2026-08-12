@@ -6,7 +6,7 @@ mod M do
   fn max(a, b) when Ord(a) do if a > b do a else b end end
   -- Likewise `when Eq(a)` satisfied at Int and String.
   fn same(a, b) when Eq(a) do a == b end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(max(1, 2)))
     if same(1, 1) do println("eq") else println("neq") end
     if same("x", "y") do println("eq") else println("neq") end

@@ -54,7 +54,7 @@ mod JsMatchStmtFallthrough do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     walk(Cons(10, Cons(20, Cons(30, Nil))), 0)
     walk_if(Cons(10, Cons(20, Cons(30, Nil))))
     walk_rec(Cons({ name: "a", v: 10.0 }, Cons({ name: "b", v: 20.0 }, Nil)))

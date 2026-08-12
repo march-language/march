@@ -1,6 +1,6 @@
 mod M do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let n = 42
     let b = true
     let s = "hi"

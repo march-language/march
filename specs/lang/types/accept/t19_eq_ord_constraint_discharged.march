@@ -1,6 +1,6 @@
 mod M do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let x = 3
     let y = 3
     println(if x == y do "eq" else "neq" end)
