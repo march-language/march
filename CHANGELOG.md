@@ -91,9 +91,23 @@ git log is authoritative for exact commits.
   spelling of the default. **This is a breaking change** for code written
   before it: the fix is one `needs` line per named module, and the error names
   the module and the capability.
+- **`march_send`/`Actor.call`/`mailbox_size` no longer take the global
+  actor-table mutex on their hot path.** The actor-table hash chain is never
+  unlinked or freed (metas live for the process lifetime), so `find_meta`
+  now walks it lock-free — acquire-loading the bucket head and following
+  `tbl_next`, paired with a release-store publish at insertion — instead of
+  holding `g_tbl_mu` for the lookup. Combined with the `green_thread`
+  atomicity fix above, per-message sends no longer contend with concurrent
+  spawns/lookups on other actors.
 
 ### Fixed
 
+- **An actor's `green_thread` field was written at spawn without holding the
+  actor-table lock, racing any concurrent reader (`march_send`,
+  `march_actor_call`, `mailbox_size`, `set_mbox_limit`).** The field is now
+  `_Atomic`, written with a release store at spawn and at green-thread exit,
+  and read with an acquire load everywhere — closing a pre-existing data
+  race rather than introducing a new lock.
 - **`mailbox_size` on compiled binaries returned only the monitor Down
   count, not the actual mailbox depth — the two backends now agree.**
 - Actor.call with a timeout no longer busy-polls the scheduler while

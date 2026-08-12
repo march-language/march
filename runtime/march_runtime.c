@@ -1635,7 +1635,13 @@ typedef struct {
  * pointer so the actor object layout (and codegen) are unaffected. */
 typedef struct march_actor_meta {
     void                      *actor;
-    march_proc                *green_thread;  /* Green thread running this actor's loop */
+    /* _Atomic: written at spawn (march_spawn) and at green-thread exit
+     * (actor_green_thread, both the normal-exit and crash-trap paths),
+     * read lock-free from march_send / march_actor_call / do_actor_death /
+     * mailbox_size / set_mbox_limit. Release-store on every write, acquire-
+     * load on every read — see the Task 10 commit message for the full
+     * site table. */
+    _Atomic(march_proc *)      green_thread;  /* Green thread running this actor's loop */
     struct march_actor_meta    *tbl_next;   /* Hash-table chain                */
     int64_t                     pid_index;  /* Sequential spawn index for Pid(n) display */
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
@@ -1675,8 +1681,18 @@ typedef struct march_actor_meta {
     int                          sup_restart_len;
 } march_actor_meta;
 
-/* Global side table: actor ptr → march_actor_meta */
-static march_actor_meta  *g_actor_tbl[MARCH_SCHED_BUCKETS];
+/* Global side table: actor ptr → march_actor_meta.
+ * _Atomic bucket heads: metas are NEVER unlinked from their chain and NEVER
+ * freed (verified — see Task 10 commit message for the grep evidence), so a
+ * reader that acquire-loads a bucket head and walks tbl_next needs no lock:
+ * every node it can reach was fully constructed before the release store
+ * that published it (tbl_next is written before the head pointer is
+ * swung). Only find_meta takes this lock-free path; every other chain
+ * walker (find_or_create_meta as writer, find_meta_by_pid_index, the
+ * broadcast_migrate snapshot loop, demonitor, unlink, the monitor sweep)
+ * still takes g_tbl_mu because they also touch mutable per-meta fields
+ * (monitor_head, supervisor, ...) that are not lock-free. */
+static _Atomic(march_actor_meta *) g_actor_tbl[MARCH_SCHED_BUCKETS];
 static pthread_mutex_t    g_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Sequential Pid index counter: each spawned actor gets a unique integer. */
@@ -1972,17 +1988,19 @@ static unsigned int actor_bucket(void *actor) {
     return (unsigned int)(((uintptr_t)actor >> 4) % MARCH_SCHED_BUCKETS);
 }
 
-/* Look up meta entry for an actor without creating (returns NULL if not found). */
+/* Look up meta entry for an actor without creating (returns NULL if not
+ * found). Lock-free: acquire-load the bucket head and walk tbl_next, which
+ * is safe because insertion never unlinks/frees a node and always writes
+ * tbl_next before the release store that publishes the new head (see
+ * find_or_create_meta). */
 static march_actor_meta *find_meta(void *actor) {
     if (!IS_HEAP_PTR(actor)) return NULL;
     unsigned int b = actor_bucket(actor);
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *m = g_actor_tbl[b];
-    while (m) {
-        if (m->actor == actor) { pthread_mutex_unlock(&g_tbl_mu); return m; }
-        m = m->tbl_next;
+    for (march_actor_meta *m = atomic_load_explicit(&g_actor_tbl[b],
+                                                     memory_order_acquire);
+         m; m = m->tbl_next) {
+        if (m->actor == actor) return m;
     }
-    pthread_mutex_unlock(&g_tbl_mu);
     return NULL;
 }
 
@@ -1999,8 +2017,14 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     if (!m) { fputs("march: out of memory (actor meta)\n", stderr); exit(1); }
     m->actor = actor;
     atomic_init(&m->down_count, 0);
-    m->tbl_next = g_actor_tbl[b];
-    g_actor_tbl[b] = m;
+    atomic_init(&m->green_thread, NULL);
+    /* tbl_next is written BEFORE the release store below publishes `m` as
+     * the new bucket head, so any lock-free find_meta reader that observes
+     * `m` via the acquire load also observes a fully-initialized node
+     * (including this tbl_next write) and a correctly-linked rest of the
+     * chain. */
+    m->tbl_next = atomic_load_explicit(&g_actor_tbl[b], memory_order_relaxed);
+    atomic_store_explicit(&g_actor_tbl[b], m, memory_order_release);
     pthread_mutex_unlock(&g_tbl_mu);
     return m;
 }
@@ -2070,9 +2094,12 @@ static void actor_green_thread(void *arg) {
          * crash-notify parity with the interpreter's kill = crash_actor. */
         self->crash_jmp = saved_jmp;
         do_actor_death(actor);
-        pthread_mutex_lock(&g_tbl_mu);
-        meta->green_thread = NULL;
-        pthread_mutex_unlock(&g_tbl_mu);
+        /* green_thread is now _Atomic — this critical section protected
+         * nothing else, so the mutex is dropped in favor of a release
+         * store (paired with the acquire loads in march_send /
+         * march_actor_call / do_actor_death / mailbox_size /
+         * set_mbox_limit). */
+        atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
         return;
     }
 
@@ -2188,9 +2215,9 @@ static void actor_green_thread(void *arg) {
      * sched_loop.  Clear the meta handle so march_kill / march_send observe
      * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
     if (self) self->crash_jmp = saved_jmp;
-    pthread_mutex_lock(&g_tbl_mu);
-    meta->green_thread = NULL;
-    pthread_mutex_unlock(&g_tbl_mu);
+    /* Same rationale as the crash-trap exit above: the mutex protected only
+     * this field, now converted to a release store. */
+    atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */
@@ -2397,9 +2424,15 @@ static void do_actor_death(void *actor) {
 
     fields[3] = 0;   /* $alive flag at byte offset 24 */
 
-    /* Wake the actor's green thread so it can notice death and exit. */
-    if (meta && meta->green_thread) {
-        march_sched_wake(meta->green_thread);
+    /* Wake the actor's green thread so it can notice death and exit.
+     * This read was already unsynchronized before Task 10 (no g_tbl_mu
+     * here); the _Atomic conversion turns that pre-existing gap into a
+     * proper acquire load, paired with the release stores in march_spawn
+     * and actor_green_thread's exit paths. */
+    if (meta) {
+        march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                              memory_order_acquire);
+        if (gt) march_sched_wake(gt);
     }
 
     if (meta && meta->supervisor) {
@@ -2433,7 +2466,14 @@ void *march_spawn(void *actor) {
     /* Daemon: an actor recv loop parks forever unless killed; it must not
      * keep the scheduler (and thus the process) alive once main and all
      * task procs have finished — see wake_idle_daemons in march_scheduler.c. */
-    meta->green_thread = march_sched_spawn_daemon(actor_green_thread, meta);
+    /* This write was already unsynchronized before Task 10 (no g_tbl_mu
+     * around it, despite every other write site taking the lock) — a
+     * pre-existing hole carried forward from Task 5's review. The _Atomic
+     * conversion fixes it properly: readers now see either NULL or a fully
+     * constructed march_proc via this release store. */
+    atomic_store_explicit(&meta->green_thread,
+                          march_sched_spawn_daemon(actor_green_thread, meta),
+                          memory_order_release);
     /* Start the scheduler in a background thread so actor green threads run
      * even when the main thread is blocked inside the HTTP event loop.
      * For non-HTTP programs this is harmless: march_run_scheduler() joins
@@ -2886,14 +2926,24 @@ void *march_send(void *actor, void *msg) {
         return none;
     }
 
-    march_actor_meta *meta = find_or_create_meta(actor);
-    if (!meta->green_thread) {
+    /* find_meta, not find_or_create_meta: a send can only race spawn if the
+     * pid escaped before march_spawn returned, which the lowering forbids
+     * (march_spawn creates the meta before returning the pid) — so a NULL
+     * meta here means the actor was never spawned; treat it the same as
+     * "no green thread yet". This is what takes march_send off g_tbl_mu
+     * entirely (find_meta is lock-free; the green_thread field is
+     * _Atomic). */
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
+                                                  memory_order_acquire)
+                          : NULL;
+    if (!gt) {
         march_decrc(msg);
         void *none = march_alloc(16);
         return none;
     }
 
-    int send_rc = march_sched_send(meta->green_thread, msg);
+    int send_rc = march_sched_send(gt, msg);
     if (send_rc == MARCH_SEND_DEAD) {
         /* Actor died in the window between the checks above and the send;
          * march_sched_send did not enqueue or dispose the message (dead
@@ -3002,8 +3052,16 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         return mk_err_cstr("actor not alive");
     }
 
-    march_actor_meta *meta = find_or_create_meta(actor);
-    if (!meta->green_thread) {
+    /* find_meta, not find_or_create_meta — same reasoning as march_send:
+     * a NULL meta here means the pid was never spawned (can't legitimately
+     * happen given the lowering, but is handled identically to "no green
+     * thread yet" either way). Lock-free lookup + atomic green_thread load
+     * takes march_actor_call off g_tbl_mu too. */
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
+                                                  memory_order_acquire)
+                          : NULL;
+    if (!gt) {
         march_decrc(inner_msg);
         return mk_err_cstr("actor not found");
     }
@@ -3057,7 +3115,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     MARCH_SET_TAG(call_msg, msg_tag);
     MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)reply_ref;
 
-    march_sched_send(meta->green_thread, call_msg);
+    march_sched_send(gt, call_msg);
 
     if (timeout_ms <= 0) {
         /* Preserve wait-forever semantics for callers that opt out. Still
@@ -4680,10 +4738,10 @@ int64_t march_mailbox_size(void *pid) {
     march_actor_meta *meta = find_meta(pid);
     if (!meta) return 0;
     int64_t depth = 0;
-    pthread_mutex_lock(&g_tbl_mu);
-    march_proc *gt = meta->green_thread;
+    /* Lock only ever protected this field read; now an acquire load. */
+    march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                          memory_order_acquire);
     if (gt) depth = march_sched_mbox_count(gt);
-    pthread_mutex_unlock(&g_tbl_mu);
     return depth + atomic_load_explicit(&meta->down_count,
                                         memory_order_relaxed);
 }
@@ -4696,9 +4754,9 @@ void march_actor_set_mbox_limit(void *actor, int64_t limit, int64_t policy) {
     if (!IS_HEAP_PTR(actor)) return;
     march_actor_meta *meta = find_meta(actor);
     if (!meta) return;
-    pthread_mutex_lock(&g_tbl_mu);
-    march_proc *gt = meta->green_thread;
-    pthread_mutex_unlock(&g_tbl_mu);
+    /* Lock only ever protected this field read; now an acquire load. */
+    march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                          memory_order_acquire);
     if (gt) march_sched_set_mbox_limit(gt, limit, (march_mbox_policy)policy);
 }
 
