@@ -204,6 +204,23 @@ typedef struct march_proc {
      * check and its PROC_PARKED store, so a sender can never observe it as
      * RUNNING after seeing an empty mailbox. */
     _Atomic int                wake_pending;
+    /* Task 16 fix-up (Important 1): bumped on every entry to and exit from
+     * march_sched_park_self_until / march_sched_recv_until's real-park
+     * branch (relaxed — this only needs to be a monotonically-increasing
+     * tag, not a synchronization point; the actual synchronization is the
+     * existing status/mbox_lock machinery). A march_timer_ent stamped with
+     * the post-entry-increment value is LIVE only while this counter still
+     * reads that same value — a wake for any other reason (a message
+     * arriving, a spurious wake, or a later park call entirely) advances
+     * this counter and makes the earlier timer entry a ghost. Lets
+     * march_sched_wait_idle (and, optionally, timer_service) distinguish a
+     * genuinely-still-parked proc from one that already woke early but
+     * whose heap entry lingers until its original deadline (no-cancellation
+     * heap by design — see the timer comment below). Without this, a
+     * successfully-answered Actor.call(...,5000) that replies in 1ms would
+     * still make run_until_idle() block for the full 5000ms. calloc
+     * zero-inits this to 0, matching "never parked yet." */
+    _Atomic int64_t             park_gen;
     ucontext_t                 ctx;          /* Saved execution context (makecontext/swap) */
     void                     (*fn)(void *);  /* Entry function */
     void                      *arg;          /* Argument passed to fn */

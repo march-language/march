@@ -111,8 +111,11 @@ static _Atomic int64_t  g_live_procs     = 0;
 static _Atomic int      g_sched_shutdown = 0;
 
 /* Timer min-heap state (full definition + helpers near march_sched_wake,
- * below). Forward-declared here so march_sched_init can reset g_timer_len. */
-typedef struct { int64_t deadline_ms; struct march_proc *proc; } march_timer_ent;
+ * below). Forward-declared here so march_sched_init can reset g_timer_len.
+ * `gen` (Task 16 fix-up, Important 1) is the proc's park_gen at the moment
+ * this entry was pushed — see park_gen's field comment in march_scheduler.h
+ * for what makes an entry LIVE vs. a ghost. */
+typedef struct { int64_t deadline_ms; struct march_proc *proc; int64_t gen; } march_timer_ent;
 static pthread_mutex_t  g_timer_mu = PTHREAD_MUTEX_INITIALIZER;
 static march_timer_ent *g_timer_heap = NULL;
 static int              g_timer_len = 0, g_timer_cap = 0;
@@ -1661,16 +1664,41 @@ void march_sched_wait_idle(void) {
              * so without this check, wait_idle would return "idle" while a
              * restart (or any future timer-based wait) is still pending,
              * breaking the "returns only once the system is quiescent"
-             * contract documented below. g_timer_heap is the definitive,
-             * always-global (not per-scheduler-thread) record of every proc
-             * currently parked on a deadline; a non-empty heap means the
-             * system is not actually idle yet. Locked independently of
-             * g_registry_mu (never nested with it elsewhere in this file),
-             * so there is no new lock-ordering hazard. */
+             * contract documented below.
+             *
+             * Task 16 fix-up (Important 1): a bare g_timer_len > 0 check is
+             * wrong — the timer heap has no cancellation by design (see its
+             * comment), so a proc that already woke early (e.g. a timed
+             * Actor.call answered in 1ms out of a 5000ms budget) still has
+             * an entry sitting in the heap until its ORIGINAL deadline. That
+             * ghost entry would make every run_until_idle() call block for
+             * up to the full original timeout of any recently-satisfied
+             * timed wait, anywhere in the process. Only count a timer entry
+             * as busy if it is LIVE: its stamped `gen` still matches its
+             * proc's current park_gen (i.e. that proc has not parked again
+             * nor woken since this entry was pushed — see park_gen's field
+             * comment in march_scheduler.h) AND that proc's status is still
+             * WAITING or PARKED (belt-and-suspenders: a live-gen entry whose
+             * proc has since died or gone runnable some other way shouldn't
+             * count either). g_timer_heap is the definitive, always-global
+             * (not per-scheduler-thread) record of every proc parked on a
+             * deadline. Locked independently of g_registry_mu (never nested
+             * with it elsewhere in this file), so there is no new
+             * lock-ordering hazard. */
             pthread_mutex_lock(&g_timer_mu);
-            int64_t timers_pending = g_timer_len;
+            int timers_pending = 0;
+            for (int ti = 0; ti < g_timer_len && !timers_pending; ti++) {
+                march_proc *tp = g_timer_heap[ti].proc;
+                if (!tp) continue;
+                if (atomic_load_explicit(&tp->park_gen, memory_order_relaxed)
+                        != g_timer_heap[ti].gen)
+                    continue;   /* ghost: this park call has already ended */
+                march_proc_status tst =
+                    atomic_load_explicit(&tp->status, memory_order_acquire);
+                if (tst == PROC_WAITING || tst == PROC_PARKED) timers_pending = 1;
+            }
             pthread_mutex_unlock(&g_timer_mu);
-            if (timers_pending == 0) return;
+            if (!timers_pending) return;
         }
         /* Still busy after yielding: the procs we wait on are runnable only on
          * other (possibly CPU-starved) scheduler threads, or are PARKED/WAITING
@@ -2305,7 +2333,7 @@ int64_t march_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void timer_heap_push(int64_t deadline_ms, march_proc *p) {
+static void timer_heap_push(int64_t deadline_ms, march_proc *p, int64_t gen) {
     pthread_mutex_lock(&g_timer_mu);
     if (g_timer_len == g_timer_cap) {
         g_timer_cap = g_timer_cap ? g_timer_cap * 2 : 64;
@@ -2314,7 +2342,7 @@ static void timer_heap_push(int64_t deadline_ms, march_proc *p) {
         if (!g_timer_heap) { fputs("march_sched: OOM (timer)\n", stderr); abort(); }
     }
     int i = g_timer_len++;
-    g_timer_heap[i] = (march_timer_ent){ deadline_ms, p };
+    g_timer_heap[i] = (march_timer_ent){ deadline_ms, p, gen };
     while (i > 0) {
         int par = (i - 1) / 2;
         if (g_timer_heap[par].deadline_ms <= g_timer_heap[i].deadline_ms) break;
@@ -2326,13 +2354,25 @@ static void timer_heap_push(int64_t deadline_ms, march_proc *p) {
     pthread_mutex_unlock(&g_timer_mu);
 }
 
-/* Pop every expired entry and wake its proc. Called from preempt_daemon. */
+/* Pop every expired entry and wake its proc. Called from preempt_daemon.
+ *
+ * Task 16 fix-up (Important 1, optional half): an entry whose `gen` no
+ * longer matches its proc's current park_gen is a ghost — the proc already
+ * woke for some other reason (message arrival, spurious wake, or it parked
+ * again with a fresh entry) and this stale entry is just waiting to be
+ * garbage-collected out of the no-cancellation heap. Waking it again is
+ * harmless (every park site loops and re-checks its own condition) but
+ * pointless, so skip the march_sched_wake call for it — the real fix for
+ * "run_until_idle blocks on a proc that already woke" lives in
+ * march_sched_wait_idle below, which checks the SAME gen match. */
 static void timer_service(int64_t now_ms) {
     for (;;) {
         march_proc *victim = NULL;
+        int stale = 0;
         pthread_mutex_lock(&g_timer_mu);
         if (g_timer_len > 0 && g_timer_heap[0].deadline_ms <= now_ms) {
             victim = g_timer_heap[0].proc;
+            int64_t vgen = g_timer_heap[0].gen;
             g_timer_heap[0] = g_timer_heap[--g_timer_len];
             int i = 0;
             for (;;) {
@@ -2345,10 +2385,11 @@ static void timer_service(int64_t now_ms) {
                 g_timer_heap[i] = t;
                 i = m;
             }
+            stale = (atomic_load_explicit(&victim->park_gen, memory_order_relaxed) != vgen);
         }
         pthread_mutex_unlock(&g_timer_mu);
         if (!victim) return;
-        march_sched_wake(victim);   /* outside the lock: wake can spin */
+        if (!stale) march_sched_wake(victim);   /* outside the lock: wake can spin */
     }
 }
 
@@ -2401,8 +2442,17 @@ int march_sched_park_self_until(int64_t deadline_ms) {
         march_sched_yield();
         return MARCH_PARK_WOKEN;
     }
-    timer_heap_push(deadline_ms, p);
+    /* Task 16 fix-up (Important 1): bump park_gen before registering the
+     * timer entry, stamp the post-increment value into it, and bump again
+     * after the park returns (for ANY reason — timeout or early wake) so
+     * this entry (and any future ghost of it) is recognizably stale to
+     * march_sched_wait_idle / timer_service the instant we're no longer
+     * genuinely waiting on it. See park_gen's field comment in
+     * march_scheduler.h. */
+    int64_t my_gen = atomic_fetch_add_explicit(&p->park_gen, 1, memory_order_relaxed) + 1;
+    timer_heap_push(deadline_ms, p, my_gen);
     march_sched_park_self();
+    atomic_fetch_add_explicit(&p->park_gen, 1, memory_order_relaxed);
     return (march_now_ms() >= deadline_ms) ? MARCH_PARK_TIMEOUT
                                            : MARCH_PARK_WOKEN;
 }
@@ -2462,7 +2512,14 @@ void *march_sched_recv_until(int64_t deadline_ms) {
      * path ever holds g_timer_mu while trying to acquire mbox_lock; the
      * reverse order (g_timer_mu -> mbox_lock) never occurs, so this cannot
      * deadlock against timer_service. */
-    timer_heap_push(deadline_ms, p);
+    /* Task 16 fix-up (Important 1): same park_gen bump/stamp discipline as
+     * march_sched_park_self_until above — see park_gen's field comment in
+     * march_scheduler.h. The exit-side bump happens right after the
+     * swapcontext returns, before we go on to actually drain the mailbox,
+     * since by that point we are no longer "parked" for any observer's
+     * purposes regardless of why we woke. */
+    int64_t my_gen = atomic_fetch_add_explicit(&p->park_gen, 1, memory_order_relaxed) + 1;
+    timer_heap_push(deadline_ms, p, my_gen);
     atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
     mbox_lock_release(p);
 
@@ -2470,6 +2527,7 @@ void *march_sched_recv_until(int64_t deadline_ms) {
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
     MARCH_ASAN_SWITCH_DONE(p);
+    atomic_fetch_add_explicit(&p->park_gen, 1, memory_order_relaxed);
     /* Context is now saved.  The scheduler (sched_loop) transitions us from
      * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
      * its side, making it safe for a waker to push us to a deque. */

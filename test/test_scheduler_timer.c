@@ -81,6 +81,57 @@ static void sender_fn(void *arg) {
     march_sched_send(g_receiver, (void *)(intptr_t)1);
 }
 
+/* Task 16 fix-up (Important 1, ghost-timer regression): a proc that parks
+ * with march_sched_recv_until(deadline) and then wakes EARLY (message
+ * arrives well before the deadline) used to leave a stale timer-heap entry
+ * behind for its full original deadline — the heap has no cancellation by
+ * design. march_sched_wait_idle()'s old busy-check was a bare
+ * `g_timer_len > 0`, so it would block for the ENTIRE remaining ~5000ms of
+ * that already-satisfied wait even though nothing else in the process was
+ * doing anything. The park_gen fix makes such an entry recognizably a
+ * ghost (its `gen` no longer matches the proc's current park_gen) the
+ * instant the park call returns, for ANY reason.
+ *
+ * This reproduces exactly that shape: ghost_receiver_fn parks on a 5000ms
+ * recv_until, is woken almost immediately by ghost_sender_fn, and exits —
+ * leaving its now-stale entry in the heap. ghost_waiter_fn then calls
+ * march_sched_wait_idle() directly and times it. Pre-fix this would take
+ * ~5000ms (bounded below by the remaining time to the ghost's original
+ * deadline); post-fix it returns in low single-digit ms once the receiver
+ * and sender have both exited. */
+static _Atomic int64_t g_ghost_wait_ms = -1;
+static march_proc     *g_ghost_receiver = NULL;
+
+static void ghost_receiver_fn(void *arg) {
+    (void)arg;
+    int64_t deadline = march_now_ms() + 5000;
+    for (;;) {
+        void *msg = march_sched_recv_until(deadline);
+        if (msg != MARCH_RECV_NO_MSG) return;      /* got it — exit, leaving a ghost */
+        if (march_now_ms() >= deadline) return;    /* genuinely timed out */
+    }
+}
+
+static void ghost_sender_fn(void *arg) {
+    (void)arg;
+    /* Yield a handful of times so the receiver is definitely parked before
+     * the message lands, then wake it almost immediately relative to its
+     * 5000ms deadline. */
+    for (int i = 0; i < 20; i++) march_sched_yield();
+    march_sched_send(g_ghost_receiver, (void *)(intptr_t)1);
+}
+
+static void ghost_waiter_fn(void *arg) {
+    (void)arg;
+    /* Give the receiver+sender a chance to run to completion (both exit)
+     * before measuring wait_idle, so the only thing left in the process is
+     * the receiver's stale timer-heap entry. */
+    for (int i = 0; i < 40; i++) march_sched_yield();
+    int64_t start = march_now_ms();
+    march_sched_wait_idle();
+    atomic_store(&g_ghost_wait_ms, march_now_ms() - start);
+}
+
 int main(void) {
     /* Watchdog: converts a reintroduced lost-wakeup hang into SIGALRM ->
      * nonzero exit (a normal test FAILURE) instead of wedging the caller
@@ -130,6 +181,17 @@ int main(void) {
     march_proc *idle = march_sched_spawn_daemon(sleeper_times_out, NULL);
     for (int i = 0; i < 5; i++) march_sched_send(idle, (void *)0x1);
     assert(march_sched_mbox_count(idle) == 5);
+
+    /* 5: ghost timer entries must not block march_sched_wait_idle(). See the
+     * comment above ghost_receiver_fn for the full scenario. */
+    march_sched_init();
+    g_ghost_receiver = march_sched_spawn(ghost_receiver_fn, NULL);
+    march_sched_spawn(ghost_sender_fn, NULL);
+    march_sched_spawn(ghost_waiter_fn, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    int64_t ghost_wait = atomic_load(&g_ghost_wait_ms);
+    assert(ghost_wait >= 0 && ghost_wait < 1000);
 
     printf("test_scheduler_timer: all passed\n");
     return 0;

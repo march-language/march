@@ -3,6 +3,25 @@
 Task 16 of the actor-system-hardening plan
 (`.superpowers/sdd/2026-08-11-actor-system-hardening/`).
 
+**Amendment (same day, follow-up commit):** a review found two Critical
+deadlock bugs in the `g_supervise_mu` design described below (it was
+originally held across the restart-strategy dispatch, which calls
+`do_actor_death` and March closures — see the "Fix report" section
+appended to `.superpowers/sdd/2026-08-11-actor-system-hardening/
+task-16-report.md` for the full analysis) plus two Important correctness
+bugs (a double batch-restart race, and `wait_idle`'s timer busy-check
+blocking on already-satisfied timed waits elsewhere in the process). All
+four were fixed in the follow-up commit: `g_supervise_mu` is now a strict
+leaf lock (never held across `do_actor_death`/`march_respawn_child`/March
+closures), a `delayed_batch_pending` flag serializes batch-strategy
+restarts, and a `park_gen` counter on `march_proc` distinguishes live
+timer-heap entries from stale ("ghost") ones. The backoff feature's own
+core logic (streak tracking, delay formula, jitter, synchronous-first-crash
+byte-identical goldens) was unchanged by this amendment — only the
+locking/synchronization scope additions were wrong. Read the fix report
+for the corrected design; the sections below are the original (partially
+superseded) implementation notes, kept for history.
+
 ## The fix
 
 `runtime/march_runtime.c`:
