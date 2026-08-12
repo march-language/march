@@ -11,10 +11,41 @@
  */
 #include "march_scheduler.h"
 #include <assert.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <unistd.h>
 
 static void tiny(void *arg) { (void)arg; }
+
+/* Task 12b: local-deque overflow regression.
+ *
+ * march_deque_push (runtime/march_deque.h) is bounded at
+ * MARCH_DEQUE_CAPACITY (4096) and returns -1 when full. The
+ * spawn-from-scheduler-thread path in sched_spawn_common used to ignore
+ * that return value: a proc pushed while the local deque was already at
+ * capacity was marked RUNNABLE and counted in g_live_procs, but never
+ * actually queued anywhere -- stranded forever. Every scheduler thread
+ * eventually idle-parks waiting for work that will never arrive: a
+ * livelock, not a crash, so nothing but a watchdog catches it.
+ *
+ * This reproduces it at the C level: a single green thread (so its
+ * spawns hit the OWNER's local Chase-Lev deque, not the global run
+ * queue) bursts more spawns than the deque can hold in one go.
+ */
+#define CHURN_BURST_N 5000
+static _Atomic int64_t g_churn_burst_done = 0;
+
+static void churn_burst_tiny(void *arg) {
+    (void)arg;
+    atomic_fetch_add_explicit(&g_churn_burst_done, 1, memory_order_relaxed);
+}
+
+static void churn_burst_spawner(void *arg) {
+    (void)arg;
+    for (int i = 0; i < CHURN_BURST_N; i++) {
+        march_sched_spawn(churn_burst_tiny, NULL);
+    }
+}
 
 int main(void) {
     /* Watchdog: this harness (3000 spawns + a second 100-spawn batch, both
@@ -39,6 +70,21 @@ int main(void) {
     for (int i = 0; i < 100; i++) march_sched_spawn(tiny, NULL);
     march_sched_request_shutdown();
     march_sched_run();
+
+    /* Local-deque overflow: burst CHURN_BURST_N (> MARCH_DEQUE_CAPACITY)
+     * spawns from INSIDE the scheduler (tl_sched set, so they hit the
+     * owner's local deque). Before the Task 12b fix, this hangs -- the
+     * alarm(60) watchdog above fires and aborts the process instead of
+     * the assert below ever running. */
+    march_sched_init();
+    march_sched_spawn(churn_burst_spawner, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    int64_t burst_done =
+        atomic_load_explicit(&g_churn_burst_done, memory_order_relaxed);
+    fprintf(stderr, "churn_burst_done=%lld (expected %d)\n",
+            (long long)burst_done, CHURN_BURST_N);
+    assert(burst_done == CHURN_BURST_N);
 
     printf("test_scheduler_churn: all passed\n");
     return 0;

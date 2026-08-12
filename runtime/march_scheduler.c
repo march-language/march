@@ -1016,8 +1016,22 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
      * deque from a thread that is not the deque's owner races with the
      * owner's pop. */
     if (tl_sched) {
-        dbg_mark_enqueued(p, "spawn_local_push");
-        march_deque_push(&tl_sched->local_queue, p);
+        /* march_deque_push returns -1 when the local deque is at
+         * MARCH_DEQUE_CAPACITY (4096). Silently dropping the return value
+         * here used to strand p: it's already RUNNABLE and counted in
+         * g_live_procs, but never queued anywhere and therefore never
+         * dispatched -- every scheduler thread eventually idle-parks with
+         * live, runnable-but-unreachable procs forever (livelock, not a
+         * crash). Fall back to the global run queue, which is unbounded and
+         * always accepts. dbg_mark_enqueued is called by whichever push
+         * path actually succeeds, since global_runq_push does its own
+         * marking and a proc must be marked enqueued exactly once.
+         */
+        if (march_deque_push(&tl_sched->local_queue, p) == 0) {
+            dbg_mark_enqueued(p, "spawn_local_push");
+        } else {
+            global_runq_push(p);
+        }
     } else {
         global_runq_push(p);
     }
@@ -1247,8 +1261,17 @@ static void sched_loop(march_scheduler *sched) {
 
         march_proc_status st = atomic_load_explicit(&p->status, memory_order_acquire);
         if (st == PROC_RUNNABLE) {
-            dbg_mark_enqueued(p, "yield_repush");
-            march_deque_push(&sched->local_queue, p);
+            /* Same overflow hazard as spawn_local_push above: a scheduler
+             * thread that yields more than MARCH_DEQUE_CAPACITY procs back
+             * to itself in a burst must not silently drop the excess --
+             * that strands a RUNNABLE proc forever (livelock). Overflow to
+             * the global run queue; mark enqueued via whichever path
+             * actually succeeds so exactly one dbg_mark_enqueued fires. */
+            if (march_deque_push(&sched->local_queue, p) == 0) {
+                dbg_mark_enqueued(p, "yield_repush");
+            } else {
+                global_runq_push(p);
+            }
             last_yielded = 1;
         } else if (st == PROC_PARKED) {
             /* The process called march_sched_recv's slow path: it stored

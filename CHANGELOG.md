@@ -108,6 +108,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A burst of >4096 spawns or yields from one scheduler thread silently
+  dropped runnable green threads (local-deque overflow) — spawn-churn
+  workloads no longer deadlock.** `march_deque_push`'s bounded-capacity
+  return value (-1 when the owner's Chase-Lev local deque is at
+  `MARCH_DEQUE_CAPACITY`, 4096) was ignored at both call sites in
+  `march_scheduler.c` (spawn-from-scheduler-thread, and the yield-repush
+  path); the dropped proc stayed `RUNNABLE` and counted in `g_live_procs`
+  but was never queued anywhere, so it was never dispatched and the
+  scheduler could never reach quiescence — every worker thread eventually
+  idle-parks forever. Both sites now overflow to the (unbounded) global
+  run queue instead of dropping the proc.
 - **Dead green-thread stacks are recycled instead of leaked — spawn-churn
   workloads no longer exhaust address space.** Every dead proc used to leak
   its ~1MiB+guard mmap stack reservation forever; dying procs now return

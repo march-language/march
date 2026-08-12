@@ -13,7 +13,10 @@ fail=0
 # in the commit that introduced this script). A FAIL for one of these prints
 # as XFAIL and does not flip the script's exit code -- the tasks that fix the
 # underlying runtime issue are expected to remove entries here as they land.
-EXPECTED_FAIL="${EXPECTED_FAIL:-churn}"
+# churn removed 2026-08-12 (Task 12b): the local-deque overflow that dropped
+# runnable green threads and deadlocked spawn-churn workloads is fixed --
+# see runtime/march_scheduler.c's overflow-to-global-runq fallback.
+EXPECTED_FAIL="${EXPECTED_FAIL:-}"
 
 is_expected_fail() {
   local name=$1
