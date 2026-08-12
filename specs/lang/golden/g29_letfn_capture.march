@@ -5,7 +5,7 @@ mod Main do
   -- The env_ref the closure re-reads (eval.ml:6880) is the block's env extended
   -- with both `step` (the prior `let`) and `go` itself, so the body sees both
   -- the captured outer variable and its own name (eval.ml:6882-6883).
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let step = 2
     fn go(n) do
       if n == 0 do

@@ -19,7 +19,7 @@ fn check(name, cond) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let failures =
     check("module A dispatch", ScLibA.say() == "from-A")
     + check("module B dispatch", ScLibB.say() == "from-B")

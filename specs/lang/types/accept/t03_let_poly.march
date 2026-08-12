@@ -1,6 +1,6 @@
 mod M do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let id = fn x -> x
     println(int_to_string(id(5)))
     println(id("hello"))

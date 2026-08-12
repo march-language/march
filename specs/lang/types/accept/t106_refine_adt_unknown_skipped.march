@@ -10,7 +10,7 @@ mod M do
   needs IO.Console
   fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
   fn f(x : Option(Int)) : Int do unwrap(x) end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(f(Some(1))))
   end
 end

@@ -1,6 +1,6 @@
 mod P04MulBindsTighterThanAdd do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- 1 + 2 * 3 == 7, not 9: `*` (expr_mul) binds tighter than `+`
     -- (expr_add) because expr_add's operands are expr_mul, not expr_add's own
     -- level again for the RHS of `*` -- the stratification itself encodes

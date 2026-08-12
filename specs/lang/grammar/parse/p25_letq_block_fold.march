@@ -16,7 +16,7 @@ mod Main do
     let? b = step(a)
     Ok(b * 10)
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     match chain(5) do
       Ok(v)  -> println(int_to_string(v))
       Err(e) -> println(e)

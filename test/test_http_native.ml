@@ -106,7 +106,7 @@ let server_src = {|mod HttpNativeE2e do
     end
   end
 
-  fn main() do
+  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process)) do
     let port = port_from_env()
     if port == 0 do
       process_exit(2)

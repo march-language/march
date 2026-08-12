@@ -1,7 +1,7 @@
 mod SmsEntry do
   needs IO.Console
   import Other
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let r = Widget.use_it(5)
     if r == 50 do println("ok")
     else panic("same-module shadow regression: Widget.use_it(5) = " ++ int_to_string(r))

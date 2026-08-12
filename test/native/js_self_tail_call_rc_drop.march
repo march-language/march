@@ -44,7 +44,7 @@ mod JsSelfTailCallRcDrop do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let xs = Cons({ v: 1 }, Cons({ v: 2 }, Cons({ v: 3 }, Nil)))
     match find(0, xs, 0) do
       None -> println("none")

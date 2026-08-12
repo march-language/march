@@ -2,7 +2,7 @@
 record Box { inner : String }
 -- fns (2) --
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let b : { inner : String } = { inner = "wrapped" } in
 let $t1 : String = peek(b) in
 println($t1)

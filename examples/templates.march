@@ -165,7 +165,7 @@ end
 -- Main — demonstrate the full pipeline
 -- ---------------------------------------------------------------------------
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let me = { name: "Alice", role: "admin" }
 
   let posts = [

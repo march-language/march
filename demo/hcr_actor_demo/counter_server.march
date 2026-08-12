@@ -47,7 +47,7 @@ mod MyApp do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) do
     let pid = spawn(Counter)
     let _ = send(pid, Inc())
     let _ = send(pid, Inc())

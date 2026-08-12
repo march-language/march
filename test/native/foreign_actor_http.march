@@ -98,7 +98,7 @@ mod ForeignActorHttp do
             ++ "/" ++ int_to_string(n))
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) : Unit do
     if Env.get("FAH_MODE", "server") == "client" do
       run_client()
     else

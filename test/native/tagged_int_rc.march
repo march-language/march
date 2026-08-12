@@ -7,7 +7,7 @@ mod Main do
     let b = f(x)
     a + b
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- fn captures nothing but forces the erased-Int RC path through a HOF
     println(int_to_string(apply_twice(fn n -> n * 3, 7)))   -- 21 + 21 = 42
   end

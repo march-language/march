@@ -12,7 +12,7 @@ mod SafeDiv do
   needs IO.Console
   cap no_panic
   fn safe_div(a : Int, d : {Int | _ != 0}) : Int do a / d end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(safe_div(10, 2)))
   end
 end

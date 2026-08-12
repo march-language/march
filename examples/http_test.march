@@ -35,7 +35,7 @@ mod HttpTest do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen)) do
     -- Spawn server subprocess: handles exactly 3 requests then exits
     let handle = HttpServer.new(18080)
       |> HttpServer.plug(router)

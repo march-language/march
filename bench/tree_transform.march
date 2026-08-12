@@ -37,7 +37,7 @@ pfn repeat(t : Tree, n : Int) : Tree do
   else repeat(inc_leaves(t), n - 1) end
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let depth  = 20
   let passes = 100
   let t  = make(depth)

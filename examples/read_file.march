@@ -6,7 +6,7 @@ mod ReadFile do
   needs IO.Console
   needs IO.FileRead
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do
     let path = "examples/read_file.march"
 
     -- Read the whole file at once

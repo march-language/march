@@ -1,7 +1,7 @@
 -- types (0) --
 -- fns (2) --
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t4 : Int = sum_to(5, 0) in
 println($t4)
 

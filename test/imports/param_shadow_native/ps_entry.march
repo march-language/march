@@ -17,7 +17,7 @@ fn check(name, got, want) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let lst = PsLib.PCons(1, PsLib.PCons(2, PsLib.PNil))
   let failures =
     check("param shadows sibling fn", PsLib.sum_all(lst), 103)

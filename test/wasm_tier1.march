@@ -51,7 +51,7 @@ fn sum_list(lst) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   -- Arithmetic
   let x = add(3, 4)
   println(int_to_string(x))            -- 7

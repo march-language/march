@@ -39,7 +39,7 @@ pfn churn(i : Int, n : Int, acc : Int) : Int do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   println("checksum=" ++ to_string(churn(0, pairs(), 0)))
 end
 

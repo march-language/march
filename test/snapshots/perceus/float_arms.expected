@@ -8,7 +8,7 @@ fn describe(x : Float) : String =
   _ -> "other"
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t1 : String = describe(1.5) in
 let $rc_1 : () = println($t1) in
 dec_rc $t1;

@@ -26,7 +26,7 @@ mod ImplContractOk do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(run(Box(4), 2)))
   end
 end

@@ -19,7 +19,7 @@ mod JsCanvasAvailable do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     println("canvas available")
   end
 end

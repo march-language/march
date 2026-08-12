@@ -27,7 +27,7 @@ mod Test do
       churn(n - 1)
     end
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(one()))          -- correctness: 42
     churn(50)
     let base = live_allocs()

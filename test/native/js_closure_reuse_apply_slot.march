@@ -32,7 +32,7 @@ mod JsClosureReuseApplySlot do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(render(JustN(7)))
     println(render(Many(Cons(1, Cons(2, Cons(3, Nil))))))
 

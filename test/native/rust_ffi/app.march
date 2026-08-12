@@ -4,6 +4,7 @@
 mod App do
   needs IO.Console
   needs Ffi
+  needs IO.Foreign
   type Point = { x : Int, y : Int }
   type Shape = Circle(Int) | Rect(Int, Int)
   resource Counter
@@ -32,7 +33,7 @@ mod App do
       None -> "none"
     end
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(add(20, 22)))            -- 42
     println(shout("hello"))                         -- HELLO
     println(shown(parse("7")))                      -- 7

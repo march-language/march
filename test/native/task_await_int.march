@@ -17,7 +17,7 @@ mod TaskAwaitInt do
   needs IO.Console
   needs IO.Spawn
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     -- Task.await on Int: expect Ok(42), not Ok(85).
     let t = Task.async(fn () -> 6 * 7)
     match Task.await(t) do

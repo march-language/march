@@ -17,7 +17,7 @@ case $t3 of
 is_even($t4)
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t5 : Bool = is_even(10) in
 println($t5)
 

@@ -17,7 +17,7 @@ mod Main do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let (cc, pp) = Chan.new(Str)
     let pp2 = Chan.send(pp, 1)
     let (x, cc2) = Chan.recv(cc)

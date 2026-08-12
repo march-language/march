@@ -342,7 +342,7 @@ mod ActorStress do
 
   -- ── Entry point ───────────────────────────────────────────────────────
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     test_counter()
     test_stack()
     test_many_counters()

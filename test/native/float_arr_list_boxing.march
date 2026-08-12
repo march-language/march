@@ -18,7 +18,7 @@ mod Main do
     end
   end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     -- native float -> List(Float) -> box into FV -> unbox & compare
     let b = match native_float_arr_to_list(native_float_arr_make(1, 50.0)) do
       Cons(f, _) -> FV(f)

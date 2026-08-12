@@ -12,7 +12,7 @@
 -- (`typed_array_map(data, fn b -> !b)`).
 mod Main do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     let arr = typed_array_create(4, false)
     let negated = typed_array_map(arr, fn b -> !b)
     println(bool_to_string(typed_array_get(negated, 0)))   -- true

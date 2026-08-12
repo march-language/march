@@ -7,7 +7,7 @@ mod P09BlockLetSequencing do
     c
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(compute())
   end
 end

@@ -75,7 +75,7 @@ let entry_src =
   {|
 mod PkgEntry do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     if PkgHelper.fetch("example.com") do
       println("y")
     else

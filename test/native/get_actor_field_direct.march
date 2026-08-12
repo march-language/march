@@ -17,7 +17,7 @@ mod GetActorFieldDirect do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let h = spawn(Holder)
     println(int_to_string(field_int(h, "wa")))
     println(int_to_string(field_int(h, "wb")))

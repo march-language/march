@@ -10,7 +10,7 @@ mod FbipDeadBindingReuse do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     match bump_head(Cons(1, Nil)) do
       Cons(h, _) -> println(h)
       Nil -> println(0)

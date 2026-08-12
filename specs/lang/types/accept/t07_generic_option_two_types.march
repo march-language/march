@@ -9,7 +9,7 @@ mod M do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(unwrap_or(Full(5), 0)))
     println(unwrap_or(Full("hi"), "default"))
     println(unwrap_or(Vacant, "fallback"))

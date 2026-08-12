@@ -14,7 +14,7 @@ mod JsFfiAsync do
     delayAdd(x, 10)
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     let r = compute(32)
     println(int_to_string(r))
   end

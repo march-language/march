@@ -1547,7 +1547,7 @@ let test_linear_double_use_points_at_first_use () =
       String.byte_size(s)
     end
 
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       linear let token = "secret"
       let a = consume(token)
       let b = consume(token)
@@ -1585,7 +1585,7 @@ let test_linear_match_arms_each_consume_once_ok () =
       String.byte_size(s)
     end
 
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       linear let token = "secret"
       let flag = true
       let r = match flag do
@@ -1609,7 +1609,7 @@ let test_linear_double_use_within_arm_labels_same_arm () =
       String.byte_size(s)
     end
 
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       linear let token = "secret"
       let flag = true
       let r = match flag do
@@ -1827,7 +1827,7 @@ let test_session_mpst_choose_unsupported_message () =
       B -> C : Int
       C -> A : Bool
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (ea, eb, ec) = MPST.new(Tri)
       let eb2 = MPST.choose(eb, :yes)
       println("unused")
@@ -1844,7 +1844,7 @@ let test_session_user_mpst_module_not_swallowed () =
     mod MPST do
       fn helper(x) do x + 1 end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let y = MPST.helper(41)
       if y > 0 do println("ok") else println("no") end
     end
@@ -1858,7 +1858,7 @@ let test_session_user_chan_module_not_swallowed () =
     mod Chan do
       fn helper(x) do x + 1 end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let y = Chan.helper(41)
       if y > 0 do println("ok") else println("no") end
     end
@@ -1879,7 +1879,7 @@ let test_session_chan_send_wrong_arity_error () =
       Client -> Server : Int
       Server -> Client : Int
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let x = Chan.send(1)
       println("unused")
     end
@@ -1905,7 +1905,7 @@ let test_session_user_chan_new_recv_close_shadow_not_swallowed () =
       fn recv(a, b) do a end
       fn close(a, b) do a end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let x = Chan.new(1, 2)
       let y = Chan.recv(x, 2)
       let z = Chan.close(y, 2)
@@ -2091,7 +2091,7 @@ let test_session_loop_two_iterations_ok () =
         Cons -> Prod : Bool
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, pp) = Chan.new(Str)
       let pp2 = Chan.send(pp, 1)
       let (x, cc2) = Chan.recv(cc)
@@ -2178,7 +2178,7 @@ let test_session_loop_stop_two_iterations_close_ok () =
         end
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, pp) = Chan.new(Stream)
       let pp1 = Chan.send(pp, 1)
       let (x1, cc1) = Chan.recv(cc)
@@ -2372,7 +2372,7 @@ let test_session_chan_new_multiparty_error () =
       B -> C : Int
       C -> A : Bool
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (x, y) = Chan.new(Tri)
       println("unused")
     end
@@ -2488,7 +2488,7 @@ let test_session_offer_unrefined_continuation_error () =
         err -> S -> C : String
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(D2)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2514,7 +2514,7 @@ let test_session_offer_identical_branches_no_match_ok () =
         err -> S -> C : Int
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(Same)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, 7)
@@ -2549,7 +2549,7 @@ let test_session_offer_label_shadow_bypass_error () =
         err -> S -> C : String
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(D2)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2583,7 +2583,7 @@ let test_session_offer_label_shadow_no_false_positive () =
         err -> S -> C : String
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(D2)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2714,7 +2714,7 @@ let test_session_offer_guarded_catch_all_not_catch_all () =
         err -> S -> C : String
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(D6)
       let sc2 = Chan.choose(sc, :ok)
       let sc3 = Chan.send(sc2, 7)
@@ -2754,7 +2754,7 @@ let test_session_offer_unrefined_laundered_by_annotation () =
     protocol E7 do
       S -> C : Int
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(D7)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2787,7 +2787,7 @@ let test_session_offer_unrefined_laundered_by_if_join () =
     protocol E8 do
       S -> C : Int
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(D8)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2829,7 +2829,7 @@ let test_session_offer_unrefined_laundered_by_fn_param () =
       Chan.close(ch2)
       v
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(D9)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2859,7 +2859,7 @@ let test_session_offer_unrefined_laundered_by_record_field () =
       S -> C : Int
     end
     type Box = { ch : Chan(C, EA), n : Int }
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(DA)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2899,7 +2899,7 @@ let test_session_offer_unrefined_laundered_by_lambda_param () =
     protocol EL do
       S -> C : Int
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(DL)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2932,7 +2932,7 @@ let test_session_offer_unrefined_laundered_by_inner_fn_param () =
     protocol EM do
       S -> C : Int
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(DM)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -2969,7 +2969,7 @@ let test_session_lambda_param_annotation_no_false_positive () =
     protocol EN do
       S -> C : Int
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let inc = fn (x : Int) -> x + 1
       let doubled = List.map([1, 2, 3], fn (x : Int) -> x * 2)
       fn triple(y : Int) do y * 3 end
@@ -3001,7 +3001,7 @@ let test_session_lambda_param_annotation_no_false_positive () =
 let test_lambda_param_annotation_mismatch_rejected () =
   let ctx = typecheck {|mod Test do
   needs IO.Console
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let f = fn (x : String) -> string_length(x)
       println(int_to_string(f(42)))
     end
@@ -3034,7 +3034,7 @@ let test_session_offer_unify_no_false_positive () =
       Chan.close(ch2)
       v
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(DB)
       let sc2 = Chan.choose(sc, :ok)
       let sc3 = Chan.send(sc2, 7)
@@ -3068,7 +3068,7 @@ let test_session_offer_unknown_arm_label_warning () =
         err -> S -> C : String
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(DC)
       let sc2 = Chan.choose(sc, :ok)
       let sc3 = Chan.send(sc2, 7)
@@ -3115,7 +3115,7 @@ let test_session_offer_unrefined_catch_all_message () =
         err -> S -> C : String
       end
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let (cc, sc) = Chan.new(DD)
       let sc2 = Chan.choose(sc, :err)
       let sc3 = Chan.send(sc2, "boom")
@@ -3605,7 +3605,7 @@ let count_errors_matching ctx needle =
 let test_let_annot_mismatch_rejects () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let x : Int = "foo"
       println(int_to_string(x))
     end
@@ -3618,7 +3618,7 @@ let test_let_annot_mismatch_rejects () =
 let test_let_annot_correct_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let x : Int = 5
       println(int_to_string(x))
     end
@@ -3631,7 +3631,7 @@ let test_let_annot_correct_accepts () =
 let test_let_annot_poly_instance_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let f : (Int) -> Int = fn n -> n
       println(int_to_string(f(5)))
     end
@@ -3650,7 +3650,7 @@ let test_zero_arg_lambda_unit_callback_accepts () =
   needs IO.Console
     fn call_it(cb : Unit -> Unit) : Unit do cb() end
     fn once() : Unit do println("ran") end
-    fn main() do call_it(fn -> once()) end
+    fn main(_cap_console : Cap(IO.Console)) do call_it(fn -> once()) end
   end|} in
   Alcotest.(check bool) "call_it(fn -> once()) : Unit -> Unit accepted"
     false (has_errors ctx)
@@ -3660,7 +3660,7 @@ let test_zero_arg_lambda_unit_callback_accepts () =
 let test_zero_arg_unit_call_returns_result () =
   let ctx = typecheck {|mod Main do
   needs IO.Console
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let n = int_max_value()
       println(int_to_string(n))
     end
@@ -3674,7 +3674,7 @@ let test_discard_arg_thunk_still_accepts () =
   let ctx = typecheck {|mod Main do
   needs IO.Console
     needs IO.Spawn
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
       let _t = task_spawn(fn _ -> 42)
       println("spawned")
     end
@@ -3700,7 +3700,7 @@ let test_letfn_ret_annot_mismatch_single_diagnostic () =
       end
       go(n)
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       println(int_to_string(describe(3)))
     end
   end|} in
@@ -3723,7 +3723,7 @@ let test_letfn_two_distinct_errors_both_report () =
       let bad : Bool = 42
       go(n)
     end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       println(int_to_string(describe(3)))
     end
   end|} in
@@ -3742,7 +3742,7 @@ let test_generic_when_constraint_unsatisfied_rejects () =
   needs IO.Console
     type Hue = Rood | Bloo
     fn same(a, b) when Eq(a) do a == b end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       if same(Rood, Rood) do println("y") else println("n") end
     end
   end|} in
@@ -3759,7 +3759,7 @@ let test_generic_when_constraint_satisfied_accepts () =
   needs IO.Console
     fn max(a, b) when Ord(a) do if a > b do a else b end end
     fn same(a, b) when Eq(a) do a == b end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       println(int_to_string(max(1, 2)))
       if same(1, 1) do println("eq") else println("neq") end
       if same("x", "y") do println("eq") else println("neq") end
@@ -3773,7 +3773,7 @@ let test_generic_no_constraint_accepts () =
   let ctx = typecheck {|mod M do
   needs IO.Console
     fn id(a) do a end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       println(int_to_string(id(5)))
       println(id("hi"))
     end
@@ -4585,7 +4585,7 @@ let test_session_compile_odd_int_roundtrip () =
       \    Client -> Server : Int\n\
       \    Server -> Client : Int\n\
       \  end\n\
-      \  fn main() do\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
       \    let (cc, sc) = Chan.new(Echo)\n\
       \    let cc2 = Chan.send(cc, 43)\n\
       \    let (n, sc2) = Chan.recv(sc)\n\
@@ -4625,7 +4625,7 @@ let test_session_compile_bool_roundtrip () =
       \  protocol B do\n\
       \    Client -> Server : Bool\n\
       \  end\n\
-      \  fn main() do\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
       \    let (cc, sc) = Chan.new(B)\n\
       \    let cc2 = Chan.send(cc, true)\n\
       \    let (b, sc2) = Chan.recv(sc)\n\
@@ -5740,7 +5740,7 @@ let test_opaque_ctor_qualified_bypass_rejected () =
   (* Sibling module constructs the private opaque ctor by qualified name. *)
   let bypass_src = {|mod OqBypass do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let t = OqToken.Token("direct-bypass")
     println(OqToken.value(t))
   end
@@ -5784,7 +5784,7 @@ end
 |} in
   let entry_src = {|mod PubUse do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let c = PubColor.Red
     println(PubColor.name(c))
   end
@@ -6121,7 +6121,7 @@ let test_unrelated_broken_lib_module_is_pruned () =
     (* (1) Entry references only GoodLib: BrokenUnrelated must be pruned. *)
     let entry_ok = Filename.concat dir "entry_ok.march" in
     write_file entry_ok
-      "mod EntryOk do\n  needs IO.Console\n  fn main() do println(int_to_string(GoodLib.helper(21))) end\nend\n";
+      "mod EntryOk do\n  needs IO.Console\n  fn main(_cap_console : Cap(IO.Console)) do println(int_to_string(GoodLib.helper(21))) end\nend\n";
     let m = parse_and_desugar (read_file_contents entry_ok) in
     let (resolve_errors, extra_decls, _uf) =
       March_resolver.Resolver.resolve_imports ~source_file:entry_ok m in
@@ -8885,7 +8885,7 @@ let test_fn_cap_closure_two_level_nesting () =
         fn f(x) do println(x) end
       end
     end
-    fn main() do Lib.Sub.f("hi") end
+    fn main(_cap_console : Cap(IO.Console)) do Lib.Sub.f("hi") end
   end|} in
   let closures = March_typecheck.Typecheck.fn_capability_closures env in
   Alcotest.(check bool) "not falsely keyed under bare immediate-parent name" true
@@ -9690,7 +9690,7 @@ let test_module_fn_shadowing_builtin_is_not_a_cap_use () =
     fn file_read(x : Int) : Int do
       x + 100
     end
-    fn main() : () do
+    fn main(_cap_console : Cap(IO.Console)) : () do
       println(int_to_string(file_read(1)))
     end
   end|} in
@@ -9707,7 +9707,7 @@ let test_module_let_shadowing_builtin_is_not_a_cap_use () =
   let ctx = typecheck {|mod ShadowLet do
     needs IO.Console
     let random_bytes = fn n -> n * 2
-    fn main() : () do
+    fn main(_cap_console : Cap(IO.Console)) : () do
       println(int_to_string(random_bytes(3)))
     end
   end|} in
@@ -9725,7 +9725,7 @@ let test_dns_resolve_shadow_witness () =
     fn dns_resolve(x : Int) : Int do
       x + 1
     end
-    fn main() : () do
+    fn main(_cap_console : Cap(IO.Console)) : () do
       println(int_to_string(dns_resolve(1)))
     end
   end|} in
@@ -9998,8 +9998,22 @@ let test_grant_full_io_accepts_everything () =
   Alcotest.(check bool) "Cap(IO) grants everything" false (has_errors ctx)
 
 let test_grant_absent_is_ambient () =
-  (* No capability parameter = no gate.  This is the compatibility half of
-     the design: every existing program keeps compiling. *)
+  (* HISTORY, because this test asserted the OPPOSITE until 2026-08-10, and
+     the reversal was deliberate rather than a regression.
+
+     Stages A/B shipped with an adoption contract: no capability parameter =
+     no gate, so every pre-grant program kept compiling. That is what let the
+     grant check land without breaking anything — and it is also what kept the
+     honest claim down to "a program that STATES its grant cannot exceed it",
+     since `file_read(p)` still compiled with nothing in scope.
+
+     R1 stage D retires the contract
+     (specs/2026-08-10-r1-stage-d-grant-required-design.md): a parameterless
+     `main` is granted NOTHING, so reaching any capability from it is an
+     error. The test is kept and INVERTED rather than deleted — it is the pin
+     on the single semantic reversal in the whole R1 sequence, and a future
+     change that quietly restored ambient IO would otherwise show up as a
+     green suite. *)
   let ctx = typecheck {|mod GrantLegacy do
     needs IO.Console
     needs IO.FileWrite
@@ -10010,7 +10024,9 @@ let test_grant_absent_is_ambient () =
       end
     end
   end|} in
-  Alcotest.(check bool) "parameterless main stays ambient" false (has_errors ctx)
+  Alcotest.(check bool)
+    "a parameterless main is granted nothing, so its IO is an error"
+    true (has_error_with ctx "declares no grant")
 
 let test_grant_narrow_refuses_foreign () =
   let ctx = typecheck {|mod GrantForeign do
@@ -10067,6 +10083,603 @@ let test_main_signature_still_rejects_non_cap () =
         ()
       end
     end|})
+
+(* ── R1 stage C: per-function grants (effect rows) ────────────────────────
+   specs/2026-08-10-r1-stage-c-effect-rows-design.md.
+
+   Stages A/B check ONE row against ONE grant, at `main`.  Stage C makes any
+   function that takes a concrete `Cap(P)` parameter a DISCHARGE POINT: its
+   own transitive capability row must sit under the capabilities its
+   parameters were handed.  The guarantee stops being "this BINARY cannot
+   touch the filesystem" and becomes "this FUNCTION cannot", which is what
+   composes across dependencies.
+
+   The claim being certified is deliberately CONDITIONAL — "this function's
+   static reach fits under P, plus whatever function values you hand it" —
+   and the tests below pin both halves of that:
+   - a function that invokes a PARAMETER still certifies (its callers are
+     charged for what they supply, by the free-variable edge that has always
+     driven the closure), and
+   - a function that invokes a value with no traceable creation site is
+     REFUSED under a narrow grant, the same way stage B refuses to certify a
+     narrow grant over `IO.Foreign`, rather than certifying a bound it cannot
+     see. *)
+
+let test_fn_grant_narrow_covers_console () =
+  let ctx = typecheck {|mod FnGrantOk do
+    needs IO.Console
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      println(msg)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a console-only helper under Cap(IO.Console) is fine"
+    false (has_errors ctx)
+
+let test_fn_grant_narrow_rejects_filewrite () =
+  (* The manifest is truthful — `needs IO.FileWrite` is declared and the
+     module-level checks are all satisfied.  Declaring still does not grant,
+     now at function granularity. *)
+  let ctx = typecheck {|mod FnGrantViolate do
+    needs IO.Console
+    needs IO.FileWrite
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      match file_write("/tmp/fn_grant_x", msg) do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "IO.FileWrite outside a Cap(IO.Console) parameter errors"
+    true (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "the violating capability is named"
+    true (has_error_with ctx "IO.FileWrite")
+
+let test_fn_grant_violation_through_helper () =
+  (* Transitive, and the diagnostic names the chain that reaches it — the
+     evidence stage B could only give as a single hop. *)
+  let ctx = typecheck {|mod FnGrantHelper do
+    needs IO.Console
+    needs IO.FileWrite
+    fn save(msg : String) : () do
+      match file_write("/tmp/fn_grant_h", msg) do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      save(msg)
+      println(msg)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a helper-reached capability is still a grant error"
+    true (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "the chain to the capability is named"
+    true (has_error_with ctx "save")
+
+let test_fn_grant_multi_cap_params_union () =
+  (* A helper may hold several narrow caps; the grant is their union, unlike
+     `main`, which the signature check restricts to exactly one parameter. *)
+  let ctx = typecheck {|mod FnGrantMulti do
+    needs IO.Console
+    needs IO.FileWrite
+    fn both(c : Cap(IO.Console), w : Cap(IO.FileWrite), msg : String) : () do
+      match file_write("/tmp/fn_grant_m", msg) do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "every parameter's capability counts toward the grant"
+    false (has_errors ctx)
+
+let test_fn_grant_polymorphic_cap_param_is_no_gate () =
+  (* `Cap(a)` is capability-POLYMORPHIC plumbing (this is how `cap_narrow` is
+     typed).  It names no lattice point, so it grants nothing and must create
+     no discharge point — otherwise every narrowing helper would be refused
+     for reaching capabilities it only forwards. *)
+  let ctx = typecheck {|mod FnGrantPoly do
+    needs IO
+    fn forward(c : Cap(a)) : Cap(a) do
+      c
+    end
+    fn noisy(c : Cap(IO)) : () do
+      match file_write("/tmp/fn_grant_p", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a Cap(a) parameter creates no discharge point"
+    false (has_errors ctx)
+
+let test_fn_grant_invoking_a_parameter_still_certifies () =
+  (* The row's conditional half.  `run` invokes a function it was GIVEN; its
+     own static reach is console-only and it certifies as such.  Nothing is
+     lost: whoever supplies `job` is charged for `job`'s row by the same
+     free-variable edge that has always driven the closure, and that supplier
+     is under its own discharge point. *)
+  let ctx = typecheck {|mod FnGrantHof do
+    needs IO.Console
+    fn run(cap : Cap(IO.Console), job : (() -> ())) : () do
+      println("before")
+      job()
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "invoking a parameter is a conditional row, not a violation"
+    false (has_errors ctx)
+
+let test_fn_grant_supplier_is_charged_for_the_callback () =
+  (* The other half of the same property: the caller that NAMES the effectful
+     callback is the one that must hold the capability for it. *)
+  let ctx = typecheck {|mod FnGrantSupplier do
+    needs IO.Console
+    needs IO.FileWrite
+    fn run(job : (() -> ())) : () do
+      job()
+    end
+    fn writer() : () do
+      match file_write("/tmp/fn_grant_s", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn caller(cap : Cap(IO.Console)) : () do
+      run(writer)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "supplying an effectful callback is charged to the supplier"
+    true (has_error_with ctx "granted `Cap(IO.Console)`")
+
+let test_fn_grant_refuses_untraceable_invocation () =
+  (* The refusal at the precision frontier.  `dispatch` invokes a function it
+     pulled out of a record — no creation site this analysis can trace, so no
+     caller can be charged for it and no narrow bound can be certified.  Like
+     the `IO.Foreign` clause, this is refused rather than silently allowed. *)
+  let ctx = typecheck {|mod FnGrantOpaque do
+    needs IO.Console
+    type Handler = { run : (() -> ()) }
+    fn dispatch(cap : Cap(IO.Console), h : Handler) : () do
+      let f = h.run
+      f()
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "an untraceable invocation refuses a narrow grant"
+    true (has_error_with ctx "cannot trace")
+
+let test_fn_grant_full_io_accepts_untraceable_invocation () =
+  (* The refusal is specific to a NARROW grant, exactly like stage B's
+     `IO.Foreign` rule: `Cap(IO)` bounds nothing within the IO lattice, so
+     there is nothing to certify falsely. *)
+  let ctx = typecheck {|mod FnGrantOpaqueFull do
+    needs IO
+    type Handler2 = { run : (() -> ()) }
+    fn dispatch(cap : Cap(IO), h : Handler2) : () do
+      let f = h.run
+      f()
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Cap(IO) certifies nothing narrow, so nothing is refused"
+    false (has_errors ctx)
+
+let test_fn_grant_narrow_refuses_foreign () =
+  let ctx = typecheck {|mod FnGrantForeign do
+    needs IO.Console
+    needs Ffi
+    extern "rt" : Cap(Ffi) do
+      fn ffi_id2(x : Int) : Int = "march_test_ffi_id"
+    end
+    fn wrapped(cap : Cap(IO.Console)) : () do
+      println(int_to_string(ffi_id2(1)))
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "IO.Foreign under a narrow per-function grant is refused"
+    true (has_error_with ctx "linked C code")
+
+let test_fn_grant_dead_code_is_not_charged () =
+  let ctx = typecheck {|mod FnGrantDead do
+    needs IO.Console
+    needs IO.FileWrite
+    fn never_called() : () do
+      match file_write("/tmp/fn_grant_d", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn log(cap : Cap(IO.Console), msg : String) : () do
+      println(msg)
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a capability the function does not reach costs nothing"
+    false (has_errors ctx)
+
+let test_fn_grant_main_is_not_double_reported () =
+  (* `main` is `check_main_grant`'s discharge point.  If stage C claimed it
+     too, every whole-program violation would be reported twice. *)
+  let ctx = typecheck {|mod FnGrantMainOnce do
+    needs IO.Console
+    needs IO.FileWrite
+    fn main(cap : Cap(IO.Console)) : () do
+      match file_write("/tmp/fn_grant_once", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end|} in
+  let mentions sub (m : string) =
+    let sub_len = String.length sub and m_len = String.length m in
+    let found = ref false in
+    for i = 0 to m_len - sub_len do
+      if String.sub m i sub_len = sub then found := true
+    done;
+    !found
+  in
+  let n =
+    List.length
+      (List.filter
+         (fun d ->
+            d.March_errors.Errors.severity = March_errors.Errors.Error
+            && mentions "granted `Cap(IO.Console)`"
+                 d.March_errors.Errors.message)
+         ctx.March_errors.Errors.diagnostics)
+  in
+  Alcotest.(check int) "exactly one grant diagnostic for main" 1 n
+
+(* The regression class this project has been bitten by twice: a capability
+   pass built on `parse_and_desugar` alone never sees the shape the REAL
+   pipeline produces.  See
+   specs/progress/2026-08-09-cap-shadowing-false-positive.md — nine green unit
+   tests shipped a regression that silenced the most basic capability check in
+   the system, because every one of them used the bare helper.
+
+   The two shapes bin/main.ml actually produces are both covered below: an
+   ordinary stdlib module keeps its `DMod` wrapper (so its members are keyed
+   "DateTime.now"), while prelude.march alone is UNWRAPPED into the entry
+   module's own flat declaration list (so `println` is keyed bare and sits in
+   the very list a module-level scan walks). *)
+let test_fn_grant_with_stdlib_prepended () =
+  with_stdlib_registered "datetime.march" (fun () ->
+    let dt = load_stdlib_file_for_test "datetime.march" in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "Main"; span = dummy_span };
+      mod_decls = dt :: (parse_and_desugar {|mod Main do
+        needs IO.Console
+        needs IO.Clock
+        fn stamped(cap : Cap(IO.Console)) : () do
+          println(int_to_string(DateTime.now()))
+        end
+        fn main() : () do
+          ()
+        end
+      end|}).March_ast.Ast.mod_decls;
+    } in
+    let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+    Alcotest.(check bool)
+      "a stdlib-mediated IO.Clock violates a Cap(IO.Console) function grant"
+      true (has_error_with errors "granted `Cap(IO.Console)`"))
+
+let test_fn_grant_with_prelude_flattened () =
+  (* Prelude's declarations ride in the entry module's own flat list, exactly
+     as bin/main.ml unwraps them.  Both directions are asserted: the console
+     grant still certifies over prelude's own `println`, and a capability
+     reached THROUGH a flattened prelude function is still caught — the
+     asymmetry that the shadowing regression got wrong in the silencing
+     direction. *)
+  let prelude = load_stdlib_file_for_test "prelude.march" in
+  let flattened =
+    match prelude with
+    | March_ast.Ast.DMod (_, _, inner, _) -> inner
+    | d -> [ d ]
+  in
+  let m = March_ast.Ast.{
+    mod_name = { txt = "Main"; span = dummy_span };
+    mod_decls = flattened @ (parse_and_desugar {|mod Main do
+      needs IO.Console
+      needs IO.FileWrite
+      fn talk(cap : Cap(IO.Console), msg : String) : () do
+        println(msg)
+      end
+      fn scribble(cap : Cap(IO.Console), msg : String) : () do
+        match file_write("/tmp/fn_grant_prelude", msg) do
+          Ok(_) -> println("ok")
+          Err(_) -> println("e")
+        end
+      end
+      fn main() : () do
+        ()
+      end
+    end|}).March_ast.Ast.mod_decls;
+  } in
+  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  Alcotest.(check bool)
+    "a prelude-mediated console use still certifies under Cap(IO.Console)"
+    true (has_error_with errors "IO.FileWrite");
+  Alcotest.(check bool)
+    "the console-only function is not itself reported"
+    false (has_error_with errors "`talk` is granted")
+
+(* ── R1 stage D: a grant is REQUIRED, and `main` may hold a SET ───────────
+   specs/2026-08-10-r1-stage-d-grant-required-design.md.
+
+   Stages A–C made a declared grant enforceable. They left the default
+   ambient: `fn main()` with no capability parameter performed IO freely,
+   which is what let them ship without breaking a program. That adoption
+   contract is retired here — the whole R1 gap was one line, the `| None ->
+   ()` arm of [check_main_grant].
+
+   The two halves ship together on purpose. Flipping the default WITHOUT
+   letting `main` hold several capabilities would force every program needing
+   (say) console AND spawn to widen to `Cap(IO)` — 30% of the migrating
+   corpus — which earns a WORSE claim than the opt-in state it replaces. *)
+
+let test_main_multi_cap_signature_accepted () =
+  Alcotest.(check bool) "main may take several capability parameters"
+    false
+    (desugar_has_errors {|mod StageDMulti do
+      needs IO.Console
+      needs IO.Spawn
+      fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
+        println("hi")
+      end
+    end|})
+
+let test_main_non_cap_param_still_rejected () =
+  Alcotest.(check bool) "a non-capability parameter is still rejected"
+    true
+    (desugar_has_errors {|mod StageDBadParam do
+      fn main(x : Int) : () do
+        ()
+      end
+    end|})
+
+let test_main_mixed_param_list_rejected () =
+  (* The relaxation is "one cap param" → "any number of cap params", NOT
+     "arbitrary parameters". A mixed list would make the grant a claim about
+     only some of what `main` receives. *)
+  Alcotest.(check bool) "a mixed capability/non-capability list is rejected"
+    true
+    (desugar_has_errors {|mod StageDMixed do
+      needs IO
+      fn main(cap : Cap(IO), x : Int) : () do
+        ()
+      end
+    end|})
+
+let test_main_unknown_cap_path_still_rejected () =
+  Alcotest.(check bool) "an unknown lattice point is still rejected"
+    true
+    (desugar_has_errors {|mod StageDBadPath do
+      fn main(cap : Cap(IO.Nope)) : () do
+        ()
+      end
+    end|})
+
+let test_main_grant_is_the_union_of_its_cap_params () =
+  let ctx = typecheck {|mod StageDUnion do
+    needs IO.Console
+    needs IO.Spawn
+    fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
+      println("start")
+      let _t = task_spawn(fn _ -> println("worker"))
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a program reaching both granted caps is accepted"
+    false (has_errors ctx)
+
+let test_main_grant_union_still_rejects_outside () =
+  let ctx = typecheck {|mod StageDUnionViolate do
+    needs IO.Console
+    needs IO.Spawn
+    needs IO.FileWrite
+    fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
+      match file_write("/tmp/stage_d_u", "d") do
+        Ok(_) -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "a capability outside the union is still an error"
+    true (has_error_with ctx "IO.FileWrite")
+
+let test_main_explicit_foreign_grant_accepted () =
+  (* Stage B refuses IO.Foreign under any grant but Cap(IO), which is right
+     when `main` holds exactly ONE capability. Once it can hold a set, a
+     `Cap(IO.Foreign)` parameter is an explicit grant of the unbounded thing
+     and the person who wrote the signature knows what they authorized —
+     stage C's rule, applied here for the same reason. *)
+  let ctx = typecheck {|mod StageDForeignOk do
+    needs IO.Console
+    needs IO.Foreign
+    needs Ffi
+    extern "rt" : Cap(Ffi) do
+      fn ffi_id3(x : Int) : Int = "march_test_ffi_id"
+    end
+    fn main(cap_console : Cap(IO.Console), cap_foreign : Cap(IO.Foreign)) : () do
+      println(int_to_string(ffi_id3(1)))
+    end
+  end|} in
+  Alcotest.(check bool) "an explicit Cap(IO.Foreign) grant is honored"
+    false (has_error_with ctx "linked C code")
+
+let test_main_foreign_under_console_still_refused () =
+  let ctx = typecheck {|mod StageDForeignBad do
+    needs IO.Console
+    needs Ffi
+    extern "rt" : Cap(Ffi) do
+      fn ffi_id4(x : Int) : Int = "march_test_ffi_id"
+    end
+    fn main(cap_console : Cap(IO.Console)) : () do
+      println(int_to_string(ffi_id4(1)))
+    end
+  end|} in
+  Alcotest.(check bool) "IO.Foreign uncovered by the grant is still refused"
+    true (has_error_with ctx "linked C code")
+
+(* ── the flip itself ────────────────────────────────────────────────────── *)
+
+let test_parameterless_main_doing_io_is_an_error () =
+  let ctx = typecheck {|mod StageDAmbient do
+    needs IO.Console
+    fn main() : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "a parameterless main performing IO is rejected"
+    true (has_error_with ctx "declares no grant");
+  Alcotest.(check bool) "the reached capability is named"
+    true (has_error_with ctx "IO.Console")
+
+let test_parameterless_main_that_is_pure_still_compiles () =
+  (* 212 of 330 in-repo programs are in this state; they must be untouched. *)
+  let ctx = typecheck {|mod StageDPure do
+    fn add(x : Int, y : Int) : Int do x + y end
+    fn main() : () do
+      let _ = add(1, 2)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a pure parameterless main still compiles"
+    false (has_errors ctx)
+
+let test_module_without_main_is_not_gated () =
+  (* A library has no entry point to be granted from. Stage C is what covers
+     its capability-parameter functions; stage D is about programs. *)
+  let ctx = typecheck {|mod StageDLib do
+    needs IO.Console
+    fn shout(msg : String) : () do
+      println(msg)
+    end
+  end|} in
+  Alcotest.(check bool) "a module with no main is not gated"
+    false (has_error_with ctx "declares no grant")
+
+let test_stage_d_with_stdlib_prepended () =
+  (* The regression class this repo has been bitten by twice — a capability
+     pass built on `parse_and_desugar` alone never sees the shape the real
+     pipeline produces. See
+     specs/progress/2026-08-09-cap-shadowing-false-positive.md. *)
+  let prelude = load_stdlib_file_for_test "prelude.march" in
+  let flattened =
+    match prelude with
+    | March_ast.Ast.DMod (_, _, inner, _) -> inner
+    | d -> [ d ]
+  in
+  let m = March_ast.Ast.{
+    mod_name = { txt = "Main"; span = dummy_span };
+    mod_decls = flattened @ (parse_and_desugar {|mod Main do
+      needs IO.Console
+      fn main() : () do
+        println("hi")
+      end
+    end|}).March_ast.Ast.mod_decls;
+  } in
+  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  Alcotest.(check bool)
+    "a prelude-mediated console use still trips the missing-grant error"
+    true (has_error_with errors "declares no grant")
+
+(* R1 stage D, the migration half: the diagnostic carries a MECHANICAL fix.
+   Under a hard flip this is the only mitigation code outside this repo gets —
+   the grant is not a judgement call, it is `caps(main)`, which the compiler
+   has already computed by the time it reports the error. Emitting it as a
+   `FReplace` over the parameter list lets `forge fix` apply it. *)
+let stage_d_fix_of src =
+  let ctx = typecheck src in
+  List.fold_left
+    (fun acc (d : March_errors.Errors.diagnostic) ->
+       match acc, d.fix with
+       | Some _, _ -> acc
+       | None, Some (March_errors.Errors.FReplace { text; span }) -> Some (text, span)
+       | None, _ -> None)
+    None
+    (List.rev ctx.March_errors.Errors.diagnostics)
+
+let test_stage_d_emits_replace_fix () =
+  match
+    stage_d_fix_of {|mod StageDFix do
+      needs IO.Console
+      fn main() : () do
+        println("hi")
+      end
+    end|}
+  with
+  | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
+  | Some (text, _) ->
+    Alcotest.(check string)
+      "the fix is the parameter list the compiler computed"
+      "(_cap_console : Cap(IO.Console))" text
+
+let test_stage_d_fix_spans_the_parameter_list () =
+  (* The span must cover `()` and NOTHING else. Replacing the function NAME
+     instead would produce `fn main(_cap_console : Cap(IO.Console))() : ()`,
+     which is why `fn_clause` had to grow a parameter-list span rather than
+     reuse one it already had. *)
+  match
+    stage_d_fix_of {|mod StageDFixSpan do
+      needs IO.Console
+      fn main() : () do
+        println("hi")
+      end
+    end|}
+  with
+  | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
+  | Some (_, span) ->
+    Alcotest.(check int) "fix starts and ends on one line"
+      span.March_ast.Ast.start_line span.March_ast.Ast.end_line;
+    Alcotest.(check int) "the replaced text is exactly `()`" 2
+      (span.March_ast.Ast.end_col - span.March_ast.Ast.start_col)
+
+let test_stage_d_fix_covers_multiple_capabilities () =
+  match
+    stage_d_fix_of {|mod StageDFixMulti do
+      needs IO.Console
+      needs IO.FileWrite
+      fn main() : () do
+        match file_write("/tmp/stage_d_fix", "d") do
+          Ok(_) -> println("ok")
+          Err(_) -> println("e")
+        end
+      end
+    end|}
+  with
+  | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
+  | Some (text, _) ->
+    Alcotest.(check string)
+      "every reached capability appears in the generated parameter list"
+      "(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite))" text
 
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
@@ -10756,7 +11369,7 @@ let test_same_name_type_collision_note () =
     type Thing = MkThing(Int)
     fn make() : Thing do MkThing(5) end
     fn use_inner(t : Inner.Thing) : Int do t.a end
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let x = make()
       println(int_to_string(use_inner(x)))
     end
@@ -12893,7 +13506,7 @@ let test_record_field_mismatch_note_polarity () =
   let ctx = typecheck {|mod T do
   needs IO.Console
     fn width({ w: w }) : Int do w end
-    fn main() : Unit do println(int_to_string(width({ w: 8, h: 9 }))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(width({ w: 8, h: 9 }))) end
   end|} in
   let notes =
     List.concat_map (fun (d : March_errors.Errors.diagnostic) -> d.notes)
@@ -13917,11 +14530,44 @@ let compiler_suites =
           Alcotest.test_case "narrow grant rejects filewrite"     `Quick test_grant_narrow_rejects_filewrite;
           Alcotest.test_case "violation through a helper"         `Quick test_grant_violation_through_helper;
           Alcotest.test_case "Cap(IO) grants everything"          `Quick test_grant_full_io_accepts_everything;
-          Alcotest.test_case "parameterless main stays ambient"   `Quick test_grant_absent_is_ambient;
+          Alcotest.test_case "parameterless main is granted nothing" `Quick test_grant_absent_is_ambient;
           Alcotest.test_case "narrow grant refuses IO.Foreign"    `Quick test_grant_narrow_refuses_foreign;
           Alcotest.test_case "dead code is not charged"           `Quick test_grant_dead_code_is_not_charged;
           Alcotest.test_case "signature accepts narrow cap"       `Quick test_main_signature_accepts_narrow_cap;
           Alcotest.test_case "signature still rejects non-cap"    `Quick test_main_signature_still_rejects_non_cap;
+        ] );
+      ( "cap_fn_grant", [
+          Alcotest.test_case "narrow fn grant covers console"      `Quick test_fn_grant_narrow_covers_console;
+          Alcotest.test_case "narrow fn grant rejects filewrite"   `Quick test_fn_grant_narrow_rejects_filewrite;
+          Alcotest.test_case "violation through a helper, chained" `Quick test_fn_grant_violation_through_helper;
+          Alcotest.test_case "multi cap params union to the grant" `Quick test_fn_grant_multi_cap_params_union;
+          Alcotest.test_case "Cap(a) param creates no gate"        `Quick test_fn_grant_polymorphic_cap_param_is_no_gate;
+          Alcotest.test_case "invoking a param still certifies"    `Quick test_fn_grant_invoking_a_parameter_still_certifies;
+          Alcotest.test_case "the supplier is charged for callback" `Quick test_fn_grant_supplier_is_charged_for_the_callback;
+          Alcotest.test_case "untraceable invocation is refused"   `Quick test_fn_grant_refuses_untraceable_invocation;
+          Alcotest.test_case "Cap(IO) refuses nothing narrow"      `Quick test_fn_grant_full_io_accepts_untraceable_invocation;
+          Alcotest.test_case "narrow fn grant refuses IO.Foreign"  `Quick test_fn_grant_narrow_refuses_foreign;
+          Alcotest.test_case "dead code is not charged"            `Quick test_fn_grant_dead_code_is_not_charged;
+          Alcotest.test_case "main is not double-reported"         `Quick test_fn_grant_main_is_not_double_reported;
+          Alcotest.test_case "real stdlib-prepended shape"         `Quick test_fn_grant_with_stdlib_prepended;
+          Alcotest.test_case "real prelude-flattened shape"        `Quick test_fn_grant_with_prelude_flattened;
+        ] );
+      ( "cap_grant_required", [
+          Alcotest.test_case "multi-cap main signature accepted"   `Quick test_main_multi_cap_signature_accepted;
+          Alcotest.test_case "non-cap param still rejected"        `Quick test_main_non_cap_param_still_rejected;
+          Alcotest.test_case "mixed param list rejected"           `Quick test_main_mixed_param_list_rejected;
+          Alcotest.test_case "unknown cap path still rejected"     `Quick test_main_unknown_cap_path_still_rejected;
+          Alcotest.test_case "grant is the union of cap params"    `Quick test_main_grant_is_the_union_of_its_cap_params;
+          Alcotest.test_case "union still rejects outside caps"    `Quick test_main_grant_union_still_rejects_outside;
+          Alcotest.test_case "explicit Cap(IO.Foreign) accepted"   `Quick test_main_explicit_foreign_grant_accepted;
+          Alcotest.test_case "Foreign under console still refused" `Quick test_main_foreign_under_console_still_refused;
+          Alcotest.test_case "parameterless main + IO is an error" `Quick test_parameterless_main_doing_io_is_an_error;
+          Alcotest.test_case "parameterless pure main compiles"    `Quick test_parameterless_main_that_is_pure_still_compiles;
+          Alcotest.test_case "module without main is not gated"    `Quick test_module_without_main_is_not_gated;
+          Alcotest.test_case "real stdlib-prepended shape"         `Quick test_stage_d_with_stdlib_prepended;
+          Alcotest.test_case "diagnostic carries a replace fix"     `Quick test_stage_d_emits_replace_fix;
+          Alcotest.test_case "fix span covers exactly `()`"         `Quick test_stage_d_fix_spans_the_parameter_list;
+          Alcotest.test_case "fix lists every reached capability"   `Quick test_stage_d_fix_covers_multiple_capabilities;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;

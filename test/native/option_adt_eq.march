@@ -11,7 +11,7 @@ mod M do
     if x != y do "ne" else "eq" end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let a = Some(Green)
     let b = Some(Green)
     let c = Some(Blue)

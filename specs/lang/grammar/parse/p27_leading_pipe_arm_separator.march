@@ -30,7 +30,7 @@ mod P27LeadingPipeArmSeparator do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(describe(Circle(1)))
     println(describe(Square(2)))
     println(grade(95))

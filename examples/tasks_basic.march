@@ -46,7 +46,7 @@ fn fan_out(n : Int) : Int do
   fan_out_inner(n, 0)
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   println("--- Task basics ---")
 
   -- Two independent tasks

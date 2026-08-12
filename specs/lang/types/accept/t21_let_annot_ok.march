@@ -1,6 +1,6 @@
 mod M do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- A correct let-annotation typechecks.
     let x : Int = 5
     -- A polymorphic RHS bound at a more specific annotated type also works —

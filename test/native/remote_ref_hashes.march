@@ -11,7 +11,7 @@ mod TestRRH do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let result = fib(10)
     let hashes = remote_ref_hashes("TestRRH", "fib")
     let sg = match hashes do (s, _) -> s end

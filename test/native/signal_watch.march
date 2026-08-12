@@ -6,7 +6,7 @@
 mod Main do
   needs IO.Console
   needs IO.Signal
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal)) do
     Signal.watch(Signal.Usr2, fn -> println("caught usr2"))
     println("before raise")
     Signal.raise(Signal.Usr2)

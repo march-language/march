@@ -17,7 +17,7 @@ mod Main do
   needs IO.Console
   fn ring_arity(_ring : ConsistentHash.HashRing(String)) : Int do 1 end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let ring = ConsistentHash.new(3)
     let ring2 = ConsistentHash.add(ring, "node-a", "node-a")
     println(int_to_string(ring_arity(ring2)))

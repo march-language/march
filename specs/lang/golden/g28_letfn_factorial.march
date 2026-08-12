@@ -5,7 +5,7 @@ mod Main do
   -- interpreter ties the recursive knot with the env_ref back-patch
   -- (eval.ml:6875-6884) — go is bound to a VBuiltin wrapper whose body re-reads
   -- the extended env (which contains go itself) on every call (eval.ml:6879-6883).
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     fn go(n) do
       if n == 0 do
         1

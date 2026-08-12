@@ -11244,14 +11244,27 @@ let run_module (m : module_) : unit =
     match List.assoc_opt "main" env with
     | None   -> ()
     | Some v ->
-      (* [main] may be declared 0-arity or take a single [Cap(IO)] parameter
-         (checked at desugar time by [Desugar.check_main_signature]); the
-         latter receives the erased root capability, matching [root_cap]'s
-         own runtime representation ([VUnit], see the initial env binding
-         above). Top-level functions are bound to a [VBuiltin] recursion
-         wrapper (see the [DFn] case of [eval_decl], the "<rec:name/arity>"
-         closure), not directly to a [VClosure], so arity can't be read off
-         [v] itself — read it from the entry module's own AST instead. *)
+      (* [main] may be declared 0-arity or take ANY NUMBER of [Cap(P)]
+         parameters (checked at desugar time by
+         [Desugar.check_main_signature]; R1 stage D made the grant a SET so a
+         program needing e.g. console AND spawn can state a narrow grant
+         instead of widening to `Cap(IO)`). Each receives the erased
+         capability, matching [root_cap]'s own runtime representation
+         ([VUnit], see the initial env binding above).
+
+         This MUST track the compiled path's entry adapter
+         (lib/tir/llvm_toplevel.ml, which supplies the same number of erased
+         nulls). The two are the same contract in two backends, and the
+         compiled-and-run parity tests in test_codegen's [main_cap_adapter]
+         group exist because only running BOTH catches a divergence — this
+         arm silently passed 0 args to a 2-parameter `main` and produced
+         "arity mismatch: expected 2 args, got 0" while the compiled side was
+         fine.
+
+         Top-level functions are bound to a [VBuiltin] recursion wrapper (see
+         the [DFn] case of [eval_decl], the "<rec:name/arity>" closure), not
+         directly to a [VClosure], so arity can't be read off [v] itself —
+         read it from the entry module's own AST instead. *)
       let main_arity = List.find_map (function
           | DFn (def, _) when def.fn_name.txt = "main" ->
             (match def.fn_clauses with
@@ -11261,7 +11274,7 @@ let run_module (m : module_) : unit =
         ) m.mod_decls
       in
       let args = match main_arity with
-        | Some 1 -> [VUnit]
+        | Some n when n > 0 -> List.init n (fun _ -> VUnit)
         | _ -> []
       in
       let _ = apply v args in

@@ -19,7 +19,7 @@ mod NestedDeriveJson do
   type Top = { mid : Mid, n : Int }
   derive Json for Top
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let t = { mid: { leaf: { id: 7 }, tag: "m" }, n: 3 }
     println(Json.to_string(to_json(t)))
     let flat = { id: 42 }

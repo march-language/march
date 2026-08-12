@@ -28,7 +28,7 @@ pfn build_lines(n, payload, acc) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let n = 2000
   let payload = String.repeat("abcdefghij", 100)  -- 1000 bytes, no quotes/backslashes
   let lines = build_lines(n, payload, Nil)

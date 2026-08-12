@@ -43,7 +43,7 @@ mod TaskBurstAwait do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     -- 40 rounds of 20 tasks; per round sum = 20*987 + (0+..+19) = 19740 + 190 = 19930
     -- total = 40 * 19930 = 797200
     let total = run_rounds(0, 40, 20, 0)

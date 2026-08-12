@@ -4,7 +4,7 @@
 mod Main do
   needs IO.Console
   fn dbl(x : Int) : Int do x * 2 end                -- named fn (clo_wrap), boundary D
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- named-fn closure through a HOF (clo_wrap + call site):
     println(int_to_string(List.head(List.map([10, 20, 30], dbl))))
     -- lambda closure through a HOF (apply-fn + call site):

@@ -10,7 +10,7 @@
 mod Main do
   needs IO.Console
   fn dbl(x : Float) : Float do x *. 2.0 end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(float_to_string(List.head(List.map([1.0, 2.5, 3.0], dbl))))
     let r = Ok(3.5)
     match r do

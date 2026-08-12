@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(bool_to_string(3 != 4))
     println(bool_to_string(3 != 3))
     println(bool_to_string(3 < 4))

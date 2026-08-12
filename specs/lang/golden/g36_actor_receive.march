@@ -29,7 +29,7 @@ mod Main do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let box = spawn(Inbox)
     send(box, Start())
     send(box, Follow(99))

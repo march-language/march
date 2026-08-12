@@ -172,7 +172,7 @@ end
 
 -- ── Main ────────────────────────────────────────────────────────────────────
 
-fn main() : Unit do
+fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   println("DataFrame benchmarks")
   println("Generating data...")
   let df1k    = make_frame(1000)

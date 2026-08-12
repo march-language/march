@@ -43,7 +43,7 @@ mod ClosureBoolField do
     Cons({ id: 3, age: 35, active: true }, Nil)))
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     -- stored Bool field: 2 active rows
     println("stored=" ++ int_to_string(run(Bx(Cons(fn r -> r.active, Nil)), rows())))
     -- computed Bool: age > 28 → 2 rows

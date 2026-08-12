@@ -63,7 +63,7 @@ fn unwrap(e : Either) : Int do
   end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(size(1))
   println(size(3))
   println(size(9))

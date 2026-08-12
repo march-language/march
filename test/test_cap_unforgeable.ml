@@ -42,7 +42,7 @@ let test_type_decl_position_counts_as_a_use () =
 
   type Handle = { id : Int, tok : Cap(IO.FileWrite) }
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("declared and used")
   end
 end|} in
@@ -68,7 +68,7 @@ let test_body_annotation_position_counts_as_a_use () =
   needs IO.Console
   needs IO.FileWrite
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let take = fn (w : Cap(IO.FileWrite)) -> 1
     println("declared and used")
   end
@@ -91,9 +91,10 @@ let test_derive_json_over_cap_is_a_desugar_error () =
     true
     (desugar_has_errors {|mod DeriveCap do
   needs IO
+  needs IO.Console
   type Loot = Loot(Cap(IO))
   derive Json for Loot
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("x")
   end
 end|});
@@ -102,9 +103,10 @@ end|});
     false
     (desugar_has_errors {|mod DeriveClean do
   needs IO
+  needs IO.Console
   type Loot = Loot(Int)
   derive Json for Loot
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("x")
   end
 end|})
@@ -135,12 +137,13 @@ end|} in
 let test_attenuation_widening_is_rejected () =
   let ctx = typecheck {|mod Widening do
   needs IO
+  needs IO.Console
 
   pfn widen(c : Cap(IO.Console)) : Cap(IO.FileWrite) do
     cap_narrow(c)
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("should not typecheck")
   end
 end|} in

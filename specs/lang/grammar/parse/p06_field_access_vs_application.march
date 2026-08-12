@@ -10,7 +10,7 @@ mod P06FieldAccessVsApplication do
     x + 100
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let b = make_box()
     -- get(b.get) == 105 only if `b.get` (expr_field, a DOT-chain reduced
     -- all the way down to expr_atom) binds as the SOLE argument to the
