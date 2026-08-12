@@ -92,6 +92,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `==` on a variant/tuple/record field of a type with no `type`
+  declaration now compares by content, not by pointer.** A ctor field typed
+  as a compiler-builtin type constructor (e.g. `Task`, `Pid`, `WorkPool`) —
+  or, on branches carrying SIMD vector types, `F32x4`/`F64x2`/`I32x4`/
+  `I64x2`/`U8x16` — has no derivable structural-equality function, and the
+  codegen fell back to raw pointer identity instead of the runtime
+  polymorphic comparator, so two distinct-but-content-identical values for
+  such a field compared unequal. Now falls back to `march_poly_eq`, matching
+  the existing generic (`TVar`) field arm.
+
 - **Compiled `!=` on NaN floats now matches the interpreter.** The native
   backend lowered float `!=` to LLVM `fcmp one` (ordered-and-not-equal),
   which per IEEE 754 is `false` whenever either operand is NaN — but the

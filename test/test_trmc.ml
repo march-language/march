@@ -349,6 +349,24 @@ let test_setfield_is_an_ownership_move () =
     "no drop is emitted for the value moved into the hole"
     0 (decrc_count after "n")
 
+(* An actor message type must never be TRMC'd: the hole-fill is a plain
+   non-atomic store, which is only safe while the cell is thread-local. *)
+let test_actor_msg_type_is_refused () =
+  let msg_ty = Tir.TCon ("Counter_Msg", []) in
+  let self = v "f" (Tir.TFn ([msg_ty], msg_ty)) in
+  let t = v "t" msg_ty and h = v "h" Tir.TInt in
+  let body =
+    Tir.ELet (t, Tir.EApp (self, [Tir.AVar (v "xs" msg_ty)]),
+              Tir.EAlloc (Tir.TCon ("Counter_Msg.Bump", []),
+                          [Tir.AVar h; Tir.AVar t]))
+  in
+  let fd =
+    { Tir.fn_name = "f"; fn_params = [v "xs" msg_ty]; fn_ret_ty = msg_ty;
+      fn_body = body; fn_kind = Tir.FnNormal }
+  in
+  Alcotest.(check bool) "actor message type is not transformed"
+    true (Trmc.transform_fn fd = None)
+
 let suites = [
   "trmc", [
     Alcotest.test_case "modulo-cons is eligible"        `Quick test_modulo_cons_eligible;
@@ -358,6 +376,7 @@ let suites = [
     Alcotest.test_case "join-point tail call"           `Quick test_join_point_tail_call;
     Alcotest.test_case "normal nested fn is not a jp"   `Quick test_normal_nested_fn_is_not_a_join_point;
     Alcotest.test_case "intervening use blocks hole"    `Quick test_intervening_let_blocks_when_used;
+    Alcotest.test_case "actor msg type refused"          `Quick test_actor_msg_type_is_refused;
   ];
   "trmc-ir", [
     Alcotest.test_case "alloc-hole emits verifiable IR"  `Quick test_alloc_hole_emits_verifiable_ir;

@@ -1,0 +1,12 @@
+# Build context hygiene for `docker build` (ci/Dockerfile.ubuntu).
+#
+# Without this, every build ships the whole working tree to the daemon —
+# _build alone is ~824MB and is rebuilt inside the image anyway, so it is
+# pure transfer cost on each build. .git is similarly large and unused: the
+# Dockerfile COPYs a source tree, it does not run git.
+_build
+.march
+.git
+.superpowers
+docs/_site
+node_modules

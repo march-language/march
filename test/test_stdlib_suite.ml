@@ -10273,7 +10273,7 @@ let test_compiled_recursive_closure_capture () =
   match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
           ~main_exe ~bin ~src () with
   | `Skipped -> ()  (* legitimate, counted skip: no clang on PATH *)
-  | `Failed (_rc, output)
+  | `Failed (_rc, output, _cmd)
     when ir_contains output "Monomorphization limit reached" ->
     (* REGRESSION GUARD: this used to be a documented skip while the
        "Monomorphization limit reached: List.fold_left > 512 specializations"
@@ -10286,7 +10286,7 @@ let test_compiled_recursive_closure_capture () =
     Alcotest.failf
       "compile_march: the Monomorphization-limit ICE (fn_arities scope-blind \
        arity poisoning) has REGRESSED for %s:\n%s" src output
-  | `Failed (rc, output) ->
+  | `Failed (rc, output, _cmd) ->
     Alcotest.failf
       "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
        PATH, so this is a real compiler failure, not an environment gap):\n%s"
