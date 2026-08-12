@@ -1891,6 +1891,21 @@ typedef struct march_actor_meta {
      * delayed_batch_pending, immediately before running the strategy.
      * Meaningless while delayed_batch_pending is 0; zeroed by calloc. */
     int                          pending_min_child_idx;
+    /* Task 16 fix-up (review round 3): incremented under g_supervise_mu on
+     * EVERY crash dropped via skip_due_to_pending while a batch restart is
+     * pending — not just ones that lower pending_min_child_idx. A crash of
+     * a slot at an index >= the index the in-flight strategy pass is
+     * about to use (e.g. a freshly-respawned sibling from an EARLIER pass
+     * of the SAME in-flight restart, crashing again before the flag is
+     * cleared) is a real drop that needs its own follow-up pass, but it
+     * does NOT lower pending_min_child_idx — the min-idx-only absorb check
+     * missed exactly this case (that incarnation stayed dead forever,
+     * uncovered by any restart window, the same symptom class the
+     * min-idx widening fixed, just at same/higher indexes). delayed_
+     * restart_thread snapshots this counter before each strategy pass and
+     * compares it after; any advance means loop again. Meaningless while
+     * delayed_batch_pending is 0; zeroed by calloc. */
+    int64_t                      pending_drop_count;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta.
@@ -2761,25 +2776,46 @@ typedef struct {
  * first-time (streak==1) crash — take the synchronous immediate-restart
  * path itself, launching a SECOND, fully concurrent, unsynchronized
  * march_one_for_all_restart/march_rest_for_one_restart racing this one.
- * Reproduced directly: an intervening lower-index rest_for_one crash inside
- * this window corrupted supervisor state badly enough to crash the whole
- * process with an uncaught panic (confirmed by re-running under
- * MARCH_NUM_SCHEDULERS=1, which serializes all green threads onto one OS
- * thread and made the race — and the crash — disappear every time).
+ * The race itself is established by code-level argument (the window is
+ * real and reachable, independent of any specific empirical outcome); the
+ * uncaught-panic crashes observed while chasing it down were confounded
+ * with a separate, pre-existing bug (see
+ * specs/todos/2026-08-12-supervised-child-registration-race.md) that also
+ * needs true parallelism to trigger, so they aren't offered as a clean
+ * reproduction of THIS race specifically — MARCH_NUM_SCHEDULERS=1 making
+ * the crashes disappear is consistent with either bug being the cause,
+ * since both require real OS-thread concurrency.
  *
  * Fixed by keeping delayed_batch_pending SET for the entire in-flight
  * duration of the strategy call (batch strategies only), not just up to
  * the moment it starts, and looping: after each strategy call returns,
- * re-check whether sup_meta->pending_min_child_idx was widened (lowered)
- * by a crash that arrived WHILE the strategy was running (it can only
- * arrive as a widen, never as a competing restart, because the flag never
- * went false during that window) — if so, that child was not covered by
- * the pass that just ran, so loop and restart again (no additional delay:
- * the point of backoff is per-crash pacing, already served by the original
- * park). Only once a pass completes with no further widening is the flag
- * finally cleared. one_for_one needs none of this — a dead slot cannot
- * crash again, so there is only ever the one child_idx to restart, no
- * pending flag, and no race to close. */
+ * re-check whether any crash was DROPPED (skip_due_to_pending) while the
+ * strategy was running — such a crash can only arrive as a drop, never as
+ * a competing restart, because the flag never went false during that
+ * window. If so, some child was not covered by the pass that just ran, so
+ * loop and restart again (no additional delay: the point of backoff is
+ * per-crash pacing, already served by the original park). Only once a
+ * pass completes with no further drops is the flag finally cleared.
+ * one_for_one needs none of this — a dead slot cannot crash again, so
+ * there is only ever the one child_idx to restart, no pending flag, and
+ * no race to close.
+ *
+ * Round-3 correction: checking only "did pending_min_child_idx get
+ * LOWER" (round 2's original absorb condition) undercounts drops. A
+ * sibling at index >= the idx this pass is about to use — e.g. a
+ * freshly-respawned incarnation from an EARLIER pass of this SAME
+ * in-flight restart, crashing again before the flag is cleared — is
+ * dropped via skip_due_to_pending exactly like a lower-index one, but
+ * widening pending_min_child_idx against it is a no-op (it's already <=
+ * the new index), so the old min-idx-only check saw no change and cleared
+ * the flag, stranding that incarnation dead forever — the identical
+ * symptom class round 2 fixed, just at same/higher indexes instead of
+ * lower ones. sup_meta->pending_drop_count (incremented on EVERY drop,
+ * not just ones that lower the min) is what the loop actually compares
+ * now: snapshot it before the pass, and after the pass, in the same
+ * critical section that would otherwise clear the flag, re-run if it
+ * advanced (using whatever pending_min_child_idx reads at that point —
+ * the widening logic for the index itself is unchanged). */
 static void delayed_restart_thread(void *arg) {
     march_delayed_restart *dr = (march_delayed_restart *)arg;
     while (march_now_ms() < dr->not_before_ms)
@@ -2787,6 +2823,15 @@ static void delayed_restart_thread(void *arg) {
     void *supervisor = dr->supervisor;
     int child_idx = dr->child_idx, strategy = dr->strategy;
     free(dr);
+    /* Note: if the supervisor is already dead here, we return without
+     * touching delayed_batch_pending — it stays set on this (now orphaned)
+     * meta forever. That's intentional, not an oversight: clearing it would
+     * let some LATER, unrelated crash of a child that still (incorrectly)
+     * points at this dead supervisor run a restart strategy against it.
+     * Leaving it set instead just means march_supervisor_notify's
+     * skip_due_to_pending path keeps dropping such crashes — a no-op
+     * against a supervisor nothing can ever revive, not a leak of live
+     * behavior. */
     if (!march_is_alive(supervisor)) return;   /* supervisor died meanwhile */
     march_actor_meta *sup_meta = find_meta(supervisor);
     if (!sup_meta) return;
@@ -2800,10 +2845,12 @@ static void delayed_restart_thread(void *arg) {
     for (;;) {
         /* Minor 1 (TOCTOU): re-check liveness on every pass, not just the
          * first — the supervisor can die while an earlier pass's strategy
-         * call was running. */
+         * call was running. Same "leave the flag set" reasoning as above
+         * applies here too. */
         pthread_mutex_lock(&g_supervise_mu);
         int alive = march_is_alive(supervisor);
         int idx = sup_meta->pending_min_child_idx;
+        int64_t drops_before = sup_meta->pending_drop_count;
         pthread_mutex_unlock(&g_supervise_mu);
         if (!alive) return;
 
@@ -2814,13 +2861,19 @@ static void delayed_restart_thread(void *arg) {
         }
 
         /* delayed_batch_pending is STILL SET here — any crash that arrived
-         * while the strategy call above was running saw it set and could
-         * only widen pending_min_child_idx (never lower than 0, never
-         * higher — see march_supervisor_notify), never start a competing
-         * restart of its own. If it's now lower than the idx we just used,
-         * that child wasn't covered by this pass; loop and cover it. */
+         * while the strategy call above was running could only be DROPPED
+         * (skip_due_to_pending) and bump pending_drop_count, never start a
+         * competing restart of its own. Comparing pending_drop_count
+         * (round 3) rather than just pending_min_child_idx (round 2) is
+         * required: a drop at an index >= idx widens nothing (the min-idx
+         * check alone would see no change and wrongly conclude nothing
+         * happened), but it's still a real drop of a child that this pass
+         * did not cover — the SAME incarnation this pass may have just
+         * respawned, if it crashed again before we get here. Any advance
+         * means loop again, using whatever pending_min_child_idx reads now
+         * (the widening logic for the index is unchanged from round 2). */
         pthread_mutex_lock(&g_supervise_mu);
-        if (sup_meta->pending_min_child_idx < idx) {
+        if (sup_meta->pending_drop_count != drops_before) {
             pthread_mutex_unlock(&g_supervise_mu);
             continue;
         }
@@ -2895,6 +2948,14 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
          * isn't left outside the eventual restart's [idx, n) range. */
         if (child_idx < sup_meta->pending_min_child_idx)
             sup_meta->pending_min_child_idx = child_idx;
+        /* Review round 3 fix: EVERY drop counts here, regardless of
+         * whether it widened pending_min_child_idx — delayed_restart_
+         * thread's absorb loop needs to know a drop happened even when
+         * child_idx >= the current min (e.g. a freshly-respawned sibling
+         * from an earlier in-flight pass crashing again), since that drop
+         * still leaves a child uncovered by the pass that's using the
+         * unchanged min. See pending_drop_count's field comment. */
+        sup_meta->pending_drop_count++;
     } else if (is_batch && streak > 1) {
         sup_meta->delayed_batch_pending = 1;
         sup_meta->pending_min_child_idx = child_idx;
