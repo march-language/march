@@ -81,6 +81,25 @@ let test_js_pipeline_dom_event_key_reaches_output () =
   | Error errs ->
     Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
 
+let test_js_pipeline_simd_builtin_rejected () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn main() : Unit do
+      let v = Simd.splat_f32x4(1.0)
+      let _ = v
+      ()
+    end
+  end|}
+  with
+  | Ok _ -> Alcotest.fail "expected a JS-target rejection, got Ok"
+  | Error errs ->
+    Alcotest.(check bool) "message names the Simd module and fixed-128 reason" true
+      (List.exists (fun e ->
+         Test_helpers.contains "simd_f32x4_splat" e
+         && Test_helpers.contains "Simd" e
+         && Test_helpers.contains "128-bit" e) errs)
+
 (* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
 
 let test_tir_names_tuple_tag () =
@@ -14360,6 +14379,7 @@ let codegen_suites =
           Alcotest.test_case "typecheck error surfaces"      `Quick test_js_pipeline_typecheck_error_surfaces;
           Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
           Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
+          Alcotest.test_case "simd builtin rejected"         `Quick test_js_pipeline_simd_builtin_rejected;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

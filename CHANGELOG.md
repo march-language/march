@@ -21,17 +21,55 @@ git log is authoritative for exact commits.
   via `Simd.<op>_<type>`, e.g. `Simd.add_f32x4`, `Simd.load_u8x16`. Lane
   get/set indices are refinement-typed to the type's lane count.
   `F32x4`/`F64x2` arithmetic is bit-exact single/double precision (verified
-  against the true-f32-vs-double-then-round distinction); `min`/`max`/
-  `hmin`/`hmax` on floats use minNum/maxNum semantics; integer arithmetic
-  wraps mod 2^w. Each type implements `Show`/`Eq`/`Hash`. `--compile`
-  support now lowers every op — including `load`/`store` (bounds-checked,
+  against the true-f32-vs-double-then-round distinction, including a true
+  fused `fma`); `min`/`max`/`hmin`/`hmax` on floats use minNum/maxNum
+  semantics; integer arithmetic wraps mod 2^w. Each type implements
+  `Show`/`Eq`/`Hash` (lane-wise; a NaN lane is unequal to itself, matching
+  IEEE 754). Width is fixed at 128 bits on every target — identical
+  semantics everywhere, a stable interpreter/native parity surface, and a
+  NEON/SSE2/WASM-SIMD baseline that every target it runs on supports without
+  runtime feature detection; a portable/scalable width is a possible future
+  layer on top, not a redesign of this one.
+
+  `--compile` lowers every op — including `load`/`store` (bounds-checked,
   with an FBIP copy-on-write store matching `NativeArray`'s in-place-vs-copy
-  contract) — to native LLVM vector instructions/intrinsics,
-  register-resident inside a function body (boxed into a 32-byte runtime
-  cell only at call/return/aggregate-field boundaries). Threading a vector
-  value as the accumulator of a self-tail-recursive loop — the natural shape
-  for a dot-product-style horizontal reduction — keeps the accumulator in a
-  vector register across iterations, so the loop body allocates nothing.
+  contract) — to native LLVM vector instructions/intrinsics, and a straight-
+  line kernel or a self-tail-recursive accumulator loop keeps the vector in
+  a register for the whole loop body (zero `march_simd_alloc` calls,
+  confirmed via `--emit-llvm` and pinned by fixtures). On a 16MB `u8`
+  delimiter scan this measured **11.7x** faster than a scalar March byte
+  loop; holding the loop shape constant, a `Simd` accumulator loop measured
+  **4.0x** faster than the equivalent scalar-element March loop. That said,
+  for a simple elementwise-then-reduce shape, composing `NativeArray`'s
+  `map2_f32` + `sum_f32` (2.3 ms at N=5M) currently beats a hand-written
+  `Simd` accumulator loop for the same computation (10.0 ms) — the gap is
+  general March index-loop overhead (per-iteration preemption check, a
+  stack save/restore, RC bookkeeping, an unhoisted length call — tracked in
+  `specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`), not
+  a cost of SIMD itself. Use `NativeArray.map`/`map2`/`sum` for simple
+  elementwise pipelines; reach for `Simd` when you need cross-lane structure
+  — scanning, masks, `select`, or a fused multi-op kernel — or byte-level
+  scanning specifically. `DataFrame`'s `Min`/`Max` deliberately stayed on
+  the existing C reduction rather than migrating to `Simd`: a probe measured
+  it ~8.2x slower, for the same index-loop-overhead reason, plus the 2-lane
+  width of `i64x2`/`f64x2` caps the ceiling even after that overhead is
+  fixed (see `bench/RESULTS.md`'s simd-kernels section).
+
+  Known limitations: a self-tail-recursive vector accumulator leaks one
+  32-byte box per **call** (not per iteration — the loop body itself is
+  allocation-free), unbounded for a long-lived process
+  (`specs/todos/2026-08-11-simd-tco-entry-box-leak.md`); mutual-recursion
+  accumulator groups still box the vector on every iteration (correct, just
+  not accelerated); `i64x2` lane values beyond ±2^62 lose their top bit
+  under the **interpreter only** (OCaml's 63-bit boxed int), a parity edge
+  confined to that range; and `==`/`show` under a polymorphic/erased-type-
+  variable context fall back to the generic runtime helpers rather than the
+  static `Eq`/`Show` impl (lane-wise comparison, NaN lanes unequal) — the
+  same caveat `NativeArray` already has. The `Simd` module is not supported
+  on the JavaScript target (fixed 128-bit SIMD has no JS lowering);
+  compiling a `Simd.*` call with `--target js` now fails with a message
+  naming the builtin, rather than emitting a call that throws
+  `ReferenceError` at runtime.
 - **`NativeArray` gained narrow element widths: f32, i32, u8** — both
   interpreted and compiled (`--compile`), with `NativeF32Arr`/`NativeI32Arr`/
   `NativeU8Arr`, e.g. `NativeArray.make_u8`/`set_i32`/`sum_f32`/`map2_i32`,
@@ -71,27 +109,6 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
-- **`Simd`: a locally-nested recursive `fn` taking a vector parameter no
-  longer segfaults when compiled.** The natural March idiom for a SIMD
-  accumulator loop — a `fn` defined inside another function, capturing its
-  arrays and threading the vector accumulator as its own parameter —
-  compiled to a program that crashed with exit 139 at every `--opt` level
-  while the interpreter produced the right answer. The closure's two call
-  sites disagreed about the vector parameter: the indirect self-call boxed
-  it (the uniform pointer closure ABI) while the direct call that kicks the
-  loop off passed the raw vector register, so the callee dereferenced a
-  register value as a heap pointer. Both call sites now box, as `Float`
-  parameters already did.
-- **`Simd`: a self-tail-recursive loop no longer heap-allocates on every
-  iteration to carry a vector accumulator.** A vector-typed parameter of a
-  self-tail-recursive function now lives in a vector register across
-  iterations instead of being boxed and immediately unboxed each time round
-  the loop (which also accumulated one 32-byte cell per iteration). A 5M-
-  element `f32` dot product went from 29.2 ms to 10.0 ms, and its loop body
-  now contains zero allocations. Note this does **not** yet make an explicit
-  `Simd` dot product beat the `map2_f32`+`sum_f32` composition — the
-  remaining gap is general per-iteration overhead in hand-written March
-  index loops, tracked in `specs/todos/`.
 - **JS backend: `==`/`!=` on a non-primitive operand now compares
   structurally.** A bare `==`/`!=` where either side is an ADT/tuple/record
   (or an erased type variable that may hold one) lowered to JavaScript `===`,
