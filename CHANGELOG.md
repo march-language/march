@@ -120,6 +120,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `if`/`match` expressions returning `Float` no longer leak a heap
+  box on every evaluation.** The result-merge path for case/match codegen
+  boxes each branch's value into a uniform pointer slot; for `Float` branches
+  this is a real heap allocation (`march_alloc_float`), and nothing freed it
+  after unboxing — any `if`/`match` producing a `Float`, called in a hot loop
+  or recursive helper, leaked ~32 bytes per call (measured: a Float
+  accumulator called 20M times peaked at ~645MB RSS instead of a flat
+  ~1.9MB). Fixed for the case/match merge path; two related sites (closure/
+  Task-trampoline float returns, apply-wrapper float params) remain open —
+  see `specs/todos/2026-08-12-float-boxing-trampoline-apply-wrapper-leak.md`.
 - **Compiled `==` on a variant/tuple/record field of a type with no `type`
   declaration now compares by content, not by pointer.** A ctor field typed
   as a compiler-builtin type constructor (e.g. `Task`, `Pid`, `WorkPool`) —
