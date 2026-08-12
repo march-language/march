@@ -108,6 +108,28 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The process registry no longer has a fixed 65536-pid lifetime cliff, and
+  a green thread that fails to spawn now warns loudly instead of dropping
+  an actor's messages silently.** `march_sched_find`, `wake_idle_daemons`,
+  and `march_sched_wait_idle` used a fixed-size `g_proc_registry[65536]`
+  array: once a program had spawned 65536 procs (over its lifetime, not
+  concurrently), any later pid silently fell off the registry — `find`
+  returned `NULL` for a live proc, and the idle-detection walkers never saw
+  it, so `wait_idle`/daemon-wake logic could go blind for long-running or
+  high-churn programs. The registry is now a single header-prefixed
+  allocation behind one atomic pointer (`{cap; slots[cap]}`) that doubles
+  under a lock when a pid outgrows it; unlocked readers (`march_sched_find`
+  and the `MARCH_DEBUG` SIGSEGV-handler stack walker, which runs in signal
+  context and cannot take a lock) load the pointer once and bound every
+  access by that snapshot's own embedded `cap`, so a growth racing a reader
+  is safe — the reader just doesn't see the newest pids yet. Old arrays are
+  intentionally leaked on growth (same discipline as retired procs), and
+  since capacity doubles, growth produces O(log N) leaked arrays total, not
+  one per pid. Separately, `march_spawn` now emits a one-shot stderr warning
+  (pointing at `Scheduler.stat(3)`) when the green thread's stack allocation
+  or `getcontext` fails, instead of silently returning an actor that drops
+  every message sent to it; both failure paths now also bump
+  `MARCH_STAT_STACK_FAIL`.
 - **A burst of >4096 spawns or yields from one scheduler thread silently
   dropped runnable green threads (local-deque overflow) — spawn-churn
   workloads no longer deadlock.** `march_deque_push`'s bounded-capacity

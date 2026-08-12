@@ -283,31 +283,82 @@ static size_t g_page_size = 0;
 
 /* ── Process registry (for march_sched_find) ──────────────────────────── */
 
+/* Historical fixed size; now only the INITIAL capacity and the growth
+ * floor (registry_add never shrinks below this many slots even when a
+ * pid+1 alone would suffice, so small-scale programs never pay for more
+ * than one allocation's worth of growth churn). */
 #define MARCH_MAX_PROCS 65536
 
-static march_proc *g_proc_registry[MARCH_MAX_PROCS];
-static int64_t     g_proc_count = 0;
+/* The registry is a single header-prefixed allocation behind one atomic
+ * pointer: { cap; slots[cap] }.  Readers (march_sched_find, the MARCH_DEBUG
+ * SIGSEGV-handler walker, wake_idle_daemons, march_sched_wait_idle) load the
+ * pointer ONCE with acquire and bound every access by THAT snapshot's cap —
+ * so a reader that raced a growth and got the old (smaller) array is still
+ * memory-safe: it simply doesn't see pids beyond the old cap yet.
+ *
+ * Growth (registry_add, under g_registry_mu): allocate a new, larger array,
+ * memcpy the old slots in, zero the rest, release-store the new pointer, and
+ * deliberately LEAK the old array — an unlocked reader (the SIGSEGV-handler
+ * walker in particular, which runs in signal context and cannot take
+ * g_registry_mu) may still hold a pointer to it. This is the same
+ * leak-don't-free discipline already used for retired procs; capacity
+ * doubles each time, so the number of leaked arrays is O(log2(max pid)),
+ * not O(pid). */
+typedef struct {
+    int64_t      cap;
+    march_proc  *slots[];
+} march_registry;
 
-/* Guards registry slots against the walk-vs-free race: sched_loop removes a
- * DEAD proc from the registry (under this mutex) strictly BEFORE freeing it,
- * so a walker holding the mutex either sees the slot populated with a
- * not-yet-freed proc or sees NULL — never a dangling pointer.  Walkers:
- * march_sched_wait_idle and wake_idle_daemons. */
+static _Atomic(march_registry *) g_registry = NULL;
+static int64_t     g_proc_count = 0;   /* under g_registry_mu */
+
+/* Guards registry growth/slot-writes against the walk-vs-free race:
+ * sched_loop removes a DEAD proc from the registry (under this mutex)
+ * strictly BEFORE freeing it, so a LOCKED walker either sees the slot
+ * populated with a not-yet-freed proc or sees NULL — never a dangling
+ * pointer.  Locked walkers: march_sched_wait_idle and wake_idle_daemons.
+ * march_sched_find and the MARCH_DEBUG signal-context walker do NOT take
+ * this lock (the latter cannot, from signal context) — they rely solely on
+ * the atomic-pointer-plus-embedded-cap snapshot pattern above for safety;
+ * they may transiently miss a proc that's mid-registration, never see a
+ * dangling one. */
 static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static march_registry *registry_alloc(int64_t cap) {
+    march_registry *r =
+        (march_registry *)calloc(1, sizeof(march_registry) + cap * sizeof(march_proc *));
+    if (!r) {
+        fputs("march_sched: out of memory (registry alloc)\n", stderr);
+        abort();
+    }
+    r->cap = cap;
+    return r;
+}
 
 static void registry_add(march_proc *p) {
     pthread_mutex_lock(&g_registry_mu);
-    if (p->pid < MARCH_MAX_PROCS) {
-        g_proc_registry[p->pid] = p;
+    march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
+    if (!r || p->pid >= r->cap) {
+        int64_t old_cap = r ? r->cap : 0;
+        int64_t new_cap = old_cap * 2;
+        if (new_cap < p->pid + 1) new_cap = p->pid + 1;
+        if (new_cap < MARCH_MAX_PROCS) new_cap = MARCH_MAX_PROCS;
+        march_registry *nr = registry_alloc(new_cap);
+        if (r) memcpy(nr->slots, r->slots, (size_t)old_cap * sizeof(march_proc *));
+        atomic_store_explicit(&g_registry, nr, memory_order_release);
+        /* Deliberately leaked: see the discipline note above `g_registry`. */
+        r = nr;
     }
+    r->slots[p->pid] = p;
     g_proc_count++;
     pthread_mutex_unlock(&g_registry_mu);
 }
 
 static void registry_remove(march_proc *p) {
     pthread_mutex_lock(&g_registry_mu);
-    if (p->pid < MARCH_MAX_PROCS) {
-        g_proc_registry[p->pid] = NULL;
+    march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
+    if (r && p->pid < r->cap) {
+        r->slots[p->pid] = NULL;
     }
     g_proc_count--;
     pthread_mutex_unlock(&g_registry_mu);
@@ -602,10 +653,16 @@ fatal:
                 (s && s->current)
                     ? (int)atomic_load_explicit(&s->current->status, memory_order_acquire)
                     : -1);
+        /* Signal context: cannot take g_registry_mu. Load the registry
+         * pointer once with acquire and bound the walk by THAT snapshot's
+         * own cap — safe even if a growth is racing this handler, because
+         * the old array (if that's what we see) is never freed, only
+         * superseded. */
+        march_registry *reg = atomic_load_explicit(&g_registry, memory_order_acquire);
         int64_t hi_pid = atomic_load_explicit(&g_next_pid, memory_order_acquire);
-        if (hi_pid > MARCH_MAX_PROCS) hi_pid = MARCH_MAX_PROCS;
-        for (int64_t i = 0; i < hi_pid; i++) {
-            march_proc *q = g_proc_registry[i];
+        if (reg && hi_pid > reg->cap) hi_pid = reg->cap;
+        for (int64_t i = 0; reg && i < hi_pid; i++) {
+            march_proc *q = reg->slots[i];
             if (!q || !q->stack_mmap_base) continue;
             char *lo = (char *)q->stack_mmap_base;
             char *hi = lo + q->stack_alloc;
@@ -900,7 +957,18 @@ void march_sched_init(void) {
      * g_runq_len could still be nonzero here — reset it alongside head/tail
      * so march_sched_stat(2) starts each init at a known 0. */
     atomic_store_explicit(&g_runq_len, 0, memory_order_relaxed);
-    memset(g_proc_registry, 0, sizeof(g_proc_registry));
+    /* Re-init (e.g. a C test harness calling march_sched_init() a second
+     * time in the same process) reuses whatever allocation growth already
+     * produced rather than freeing it — freeing would race any unlocked
+     * reader (march_sched_find, the MARCH_DEBUG walker) that still holds
+     * the old pointer, and the leak-don't-free discipline for growth
+     * already accepts these allocations living for process lifetime.
+     * Zeroing the slots (not the header) is enough to make every pid look
+     * unregistered again. */
+    {
+        march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
+        if (r) memset(r->slots, 0, (size_t)r->cap * sizeof(march_proc *));
+    }
     g_proc_count = 0;
     g_timer_len = 0;   /* keep the heap allocation; the mutex is static */
 
@@ -984,6 +1052,8 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
         p->stack_base = stack_alloc_lazy(&p->stack_alloc, &p->stack_mmap_base);
     if (!p->stack_base) {
         fputs("march_sched: failed to allocate process stack\n", stderr);
+        atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_STACK_FAIL],
+                                   1, memory_order_relaxed);
         free(p);
         return NULL;
     }
@@ -991,6 +1061,8 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
     /* Build the execution context. */
     if (getcontext(&p->ctx) != 0) {
         fputs("march_sched: getcontext failed\n", stderr);
+        atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_STACK_FAIL],
+                                   1, memory_order_relaxed);
         munmap(p->stack_mmap_base, p->stack_alloc);
         free(p);
         return NULL;
@@ -1060,10 +1132,11 @@ march_proc *march_sched_spawn_daemon(void (*fn)(void *), void *arg) {
 static int wake_idle_daemons(void) {
     int woken = 0;
     pthread_mutex_lock(&g_registry_mu);
+    march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
     int64_t hi = atomic_load_explicit(&g_next_pid, memory_order_acquire);
-    if (hi > MARCH_MAX_PROCS) hi = MARCH_MAX_PROCS;
-    for (int64_t i = 0; i < hi; i++) {
-        march_proc *q = g_proc_registry[i];
+    if (r && hi > r->cap) hi = r->cap;
+    for (int64_t i = 0; r && i < hi; i++) {
+        march_proc *q = r->slots[i];
         if (!q || !q->is_daemon) continue;
         if (atomic_load_explicit(&q->status, memory_order_acquire) == PROC_WAITING
                 && atomic_load_explicit(&q->mbox_count, memory_order_relaxed) == 0) {
@@ -1343,7 +1416,7 @@ static void sched_loop(march_scheduler *sched) {
              * march_proc* that is read from OTHER OS threads (do_actor_death,
              * march_actor_broadcast_migrate, march_actor_call/reply) with NO
              * synchronization against this thread's registry_remove/free —
-             * only the SEPARATE g_proc_registry array (walked by
+             * only the SEPARATE g_registry array (walked by
              * march_sched_wait_idle / wake_idle_daemons, under g_registry_mu)
              * had that protection. A reader on another thread can therefore
              * still be mid-dereference of `p` (or about to dereference it)
@@ -1511,10 +1584,11 @@ void march_sched_wait_idle(void) {
         march_sched_yield();
         int busy = 0;
         pthread_mutex_lock(&g_registry_mu);
+        march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
         int64_t hi = atomic_load_explicit(&g_next_pid, memory_order_acquire);
-        if (hi > MARCH_MAX_PROCS) hi = MARCH_MAX_PROCS;
-        for (int64_t i = 0; i < hi && !busy; i++) {
-            march_proc *q = g_proc_registry[i];
+        if (r && hi > r->cap) hi = r->cap;
+        for (int64_t i = 0; r && i < hi && !busy; i++) {
+            march_proc *q = r->slots[i];
             if (!q || q == self) continue;
             march_proc_status st =
                 atomic_load_explicit(&q->status, memory_order_acquire);
@@ -1589,8 +1663,10 @@ int64_t march_sched_total_spawned(void) {
 }
 
 march_proc *march_sched_find(int64_t pid) {
-    if (pid < 0 || pid >= MARCH_MAX_PROCS) return NULL;
-    return g_proc_registry[pid];
+    if (pid < 0) return NULL;
+    march_registry *r = atomic_load_explicit(&g_registry, memory_order_acquire);
+    if (!r || pid >= r->cap) return NULL;
+    return r->slots[pid];
 }
 
 /* ── Phase 4: compiled-code reduction counting ────────────────────────── */

@@ -86,6 +86,35 @@ int main(void) {
             (long long)burst_done, CHURN_BURST_N);
     assert(burst_done == CHURN_BURST_N);
 
+    /* Task 13: registry survives past the old fixed MARCH_MAX_PROCS (65536)
+     * cliff. With the old fixed-size g_proc_registry[65536], registry_add
+     * silently skipped the store (but still counted the proc) for any pid
+     * >= 65536 -- march_sched_run still terminated (the deque-overflow
+     * livelock this file guards against above is a separate, already-fixed
+     * bug, per Task 12b), but march_sched_find went blind for every proc
+     * beyond the cliff, and wait_idle/wake_idle_daemons silently never saw
+     * them either. Spawning all 70000 from main (not from inside a
+     * scheduler thread) routes them through the global run queue, so
+     * nothing runs until march_sched_run() below -- letting us assert
+     * march_sched_find on a high pid BOTH while every proc is still alive
+     * (positive) and after they've all been reaped (negative), a real
+     * pair that only a growable registry can satisfy. 70000 tiny procs
+     * through spawn+stack-recycling can run past the default 60s budget on
+     * a loaded box; alarm() resets the watchdog for this segment alone. */
+    alarm(120);
+    march_sched_init();
+    for (int i = 0; i < 70000; i++) march_sched_spawn(tiny, NULL);
+    assert(march_sched_find(69000) != NULL);   /* alive, above the old cliff */
+    march_sched_request_shutdown();
+    march_sched_run();
+    /* every proc must have been reaped -- with the old fixed array,
+     * procs with pid >= 65536 were invisible to the registry and
+     * (harmlessly here, catastrophically for wait_idle) skipped; live
+     * must hit 0 for march_sched_run to have returned at all, so reaching
+     * this line with find returning NULL for a high pid is the assertion: */
+    assert(march_sched_find(69999) == NULL);   /* reaped and removed, not lost */
+    printf("registry growth OK\n");
+
     printf("test_scheduler_churn: all passed\n");
     return 0;
 }

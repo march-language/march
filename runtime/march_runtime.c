@@ -2471,9 +2471,21 @@ void *march_spawn(void *actor) {
      * pre-existing hole carried forward from Task 5's review. The _Atomic
      * conversion fixes it properly: readers now see either NULL or a fully
      * constructed march_proc via this release store. */
-    atomic_store_explicit(&meta->green_thread,
-                          march_sched_spawn_daemon(actor_green_thread, meta),
-                          memory_order_release);
+    void *green_thread = march_sched_spawn_daemon(actor_green_thread, meta);
+    atomic_store_explicit(&meta->green_thread, green_thread, memory_order_release);
+    if (!green_thread) {
+        /* Task 12 made exhaustion unlikely (stack recycling + on-demand
+         * growth); this makes it LOUD instead of silently dropping the
+         * actor on the floor. march_spawn holds no locks here, so a plain
+         * one-shot atomic flag is enough to avoid spamming stderr under
+         * sustained exhaustion. */
+        static _Atomic int warned = 0;
+        if (!atomic_exchange(&warned, 1))
+            fprintf(stderr,
+                    "march: FAILED to start actor green thread "
+                    "(stack allocation) — this actor will drop all "
+                    "messages; see Scheduler.stat(3)\n");
+    }
     /* Start the scheduler in a background thread so actor green threads run
      * even when the main thread is blocked inside the HTTP event loop.
      * For non-HTTP programs this is harmless: march_run_scheduler() joins
