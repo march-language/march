@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <unistd.h>
 
 static _Atomic int g_timed_out = 0;
 static _Atomic int g_woken_early = 0;
@@ -81,6 +82,13 @@ static void sender_fn(void *arg) {
 }
 
 int main(void) {
+    /* Watchdog: converts a reintroduced lost-wakeup hang into SIGALRM ->
+     * nonzero exit (a normal test FAILURE) instead of wedging the caller
+     * forever. See test_scheduler_mbox.c's identical guard for the full
+     * rationale; 30s is generous headroom over this file's actual
+     * sub-second runtime. */
+    alarm(30);
+
     /* 1: park times out */
     march_sched_init();
     march_sched_spawn(sleeper_times_out, NULL);

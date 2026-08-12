@@ -631,41 +631,120 @@ static void *mbox_pop(march_proc *p) {
  *
  * Called by every receive-side call site (march_sched_recv,
  * march_sched_try_recv, march_sched_try_recv2, march_sched_recv_until)
- * immediately after a successful mbox_pop, still under p's own mbox_lock.
- * If that pop just crossed the BLOCK policy's low-water mark (depth <=
- * limit/2), unlinks and returns the ENTIRE waiter list so the caller can
- * wake all of them AFTER releasing mbox_lock -- waking while still holding
- * the lock would make march_sched_wake's PROC_PARKED spin-wait run while
- * blocking whoever needs this same lock next; not a deadlock (mbox_lock
- * and wake don't nest the other way), just needless serialization.
+ * immediately after a successful mbox_pop, and by sched_loop's PROC_DEAD
+ * reap branch -- in ALL cases while STILL HOLDING p's own mbox_lock, and
+ * NOT releasing it until this function returns. If that pop (or death)
+ * crossed the BLOCK policy's low-water mark (depth <= limit/2, or the
+ * proc died), unlinks the waiter list from p->mbox_send_waiters and wakes
+ * every entry, ENTIRELY under the lock.
  *
  * Wake-ALL, not wake-one: every woken waiter re-enters march_sched_send's
  * retry loop and re-checks capacity there, re-parking if the mailbox
  * filled back up before it got scheduled. The resulting thundering herd is
  * bounded by the waiter count, which is simpler than a single-handoff
- * protocol (design locked in the task-8 brief). */
-static march_proc *mbox_take_waiters_if_low(march_proc *p) {
-    if (p->mbox_send_waiters
-            && (p->mbox_limit == 0
-                || march_sched_mbox_count(p) <= p->mbox_limit / 2)) {
-        march_proc *w = p->mbox_send_waiters;
-        p->mbox_send_waiters = NULL;
-        return w;
-    }
-    return NULL;
-}
-
-/* Wake every proc in a waiter list returned by mbox_take_waiters_if_low (or
- * drained directly from a dead target's mbox_send_waiters by sched_loop's
- * PROC_DEAD reap branch). Must be called AFTER releasing the mbox_lock that
- * guarded the list -- see the comment above. */
-static void mbox_wake_waiters(march_proc *waiters) {
-    for (march_proc *w = waiters; w; ) {
+ * protocol (design locked in the task-8 brief).
+ *
+ * CORRECTNESS-CRITICAL: waking under the lock, not after releasing it.
+ * An earlier version of this code detached the list under the lock but
+ * called march_sched_wake on each entry AFTER releasing it, to avoid
+ * holding mbox_lock across march_sched_wake's PROC_PARKED spin (a
+ * liveness/performance concern, not a correctness one -- see the old
+ * comment this replaced). That left a real, deterministic-once-triggered
+ * race: a waiter can be woken by a source that has NOTHING to do with
+ * this drain -- another sender targeting IT directly, a stale timer, a
+ * supervised-death wake -- while it is still sitting in the JUST-DETACHED
+ * (no longer reachable from p->mbox_send_waiters, but not yet fully
+ * walked) local list. That waiter resumes, finds itself no longer
+ * discoverable via ANY target's live mbox_send_waiters (this function
+ * already NULLed p->mbox_send_waiters before any of this), concludes
+ * (correctly, per mbox_unlink_send_waiter's contract) that it has nothing
+ * to unlink, and retries -- possibly re-registering on a mailbox (this
+ * one or a different one) and WRITING its own send_wait_next field at the
+ * exact moment THIS function's traversal was still READING that same
+ * field (`next = w->send_wait_next`) to find where to continue -- an
+ * unsynchronized read/write race on send_wait_next that can sever the
+ * remainder of the chain (orphaning every waiter after the raced-on node,
+ * a silent lost wakeup) or hand back garbage.
+ *
+ * Doing the ENTIRE walk (read next, wake) under p's mbox_lock removes the
+ * window: every node on this chain either (a) is genuinely PARKED/WAITING
+ * and cannot touch its own send_wait_next until march_sched_wake actually
+ * resumes it -- which THIS loop hasn't called yet for that node -- or (b)
+ * is a proc trying to REGISTER on some mailbox, which requires acquiring
+ * THAT mailbox's mbox_lock first. If the mailbox it wants to register on
+ * is `p` itself, that acquire blocks until this function returns (we hold
+ * p's lock the whole time). If it's registering on a DIFFERENT proc's
+ * mailbox, that requires the OTHER proc's mbox_lock, which doesn't
+ * synchronize with this one directly -- but a proc can only be READING or
+ * WRITING send_wait_next while attempting to join/leave exactly ONE list
+ * at a time, and mbox_unlink_send_waiter (called right after every park
+ * returns, before any re-registration attempt) always tries to remove
+ * itself from its PREVIOUS target first; since that previous target here
+ * is `p`, and `p`'s lock is held for this whole function, that unlink
+ * cannot proceed until we release it -- so the re-registration write
+ * cannot happen until after this loop has moved past that node. This
+ * cannot deadlock: march_sched_wake's own PROC_PARKED spin synchronizes
+ * on the TARGET's status/wake_pending, not on p's mbox_lock, so it always
+ * makes progress independent of whether we hold p's lock. The cost is
+ * pure serialization -- other senders trying to register on p, or other
+ * receive-side pops on p, wait for this loop to finish -- bounded by the
+ * waiter count, same bound the wake-all design already accepts. */
+static void mbox_wake_send_waiters_if_low(march_proc *p) {
+    if (!p->mbox_send_waiters
+            || !(p->mbox_limit == 0
+                 || march_sched_mbox_count(p) <= p->mbox_limit / 2))
+        return;
+    march_proc *w = p->mbox_send_waiters;
+    p->mbox_send_waiters = NULL;
+    while (w) {
         march_proc *next = w->send_wait_next;
         w->send_wait_next = NULL;
         march_sched_wake(w);
         w = next;
     }
+}
+
+/* Remove `self` from `target->mbox_send_waiters` if it is still linked
+ * there. MUST be called under target's mbox_lock (acquired by the
+ * caller); does not itself acquire or release it. Called by
+ * mbox_block_register_and_park immediately after march_sched_park_self
+ * returns, UNCONDITIONALLY, before any retry/re-registration.
+ *
+ * self will usually already be absent: the common case is a normal
+ * drain-triggered wake, and mbox_wake_send_waiters_if_low above already
+ * fully unlinked (and NULLed the link field of) every waiter it woke,
+ * entirely under this same lock, before ever calling march_sched_wake --
+ * so by the time a normally-woken self resumes and gets here, there is
+ * nothing left to do, and that is treated as success (a target that died
+ * while we were parked -- see the PROC_DEAD reap branch in sched_loop --
+ * also already ran this exact drain-and-wake, so it's the same case).
+ *
+ * self will be FOUND here only when park_self returned for a reason OTHER
+ * than this target's own drain -- a spurious wake: another sender
+ * targeting self directly, a stale march_sched_recv_until timer entry
+ * firing late, or a supervised actor-death wake -- while self was still
+ * genuinely linked in target->mbox_send_waiters, never drained. Without
+ * this unconditional unlink, retrying while still linked would
+ * re-register self ON TOP of its own still-present entry
+ * (self->send_wait_next = target->mbox_send_waiters, which already
+ * equals self or points through self), corrupting the chain into a
+ * self-loop or an orphaned tail -- deterministic on the very first
+ * spurious wake while linked, no race required to trigger it (distinct
+ * from, and in addition to, the race mbox_wake_send_waiters_if_low's
+ * comment above addresses). */
+static void mbox_unlink_send_waiter(march_proc *target, march_proc *self) {
+    march_proc **link = &target->mbox_send_waiters;
+    while (*link) {
+        if (*link == self) {
+            *link = self->send_wait_next;
+            self->send_wait_next = NULL;
+            return;
+        }
+        link = &(*link)->send_wait_next;
+    }
+    /* Not found: already taken (and woken, under the same lock, by
+     * mbox_wake_send_waiters_if_low or the PROC_DEAD reap branch) --
+     * nothing to do. */
 }
 
 /* ── Trampoline ───────────────────────────────────────────────────────── */
@@ -1061,20 +1140,28 @@ static void sched_loop(march_scheduler *sched) {
                 atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
             /* Task 8: wake any senders parked under MARCH_MBOX_BLOCK
              * waiting for THIS proc's mailbox to drain below low-water --
-             * it never will now, since p just died. Same lock-then-wake
-             * pattern as mbox_take_waiters_if_low / mbox_wake_waiters
-             * (the receive-side drain wake): take the whole list under
-             * p's own mbox_lock, release, then wake outside the lock. This
-             * is also the release half of the dead-during-registration
-             * race closed by the recheck in march_sched_send's
-             * MARCH_MBOX_BLOCK case -- see the comment there for the full
-             * happens-before argument (this release pairs with that
-             * acquire). */
+             * it never will now, since p just died. Unconditional (not
+             * gated on the low-water check mbox_wake_send_waiters_if_low
+             * uses for the ordinary drain path -- every waiter needs
+             * waking here, not just enough to cross a threshold), but the
+             * SAME "walk and wake entirely under p's own mbox_lock"
+             * discipline -- see mbox_wake_send_waiters_if_low's comment
+             * for why waking after releasing the lock is a real,
+             * deterministic-once-triggered race, not just a style choice.
+             * This is also the release half of the dead-during-registration
+             * race closed by the recheck in mbox_block_register_and_park --
+             * see its comment for the full happens-before argument (this
+             * release pairs with that acquire). */
             mbox_lock_acquire(p);
-            march_proc *dead_send_waiters = p->mbox_send_waiters;
+            march_proc *dead_w = p->mbox_send_waiters;
             p->mbox_send_waiters = NULL;
+            while (dead_w) {
+                march_proc *dead_next = dead_w->send_wait_next;
+                dead_w->send_wait_next = NULL;
+                march_sched_wake(dead_w);
+                dead_w = dead_next;
+            }
             mbox_lock_release(p);
-            mbox_wake_waiters(dead_send_waiters);
             /* Deliberately NOT munmap(p->stack_mmap_base, ...) / free(p) here.
              *
              * march_actor_meta.green_thread (march_runtime.c) holds a
@@ -1415,9 +1502,17 @@ __attribute__((noinline))
 static int mbox_block_register_and_park(march_proc *target) {
     march_proc *self = tl_sched ? tl_sched->current : NULL;
     if (!self) {
-        /* Foreign thread (evloop etc.): cannot park a green thread that
-         * doesn't exist. Sleep-poll at the scheduler's own idle cadence;
-         * bounded by the receiver draining. */
+        /* Genuine foreign OS thread (evloop etc.) -- tl_sched itself is
+         * NULL here, meaning this is not a scheduler thread at all. (The
+         * OTHER `self == NULL` case, a scheduler thread with no current
+         * green thread, is intercepted by the caller BEFORE it ever
+         * calls this function -- see the `tl_sched && !tl_sched->current`
+         * check in march_sched_send's MARCH_MBOX_BLOCK case for why that
+         * one needs different handling: it cannot safely sleep-poll.)
+         * Cannot park a green thread that doesn't exist. Sleep-poll at
+         * the scheduler's own idle cadence; safe here because some
+         * OTHER, independent OS thread (a real scheduler) can still run
+         * sched_loop and drain the mailbox while this one naps. */
         mbox_lock_release(target);
         struct timespec ts = { 0, 1000000 }; /* 1ms */
         nanosleep(&ts, NULL);
@@ -1459,16 +1554,42 @@ static int mbox_block_register_and_park(march_proc *target) {
         return MARCH_SEND_DEAD;
     }
 
-    /* Register as waiter, release lock, park. A parked sender can also be
-     * woken by an unrelated source (e.g. a stale timer entry from an
-     * earlier march_sched_recv_until on this same proc firing late) --
-     * that's just a spurious wake, tolerated because the caller's retry
-     * loop re-checks capacity (and DEAD-ness) from scratch rather than
-     * assuming the wake means "room now". */
+    /* Register as waiter, release lock, park. */
     self->send_wait_next = target->mbox_send_waiters;
     target->mbox_send_waiters = self;
     mbox_lock_release(target);
     march_sched_park_self();
+
+    /* UNCONDITIONALLY deregister self from target->mbox_send_waiters
+     * before returning to the caller's retry, regardless of WHY
+     * park_self returned. This is required, not optional cleanup: a
+     * parked sender can be woken by a source that has nothing to do
+     * with THIS target ever draining -- another sender targeting self
+     * directly, a stale march_sched_recv_until timer entry firing late,
+     * a supervised actor-death wake -- while self is still genuinely
+     * linked in target->mbox_send_waiters (no drain has taken it yet).
+     * If the caller's retry loop then re-checks capacity, finds it
+     * still full, and calls back in here, this function would
+     * re-register self ON TOP of its own still-present entry
+     * (self->send_wait_next = target->mbox_send_waiters, which would
+     * already equal self, or point through self) -- corrupting the
+     * chain into a self-loop or an orphaned tail, deterministically, on
+     * the very first spurious wake while still linked. No race is
+     * needed to trigger this -- it is a straight-line logic bug in the
+     * "just park and retry" shape without this step, caught by the
+     * Task 8 code review before it ever needed a stress run to surface.
+     *
+     * In the common case (a normal drain-triggered wake, or the
+     * PROC_DEAD reap branch) self is already gone from the list --
+     * mbox_wake_send_waiters_if_low and the reap branch both fully
+     * unlink (and NULL the link field of) every waiter they wake,
+     * entirely under this same mbox_lock, before ever calling
+     * march_sched_wake -- so this call finds nothing and is a no-op.
+     * mbox_unlink_send_waiter's own comment has the full argument for
+     * why "not found" is always safe to treat as "already handled". */
+    mbox_lock_acquire(target);
+    mbox_unlink_send_waiter(target, self);
+    mbox_lock_release(target);
     return MARCH_SEND_OK;   /* caller retries unconditionally */
 }
 
@@ -1507,13 +1628,59 @@ int march_sched_send(march_proc *target, void *msg) {
                 break;
             }
             case MARCH_MBOX_BLOCK: {
-                /* Registration, the dead-during-registration race, and the
-                 * park itself all live in a dedicated NOINLINE helper --
-                 * see mbox_block_register_and_park's own comment for why
-                 * that split is load-bearing (not just style): the
-                 * tl_sched read has to happen inside a function this loop
-                 * calls fresh every iteration, or the optimizer can hoist
-                 * it out of the loop entirely across the swapcontext
+                /* Scheduler-thread self-deadlock guard: `tl_sched != NULL
+                 * && tl_sched->current == NULL` means we are running ON a
+                 * scheduler's own OS thread's C stack, but NOT inside any
+                 * dispatched green thread -- e.g. march_signal_drain,
+                 * called from sched_loop's own control-plane code between
+                 * (or before) dispatching green threads, or any future
+                 * code that calls march_sched_send directly from that
+                 * context. This is a DIFFERENT case from a genuine
+                 * foreign OS thread (evloop etc., where tl_sched itself
+                 * is NULL) -- mbox_block_register_and_park's `!self`
+                 * branch already handles that one correctly with a
+                 * sleep-poll, because some OTHER, independent OS thread
+                 * (a real scheduler) can still run sched_loop and drain
+                 * the mailbox while a foreign thread naps.
+                 *
+                 * Here, THIS scheduler thread is the one that would need
+                 * to run sched_loop's dispatch loop to ever schedule the
+                 * receiver and drain this mailbox -- and it can't do that
+                 * while parked in nanosleep (or, for a genuine green
+                 * thread, in swapcontext) instead of returning to
+                 * sched_loop. At MARCH_NUM_SCHEDULERS=1 there is no other
+                 * thread at all: sleep-polling here is not a slow path,
+                 * it is a PERMANENT, unrecoverable self-deadlock. Even at
+                 * N>1 it wastes a whole scheduler thread indefinitely for
+                 * no reason -- draining still requires the RECEIVER to be
+                 * dispatched, which polling this thread doesn't help.
+                 *
+                 * Fix: bypass the capacity check entirely and fall
+                 * through to the ordinary mbox_push below, exactly like
+                 * MARCH_MBOX_DROP_OLD's `break` does after its eviction
+                 * (mbox_lock is still held at this point; the shared
+                 * epilogue pushes and releases it). This is a rare
+                 * control-plane send (a signal-watcher closure delivering
+                 * to a BLOCK-limited mailbox), so a bounded one-off
+                 * overshoot past `limit` is an acceptable price for
+                 * keeping BLOCK's actual promise: the sender can rely on
+                 * delivery. Silently dropping instead (DROP_NEW's
+                 * behavior) would violate that promise for a policy whose
+                 * entire point is "never drop, only wait" -- worse than a
+                 * depth spike this thread cannot cause again until it is
+                 * next dispatched to run more control-plane code. */
+                if (tl_sched && !tl_sched->current) {
+                    break;
+                }
+
+                /* Registration, the dead-during-registration race, the
+                 * park, and self-deregistration on return all live in a
+                 * dedicated NOINLINE helper -- see
+                 * mbox_block_register_and_park's own comment for why that
+                 * split is load-bearing (not just style): the tl_sched
+                 * read has to happen inside a function this loop calls
+                 * fresh every iteration, or the optimizer can hoist it
+                 * out of the loop entirely across the swapcontext
                  * migration. mbox_lock is ALWAYS released by the callee
                  * before it returns, on every path. */
                 int r = mbox_block_register_and_park(target);
@@ -1563,9 +1730,8 @@ void *march_sched_recv(void) {
     mbox_lock_acquire(p);
     if (p->mailbox) {
         void *msg = mbox_pop(p);
-        march_proc *waiters = mbox_take_waiters_if_low(p);
+        mbox_wake_send_waiters_if_low(p);
         mbox_lock_release(p);
-        mbox_wake_waiters(waiters);
         return msg;
     }
     /* PROC_PARKED: we're about to call swapcontext but haven't yet saved our
@@ -1589,15 +1755,13 @@ void *march_sched_recv(void) {
      * (the actor was woken for a reason other than a new message, e.g. kill). */
     mbox_lock_acquire(p);
     void *msg;
-    march_proc *waiters = NULL;
     if (p->mailbox) {
         msg = mbox_pop(p);
-        waiters = mbox_take_waiters_if_low(p);
+        mbox_wake_send_waiters_if_low(p);
     } else {
         msg = MARCH_RECV_NO_MSG;
     }
     mbox_lock_release(p);
-    mbox_wake_waiters(waiters);
     return msg;
 }
 
@@ -1605,14 +1769,12 @@ void *march_sched_try_recv(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return NULL;
     mbox_lock_acquire(p);
-    march_proc *waiters = NULL;
     void *msg = NULL;
     if (p->mailbox) {
         msg = mbox_pop(p);
-        waiters = mbox_take_waiters_if_low(p);
+        mbox_wake_send_waiters_if_low(p);
     }
     mbox_lock_release(p);
-    mbox_wake_waiters(waiters);
     return msg;
 }
 
@@ -1625,9 +1787,8 @@ int march_sched_try_recv2(void **out) {
         return 0;
     }
     *out = mbox_pop(p);
-    march_proc *waiters = mbox_take_waiters_if_low(p);
+    mbox_wake_send_waiters_if_low(p);
     mbox_lock_release(p);
-    mbox_wake_waiters(waiters);
     return 1;
 }
 
@@ -1920,9 +2081,8 @@ void *march_sched_recv_until(int64_t deadline_ms) {
     mbox_lock_acquire(p);
     if (p->mailbox) {
         void *msg = mbox_pop(p);
-        march_proc *waiters = mbox_take_waiters_if_low(p);
+        mbox_wake_send_waiters_if_low(p);
         mbox_lock_release(p);
-        mbox_wake_waiters(waiters);
         return msg;
     }
     if (march_now_ms() >= deadline_ms) {
@@ -1966,15 +2126,13 @@ void *march_sched_recv_until(int64_t deadline_ms) {
 
     mbox_lock_acquire(p);
     void *msg;
-    march_proc *waiters = NULL;
     if (p->mailbox) {
         msg = mbox_pop(p);
-        waiters = mbox_take_waiters_if_low(p);
+        mbox_wake_send_waiters_if_low(p);
     } else {
         msg = MARCH_RECV_NO_MSG;
     }
     mbox_lock_release(p);
-    mbox_wake_waiters(waiters);
     return msg;
 }
 

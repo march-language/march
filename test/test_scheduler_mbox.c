@@ -16,6 +16,7 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <unistd.h>
 
 static void nop(void *arg) { (void)arg; }
 
@@ -63,6 +64,79 @@ static void test_block_live_scheduler(void) {
     assert(atomic_load(&g_send_ok) == N_MSGS);       /* nothing dropped */
     assert(atomic_load(&g_received) == N_MSGS);       /* everything arrived */
     assert(atomic_load(&g_peak_depth) <= 16 + 2);     /* bound held (small racy slack) */
+}
+
+/* ── MARCH_MBOX_BLOCK: spurious-wake-while-linked regime ─────────────────
+ *
+ * Task 8 code review (Critical 1) caught a deterministic corruption: a
+ * sender parked and genuinely linked in target->mbox_send_waiters, if
+ * woken for ANY reason other than that target's own drain -- e.g. another
+ * sender targeting IT directly -- and then found the target still full on
+ * retry, would re-register on top of its own still-present entry,
+ * corrupting the waiter chain (self-loop or an orphaned tail) on the very
+ * first such spurious wake. mbox_block_register_and_park now
+ * unconditionally deregisters self after every park_self return, before
+ * any retry. This segment exercises exactly that regime: two senders
+ * (txA, txB) block repeatedly on a tightly-limited receiver (rxC) while a
+ * third proc (prodder) independently and continuously sends directly to
+ * txA's own (unbounded, default-policy) mailbox -- each such send wakes
+ * txA if it is currently PARKED/WAITING, regardless of what it's parked
+ * for, which is precisely a wake "for a reason other than the drain it's
+ * actually waiting on" while it may still be linked in rxC's waiter list.
+ * txA never has to actually receive the prodded messages for this to
+ * matter -- the wake is what exercises the regime, not the payload. */
+#define N_MSGS2 400
+static _Atomic int64_t g_received2 = 0, g_send_ok2 = 0;
+static march_proc *g_bounded_rxC = NULL;
+static march_proc *g_txA = NULL;
+
+static void rx_loop2(void *arg) {
+    (void)arg;
+    for (int i = 0; i < N_MSGS2; i++) {
+        void *m = march_sched_recv();
+        if (m == MARCH_RECV_NO_MSG) return;
+        atomic_fetch_add(&g_received2, 1);
+    }
+}
+
+static void tx_loop2(void *arg) {
+    (void)arg;
+    for (int i = 0; i < N_MSGS2 / 2; i++) {
+        if (march_sched_send(g_bounded_rxC, (void *)0x1) == MARCH_SEND_OK)
+            atomic_fetch_add(&g_send_ok2, 1);
+    }
+}
+
+/* Bounded iteration count (not an external stop flag): a proc that loops
+ * forever waiting on a flag set AFTER march_sched_run() returns would
+ * itself prevent the scheduler from ever reaching quiescence (it is a
+ * non-daemon proc; shutdown waits for every non-daemon proc to finish) --
+ * a self-deadlock in the TEST, not the runtime under test. Looping a
+ * fixed number of times instead lets this proc finish on its own,
+ * alongside txA/txB/rxC, once its work is done. */
+#define PRODDER_ITERS 3000
+static void prodder_loop(void *arg) {
+    (void)arg;
+    for (int i = 0; i < PRODDER_ITERS; i++) {
+        march_sched_send(g_txA, (void *)0x2);   /* result ignored; txA never drains these */
+        march_sched_yield();
+    }
+}
+
+static void test_block_spurious_wake_while_linked(void) {
+    march_sched_init();
+    g_bounded_rxC = march_sched_spawn(rx_loop2, NULL);
+    march_sched_set_mbox_limit(g_bounded_rxC, 4, MARCH_MBOX_BLOCK);  /* tight: heavy contention */
+    g_txA = march_sched_spawn(tx_loop2, NULL);
+    march_sched_spawn(tx_loop2, NULL);          /* txB */
+    march_sched_spawn(prodder_loop, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    assert(atomic_load(&g_send_ok2) == N_MSGS2);   /* full delivery: nothing dropped */
+    assert(atomic_load(&g_received2) == N_MSGS2);  /* full delivery: everything arrived */
+    /* Reaching here at all (rather than the alarm(30) watchdog firing) is
+     * itself the termination assertion for the corrupted-chain lost-wakeup
+     * this regression guards against. */
 }
 
 /* Default mailbox (mbox_limit == 0, MARCH_MBOX_UNBOUNDED) never rejects. */
@@ -120,7 +194,20 @@ static void test_dead_target_unaffected(void) {
 }
 
 int main(void) {
+    /* Watchdog: a reintroduced lost wakeup in the MARCH_MBOX_BLOCK path
+     * hangs this process forever, which (run under CI or a plain shell
+     * loop with no external timeout) wedges the caller indefinitely
+     * instead of failing. alarm(30) converts that hang into SIGALRM ->
+     * default action -> nonzero exit, i.e. a normal test FAILURE, well
+     * before any CI job-level timeout would otherwise eat the whole
+     * remaining budget silently. 30s is generous headroom over this
+     * file's actual runtime (well under 1s on an idle host; the
+     * live-scheduler segments below are the only ones that can hang at
+     * all, since every other segment never calls march_sched_run()). */
+    alarm(30);
+
     test_block_live_scheduler();
+    test_block_spurious_wake_while_linked();
 
     march_sched_init();
 
