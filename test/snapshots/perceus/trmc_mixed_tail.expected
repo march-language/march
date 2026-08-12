@@ -161,40 +161,6 @@ let $t24 : '_ = inc_rc i;
 let $t25 : '_ = alloc Cons(i, acc) in
 call_ptr build($t24, $t25)
 
-## dup
-fn dup(xs : List(Int)) : List(Int) =
-  case xs of
-  Nil() -> dec_rc xs;
-alloc List.Nil(Int)()
-  Cons($f3, $f4) -> let $jp_clo6 : () -> '_ = alloc $Clo_$jp5$0($jp5$apply$0) in
-dec_rc $jp_clo6;
-let t : List(Int) = $f4 in
-let h : Int = $f3 in
-let $t1 : Int = *(h, 2) in
-let $trmc4 : List.Cons = reuse_hole xs as List.Cons($t1, _) in
-dup$dps(t, $trmc4);
-$trmc4
-  _ -> dec_rc xs;
-panic("non-exhaustive pattern match")
-
-## dup$dps
-fn dup$dps(xs : List(Int), $dst : List(Int)) : Unit =
-  case xs of
-  Nil() -> dec_rc xs;
-let $trmc2 : List(Int) = alloc List.Nil(Int)() in
-$dst.1 <- $trmc2
-  Cons($f3, $f4) -> let $jp_clo6 : () -> '_ = alloc $Clo_$jp5$1($jp5$apply$1) in
-dec_rc $jp_clo6;
-let t : List(Int) = $f4 in
-let h : Int = $f3 in
-let $t1 : Int = *(h, 2) in
-let $trmc3 : List.Cons = reuse_hole xs as List.Cons($t1, _) in
-$dst.1 <- $trmc3;
-dup$dps(t, $trmc3)
-  _ -> dec_rc xs;
-let $trmc1 : List(Int) = panic("non-exhaustive pattern match") in
-$dst.1 <- $trmc1
-
 ## go$apply$11
 fn go$apply$11($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
@@ -336,15 +302,56 @@ call_ptr go(r, m)
 dec_rc lst;
 panic("non-exhaustive pattern match")
 
+## keep
+fn keep(xs : List(Int)) : List(Int) =
+  case xs of
+  Nil() -> dec_rc xs;
+alloc List.Nil(Int)()
+  Cons($f3, $f4) -> dec_rc xs;
+let $jp_clo6 : () -> '_ = alloc $Clo_$jp5$0($jp5$apply$0) in
+dec_rc $jp_clo6;
+let t : List(Int) = $f4 in
+let h : Int = $f3 in
+let $t1 : Bool = >(h, 2) in
+case $t1 of
+  True() -> let $trmc4 : List.Cons = alloc_hole List.Cons(h, _) in
+keep$dps(t, $trmc4);
+$trmc4
+  _ -> keep(t)
+  _ -> dec_rc xs;
+panic("non-exhaustive pattern match")
+
+## keep$dps
+fn keep$dps(xs : List(Int), $dst : List(Int)) : Unit =
+  case xs of
+  Nil() -> dec_rc xs;
+let $trmc2 : List(Int) = alloc List.Nil(Int)() in
+$dst.1 <- $trmc2
+  Cons($f3, $f4) -> dec_rc xs;
+let $jp_clo6 : () -> '_ = alloc $Clo_$jp5$1($jp5$apply$1) in
+dec_rc $jp_clo6;
+let t : List(Int) = $f4 in
+let h : Int = $f3 in
+let $t1 : Bool = >(h, 2) in
+case $t1 of
+  True() -> let $trmc3 : List.Cons = alloc_hole List.Cons(h, _) in
+$dst.1 <- $trmc3;
+keep$dps(t, $trmc3)
+  _ -> keep$dps(t, $dst)
+  _ -> dec_rc xs;
+let $trmc1 : List(Int) = panic("non-exhaustive pattern match") in
+$dst.1 <- $trmc1
+
 ## main
 fn main() : () =
-  let $t526 : String = let $t525 : List(Int) = let $t524 : List(Int) = let $t523 : List(Int) = let $t522 : List(Int) = let $t521 : List(Int) = alloc List.Nil(Int)() in
-alloc List.Cons(3, $t521) in
+  let $t527 : String = let $t526 : List(Int) = let $t525 : List(Int) = let $t524 : List(Int) = let $t523 : List(Int) = let $t522 : List(Int) = let $t521 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(4, $t521) in
 alloc List.Cons(2, $t522) in
-alloc List.Cons(1, $t523) in
-dup($t524) in
-List.length$List_Int($t525) in
-let $rc_1 : () = println($t526) in
-dec_rc $t526;
+alloc List.Cons(3, $t523) in
+alloc List.Cons(1, $t524) in
+keep($t525) in
+List.length$List_Int($t526) in
+let $rc_1 : () = println($t527) in
+dec_rc $t527;
 $rc_1
 

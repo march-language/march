@@ -1,0 +1,28 @@
+-- TRMC with a MIXED body: one modulo-cons branch (`Cons(h, keep(t))`) and one
+-- PLAIN tail self-call branch (`keep(t)`).  This is `List.filter`'s shape.
+--
+-- The post-perceus golden is the point.  `keep$dps` must end BOTH branches in
+-- a tail call to `keep$dps` -- the drop branch threading the SAME `$dst`
+-- through.  The first version of the transform instead emitted
+-- `let r = keep(t) in $dst.1 <- r` for that branch: a non-tail call back to
+-- the ENTRY, whose own modulo-cons branch re-enters the helper.  A predicate
+-- that ALTERNATES then pushes one frame per alternation, so a "transformed"
+-- function still consumed O(n) stack and overflowed at ~300k elements.
+--
+-- An all-true or all-false predicate never alternates and never grows the
+-- stack, so a runtime control that tests only those two directions cannot see
+-- the bug -- which is why the shape is pinned here, at the IR, as well.
+mod TrmcMixedTail do
+  needs IO.Console
+
+  fn keep(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil        -> Nil
+      Cons(h, t) -> if h > 2 do Cons(h, keep(t)) else keep(t) end
+    end
+  end
+
+  fn main() do
+    println(List.length(keep([1, 3, 2, 4])))
+  end
+end

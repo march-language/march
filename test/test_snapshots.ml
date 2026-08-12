@@ -85,6 +85,7 @@ let corpus = [
   "nested_cons_ctor_heap",           "nested_cons_ctor_heap.march";
   "interp_string_operand_rc",        "interp_string_operand_rc.march";
   "trmc_modulo_cons",                "trmc_modulo_cons.march";
+  "trmc_mixed_tail",                 "trmc_mixed_tail.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────

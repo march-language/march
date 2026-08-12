@@ -307,6 +307,8 @@ let report (m : Tir.tir_module) : unit =
      fn f$dps(ps, dst) = .. let c = allochole Ctor(.., _, ..) in
                             dst.hole <- c;
                             f$dps(as, c)              <- tail call
+                         .. a PLAIN tail self-call f(as) becomes
+                            f$dps(as, dst)            <- tail call, same dst
                          .. and every OTHER tail expression E becomes
                             let r = E in dst.hole <- r
 
@@ -357,7 +359,26 @@ let rec returnify ~(self : string) ~(dps : Tir.var) ~(dst : Tir.var)
     Tir.ELet (r, tail, Tir.ESetField (Tir.AVar dst, hole, Tir.AVar r))
   in
   let recur = returnify ~self ~dps ~dst ~hole ~ret_ty in
+  (* A PLAIN tail self-call in the helper must stay a TAIL call, threading the
+     SAME destination through: [f(as)] in tail position means "the result of
+     f(as) is my result", and the helper's result is "what gets written into
+     dst's hole" — which is exactly what [f$dps(as, dst)] does.
+
+     The generic [store_tail] fallback below would instead emit
+     [let r = f(as) in dst.hole <- r], a NON-tail call to the entry, and the
+     entry's own modulo-cons branch calls back into the helper.  For a function
+     whose branches alternate (List.filter with a predicate that is sometimes
+     true and sometimes false) that mutual cycle pushes one frame per
+     alternation, so a "transformed" function still consumed O(n) stack and
+     overflowed at ~300k elements.  It did NOT show up with an all-true or
+     all-false predicate, because neither ever alternates — a control that
+     tests only those two directions proves nothing here. *)
+  let is_self (f : Tir.var) = String.equal f.Tir.v_name self in
   match e with
+  | Tir.EApp (f, args) when is_self f -> Tir.EApp (dps, args @ [Tir.AVar dst])
+  | Tir.ELet (bv, Tir.EApp (f, args), Tir.EAtom (Tir.AVar r))
+    when is_self f && String.equal r.Tir.v_name bv.Tir.v_name ->
+    Tir.EApp (dps, args @ [Tir.AVar dst])
   | Tir.ELet (bv, Tir.EApp (f, args), k)
     when String.equal f.Tir.v_name self && not (calls_name self k) ->
     (match modcons_alloc bv.Tir.v_name k with
@@ -450,7 +471,12 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
 (** Whether the destination-passing transform runs.  A [ref] rather than an
     env-var read so the driver owns the decision and a CLI flag can set it;
     [bin/main.ml] is the only writer.  Default ON since 2026-08-10; --no-trmc
-    disables it. *)
+    disables it.
+
+    Since 2026-08-12 [--no-trmc] is a DEBUG/BISECT switch, not a supported
+    mode: [List.map]/[List.filter]/[List.filter_map] in [stdlib/list.march]
+    are written in natural (non-tail) style and rely on this transform to
+    become loops, so a --no-trmc binary overflows the stack on long lists. *)
 let enabled : bool ref = ref true
 
 (** Apply TRMC across a module.  Gated on [enabled] (see [--trmc]). *)
