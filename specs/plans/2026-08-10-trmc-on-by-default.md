@@ -521,7 +521,7 @@ git commit -m "cli(trmc): add --trmc/--no-trmc; MARCH_TRMC stays as a legacy ali
 - Consumes: `Trmc.enabled` and `Trmc.transform_module` from Task 5.
 - Produces: no new API.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `test/test_trmc.ml` before `let suites = [`:
 
@@ -560,31 +560,39 @@ Register it in the `"trmc"` suite list:
     Alcotest.test_case "transform is idempotent"         `Quick test_transform_is_idempotent_on_a_transformed_module;
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc`
 Expected: PASS. If the second assertion fails with 3 instead of 2, the transform is not idempotent — it re-transformed its own helper. Fix that before wiring the second call site in Step 3, because `repl_jit` re-lowers modules the driver has already transformed.
 
-- [ ] **Step 3: Wire the transform into the REPL/JIT pipeline**
+- [x] **Step 3: Wire the transform into the REPL/JIT pipeline**
 
-In `lib/jit/repl_jit.ml`, immediately before line 313's `let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars tir in`, insert:
+In `lib/jit/repl_jit.ml`, in `lower_module`, insert immediately **after** the `Lower.lower_module` call:
 
 ```ocaml
-  (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
-     post-lower, and without it a function behaves differently in the REPL than
-     when compiled.  Gated by the same Trmc.enabled ref. *)
   let tir = March_tir.Trmc.transform_module tir in
 ```
 
-- [ ] **Step 4: Verify the REPL still works**
+**The position is as load-bearing as the call.** An earlier draft of this step put it just before the `Perceus.perceus` call, which is *post-defun* — and measured on a real REPL session that placement transforms **5** functions where post-lower transforms **10**. By defun the stdlib's nested `go` helpers are closures invoked via `ECallPtr`, so self-recursion is no longer syntactically visible (`lib/tir/trmc.ml`'s header says exactly this). Halving REPL coverage relative to compiled is the opposite of the parity this task exists to establish. `lower_module` is the only lowering entry point in `lib/jit/`, so one call site covers `run_expr`, `run_decl`, and `precompile_stdlib`.
+
+- [x] **Step 4: Verify the REPL still works**
+
+A build is not parity — prove the three paths agree on a genuinely eligible function. Write a fixture with a natural-style producer (`dup(xs) = match xs do Cons(h,t) -> Cons(h*2, dup(t)) ; Nil -> Nil end`) and run all three:
 
 ```bash
-dune build --root . 2>&1 | grep -E "Error" -A 3 | head
+dune build --root . bin/main.exe test/run_codegen.exe   # never a targetless dune build — it wedges
+F=/tmp/trmc_parity_78111d.march
+./_build/default/bin/main.exe $F                                             # interpreter = reference
+./_build/default/bin/main.exe --compile --opt 2 --trmc -o /tmp/p_78111d $F && /tmp/p_78111d
+printf '<decls>\n<exprs>\n:quit\n' | MARCH_TRMC_REPORT=1 ./_build/default/bin/main.exe --trmc
 scripts/run-tests.sh -q
 ```
-Expected: build clean, `All suites passed.`
 
-- [ ] **Step 5: Commit**
+`march` with no file argument enters the JIT REPL and accepts piped stdin, so this path is drivable non-interactively. Expected: identical output from all three, equal `TRMCXFORM` counts between the REPL and compiled runs, and `All suites passed.` Control: `--no-trmc` in the REPL must give **zero** `TRMCXFORM` lines, or the report is firing unconditionally and proves nothing.
+
+If the REPL run dies with `Library not loaded: …libmarch_runtime_….so.NNN.tmp`, that is the known shared `~/.cache/march` poisoning from a concurrent session, not this change — rerun under an isolated `HOME`.
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/jit/repl_jit.ml test/test_trmc.ml
