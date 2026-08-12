@@ -10,12 +10,12 @@ mod Main do
   --
   -- Here every `needs` line is truthful and every earlier check passes. The
   -- program is rejected because it never says what authority it runs under.
-  -- Accept companion t171 adds exactly that, and nothing else.
+  -- Accept companion t176 adds exactly that, and nothing else.
   needs IO.Console
   needs IO.FileWrite
 
   fn main() : () do
-    match file_write("/tmp/t171_out", "d") do
+    match file_write("/tmp/t176_out", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
     end

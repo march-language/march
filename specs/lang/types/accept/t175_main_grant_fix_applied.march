@@ -16,7 +16,7 @@ mod Main do
   needs IO.FileWrite
 
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
-    match file_write("/tmp/t173_out", "d") do
+    match file_write("/tmp/t175_out", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
     end

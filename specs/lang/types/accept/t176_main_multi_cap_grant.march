@@ -9,13 +9,13 @@ mod Main do
   -- a WEAKER guarantee than the ambient default it replaced.
   --
   -- The grant is now the UNION over `main`'s capability parameters — the same
-  -- rule stage C already applied to ordinary functions. Reject companion t171
+  -- rule stage C already applied to ordinary functions. Reject companion t176
   -- is this file with the parameters removed.
   needs IO.Console
   needs IO.FileWrite
 
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
-    match file_write("/tmp/t171_out", "d") do
+    match file_write("/tmp/t176_out", "d") do
       Ok(_)  -> println("ok")
       Err(_) -> println("e")
     end
