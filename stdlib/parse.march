@@ -22,18 +22,17 @@
 --   RFail  soft — `alt` may try the next alternative
 --   RCut   hard — a commit point was passed; propagate, do not backtrack
 --
--- Functions:
---   run(Parser(a), String)              -> Result(a, ParseErr)
---   lit(String)                         -> Parser(String)
---   and_then(Parser(a), Parser(b))      -> Parser((a, b))
---   alt(Parser(a), Parser(a))           -> Parser(a)
---   commit(Parser(a))                   -> Parser(a)
---   ctx(String, Parser(a))              -> Parser(a)
---   label(String, Parser(a))            -> Parser(a)
+-- Primitives:      lit, byte, byte_if, eof, pure
+-- Sequencing:      and_then, skip_then, skip_first, map
+-- Choice:          alt
+-- Repetition:      many, many1, sep_by, sep_by1
+-- Error control:   commit, ctx, label
+-- Running:         run
+-- Rendering:       render, line_col
 --
--- Still to come (plan §3.5-3.6, §4.1): byte/satisfy, many/sep_by in
--- tail-recursive form, map, skip_then, to_diagnostic, and the recovery
--- combinators.
+-- Still to come (plan §3.6): the recovery combinators (`recover`, `fence`)
+-- that let a driver collect several errors from one pass instead of stopping
+-- at the first.
 
 mod Parse do
 
@@ -152,6 +151,31 @@ mod Parse do
     if a > b do a else b end
   end
 
+  -- Render a byte code for a message.  Printable ASCII shows as itself;
+  -- anything else shows as its number, which beats emitting a control byte
+  -- into a diagnostic.
+  pfn byte_name(code : Int) : String do
+    if code >= 32 && code < 127 do string_from_chars(Cons(byte_to_char(code), Nil))
+    else "byte " ++ int_to_string(code) end
+  end
+
+  -- `many`'s loop, at module level and in tail position so TCO applies.
+  --
+  -- The `j == i` guard is load-bearing: a parser that succeeds WITHOUT
+  -- consuming (say `lit("")`) would otherwise be retried at the same offset
+  -- forever.  Stopping is the only sane answer — the alternative is a hang
+  -- that looks like an infinite loop in the user's grammar.
+  pfn many_go(f : String -> Int -> ParseReply(a), input : String, i : Int,
+              acc : List(a), furthest : Int) : ParseReply(List(a)) do
+    match f(input, i) do
+      ROk(x, j, fp) ->
+        if j == i do ROk(List.reverse(acc), i, max_int2(furthest, fp))
+        else many_go(f, input, j, Cons(x, acc), max_int2(furthest, fp)) end
+      RFail(e) -> ROk(List.reverse(acc), i, max_int2(furthest, e.pos))
+      RCut(e)  -> RCut(e)
+    end
+  end
+
   -- KNOWN LIMITATION of the Int-only success channel.  When `p` succeeds
   -- having internally failed deeper than the offset at which `q` later fails,
   -- we know a deeper failure happened (the Int survives) but not what it
@@ -214,6 +238,127 @@ mod Parse do
               end
           end)
     end
+  end
+
+  doc """
+  Match one byte by its code (0..255).
+
+  There is no character literal in March, so byte codes are the primitive and
+  `lit` is the ergonomic form for anything spelled as text.
+  """
+  fn byte(code : Int) : Parser(Int) do
+    Parser(fn (input, i) ->
+      if string_byte_at(input, i) == code do ROk(code, i + 1, i)
+      else RFail(fail_at(i, ExpLit(byte_name(code)))) end)
+  end
+
+  doc """
+  Match one byte satisfying `pred`, described to the user as `name`.
+
+  Named `byte_if` rather than the conventional `satisfy`: `satisfy` is a
+  reserved keyword in March (it belongs to refinement types), so `fn satisfy`
+  does not parse. `byte_if` also pairs with `byte` and says what it does.
+
+  The name is what the reader sees in a message ("I was expecting a digit"),
+  so it should name the class, not the predicate: "digit", not "is_digit".
+
+  `string_byte_at` returns -1 past the end of the input, and a predicate over
+  byte values will reject that, so end-of-input needs no special case.
+  """
+  fn byte_if(name : String, pred : Int -> Bool) : Parser(Int) do
+    Parser(fn (input, i) ->
+      let b = string_byte_at(input, i)
+      if b >= 0 && pred(b) do ROk(b, i + 1, i)
+      else RFail(fail_at(i, ExpLabel(name))) end)
+  end
+
+  doc """
+  Succeed only at the end of the input.
+
+  Without this a grammar silently accepts a valid prefix of invalid input —
+  `1 + 2 )))` parses as `1 + 2` and the trailing garbage is never reported.
+  """
+  fn eof() : Parser(Unit) do
+    Parser(fn (input, i) ->
+      if string_byte_at(input, i) < 0 do ROk((), i, i)
+      else RFail(fail_at(i, ExpEof)) end)
+  end
+
+  doc """
+  Transform a parser's result, leaving its failure behaviour untouched.
+  """
+  fn map(p : Parser(a), f : a -> b) : Parser(b) do
+    match p do
+      Parser(pf) ->
+        Parser(fn (input, i) ->
+          match pf(input, i) do
+            ROk(x, j, fp) -> ROk(f(x), j, fp)
+            RFail(e)      -> RFail(e)
+            RCut(e)       -> RCut(e)
+          end)
+    end
+  end
+
+  doc """
+  Run `p`, then `q`, and keep **`p`'s** value.
+
+  This is the pipe-friendly sequencing form: `a |> skip_then(sep)` reads as
+  "a, then a separator I do not care about". Pairing with `and_then` gives the
+  NimbleParsec-style pipeline the design notes describe — and the left-nested
+  tuples that make the case for named binders past three elements.
+  """
+  fn skip_then(p : Parser(a), q : Parser(b)) : Parser(a) do
+    map(and_then(p, q), fn (pr) -> match pr do (x, _) -> x end)
+  end
+
+  doc """
+  Zero or more occurrences of `p`, in order.
+
+  Stops at the first soft failure and succeeds with what it has. A HARD
+  failure propagates instead: once a commit point inside an item has been
+  passed, the item was not optional, and quietly ending the list there would
+  turn a real error into a short parse.
+  """
+  fn many(p : Parser(a)) : Parser(List(a)) do
+    match p do
+      Parser(pf) -> Parser(fn (input, i) -> many_go(pf, input, i, Nil, i))
+    end
+  end
+
+  doc """
+  One or more occurrences of `p`.
+  """
+  fn many1(p : Parser(a)) : Parser(List(a)) do
+    map(and_then(p, many(p)), fn (pr) -> match pr do (x, xs) -> Cons(x, xs) end)
+  end
+
+  doc """
+  Zero or more occurrences of `p` separated by `sep`, discarding separators.
+  """
+  fn sep_by(p : Parser(a), sep : Parser(b)) : Parser(List(a)) do
+    alt(sep_by1(p, sep), pure(Nil))
+  end
+
+  doc """
+  One or more occurrences of `p` separated by `sep`.
+  """
+  fn sep_by1(p : Parser(a), sep : Parser(b)) : Parser(List(a)) do
+    map(and_then(p, many(skip_first(sep, p))),
+        fn (pr) -> match pr do (x, xs) -> Cons(x, xs) end)
+  end
+
+  doc """
+  Succeed with `x` without consuming input.
+  """
+  fn pure(x : a) : Parser(a) do
+    Parser(fn (_input, i) -> ROk(x, i, i))
+  end
+
+  doc """
+  Run `p`, then `q`, and keep **`q`'s** value — the mirror of `skip_then`.
+  """
+  fn skip_first(p : Parser(a), q : Parser(b)) : Parser(b) do
+    map(and_then(p, q), fn (pr) -> match pr do (_, y) -> y end)
   end
 
   doc """
@@ -283,6 +428,66 @@ mod Parse do
   A hard failure is never relabelled either: past a commit point the specific
   error is the whole point.
   """
+  -- ── Rendering (plan §3.5) ────────────────────────────────────────────────
+  --
+  -- Byte offset -> 1-based line/column happens ONCE, here, at render time.
+  -- Never in the parse loop: the hot path deals in byte indices and nothing
+  -- else, which is the whole reason positions are integers.
+  pfn line_col_go(input : String, target : Int, i : Int,
+                  line : Int, col : Int) : (Int, Int) do
+    if i >= target do (line, col)
+    else
+      if string_byte_at(input, i) == 10 do
+        line_col_go(input, target, i + 1, line + 1, 1)
+      else line_col_go(input, target, i + 1, line, col + 1) end
+    end
+  end
+
+  doc """
+  Convert a byte offset into a 1-based `(line, column)` pair.
+  """
+  fn line_col(input : String, pos : Int) : (Int, Int) do
+    line_col_go(input, pos, 0, 1, 1)
+  end
+
+  pfn expected_name(e : Expected) : String do
+    match e do
+      ExpLit(s)   -> "`" ++ s ++ "`"
+      ExpLabel(s) -> s
+      ExpEof      -> "end of input"
+    end
+  end
+
+  pfn join_expected(xs : List(Expected)) : String do
+    String.join(List.map(xs, fn e -> expected_name(e)), " or ")
+  end
+
+  pfn render_context(input : String, ctx : List((String, Int))) : String do
+    match ctx do
+      Nil -> ""
+      Cons((name, start), _) ->
+        let (l, c) = line_col(input, start)
+        " in the " ++ name ++ " that started at "
+          ++ int_to_string(l) ++ ":" ++ int_to_string(c)
+    end
+  end
+
+  doc """
+  Render a failure as a diagnostic in the March compiler's voice.
+
+      2:3: I was expecting `Z` in the block that started at 1:1
+
+  Only the innermost context frame is named. A full stack reads as a trace,
+  and a parse error is not a stack trace — the construct you are inside is
+  what locates the mistake.
+  """
+  fn render(input : String, e : ParseErr) : String do
+    let (l, c) = line_col(input, e.pos)
+    int_to_string(l) ++ ":" ++ int_to_string(c)
+      ++ ": I was expecting " ++ join_expected(e.expected)
+      ++ render_context(input, e.context)
+  end
+
   fn label(name : String, p : Parser(a)) : Parser(a) do
     match p do
       Parser(f) ->

@@ -1,7 +1,8 @@
-# `[P2]` `Parse`: parser combinator core, first slice
+# `[P2]` `Parse`: parser combinator core
 
-**Status:** Landed (2026-08-11). First slice of
-`specs/plans/2026-08-09-parsing-and-string-search.md` §10 step 1.
+**Status:** Landed (2026-08-11). Covers most of
+`specs/plans/2026-08-09-parsing-and-string-search.md` §10 step 1; the
+recovery combinators (§3.6) and the golden error corpus (§3.7) remain.
 
 New stdlib module `stdlib/parse.march`, registered in
 `lib/modules/stdlib_manifest.ml` and exercised by `test/stdlib/test_parse.march`
@@ -19,7 +20,11 @@ type ParseReply(a) = ROk(a, Int, Int) | RFail(ParseErr) | RCut(ParseErr)
 type Parser(a) = Parser(String -> Int -> ParseReply(a))
 ```
 
-Combinators: `run`, `lit`, `and_then`, `alt`, `commit`, `ctx`, `label`.
+Primitives: `lit`, `byte`, `byte_if`, `eof`, `pure`.
+Sequencing: `and_then`, `skip_then`, `skip_first`, `map`.
+Choice: `alt`. Repetition: `many`, `many1`, `sep_by`, `sep_by1`.
+Error control: `commit`, `ctx`, `label`. Running: `run`.
+Rendering: `render`, `line_col`.
 
 Both asymmetries the plan argued for are real in the code:
 
@@ -60,10 +65,19 @@ green:
 | `merge_err` returns `b` (the "report the last alternative" bug) | furthest-failure |
 | `label` drops its consumed-input guard | label keeps inner error |
 | `commit` returns `RFail` instead of `RCut` | commit blocks alt |
+| `many` swallows `RCut` instead of propagating | many propagates cut |
+| `line_col` stops counting newlines | render reports 2:3 |
 
 The commit test is built so a broken `commit` yields `Ok`, not a different
 error: its second alternative *would* succeed on the input, so swallowing the
 hard failure produces a parse rather than a wrong message.
+
+The `many` zero-width guard is *not* in that table on purpose: removing it
+produces an infinite loop, and there is no `timeout(1)` on this machine, so
+spawning an unkillable spin to prove the point was a worse trade than
+reasoning from the loop — without the guard the recursive call advances
+neither `i` nor `acc`, so it cannot terminate. The guard's presence is pinned
+by a test that `many(lit(""))` returns at all.
 
 An earlier sabotage attempt (`if a.pos > b.pos` → `if false`) did *not* fail
 the test, because the tie branch still selects `a.pos`. Worth recording: a
@@ -89,6 +103,19 @@ was inert.
   112 → 113). Current-truth docs updated; two spec statements describing a
   historical blast-radius sweep over 112 modules carry `doc-lint:ignore-count`
   markers instead, since editing them would falsify what was actually swept.
+- **`satisfy` is a reserved keyword** (it belongs to refinement types), so the
+  conventional combinator name does not parse as a function. It is `byte_if`
+  here, which also pairs with `byte`.
+- **A lambda cannot destructure a tuple parameter.** `fn ((x, _)) -> x` is a
+  parse error; `fn (x, _) -> x` is a *two-parameter* lambda, not a
+  destructure. Use `fn (pr) -> match pr do (x, _) -> x end`. (Named functions
+  *can* destructure: `fn f((x, y)) do ... end`.)
+- **The test harness's stdlib load list is not the production manifest.**
+  `test_stdlib_march.ml` has its own `all_stdlib_decls`, and `tuple.march` is
+  in `stdlib_manifest.ml` but not in it — so `Tuple.first` worked under the
+  real compiler and was `unbound variable` under the harness. `parse.march`
+  now uses pattern destructuring and depends on neither. Keeping a new stdlib
+  module dependency-light avoids the whole class.
 
 ## Known limitation, deliberately taken
 
@@ -100,14 +127,35 @@ If it produces misleading messages on a real grammar, widen the success channel
 to `(pos, expected)` and pay for it — do not paper over it at the call site.
 Revisit after the JSON/TOML rewrite (plan §10 step 2).
 
+## Rendering
+
+`render` produces the compiler's voice from a byte offset:
+
+    2:3: I was expecting `Z`
+    1:3: I was expecting `cd` in the block that started at 1:3
+
+Byte offset → 1-based line/column happens once, in `line_col`, at render time
+— never in the parse loop, which is the whole reason positions are integers.
+Only the innermost context frame is named: a full stack reads as a trace, and
+a parse error is not a stack trace.
+
+Two guards worth naming, both pinned by tests:
+
+- `many`'s `j == i` check. A parser that succeeds without consuming (`lit("")`)
+  would otherwise be retried at the same offset forever — a hang that looks
+  like an infinite loop in the user's grammar.
+- `many` propagates `RCut` rather than ending the list. Once a commit point
+  inside an item has been passed the item was not optional, and stopping
+  quietly would turn a real error into a short parse.
+
 ## Next
 
-`byte`/`satisfy`, `map`/`skip_then`, `many`/`sep_by` in tail-recursive form,
-`to_diagnostic` (§3.5), and the recovery combinators (§3.6) — then the golden
-error corpus (§3.7), which is the acceptance bar for step 1.
+The recovery combinators (§3.6) — `recover(p, sync, default)` and `fence(p)` —
+so a driver can collect several errors from one pass instead of stopping at
+the first. Then the golden error corpus (§3.7), which is the actual acceptance
+bar for step 1.
 
-`to_diagnostic` is the one with an external dependency worth planning around:
-it renders into the compiler's own diagnostic type (`lib/errors/errors.ml`) so
-library errors and compiler errors look identical and LSP integration is free.
-Byte-offset → line/column conversion belongs there, once, at render time —
-never in the parse loop.
+Separately, an OCaml-side `to_diagnostic` that renders a `ParseErr` into
+`lib/errors/errors.ml`'s type would make library and compiler diagnostics
+indistinguishable and give LSP integration for free — that is what §8's
+editor probes want.
