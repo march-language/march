@@ -694,7 +694,7 @@ git commit -m "test(trmc): cover the JS backend's hole allocation and fill"
 
 **Do these one function at a time**, benchmarking after each. Do not batch.
 
-- [ ] **Step 1: Record the pre-rewrite number**
+- [x] **Step 1: Record the pre-rewrite number**
 
 ```bash
 dune build --root . bin/main.exe
@@ -705,7 +705,7 @@ for i in 1 2 3; do /usr/bin/time -p /tmp/lp_pre_78111d >/dev/null; done
 
 Record runs 2 and 3.
 
-- [ ] **Step 2: Rewrite `List.map`**
+- [x] **Step 2: Rewrite `List.map`**
 
 In `stdlib/list.march`, replace the body of `map` (currently at ~line 230, an inner `go` with an accumulator plus `List.reverse(acc)`) with:
 
@@ -718,7 +718,7 @@ In `stdlib/list.march`, replace the body of `map` (currently at ~line 230, an in
   end
 ```
 
-- [ ] **Step 3: Verify eligibility and correctness**
+- [x] **Step 3: Verify eligibility and correctness**
 
 ```bash
 dune build --root . bin/main.exe
@@ -734,7 +734,7 @@ Expected: a `TRMCXFORM` line naming a `List.map` instantiation, and the program 
 `MARCH_DUMP_TXT=tir-lower ./_build/default/bin/main.exe --compile --opt 2 -o /tmp/x bench/list_producers.march 2>&1 | grep -A 12 "^fn List.map"`.
 The transform needs `let t = map(...) in alloc List.Cons(fh, t)` — a *direct* `EAlloc`, no intervening let.
 
-- [ ] **Step 4: Benchmark and run the suite**
+- [x] **Step 4: Benchmark and run the suite**
 
 ```bash
 for i in 1 2 3; do /usr/bin/time -p /tmp/lp_map_78111d >/dev/null; done
@@ -742,14 +742,18 @@ scripts/run-tests.sh
 ```
 Expected: faster than Step 1's number; `All suites passed.`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add stdlib/list.march
 git commit -m "stdlib(list): map in natural style — one traversal under TRMC"
 ```
 
-- [ ] **Step 6: Repeat Steps 2-5 for `filter`**
+- [x] **Step 6: Repeat Steps 2-5 for `filter`**
+
+> **CORRECTION: `filter` classifies `eligible`, not `mixed`** (`tail=1 modcons=1 other=0`), and IS transformed — which turned out worse than being declined. `returnify` lowered the plain tail self-call in the `$dps` helper to `let r = f(as) in $dst.hole <- r`: a NON-tail call back to the ENTRY, whose own modulo-cons branch re-enters the helper. A predicate that ALTERNATES pushes one frame per alternation, so a "transformed" `filter` still consumed O(n) stack and overflowed at ~300k. Fixed in `7031ddda` (emit `f$dps(as, $dst)` — same destination, genuine tail call).
+>
+> **The measurement trap:** `fn _ -> true` and `fn _ -> false` BOTH completed cleanly at 300k. Only an alternating predicate (`x % 2 == 0`) died. A control that exercises the two extreme directions of a two-branch function proves nothing about the branch INTERLEAVING. The brief's stop-condition ("if the whole function is declined, stop") would never have fired, and its Step 3 check — a `TRMCXFORM` line plus a correct-output run — is exactly what the mis-transformed version produced.
 
 ```march
   fn filter(xs : List(a), pred : a -> Bool) : List(a) do
@@ -764,7 +768,7 @@ git commit -m "stdlib(list): map in natural style — one traversal under TRMC"
 
 Note the `else` branch is a plain tail call, so this function is classified `mixed`, not `eligible` — the `Cons` branch still gets the loop. Confirm with the report; if the whole function is declined, stop and record it rather than forcing it.
 
-- [ ] **Step 7: Repeat Steps 2-5 for `filter_map`**
+- [x] **Step 7: Repeat Steps 2-5 for `filter_map`**
 
 ```march
   fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
@@ -779,7 +783,7 @@ Note the `else` branch is a plain tail call, so this function is classified `mix
   end
 ```
 
-- [ ] **Step 8: Add the changelog entry**
+- [x] **Step 8: Add the changelog entry**
 
 In `CHANGELOG.md`, under `## [Unreleased]` → `### Changed`:
 
@@ -789,7 +793,7 @@ In `CHANGELOG.md`, under `## [Unreleased]` → `### Changed`:
   same complexity class, roughly half the work per call.
 ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add stdlib/list.march CHANGELOG.md
