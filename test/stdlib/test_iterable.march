@@ -99,32 +99,32 @@ end
 describe "fold" do
   test "fold on empty list returns zero" do
     let empty : List(Int) = Nil
-    assert (Iterable.fold(0, empty, fn (acc, x) -> acc + x) == 0)
+    assert (Iterable.fold(empty, 0, fn (acc, x) -> acc + x) == 0)
   end
 
   test "fold sum of list" do
-    assert (Iterable.fold(0, [1, 2, 3, 4, 5], fn (acc, x) -> acc + x) == 15)
+    assert (Iterable.fold([1, 2, 3, 4, 5], 0, fn (acc, x) -> acc + x) == 15)
   end
 
   test "fold singleton" do
-    assert (Iterable.fold(0, [42], fn (acc, x) -> acc + x) == 42)
+    assert (Iterable.fold([42], 0, fn (acc, x) -> acc + x) == 42)
   end
 
   test "fold is left-associative" do
     -- (((10 - 1) - 2) - 3) = 4
-    assert (Iterable.fold(10, [1, 2, 3], fn (acc, x) -> acc - x) == 4)
+    assert (Iterable.fold([1, 2, 3], 10, fn (acc, x) -> acc - x) == 4)
   end
 
   test "fold builds string in order" do
-    assert (Iterable.fold("", ["a", "b", "c"], fn (acc, x) -> acc ++ x) == "abc")
+    assert (Iterable.fold(["a", "b", "c"], "", fn (acc, x) -> acc ++ x) == "abc")
   end
 
   test "fold count elements" do
-    assert (Iterable.fold(0, [1, 2, 3, 4], fn (acc, x) -> acc + 1) == 4)
+    assert (Iterable.fold([1, 2, 3, 4], 0, fn (acc, x) -> acc + 1) == 4)
   end
 
   test "fold with non-zero initial value" do
-    assert (Iterable.fold(100, [1, 2, 3], fn (acc, x) -> acc + x) == 106)
+    assert (Iterable.fold([1, 2, 3], 100, fn (acc, x) -> acc + x) == 106)
   end
 end
 

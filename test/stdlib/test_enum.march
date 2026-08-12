@@ -71,18 +71,18 @@ describe "Enum" do
 
     test "fold sum" do
       let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
-      let sum = Enum.fold(0, xs, fn acc -> fn x -> acc + x)
+      let sum = Enum.fold(xs, 0, fn acc -> fn x -> acc + x)
       assert (sum == 10)
     end
 
     test "fold product" do
       let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
-      let prod = Enum.fold(1, xs, fn acc -> fn x -> acc * x)
+      let prod = Enum.fold(xs, 1, fn acc -> fn x -> acc * x)
       assert (prod == 24)
     end
 
     test "fold empty" do
-      let result = Enum.fold(0, Nil, fn acc -> fn (x : Int) -> acc + x)
+      let result = Enum.fold(Nil, 0, fn acc -> fn (x : Int) -> acc + x)
       assert (result == 0)
     end
 
