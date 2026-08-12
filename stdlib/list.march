@@ -228,13 +228,13 @@ mod List do
       ["A", "B"]
   """
   fn map(xs : List(a), f : a -> b) : List(b) do
-    fn go(lst : List(a), acc : List(b)) : List(b) do
-      match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) -> go(t, Cons(f(h), acc))
-      end
+    -- Natural style: one traversal, no reversed accumulator.  Not itself
+    -- tail-recursive -- tail-recursion-modulo-cons (on by default) turns the
+    -- `Cons(f(h), map(...))` into a destination-passing loop.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> Cons(f(h), map(t, f))
     end
-    go(xs, Nil)
   end
 
   doc "Applies `f` to each element for side effects. Returns ()."
