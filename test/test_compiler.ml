@@ -11709,7 +11709,13 @@ let assert_stdlib_file_typechecks_cleanly name =
    specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md *)
 let stdlib_dir_for_test () =
   let candidates = [ "stdlib"; "../../../stdlib"; "../../stdlib" ] in
-  match List.find_opt Sys.file_exists candidates with
+  (* A candidate must contain a real stdlib module, not just any directory
+     named "stdlib" -- dune mirrors test/stdlib/*.march (the test corpus,
+     unrelated files also literally named "stdlib" one level up) into the
+     build tree whenever a runtest rule depends on one, and a bare
+     [Sys.file_exists d] check picks that up as a false positive. *)
+  let looks_like_real_stdlib d = Sys.file_exists (Filename.concat d "list.march") in
+  match List.find_opt looks_like_real_stdlib candidates with
   | Some d -> d
   | None ->
     Alcotest.failf "cannot find the stdlib directory (searched: %s)"
