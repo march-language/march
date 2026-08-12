@@ -607,13 +607,13 @@ git commit -m "jit(trmc): run the transform in the REPL pipeline so it matches c
 
 **Files:**
 - Test: `test/test_trmc.ml`
-- Modify: `test/test_codegen.ml`
+- ~~Modify: `test/test_codegen.ml`~~ — not needed: it already ends with `@ Test_trmc.suites`, so a new group in `test_trmc.ml` registers itself.
 
 **Interfaces:**
 - Consumes: `Trmc.enabled` (Task 5), `trmc_hole_module ()` (existing in `test/test_trmc.ml`).
 - Produces: no new API.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `test/test_trmc.ml` before `let suites = [`:
 
@@ -643,7 +643,7 @@ Register it in a new suite group by adding to `suites`:
   ];
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc-js`
 Expected: PASS.
@@ -651,7 +651,7 @@ Expected: PASS.
 Signature for reference (`lib/tir/js_emit.ml:1304`):
 `val emit_module : ?source_file:string -> ?fn_lines:(...) list -> Tir.tir_module -> string * string option`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add test/test_trmc.ml test/test_codegen.ml
