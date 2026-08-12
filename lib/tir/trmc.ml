@@ -319,6 +319,13 @@ let report (m : Tir.tir_module) : unit =
 
 let trmc_ctr = ref 0
 
+(** Reset the fresh-name counter.  Mirrors [Defun.set_lambda_counter]: the
+    counter is process-global, so without a reset the names a module gets
+    depend on how many modules were transformed before it in the same process.
+    That makes the emitted TIR a function of run order rather than of the
+    source — which the snapshot suite catches as a double-run instability. *)
+let set_counter n = trmc_ctr := n
+
 let fresh_var (ty : Tir.ty) : Tir.var =
   incr trmc_ctr;
   { Tir.v_name = Printf.sprintf "$trmc%d" !trmc_ctr; v_ty = ty; v_lin = Tir.Unr }

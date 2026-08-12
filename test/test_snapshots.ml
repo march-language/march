@@ -84,6 +84,7 @@ let corpus = [
   "nested_generic_adt",              "nested_generic_adt.march";
   "nested_cons_ctor_heap",           "nested_cons_ctor_heap.march";
   "interp_string_operand_rc",        "interp_string_operand_rc.march";
+  "trmc_modulo_cons",                "trmc_modulo_cons.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────
@@ -177,7 +178,18 @@ let dump_post_lower src =
 
 let dump_post_perceus src =
   March_tir.Defun.set_lambda_counter 0;
-  let tir = Test_helpers.mono_module src in
+  (* Trmc runs post-lower / pre-mono, exactly as bin/main.ml orders it.  It is
+     inlined here rather than reusing Test_helpers.mono_module (which fuses
+     lower+mono) because the position is load-bearing: by defun a nested `go`
+     helper is an ECallPtr closure and self-recursion is no longer
+     syntactically visible, so a transform run later sees nothing.
+     Before TRMC became the default this stage was absent from the harness,
+     which meant no golden could ever move when it changed — the pass was a
+     default part of the pipeline with zero snapshot coverage. *)
+  March_tir.Trmc.set_counter 0;
+  let tir = Test_helpers.lower_module_typed src in
+  let tir = March_tir.Trmc.transform_module tir in
+  let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let tir = March_tir.Perceus.perceus tir in
   render_module tir

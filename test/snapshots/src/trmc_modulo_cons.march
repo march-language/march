@@ -1,0 +1,24 @@
+-- TRMC (tail-recursion-modulo-cons): `Cons(f(h), dup(t))` puts the recursive
+-- call in the direct-argument position of a tail-position constructor, which
+-- is the one shape Trmc.transform_fn rewrites into destination-passing style.
+--
+-- The post-perceus golden is where this earns its keep: it should show the
+-- entry function seeding a `$dst` and a `$dps` helper that allocates the cell
+-- with a HOLE and fills it, rather than a recursive call whose result is then
+-- consed. Without a producer-shaped fixture the snapshot harness runs the
+-- TRMC pass over a corpus where nothing is eligible, so the pass could break
+-- outright without moving a single golden.
+mod TrmcModuloCons do
+  needs IO.Console
+
+  fn dup(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil        -> Nil
+      Cons(h, t) -> Cons(h * 2, dup(t))
+    end
+  end
+
+  fn main() do
+    println(List.length(dup([1, 2, 3])))
+  end
+end
