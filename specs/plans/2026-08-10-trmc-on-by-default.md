@@ -305,15 +305,32 @@ let transform_fn (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc`
 Expected: all `trmc` cases PASS, including the new one.
 
-- [ ] **Step 5: Confirm eligibility counts did not collapse**
+- [ ] **Step 5: Confirm the guard is not over-broad**
+
+The transform count is PROGRAM-DEPENDENT — it reflects that program's stdlib
+link closure — so the "19" from the Phase 1 report (a different corpus) is NOT
+a valid target here. On `bench/list_producers.march` the correct count is 10,
+and comparing it against 19 produces a false alarm. Do an A/B on the SAME
+program instead, with and without the guard:
 
 ```bash
+cp lib/tir/trmc.ml /tmp/trmc_withguard.ml        # never `git stash` in this worktree
+git checkout -- lib/tir/trmc.ml
+dune build --root . bin/main.exe
 rm -rf .march/cas/artifacts-v2
 MARCH_TRMC=1 MARCH_TRMC_REPORT=1 ./_build/default/bin/main.exe --compile --opt 2 \
-  -o /tmp/trmc_probe_78111d bench/list_producers.march 2>&1 | grep -c TRMCXFORM
+  -o /tmp/t3_noguard bench/list_producers.march 2>&1 | grep -c TRMCXFORM
+cp /tmp/trmc_withguard.ml lib/tir/trmc.ml
+dune build --root . bin/main.exe
+rm -rf .march/cas/artifacts-v2
+MARCH_TRMC=1 MARCH_TRMC_REPORT=1 ./_build/default/bin/main.exe --compile --opt 2 \
+  -o /tmp/t3_guard bench/list_producers.march 2>&1 | grep -c TRMCXFORM
 ```
 
-Expected: still 19. If it dropped, the guard is over-broad — check which functions disappeared from the `TRMCXFORM` lines.
+Expected: the two counts are EQUAL (10 and 10 when this was run), i.e. the
+guard blocks nothing that was previously transformed. If the guarded count is
+lower, the guard IS over-broad — diff the `TRMCXFORM` lines between the two
+runs to see which functions it swallowed.
 
 - [ ] **Step 6: Commit**
 
