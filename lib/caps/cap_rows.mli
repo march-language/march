@@ -99,13 +99,24 @@ type row = { caps : string list; deps : string list; unknown : bool }
 val empty_row : row
 
 val solve :
+  ?with_rows:bool ->
   own_caps:(string, string list) Hashtbl.t ->
   refs:(string, string list) Hashtbl.t ->
   seeds:(string, seed) Hashtbl.t ->
+  unit ->
   (string, row) Hashtbl.t
 (** Fixpoint over the reference graph. [own_caps] seeds [caps], [refs] carries
     both [caps] and [unknown] upward, [seeds] supplies [deps]/[unknown]/calls.
 
     Passing an empty [seeds] table yields exactly the pre-stage-C flat closure
     in the [caps] projection — that equivalence is the reason this function
-    owns the caps fixpoint rather than duplicating it. *)
+    owns the caps fixpoint rather than duplicating it.
+
+    [with_rows] (default [true]) computes [deps] and [unknown]. Set it to
+    [false] when only [caps] will be read: that skips the per-sweep pass over
+    [seeds] and the [unknown] propagation, making the solve cost exactly what
+    the pre-stage-C flat closure cost. This matters because EVERY `--check`
+    projects the caps (the closure feeds Check 4 and the `main` grant) while
+    almost no program declares a capability parameter — measured, computing
+    rows unconditionally cost ~25% of `--check` wall-clock across the
+    conformance corpus. *)

@@ -838,7 +838,7 @@ type env = {
 
       Recorded at exactly the [record_fn_caps] call sites, so a key here is a
       key there. Consumed only by [fn_transitive_capability_closures]. *)
-  fn_row_seeds : (string, March_caps.Cap_rows.seed) Hashtbl.t;
+  fn_row_bodies : (string, (string list * Ast.expr) list) Hashtbl.t;
   (** R1 stage C: per-function ROW seeds, keyed exactly like [fn_refs] and
       recorded at exactly the [record_fn_refs] call sites.  Where [fn_refs]
       answers "what does this function reference", a seed answers the two
@@ -941,7 +941,7 @@ let make_env errors type_map = {
   cap_closures = Hashtbl.create 64;
   own_cap_closures = Hashtbl.create 64;
   fn_refs = Hashtbl.create 64;
-  fn_row_seeds = Hashtbl.create 64;
+  fn_row_bodies = Hashtbl.create 64;
   fn_grant_points = Hashtbl.create 16;
   local_mods = StrMap.empty;
   offer_conts = ref [];
@@ -8413,10 +8413,23 @@ let is_migrate_fn_name (fn_name : string) : bool =
     Defined ABOVE [check_module_needs] because that function consumes it —
     Check 4 asks what the functions an importer actually references require,
     rather than what the imported module as a whole requires. *)
-let fn_capability_rows_tbl (env : env)
+let fn_capability_rows_tbl ?(with_rows = true) (env : env)
   : (string, March_caps.Cap_rows.row) Hashtbl.t =
-  March_caps.Cap_rows.solve ~own_caps:env.own_cap_closures ~refs:env.fn_refs
-    ~seeds:env.fn_row_seeds
+  (* Seeds are derived HERE, not at recording time, and only when the caller
+     will actually read [deps]/[unknown] — see [record_fn_refs]. *)
+  let seeds : (string, March_caps.Cap_rows.seed) Hashtbl.t =
+    if not with_rows then Hashtbl.create 1
+    else begin
+      let t = Hashtbl.create 64 in
+      Hashtbl.iter
+        (fun k bodies ->
+           Hashtbl.replace t k (March_caps.Cap_rows.seed_of_bodies bodies))
+        env.fn_row_bodies;
+      t
+    end
+  in
+  March_caps.Cap_rows.solve ~with_rows ~own_caps:env.own_cap_closures
+    ~refs:env.fn_refs ~seeds ()
 
 let fn_transitive_capability_closures_tbl (env : env)
   : (string, string list) Hashtbl.t =
@@ -8429,7 +8442,7 @@ let fn_transitive_capability_closures_tbl (env : env)
   let tbl : (string, string list) Hashtbl.t = Hashtbl.create 64 in
   Hashtbl.iter
     (fun k (r : March_caps.Cap_rows.row) -> Hashtbl.replace tbl k r.caps)
-    (fn_capability_rows_tbl env);
+    (fn_capability_rows_tbl ~with_rows:false env);
   tbl
 
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
@@ -8702,17 +8715,19 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let refs = List.concat_map (fun (bound, e) -> free_vars_expr bound e) bodies in
     let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
     Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior));
-    (* R1 stage C: the ROW seed for the same bodies, from the same
-       (params, body) pairing.  Recorded here rather than at a parallel set of
-       call sites so a form that gains reference edges can never silently miss
-       its row — the two are the same list, walked twice. *)
-    let seed = March_caps.Cap_rows.seed_of_bodies bodies in
-    let prior_seed =
-      Option.value ~default:March_caps.Cap_rows.empty_seed
-        (Hashtbl.find_opt env.fn_row_seeds fn_qname)
+    (* R1 stage C: retain the same (params, body) pairs the reference walk
+       used, so a row SEED can be derived from them later. Deliberately not
+       walked here: the seed walk is a second full pass over every function
+       body, and its output ([deps]/[unknown]) is read only by
+       [check_fn_grants], which does nothing unless the program declares a
+       capability parameter. Doing it eagerly cost ~18% of `--check`
+       wall-clock across the conformance corpus for a result almost every
+       program discards. Storing the pairs is O(1) — they are already-built
+       AST nodes. *)
+    let prior_bodies =
+      Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies fn_qname)
     in
-    Hashtbl.replace env.fn_row_seeds fn_qname
-      (March_caps.Cap_rows.merge_seed prior_seed seed)
+    Hashtbl.replace env.fn_row_bodies fn_qname (prior_bodies @ bodies)
   in
   (* Names bound by a clause's parameter list. [FPPat] goes through
      [free_vars_pattern] so a destructuring head ([fn f((a, b))]) binds its
@@ -12794,7 +12809,13 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
    - The check runs at the end of [check_module_core] only — never on the
      REPL's [check_module_with_env] path, which has no entry point to be
      granted from (the same exemption R2 gives it). *)
-let check_main_grant (env : env) (decls : Ast.decl list) : unit =
+let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
+  (* [rows] lets the caller hand in an already-solved row table. Stage C made
+     the flat closure a projection of that solve, and stage D added a second
+     end-of-module consumer ([check_fn_grants]) — so without sharing, every
+     `--check` ran the fixpoint twice over the whole stdlib-prepended program.
+     That cost ~10% of wall-clock per file and pushed CI's @types-check step
+     (288 files, a 10-minute budget it was already using 9 of) over the limit. *)
   (* R1 stage D: `main`'s grant is the UNION over ALL of its capability
      parameters, not the head of the first one's caps.  Same rule as
      [check_fn_grants]; [Desugar.check_main_signature] guarantees every
@@ -12831,10 +12852,19 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
     | Some ((_ :: _ as grants), span, _) -> Some (grants, span)
     | _ -> None
   in
+  let solved = lazy (match rows with
+    | Some r -> r
+    | None -> fn_capability_rows_tbl env)
+  in
+  let closures_tbl () =
+    let tbl : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+    Hashtbl.iter
+      (fun k (r : March_caps.Cap_rows.row) -> Hashtbl.replace tbl k r.caps)
+      (Lazy.force solved);
+    tbl
+  in
   let main_closure () =
-    match
-      Hashtbl.find_opt (fn_transitive_capability_closures_tbl env) "main"
-    with
+    match Hashtbl.find_opt (closures_tbl ()) "main" with
     | Some caps -> caps
     | None -> []
   in
@@ -12906,9 +12936,7 @@ let check_main_grant (env : env) (decls : Ast.decl list) : unit =
   | None -> ()
   | Some (grants, span) ->
     let closure =
-      match
-        Hashtbl.find_opt (fn_transitive_capability_closures_tbl env) "main"
-      with
+      match Hashtbl.find_opt (closures_tbl ()) "main" with
       | Some caps -> caps
       | None -> []
     in
@@ -13105,10 +13133,12 @@ let dump_cap_rows (env : env) : unit =
     Printf.eprintf "cap-row-summary total=%d unknown=%d\n" (List.length rows)
       unknown_count
 
-let check_fn_grants (env : env) : unit =
+let check_fn_grants ?rows (env : env) : unit =
   dump_cap_rows env;
   if Hashtbl.length env.fn_grant_points > 0 then begin
-    let rows = fn_capability_rows_tbl env in
+    let rows =
+      match rows with Some r -> r | None -> fn_capability_rows_tbl env
+    in
     Hashtbl.iter
       (fun qname (grants, span) ->
          let row =
@@ -13491,11 +13521,18 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
     ~cap_qname_prefix:"";
   (* R1: hold the program's capability closure under main's grant. *)
-  check_main_grant final_env m.Ast.mod_decls;
+  (* Rows (deps/unknown) are only READ by [check_fn_grants], which does
+     nothing unless the program declares a capability parameter. Solving
+     caps-only otherwise keeps `--check` at its pre-stage-C cost. *)
+  let cap_rows =
+    fn_capability_rows_tbl
+      ~with_rows:(Hashtbl.length final_env.fn_grant_points > 0) final_env
+  in
+  check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
   (* R1 stage C: and each Cap-parameter function's row under its own grant.
      After [check_module_needs] for every module, so the closure every
      discharge point is judged against is complete. *)
-  check_fn_grants final_env;
+  check_fn_grants ~rows:cap_rows final_env;
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;

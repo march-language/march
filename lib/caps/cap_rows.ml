@@ -210,9 +210,9 @@ type row = { caps : string list; deps : string list; unknown : bool }
 
 let empty_row = { caps = []; deps = []; unknown = false }
 
-let solve ~(own_caps : (string, string list) Hashtbl.t)
+let solve ?(with_rows = true) ~(own_caps : (string, string list) Hashtbl.t)
     ~(refs : (string, string list) Hashtbl.t)
-    ~(seeds : (string, seed) Hashtbl.t) : (string, row) Hashtbl.t =
+    ~(seeds : (string, seed) Hashtbl.t) () : (string, row) Hashtbl.t =
   let caps : (string, string list) Hashtbl.t = Hashtbl.create 64 in
   Hashtbl.iter (fun k v -> Hashtbl.replace caps k v) own_caps;
   let deps : (string, string list) Hashtbl.t = Hashtbl.create 64 in
@@ -273,7 +273,7 @@ let solve ~(own_caps : (string, string list) Hashtbl.t)
          (* An untraceable invocation anywhere in the reach poisons every
             caller: a discharge point that can reach the invoker cannot be
             certified under a narrow grant. *)
-         if not (Hashtbl.mem unknown fn_qname) then
+         if with_rows && not (Hashtbl.mem unknown fn_qname) then
            if
              List.exists
                (fun r ->
@@ -287,7 +287,9 @@ let solve ~(own_caps : (string, string list) Hashtbl.t)
            end)
       refs;
     (* Effect polymorphism: passing one's own parameter into a callee's dep
-       position makes it this function's dep too. *)
+       position makes it this function's dep too. Skipped entirely when only
+       [caps] will be read — see [with_rows] in the .mli. *)
+    if with_rows then
     Hashtbl.iter
       (fun fn_qname (s : seed) ->
          List.iter
