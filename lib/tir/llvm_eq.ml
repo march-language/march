@@ -464,12 +464,12 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
                   | Some fen ->
                     e (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" ok fen fva fvb)
                   | None ->
-                    let pa = frsh "pa" in let pb = frsh "pb" in
-                    e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
-                    e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
-                    let c = frsh "c" in
-                    e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
-                    e (Printf.sprintf "%s = zext i1 %s to i64" ok c))
+                    (* No eq fn derivable (e.g. an opaque builtin type
+                       constructor with no March-level [type] declaration,
+                       like Task/Pid/WorkPool) — fall back to
+                       [march_poly_eq], same as the [TVar] arm just below,
+                       instead of raw pointer identity. *)
+                    e (Printf.sprintf "%s = call i64 @march_poly_eq(ptr %s, ptr %s)" ok fva fvb))
                | _ ->
                  (* Generic (TVar) field: the static type gives no comparison
                     strategy, so dispatch on the runtime shape via march_poly_eq
