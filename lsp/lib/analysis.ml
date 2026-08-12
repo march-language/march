@@ -3992,15 +3992,21 @@ let ty_at (a : t) ~line ~character : Tc.ty option =
     Some ty
 
 (* Find the Depot schema field under the cursor, if any.
-   co_span.start_col is the closing-quote column; opening = start_col - len - 1. *)
+
+   [co_span] covers the whole string literal, opening quote through closing
+   quote, so containment is a direct range test.  This used to back-compute
+   the opening quote as [start_col - String.length co_col - 1], because a
+   string literal's span recorded only its CLOSING quote; that is fixed, and
+   the back-computation was in any case wrong for a column name containing an
+   escape, where the literal's source extent is longer than its value. *)
 let depot_field_at (a : t) ~line ~character
     : (Depot.col_occ * Depot.depot_field) option =
   List.find_map (fun (occ : Depot.col_occ) ->
     let sp = occ.co_span in
     let sl = sp.start_line - 1 in
-    let closing_col = sp.start_col in
-    let str_start = closing_col - String.length occ.co_col - 1 in
-    if line = sl && character >= str_start && character <= closing_col then
+    (* end_col is one past the closing quote, so [<] keeps the old inclusive
+       "cursor may sit on either quote" behaviour. *)
+    if line = sl && character >= sp.start_col && character < sp.end_col then
       match List.find_opt (fun (s : Depot.schema) -> s.ds_table = occ.co_table)
               a.depot_schemas with
       | Some schema ->
@@ -4495,11 +4501,10 @@ let completions_at (a : t) ~line ~character =
     let open Lsp.Types in
     List.find_map (fun (occ : Depot.col_occ) ->
       let sp = occ.co_span in
-      (* Span start_col points at the closing quote; opening = start_col - len - 1 *)
+      (* co_span covers the whole literal; end_col is one past the closing
+         quote.  See depot_field_at for why this is no longer back-computed. *)
       let sl = sp.start_line - 1 in
-      let closing_col = sp.start_col in
-      let str_start = closing_col - String.length occ.co_col - 1 in
-      if line = sl && character >= str_start && character <= closing_col then
+      if line = sl && character >= sp.start_col && character < sp.end_col then
         match List.find_opt (fun (s : Depot.schema) -> s.ds_table = occ.co_table)
                 a.depot_schemas with
         | Some schema ->
@@ -4520,10 +4525,10 @@ let completions_at (a : t) ~line ~character =
     let open Lsp.Types in
     List.find_map (fun (occ : Depot.table_occ) ->
       let sp = occ.to_span in
+      (* to_span covers the whole literal; end_col is one past the closing
+         quote.  See depot_field_at for why this is no longer back-computed. *)
       let sl = sp.start_line - 1 in
-      let closing_col = sp.start_col in
-      let str_start = closing_col - String.length occ.to_table - 1 in
-      if line = sl && character >= str_start && character <= closing_col then
+      if line = sl && character >= sp.start_col && character < sp.end_col then
         Some (List.map (fun (s : Depot.schema) ->
           CompletionItem.create
             ~label:s.ds_table
