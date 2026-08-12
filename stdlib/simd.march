@@ -1,0 +1,422 @@
+-- Simd -- explicit 128-bit SIMD vector values (F32x4, F64x2, I32x4, I64x2, U8x16).
+-- Fixed width: identical semantics on every target, interpreted or compiled.
+-- See docs/simd-vectorization.md.
+--
+-- Boundary rule: lane get/set traffic in widened Int/Float; integer narrowing
+-- wraps mod 2^w two's-complement; f32 narrowing rounds to nearest-even; u8 loads
+-- zero-extend (0..255), i32 sign-extends. Integer lane arithmetic wraps. Float
+-- lanes are true single/double precision. min/max/hmin/hmax on floats use
+-- minNum/maxNum semantics (a NaN operand loses to the other; both NaN is NaN).
+-- sum accumulates sequentially (f32x4/f64x2 in double, i32x4/i64x2 in i64).
+--
+-- Lane order: lane 0 is the first make_* argument / lowest-addressed on load.
+--
+-- Mask convention: select/any/all/first_set all read a lane's HIGH BIT (its
+-- sign bit), matching hardware blend/movemask. eq/lt/gt still produce
+-- canonical all-ones/all-zero lanes, which read the same either way; a
+-- hand-rolled non-canonical mask lane follows the high-bit rule.
+mod Simd do
+
+  -- ── F32x4 ──────────────────────────────────────────────
+  doc "All lanes set to [v] (rounded to binary32)."
+  fn splat_f32x4(v : Float) do simd_f32x4_splat(v) end
+  doc "Vector with lane 0 = the first argument, ..., lane 3 = the last."
+  fn make_f32x4(v0 : Float, v1 : Float, v2 : Float, v3 : Float) do simd_f32x4_make(v0, v1, v2, v3) end
+  doc "Lane [i] (0-3), widened to Float exactly."
+  fn extract_f32x4(v, i : {Int | 0 <= _ && _ < 4}) do simd_f32x4_extract(v, i) end
+  doc "[v] with lane [i] set to [x] (rounded to binary32)."
+  fn replace_f32x4(v, i : {Int | 0 <= _ && _ < 4}, x : Float) do simd_f32x4_replace(v, i, x) end
+  doc "Load 4 lanes from [arr] starting at index [i] (dynamic bounds check; panics out of range)."
+  fn load_f32x4(arr, i : Int) do simd_f32x4_load(arr, i) end
+  doc "Store [v]'s 4 lanes into [arr] starting at index [i], returning the updated array (dynamic bounds check; panics out of range)."
+  fn store_f32x4(arr, i : Int, v) do simd_f32x4_store(arr, i, v) end
+  doc "Per-lane equality mask (all-ones lane where equal, zero otherwise)."
+  fn eq_f32x4(a, b) do simd_f32x4_eq(a, b) end
+  doc "Per-lane less-than mask (all-ones lane where [a] < [b], zero otherwise)."
+  fn lt_f32x4(a, b) do simd_f32x4_lt(a, b) end
+  doc "Per-lane greater-than mask (all-ones lane where [a] > [b], zero otherwise)."
+  fn gt_f32x4(a, b) do simd_f32x4_gt(a, b) end
+  doc "Per-lane bitwise AND."
+  fn and_f32x4(a, b) do simd_f32x4_and(a, b) end
+  doc "Per-lane bitwise OR."
+  fn or_f32x4(a, b) do simd_f32x4_or(a, b) end
+  doc "Per-lane bitwise XOR."
+  fn xor_f32x4(a, b) do simd_f32x4_xor(a, b) end
+  doc "Per-lane bitwise complement."
+  fn not_f32x4(v) do simd_f32x4_not(v) end
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
+  fn select_f32x4(mask, a, b) do simd_f32x4_select(mask, a, b) end
+  doc "True if any lane's high bit is set (interprets [v] as a mask)."
+  fn any_f32x4(v) do simd_f32x4_any(v) end
+  doc "True if every lane's high bit is set (interprets [v] as a mask)."
+  fn all_f32x4(v) do simd_f32x4_all(v) end
+  doc "Index of the first lane whose high bit is set (interprets [v] as a mask), or -1 if none."
+  fn first_set_f32x4(v) do simd_f32x4_first_set(v) end
+  doc "Per-lane addition, rounded to binary32."
+  fn add_f32x4(a, b) do simd_f32x4_add(a, b) end
+  doc "Per-lane subtraction, rounded to binary32."
+  fn sub_f32x4(a, b) do simd_f32x4_sub(a, b) end
+  doc "Per-lane multiplication, rounded to binary32."
+  fn mul_f32x4(a, b) do simd_f32x4_mul(a, b) end
+  doc "Per-lane division."
+  fn div_f32x4(a, b) do simd_f32x4_div(a, b) end
+  doc "Per-lane minimum (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn min_f32x4(a, b) do simd_f32x4_min(a, b) end
+  doc "Per-lane maximum (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn max_f32x4(a, b) do simd_f32x4_max(a, b) end
+  doc "Per-lane fused multiply-add: [a] * [b] + [c], one rounding."
+  fn fma_f32x4(a, b, c) do simd_f32x4_fma(a, b, c) end
+  doc "Per-lane square root."
+  fn sqrt_f32x4(v) do simd_f32x4_sqrt(v) end
+  doc "Horizontal sum of all lanes, accumulated sequentially in double."
+  fn sum_f32x4(v) do simd_f32x4_sum(v) end
+  doc "Horizontal minimum of all lanes (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn hmin_f32x4(v) do simd_f32x4_hmin(v) end
+  doc "Horizontal maximum of all lanes (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn hmax_f32x4(v) do simd_f32x4_hmax(v) end
+
+  -- ── F64x2 ──────────────────────────────────────────────
+  doc "All lanes set to [v]."
+  fn splat_f64x2(v : Float) do simd_f64x2_splat(v) end
+  doc "Vector with lane 0 = the first argument, ..., lane 1 = the last."
+  fn make_f64x2(v0 : Float, v1 : Float) do simd_f64x2_make(v0, v1) end
+  doc "Lane [i] (0-1), widened to Float exactly."
+  fn extract_f64x2(v, i : {Int | 0 <= _ && _ < 2}) do simd_f64x2_extract(v, i) end
+  doc "[v] with lane [i] set to [x]."
+  fn replace_f64x2(v, i : {Int | 0 <= _ && _ < 2}, x : Float) do simd_f64x2_replace(v, i, x) end
+  doc "Load 2 lanes from [arr] starting at index [i] (dynamic bounds check; panics out of range)."
+  fn load_f64x2(arr, i : Int) do simd_f64x2_load(arr, i) end
+  doc "Store [v]'s 2 lanes into [arr] starting at index [i], returning the updated array (dynamic bounds check; panics out of range)."
+  fn store_f64x2(arr, i : Int, v) do simd_f64x2_store(arr, i, v) end
+  doc "Per-lane equality mask (all-ones lane where equal, zero otherwise)."
+  fn eq_f64x2(a, b) do simd_f64x2_eq(a, b) end
+  doc "Per-lane less-than mask (all-ones lane where [a] < [b], zero otherwise)."
+  fn lt_f64x2(a, b) do simd_f64x2_lt(a, b) end
+  doc "Per-lane greater-than mask (all-ones lane where [a] > [b], zero otherwise)."
+  fn gt_f64x2(a, b) do simd_f64x2_gt(a, b) end
+  doc "Per-lane bitwise AND."
+  fn and_f64x2(a, b) do simd_f64x2_and(a, b) end
+  doc "Per-lane bitwise OR."
+  fn or_f64x2(a, b) do simd_f64x2_or(a, b) end
+  doc "Per-lane bitwise XOR."
+  fn xor_f64x2(a, b) do simd_f64x2_xor(a, b) end
+  doc "Per-lane bitwise complement."
+  fn not_f64x2(v) do simd_f64x2_not(v) end
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
+  fn select_f64x2(mask, a, b) do simd_f64x2_select(mask, a, b) end
+  doc "True if any lane's high bit is set (interprets [v] as a mask)."
+  fn any_f64x2(v) do simd_f64x2_any(v) end
+  doc "True if every lane's high bit is set (interprets [v] as a mask)."
+  fn all_f64x2(v) do simd_f64x2_all(v) end
+  doc "Index of the first lane whose high bit is set (interprets [v] as a mask), or -1 if none."
+  fn first_set_f64x2(v) do simd_f64x2_first_set(v) end
+  doc "Per-lane addition."
+  fn add_f64x2(a, b) do simd_f64x2_add(a, b) end
+  doc "Per-lane subtraction."
+  fn sub_f64x2(a, b) do simd_f64x2_sub(a, b) end
+  doc "Per-lane multiplication."
+  fn mul_f64x2(a, b) do simd_f64x2_mul(a, b) end
+  doc "Per-lane division."
+  fn div_f64x2(a, b) do simd_f64x2_div(a, b) end
+  doc "Per-lane minimum (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn min_f64x2(a, b) do simd_f64x2_min(a, b) end
+  doc "Per-lane maximum (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn max_f64x2(a, b) do simd_f64x2_max(a, b) end
+  doc "Per-lane fused multiply-add: [a] * [b] + [c], one rounding."
+  fn fma_f64x2(a, b, c) do simd_f64x2_fma(a, b, c) end
+  doc "Per-lane square root."
+  fn sqrt_f64x2(v) do simd_f64x2_sqrt(v) end
+  doc "Horizontal sum of all lanes, accumulated sequentially in double."
+  fn sum_f64x2(v) do simd_f64x2_sum(v) end
+  doc "Horizontal minimum of all lanes (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn hmin_f64x2(v) do simd_f64x2_hmin(v) end
+  doc "Horizontal maximum of all lanes (minNum/maxNum: a NaN lane yields the other operand; both NaN yields NaN)."
+  fn hmax_f64x2(v) do simd_f64x2_hmax(v) end
+
+  -- ── I32x4 ──────────────────────────────────────────────
+  doc "All lanes set to [v]."
+  fn splat_i32x4(v : Int) do simd_i32x4_splat(v) end
+  doc "Vector with lane 0 = the first argument, ..., lane 3 = the last."
+  fn make_i32x4(v0 : Int, v1 : Int, v2 : Int, v3 : Int) do simd_i32x4_make(v0, v1, v2, v3) end
+  doc "Lane [i] (0-3), widened to Int exactly."
+  fn extract_i32x4(v, i : {Int | 0 <= _ && _ < 4}) do simd_i32x4_extract(v, i) end
+  doc "[v] with lane [i] set to [x]."
+  fn replace_i32x4(v, i : {Int | 0 <= _ && _ < 4}, x : Int) do simd_i32x4_replace(v, i, x) end
+  doc "Load 4 lanes from [arr] starting at index [i] (dynamic bounds check; panics out of range)."
+  fn load_i32x4(arr, i : Int) do simd_i32x4_load(arr, i) end
+  doc "Store [v]'s 4 lanes into [arr] starting at index [i], returning the updated array (dynamic bounds check; panics out of range)."
+  fn store_i32x4(arr, i : Int, v) do simd_i32x4_store(arr, i, v) end
+  doc "Per-lane equality mask (all-ones lane where equal, zero otherwise)."
+  fn eq_i32x4(a, b) do simd_i32x4_eq(a, b) end
+  doc "Per-lane less-than mask (all-ones lane where [a] < [b], zero otherwise)."
+  fn lt_i32x4(a, b) do simd_i32x4_lt(a, b) end
+  doc "Per-lane greater-than mask (all-ones lane where [a] > [b], zero otherwise)."
+  fn gt_i32x4(a, b) do simd_i32x4_gt(a, b) end
+  doc "Per-lane bitwise AND."
+  fn and_i32x4(a, b) do simd_i32x4_and(a, b) end
+  doc "Per-lane bitwise OR."
+  fn or_i32x4(a, b) do simd_i32x4_or(a, b) end
+  doc "Per-lane bitwise XOR."
+  fn xor_i32x4(a, b) do simd_i32x4_xor(a, b) end
+  doc "Per-lane bitwise complement."
+  fn not_i32x4(v) do simd_i32x4_not(v) end
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
+  fn select_i32x4(mask, a, b) do simd_i32x4_select(mask, a, b) end
+  doc "True if any lane's high bit is set (interprets [v] as a mask)."
+  fn any_i32x4(v) do simd_i32x4_any(v) end
+  doc "True if every lane's high bit is set (interprets [v] as a mask)."
+  fn all_i32x4(v) do simd_i32x4_all(v) end
+  doc "Index of the first lane whose high bit is set (interprets [v] as a mask), or -1 if none."
+  fn first_set_i32x4(v) do simd_i32x4_first_set(v) end
+  doc "Per-lane addition, wraps mod 2^w."
+  fn add_i32x4(a, b) do simd_i32x4_add(a, b) end
+  doc "Per-lane subtraction, wraps mod 2^w."
+  fn sub_i32x4(a, b) do simd_i32x4_sub(a, b) end
+  doc "Per-lane multiplication, wraps mod 2^w."
+  fn mul_i32x4(a, b) do simd_i32x4_mul(a, b) end
+  doc "Per-lane minimum."
+  fn min_i32x4(a, b) do simd_i32x4_min(a, b) end
+  doc "Per-lane maximum."
+  fn max_i32x4(a, b) do simd_i32x4_max(a, b) end
+  doc "Per-lane logical shift left by [n] (masked to the element width)."
+  fn shl_i32x4(v, n : Int) do simd_i32x4_shl(v, n) end
+  doc "Per-lane arithmetic shift right by [n] (masked to the element width, sign-extending)."
+  fn shr_i32x4(v, n : Int) do simd_i32x4_shr(v, n) end
+  doc "Horizontal sum of all lanes, accumulated sequentially in i64."
+  fn sum_i32x4(v) do simd_i32x4_sum(v) end
+  doc "Horizontal minimum of all lanes."
+  fn hmin_i32x4(v) do simd_i32x4_hmin(v) end
+  doc "Horizontal maximum of all lanes."
+  fn hmax_i32x4(v) do simd_i32x4_hmax(v) end
+
+  -- ── I64x2 ──────────────────────────────────────────────
+  doc "All lanes set to [v]."
+  fn splat_i64x2(v : Int) do simd_i64x2_splat(v) end
+  doc "Vector with lane 0 = the first argument, ..., lane 1 = the last."
+  fn make_i64x2(v0 : Int, v1 : Int) do simd_i64x2_make(v0, v1) end
+  doc "Lane [i] (0-1), widened to Int exactly."
+  fn extract_i64x2(v, i : {Int | 0 <= _ && _ < 2}) do simd_i64x2_extract(v, i) end
+  doc "[v] with lane [i] set to [x]."
+  fn replace_i64x2(v, i : {Int | 0 <= _ && _ < 2}, x : Int) do simd_i64x2_replace(v, i, x) end
+  doc "Load 2 lanes from [arr] starting at index [i] (dynamic bounds check; panics out of range)."
+  fn load_i64x2(arr, i : Int) do simd_i64x2_load(arr, i) end
+  doc "Store [v]'s 2 lanes into [arr] starting at index [i], returning the updated array (dynamic bounds check; panics out of range)."
+  fn store_i64x2(arr, i : Int, v) do simd_i64x2_store(arr, i, v) end
+  doc "Per-lane equality mask (all-ones lane where equal, zero otherwise)."
+  fn eq_i64x2(a, b) do simd_i64x2_eq(a, b) end
+  doc "Per-lane less-than mask (all-ones lane where [a] < [b], zero otherwise)."
+  fn lt_i64x2(a, b) do simd_i64x2_lt(a, b) end
+  doc "Per-lane greater-than mask (all-ones lane where [a] > [b], zero otherwise)."
+  fn gt_i64x2(a, b) do simd_i64x2_gt(a, b) end
+  doc "Per-lane bitwise AND."
+  fn and_i64x2(a, b) do simd_i64x2_and(a, b) end
+  doc "Per-lane bitwise OR."
+  fn or_i64x2(a, b) do simd_i64x2_or(a, b) end
+  doc "Per-lane bitwise XOR."
+  fn xor_i64x2(a, b) do simd_i64x2_xor(a, b) end
+  doc "Per-lane bitwise complement."
+  fn not_i64x2(v) do simd_i64x2_not(v) end
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
+  fn select_i64x2(mask, a, b) do simd_i64x2_select(mask, a, b) end
+  doc "True if any lane's high bit is set (interprets [v] as a mask)."
+  fn any_i64x2(v) do simd_i64x2_any(v) end
+  doc "True if every lane's high bit is set (interprets [v] as a mask)."
+  fn all_i64x2(v) do simd_i64x2_all(v) end
+  doc "Index of the first lane whose high bit is set (interprets [v] as a mask), or -1 if none."
+  fn first_set_i64x2(v) do simd_i64x2_first_set(v) end
+  doc "Per-lane addition, wraps mod 2^w."
+  fn add_i64x2(a, b) do simd_i64x2_add(a, b) end
+  doc "Per-lane subtraction, wraps mod 2^w."
+  fn sub_i64x2(a, b) do simd_i64x2_sub(a, b) end
+  doc "Per-lane multiplication, wraps mod 2^w."
+  fn mul_i64x2(a, b) do simd_i64x2_mul(a, b) end
+  doc "Per-lane minimum."
+  fn min_i64x2(a, b) do simd_i64x2_min(a, b) end
+  doc "Per-lane maximum."
+  fn max_i64x2(a, b) do simd_i64x2_max(a, b) end
+  doc "Per-lane logical shift left by [n] (masked to the element width)."
+  fn shl_i64x2(v, n : Int) do simd_i64x2_shl(v, n) end
+  doc "Per-lane arithmetic shift right by [n] (masked to the element width, sign-extending)."
+  fn shr_i64x2(v, n : Int) do simd_i64x2_shr(v, n) end
+  doc "Horizontal sum of all lanes, accumulated sequentially in i64."
+  fn sum_i64x2(v) do simd_i64x2_sum(v) end
+  doc "Horizontal minimum of all lanes."
+  fn hmin_i64x2(v) do simd_i64x2_hmin(v) end
+  doc "Horizontal maximum of all lanes."
+  fn hmax_i64x2(v) do simd_i64x2_hmax(v) end
+
+  -- ── U8x16 ──────────────────────────────────────────────
+  doc "All lanes set to [v]."
+  fn splat_u8x16(v : Int) do simd_u8x16_splat(v) end
+  doc "Vector with lane 0 = the first argument, ..., lane 15 = the last."
+  fn make_u8x16(v0 : Int, v1 : Int, v2 : Int, v3 : Int, v4 : Int, v5 : Int, v6 : Int, v7 : Int, v8 : Int, v9 : Int, v10 : Int, v11 : Int, v12 : Int, v13 : Int, v14 : Int, v15 : Int) do simd_u8x16_make(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15) end
+  doc "Lane [i] (0-15), widened to Int exactly."
+  fn extract_u8x16(v, i : {Int | 0 <= _ && _ < 16}) do simd_u8x16_extract(v, i) end
+  doc "[v] with lane [i] set to [x]."
+  fn replace_u8x16(v, i : {Int | 0 <= _ && _ < 16}, x : Int) do simd_u8x16_replace(v, i, x) end
+  doc "Load 16 lanes from [arr] starting at index [i] (dynamic bounds check; panics out of range)."
+  fn load_u8x16(arr, i : Int) do simd_u8x16_load(arr, i) end
+  doc "Store [v]'s 16 lanes into [arr] starting at index [i], returning the updated array (dynamic bounds check; panics out of range)."
+  fn store_u8x16(arr, i : Int, v) do simd_u8x16_store(arr, i, v) end
+  doc "Per-lane equality mask (all-ones lane where equal, zero otherwise)."
+  fn eq_u8x16(a, b) do simd_u8x16_eq(a, b) end
+  doc "Per-lane less-than mask (all-ones lane where [a] < [b], zero otherwise)."
+  fn lt_u8x16(a, b) do simd_u8x16_lt(a, b) end
+  doc "Per-lane greater-than mask (all-ones lane where [a] > [b], zero otherwise)."
+  fn gt_u8x16(a, b) do simd_u8x16_gt(a, b) end
+  doc "Per-lane bitwise AND."
+  fn and_u8x16(a, b) do simd_u8x16_and(a, b) end
+  doc "Per-lane bitwise OR."
+  fn or_u8x16(a, b) do simd_u8x16_or(a, b) end
+  doc "Per-lane bitwise XOR."
+  fn xor_u8x16(a, b) do simd_u8x16_xor(a, b) end
+  doc "Per-lane bitwise complement."
+  fn not_u8x16(v) do simd_u8x16_not(v) end
+  doc "Per-lane: [mask]'s lane high bit set selects [a]'s lane, else [b]'s lane."
+  fn select_u8x16(mask, a, b) do simd_u8x16_select(mask, a, b) end
+  doc "True if any lane's high bit is set (interprets [v] as a mask)."
+  fn any_u8x16(v) do simd_u8x16_any(v) end
+  doc "True if every lane's high bit is set (interprets [v] as a mask)."
+  fn all_u8x16(v) do simd_u8x16_all(v) end
+  doc "Index of the first lane whose high bit is set (interprets [v] as a mask), or -1 if none."
+  fn first_set_u8x16(v) do simd_u8x16_first_set(v) end
+
+  -- ── Show / Eq / Hash impls — pure March, shared by both execution paths ──
+
+  impl Show(F32x4) do
+    fn show(v) do
+      "F32x4[" ++ to_string(simd_f32x4_extract(v, 0)) ++ ", " ++ to_string(simd_f32x4_extract(v, 1)) ++ ", " ++ to_string(simd_f32x4_extract(v, 2)) ++ ", " ++ to_string(simd_f32x4_extract(v, 3)) ++ "]"
+    end
+  end
+
+  impl Eq(F32x4) do
+    fn eq(a, b) do
+      simd_f32x4_extract(a, 0) == simd_f32x4_extract(b, 0)
+        && simd_f32x4_extract(a, 1) == simd_f32x4_extract(b, 1)
+        && simd_f32x4_extract(a, 2) == simd_f32x4_extract(b, 2)
+        && simd_f32x4_extract(a, 3) == simd_f32x4_extract(b, 3)
+    end
+  end
+
+  impl Hash(F32x4) do
+    fn hash(v) do
+      hash(simd_f32x4_extract(v, 0)) * 31
+        + hash(simd_f32x4_extract(v, 1)) * 17
+        + hash(simd_f32x4_extract(v, 2)) * 7
+        + hash(simd_f32x4_extract(v, 3))
+    end
+  end
+
+  impl Show(F64x2) do
+    fn show(v) do
+      "F64x2[" ++ to_string(simd_f64x2_extract(v, 0)) ++ ", " ++ to_string(simd_f64x2_extract(v, 1)) ++ "]"
+    end
+  end
+
+  impl Eq(F64x2) do
+    fn eq(a, b) do
+      simd_f64x2_extract(a, 0) == simd_f64x2_extract(b, 0)
+        && simd_f64x2_extract(a, 1) == simd_f64x2_extract(b, 1)
+    end
+  end
+
+  impl Hash(F64x2) do
+    fn hash(v) do
+      hash(simd_f64x2_extract(v, 0)) * 31
+        + hash(simd_f64x2_extract(v, 1))
+    end
+  end
+
+  impl Show(I32x4) do
+    fn show(v) do
+      "I32x4[" ++ to_string(simd_i32x4_extract(v, 0)) ++ ", " ++ to_string(simd_i32x4_extract(v, 1)) ++ ", " ++ to_string(simd_i32x4_extract(v, 2)) ++ ", " ++ to_string(simd_i32x4_extract(v, 3)) ++ "]"
+    end
+  end
+
+  impl Eq(I32x4) do
+    fn eq(a, b) do
+      simd_i32x4_extract(a, 0) == simd_i32x4_extract(b, 0)
+        && simd_i32x4_extract(a, 1) == simd_i32x4_extract(b, 1)
+        && simd_i32x4_extract(a, 2) == simd_i32x4_extract(b, 2)
+        && simd_i32x4_extract(a, 3) == simd_i32x4_extract(b, 3)
+    end
+  end
+
+  impl Hash(I32x4) do
+    fn hash(v) do
+      hash(simd_i32x4_extract(v, 0)) * 31
+        + hash(simd_i32x4_extract(v, 1)) * 17
+        + hash(simd_i32x4_extract(v, 2)) * 7
+        + hash(simd_i32x4_extract(v, 3))
+    end
+  end
+
+  impl Show(I64x2) do
+    fn show(v) do
+      "I64x2[" ++ to_string(simd_i64x2_extract(v, 0)) ++ ", " ++ to_string(simd_i64x2_extract(v, 1)) ++ "]"
+    end
+  end
+
+  impl Eq(I64x2) do
+    fn eq(a, b) do
+      simd_i64x2_extract(a, 0) == simd_i64x2_extract(b, 0)
+        && simd_i64x2_extract(a, 1) == simd_i64x2_extract(b, 1)
+    end
+  end
+
+  impl Hash(I64x2) do
+    fn hash(v) do
+      hash(simd_i64x2_extract(v, 0)) * 31
+        + hash(simd_i64x2_extract(v, 1))
+    end
+  end
+
+  impl Show(U8x16) do
+    fn show(v) do
+      "U8x16[" ++ to_string(simd_u8x16_extract(v, 0)) ++ ", " ++ to_string(simd_u8x16_extract(v, 1)) ++ ", " ++ to_string(simd_u8x16_extract(v, 2)) ++ ", " ++ to_string(simd_u8x16_extract(v, 3)) ++ ", " ++ to_string(simd_u8x16_extract(v, 4)) ++ ", " ++ to_string(simd_u8x16_extract(v, 5)) ++ ", " ++ to_string(simd_u8x16_extract(v, 6)) ++ ", " ++ to_string(simd_u8x16_extract(v, 7)) ++ ", " ++ to_string(simd_u8x16_extract(v, 8)) ++ ", " ++ to_string(simd_u8x16_extract(v, 9)) ++ ", " ++ to_string(simd_u8x16_extract(v, 10)) ++ ", " ++ to_string(simd_u8x16_extract(v, 11)) ++ ", " ++ to_string(simd_u8x16_extract(v, 12)) ++ ", " ++ to_string(simd_u8x16_extract(v, 13)) ++ ", " ++ to_string(simd_u8x16_extract(v, 14)) ++ ", " ++ to_string(simd_u8x16_extract(v, 15)) ++ "]"
+    end
+  end
+
+  impl Eq(U8x16) do
+    fn eq(a, b) do
+      simd_u8x16_extract(a, 0) == simd_u8x16_extract(b, 0)
+        && simd_u8x16_extract(a, 1) == simd_u8x16_extract(b, 1)
+        && simd_u8x16_extract(a, 2) == simd_u8x16_extract(b, 2)
+        && simd_u8x16_extract(a, 3) == simd_u8x16_extract(b, 3)
+        && simd_u8x16_extract(a, 4) == simd_u8x16_extract(b, 4)
+        && simd_u8x16_extract(a, 5) == simd_u8x16_extract(b, 5)
+        && simd_u8x16_extract(a, 6) == simd_u8x16_extract(b, 6)
+        && simd_u8x16_extract(a, 7) == simd_u8x16_extract(b, 7)
+        && simd_u8x16_extract(a, 8) == simd_u8x16_extract(b, 8)
+        && simd_u8x16_extract(a, 9) == simd_u8x16_extract(b, 9)
+        && simd_u8x16_extract(a, 10) == simd_u8x16_extract(b, 10)
+        && simd_u8x16_extract(a, 11) == simd_u8x16_extract(b, 11)
+        && simd_u8x16_extract(a, 12) == simd_u8x16_extract(b, 12)
+        && simd_u8x16_extract(a, 13) == simd_u8x16_extract(b, 13)
+        && simd_u8x16_extract(a, 14) == simd_u8x16_extract(b, 14)
+        && simd_u8x16_extract(a, 15) == simd_u8x16_extract(b, 15)
+    end
+  end
+
+  impl Hash(U8x16) do
+    fn hash(v) do
+      hash(simd_u8x16_extract(v, 0)) * 31
+        + hash(simd_u8x16_extract(v, 1)) * 17
+        + hash(simd_u8x16_extract(v, 2)) * 7
+        + hash(simd_u8x16_extract(v, 3)) * 3
+        + hash(simd_u8x16_extract(v, 4)) * 13
+        + hash(simd_u8x16_extract(v, 5)) * 11
+        + hash(simd_u8x16_extract(v, 6)) * 5
+        + hash(simd_u8x16_extract(v, 7)) * 19
+        + hash(simd_u8x16_extract(v, 8)) * 23
+        + hash(simd_u8x16_extract(v, 9)) * 29
+        + hash(simd_u8x16_extract(v, 10)) * 37
+        + hash(simd_u8x16_extract(v, 11)) * 41
+        + hash(simd_u8x16_extract(v, 12)) * 43
+        + hash(simd_u8x16_extract(v, 13)) * 47
+        + hash(simd_u8x16_extract(v, 14)) * 53
+        + hash(simd_u8x16_extract(v, 15))
+    end
+  end
+
+end

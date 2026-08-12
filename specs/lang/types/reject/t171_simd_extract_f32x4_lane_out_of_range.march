@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: refinement violation: argument `i` of `Simd.extract_f32x4` does not satisfy precondition
+-- Refinement types (widening slice 12, §2.14), applied to Simd (2026-08-10 —
+-- specs/todos/2026-08-10-simd-vector-types.md Task 1). `Simd.extract_f32x4`'s
+-- lane index carries `{Int | 0 <= _ && _ < 4}` (stdlib/simd.march); a DIRECT
+-- call with the literal `4` violates the upper bound (F32x4 has lanes 0..3)
+-- -- Z3 refutes it with no path-sensitivity needed, so `--check` rejects with
+-- the pinned "refinement violation" message, same shape as reject/t71's
+-- `take_n(-3)`. Accept companion: accept/t173 (lane 3, the last legal index).
+mod M do
+  needs IO.Console
+  fn main() do
+    let v = Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
+    println(to_string(Simd.extract_f32x4(v, 4)))
+  end
+end

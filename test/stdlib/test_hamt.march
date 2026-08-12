@@ -60,7 +60,7 @@ describe "empty" do
   end
 
   test "fold on empty returns initial accumulator" do
-    assert (Hamt.fold(99, Hamt.empty(), count_fn) == 99)
+    assert (Hamt.fold(Hamt.empty(), 99, count_fn) == 99)
   end
 end
 
@@ -103,12 +103,12 @@ describe "single element" do
 
   test "fold over singleton calls f once" do
     let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
-    assert (Hamt.fold(0, node, count_fn) == 1)
+    assert (Hamt.fold(node, 0, count_fn) == 1)
   end
 
   test "fold over singleton accumulates value" do
     let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
-    assert (Hamt.fold(0, node, sum_vals_fn) == 100)
+    assert (Hamt.fold(node, 0, sum_vals_fn) == 100)
   end
 end
 
@@ -188,14 +188,14 @@ describe "multiple elements" do
     let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
     let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
     let n3 = Hamt.insert(n2, 3, 30, int_hash, int_eq)
-    assert (Hamt.fold(0, n3, count_fn) == 3)
+    assert (Hamt.fold(n3, 0, count_fn) == 3)
   end
 
   test "fold sum matches expected total" do
     let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
     let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
     let n3 = Hamt.insert(n2, 3, 30, int_hash, int_eq)
-    assert (Hamt.fold(0, n3, sum_vals_fn) == 60)
+    assert (Hamt.fold(n3, 0, sum_vals_fn) == 60)
   end
 
   test "fold count matches size" do
@@ -204,7 +204,7 @@ describe "multiple elements" do
     let n3 = Hamt.insert(n2, 30, 3, int_hash, int_eq)
     let n4 = Hamt.insert(n3, 40, 4, int_hash, int_eq)
     let n5 = Hamt.insert(n4, 50, 5, int_hash, int_eq)
-    let fold_count = Hamt.fold(0, n5, count_fn)
+    let fold_count = Hamt.fold(n5, 0, count_fn)
     assert (fold_count == Hamt.size(n5))
   end
 end
@@ -320,14 +320,14 @@ describe "hash collisions" do
     let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
     let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
     let n3 = Hamt.insert(n2, 3, 30, zero_hash, int_eq)
-    assert (Hamt.fold(0, n3, count_fn) == 3)
+    assert (Hamt.fold(n3, 0, count_fn) == 3)
   end
 
   test "fold sum over collision bucket" do
     let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
     let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
     let n3 = Hamt.insert(n2, 3, 30, zero_hash, int_eq)
-    assert (Hamt.fold(0, n3, sum_vals_fn) == 60)
+    assert (Hamt.fold(n3, 0, sum_vals_fn) == 60)
   end
 
   test "absent key with colliding hash returns None" do
@@ -367,7 +367,7 @@ describe "larger trie" do
     let n5 = Hamt.insert(n4, 500, 5, int_hash, int_eq)
     let n6 = Hamt.insert(n5, 600, 6, int_hash, int_eq)
     let n7 = Hamt.insert(n6, 700, 7, int_hash, int_eq)
-    let fold_count = Hamt.fold(0, n7, count_fn)
+    let fold_count = Hamt.fold(n7, 0, count_fn)
     assert (fold_count == Hamt.size(n7))
     assert (Hamt.size(n7) == 7)
   end

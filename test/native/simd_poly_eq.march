@@ -1,0 +1,24 @@
+-- Witness for the march_poly_eq/march_poly_compare MARCH_SIMD_TAG fix
+-- (2026-08 SIMD Task 2 review finding #1): List.member's `y == x` compares
+-- two GENERICALLY-typed (TVar `a`) elements, so both operands arrive at the
+-- comparison codegen already boxed `ptr` — the SIMD-vector `==`/`!=` branch
+-- (keyed on the EMITTED LLVM type, which is `ptr` here, not a vector type)
+-- does not fire, so this falls all the way through to march_poly_eq. Before
+-- the fix, march_poly_eq had no MARCH_SIMD_TAG case and fell to its default
+-- `return 0` (not-equal) for ANY two distinct SIMD boxes — so
+-- `List.member([v1, v2], v1_content_equal_but_different_box)` was always
+-- false, even when the vectors held the same lanes.
+mod SimdPolyEq do
+  needs IO.Console
+
+  fn main() : Unit do
+    let xs = [Simd.make_f32x4(1.0, 2.0, 3.0, 4.0), Simd.splat_f32x4(1.0)]
+    -- Content-equal to the 2nd element via a FRESH box (splat_f32x4 called
+    -- again — a different heap allocation, same lanes).
+    println(List.member(xs, Simd.splat_f32x4(1.0)))
+    -- No content match anywhere in xs.
+    println(List.member(xs, Simd.splat_f32x4(9.0)))
+    -- Content-equal to the 1st element via a fresh box.
+    println(List.member(xs, Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)))
+  end
+end
