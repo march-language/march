@@ -11892,6 +11892,36 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
 
+(** Bug: a variant field typed as an OPAQUE builtin type constructor (no
+    March-level `type` declaration exists for it — e.g. `Task(a)`) makes
+    [ensure_adt_eq_fn] return [None] for that field's own type. The `==`
+    operator's per-ctor field-compare arm for [TCon _ | TTuple _ | TRecord _]
+    then fell back to raw pointer-identity (ptrtoint + icmp eq) instead of
+    [march_poly_eq] — the runtime-shape-dispatched comparator the sibling
+    [TVar] arm (ten lines below in [llvm_eq.ml]) already uses for exactly
+    this "no eq fn derivable" situation. Two distinct heap cells with
+    identical content would then compare unequal.
+    `Task(Int)` gives a clean repro: `Holder` itself has a `type`
+    declaration (resolvable), but its field type `Task(Int)` does not (Task
+    is a compiler-builtin type constructor never declared in March source) —
+    and two non-nullary single-field ctors keep this off the Newtype/Niche
+    shortcuts, landing in the general ctor-table codegen path where the bug
+    lives. This only checks the emitted IR (no execution needed — the bug is
+    in which comparator gets *called*, not runtime behavior of Task itself). *)
+let test_eq_operator_opaque_ctor_field_uses_poly_eq () =
+  let ir = emit_actor_ir {|mod EqOpaqueCtorField do
+  needs IO.Console
+  type Holder = HA(Task(Int)) | HB(Task(Int))
+  derive Eq for Holder
+  fn main() : Unit do
+    let t = task_spawn(fn n -> n)
+    println(bool_to_string(HA(t) == HA(t)))
+  end
+end|} in
+  Alcotest.(check bool)
+    "opaque ctor field falls back to march_poly_eq, not pointer identity"
+    true (ir_contains ir "call i64 @march_poly_eq")
+
 (** Cross-module ambiguous-constructor resolution (compiled-only regression).
 
     `Msgpack.Value` and `Json.JsonValue` (both stdlib) share the bare constructor
@@ -14305,6 +14335,8 @@ let codegen_suites =
             test_newtype_eq_operator_boxed_payload_compiled;
           Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
             test_newtype_eq_operator_generic_payload_compiled;
+          Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
+            test_eq_operator_opaque_ctor_field_uses_poly_eq;
         ] );
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
