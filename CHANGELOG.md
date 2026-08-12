@@ -44,7 +44,24 @@ git log is authoritative for exact commits.
 - **Tail-recursion-modulo-cons is now on by default.** A recursive call that is
   the direct argument of a constructor in tail position compiles to a loop that
   allocates the cell up front and fills its hole in place, instead of consuming
-  O(depth) stack. `--no-trmc` disables it.
+  O(depth) stack. `--no-trmc` disables it, but see the note below — it is now a
+  debug/bisect switch, not a supported mode.
+- **`List.map`, `List.filter` and `List.filter_map` now traverse the list once**
+  instead of building a reversed accumulator and reversing it. Same results,
+  same complexity class, roughly half the work per call — `bench/list_producers`
+  went from 0.59-0.62s to 0.19-0.21s. These three are now written in natural
+  (non-tail) style and depend on TRMC to become loops, so **`--no-trmc` is no
+  longer a supported mode**: a `--no-trmc` binary overflows the stack on long
+  lists (measured: exit 138 at 300k elements). The flag is kept for bisecting
+  compiler bugs.
+- **TRMC now keeps a plain tail self-call inside the generated
+  destination-passing helper a real tail call**, threading the same destination
+  through, instead of emitting a non-tail call back to the entry function whose
+  result is then stored. Functions with both a modulo-cons branch and a plain
+  tail branch — `List.filter`'s shape — previously still consumed O(n) stack
+  whenever the two branches *alternated*, and overflowed at ~300k elements. An
+  all-true or all-false predicate never alternates, so this was invisible to a
+  control that tested only those two directions.
 - **The structural-recursion warning no longer prescribes an accumulator for
   constructor-wrapped recursion.** For a body like `Succ(bump(k))`, TRMC
   compiles the recursion into a loop, so the old "uses O(depth) stack space"

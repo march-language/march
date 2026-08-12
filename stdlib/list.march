@@ -285,14 +285,16 @@ mod List do
       ["foo", "bar"]
   """
   fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
-      match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) ->
-        if pred(h) do go(t, Cons(h, acc)) else go(t, acc) end
-      end
+    -- Natural style (see `map`).  The keep branch is modulo-cons and the drop
+    -- branch a plain tail call; TRMC turns BOTH into tail calls to the same
+    -- destination-passing helper, so neither grows the stack.  It must do both
+    -- -- with only the keep branch rewritten, a predicate that ALTERNATES
+    -- pushed a frame per alternation and overflowed at ~300k elements.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, filter(t, pred)) else filter(t, pred) end
     end
-    go(xs, Nil)
   end
 
   -- ---- Parallel ----
@@ -405,18 +407,17 @@ mod List do
   Equivalent to map followed by filter for non-None values.
   """
   fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
-    fn go(lst : List(a), acc : List(b)) : List(b) do
-      match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) -> do
-        match f(h) do
-        Some(v) -> go(t, Cons(v, acc))
-        None    -> go(t, acc)
-        end
-      end
+    -- Natural style (see `map`).  Like `filter`, the Some branch is the
+    -- modulo-cons one and the None branch a plain tail call; TRMC turns both
+    -- into a destination-passing loop.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      match f(h) do
+      Some(v) -> Cons(v, filter_map(t, f))
+      None    -> filter_map(t, f)
       end
     end
-    go(xs, Nil)
   end
 
   doc """

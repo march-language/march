@@ -575,15 +575,38 @@ to natural style.
 - Atomic hole-fill for actor-shared values — refused the types instead of
   answering the question.
 
-### STILL OUTSTANDING
+### Stdlib rewrite to natural style (2026-08-12, Task 8) — DONE for map/filter/filter_map
 
-**The stdlib rewrite to natural style has NOT been done.** `stdlib/list.march`
-remains accumulator-style, so the headline list-producer win is not yet
-collected. That is tracked as Task 8 of
-`specs/plans/2026-08-10-trmc-on-by-default.md` and is deliberately sequenced
-after this flip. This file is filed under `progress/` because the *compiler*
-side is complete and shipping by default — not because the whole TRMC program
-is finished.
+`List.map`, `List.filter` and `List.filter_map` in `stdlib/list.march` are now
+natural style; all three classify `eligible` and get a `$dps` helper.
+`bench/list_producers` went 0.59-0.62s → 0.19-0.21s (same-minute A/B).
+
+Landing them exposed a real transform bug, fixed in the same scope:
+**`returnify` turned a PLAIN tail self-call inside the `$dps` helper into a
+non-tail call back to the ENTRY plus a store** (`let r = filter(t,p) in
+$dst.1 <- r`). The entry's own modulo-cons branch re-enters the helper, so a
+function with both branch kinds — `List.filter`'s shape — pushed one frame per
+*alternation* and still overflowed at ~300k elements despite a `TRMCXFORM`
+line. `returnify` now emits `f$dps(as, dst)`, threading the same destination
+through. Pinned by `test/snapshots/*/trmc_mixed_tail.expected` (IR shape) and
+by the 300k `adversarial-regressions` case in `test/test_stdlib_suite.ml`
+(runtime).
+
+**The measurement trap worth remembering:** an all-true or all-false predicate
+never alternates and never grows the stack. Both passed at 300k while the
+alternating predicate died with SIGBUS. A control that exercises only the two
+extreme directions of a two-branch function proves nothing about the branch
+*interleaving*.
+
+Still accumulator-style, deliberately (not rewritten, one scope at a time):
+`append`, `flat_map`, `concat`, `take`, `take_while`, `chunks`, `zip`,
+`zip_with`, `enumerate`, `intersperse`, `dedup`, `scan_left`, `range_step`,
+`split_at`, `unzip`.
+
+**Consequence: `--no-trmc` is no longer a supported mode.** The three rewritten
+producers are non-tail by construction, so a `--no-trmc` binary overflows the
+stack on long lists (exit 138 at 300k). The flag is kept as a debug/bisect
+switch and its `--help` text now says so.
 
 ### CI
 

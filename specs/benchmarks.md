@@ -340,14 +340,28 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 | Recursive driver | `repeat_n` is itself tail-recursive; the cost under test is entirely inside `step`/`List.map` |
 
 **Baseline (2026-08-10, macOS/arm64 shared/contended dev machine, compiled
-`--compile --opt 2`, TRMC off — `MARCH_TRMC` unset, which is the default):**
-3 runs of the compiled binary, run 1 discarded as ~25% warmup:
+`--compile --opt 2`, TRMC off — at the time `MARCH_TRMC` was unset and that
+WAS the default. TRMC has since been turned on by default (2026-08-10) and
+`List.map` rewritten into natural style (2026-08-12), so this row is a
+historical accumulator+TRMC-off baseline, not a reproducible one — see the
+post-rewrite numbers below it):** 3 runs of the compiled binary, run 1
+discarded as ~25% warmup:
 
 | run | real | user | sys |
 |---|---|---|---|
 | 1 (warmup, discarded) | 0.96s | 0.64s | 0.05s |
 | 2 | 0.77s | 0.64s | 0.04s |
 | 3 | 0.86s | 0.64s | 0.04s |
+
+**After the natural-style rewrite (2026-08-12, same machine, same command,
+TRMC on by default).** Both binaries were re-timed back-to-back in the same
+minute — an absolute number recorded hours apart on this box is not a
+regression detector:
+
+| binary | run 2 | run 3 |
+|---|---|---|
+| accumulator + `reverse` (pre-rewrite) | 0.59s | 0.62s |
+| natural style + TRMC (current) | 0.19s | 0.19s |
 
 **Usable baseline: real ≈ 0.77-0.86s, user ≈ 0.64s (runs 2-3).** Compare on
 `user` CPU time, not `real` — on a contended machine `real` wall-clock time

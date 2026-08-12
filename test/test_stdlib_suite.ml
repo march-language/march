@@ -10377,6 +10377,60 @@ let run_capture_rc cmd =
   (try Sys.remove out_f with _ -> ());
   (rc, String.trim out)
 
+(* ── Deep-list guard: the stdlib producers must not consume O(depth) stack ──
+   Since 2026-08-12 List.map / List.filter / List.filter_map in
+   stdlib/list.march are written in NATURAL (non-tail) style — `Cons(f(h),
+   map(t, f))` — instead of the old accumulator + `reverse`.  That halves the
+   traversal work, but only because tail-recursion-modulo-cons (ON by default,
+   lib/tir/trmc.ml) rewrites the constructor-wrapped self-call into a
+   destination-passing LOOP.  Without that rewrite each of the three is a
+   genuinely non-tail recursion and a long list blows the stack.
+
+   This test pins exactly that property.  300k elements is well past the
+   overflow point: compiled with --no-trmc the same program dies with exit 139
+   (SIGSEGV / stack overflow), so a regression that makes any of these three
+   ineligible for TRMC — an intervening `let` between the recursive call and
+   the `EAlloc`, a lowering change that hides the Cons, or the transform being
+   turned off — surfaces here as a crash rather than as a slow, silent
+   time-bomb in user code.
+
+   Deliberately checks the VALUES too, not just the exit code: the whole risk
+   of destination-passing is that it builds the list by mutating a hole, so a
+   wrong-but-terminating result is a live failure mode. *)
+let test_compiled_deep_list_producers_no_stack_overflow () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_deeplist" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "deeplist.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod DeepListProducers do\n\
+    \  needs IO.Console\n\
+    \  fn main() do\n\
+    \    let xs = List.range(0, 300000)\n\
+    \    let ys = List.map(xs, fn x -> x + 1)\n\
+    \    let zs = List.filter(ys, fn x -> x % 2 == 0)\n\
+    \    let ws = List.filter_map(ys, fn x -> if x % 3 == 0 do Some(x) else None end)\n\
+    \    println(List.length(ys))\n\
+    \    println(List.length(zs))\n\
+    \    println(List.length(ws))\n\
+    \    println(List.sum_int(List.take(ys, 10)))\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "deepbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (rc, out) = run_capture_rc (Filename.quote bin) in
+    Alcotest.(check int)
+      "map/filter/filter_map over 300k elements do not overflow the stack \
+       (TRMC must have turned them into loops)" 0 rc;
+    Alcotest.(check string)
+      "map/filter/filter_map over 300k elements produce the right lists"
+      "300000\n150000\n100000\n55" out
+
 (* Regression (P0, perceus.ml EApp/ECallPtr-extern post_dec_vars): a variable
    passed at BOTH an owned and a borrowed argument position of the same call,
    dead afterwards, was consumed twice — find_inc_vars saw only the owned
@@ -13770,6 +13824,8 @@ let stdlib_suites =
           test_compiled_pmap_matches_map;
         Alcotest.test_case "sort_by with heap-capturing comparator (98 elems) no SIGBUS" `Slow
           test_compiled_sortby_heap_capturing_comparator;
+        Alcotest.test_case "List.map/filter/filter_map over 300k elements: no stack overflow, right values (TRMC)" `Slow
+          test_compiled_deep_list_producers_no_stack_overflow;
         Alcotest.test_case "dual-position owned+borrowed arg both(s,s,1): no RC underflow, parity (compiled)" `Slow
           test_compiled_dual_position_owned_borrowed;
         Alcotest.test_case "file_open on missing path: Err carries a real FileError NotFound ctor cell (compiled)" `Slow

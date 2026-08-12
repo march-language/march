@@ -4724,7 +4724,9 @@ let () =
     ("--trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := true),
      " Enable tail-recursion-modulo-cons (destination-passing rewrite; on by default)");
     ("--no-trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := false),
-     " Disable tail-recursion-modulo-cons (on by default)");
+     " Disable tail-recursion-modulo-cons (debug/bisect only: the stdlib list \
+      producers are written in natural style and OVERFLOW THE STACK on long \
+      lists without it)");
     ("--pmap-threshold", Arg.Set_int pmap_threshold, "<N>  List.pmap/pfilter/preduce fall back to sequential below N elements (default 1024)");
     ("--opt",        Arg.Set_int opt_level, "<N>  Optimization level passed to clang (0-3)");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
