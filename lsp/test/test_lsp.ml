@@ -2815,6 +2815,53 @@ end
   Alcotest.(check bool) "non-tail call inside constructor detected" true
     (has_non_tail_call (perf_insights_of src))
 
+(* A constructor-wrapped recursive call is the tail-recursion-modulo-cons
+   shape the compiler turns into a loop, so telling the user to rewrite it
+   with an accumulator is advice against what the compiler already does — and
+   against how the stdlib producers are written.  The insight is still
+   REPORTED (the stack cost is real when TRMC declines the function); only the
+   advice changes.  The arithmetic case below must keep the old advice, since
+   TRMC can never transform `1 + f(n-1)`. *)
+let test_perf_constructor_wrapped_advice_is_not_accumulator () =
+  let msg_of src =
+    match List.filter (fun (i : An.perf_insight) ->
+            match i.An.pi_kind with An.NonTailCall _ -> true | _ -> false)
+            (perf_insights_of src) with
+    | i :: _ -> i.An.pi_message
+    | [] -> Alcotest.fail "expected a NonTailCall insight"
+  in
+  let has needle m =
+    let n = String.length needle and l = String.length m in
+    let rec go i = i + n <= l && (String.sub m i n = needle || go (i + 1)) in
+    go 0
+  in
+  let ctor = msg_of {|
+mod Test do
+  type Nat = Zero | Succ(Nat)
+  pfn bump(n: Nat): Nat do
+    match n do
+      Zero -> Zero
+      Succ(k) -> Succ(bump(k))
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "constructor case does not prescribe an accumulator"
+    false (has "accumulator" ctor);
+  Alcotest.(check bool) "constructor case says the compiler loops it"
+    true (has "compiles to a loop" ctor);
+  (* Non-vacuousness: the arithmetic case still gives the old advice, so the
+     assertion above is testing the branch and not an empty message. *)
+  let arith = msg_of {|
+mod Test do
+  pfn sum_helper(n: Int): Int do
+    1 + sum_helper(n - 1)
+  end
+end
+|} in
+  Alcotest.(check bool) "arithmetic case still prescribes an accumulator"
+    true (has "accumulator parameter" arith)
+
 let test_perf_non_tail_produces_warning_diagnostic () =
   let src = {|
 mod Test do
@@ -6891,6 +6938,7 @@ let () =
       "non-tail recursive call detected",         `Quick, test_perf_non_tail_call_detected;
       "tail-recursive call not flagged",          `Quick, test_perf_tail_call_not_flagged;
       "non-tail inside constructor detected",     `Quick, test_perf_non_tail_inside_constructor;
+      "ctor-wrapped advice is not accumulator",   `Quick, test_perf_constructor_wrapped_advice_is_not_accumulator;
       "non-tail produces warning diagnostic",     `Quick, test_perf_non_tail_produces_warning_diagnostic;
       "non-recursive call not flagged",           `Quick, test_perf_non_tail_not_flagged_for_non_recursive;
     ];

@@ -12505,8 +12505,9 @@ let rec check_tail_position
             Err.warning errors ~span:sp
               (Printf.sprintf
                  "Warning: function `%s` is structurally recursive but not \
-                  tail-recursive. This is safe for bounded input but uses \
-                  O(depth) stack space."
+                  tail-recursive. This is safe for bounded input but may use \
+                  O(depth) stack space; when the recursive call is the direct \
+                  argument of a constructor, the compiler turns it into a loop."
                  fn_name)
         end
       end;
