@@ -11162,7 +11162,7 @@ let test_compiled_float_nan_neq_parity () =
     ~name:"march_float_nan_neq"
     ~src:"mod FloatNanNeqParity do\n\
     \  needs IO.Console\n\
-         \  fn main() do\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
          \    let x = match string_to_float(\"nan\") do\n\
          \      Some(v) -> v\n\
          \      None -> 0.0\n\

@@ -78,6 +78,7 @@ let keys = Vault.keys(store)    -- ["host", "port"]
 
 ```march
 mod RateLimit do
+  needs IO.Mut
   needs IO.Console
   let store = Vault.new("rate-limit")
 
@@ -101,7 +102,7 @@ mod RateLimit do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_mut : Cap(IO.Mut)) do
     let ip = "192.0.2.1"
     let limit = 3
     println("hit 1: " ++ bool_to_string(check(ip, limit)))
