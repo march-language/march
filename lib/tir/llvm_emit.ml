@@ -1554,7 +1554,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           (* Float comparison: use fcmp ordered predicates.
              Coerce both sides to double in case one came from a boxed ptr. *)
           let fpred = match f.Tir.v_name with
-            | "==" -> "oeq" | "!=" -> "one"
+            (* "!=" must match IEEE `<>` semantics used by the interpreter
+               (OCaml's polymorphic `<>` on floats is true whenever either
+               operand is NaN), i.e. "unordered or not equal" ("une"), not
+               "one" (ordered and not equal, which is false for any NaN
+               operand). See eval.ml's cmp_op float branch. *)
+            | "==" -> "oeq" | "!=" -> "une"
             | "<"  -> "olt" | "<=" -> "ole"
             | ">"  -> "ogt" | ">=" -> "oge"
             | s -> failwith ("unknown cmp: " ^ s)
