@@ -1,0 +1,48 @@
+-- Witness for the march_message.c copy_value MARCH_SIMD_TAG fix (2026-08
+-- SIMD Task 2 review finding #2): sending a SIMD vector value to an actor
+-- exercises march_send -> march_msg_copy -> copy_value, the cross-heap
+-- deep-copy path. Before the fix, copy_value had no MARCH_SIMD_TAG arm, so
+-- the boxed vector's raw 16-byte lane payload was walked by the generic
+-- n_fields-based field loop (IS_HEAP_PTR-sniffing lane bits that are not
+-- pointers at all) instead of being copied opaquely like the MARCH_FLOAT_TAG
+-- arm already does.
+--
+-- Mirrors test/native/actor_counter.march's Actor.call shape exactly: the
+-- actor_call target (GetLast) is declared FIRST (tag 0, matching the
+-- runtime's call_tag_base convention — see march_actor_call's doc comment
+-- in runtime/march_runtime.c); Extract(v) is a plain fire-and-forget `send`
+-- carrying the I32x4 payload (tag 1). The printed result is the lane the
+-- actor extracted AFTER receiving its own cross-heap COPY of the vector, so
+-- it only round-trips correctly if that copy preserved the vector bits.
+mod SimdActorMsg do
+  needs IO.Console
+
+  type CallGetLast = CallGetLast
+
+  actor Worker do
+    state { last : Int }
+    init { last: 0 }
+    on GetLast(ref) do
+      Actor.reply(ref, state.last)
+      state
+    end
+    on Extract(v : I32x4) do
+      { last: Simd.extract_i32x4(v, 1) }
+    end
+  end
+
+  fn main() : Unit do
+    let pid = spawn(Worker)
+    let v = Simd.make_i32x4(10, 20, 30, 40)
+    let _ = send(pid, Extract(v))
+    match Actor.call(pid, CallGetLast, 5000) do
+      -- to_string(n), not a bare println(n): a raw Int unwrapped straight out
+      -- of Actor.call's Ok(...) payload hits an unrelated, pre-existing
+      -- compiled println/Result-unwrap crash (flagged separately, out of
+      -- scope here — task_855e7bbe).
+      Ok(n) -> println(to_string(n))
+      Err(e) -> println("error: " ++ e)
+    end
+    kill(pid)
+  end
+end

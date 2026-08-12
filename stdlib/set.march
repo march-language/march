@@ -515,7 +515,7 @@ mod Set do
   doc """
   Left fold over all elements.  Argument order: collection first, init
   second, callback last (uncurried-collection convention).  The
-  callback `f` itself is curried as `f(acc)(elem) = new_acc`.
+  callback `f` is called uncurried as `f(acc, elem) = new_acc`.
   """
   fn fold(s, acc, f) do
     match s do

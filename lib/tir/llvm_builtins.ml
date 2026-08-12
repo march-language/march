@@ -981,6 +981,9 @@ let runtime_only_declares : (string * string) list = [
   ("march_alloc_float", "declare ptr  @march_alloc_float(double %v)");
   ("march_unbox_float", "declare double @march_unbox_float(ptr %p)");
   ("march_poly_compare", "declare i64  @march_poly_compare(ptr %a, ptr %b)");
+  ("march_simd_alloc", "declare ptr  @march_simd_alloc(i64 %kind)");
+  ("march_simd_bounds_panic", "declare void @march_simd_bounds_panic(i64 %i, i64 %lanes, i64 %len)");
+  ("march_simd_lane_panic", "declare void @march_simd_lane_panic(i64 %i, i64 %lanes)");
 ]
 
 (** Look up the exact historical `declare ...` text for C symbol [c_name],
@@ -1270,6 +1273,9 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_alloc_float";
   PDeclare "march_unbox_float";
   PDeclare "march_poly_compare";
+  PDeclare "march_simd_alloc";
+  PDeclare "march_simd_bounds_panic";
+  PDeclare "march_simd_lane_panic";
 ]
 
 let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/CSV/session-types *)
@@ -1501,6 +1507,9 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_alloc_float";
   PDeclare "march_unbox_float";
   PDeclare "march_poly_compare";
+  PDeclare "march_simd_alloc";
+  PDeclare "march_simd_bounds_panic";
+  PDeclare "march_simd_lane_panic";
 ]
 
 (** Emit the LLVM preamble (`declare`d externs for every builtin/runtime

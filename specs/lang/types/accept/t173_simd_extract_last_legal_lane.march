@@ -1,0 +1,15 @@
+-- Refinement types (widening slice 12, §2.14), applied to Simd (2026-08-10 —
+-- specs/todos/2026-08-10-simd-vector-types.md Task 1). Accept twin to
+-- reject/t171 and reject/t172: the LAST legal lane index for each type
+-- (`extract_f32x4(v, 3)` — F32x4 has lanes 0..3; `extract_u8x16(v, 15)` —
+-- U8x16 has lanes 0..15) satisfies `{Int | 0 <= _ && _ < LANES}` trivially,
+-- so both calls typecheck and the refinement obligation discharges.
+mod M do
+  needs IO.Console
+  fn main() do
+    let v = Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
+    let u = Simd.splat_u8x16(7)
+    println(to_string(Simd.extract_f32x4(v, 3)))
+    println(to_string(Simd.extract_u8x16(u, 15)))
+  end
+end

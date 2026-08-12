@@ -61,7 +61,7 @@ Gives the feature real memory-safety evidence, using the gate that already works
 - Consumes: nothing from earlier tasks.
 - Produces: a CI job leg that runs all 46 goldens under ASAN with TRMC active. Later tasks rely on this being green before the default flips.
 
-- [ ] **Step 1: Make the sweep label its mode**
+- [x] **Step 1: Make the sweep label its mode**
 
 In `specs/lang/golden/sanitize.sh`, after the `export ASAN_OPTIONS=...` line, add:
 
@@ -85,12 +85,12 @@ to:
 echo "=== golden sanitize ($mode_label): $pass clean, $fail failed ==="
 ```
 
-- [ ] **Step 2: Verify the script still runs and skips cleanly on macOS**
+- [x] **Step 2: Verify the script still runs and skips cleanly on macOS**
 
 Run: `MARCH_BIN="$PWD/_build/default/bin/main.exe" ./specs/lang/golden/sanitize.sh; echo "EXIT=$?"`
 Expected: the Falcon SKIP message and `EXIT=0`. (This machine cannot run the real sweep — that is what CI is for.)
 
-- [ ] **Step 3: Add the TRMC leg to CI**
+- [x] **Step 3: Add the TRMC leg to CI**
 
 In `.github/workflows/ci.yml`, inside the `sanitize-gate` job, after the existing "Golden corpus AddressSanitizer gate" step, add:
 
@@ -105,7 +105,7 @@ In `.github/workflows/ci.yml`, inside the `sanitize-gate` job, after the existin
 
 Bump the job's `timeout-minutes: 25` to `40` on the line above `steps:` — the job now does two full sweeps.
 
-- [ ] **Step 4: Add a TRMC-on test leg**
+- [x] **Step 4: Add a TRMC-on test leg**
 
 Until Task 10 flips the default, nothing in CI runs the *suite* with TRMC
 active — only this ASAN gate would. Add a second step to the same job so
@@ -121,14 +121,14 @@ regressions in the transform are caught by the normal tests too:
 
 Remove this step in Task 10, when the default makes it redundant.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add specs/lang/golden/sanitize.sh .github/workflows/ci.yml
 git commit -m "ci(trmc): run the golden ASAN gate and the test suite with TRMC enabled"
 ```
 
-- [ ] **Step 6: Push and confirm the gate is green in CI**
+- [x] **Step 6: Push and confirm the gate is green in CI**
 
 Push the branch and open a draft PR. Wait for `sanitize-gate` to finish. Expected: both legs report `46 clean, 0 failed`.
 
@@ -148,7 +148,7 @@ The existing benchmarks do not isolate the cost TRMC targets.
 - Consumes: nothing.
 - Produces: `bench/list_producers.march`, referenced by Task 8's before/after comparison.
 
-- [ ] **Step 1: Write the benchmark**
+- [x] **Step 1: Write the benchmark**
 
 Create `bench/list_producers.march`:
 
@@ -174,7 +174,7 @@ mod ListProducers do
 end
 ```
 
-- [ ] **Step 2: Compile and record the baseline**
+- [x] **Step 2: Compile and record the baseline**
 
 ```bash
 dune build --root . bin/main.exe
@@ -185,7 +185,7 @@ for i in 1 2 3; do /usr/bin/time -p /tmp/lp_base_78111d >/dev/null; done
 
 Expected: prints `239988000`. Record the three `real` values; the FIRST timed run pays ~25% warmup, so use runs 2 and 3.
 
-- [ ] **Step 3: Record the TRMC number on the existing FBIP/HOF/alloc benchmarks**
+- [x] **Step 3: Record the TRMC number on the existing FBIP/HOF/alloc benchmarks**
 
 ```bash
 rm -rf .march/cas/artifacts-v2
@@ -201,7 +201,7 @@ Expected: no variant is slower with TRMC on by more than run-to-run noise. `tree
 
 **If any benchmark regresses:** record which, and stop. A regression here means the transform is firing somewhere it should not; fix before continuing.
 
-- [ ] **Step 4: Document the benchmark**
+- [x] **Step 4: Document the benchmark**
 
 Add to `specs/benchmarks.md`, in the mapping table, a row:
 
@@ -209,7 +209,7 @@ Add to `specs/benchmarks.md`, in the mapping table, a row:
 | `bench/list_producers.march` | TRMC / list-producer traversal count | `lib/tir/trmc.ml`, `lib/tir/perceus_fbip.ml` |
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bench/list_producers.march specs/benchmarks.md
@@ -232,7 +232,7 @@ git commit -m "bench: add list_producers, isolating list-producer traversal cost
 
 **Why this is needed even though the RC check is atomic:** the reuse path loads the refcount atomically and falls back to a fresh allocation when shared, but `ESetField` writes the hole with a **plain, non-atomic store**. That is safe only while the cell is unreachable from another thread. For a value that can cross an actor boundary that is not guaranteed, and `Repr.is_actor_struct_type` already exists precisely because a name-based guess here was found to false-positive on a user type called `Tree_Actor`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `test/test_trmc.ml`, before the `let suites = [` block:
 
@@ -262,12 +262,12 @@ Register it by adding to the `"trmc"` list in `suites`:
     Alcotest.test_case "actor msg type refused"          `Quick test_actor_msg_type_is_refused;
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc`
 Expected: FAIL on "actor msg type refused" — the transform currently accepts it.
 
-- [ ] **Step 3: Implement the refusal**
+- [x] **Step 3: Implement the refusal**
 
 In `lib/tir/trmc.ml`, in `transform_fn`, replace the match scrutinee guard. Change:
 
@@ -300,12 +300,12 @@ let transform_fn (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
   | Eligible, [ (_ctor, hole) ] ->
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc`
 Expected: all `trmc` cases PASS, including the new one.
 
-- [ ] **Step 5: Confirm the guard is not over-broad**
+- [x] **Step 5: Confirm the guard is not over-broad**
 
 The transform count is PROGRAM-DEPENDENT — it reflects that program's stdlib
 link closure — so the "19" from the Phase 1 report (a different corpus) is NOT
@@ -332,7 +332,7 @@ guard blocks nothing that was previously transformed. If the guarded count is
 lower, the guard IS over-broad — diff the `TRMCXFORM` lines between the two
 runs to see which functions it swallowed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/tir/trmc.ml test/test_trmc.ml
@@ -352,7 +352,7 @@ Right now `transform_fn` silently declines `mixed`, multi-site, and intervening-
 - Consumes: `Trmc.transform_fn` from Task 3.
 - Produces: unchanged signatures. `MARCH_TRMC_REPORT=1` now emits a `TRMCSKIP` line per declined-but-eligible-looking function.
 
-- [ ] **Step 1: Emit skip reasons**
+- [x] **Step 1: Emit skip reasons**
 
 In `lib/tir/trmc.ml`, in `transform_module`, replace the `| None -> [fn]` arm:
 
@@ -379,7 +379,7 @@ with:
         [fn]
 ```
 
-- [ ] **Step 2: Verify the skip lines appear**
+- [x] **Step 2: Verify the skip lines appear**
 
 ```bash
 dune build --root . bin/main.exe
@@ -390,7 +390,7 @@ MARCH_TRMC=1 MARCH_TRMC_REPORT=1 ./_build/default/bin/main.exe --compile --opt 2
 
 Expected: at least one line, for `OrderedMap.tree_map` (verdict `mixed`, which `transform_fn` declines).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add lib/tir/trmc.ml
@@ -411,7 +411,7 @@ Env vars are undiscoverable and neither `forge` nor CI will set one. This also m
 - Consumes: `Trmc.transform_module : Tir.tir_module -> Tir.tir_module` (existing).
 - Produces: `Trmc.enabled : bool ref` (default `false`), read by `transform_module` instead of `Sys.getenv_opt`. `bin/main.ml` sets it from `--trmc` / `--no-trmc`.
 
-- [ ] **Step 1: Add the ref and switch the gate**
+- [x] **Step 1: Add the ref and switch the gate**
 
 In `lib/tir/trmc.ml`, immediately above `let transform_module`, add:
 
@@ -435,7 +435,7 @@ to:
   if not !enabled then m
 ```
 
-- [ ] **Step 2: Add the CLI flags**
+- [x] **Step 2: Add the CLI flags**
 
 In `bin/main.ml`, find the argument-parsing list and add two entries alongside the other codegen flags:
 
@@ -454,7 +454,7 @@ Then, immediately after argument parsing completes and before the pipeline runs,
   if Sys.getenv_opt "MARCH_TRMC" <> None then March_tir.Trmc.enabled := true;
 ```
 
-- [ ] **Step 3: Update the CAS tag to follow the ref**
+- [x] **Step 3: Update the CAS tag to follow the ref**
 
 In `bin/main.ml`, `codegen_cas_tags ()` currently reads the env var. Change:
 
@@ -470,25 +470,37 @@ to:
 
 **This ordering matters:** `codegen_cas_tags ()` must be called *after* argument parsing sets the ref. Verify by inspection that every `cas_flags` construction site (`bin/main.ml`, two sites) runs after `Arg.parse`.
 
-- [ ] **Step 4: Verify both spellings work and stay CAS-distinct**
+- [x] **Step 4: Verify both spellings work and stay CAS-distinct**
+
+**Do NOT check this with timings.** Until Task 8 rewrites the stdlib producers, the hot path of `bench/list_producers.march` is `List.map`, whose inner `go` is `already-tail` — TRMC has nothing to bite on, so the two modes are legitimately the same speed. A timing A/B here cannot distinguish "the flag works" from "the CAS served one binary twice", which is exactly the failure this step exists to catch.
+
+**Do NOT check it with `cmp` either.** On macOS every fresh link gets a random `LC_UUID`, so two binaries differ at ~char 1609 regardless of the flag.
+
+Check the **CAS key** directly — it is the thing under test:
 
 ```bash
 dune build --root . bin/main.exe
 rm -rf .march/cas/artifacts-v2
-./_build/default/bin/main.exe --compile --opt 2 --trmc -o /tmp/t_flag_78111d bench/list_producers.march
-./_build/default/bin/main.exe --compile --opt 2        -o /tmp/t_off_78111d  bench/list_producers.march
-for i in 1 2; do /usr/bin/time -p /tmp/t_flag_78111d >/dev/null; done
-for i in 1 2; do /usr/bin/time -p /tmp/t_off_78111d  >/dev/null; done
+n() { ls .march/cas/artifacts-v2 2>/dev/null | wc -l; }
+M=./_build/default/bin/main.exe; B=bench/list_producers.march
+echo "start $(n)"
+$M --compile --opt 2 --trmc -o /tmp/t_a_78111d $B; echo "trmc      $(n)"
+$M --compile --opt 2 --trmc -o /tmp/t_a2_78111d $B; echo "trmc again $(n)   # must not grow: cache HIT"
+$M --compile --opt 2        -o /tmp/t_b_78111d $B; echo "off       $(n)   # must grow: different key"
+MARCH_TRMC=1 $M --compile --opt 2 --no-trmc -o /tmp/t_c_78111d $B; echo "env+--no-trmc $(n)   # must not grow: OFF key"
+MARCH_TRMC=1 $M --compile --opt 2           -o /tmp/t_d_78111d $B; echo "env only  $(n)   # must not grow: ON key"
+cmp -s /tmp/t_b_78111d /tmp/t_c_78111d && echo "OK: --no-trmc beats the env var"
+cmp -s /tmp/t_a_78111d /tmp/t_d_78111d && echo "OK: MARCH_TRMC=1 == --trmc"
 ```
 
-Expected: the `--trmc` binary is markedly faster. If they are identical, the CAS tag is not following the flag — re-check Step 3's ordering.
+Expected: entry count `0 → 2 → 2 → 4 → 4 → 4`, and both `OK:` lines. (Cache-*served* binaries are byte-identical, so `cmp` is valid on those — just not on two fresh links.) If the count stays at 2 through the `off` build, the CAS tag is not following the flag — re-check Step 3's ordering.
 
-- [ ] **Step 5: Full suite**
+- [x] **Step 5: Full suite**
 
 Run: `scripts/run-tests.sh`
 Expected: `All suites passed.`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/main.ml lib/tir/trmc.ml
@@ -509,7 +521,7 @@ git commit -m "cli(trmc): add --trmc/--no-trmc; MARCH_TRMC stays as a legacy ali
 - Consumes: `Trmc.enabled` and `Trmc.transform_module` from Task 5.
 - Produces: no new API.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `test/test_trmc.ml` before `let suites = [`:
 
@@ -548,31 +560,39 @@ Register it in the `"trmc"` suite list:
     Alcotest.test_case "transform is idempotent"         `Quick test_transform_is_idempotent_on_a_transformed_module;
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc`
 Expected: PASS. If the second assertion fails with 3 instead of 2, the transform is not idempotent — it re-transformed its own helper. Fix that before wiring the second call site in Step 3, because `repl_jit` re-lowers modules the driver has already transformed.
 
-- [ ] **Step 3: Wire the transform into the REPL/JIT pipeline**
+- [x] **Step 3: Wire the transform into the REPL/JIT pipeline**
 
-In `lib/jit/repl_jit.ml`, immediately before line 313's `let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars tir in`, insert:
+In `lib/jit/repl_jit.ml`, in `lower_module`, insert immediately **after** the `Lower.lower_module` call:
 
 ```ocaml
-  (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
-     post-lower, and without it a function behaves differently in the REPL than
-     when compiled.  Gated by the same Trmc.enabled ref. *)
   let tir = March_tir.Trmc.transform_module tir in
 ```
 
-- [ ] **Step 4: Verify the REPL still works**
+**The position is as load-bearing as the call.** An earlier draft of this step put it just before the `Perceus.perceus` call, which is *post-defun* — and measured on a real REPL session that placement transforms **5** functions where post-lower transforms **10**. By defun the stdlib's nested `go` helpers are closures invoked via `ECallPtr`, so self-recursion is no longer syntactically visible (`lib/tir/trmc.ml`'s header says exactly this). Halving REPL coverage relative to compiled is the opposite of the parity this task exists to establish. `lower_module` is the only lowering entry point in `lib/jit/`, so one call site covers `run_expr`, `run_decl`, and `precompile_stdlib`.
+
+- [x] **Step 4: Verify the REPL still works**
+
+A build is not parity — prove the three paths agree on a genuinely eligible function. Write a fixture with a natural-style producer (`dup(xs) = match xs do Cons(h,t) -> Cons(h*2, dup(t)) ; Nil -> Nil end`) and run all three:
 
 ```bash
-dune build --root . 2>&1 | grep -E "Error" -A 3 | head
+dune build --root . bin/main.exe test/run_codegen.exe   # never a targetless dune build — it wedges
+F=/tmp/trmc_parity_78111d.march
+./_build/default/bin/main.exe $F                                             # interpreter = reference
+./_build/default/bin/main.exe --compile --opt 2 --trmc -o /tmp/p_78111d $F && /tmp/p_78111d
+printf '<decls>\n<exprs>\n:quit\n' | MARCH_TRMC_REPORT=1 ./_build/default/bin/main.exe --trmc
 scripts/run-tests.sh -q
 ```
-Expected: build clean, `All suites passed.`
 
-- [ ] **Step 5: Commit**
+`march` with no file argument enters the JIT REPL and accepts piped stdin, so this path is drivable non-interactively. Expected: identical output from all three, equal `TRMCXFORM` counts between the REPL and compiled runs, and `All suites passed.` Control: `--no-trmc` in the REPL must give **zero** `TRMCXFORM` lines, or the report is firing unconditionally and proves nothing.
+
+If the REPL run dies with `Library not loaded: …libmarch_runtime_….so.NNN.tmp`, that is the known shared `~/.cache/march` poisoning from a concurrent session, not this change — rerun under an isolated `HOME`.
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/jit/repl_jit.ml test/test_trmc.ml
@@ -587,13 +607,13 @@ git commit -m "jit(trmc): run the transform in the REPL pipeline so it matches c
 
 **Files:**
 - Test: `test/test_trmc.ml`
-- Modify: `test/test_codegen.ml`
+- ~~Modify: `test/test_codegen.ml`~~ — not needed: it already ends with `@ Test_trmc.suites`, so a new group in `test_trmc.ml` registers itself.
 
 **Interfaces:**
 - Consumes: `Trmc.enabled` (Task 5), `trmc_hole_module ()` (existing in `test/test_trmc.ml`).
 - Produces: no new API.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `test/test_trmc.ml` before `let suites = [`:
 
@@ -623,7 +643,7 @@ Register it in a new suite group by adding to `suites`:
   ];
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `dune build --root . test/run_codegen.exe && ./_build/default/test/run_codegen.exe test trmc-js`
 Expected: PASS.
@@ -631,7 +651,7 @@ Expected: PASS.
 Signature for reference (`lib/tir/js_emit.ml:1304`):
 `val emit_module : ?source_file:string -> ?fn_lines:(...) list -> Tir.tir_module -> string * string option`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add test/test_trmc.ml test/test_codegen.ml
@@ -643,6 +663,26 @@ git commit -m "test(trmc): cover the JS backend's hole allocation and fill"
 ### Task 8: Rewrite the stdlib producers into natural style
 
 **This is the task that makes the default worth flipping.** Today `List.map`/`filter`/`filter_map`/`append`/`flat_map` are accumulator+`reverse` and classify `already-tail`, so TRMC never sees them.
+
+> **ORDERING CORRECTION (2026-08-12): run this task AFTER Task 10, not before.**
+> Natural style is not tail-recursive; it depends on TRMC to become a loop.
+> Measured on a 500k-element list, natural-style `map`:
+>
+> | | result |
+> |---|---|
+> | interpreter | prints `500000` |
+> | compiled `--no-trmc` | **exit 138 — stack overflow** |
+> | compiled `--trmc` | prints `500000` |
+>
+> Landing this while the default is still OFF ships a `List.map` that crashes
+> on long lists for every user who does not pass `--trmc`. The default must
+> already be on. The interpreter is unaffected (it handles 500k fine), so the
+> hazard is specific to the compiled backend.
+>
+> **Consequence to decide before landing:** after this task `--no-trmc` is no
+> longer a safe escape hatch — it will stack-overflow on stdlib `List.map`
+> over a long list. Either drop the flag, or document it as a debugging-only
+> switch that is unsound against the natural-style stdlib.
 
 **Files:**
 - Modify: `stdlib/list.march`
@@ -772,7 +812,9 @@ git commit -m "stdlib(list): filter/filter_map in natural style; changelog"
 
 **Scope note:** only the *wording* changes here, not the detection. Suppressing the warning entirely would require the typechecker to know TIR-level eligibility, which it does not have — verified: the AST-shaped `Succ(Succ(add_one(k)))` looks transformable but is classified `non-trmc` because of the intervening let. Leave the LSP lint alone; wire it to real eligibility in a separate piece of work.
 
-- [ ] **Step 1: Write the failing test**
+> **UPDATE (2026-08-12): the LSP lint WAS changed, in commit `b64bd3dd`.** Leaving it alone would have had the compiler and the editor give opposite advice on the same line: `lsp/lib/analysis.ml` told the user to rewrite *every* non-tail self-call with an accumulator, including the constructor-wrapped one the typechecker had just stopped flagging that way. `tco_check` already distinguishes the constructor case (it builds a distinct "constructor `X` wraps it" reason string), so the advice could be branched without any TIR-eligibility wiring. The insight is still reported — the stack cost is real whenever TRMC declines the function — and the arithmetic case keeps the old wording.
+
+- [x] **Step 1: Write the failing test**
 
 Add to `test/test_compiler.ml` in the diagnostics section:
 
@@ -806,12 +848,12 @@ This uses the file's existing idiom: `typecheck` (returns an error ctx),
 matching — the same shape as `test_actor_handler_body_io_with_needs_no_warning`
 at `test/test_compiler.ml:3351`. There is no `diagnostics_of` helper.
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `dune build --root . test/run_compiler.exe && ./_build/default/test/run_compiler.exe test error_improvements`
 Expected: FAIL — the current message says "Consider using an accumulator parameter."
 
-- [ ] **Step 3: Reword the non-arithmetic warning**
+- [x] **Step 3: Reword the non-arithmetic warning**
 
 In `lib/typecheck/typecheck.ml`, the `else` branch at ~12060 currently reads:
 
@@ -838,12 +880,12 @@ Replace the message text with:
 
 Leave the *arithmetic* variant (~12053) unchanged — `1 + f(n-1)` is not constructor-wrapped and TRMC can never transform it, so "use an accumulator" is still correct advice there.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `./_build/default/test/run_compiler.exe test error_improvements`
 Expected: PASS.
 
-- [ ] **Step 5: Check the conformance corpora**
+- [x] **Step 5: Check the conformance corpora**
 
 The `@types-check` corpus asserts diagnostic **text** and is CI-only. Run it locally:
 
@@ -852,7 +894,7 @@ dune build --root . @types-check 2>&1 | tail -20; echo "EXIT=$?"
 ```
 Expected: EXIT=0. If a fixture pins the old wording, update the fixture's expected output in the same commit.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/typecheck/typecheck.ml test/test_compiler.ml

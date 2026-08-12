@@ -1618,6 +1618,17 @@ let rec send_copy_check (type_map : (Ast.span, Tc.ty) Hashtbl.t) (e : Ast.expr) 
     send_copy_check type_map e acc
   | _ -> acc
 
+(** The reason string used when a call is blocked by a constructor wrapping it.
+    Constructed here rather than inline because [tco_check]'s advice depends on
+    recognising this case: a constructor-wrapped call is the tail-recursion-
+    modulo-cons shape the compiler turns into a loop, so telling the user to
+    rewrite it with an accumulator would be advice against what the compiler
+    already does — and against how the stdlib producers are written. *)
+let ctor_blocks name = Printf.sprintf "constructor `%s` wraps it" name
+
+let is_ctor_blocked (b : string) =
+  String.length b > 12 && String.sub b 0 12 = "constructor "
+
 (** Walk [e] looking for calls to [fn_name] that are not in tail position.
     [blocking] is [None] when the expression is in tail position, or
     [Some description] when there is pending work after it returns. *)
@@ -1629,9 +1640,15 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
       match blocking with
       | None -> acc   (* tail position — no stack growth *)
       | Some b ->
-        let msg = Printf.sprintf
-          "This recursive call is not in tail position — %s, so the stack grows by one frame per call.\n\nRewrite using an accumulator parameter to move the work before the recursive call."
-          b
+        let msg =
+          if is_ctor_blocked b then
+            Printf.sprintf
+              "This recursive call is not in tail position — %s. The compiler transforms this shape (tail-recursion-modulo-cons): the constructor is allocated first with a hole, and the call fills it, so this compiles to a loop rather than growing the stack. No rewrite needed."
+              b
+          else
+            Printf.sprintf
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call.\n\nRewrite using an accumulator parameter to move the work before the recursive call."
+              b
         in
         { pi_span    = sp;
           pi_kind    = NonTailCall { pi_fn_name = fn_name; pi_blocking = b };
@@ -1684,7 +1701,7 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
 
   (* Constructor wraps the result — args are not in tail position *)
   | Ast.ECon (name, args, _) ->
-    let b = Printf.sprintf "constructor `%s` wraps it" name.Ast.txt in
+    let b = ctor_blocks name.Ast.txt in
     List.fold_left (fun a arg -> tco_check fn_name (Some b) arg a) acc args
 
   (* Tuple — elements are not in tail position *)

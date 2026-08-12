@@ -121,6 +121,7 @@ let stdlib_file_list = [
   "crypto.march";
   "base64.march";
   "native_array.march";
+  "simd.march";
   "task.march";
   "signal.march";
   "rrb_vec.march";
