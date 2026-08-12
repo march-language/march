@@ -1,8 +1,8 @@
 # `[P2]` `Parse`: parser combinator core
 
-**Status:** Landed (2026-08-11/12). Covers plan
-`specs/plans/2026-08-09-parsing-and-string-search.md` §10 step 1 except the
-golden error corpus (§3.7).
+**Status:** Landed (2026-08-11/12). Completes plan
+`specs/plans/2026-08-09-parsing-and-string-search.md` §10 step 1, including the
+golden error corpus (§3.7) that is its acceptance bar.
 
 New stdlib module `stdlib/parse.march`, registered in
 `lib/modules/stdlib_manifest.ml` and exercised by `test/stdlib/test_parse.march`
@@ -183,11 +183,38 @@ Both are "correct"; only the second reports what a reader would call the
 mistakes. Documented on `recover` itself, since it is the kind of thing that
 otherwise gets discovered as "the library is noisy".
 
+## The golden error corpus (§3.7)
+
+`test/stdlib/test_parse_errors.march` pins the EXACT rendered diagnostic for
+each malformed input against a miniature config grammar chosen to exercise
+every error feature at once — labels, commit, context frames, ordered choice,
+end-of-input, and recovery.
+
+Deliberately a table of expected **strings**, not a regenerate-from-output
+snapshot like `test/snapshots/`. A diagnostic that changed should have to be
+re-read and consciously accepted; the question is "is the new one better?",
+which is a judgement, not a diff. `expect_error` panics with both `want:` and
+`got:` on mismatch, because `assert (a == b)` reports only "condition was
+false" — useless when the text *is* the subject.
+
+Every expected message was written before running it, and all six matched on
+the first run. Two sabotages confirm the corpus is not vacuous:
+
+| Sabotage | Effect |
+|---|---|
+| a corpus expectation changed to a wrong string | that case fails with want/got |
+| `ctx` stops pushing its frame | **three** messages silently lose "in the entry that started at 1:1" and all three fail |
+
+The second is the one that matters: it is a library regression that changes no
+control flow and breaks no other test — precisely the silent message rot §3.7
+exists to catch.
+
 ## Next
 
-The golden error corpus (§3.7) — the actual acceptance bar for step 1: a set
-of malformed inputs with expected *rendered* diagnostics, so message quality
-regressions fail a test instead of being noticed by a user.
+Step 2 of the plan: reimplement `stdlib/json.march` with these combinators,
+against the hand-written original as the control. Pick the acceptable
+speed factor *before* measuring, or it gets rationalized to whatever the
+result turns out to be.
 
 Separately, an OCaml-side renderer from `ParseErr` into `lib/errors/errors.ml`
 would make library and compiler diagnostics indistinguishable and give LSP

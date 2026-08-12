@@ -449,4 +449,8 @@ let () =
       Alcotest.test_case "Parse module"
         `Quick (run_stdlib_test "test_parse.march" "TestParse");
     ]);
+    ("parse_errors", [
+      Alcotest.test_case "Parse golden error corpus"
+        `Quick (run_stdlib_test "test_parse_errors.march" "TestParseErrors");
+    ]);
   ]
