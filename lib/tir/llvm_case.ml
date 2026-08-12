@@ -419,6 +419,19 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let result_slot = Llvm_ctx.fresh ctx "res_slot" in
   Llvm_ctx.emit ctx (Printf.sprintf "%s = alloca ptr" result_slot);
 
+  (* Track each arm's pre-coercion LLVM type.  When every arm that reaches
+     [merge_lbl] is "double", the ptr stored in [result_slot] is a
+     freshly-allocated [march_float_box] created solely by THIS emit_case
+     call's own coerce-to-ptr calls below (float-boxing Stage 2,
+     [Llvm_ctx.coerce]'s ("double","ptr") arm) — never escaped, never aliased,
+     never read by anyone else. The merge below can safely unbox-and-free it
+     instead of handing the still-live box to the caller as a generic "ptr",
+     which is what leaked one [march_alloc_float] cell per case/match
+     evaluation (specs/todos/2026-08-11-float-boxing-erasure-boundary-per-call-leak.md).
+     Arms that don't reach merge (e.g. the `unreachable` default) contribute
+     nothing, so they can't spoil the all-double proof. *)
+  let arm_result_tys = ref [] in
+
   (* Detect string-literal case: br_tag starts with '"' *)
   let is_string_case = List.exists (fun br ->
       String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = '"'
@@ -845,6 +858,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       | _ -> br.Tir.br_body
     in
     let (br_ty, br_val) = emit_expr ctx body_to_emit in
+    arm_result_tys := br_ty :: !arm_result_tys;
     let stored = Llvm_ctx.coerce ctx br_ty br_val "ptr" in
     Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
     Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
@@ -894,6 +908,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        Llvm_ctx.emit_term ctx "unreachable"
    | Some d ->
      let (d_ty, d_val) = emit_expr ctx d in
+     arm_result_tys := d_ty :: !arm_result_tys;
      let stored = Llvm_ctx.coerce ctx d_ty d_val "ptr" in
      Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
      Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl));
@@ -902,4 +917,13 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   Llvm_ctx.emit_label ctx merge_lbl;
   let r = Llvm_ctx.fresh ctx "case_r" in
   Llvm_ctx.emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r result_slot);
-  ("ptr", r)
+  (* All arms that reached merge were "double" → the box is ours alone
+     (see [arm_result_tys]'s doc comment above); unbox and free it here
+     instead of leaking it into the caller as an opaque live ptr. *)
+  if !arm_result_tys <> [] && List.for_all (fun t -> t = "double") !arm_result_tys then begin
+    let d = Llvm_ctx.fresh ctx "case_rd" in
+    Llvm_ctx.emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r);
+    Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r);
+    ("double", d)
+  end else
+    ("ptr", r)
