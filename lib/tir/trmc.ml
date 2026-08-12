@@ -390,9 +390,22 @@ let rec seed_entry ~(self : string) ~(dps : Tir.var) (e : Tir.expr) : Tir.expr =
       Option.map recur default)
   | _ -> e
 
+(** True when [ty] names a type that can cross an actor boundary, and so must
+    never be rewritten: the hole-fill is a plain non-atomic store, safe only
+    while the cell is thread-local.  Both checks are STRUCTURAL — a name-suffix
+    guess here was previously found to false-positive on a user type called
+    [Tree_Actor] (see [Repr.is_actor_struct_type]). *)
+let crosses_actor_boundary (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TCon (name, _) ->
+    Tir_names.is_actor_msg_name name || Tir_names.is_actor_struct_name name
+  | _ -> false
+
 (** [Some (f', f_dps)] when [fn] is transformable. *)
 let transform_fn (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
   let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
+  if crosses_actor_boundary fn.Tir.fn_ret_ty then None
+  else
   match verdict_of r, r.r_modcons with
   | Eligible, [ (_ctor, hole) ] ->
     let dps_name = fn.Tir.fn_name ^ "$dps" in

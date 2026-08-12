@@ -11051,6 +11051,32 @@ let test_compiled_iolist_deep_flatten_parity () =
     ~expected:"25000\n25000"
     ()
 
+(** Float `!=` on NaN: the interpreter implements float `!=` via OCaml's
+    polymorphic `<>`, under which `nan <> nan` is `true`. The compiled
+    backend used LLVM `fcmp one` (ordered-and-not-equal, IEEE 754 semantics)
+    for `!=`, which is `false` whenever either operand is NaN — a
+    interp/compiled divergence. Fixed by using `fcmp une`
+    (unordered-or-not-equal), which matches `<>`: true whenever the operands
+    differ OR either is NaN. `string_to_float("nan")` is used to produce a
+    NaN without hitting the checked-div-by-zero abort that `0.0 /. 0.0`
+    triggers on both backends. *)
+let test_compiled_float_nan_neq_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_float_nan_neq"
+    ~src:"mod FloatNanNeqParity do\n\
+    \  needs IO.Console\n\
+         \  fn main() do\n\
+         \    let x = match string_to_float(\"nan\") do\n\
+         \      Some(v) -> v\n\
+         \      None -> 0.0\n\
+         \    end\n\
+         \    println(x != x)\n\
+         \    println(x != 1.0)\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\ntrue"
+    ()
+
 (** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
     the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
     left the outer binding's literal mapping (`x -> 10`) in scope when the
@@ -11865,6 +11891,36 @@ let test_newtype_eq_operator_generic_payload_compiled () =
           end\n"
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
+
+(** Bug: a variant field typed as an OPAQUE builtin type constructor (no
+    March-level `type` declaration exists for it — e.g. `Task(a)`) makes
+    [ensure_adt_eq_fn] return [None] for that field's own type. The `==`
+    operator's per-ctor field-compare arm for [TCon _ | TTuple _ | TRecord _]
+    then fell back to raw pointer-identity (ptrtoint + icmp eq) instead of
+    [march_poly_eq] — the runtime-shape-dispatched comparator the sibling
+    [TVar] arm (ten lines below in [llvm_eq.ml]) already uses for exactly
+    this "no eq fn derivable" situation. Two distinct heap cells with
+    identical content would then compare unequal.
+    `Task(Int)` gives a clean repro: `Holder` itself has a `type`
+    declaration (resolvable), but its field type `Task(Int)` does not (Task
+    is a compiler-builtin type constructor never declared in March source) —
+    and two non-nullary single-field ctors keep this off the Newtype/Niche
+    shortcuts, landing in the general ctor-table codegen path where the bug
+    lives. This only checks the emitted IR (no execution needed — the bug is
+    in which comparator gets *called*, not runtime behavior of Task itself). *)
+let test_eq_operator_opaque_ctor_field_uses_poly_eq () =
+  let ir = emit_actor_ir {|mod EqOpaqueCtorField do
+  needs IO.Console
+  type Holder = HA(Task(Int)) | HB(Task(Int))
+  derive Eq for Holder
+  fn main() : Unit do
+    let t = task_spawn(fn n -> n)
+    println(bool_to_string(HA(t) == HA(t)))
+  end
+end|} in
+  Alcotest.(check bool)
+    "opaque ctor field falls back to march_poly_eq, not pointer identity"
+    true (ir_contains ir "call i64 @march_poly_eq")
 
 (** Cross-module ambiguous-constructor resolution (compiled-only regression).
 
@@ -14215,6 +14271,8 @@ let codegen_suites =
             test_compiled_deque_pop_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
             test_compiled_let_shadowing_parity;
+          Alcotest.test_case "compiled float NaN `!=` parity (une vs one)" `Quick
+            test_compiled_float_nan_neq_parity;
           Alcotest.test_case "compiled entry-module self-qualification parity" `Quick
             test_compiled_entry_self_qual_parity;
           Alcotest.test_case "compiled entry-module nested self-qualification parity" `Quick
@@ -14279,6 +14337,8 @@ let codegen_suites =
             test_newtype_eq_operator_boxed_payload_compiled;
           Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
             test_newtype_eq_operator_generic_payload_compiled;
+          Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
+            test_eq_operator_opaque_ctor_field_uses_poly_eq;
         ] );
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
