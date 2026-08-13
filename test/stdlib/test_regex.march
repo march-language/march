@@ -11,6 +11,13 @@ pfn agree(pat : String, s : String) : Bool do
   Regex.matches_backtracking(pat, s) == Regex.matches_linear(pat, s)
 end
 
+-- Spans, not just booleans: the find family needs (start, end), and greedy
+-- backtracking is not the same rule as leftmost-longest in general. This
+-- compares the actual matched substring.
+pfn agree_find(pat : String, s : String) : Bool do
+  Regex.find_backtracking(pat, s) == Regex.find_linear(pat, s)
+end
+
 
 describe "Regex" do
 
@@ -57,6 +64,30 @@ describe "Regex" do
     -- The whole point: bounded work per byte. The backtracking matcher needs
     -- ~5.7s for 80 bytes of this; if the NFA were not linear this test would
     -- not finish either.
+    test "find agrees with backtracking on the matched substring" do
+      assert agree_find("hello", "say hello world")
+      assert agree_find("l+", "hello")
+      assert agree_find("a*", "aaa")
+      assert agree_find("a*", "bbb")
+      assert agree_find("a*b", "aaab")
+      assert agree_find("a*a", "aaa")
+      assert agree_find("a*ab", "aab")
+      assert agree_find("ab?", "ab")
+      assert agree_find("ab?", "a")
+      assert agree_find("[0-9]+", "abc123def456")
+      assert agree_find("\\d+", "price: 42 dollars")
+      assert agree_find("\\w+", "  hi there")
+      assert agree_find("^ab", "abc")
+      assert agree_find("^ab", "xabc")
+      assert agree_find("bc$", "abc")
+      assert agree_find("bc$", "abcd")
+      assert agree_find("^a*$", "aaa")
+      assert agree_find("x", "abc")
+      assert agree_find(".", "abc")
+      assert agree_find(".*", "abc")
+      assert agree_find("a.c", "xxabcxx")
+    end
+
     test "stays fast on input that is catastrophic for backtracking" do
       let long = String.repeat("a", 400)
       assert (Regex.matches_linear("a*a*a*a*b", long) == false)
