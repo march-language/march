@@ -57,15 +57,42 @@ let shim_src =
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+#include <signal.h>
 
 int64_t sbx_probe_socket(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return (int64_t)errno;
+    close(fd);
+    return 0;
+}
+
+/* macOS network probe: Seatbelt's network* deny does not gate socket()
+   creation itself, only the actual network operation -- forge/lib/
+   cap_sandbox.ml's own measurement notes "deny network* -> program runs,
+   bind fails cleanly ENFORCEABLE". bind() to loopback:0 (OS-assigned port)
+   is the minimal operation that actually exercises the gate. */
+int64_t sbx_probe_bind(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return (int64_t)errno;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
+    if (rc < 0) {
+        int e = errno;
+        close(fd);
+        return (int64_t)e;
+    }
     close(fd);
     return 0;
 }
@@ -120,8 +147,22 @@ int64_t sbx_probe_write_open(void) {
    there (only process-fork is), so this always succeeds. execve()s the
    CURRENT process (no fork) into /bin/echo, which prints "exec=0" to the
    same stdout the caller was already writing to -- never returns on
-   success, so callers must treat it as the last statement in main(). */
+   success, so callers must treat it as the last statement in main().
+
+   The caller is a March program running under the runtime's green-thread
+   scheduler, which runs a background preemption thread that periodically
+   pthread_kill()s SIGUSR1 at worker threads (runtime/march_scheduler.c).
+   execve() resets the SIGUSR1 handler to default (terminate) but the signal
+   MASK survives exec, so a SIGUSR1 already in flight at the moment of exec
+   was observed to kill the freshly-exec'd /bin/echo before it could print
+   anything. Blocking SIGUSR1 immediately before the call closes the race:
+   the signal mask carries into the new image, so it simply stays pending
+   and un-delivered in a process that never unblocks or waits for it. */
 int64_t sbx_probe_exec_inplace(void) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, NULL);
     char *argv[] = { (char *)"/bin/echo", (char *)"exec=0", NULL };
     char *envp[] = { NULL };
     execve("/bin/echo", argv, envp);
@@ -196,4 +237,245 @@ let check_field (name : string) (expected : int) (output : string) : unit =
     (Printf.sprintf "%s = %d" name expected)
     expected (field name output)
 
-let tests : unit Alcotest.test_case list = []
+(* ── Linux: IO.Process gates execve/execveat specifically ───────────────
+
+   The SBPL/-D derivation (bin/main.ml's cap_sandbox_define) is driven by
+   ACTUAL CAPABILITY USAGE in the module's own code (own_caps_of_this_module,
+   bin/main.ml ~996), not by `needs` declarations alone. Confirmed empirically
+   two ways: an extern block's declared Cap(X) does NOT count as a use for
+   this purpose (only for the separate "extern blocks require the declared
+   capability to be in needs" check) -- tagging every probe's extern block
+   uniformly Cap(IO.Foreign) meant none of the two classes meant to stay
+   held/allowed ever registered as "used", so they were wrongly denied too.
+   What DOES register: a direct call to a real capability-tagged builtin. So
+   each fixture below makes one throwaway "anchor" call per class meant to
+   stay held -- tcp_connect to loopback for Network, process_pid for Process,
+   file_write to a scratch path for FileWrite -- purely to get that class
+   into the module's own-capability set; the result is discarded, and the
+   call is otherwise inert (loopback-only, no external network; a real but
+   harmless local file write; a read-only pid query). The class actually
+   under test in each fixture is never anchored -- that's the whole point. *)
+
+let linux_deny_net_src =
+  {|
+mod SbxDenyNet do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Process
+  needs IO.FileWrite
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_socket() : Int = "sbx_probe_socket"
+    fn probe_execve() : Int = "sbx_probe_execve"
+    fn probe_write_open() : Int = "sbx_probe_write_open"
+  end
+
+  fn main() : Unit do
+    let _anchor_proc = process_pid()
+    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    println("socket=" ++ int_to_string(probe_socket()))
+    println("execve=" ++ int_to_string(probe_execve()))
+    println("write=" ++ int_to_string(probe_write_open()))
+  end
+end
+|}
+
+let linux_deny_exec_src =
+  {|
+mod SbxDenyExec do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Network
+  needs IO.FileWrite
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_socket() : Int = "sbx_probe_socket"
+    fn probe_execve() : Int = "sbx_probe_execve"
+    fn probe_write_open() : Int = "sbx_probe_write_open"
+  end
+
+  fn main() : Unit do
+    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    println("socket=" ++ int_to_string(probe_socket()))
+    println("execve=" ++ int_to_string(probe_execve()))
+    println("write=" ++ int_to_string(probe_write_open()))
+  end
+end
+|}
+
+let linux_deny_write_src =
+  {|
+mod SbxDenyWrite do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Network
+  needs IO.Process
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_socket() : Int = "sbx_probe_socket"
+    fn probe_execve() : Int = "sbx_probe_execve"
+    fn probe_write_open() : Int = "sbx_probe_write_open"
+  end
+
+  fn main() : Unit do
+    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_proc = process_pid()
+    println("socket=" ++ int_to_string(probe_socket()))
+    println("execve=" ++ int_to_string(probe_execve()))
+    println("write=" ++ int_to_string(probe_write_open()))
+  end
+end
+|}
+
+let test_linux_deny_net () =
+  if not is_linux then Alcotest.skip ()
+  else begin
+    let out = compile_and_run linux_deny_net_src in
+    check_field "socket" 1 out;
+    check_field "execve" 0 out;
+    check_field "write" 0 out
+  end
+
+let test_linux_deny_exec () =
+  if not is_linux then Alcotest.skip ()
+  else begin
+    let out = compile_and_run linux_deny_exec_src in
+    check_field "socket" 0 out;
+    check_field "execve" 1 out;
+    check_field "write" 0 out
+  end
+
+let test_linux_deny_write () =
+  if not is_linux then Alcotest.skip ()
+  else begin
+    let out = compile_and_run linux_deny_write_src in
+    check_field "socket" 0 out;
+    check_field "execve" 0 out;
+    check_field "write" 1 out
+  end
+
+(* ── macOS: IO.Process gates fork, not exec (see the asymmetry note in the
+   module doc comment and specs/todos/2026-08-12-cap-sandbox-macos-process-
+   exec-not-gated.md). Same per-capability extern-block tagging as the Linux
+   fixtures above, for the same reason. The "socket" probe is bound to
+   sbx_probe_bind, not sbx_probe_socket -- Seatbelt's network* deny does not
+   gate socket() creation, only the actual network operation (bind/connect);
+   confirmed by direct inspection of the embedded profile (`strings <bin> |
+   grep '(version 1)'`) after a raw socket()-only probe returned 0 in a fixture
+   that withheld IO.Network. forge/lib/cap_sandbox.ml's own measurement notes
+   the same thing ("deny network* -> program runs, bind fails cleanly"). The
+   printed label stays "socket=" for output-format consistency with the Linux
+   fixtures; only the underlying C symbol differs. Same anchor-call pattern as
+   the Linux fixtures above, and for the same reason. ────────────────────── *)
+
+let macos_deny_net_src =
+  {|
+mod SbxDenyNetMac do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Process
+  needs IO.FileWrite
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_socket() : Int = "sbx_probe_bind"
+    fn probe_fork() : Int = "sbx_probe_fork"
+    fn probe_write_open() : Int = "sbx_probe_write_open"
+  end
+
+  fn main() : Unit do
+    let _anchor_proc = process_pid()
+    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    println("socket=" ++ int_to_string(probe_socket()))
+    println("fork=" ++ int_to_string(probe_fork()))
+    println("write=" ++ int_to_string(probe_write_open()))
+  end
+end
+|}
+
+let macos_deny_process_src =
+  {|
+mod SbxDenyProcessMac do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Network
+  needs IO.FileWrite
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_socket() : Int = "sbx_probe_bind"
+    fn probe_fork() : Int = "sbx_probe_fork"
+    fn probe_write_open() : Int = "sbx_probe_write_open"
+    fn probe_exec_inplace() : Int = "sbx_probe_exec_inplace"
+  end
+
+  fn main() : Unit do
+    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
+    println("socket=" ++ int_to_string(probe_socket()))
+    println("fork=" ++ int_to_string(probe_fork()))
+    println("write=" ++ int_to_string(probe_write_open()))
+    println("exec=" ++ int_to_string(probe_exec_inplace()))
+  end
+end
+|}
+
+let macos_deny_write_src =
+  {|
+mod SbxDenyWriteMac do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Network
+  needs IO.Process
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_socket() : Int = "sbx_probe_bind"
+    fn probe_fork() : Int = "sbx_probe_fork"
+    fn probe_write_open() : Int = "sbx_probe_write_open"
+  end
+
+  fn main() : Unit do
+    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_proc = process_pid()
+    println("socket=" ++ int_to_string(probe_socket()))
+    println("fork=" ++ int_to_string(probe_fork()))
+    println("write=" ++ int_to_string(probe_write_open()))
+  end
+end
+|}
+
+let test_macos_deny_net () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let out = compile_and_run macos_deny_net_src in
+    check_field "socket" 1 out;
+    check_field "fork" 0 out;
+    check_field "write" 0 out
+  end
+
+let test_macos_deny_process () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let out = compile_and_run macos_deny_process_src in
+    check_field "socket" 0 out;
+    check_field "fork" 1 out;
+    check_field "write" 0 out;
+    check_field "exec" 0 out
+  end
+
+let test_macos_deny_write () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let out = compile_and_run macos_deny_write_src in
+    check_field "socket" 0 out;
+    check_field "fork" 0 out;
+    check_field "write" 1 out
+  end
+
+let tests : unit Alcotest.test_case list =
+  [ Alcotest.test_case "linux: NET withheld denies socket, EXEC/WRITE still allowed" `Slow test_linux_deny_net;
+    Alcotest.test_case "linux: PROCESS withheld denies execve, NET/WRITE still allowed" `Slow test_linux_deny_exec;
+    Alcotest.test_case "linux: FILEWRITE withheld denies write-open, NET/EXEC still allowed" `Slow test_linux_deny_write;
+    Alcotest.test_case "macos: NET withheld denies socket, FORK/WRITE still allowed" `Slow test_macos_deny_net;
+    Alcotest.test_case "macos: PROCESS withheld denies fork, NET/WRITE still allowed, EXEC still allowed (documented asymmetry)" `Slow test_macos_deny_process;
+    Alcotest.test_case "macos: FILEWRITE withheld denies write-open, NET/FORK still allowed" `Slow test_macos_deny_write;
+  ]
