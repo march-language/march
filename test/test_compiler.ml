@@ -13744,6 +13744,7 @@ let compiler_suites =
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
+      ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);
       ( "match_diagnostics",
         [
           Alcotest.test_case "or-pattern binding accepted" `Quick
