@@ -270,7 +270,7 @@ mod SbxDenyNet do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main() : Unit do
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process), _w : Cap(IO.FileWrite)) : Unit do
     let _anchor_proc = process_pid()
     let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
@@ -294,7 +294,7 @@ mod SbxDenyExec do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main() : Unit do
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
     let _anchor_net = tcp_connect("127.0.0.1", 1)
     let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
@@ -318,7 +318,7 @@ mod SbxDenyWrite do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main() : Unit do
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
     let _anchor_net = tcp_connect("127.0.0.1", 1)
     let _anchor_proc = process_pid()
     println("socket=" ++ int_to_string(probe_socket()))
@@ -357,17 +357,17 @@ let test_linux_deny_write () =
 
 (* ── macOS: IO.Process gates fork, not exec (see the asymmetry note in the
    module doc comment and specs/todos/2026-08-12-cap-sandbox-macos-process-
-   exec-not-gated.md). Same per-capability extern-block tagging as the Linux
-   fixtures above, for the same reason. The "socket" probe is bound to
-   sbx_probe_bind, not sbx_probe_socket -- Seatbelt's network* deny does not
-   gate socket() creation, only the actual network operation (bind/connect);
-   confirmed by direct inspection of the embedded profile (`strings <bin> |
-   grep '(version 1)'`) after a raw socket()-only probe returned 0 in a fixture
+   exec-not-gated.md). The "socket" probe is bound to sbx_probe_bind, not
+   sbx_probe_socket -- Seatbelt's network* deny does not gate socket()
+   creation, only the actual network operation (bind/connect); confirmed by
+   direct inspection of the embedded profile (`strings <bin> | grep
+   '(version 1)'`) after a raw socket()-only probe returned 0 in a fixture
    that withheld IO.Network. forge/lib/cap_sandbox.ml's own measurement notes
    the same thing ("deny network* -> program runs, bind fails cleanly"). The
    printed label stays "socket=" for output-format consistency with the Linux
-   fixtures; only the underlying C symbol differs. Same anchor-call pattern as
-   the Linux fixtures above, and for the same reason. ────────────────────── *)
+   fixtures; only the underlying C symbol differs. Same anchor-call pattern,
+   and same explicit-`main`-grant requirement, as the Linux fixtures above,
+   and for the same reasons. ─────────────────────────────────────────────── *)
 
 let macos_deny_net_src =
   {|
@@ -383,7 +383,7 @@ mod SbxDenyNetMac do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main() : Unit do
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process), _w : Cap(IO.FileWrite)) : Unit do
     let _anchor_proc = process_pid()
     let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
@@ -408,7 +408,7 @@ mod SbxDenyProcessMac do
     fn probe_exec_inplace() : Int = "sbx_probe_exec_inplace"
   end
 
-  fn main() : Unit do
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
     let _anchor_net = tcp_connect("127.0.0.1", 1)
     let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
@@ -433,7 +433,7 @@ mod SbxDenyWriteMac do
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
 
-  fn main() : Unit do
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
     let _anchor_net = tcp_connect("127.0.0.1", 1)
     let _anchor_proc = process_pid()
     println("socket=" ++ int_to_string(probe_socket()))
