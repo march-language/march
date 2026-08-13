@@ -4111,6 +4111,15 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; the mutual-TCO param-slot alloca site in lib/tir/llvm_tco.ml. This fixture
 ; pins that the boxed path still produces the CORRECT result so a future
 ; change to the mutual-TCO slot strategy can't silently corrupt it.
+;
+; The diff rule below is NOT sufficient on its own, and shipped vacuous once:
+; both steps must READ memory (Simd.load_f32x4) to be impure, because a pure
+; step is an inline candidate and lib/tir/inline.ml's SCC exclusion only
+; walks edges BETWEEN candidates -- so a pure `odd_step` got folded into the
+; impure `even_step`, collapsing the mutual recursion into SELF-recursion.
+; The collapsed program prints the same number, so only the IR-shape rule
+; further below (simd_mutual_tco_llvm_check) can tell the two lowerings
+; apart. Keep the two rules together.
 (rule
  (targets simd_mutual_tco simd_mutual_tco.out)
  (deps (file %{exe:../bin/main.exe})
@@ -4127,6 +4136,49 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/simd_mutual_tco.expected simd_mutual_tco.out)))
+
+; IR-shape half of the mutual-TCO pin: proves the fixture actually reaches
+; the mutual-TCO lowering it claims to guard. Scoped to the combined
+; dispatcher's own `define`, in the style of simd_nested_closure_acc's check.
+;
+; The contract is a CONJUNCTION; no single count is falsifiable alone:
+;   mutco >= 1 -- a `@__mutco_*` combined dispatcher was emitted at all. If
+;     the inliner ever collapses the pair back into self-recursion (the
+;     regression this rule exists for -- see the comment on the run rule
+;     above) there is no such symbol and the awk body is empty, so this
+;     goes 0.
+;   boxed >= 2 -- both accumulator param slots are the uniform BOXED
+;     `alloca ptr` (%even_step__acc.addr / %odd_step__acc.addr), which is
+;     what the llvm_tco.ml comment documents as the mutual-group strategy.
+;     A future change promoting them to native <4 x float> slots must come
+;     here and re-decide deliberately rather than drift.
+;   vadd >= 1 -- the vector arithmetic survived into the dispatcher, so a
+;     DCE'd or scalarized body cannot satisfy the two counts above
+;     vacuously.
+(rule
+ (targets simd_mutual_tco_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_mutual_tco.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/simd_mutual_tco.march)
+   (with-stdout-to simd_mutual_tco_llvm_check.out
+    (run bash -c
+     "body=$(awk '/^define .*@__mutco_/{f=1} f{print} f && /^}/{exit}' native/simd_mutual_tco.ll); \
+      mutco=$(grep -c '@__mutco_' native/simd_mutual_tco.ll); \
+      boxed=$(printf '%s\\n' \"$body\" | grep -c '__acc\\.addr = alloca ptr'); \
+      vadd=$(printf '%s\\n' \"$body\" | grep -c 'fadd <4 x float>'); \
+      echo \"$mutco $boxed $vadd\"")))))
+
+(rule
+ (alias runtest)
+ (deps simd_mutual_tco_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r mutco boxed vadd < simd_mutual_tco_llvm_check.out; \
+    test \"$mutco\" -ge 1 -a \"$boxed\" -ge 2 -a \"$vadd\" -ge 1 || { echo \"simd_mutual_tco no longer exercises the mutual-TCO boxed-vector-slot path: expected >=1 '@__mutco_' symbol (0 means the inliner collapsed even_step/odd_step into SELF-recursion -- make sure BOTH steps stay impure by loading from the array, see the comment in test/native/simd_mutual_tco.march), >=2 boxed '%<fn>__acc.addr = alloca ptr' accumulator slots inside the combined dispatcher, and >=1 'fadd <4 x float>' (body not DCE'd) -- found mutco=$mutco boxed=$boxed vadd=$vadd\" >&2; exit 1; }")))
 
 ; Witness for the march_poly_eq/march_poly_compare MARCH_SIMD_TAG fix
 ; (review finding #1): List.member's `y == x` compares two generically-typed

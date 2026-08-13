@@ -342,9 +342,16 @@ feature needs to replace.
   optimization above covers self-tail-recursion only; a vector threaded
   through a mutual-recursion group is still correct but boxes/unboxes on
   every call, same as before the TCO optimization landed. This is a
-  deliberate wontfix-until-demand, not a gap-in-waiting: pinned correct by
-  `test/native/simd_mutual_tco.march`, so a future change to the mutual-TCO
-  slot strategy can't silently corrupt it. See
+  deliberate wontfix-until-demand, not a gap-in-waiting. `test/native/
+  simd_mutual_tco.march` pins it two ways: an output diff (the boxed path
+  still computes the right answer) and an IR-shape rule
+  (`simd_mutual_tco_llvm_check` in `test/dune`) asserting a `@__mutco_*`
+  dispatcher is emitted at all with both accumulator slots boxed as
+  `alloca ptr`. The second rule is not redundant — the two lowerings print
+  the same number, and the fixture was briefly vacuous because the TIR
+  inliner collapsed the mutual pair into self-recursion. So a change to the
+  mutual-TCO slot strategy can neither silently corrupt the result nor
+  silently stop being tested. See
   `specs/progress/2026-08-13-simd-closeouts-task3-mutual-tco-pin.md`.
 - **`fma` is a true fused multiply-add** (`llvm.fma.v4f32`/`v2f64`, one
   rounding) — it can differ from a separate multiply followed by an add in

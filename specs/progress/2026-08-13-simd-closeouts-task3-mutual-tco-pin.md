@@ -29,34 +29,86 @@ miscompile if they break it.
 
 - `test/native/simd_mutual_tco.march` — `even_step`/`odd_step` mutually
   tail-call each other threading a `Simd.F32x4` accumulator over a 16-lane
-  `NativeArray.make_f32` source: `even_step` adds a freshly loaded 4-lane
-  chunk, `odd_step` multiplies by `splat_f32x4(1.0)` (identity, to also
-  exercise a second op on the boxed accumulator without changing the
-  expected value). `main` requires `Cap(IO.Console)` per the current strict
-  capability rule. Verified interpreted first (`dune exec march --`) —
-  prints `16.` — then `.expected` was produced from that run.
+  `NativeArray.make_f32` source. BOTH steps add a freshly loaded 4-lane
+  chunk; the symmetry is load-bearing, see "The vacuous first cut" below.
+  `main` requires `Cap(IO.Console)` per the current strict capability rule.
+  Verified interpreted first (`dune exec march --`) — prints `32.` — then
+  `.expected` was produced from that run.
 - `test/dune` — a compile-run-diff rule pair for `simd_mutual_tco`, modeled
   on `simd_vector_core`'s (compile once, run once, diff stdout against
   `.expected`; no RSS assertion needed here, this is a correctness pin, not
-  a leak guard).
+  a leak guard), PLUS an IR-shape rule pair `simd_mutual_tco_llvm_check`
+  modeled on `simd_nested_closure_acc`'s: it re-emits with `--emit-llvm`,
+  scopes an `awk` window to the `@__mutco_*` combined dispatcher's own
+  `define`, and asserts the conjunction `mutco >= 1 && boxed >= 2 &&
+  vadd >= 1` — a dispatcher exists at all, both accumulator slots are the
+  uniform boxed `alloca ptr`, and the vector arithmetic survived (so a
+  DCE'd body can't satisfy the first two vacuously).
 - `lib/tir/llvm_tco.ml` — the mutual-TCO boxed-slot comment now cites this
   fixture and this file by path instead of only gesturing at
   docs/simd-vectorization.md.
 
 ## Verification
 
-- `dune exec march -- test/native/simd_mutual_tco.march` → `16.` (interpreted)
-- Compiled binary via the new `test/dune` rule reproduces `16.` byte-for-byte
+- `dune exec march -- test/native/simd_mutual_tco.march` → `32.` (interpreted)
+- Compiled binary via the `test/dune` diff rule reproduces `32.` byte-for-byte
   (asserted every `dune build @test/runtest`).
-- Manual trace: `a` is 16 lanes of `2.0`. `even_step(a,0,16,[0,0,0,0])` loads
-  `[2,2,2,2]` → `odd_step` multiplies by 1 (no-op) → `even_step` adds the next
-  4-lane chunk `[2,2,2,2]` giving `[4,4,4,4]` → `odd_step` multiplies by 1
-  again → `i=16 >= n=16`, `sum_f32x4([4,4,4,4]) = 16.0`. Matches.
+- `simd_mutual_tco_llvm_check` observes `mutco=3 boxed=2 vadd=2` — the
+  emitted dispatcher is
+  `define double @__mutco_even_step_odd_step__(i64 %__tag__.arg, ...)` with
+  `%even_step__acc.addr = alloca ptr` and `%odd_step__acc.addr = alloca ptr`,
+  i.e. exactly the boxed mutual-group slots this file claims to pin.
+- Manual trace: `a` is 16 lanes of `2.0`. The walk visits `i = 0, 4, 8, 12`
+  (even, odd, even, odd) and adds one 4-lane chunk of `[2,2,2,2]` at each, so
+  `acc` ends at `[8,8,8,8]` and `sum_f32x4` gives `32.0`. Matches.
+- Falsification cycle run on the shape rule (see below), both directions.
+
+## The vacuous first cut — and why the shape rule is mandatory
+
+The first version of this fixture **did not exercise the mutual-TCO path at
+all**, and its output diff could not tell. `odd_step` originally multiplied
+the accumulator by `splat_f32x4(1.0)` instead of loading from the array. That
+made it *pure*, hence an inline candidate in `lib/tir/inline.ml`; `even_step`
+was not a candidate because `Simd.load_f32x4` reads memory. And
+`direct_candidate_calls` only walks edges BETWEEN candidates, so the SCC
+exclusion in `recursive_candidate_names` never saw the even↔odd cycle. The
+inliner folded `odd_step` into `even_step`, collapsing mutual recursion into
+SELF-recursion: the emitted IR was `define double @even_step` with
+`%acc.addr = alloca <4 x float>` — the NATIVE-slot path that
+`simd_leak_probe` already pins — with no `__mutco_*` symbol and no
+`mutual_loop` block. `odd_step` was not emitted at all.
+
+Note the trap: this is not specific to the inline *threshold*. Any change
+that makes a step inlinable (purity, size, or a smarter SCC pass) collapses
+the fixture, and the program keeps printing a plausible number. **Output
+equality can never distinguish the two lowerings**, which is precisely how
+this shipped green. Hence the IR-shape rule is part of the pin, not an
+optional extra.
+
+Falsification cycle (both directions actually run, not reasoned about):
+
+| state | fixture | shape rule | counts |
+|---|---|---|---|
+| fixed | both steps load from `a` | GREEN | `mutco=3 boxed=2 vadd=2` |
+| sabotaged | `odd_step` back to the pure `mul_f32x4(acc, splat(1.0))` | **RED** | `mutco=0 boxed=0 vadd=0` |
+| restored | both steps load from `a` | GREEN | `mutco=3 boxed=2 vadd=2` |
+
+The sabotage run was done twice. The first left `.expected` at `32.`, so the
+diff rule went red too — which proves nothing about the shape rule's
+independent value. The second set `.expected` to the sabotaged program's own
+output (`16.`), making the **diff rule green while the shape rule stayed
+red** (`test/dune`, the `simd_mutual_tco_llvm_check` assertion, `found
+mutco=0 boxed=0 vadd=0`). That is the direct demonstration that the shape
+assertion — and only the shape assertion — catches the collapse.
 
 ## Pointers
 
 - `test/native/simd_mutual_tco.march`, `test/native/simd_mutual_tco.expected`
-- `test/dune` (search `simd_mutual_tco`)
+- `test/dune` (search `simd_mutual_tco` — four rules: compile/run,
+  diff, `--emit-llvm` shape extraction, shape assertion)
+- `lib/tir/inline.ml` (`run`, `recursive_candidate_names`,
+  `direct_candidate_calls`) — the pass whose candidate-set scoping made the
+  first cut vacuous
 - `lib/tir/llvm_tco.ml` (the mutual-TCO param-slot alloca comment)
 - Sibling closeouts: `specs/progress/2026-08-11-simd-tco-entry-box-leak.md`
   (Task 1), `specs/progress/2026-08-13-simd-fma-rounding-parity.md` (Task 2)

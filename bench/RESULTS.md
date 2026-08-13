@@ -426,8 +426,11 @@ no STOP-for-coordination was triggered on that leg. The comparison is at
 checksum granularity only: the leg prints a summed total, not per-triple
 values, so it evidences agreement in aggregate and would not localize (or,
 in principle, notice two cancelling last-ulp) divergences. The formal
-question is tracked in
-`specs/todos/2026-08-12-simd-fma-rounding-parity.md`.
+question has since been settled and closed: the interpreter now emulates a
+*single*-rounded binary32 `fma` (`eval.ml`'s `fma32_single_round`, round-to-odd
+over binary64) instead of double-rounding a binary64 `Float.fma`, and parity is
+fuzzed over 400k boundary-heavy lanes by `test/native/simd_fma_fuzz.march`. See
+`specs/progress/2026-08-13-simd-fma-rounding-parity.md`.
 
 ## DataFrame Min/Max: not migrated
 

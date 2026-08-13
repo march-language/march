@@ -10,7 +10,26 @@
 -- boxed path still produces the CORRECT numeric result, so a future change
 -- to the mutual-TCO slot strategy can't silently corrupt it.
 --
--- specs/progress/2026-08-12-simd-closeouts-task-3-mutual-tco-pin.md
+-- WHY BOTH STEPS LOAD FROM `a`: the two bodies must be symmetric for this
+-- fixture to be non-vacuous. `Simd.load_f32x4` reads memory, so a step that
+-- performs one is impure and is therefore never an inline candidate
+-- (lib/tir/inline.ml `run`, `Purity.is_pure`). An earlier revision had
+-- `odd_step` do only pure vector arithmetic; it became a candidate, and
+-- because `direct_candidate_calls` only walks edges BETWEEN candidates the
+-- SCC exclusion in `recursive_candidate_names` never saw the even<->odd
+-- cycle. The inliner then folded `odd_step` into `even_step`, collapsing
+-- the mutual recursion into SELF-recursion -- so the fixture silently
+-- exercised the NATIVE-slot path that simd_leak_probe already pins, and no
+-- `__mutco_*` function was emitted at all. The IR-shape rule beside the
+-- run rule in test/dune now asserts the mutual group actually reaches
+-- codegen; output equality alone cannot tell the two lowerings apart.
+--
+-- Expected value, hand-checkable: `a` is 16 f32 lanes of 2.0. The walk
+-- visits i = 0, 4, 8, 12 (even, odd, even, odd) and adds one 4-lane chunk
+-- at each, so every lane of `acc` ends at 4 * 2.0 = 8.0 and the horizontal
+-- sum of the 4 lanes is 32.0.
+--
+-- specs/progress/2026-08-13-simd-closeouts-task3-mutual-tco-pin.md
 mod SimdMutualTco do
   needs IO.Console
 
@@ -21,7 +40,7 @@ mod SimdMutualTco do
 
   pfn odd_step(a, i : Int, n : Int, acc) : Float do
     if i >= n do Simd.sum_f32x4(acc)
-    else even_step(a, i + 4, n, Simd.mul_f32x4(acc, Simd.splat_f32x4(1.0))) end
+    else even_step(a, i + 4, n, Simd.add_f32x4(acc, Simd.load_f32x4(a, i))) end
   end
 
   fn main(_cap_console : Cap(IO.Console)) : () do

@@ -93,6 +93,28 @@ same driver shape. `test/native/simd_leak_probe.march` is the ready-made
 harness — swap its `go` for a non-tail-recursive callee and the RSS assertion
 (< 32 MB) fails again.
 
+## Known weaknesses of the existing guard (read before trusting it)
+
+Two things about the `simd_leak_probe` RSS assertion in `test/dune` are worth
+knowing by whoever generalizes this fix, because both weaken it:
+
+- **The RSS assertion is Darwin-only.** It reads max RSS from
+  `/usr/bin/time -l`, which is a macOS spelling, so `test/dune` gates it on
+  `uname -s = Darwin` and prints a skip notice elsewhere. On Linux CI the
+  compile, the exit status, and the stdout diff still run, but the leak
+  assertion itself does not — meaning the *only* automated place the leak is
+  actually measured is a developer macOS box (and macOS CI, where present).
+  A Linux-portable reading (`/usr/bin/time -v`'s "Maximum resident set size",
+  or `getrusage`/`/proc/self/status` from inside the probe) would close this.
+- **The threshold shipped as an absolute bound, not the specified delta.**
+  The closeouts spec asked for "max RSS delta vs a scalar control < 5 MB";
+  what landed is an absolute `< 32 MB` with no control run. That deviation is
+  accepted (the pre-fix measurement was ~67 MB and post-fix ~2.7 MB, so 32 MB
+  separates them by a wide margin and needs no second binary), but it does
+  mean the guard cannot distinguish a genuine regression from a general
+  baseline-RSS drift of the runtime. If runtime baseline RSS ever grows
+  materially, re-derive the bound or add the scalar control.
+
 ## Related
 
 - `specs/progress/2026-08-11-simd-tco-entry-box-leak.md` — the narrow fix, and
