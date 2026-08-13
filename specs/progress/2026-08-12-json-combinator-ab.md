@@ -100,7 +100,18 @@ consumed-input rule correctly replaces the expected-set, but `true`/`false`/
 ## Verdict
 
 Against the bar set before measuring: **do not replace the hand-written JSON
-parser.** Keep `parse_c` as the A/B artifact and the regression target.
+parser.**
+
+`Json.parse_c` has been **removed from the stdlib** rather than kept around.
+It was ~100 lines loaded by every March program, in service of an experiment
+that concluded "do not adopt", and it made `json.march` depend on
+`parse.march`. The full implementation, the correctness harness and the
+benchmark are reproducible from commit `159ea9e8`; re-run them there after
+either fix below lands.
+
+(`parse.march` stays ahead of `json.march`/`toml.march` in both load lists.
+The dependency is gone, but the ordering costs nothing and the next stdlib
+consumer of `Parse` will want it.)
 
 This is a useful result, not a wasted one. It says the combinator library is
 correct and its authoring story works — a complete JSON grammar is ~80 lines
@@ -110,5 +121,17 @@ identified fixes before it can carry a hot path:
 1. memoizing `delay`, so the grammar is built once rather than per descent;
 2. a wider success channel, so ordered choice stops losing the deeper error.
 
-Both are worth doing before any further format is ported. Neither was
+Both are worth doing before any further format is ported, and both are filed:
+
+- `specs/todos/2026-08-12-parse-rebuilds-its-grammar-on-every-descent.md`
+- `specs/todos/2026-08-12-parse-and-then-discards-the-deeper-error.md`
+
+They are ordered: the `delay` fix changes the allocation budget against which
+the wider success channel has to be judged, so it goes first. Neither was
 speculative before this experiment; both are now measured.
+
+**What was kept.** The three combinators the experiment forced out — `delay`,
+`take_while`/`take_while1`, `optional` — stay in `Parse` with their tests.
+They are not JSON-specific: recursion, single-slice token capture and
+optionality are needed by every grammar, and finding them is most of what a
+first real grammar is *for*.
