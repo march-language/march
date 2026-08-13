@@ -415,6 +415,13 @@ int64_t march_actor_get_int(void *actor, int64_t index);
 void   *march_send(void *actor, void *msg);
 /* Process all actors in the run queue (called automatically by march_send). */
 void    march_run_scheduler(void);
+/* Named process registry (named-registry plan, Task 3). Forward table is a
+ * runtime-owned Vault table; reverse index lives on march_actor_meta.
+ * See the design comment above registry_init_once in march_runtime.c. */
+int64_t march_actor_register(void *name_str, void *actor);   /* 1 ok, 0 taken/dead */
+int64_t march_actor_unregister(void *name_str);               /* 1 removed, 0 absent */
+void   *march_actor_whereis(void *name_str);   /* Option(actor): niche-encoded */
+void   *march_actor_registered(void);          /* List(String) of live names */
 /* Spawn a no-arg C function as a green thread (for the main entrypoint). */
 /* Self-imposed capability sandbox (opt-in, --cap-sandbox). No-op unless
  * MARCH_CAP_PROFILE was defined at build time. See runtime/march_sandbox.c. */

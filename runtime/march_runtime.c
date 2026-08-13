@@ -1906,6 +1906,15 @@ typedef struct march_actor_meta {
      * compares it after; any advance means loop again. Meaningless while
      * delayed_batch_pending is 0; zeroed by calloc. */
     int64_t                      pending_drop_count;
+    /* Named-registry reverse index (Task 3): every name currently registered
+     * to THIS actor, as plain strdup'd C strings — NOT a March List(String),
+     * see the design comment above registry_init_once for why. Grown one at
+     * a time via realloc (a handful of names per actor, not a hot path).
+     * Walked by registry_retire_actor (Task 5) so a dying actor's names are
+     * dropped from the forward table in O(names held) rather than a full
+     * table scan. Zeroed by calloc at meta creation. */
+    char                       **reg_names;
+    int                          reg_name_count;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta.
@@ -2374,6 +2383,164 @@ static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
             return m;
     }
     return NULL;
+}
+
+/* ── Named process registry ───────────────────────────────────────────────
+ * Forward mapping (name -> actor) lives in a Vault table the RUNTIME owns, so
+ * it inherits Vault's concurrent reads and is inspectable by the same tooling
+ * as any other table — and so `Actor.whereis` needs no capability, since no
+ * March-level naming call happens.
+ *
+ * The reverse index (actor -> its names) is the march_actor_meta.reg_names
+ * array above, NOT a second Vault table: it exists only so death cleanup is
+ * O(names held) instead of a full table walk per death (the churn scenario
+ * kills 40k actors), no user inspects it, and building/refcounting a
+ * List(String) from C to store as a Vault value is real machinery for no
+ * gain.
+ *
+ * march_vault_get returns a NICHE-encoded Option(ptr): None = NULL,
+ * Some(v) = v itself, incrc'd by the callee (see march_vault_get / the
+ * march_vault_update comment on the same convention). Every use below that
+ * receives a non-NULL result therefore owns exactly one extra reference that
+ * must be either handed onward (as a return value) or explicitly decrc'd. */
+#define MARCH_REGISTRY_TABLE_NAME "$actor_registry"
+
+static void *g_registry_tbl = NULL;
+static pthread_once_t g_registry_once = PTHREAD_ONCE_INIT;
+
+static void registry_init_once(void) {
+    g_registry_tbl = march_vault_new(march_string_lit(MARCH_REGISTRY_TABLE_NAME,
+                                                        (int64_t)strlen(MARCH_REGISTRY_TABLE_NAME)));
+    /* registry table itself is never released for the process lifetime. */
+    march_incrc(g_registry_tbl);
+}
+static void *registry_tbl(void) {
+    pthread_once(&g_registry_once, registry_init_once);
+    return g_registry_tbl;
+}
+
+/* Append a strdup'd copy of [name] to [m]'s reverse index. */
+static void meta_add_name(march_actor_meta *m, const char *name) {
+    m->reg_names = (char **)realloc(m->reg_names,
+                                     sizeof(char *) * (size_t)(m->reg_name_count + 1));
+    if (!m->reg_names) { fputs("march: out of memory (registry)\n", stderr); exit(1); }
+    m->reg_names[m->reg_name_count++] = strdup(name);
+}
+
+/* Remove [name] from [m]'s reverse index, if present (order not preserved). */
+static void meta_remove_name(march_actor_meta *m, const char *name) {
+    for (int i = 0; i < m->reg_name_count; i++) {
+        if (strcmp(m->reg_names[i], name) == 0) {
+            free(m->reg_names[i]);
+            m->reg_names[i] = m->reg_names[m->reg_name_count - 1];
+            m->reg_name_count--;
+            return;
+        }
+    }
+}
+
+/* march_actor_register(name, actor) -> 1 on success, 0 if the name is held
+ * by a LIVE actor, or if [actor] itself is dead. A stale entry left behind
+ * by a dead actor is silently overwritten (that's what makes the name
+ * reusable after the incarnation that held it dies). */
+int64_t march_actor_register(void *name_str, void *actor) {
+    if (!IS_HEAP_PTR(actor) || !((int64_t *)actor)[3]) return 0;   /* dead/invalid */
+
+    void *existing = march_vault_get(registry_tbl(), name_str);
+    if (existing != NULL) {
+        int taken = IS_HEAP_PTR(existing) && ((int64_t *)existing)[3];
+        march_decrc(existing);
+        if (taken) return 0;
+        /* stale entry for a dead actor: fall through and overwrite */
+    }
+
+    march_vault_set(registry_tbl(), name_str, actor);
+
+    char scratch[MARCH_SSO_MAX + 1];
+    meta_add_name(find_or_create_meta(actor), march_str_data(name_str, scratch));
+    return 1;
+}
+
+/* march_actor_unregister(name) -> 1 if a mapping was removed, 0 otherwise.
+ * Removes the forward-table entry regardless of the owning actor's
+ * liveness, and drops the name from that actor's reverse index if it still
+ * has one. */
+int64_t march_actor_unregister(void *name_str) {
+    void *existing = march_vault_get(registry_tbl(), name_str);
+    if (existing == NULL) return 0;
+
+    if (IS_HEAP_PTR(existing)) {
+        march_actor_meta *m = find_meta(existing);
+        if (m) {
+            char scratch[MARCH_SSO_MAX + 1];
+            meta_remove_name(m, march_str_data(name_str, scratch));
+        }
+    }
+    march_decrc(existing);   /* release our extra ref from march_vault_get */
+
+    march_vault_drop(registry_tbl(), name_str);
+    return 1;
+}
+
+/* march_actor_whereis(name) -> Some(actor) if registered AND alive, else
+ * None. Liveness is checked here (not just table membership) because
+ * cleanup and lookup race by nature — a stale entry for an actor that died
+ * without deregistering must resolve to None, not a dangling handle. */
+void *march_actor_whereis(void *name_str) {
+    void *val = march_vault_get(registry_tbl(), name_str);
+    if (val != NULL && IS_HEAP_PTR(val) && ((int64_t *)val)[3]) {
+        return val;   /* Some(actor): niche encoding, ref transferred to caller */
+    }
+    if (val != NULL) march_decrc(val);
+    return NULL;   /* None */
+}
+
+/* march_actor_registered() -> List(String) of every currently-live
+ * registered name. Walks the forward table's keys and filters to entries
+ * whose actor is still alive, discarding stale ones (does not clean them
+ * up — that's registry_retire_actor's job, driven by actual death). */
+void *march_actor_registered(void) {
+    void *keys = march_vault_keys(registry_tbl());   /* owned List(String) */
+    void *result = march_alloc(16);                  /* Nil */
+
+    void *p = keys;
+    while (p && ((march_hdr *)p)->tag == 1) {
+        void *next = *(void **)((char *)p + 24);
+        void *key  = *(void **)((char *)p + 16);
+
+        void *val = march_vault_get(registry_tbl(), key);
+        int live = val != NULL && IS_HEAP_PTR(val) && ((int64_t *)val)[3];
+        if (val != NULL) march_decrc(val);
+
+        if (live) {
+            /* Reuse this Cons cell as the new head of [result] — we already
+             * own both it and [key] from march_vault_keys, so no
+             * incrc/decrc needed, just relink the tail. */
+            *(void **)((char *)p + 24) = result;
+            result = p;
+        } else {
+            march_decrc(key);
+            march_decrc(p);
+        }
+        p = next;
+    }
+    return result;
+}
+
+/* Used by Task 5's do_actor_death: walk [m]'s reverse index, drop each name
+ * from the forward table, and free the index. Internal (static) because
+ * do_actor_death lives in this same translation unit. */
+static void registry_retire_actor(march_actor_meta *m) {
+    if (!m->reg_names) return;
+    for (int i = 0; i < m->reg_name_count; i++) {
+        void *key = march_string_lit(m->reg_names[i], (int64_t)strlen(m->reg_names[i]));
+        march_vault_drop(registry_tbl(), key);
+        march_decrc(key);   /* release our own ref from march_string_lit */
+        free(m->reg_names[i]);
+    }
+    free(m->reg_names);
+    m->reg_names = NULL;
+    m->reg_name_count = 0;
 }
 
 /* ── Actor green thread loop ─────────────────────────────────────── */

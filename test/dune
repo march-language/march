@@ -367,6 +367,41 @@
  (deps    (file test_vault_hammer_runner))
  (action  (run ./test_vault_hammer_runner)))
 
+; ── Named process registry C API (named-registry plan, task 3) ────────────
+; Exercises march_actor_register/unregister/whereis/registered directly at
+; the C level, with fake actor records (5-word heap objects with the $alive
+; flag set) so it's free of the scheduler. Same full-runtime link set as the
+; vault tests above, since the registry's forward table is Vault-backed.
+(rule
+ (targets test_actor_registry_runner)
+ (deps    test_actor_registry.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_actor_registry.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_actor_registry_runner))
+ (action  (run ./test_actor_registry_runner)))
+
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
 ; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the
@@ -456,7 +491,9 @@
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
           ../runtime/march_monitor_registry.c ../runtime/march_monitor_registry.h
-         
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_remote_registry.c
           ../lib/cas/blake3_cflags.sexp ../lib/cas/blake3_libs.sexp
           (glob_files ../runtime/*.h))
  (action
@@ -472,7 +509,10 @@
       ../runtime/march_scheduler.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c \
-      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread -lm")))
+      ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c \
+      ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c \
+      ../runtime/march_remote_registry.c \
+      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread -lm -lz")))
 
 (rule
  (alias runtest)
@@ -544,7 +584,9 @@
           ../runtime/march_gc.c
           ../runtime/march_monitor_registry.c
           ../runtime/march_monitor_registry.h
-         
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c
+          ../runtime/march_remote_registry.c
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -I../runtime -O2
@@ -558,8 +600,10 @@
                ../runtime/march_heap.c
                ../runtime/march_gc.c
                ../runtime/march_monitor_registry.c
-              
-               -lpthread -lm)))
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lm -lz)))
 
 (rule
  (alias   runtest)
