@@ -13,7 +13,7 @@ git log is authoritative for exact commits.
 
 ### Changed
 
-- Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared lock, writes an exclusive one.
+- Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared, striped reader-count lock (`set`/`set_ttl`/`put_new`/`incr`/`push_capped`/`drop` still take it exclusively). Concurrent reads of *distinct* keys now scale close to linearly with thread count; concurrent reads of the *same* key are still bounded by reference-count contention on that key's one shared value, an orthogonal cost the lock change doesn't touch.
 
 ### Fixed
 

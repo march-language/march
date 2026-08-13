@@ -1,28 +1,38 @@
-/* Concurrent readers must not serialise. Four threads each do a large number
- * of gets against one table.
+/* Many readers of ONE key. This test guards against a catastrophic
+ * regression (e.g. back to an exclusive lock) — it does NOT measure lock
+ * quality, and its ratio must not be read as "how well does Vault's table
+ * lock scale." See test_vault_distinct_keys_scale.c for that.
  *
- * READS=1,000,000 (not the original 200,000): at 200K, solo runs at ~8-9ms —
- * close enough to the 1ms wall-clock quantization that the four/solo ratio
- * swung 4x-8.5x run to run on pure timer noise, useless as a regression
- * signal. 1M reads (~42-46ms solo) tightened that to a stable 5.6x-7.0x band.
+ * Why the same key can't approach 1x no matter how good the table lock is:
+ * every march_vault_get call does march_incrc(n->value) on the *returned
+ * value's own refcount field*. When every reader thread fetches the same
+ * key, they all bump the SAME value's refcount — an atomic RMW on one
+ * shared cache line, contended across cores independent of whatever guards
+ * the table. Table-lock quality and refcount-bump contention are two
+ * different costs; this test's shape conflates them, which is exactly why
+ * its bound is loose and test_vault_distinct_keys_scale.c exists to isolate
+ * the one this task is actually about.
  *
- * The ratio threshold below (9x) is looser than a textbook "close to 1x"
- * expectation for a shared lock. Measured on this repo's 14-core dev box
- * (which regularly runs other CPU-bound sessions concurrently, so absolute
- * times are noisy — see specs/todos or ask about "bench load contamination"):
- * the ORIGINAL exclusive pthread_mutex_t gave a consistent ~9.5x ratio; a
- * first attempt using pthread_rwlock_t gave a consistent ~18x ratio, WORSE
- * than the mutex it replaced (a documented Darwin pathology: pthread_rwlock's
- * fairness/ticket bookkeeping serialises readers harder than a plain mutex —
- * WebKit carries its own ReadWriteLock for the same reason). The shipped
- * hand-rolled atomic reader-count lock (see vault_rwlock_t in
- * runtime/march_extras.c) gives a consistent 5.6x-7.0x ratio — clearly better
- * than both, but the true "close to 1x" ceiling is not reachable at this
- * box's lock-acquisition rate (tens of millions of atomic RMWs/sec on one
- * word) without a reclamation scheme (RCU/epochs), which Task 1 explicitly
- * defers. 9x leaves margin above the measured ~7.0x peak while still failing
- * on a regression back toward mutex-like (~9.5x) or rwlock-like (~18x)
- * behavior. */
+ * Measured on this repo's 14-core dev box (READS=1,000,000/thread; box runs
+ * other CPU-bound sessions concurrently, so treat absolute numbers as noisy
+ * — see "bench load contamination" in project memory):
+ *   - original exclusive pthread_mutex_t:            ~9.5x
+ *   - pthread_rwlock_t (rejected, see march_extras.c): ~18x  (Darwin pathology)
+ *   - single hand-rolled atomic reader count:          5.6x-7.0x
+ *   - striped reader counters (shipped):               5.7x-6.5x  <- this test
+ *   - striped, but each thread reads a DISTINCT key:    2.75x-3.11x (see the
+ *     other test — this is what the striped lock actually buys)
+ *   - diagnostic only, never shipped: same key with the march_incrc call
+ *     temporarily removed from march_vault_get to isolate the refcount cost:
+ *     ~1.5x-2.0x
+ * The striped-lock same-key number (5.7x-6.5x) barely moved from the
+ * single-counter number (5.6x-7.0x) *because the table lock was never the
+ * bottleneck in this shape* — the distinct-key numbers above are the actual
+ * before/after for the table lock itself.
+ *
+ * 9x is roughly the ORIGINAL mutex's ratio: the bar here is "never worse
+ * than where we started," not "scales well" — that claim belongs to
+ * test_vault_distinct_keys_scale.c. */
 #include <assert.h>
 #include <pthread.h>
 #include <stdio.h>

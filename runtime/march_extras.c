@@ -624,54 +624,116 @@ typedef struct vault_node {
  * Not lock-free: march_vault_drop is the one place a node is unlinked and
  * freed, so lock-free readers would need retire-in-place (which leaks a node
  * per distinct key, unacceptable for a high-cardinality cache) or epoch
- * reclamation. A shared lock buys the concurrency with no change to deletion.
+ * reclamation. Striping (below) buys the concurrency with no change to
+ * deletion and no reclamation scheme.
  *
- * Writer starvation under sustained read load is possible and platform-
- * dependent; Vault's writes are rare relative to reads, and the registry's
- * writes (register/unregister) are rarer still. Revisit with striped
- * per-bucket locks if measurement ever shows otherwise.
+ * FIX ROUND 1 — striped reader counters, not a single shared counter:
  *
- * A hand-rolled atomic reader-count lock, not pthread_rwlock_t: measured on
- * this repo's dev/CI macOS boxes, Darwin's pthread_rwlock serialises
- * concurrent readers far worse than a plain pthread_mutex_t does (4 threads
- * doing read-only Vault.get ran ~15-20x a single thread's time under
- * pthread_rwlock, vs ~9-10x under the exclusive mutex it replaced) — a
- * documented Darwin pathology (WebKit carries its own ReadWriteLock for the
- * same reason). The state word below is a single _Atomic int32_t: 0 = free,
- * N>0 = N readers held, -1 = a writer holds it. CAS-retry with sched_yield
- * backoff, no fairness queue, so it is genuinely reader-cheap on both Darwin
- * and Linux. */
+ * A first version used one _Atomic int32_t reader count (or, before that,
+ * pthread_rwlock_t — see below). Both plateaued at a measured 5.6x-7.0x wall
+ * time for 4 concurrent readers vs. 1 (should be close to 1x): every reader
+ * does an atomic RMW on the *same* cache line, so the line ping-pongs between
+ * cores on every lock/unlock regardless of how the lock is coded — a single
+ * counter cannot scale no matter what. Striping gives each reader its own
+ * cache line (one per stripe, `_Alignas(64)`), which is how ETS's
+ * read_concurrency actually scales: readers hash to a stripe and only
+ * contend with other readers hashing to the *same* stripe, not with every
+ * reader in the process.
+ *
+ * Not pthread_rwlock_t either: measured on this repo's dev/CI macOS boxes,
+ * Darwin's pthread_rwlock serialises concurrent readers far worse than a
+ * plain pthread_mutex_t does (4 threads doing read-only Vault.get ran
+ * ~15-20x a single thread's time under pthread_rwlock, vs ~9-10x under the
+ * exclusive mutex it replaced) — a documented Darwin pathology (WebKit
+ * carries its own ReadWriteLock for the same reason).
+ *
+ * Writer preference: a pending/active writer sets `writer` before waiting for
+ * readers to drain, and new readers spin on `writer` before incrementing
+ * their stripe — this is what prevents writer starvation under sustained
+ * read load (readers keep arriving faster than any writer could ever see all
+ * stripes hit zero, without this). Writers serialise among themselves with
+ * `wmutex` — a plain mutex is fine there, writes are rare.
+ *
+ * INVARIANT 1 (load-bearing): the unlock must use the SAME stripe index as
+ * the lock. `vault_rd_lock` returns the index it used; `vault_rd_unlock`
+ * takes it as a parameter. Do not recompute the index at unlock time from
+ * pthread_self() again — it happens to give the same answer only because
+ * nothing below reschedules the calling thread, and recomputing invites a
+ * future refactor to silently break that assumption.
+ *
+ * INVARIANT 2 (load-bearing): a green thread must never park while holding a
+ * Vault read lock. March green threads migrate across OS threads at any
+ * swapcontext, which would (a) decrement a different stripe than the one
+ * incremented — corrupting that stripe's count — and (b) leave the
+ * originally-incremented stripe permanently nonzero, wedging every future
+ * writer forever. Every Vault critical section today is pure C with no yield
+ * point, so this holds — but it is exactly the TLS/thread-identity-across-
+ * migration hazard class that has bitten this repo before, which is why
+ * march_sched_yield and friends carry `noinline` migration-barrier comments.
+ * If a future change ever adds a yieldable call inside a locked Vault
+ * section, this invariant breaks. */
+#define VAULT_RD_STRIPES 16 /* power of two */
+
 typedef struct {
-    _Atomic int32_t state;
+    _Alignas(64) _Atomic int64_t readers; /* one cache line each — the point */
+} vault_rd_stripe;
+
+typedef struct {
+    vault_rd_stripe rd[VAULT_RD_STRIPES];
+    _Atomic int      writer;  /* 1 = a writer holds or is waiting */
+    pthread_mutex_t  wmutex;  /* serialises writers among themselves */
 } vault_rwlock_t;
 
-static inline void vault_rd_lock(vault_rwlock_t *l) {
+/* Hash the calling thread's identity into [0, VAULT_RD_STRIPES). Deliberately
+ * NOT _Thread_local: this repo has a documented Darwin hazard where lazy TLS
+ * materialisation calls malloc (see the scheduler's TLS comments), which is
+ * unsafe to trigger from arbitrary Vault call sites. pthread_self() has no
+ * such hazard. */
+static inline unsigned vault_stripe_of_self(void) {
+    uintptr_t self = (uintptr_t)pthread_self();
+    /* fibonacci hashing: spreads adjacent pthread_t values (common on Linux,
+     * where thread structs are often bump-allocated) across stripes. */
+    uint64_t h = (uint64_t)self * 0x9E3779B97F4A7C15ULL;
+    return (unsigned)(h >> 60) & (VAULT_RD_STRIPES - 1);
+}
+
+/* Returns the stripe index used — pass it unchanged to vault_rd_unlock. */
+static inline unsigned vault_rd_lock(vault_rwlock_t *l) {
+    unsigned i = vault_stripe_of_self();
     for (;;) {
-        int32_t s = atomic_load_explicit(&l->state, memory_order_relaxed);
-        if (s >= 0 &&
-            atomic_compare_exchange_weak_explicit(&l->state, &s, s + 1,
-                memory_order_acquire, memory_order_relaxed))
-            return;
-        sched_yield();
+        /* Writer preference: don't even try to acquire while one is
+         * pending/active, so writers aren't starved by a steady stream of
+         * new readers. */
+        while (atomic_load_explicit(&l->writer, memory_order_acquire))
+            sched_yield();
+        atomic_fetch_add_explicit(&l->rd[i].readers, 1, memory_order_acq_rel);
+        /* Re-check: a writer may have set the flag between our load above
+         * and our increment. If so, back off and retry rather than let the
+         * writer wait on a reader that arrived after it announced intent. */
+        if (!atomic_load_explicit(&l->writer, memory_order_acquire))
+            return i;
+        atomic_fetch_sub_explicit(&l->rd[i].readers, 1, memory_order_release);
     }
 }
 
-static inline void vault_rd_unlock(vault_rwlock_t *l) {
-    atomic_fetch_sub_explicit(&l->state, 1, memory_order_release);
+/* `i` MUST be the value vault_rd_lock returned for this critical section —
+ * see INVARIANT 1 above. */
+static inline void vault_rd_unlock(vault_rwlock_t *l, unsigned i) {
+    atomic_fetch_sub_explicit(&l->rd[i].readers, 1, memory_order_release);
 }
 
 static inline void vault_wr_lock(vault_rwlock_t *l) {
-    for (;;) {
-        int32_t expect = 0;
-        if (atomic_compare_exchange_weak_explicit(&l->state, &expect, -1,
-                memory_order_acquire, memory_order_relaxed))
-            return;
-        sched_yield();
+    pthread_mutex_lock(&l->wmutex);
+    atomic_store_explicit(&l->writer, 1, memory_order_seq_cst);
+    for (int i = 0; i < VAULT_RD_STRIPES; i++) {
+        while (atomic_load_explicit(&l->rd[i].readers, memory_order_acquire) != 0)
+            sched_yield();
     }
 }
 
 static inline void vault_wr_unlock(vault_rwlock_t *l) {
-    atomic_store_explicit(&l->state, 0, memory_order_release);
+    atomic_store_explicit(&l->writer, 0, memory_order_release);
+    pthread_mutex_unlock(&l->wmutex);
 }
 
 typedef struct {
@@ -718,7 +780,10 @@ static char *vault_key_cstr(void *key) {
 /* Create a new vault_data wrapped in a March heap handle. */
 static void *vault_new_handle(void) {
     vault_data *vd = calloc(1, sizeof(vault_data));
-    vd->rwlock.state = 0;
+    /* calloc already zeroed rd[*].readers and writer; wmutex still needs a
+     * real pthread_mutex_init (a zeroed pthread_mutex_t is not portably
+     * equivalent to PTHREAD_MUTEX_INITIALIZER). */
+    pthread_mutex_init(&vd->rwlock.wmutex, NULL);
     /* Wrap in a March heap object: [rc=1][tag=0][pad=0][ptr_to_vd] */
     void *handle = march_alloc(16 + 8);
     *(void **)((char *)handle + 16) = vd;
@@ -1027,7 +1092,7 @@ void *march_vault_get(void *handle, void *key_val) {
     vault_data *vd = vault_get_data(handle);
     char *key = vault_key_cstr(key_val);
     int64_t now = vault_now_ms();
-    vault_rd_lock(&vd->rwlock);
+    unsigned stripe = vault_rd_lock(&vd->rwlock);
     vault_node *n = vault_find(vd, key, now);
     void *result;
     if (n) {
@@ -1040,7 +1105,7 @@ void *march_vault_get(void *handle, void *key_val) {
     } else {
         result = make_none();
     }
-    vault_rd_unlock(&vd->rwlock);
+    vault_rd_unlock(&vd->rwlock, stripe);
     free(key);
     return result;
 }
@@ -1115,7 +1180,7 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
 int64_t march_vault_size(void *handle) {
     vault_data *vd = vault_get_data(handle);
     int64_t now = vault_now_ms();
-    vault_rd_lock(&vd->rwlock);
+    unsigned stripe = vault_rd_lock(&vd->rwlock);
     /* Count live entries */
     int64_t count = 0;
     for (int i = 0; i < VAULT_BUCKETS; i++) {
@@ -1125,7 +1190,7 @@ int64_t march_vault_size(void *handle) {
             n = n->next;
         }
     }
-    vault_rd_unlock(&vd->rwlock);
+    vault_rd_unlock(&vd->rwlock, stripe);
     return count;
 }
 
@@ -1134,7 +1199,7 @@ int64_t march_vault_size(void *handle) {
 void *march_vault_keys(void *handle) {
     vault_data *vd = vault_get_data(handle);
     int64_t now = vault_now_ms();
-    vault_rd_lock(&vd->rwlock);
+    unsigned stripe = vault_rd_lock(&vd->rwlock);
     /* Build a March List of key strings */
     void *list = march_alloc(16); /* Nil */
     for (int i = VAULT_BUCKETS - 1; i >= 0; i--) {
@@ -1152,7 +1217,7 @@ void *march_vault_keys(void *handle) {
             n = n->next;
         }
     }
-    vault_rd_unlock(&vd->rwlock);
+    vault_rd_unlock(&vd->rwlock, stripe);
     return list;
 }
 
