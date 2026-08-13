@@ -23,6 +23,9 @@ The library is organized by domain. The main families:
 - **Core data** — `Option`, `Result`, `List`, `Tuple`, `Range`.
 - **Collections** — `Map` (AVL), `HAMT`, `Set`, `SortedSet`, `OrderedMap`,
   `Queue`, `Deque`, `Array`, `NativeArray`, `RRB` (persistent vector).
+  `NativeArray` pairs with `Simd` — fixed 128-bit vector types
+  (`F32x4`/`F64x2`/`I32x4`/`I64x2`/`U8x16`) for guaranteed-vectorized numeric
+  kernels; see `docs/simd-vectorization.md`.
 - **Text** — `String`, `Char`, `IOList`, `Regex`, `CSV`, `Bytes`.
 - **Numbers** — `Math`, `BigInt`, `Decimal`, `Stats`, `Random`, `DateTime`,
   `Duration`.

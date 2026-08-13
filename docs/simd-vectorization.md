@@ -368,4 +368,5 @@ feature needs to replace.
 - [Standard Library → NativeArray]({{ site.baseurl }}/docs/stdlib/NativeArray.html) — full API reference.
 - [Standard Library → DataFrame]({{ site.baseurl }}/docs/stdlib/DataFrame.html) — columnar data built on `NativeArray`.
 - [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — parallelizing across cores, a different axis from vectorizing within one core.
-- [Memory Model]({{ site.baseurl }}/docs/memory-model/) — how March values are represented, including the float-boxing tradeoff mentioned above.
+- [Value Representation]({{ site.baseurl }}/docs/value-representation/) — how March values are represented at the bit level, including the float-boxing tradeoff mentioned above.
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/) — Perceus reference counting and FBIP, the allocation model underneath the register-residency contract above.
