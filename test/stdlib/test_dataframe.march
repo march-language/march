@@ -925,8 +925,11 @@ end
 -- tight C reduction). The original ~35x figure was caused by a heap
 -- allocation on every loop iteration; that is fixed (commit 08c02ebb gave
 -- vector-typed self-TCO parameters native register slots, leaving one box
--- per CALL rather than per iteration -- see
--- specs/todos/2026-08-11-simd-tco-entry-box-leak.md), but ~8.2x is still a
+-- per CALL rather than per iteration; the remaining per-call box is now
+-- released too for callees with a native vector TCO slot -- see
+-- specs/progress/2026-08-11-simd-tco-entry-box-leak.md. Vector params on
+-- callees WITHOUT such a slot still leak one box per call, tracked in
+-- specs/todos/2026-08-12-simd-nontco-vector-param-leak.md), but ~8.2x is still a
 -- clear regression, so the migration stays blocked on the general March
 -- index-loop overhead tracked in
 -- specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md.

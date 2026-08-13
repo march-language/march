@@ -325,27 +325,44 @@ feature needs to replace.
 
 ### Known limitations
 
-- **TCO-entry box leak:** a self-tail-recursive function's vector
-  accumulator leaks one 32-byte box per **call** (not per loop iteration —
-  the loop body itself, per the register-residency contract above, is
-  allocation-free). Bounded and harmless for a program that calls such a
-  kernel a handful of times; unbounded for a long-lived process calling one
-  per request or tick. See
-  `specs/todos/2026-08-11-simd-tco-entry-box-leak.md`.
+- **TCO-entry box leak — fixed 2026-08-11.** A self-tail-recursive function's
+  vector accumulator used to leak one 32-byte box per **call** (not per loop
+  iteration — the loop body itself, per the register-residency contract
+  above, is allocation-free). The call site now releases the caller-created
+  temp box for callees with a native vector TCO slot; measured RSS on a
+  2,000,000-call probe went from ~64 MB to ~2.7 MB. The fix is narrow —
+  non-TCO vector params still leak per call, and three call paths
+  (raises-wrapper, blocking-extern, hot-reload dispatch) are deliberately
+  excluded; see `specs/todos/2026-08-12-simd-nontco-vector-param-leak.md` for
+  the still-open generalization. Pinned by
+  `test/native/simd_leak_probe.march` (leak must happen) and
+  `test/native/simd_vector_escape_arg.march` (release must NOT happen for an
+  escaping vector). See `specs/progress/2026-08-11-simd-tco-entry-box-leak.md`.
 - **Mutual-recursion accumulators stay boxed.** The register-residency
   optimization above covers self-tail-recursion only; a vector threaded
   through a mutual-recursion group is still correct but boxes/unboxes on
-  every call, same as before the TCO optimization landed.
+  every call, same as before the TCO optimization landed. This is a
+  deliberate wontfix-until-demand, not a gap-in-waiting. `test/native/
+  simd_mutual_tco.march` pins it two ways: an output diff (the boxed path
+  still computes the right answer) and an IR-shape rule
+  (`simd_mutual_tco_llvm_check` in `test/dune`) asserting a `@__mutco_*`
+  dispatcher is emitted at all with both accumulator slots boxed as
+  `alloca ptr`. The second rule is not redundant — the two lowerings print
+  the same number, and the fixture was briefly vacuous because the TIR
+  inliner collapsed the mutual pair into self-recursion. So a change to the
+  mutual-TCO slot strategy can neither silently corrupt the result nor
+  silently stop being tested. See
+  `specs/progress/2026-08-13-simd-closeouts-task3-mutual-tco-pin.md`.
 - **`fma` is a true fused multiply-add** (`llvm.fma.v4f32`/`v2f64`, one
   rounding) — it can differ from a separate multiply followed by an add in
-  the last ulp. For `f64x2` the interpreter runs the identical operation
-  (OCaml's `Float.fma`, binary64-fused). For `f32x4` it does *not*: the
-  interpreter computes a binary64 fused multiply-add and then rounds the
-  result to binary32 (a double rounding), while the compiled path is a
-  single binary32-fused rounding. These are formally different operations
-  and a last-ulp divergence is not ruled out; none has been observed over
-  the parity fixtures. Tracked in
-  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`.
+  the last ulp. Both backends run the same operation on both widths: for
+  `f64x2` the interpreter uses OCaml's `Float.fma` (binary64-fused), and for
+  `f32x4` it emulates a *single*-rounded binary32 fma (round-to-odd over
+  binary64, `eval.ml`'s `fma32_single_round`) rather than double-rounding a
+  binary64 `Float.fma`, which is what it did until 2026-08-13 and which
+  genuinely diverged in the last ulp on rounding-boundary triples. Pinned by
+  test t15 of the `simd_vector` suite and fuzzed compiled-vs-interpreted over
+  400k boundary-heavy lanes by `test/native/simd_fma_fuzz.march`.
 - **`i64x2` interpreter parity edge:** lane values beyond ±2^62 lose their
   top bit under the interpreter only, because OCaml's native `int` is
   63-bit. Compiled `i64x2` uses a true 64-bit lane and has no such limit.

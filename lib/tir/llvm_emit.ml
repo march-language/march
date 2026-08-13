@@ -128,6 +128,7 @@ type ctx = Llvm_ctx.ctx = {
   top_fn_ret_ty : (string, Tir.ty) Hashtbl.t;
   top_fn_nparams : (string, int) Hashtbl.t;
   top_fn_param_tys : (string, Tir.ty list) Hashtbl.t;
+  native_vec_params : (string, int list) Hashtbl.t;
   zero_arg_fns  : (string, bool) Hashtbl.t;
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
@@ -193,6 +194,20 @@ let emit_untag_scalar = Llvm_ctx.emit_untag_scalar
 let emit_untag_known_scalar = Llvm_ctx.emit_untag_known_scalar
 let coerce = Llvm_ctx.coerce
 let is_vec_ty = Llvm_ctx.is_vec_ty
+
+(** Release the call-scoped SIMD vector temp boxes collected for one call site.
+
+    Emitted in the SAME basic block as the call, immediately after it (and
+    after the result register is captured), so there is no control flow between
+    the call and the release and every path that reached the call reaches the
+    release.  Only ever non-empty for callees listed in
+    [ctx.native_vec_params] — see the invariant comment in the EApp arm for why
+    that restriction is load-bearing. *)
+let release_temp_boxes (ctx : Llvm_ctx.ctx) (boxes : string list ref) : unit =
+  List.iter
+    (fun b -> Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" b))
+    !boxes;
+  boxes := []
 let simd_kind_of_vec = Llvm_ctx.simd_kind_of_vec
 let llvm_escape_string = Llvm_ctx.llvm_escape_string
 let intern_string = Llvm_ctx.intern_string
@@ -3043,13 +3058,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        emit ctx (Printf.sprintf "%s = call %s @%s(%s %s, %s %s)" r v_ty name v_ty av v_ty bv);
        (v_ty, r)
      | "fma" ->
-       (* f32x4: llvm.fma.v4f32 is a SINGLE binary32-fused rounding, whereas
-          the interpreter (eval.ml's simd_f32x4_fma) computes a binary64
-          Float.fma and then rounds to binary32 — a double rounding. Not
-          formally the same operation; no divergence observed over the
-          parity leg, but a last-ulp difference is not ruled out. See
-          specs/todos/2026-08-12-simd-fma-rounding-parity.md.
-          f64x2 has no such asymmetry. *)
+       (* f32x4: llvm.fma.v4f32 is a SINGLE binary32-fused rounding. The
+          interpreter matches it by construction — eval.ml's
+          [fma32_single_round] emulates a single-rounded binary32 fma via
+          round-to-odd rather than double-rounding a binary64 Float.fma (which
+          it used to do, and which diverged in the last ulp; boundary triples
+          are pinned by t15 in test/test_stdlib_suite.ml and fuzzed against
+          this lowering by test/native/simd_fma_fuzz.march).
+          f64x2 needs no emulation: Float.fma IS binary64-fused. *)
        let av = vec_arg 0 and bv = vec_arg 1 and cv = vec_arg 2 in
        let name = Printf.sprintf "llvm.fma.%s" (simd_intrinsic_suffix sty) in
        ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "%s @%s(%s, %s, %s)" v_ty name v_ty v_ty v_ty);
@@ -3389,6 +3405,58 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        by construction. *)
     if decode_simd_call resolved_name <> None then
       failwith ("simd builtin reached generic call path: " ^ resolved_name);
+    (* ── Call-scoped SIMD vector temp boxes ────────────────────────────
+       A vector argument whose ACTUAL emitted type is native (`<N x T>` — an
+       ELet vector slot or a SIMD builtin result) is boxed here, by [coerce]'s
+       (vec, "ptr") arm, into a fresh `march_simd_alloc` cell with rc=1.  That
+       box is CALL-SCOPED: it never enters a TIR variable — it exists only
+       between this argument coerce and the call — so Perceus accounting never
+       sees it and no other party holds a reference to it.
+
+       INVARIANT that makes releasing it after the call sound: the callee must
+       provably not RETAIN the pointer.  That is true for, and ONLY for, a
+       callee whose parameter got a native vector TCO slot
+       ([Llvm_toplevel.emit_fn]'s `native_vec_slot` arm, tabulated in
+       [ctx.native_vec_params] by a pre-pass): its entry prologue does one
+       GEP + load of the payload and drops the pointer on the floor.  Releasing
+       the box after the call therefore closes the per-call leak recorded in
+       specs/progress/2026-08-11-simd-tco-entry-box-leak.md.
+
+       It is NOT true in general.  A callee whose vector parameter stays `ptr`
+       (any non-TCO fn, an apply fn, a mutual-TCO group member) is free to
+       store that exact pointer into a heap aggregate which then owns it —
+       `fn wrap(v) = [v]` compiles to `store ptr %v.arg, ptr %cons.field`.
+       Releasing there frees a live list element: measured segfault, guarded by
+       test/native/simd_vector_escape_arg.march.  Hence the table lookup rather
+       than "release every box I created".
+
+       Arguments that were ALREADY `ptr` before the coerce (a vector at rest in
+       a variable/field) are never recorded: no box was created, [coerce] was
+       the identity, and the box belongs to whoever owns the at-rest value.
+
+       Scope note: this closes the leak for native-slot callees only.  Non-TCO
+       vector params still leak one box per call on BOTH sides (neither caller
+       nor callee releases) — that needs Perceus-level accounting, tracked in
+       specs/todos/2026-08-12-simd-nontco-vector-param-leak.md. *)
+    let native_vec_idxs =
+      (* ARITY GUARD, not a formality: the indices are positional, so they only
+         mean anything if this call site passes exactly the callee's declared
+         parameter list.  The top_fn_param_tys coercion branch below already
+         refuses to coerce on a length mismatch; the apply-fn (Boundary B)
+         branch indexes positionally with no such check, so the guard lives
+         here, where BOTH branches inherit it.  On any mismatch we record
+         nothing and simply keep leaking — the safe direction. *)
+      match Hashtbl.find_opt ctx.native_vec_params resolved_name with
+      | Some idxs
+        when Hashtbl.find_opt ctx.top_fn_nparams resolved_name
+             = Some (List.length arg_pairs) -> idxs
+      | Some _ | None -> []
+    in
+    let temp_boxes : string list ref = ref [] in
+    let record_temp_box i ~from_ty ~to_ty boxed =
+      if is_vec_ty from_ty && to_ty = "ptr" && List.mem i native_vec_idxs then
+        temp_boxes := boxed :: !temp_boxes
+    in
     (* Boundary B: a direct call to an apply fn (known_call rewrote a
        non-escaping ECallPtr into EApp(apply_fn, ...)) must pass every scalar
        arg through the uniform ptr closure ABI — tag Int/Bool via (n<<1)|1,
@@ -3421,9 +3489,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        call at all. *)
     let arg_strs =
       if is_apply_fn resolved_name then
-        List.map (fun (ty, v) ->
+        List.mapi (fun i (ty, v) ->
           if ty = "i64" || ty = "double" || is_vec_ty ty then
-            let v' = coerce ctx ty v "ptr" in "ptr " ^ v'
+            let v' = coerce ctx ty v "ptr" in
+            record_temp_box i ~from_ty:ty ~to_ty:"ptr" v';
+            "ptr " ^ v'
           else ty ^ " " ^ v) arg_pairs
       else
         (* Coerce each argument's ACTUAL emitted representation to the
@@ -3440,11 +3510,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            concrete Array.push$..$Float always read 0.0 for the element). *)
         match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
         | Some param_tirs when List.length param_tirs = List.length arg_pairs ->
-          List.map2 (fun param_tir (ty, v) ->
+          List.mapi (fun i (param_tir, (ty, v)) ->
             let param_ty = llvm_ty param_tir in
             let v' = coerce ctx ty v param_ty in
+            record_temp_box i ~from_ty:ty ~to_ty:param_ty v';
             param_ty ^ " " ^ v'
-          ) param_tirs arg_pairs
+          ) (List.combine param_tirs arg_pairs)
         | _ ->
           (* Compiler builtins (int_to_string, math_sqrt, ...) are never
              registered in top_fn_param_tys — that table only covers
@@ -3656,10 +3727,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end
     else if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
+      release_temp_boxes ctx temp_boxes;
       ("i64", "0")
     end else begin
       let r = fresh ctx "cr" in
       emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
+      release_temp_boxes ctx temp_boxes;
       (ret_ty, r)
     end
 

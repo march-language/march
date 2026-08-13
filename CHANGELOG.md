@@ -175,10 +175,8 @@ git log is authoritative for exact commits.
   high-bit rule.
   `F32x4`/`F64x2` arithmetic is bit-exact single/double precision (verified
   against the true-f32-vs-double-then-round distinction) and `fma` is a
-  true fused multiply-add on both paths (for `f32x4` the interpreter's is a
-  binary64 fusion rounded to binary32 — no divergence observed, formal
-  equivalence tracked in
-  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`);
+  true fused multiply-add on both paths, interpreted and compiled (see the
+  Fixed entry below for the single-rounding fix this required);
   `min`/`max`/`hmin`/`hmax` on floats use minNum/maxNum
   semantics; integer arithmetic wraps mod 2^w. Each type implements
   `Show`/`Eq`/`Hash` (lane-wise; a NaN lane is unequal to itself, matching
@@ -212,12 +210,11 @@ git log is authoritative for exact commits.
   width of `i64x2`/`f64x2` caps the ceiling even after that overhead is
   fixed (see `bench/RESULTS.md`'s simd-kernels section).
 
-  Known limitations: a self-tail-recursive vector accumulator leaks one
-  32-byte box per **call** (not per iteration — the loop body itself is
-  allocation-free), unbounded for a long-lived process
-  (`specs/todos/2026-08-11-simd-tco-entry-box-leak.md`); mutual-recursion
-  accumulator groups still box the vector on every iteration (correct, just
-  not accelerated); `i64x2` lane values beyond ±2^62 lose their top bit
+  Known limitations: mutual-recursion accumulator groups still box the
+  vector on every call (correct, just not accelerated — see the Fixed entry
+  below for the self-tail-recursive case, which *is* accelerated and does
+  not have this box; pinned by `test/native/simd_mutual_tco.march`);
+  `i64x2` lane values beyond ±2^62 lose their top bit
   under the **interpreter only** (OCaml's 63-bit boxed int), a parity edge
   confined to that range; and `==`/`show` under a polymorphic/erased-type-
   variable context fall back to the generic runtime helpers rather than the
@@ -302,6 +299,29 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Simd.fma_f32x4` now gives the same answer interpreted and compiled.** The
+  compiled path emits `llvm.fma.v4f32` — one binary32 rounding — while the
+  interpreter computed a binary64 fused multiply-add and then narrowed it, two
+  roundings, which really did differ in the last ulp: about 1 random binary32
+  triple in 20 million, and *systematically* whenever `a * b` lands exactly on
+  a binary32 midpoint (e.g. `24929.0 * 673.0 = 2^24 + 1` with any tiny positive
+  `c`, where the compiled path gave `16777218` and the interpreter `16777216`).
+  The interpreter now emulates a genuine single-rounded binary32 fused
+  multiply-add, so both backends run the same operation by construction. Boundary
+  triples are pinned as tests and the two paths are fuzzed against each other
+  over 400,000 boundary-heavy lanes.
+- **Calling a SIMD kernel no longer leaks 32 bytes per call.** A
+  self-tail-recursive function with a SIMD-vector parameter keeps that
+  parameter in a native vector register, so the compiler boxes the argument at
+  the call site and unboxes it once on entry — and nothing ever released that
+  box. One 32-byte cell leaked per *invocation*, unbounded: a server calling a
+  vector kernel per request grew without limit (measured 64 MB over 2,000,000
+  calls; now 2.7 MB, guarded by an RSS assertion in the test suite). The call
+  site now releases the box it created, but only for callees whose entry
+  prologue provably cannot retain it. Vector arguments to any other function —
+  where the callee may store the vector into a list, record, or closure that
+  then owns it — are deliberately left alone; those shapes still leak one box
+  per call and are tracked separately.
 - **Compiled `to_string(x)` inside a generic function printed `#<tag:N>`
   garbage for non-primitive `x` (Lists, records, user ADTs) instead of the
   real value**, diverging from the interpreter. `to_string` on a concretely-

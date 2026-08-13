@@ -12925,6 +12925,55 @@ let test_simd_noncanonical_mask () =
   Alcotest.(check (list (float 0.0))) "f32: sign-bit lane picks a"
     [1.0; 2.0] (List.map vfloat (vlist (call_fn env "self32" [])))
 
+(* t15: fma_f32x4 is a SINGLE-rounded binary32 fused multiply-add, bit-identical
+   to the compiled path's llvm.fma.v4f32. The naive interpreter formula
+   (`f32_round (Float.fma a b c)`) double-rounds — binary64-fused, then narrowed
+   — and differs from llvm.fma.v4f32 in the last ulp on these triples. Every
+   expected value below is the value PRINTED BY THE COMPILED BINARY for the same
+   triple (probe: Simd.make_f32x4 of the same literals, --compile, run), so this
+   test is an interpreted-vs-compiled equality assertion with the compiled side
+   frozen as a constant.
+
+   - lane 0: a*b = 24929*673 = 2^24+1 EXACTLY, a binary32 midpoint (25-bit odd
+     significand). A tiny positive c pushes the exact value above the midpoint,
+     so the single rounding goes UP to 2^24+2; the binary64 intermediate swallows
+     c, lands back exactly on the midpoint, and ties-to-even sends the double
+     rounding DOWN to 2^24.
+   - lane 1: the same, with c = the smallest binary32 subnormal (2^-149) — the
+     smallest nonzero nudge a binary32 addend can supply.
+   - lane 2: found by random search (LCG over 20M binary32 triples, ~1 in 20M
+     diverge), i.e. not a hand-built midpoint — the generic double-rounding case.
+   - lane 3: c = 0.0, where the two formulas provably agree (a*b is exact in
+     binary64) — a control that the fix does not perturb the agreeing majority.
+   Fuzz witness over the compiled oracle: test/native/simd_fma_fuzz.march. *)
+let test_simd_fma_single_rounding () =
+  let env = eval_with_simd {|mod Test do
+    fn f() do
+      let a = Simd.make_f32x4(24929.0, 24929.0, 554896951000000000000000000.0,
+                              554896951000000000000000000.0)
+      let b = Simd.make_f32x4(673.0, 673.0, 0.000557824969, 0.000557824969)
+      let c = Simd.make_f32x4(0.000000000000000000000000000001,
+                              0.0000000000000000000000000000000000000000000014,
+                              0.000000000000000000000000000199625696, 0.0)
+      let r = Simd.fma_f32x4(a, b, c)
+      [Simd.extract_f32x4(r, 0), Simd.extract_f32x4(r, 1),
+       Simd.extract_f32x4(r, 2), Simd.extract_f32x4(r, 3)]
+    end
+    fn nan_inf() do
+      let inf = Simd.splat_f32x4(340282350000000000000000000000000000000.0 *. 2.0)
+      let r = Simd.fma_f32x4(inf, Simd.splat_f32x4(2.0), Simd.splat_f32x4(1.0))
+      let z = Simd.fma_f32x4(Simd.splat_f32x4(1.5), Simd.splat_f32x4(2.0),
+                             Simd.splat_f32x4(0.0 -. 3.0))
+      [Simd.extract_f32x4(r, 0), Simd.extract_f32x4(z, 0)]
+    end
+  end|} in
+  Alcotest.(check (list (float 0.0)))
+    "single-rounded binary32 fma == llvm.fma.v4f32 on double-rounding boundaries"
+    [16777218.0; 16777218.0; 3.0953539277932676e+23; 3.0953535675052975e+23]
+    (List.map vfloat (vlist (call_fn env "f" [])));
+  Alcotest.(check (list (float 0.0))) "infinity propagates; exact cancellation is +0"
+    [infinity; 0.0] (List.map vfloat (vlist (call_fn env "nan_inf" [])))
+
 (* t9: u8 byte scan — find a byte value's index via eq + first_set *)
 let test_simd_u8_byte_scan () =
   let env = eval_with_simd {|mod Test do
@@ -13828,6 +13877,7 @@ let stdlib_suites =
         Alcotest.test_case "t12 Show/Eq/Hash"                  `Quick test_simd_show_eq_hash;
         Alcotest.test_case "t13 actor sendability"             `Quick test_simd_actor_sendable;
         Alcotest.test_case "t14 non-canonical mask = high bit" `Quick test_simd_noncanonical_mask;
+        Alcotest.test_case "t15 fma single rounding"           `Quick test_simd_fma_single_rounding;
       ]);
       ("vault stdlib", [
         Alcotest.test_case "set and get"                  `Quick test_vault_set_get;
