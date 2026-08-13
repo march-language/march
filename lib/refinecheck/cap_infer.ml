@@ -106,11 +106,15 @@ let cap_table : (string * string) list = [
   ("task_spawn_steal",      "IO.Spawn");
   ("task_spawn_with_cancel","IO.Spawn");
   ("get_work_pool",         "IO.Spawn");
+  (* Vault is IN MEMORY: nothing a read does escapes the process, so a lookup
+     carries no ambient authority and needs no capability. What IS authority is
+     (a) turning a NAME into a table handle — vault_new/vault_whereis, the
+     File.open(path) shape — and (b) mutating state other actors observe.
+     Those keep IO.Mut. See lib/caps/cap_symbols.ml for the full note. *)
   (* IO.Mut — shared mutable state via Vault *)
   ("vault_new",             "IO.Mut");
   ("vault_set",             "IO.Mut");
   ("vault_set_ttl",         "IO.Mut");
-  ("vault_get",             "IO.Mut");
   ("vault_drop",            "IO.Mut");
   ("vault_update",          "IO.Mut");
   ("vault_put_new",         "IO.Mut");
@@ -119,9 +123,7 @@ let cap_table : (string * string) list = [
   ("vault_ns_set",          "IO.Mut");
   ("vault_ns_get",          "IO.Mut");
   ("vault_ns_drop",         "IO.Mut");
-  ("vault_keys",            "IO.Mut");
   ("vault_whereis",         "IO.Mut");
-  ("vault_size",            "IO.Mut");
   (* IO.NetConnect.TLS *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");

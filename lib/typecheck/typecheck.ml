@@ -1943,11 +1943,15 @@ let builtin_cap_table : (string * string) list = [
   ("task_spawn_steal",      "IO.Spawn");
   ("task_spawn_with_cancel","IO.Spawn");
   ("get_work_pool",         "IO.Spawn");
+  (* Vault is IN MEMORY: nothing a read does escapes the process, so a lookup
+     carries no ambient authority and needs no capability. What IS authority is
+     (a) turning a NAME into a table handle — vault_new/vault_whereis, the
+     File.open(path) shape — and (b) mutating state other actors observe.
+     Those keep IO.Mut. See lib/caps/cap_symbols.ml for the full note. *)
   (* IO.Mut — shared mutable state via Vault *)
   ("vault_new",             "IO.Mut");
   ("vault_set",             "IO.Mut");
   ("vault_set_ttl",         "IO.Mut");
-  ("vault_get",             "IO.Mut");
   ("vault_drop",            "IO.Mut");
   ("vault_update",          "IO.Mut");
   ("vault_put_new",         "IO.Mut");
@@ -1956,9 +1960,7 @@ let builtin_cap_table : (string * string) list = [
   ("vault_ns_set",          "IO.Mut");
   ("vault_ns_get",          "IO.Mut");
   ("vault_ns_drop",         "IO.Mut");
-  ("vault_keys",            "IO.Mut");
   ("vault_whereis",         "IO.Mut");
-  ("vault_size",            "IO.Mut");
   (* IO.NetConnect.TLS — encrypted transport; tls_close/tls_ctx_free are cleanup, no cap *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
@@ -2213,6 +2215,13 @@ let builtin_bindings : (string * scheme) list =
     let b = fresh_var 0 in
     Poly ([get_id a; get_id b], [], f a b)
   in
+  (* ∀a b c. f(a, b, c) — three unconstrained type variables *)
+  let poly3 f =
+    let a = fresh_var 0 in
+    let b = fresh_var 0 in
+    let c = fresh_var 0 in
+    Poly ([get_id a; get_id b; get_id c], [], f a b c)
+  in
   [
     (* Arithmetic: Num-constrained so they work on Int and Float *)
     ("+",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
@@ -2297,6 +2306,40 @@ let builtin_bindings : (string * scheme) list =
     ("record_put",       poly2 (fun a b -> TArrow (a, TArrow (t_string, TArrow (b, a)))));
     ("record_has_key",   poly1 (fun a -> TArrow (a, TArrow (t_string, t_bool))));
     ("record_from_list", poly2 (fun a b -> TArrow (t_list (TTuple [t_string; a]), b)));
+    (* Vault (in-memory key-value table) — raw C-runtime entry points backing
+       the typed wrapper module [stdlib/vault.march] (`Vault.new`, `Vault.get`,
+       …). Deliberately near-fully-generic, like [record_get]/[record_put]
+       above: a table holds arbitrary March values under arbitrary keys, so
+       there is no meaningful static element type to enforce here — the typed
+       surface is [Vault.*], not these raw names.
+
+       Needed so a BARE call to one of these resolves at all. Before this they
+       were simply UNBOUND — every call site (including inside
+       [stdlib/vault.march] and [stdlib/config.march] themselves) hit "I
+       cannot find `vault_get`", tolerated for years only because a
+       diagnostic whose span lands in a stdlib file never reaches CLI output
+       (see [bin/main.ml]'s `is_user_file` filter) and [TError] unifies
+       permissively downstream. Surfaced by the vault-read capability test in
+       test/test_caps.ml, which typechecks a bare `vault_get`/`vault_set`
+       call directly (no stdlib loaded) and got "I cannot find" for BOTH,
+       masking the real capability check either way.
+
+       Return shapes mirror the actual [VBuiltin] cases in lib/eval/eval.ml. *)
+    ("vault_new",          poly1 (fun a -> TArrow (t_string, a)));
+    ("vault_whereis",      poly1 (fun a -> TArrow (t_string, t_option a)));
+    ("vault_set",          poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, t_unit)))));
+    ("vault_set_ttl",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
+    ("vault_get",          poly3 (fun t k v -> TArrow (t, TArrow (k, t_option v))));
+    ("vault_drop",         poly2 (fun t k -> TArrow (t, TArrow (k, t_unit))));
+    ("vault_update",       poly3 (fun t k f -> TArrow (t, TArrow (k, TArrow (f, t_unit)))));
+    ("vault_put_new",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_bool))))));
+    ("vault_incr",         poly2 (fun t k -> TArrow (t, TArrow (k, TArrow (t_int, t_int)))));
+    ("vault_push_capped",  poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
+    ("vault_keys",         poly2 (fun t k -> TArrow (t, t_list k)));
+    ("vault_size",         poly1 (fun t -> TArrow (t, t_int)));
+    ("vault_ns_set",       poly2 (fun k v -> TArrow (t_string, TArrow (k, TArrow (v, t_unit)))));
+    ("vault_ns_get",       poly2 (fun k v -> TArrow (t_string, TArrow (k, t_option v))));
+    ("vault_ns_drop",      poly1 (fun k -> TArrow (t_string, TArrow (k, t_unit))));
     (* Generic to_json/from_json: fully polymorphic — runtime dispatches via impl_tbl.
        ∀a b. a -> b  — this avoids shadowing when multiple types derive Json. *)
     ("to_json",   poly2 (fun a b -> TArrow (a, b)));

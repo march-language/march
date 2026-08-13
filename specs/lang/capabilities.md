@@ -399,6 +399,8 @@ end
 
 This is especially useful for library code that should have no hidden state.
 
+**Reads need no capability.** A Vault table is in-memory — nothing a `Vault.get`/`Vault.size`/`Vault.keys` lookup does escapes the process, so it carries no ambient authority and needs no `needs IO.Mut`. What IS authority is turning a NAME into a table handle (`Vault.new`/`Vault.whereis` — the `File.open(path)` shape) and mutating state other actors observe (`Vault.set`, `Vault.set_ttl`, `Vault.drop`, `Vault.update`); those keep `needs IO.Mut`. Accepted trade-off: a read of shared mutable state is non-deterministic (it observes another actor's writes), so `needs` no longer signals "this function is not pure" for a reader — authority stays auditable at the boundary, since some module still had to name the table and declare the capability to create or write it.
+
 ### IO.NetConnect.TLS — encrypted transport only
 
 `IO.NetConnect.TLS` is a child of `IO.NetConnect`. Declaring it (without `IO.NetConnect`) proves the module uses *only* encrypted connections — no plaintext TCP. Declaring `needs IO.NetConnect` covers both.

@@ -93,11 +93,21 @@ let table : (string * string) list = [
   (* IO.Spawn — trampoline lowering *)
   ("march_task_spawn_thunk",       "IO.Spawn");
   ("march_task_spawn_with_cancel_thunk", "IO.Spawn");
+  (* Vault is IN MEMORY: nothing a read does escapes the process, so a lookup
+     carries no ambient authority and needs no capability. What IS authority is
+     (a) turning a NAME into a table handle — vault_new/vault_whereis, the
+     File.open(path) shape — and (b) mutating state other actors observe.
+     Those keep IO.Mut.
+
+     Known trade-off, accepted deliberately: a read of shared mutable state is
+     non-deterministic (it observes another actor's writes), so `needs` no
+     longer signals "this function is not pure" for readers. Authority remains
+     auditable at the boundary — some module named the table and declared the
+     capability, and the handle flows through explicit signatures. *)
   (* IO.Mut — shared mutable state via Vault *)
   ("march_vault_new",              "IO.Mut");
   ("march_vault_set",              "IO.Mut");
   ("march_vault_set_ttl",          "IO.Mut");
-  ("march_vault_get",              "IO.Mut");
   ("march_vault_drop",             "IO.Mut");
   ("march_vault_update",           "IO.Mut");
   ("march_vault_put_new",          "IO.Mut");
@@ -106,9 +116,7 @@ let table : (string * string) list = [
   ("march_vault_ns_set",           "IO.Mut");
   ("march_vault_ns_get",           "IO.Mut");
   ("march_vault_ns_drop",          "IO.Mut");
-  ("march_vault_keys",             "IO.Mut");
   ("march_vault_whereis",          "IO.Mut");
-  ("march_vault_size",             "IO.Mut");
   (* IO.NetConnect.TLS *)
   ("march_tls_client_ctx",         "IO.NetConnect.TLS");
   ("march_tls_server_ctx",         "IO.NetConnect.TLS");
