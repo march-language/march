@@ -254,6 +254,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Calling a SIMD kernel no longer leaks 32 bytes per call.** A
+  self-tail-recursive function with a SIMD-vector parameter keeps that
+  parameter in a native vector register, so the compiler boxes the argument at
+  the call site and unboxes it once on entry — and nothing ever released that
+  box. One 32-byte cell leaked per *invocation*, unbounded: a server calling a
+  vector kernel per request grew without limit (measured 64 MB over 2,000,000
+  calls; now 2.7 MB, guarded by an RSS assertion in the test suite). The call
+  site now releases the box it created, but only for callees whose entry
+  prologue provably cannot retain it. Vector arguments to any other function —
+  where the callee may store the vector into a list, record, or closure that
+  then owns it — are deliberately left alone; those shapes still leak one box
+  per call and are tracked separately.
 - **Killing (or crashing) a busy actor no longer leaks its queued mailbox.**
   Undelivered messages sitting in a dead process's mailbox were never
   disposed — `sched_loop`'s `PROC_DEAD` reap branch freed the mailbox

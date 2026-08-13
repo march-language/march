@@ -1,4 +1,58 @@
-# SIMD self-TCO entry prologue leaks one vector box per call (unbounded)
+# SIMD self-TCO entry prologue leaks one vector box per call (unbounded) — FIXED 2026-08-12
+
+## Fix summary (2026-08-12)
+
+Fixed **caller-side, narrowly**: the call site releases the temp box IT created
+for the call, but ONLY when the callee is known to give that parameter a native
+`<N x T>` vector TCO slot. Such a callee's entry prologue provably does one
+`getelementptr` + `load` of the payload and never stores the pointer anywhere,
+so the box cannot escape into it and releasing after the call is sound.
+
+- `Llvm_ctx.ctx.native_vec_params : (string, int list) Hashtbl.t` — callee name
+  → parameter indices with a native vector slot. Filled by a **pre-pass** in
+  `Llvm_toplevel.emit_module` before ANY function body is emitted (a caller can
+  be emitted before its callee), recomputing `emit_fn`'s own `native_vec_slot`
+  decision from the same `is_tco` + `vec_ty_of_tir` predicates. Mutual-TCO group
+  members are excluded — `Llvm_tco.emit_mutual_tco_group` has no native-slot arm.
+- `Llvm_emit`'s `EApp` arm records the boxed register whenever an argument at
+  such an index is coerced native → `ptr`, and emits `call void @march_decrc`
+  for each immediately after the call, in the same basic block. Arguments that
+  were already `ptr` (a vector at rest) are never recorded: no box was created.
+
+**Measured:** `test/native/simd_leak_probe.march`, 2,000,000 calls,
+`--compile --opt 2`, `/usr/bin/time -l` max RSS
+**67,092,480 B (64 MB) → 2,818,048 B (2.7 MB)**, i.e. 33.5 B/call → ~0.
+Committed as a dune `runtest` rule asserting max RSS < 32 MB (Darwin-gated:
+`/usr/bin/time -l` is macOS-specific, the rule skips with exit 0 elsewhere).
+
+**Scope — the leak is NOT fully closed.** A vector parameter that does *not* get
+a native slot (any non-tail-recursive fn, apply fn/closure, mutual-TCO member)
+still leaks one box per call when the callee only reads it: neither side
+releases. Tracked in
+`specs/todos/2026-08-12-simd-nontco-vector-param-leak.md` — it needs
+Perceus-level ownership accounting, not another emitter special case.
+
+**Why the release is narrow, and what proved it.** The obvious generalization —
+release every box the call site created — is a use-after-free. A callee whose
+vector parameter stays `ptr` may store that exact pointer into a heap aggregate
+that then owns it (`fn wrap(v) = Cons(v, Nil)` compiles to
+`store ptr %v.arg, ptr %cons.field`); releasing frees a live list element.
+Built and measured: reproducible exit 139/133, while `simd_vector_core`,
+`simd_nested_closure_acc` **and** `simd_poly_eq` all still passed — the existing
+fixture set could not see it. Pinned now by
+`test/native/simd_vector_escape_arg.march` (with `k = 0` on purpose, so the
+escaped box has rc = 1 and the bad dec frees it outright rather than merely
+under-counting).
+
+This also answers the "why the one-line fix is wrong" section below: the
+ownership question the backend could not answer for an arbitrary parameter *is*
+answerable for the native-slot case specifically, because there the callee's
+treatment of the pointer is fixed by construction rather than by its body.
+
+---
+
+## Original report (2026-08-11)
+
 
 Filed 2026-08-11, review finding on Task 4b (commit `08c02ebb`). **Not a
 regression** — the code this replaced leaked strictly more — but it is an

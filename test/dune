@@ -4342,6 +4342,76 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r alloc vstore fma < simd_nested_closure_acc_llvm_check.out; \
     test \"$vstore\" -ge 2 -a \"$alloc\" -eq 1 -a \"$fma\" -ge 1 || { echo \"expected the self-TCO'd simd_acc_go to keep its vector accumulator in a NATIVE slot: >=2 'store <4 x float> ... %acc.addr' (entry unbox + back-edge; 0 means the slot regressed to 'alloca ptr' and the back-edge boxes every iteration), exactly 1 march_simd_alloc (the return-path coercion only), and >=1 fma.v4f32 (body not DCE'd) -- found alloc=$alloc vstore=$vstore fma=$fma\" >&2; exit 1; }")))
 
+; ── Call-scoped SIMD vector temp boxes: the two halves of the contract ──
+;
+; llvm_emit's EApp arm releases a vector argument box the CALL SITE created,
+; but ONLY for callees whose parameter got a native vector TCO slot
+; (ctx.native_vec_params, filled by a pre-pass in emit_module). These two
+; fixtures pin the two directions; neither is meaningful without the other.
+;
+; (1) simd_leak_probe -- the release must HAPPEN. `go` is self-tail-recursive
+; with a vector param, so its entry prologue unboxes one caller-made box per
+; INVOCATION and (pre-fix) never released it: 2,000,000 calls leaked ~64 MB of
+; 32-byte march_simd_alloc cells. Post-fix max RSS is ~2.7 MB; the threshold is
+; 32 MB, comfortably above allocator noise and comfortably below the 64 MB
+; pre-fix figure, so it is falsifiable in both directions. An output check
+; cannot see a leak -- RSS is the only signal -- hence the unusual assertion.
+; /usr/bin/time -l is macOS-specific (Linux's coreutils `time` spells it
+; `-v` and reports kbytes), so the rule SKIPS with exit 0 off Darwin rather
+; than reporting a spurious failure; the leak is platform-independent, only
+; the measurement instrument is not.
+(rule
+ (targets simd_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o simd_leak_probe
+       native/simd_leak_probe.march)))
+
+(rule
+ (alias runtest)
+ (deps simd_leak_probe)
+ (action
+  (run bash -c
+   "case \"$(uname -s)\" in Darwin) ;; *) echo 'simd_leak_probe: skipped (max-RSS check needs macOS /usr/bin/time -l)' >&2; exit 0 ;; esac; \
+    rss=$(/usr/bin/time -l ./simd_leak_probe 2>&1 >/dev/null | awk '/maximum resident set size/ {print $1}'); \
+    test -n \"$rss\" || { echo 'could not read maximum resident set size from /usr/bin/time -l' >&2; exit 1; }; \
+    test \"$rss\" -lt 33554432 || { echo \"simd_leak_probe leaked: max RSS ${rss} B >= 32 MB. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- pre-fix this measured ~67 MB (32 B/call), post-fix ~2.7 MB. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that llvm_toplevel's pre-pass still agrees with emit_fn's native_vec_slot decision.\" >&2; exit 1; }; \
+    echo \"simd_leak_probe max RSS = ${rss} B\"")))
+
+; (2) simd_vector_escape_arg -- the release must NOT happen. `wrap` is
+; structurally (not tail) recursive, so it gets NO native slot, its `v`
+; parameter stays `ptr`, and its body stores that incoming pointer straight
+; into the cons cell it returns: the caller's box escapes into a list that
+; then owns it. Releasing it after the call frees a live list element.
+; Verified non-vacuous: with the index guard removed (release every box the
+; call site created -- the design this replaced) this fixture exits 139/133 on
+; every run, while simd_vector_core, simd_nested_closure_acc AND simd_poly_eq
+; all still passed, which is exactly why it had to be added. k = 0 is
+; deliberate: the base-case branch stores the box with no incrc, so the list
+; holds its ONLY reference and the bad dec frees it outright (a k = 3 version
+; leaves rc > 0 after the bad dec and silently passes).
+; .expected is interpreter-produced; compiled must match byte-for-byte.
+(rule
+ (targets simd_vector_escape_arg simd_vector_escape_arg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_escape_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_vector_escape_arg
+        native/simd_vector_escape_arg.march)
+   (with-stdout-to simd_vector_escape_arg.out
+        (system "./simd_vector_escape_arg")))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/simd_vector_escape_arg.expected simd_vector_escape_arg.out)))
+
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
  (deps (file %{exe:../bin/main.exe})
