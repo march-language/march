@@ -748,7 +748,7 @@
 (test
  (name test_caps)
  (modules test_caps)
- (libraries march_caps alcotest))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (test
  (name test_refinecheck)

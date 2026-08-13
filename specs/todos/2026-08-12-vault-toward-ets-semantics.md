@@ -10,9 +10,16 @@ Filed out of the named-registry design
 (`specs/2026-08-12-named-registry-design.md`), which depends on items 1 and 3,
 but every item stands on its own merit for existing Vault users.
 
-## 1. Concurrent reads
+## 1. Concurrent reads — DONE (Task 1, 2026-08-12, commits 6a9c7491..acf9a35b)
 
-`march_vault_get` takes the table's `pthread_mutex_t` on **every read**
+Implemented as a striped reader-count lock (not the epoch/RCU or centralized
+counter alternatives considered — see `.superpowers/sdd/2026-08-12-named-registry/progress.md`
+for the measurement trail). Concurrent reads of distinct keys now scale close
+to linearly with thread count; same-key reads remain bounded by refcount
+contention on that key's one shared value, tracked as its own cost. The
+paragraph below is kept for historical context.
+
+`march_vault_get` used to take the table's `pthread_mutex_t` on **every read**
 (`runtime/march_extras.c`). Elixir's Registry — the closest reference — creates
 its ETS tables with `read_concurrency: true, write_concurrency: true` and reads
 them **directly from the calling process**, no round-trip and no serialisation.
@@ -57,14 +64,22 @@ the one that closes the hole.
 Note the interaction with `Vault.update(table, key, fn)`: the function's type
 has to line up with `v` too.
 
-## 4. Capability shape — `IO.Mut` on every operation
+## 4. Capability shape — `IO.Mut` on every operation — DONE (Task 2, 2026-08-12)
 
-**Decided 2026-08-12:** reads are capability-free — `get`/`size`/`keys` lose the
-requirement; `new`/`whereis`/`set`/`set_ttl`/`drop`/`update` keep `IO.Mut`.
-`whereis` keeps it because it mints a handle from a string (the ambient-authority
-case), not because it writes. Scheduled as Task 2 of
-`docs/superpowers/plans/2026-08-12-named-registry.md`. The rest of this section
-records the reasoning and the accepted costs.
+**Decided and shipped 2026-08-12:** reads are capability-free — `get`/`size`/`keys`
+lose the requirement; `new`/`whereis`/`set`/`set_ttl`/`drop`/`update`/`put_new`/
+`incr`/`push_capped`/`ns_set`/`ns_get`/`ns_drop` keep `IO.Mut`. `whereis` keeps
+it because it mints a handle from a string (the ambient-authority case), not
+because it writes; the three `ns_*` wrappers keep it too because they resolve
+a string namespace to a table handle internally (the same shape), regardless
+of whether the wrapped operation itself is a read (`ns_get`) or a write
+(`ns_set`/`ns_drop`). Landed as Task 2 of
+`docs/superpowers/plans/2026-08-12-named-registry.md` — see
+`.superpowers/sdd/2026-08-12-named-registry/task-2-report.md` for the full
+before/after table and a pre-existing bare-builtin name-resolution gap it
+surfaced and fixed along the way. The rest of this section records the
+reasoning and the accepted costs, which the implementation carried through
+unchanged.
 
 Every `vault_*` builtin requires `IO.Mut` (`lib/caps/cap_symbols.ml:96-…`,
 `lib/typecheck/typecheck.ml:1947-1960`). So *reading* an in-memory table
@@ -111,7 +126,9 @@ Proposed shape (full argument in the registry design, §7):
 
 ## Acceptance
 
-- A read-heavy Vault benchmark scales with cores instead of serialising.
-- Storing an `Int` and reading it as a `Pid` is a type error.
-- A module that only reads a table it was handed needs no `needs` line, and the
-  capability docs explain where the authority came from instead.
+- ~~A read-heavy Vault benchmark scales with cores instead of serialising.~~ DONE (item 1).
+- Storing an `Int` and reading it as a `Pid` is a type error. Still open (item 3).
+- ~~A module that only reads a table it was handed needs no `needs` line, and the
+  capability docs explain where the authority came from instead.~~ DONE (item 4).
+
+Items 2 (write partitioning) and 3 (typed handles) remain open.
