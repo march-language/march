@@ -1,4 +1,5 @@
 mod RecordFieldErasedInt do
+  needs IO.Console
 
 -- A record REBUILT inside a generic `List.map` lambda and then read by a
 -- separate function.  The rebuilding lambda is monomorphised (it knows the
@@ -30,7 +31,7 @@ pfn describe(r) do
   r.name ++ " odd=" ++ int_to_string(r.odd) ++ " even=" ++ int_to_string(r.even)
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   let rows = [{ name: "a", odd: 35, even: 32 },
               { name: "b", odd: 51, even: 54 }]
   List.each(rows, fn r -> println("direct " ++ describe(r)))
