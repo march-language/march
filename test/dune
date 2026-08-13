@@ -4356,10 +4356,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; 32 MB, comfortably above allocator noise and comfortably below the 64 MB
 ; pre-fix figure, so it is falsifiable in both directions. An output check
 ; cannot see a leak -- RSS is the only signal -- hence the unusual assertion.
-; /usr/bin/time -l is macOS-specific (Linux's coreutils `time` spells it
-; `-v` and reports kbytes), so the rule SKIPS with exit 0 off Darwin rather
-; than reporting a spurious failure; the leak is platform-independent, only
-; the measurement instrument is not.
+;
+; THREE checks, and all three are load-bearing. The first version of this rule
+; asserted ONLY the RSS, by piping `/usr/bin/time -l ./probe` into awk -- which
+; is an ANTI-canary: the pipeline's exit status is awk's, and macOS
+; /usr/bin/time -l still prints a max RSS for a child that died on SIGSEGV
+; (measured: RSS 1425408, pipeline rc 0). So the exact drift this rule exists
+; to catch -- the pre-pass says "native slot" while emit_fn stops giving one,
+; the caller releases a box the callee retained, and the probe segfaults early
+; -- would have produced a TINY RSS and a GREEN rule. Hence:
+;   (a) the run's EXIT STATUS is dune's (a `system` action fails on nonzero),
+;   (b) stdout is diffed against .expected, so a crash-after-partial-output or
+;       a wrong result cannot pass, and
+;   (c) only then is RSS read, from the captured stderr FILE rather than a
+;       pipeline whose status belongs to the last stage.
+;
+; .expected is NOT interpreter-produced (2,000,000 iterations do not finish
+; under the tree-walker in any reasonable time; same posture as
+; simd_bounds_panic, which is compiled-only by design). The value is
+; arithmetic: 2,000,000 calls x sum of splat(1.0) over 4 lanes = 8000000.
+;
+; /usr/bin/time -l is macOS-specific (Linux's coreutils `time` spells it `-v`
+; and reports kbytes). Off Darwin the binary still runs, and checks (a) and (b)
+; still apply -- only the RSS assertion (c) skips. The leak is
+; platform-independent; only the measurement instrument is not.
 (rule
  (targets simd_leak_probe)
  (deps (file %{exe:../bin/main.exe})
@@ -4370,15 +4390,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run %{exe:../bin/main.exe} --compile --opt 2 -o simd_leak_probe
        native/simd_leak_probe.march)))
 
+; Check (a): nonzero exit fails this rule (dune's own `system` semantics -- cf.
+; simd_bounds_panic, which needs an explicit with-accepted-exit-codes to allow
+; its nonzero exit). Stdout and the time(1) report land in separate files.
 (rule
- (alias runtest)
+ (targets simd_leak_probe.out simd_leak_probe.time)
  (deps simd_leak_probe)
  (action
+  (with-stdout-to simd_leak_probe.out
+   (with-stderr-to simd_leak_probe.time
+    (system
+     "if [ \"$(uname -s)\" = Darwin ]; then exec /usr/bin/time -l ./simd_leak_probe; else exec ./simd_leak_probe; fi")))))
+
+; Check (b): the probe must actually finish and print the right answer.
+(rule
+ (alias runtest)
+ (action (diff native/simd_leak_probe.expected simd_leak_probe.out)))
+
+; Check (c): the leak assertion proper, read from the captured stderr file.
+(rule
+ (alias runtest)
+ (deps simd_leak_probe.time)
+ (action
   (run bash -c
-   "case \"$(uname -s)\" in Darwin) ;; *) echo 'simd_leak_probe: skipped (max-RSS check needs macOS /usr/bin/time -l)' >&2; exit 0 ;; esac; \
-    rss=$(/usr/bin/time -l ./simd_leak_probe 2>&1 >/dev/null | awk '/maximum resident set size/ {print $1}'); \
-    test -n \"$rss\" || { echo 'could not read maximum resident set size from /usr/bin/time -l' >&2; exit 1; }; \
-    test \"$rss\" -lt 33554432 || { echo \"simd_leak_probe leaked: max RSS ${rss} B >= 32 MB. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- pre-fix this measured ~67 MB (32 B/call), post-fix ~2.7 MB. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that llvm_toplevel's pre-pass still agrees with emit_fn's native_vec_slot decision.\" >&2; exit 1; }; \
+   "case \"$(uname -s)\" in Darwin) ;; *) echo 'simd_leak_probe: max-RSS assertion skipped (needs macOS /usr/bin/time -l); the exit-status and stdout checks still ran' >&2; exit 0 ;; esac; \
+    rss=$(awk '/maximum resident set size/ {print $1}' simd_leak_probe.time); \
+    test -n \"$rss\" || { echo 'could not read maximum resident set size from simd_leak_probe.time' >&2; cat simd_leak_probe.time >&2; exit 1; }; \
+    test \"$rss\" -lt 33554432 || { echo \"simd_leak_probe leaked: max RSS ${rss} B >= 32 MB. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- pre-fix this measured ~67 MB (32 B/call), post-fix ~2.7 MB. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that Llvm_toplevel.native_vec_param_idxs is still the single source of truth for that decision.\" >&2; exit 1; }; \
     echo \"simd_leak_probe max RSS = ${rss} B\"")))
 
 ; (2) simd_vector_escape_arg -- the release must NOT happen. `wrap` is
@@ -4411,6 +4449,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action
   (diff native/simd_vector_escape_arg.expected simd_vector_escape_arg.out)))
+
+; ...and again at --opt 2, which is where the double-free was originally
+; measured. Not redundant with the default-opt run above: at --opt 2 LLVM may
+; inline `wrap` into `drive`, which changes whether the escaping store and the
+; erroneous release end up in the same function -- i.e. exactly the variable
+; that decides whether a bad release is observable. Cheap (the fixture runs in
+; milliseconds) and the two levels have already been seen to disagree on
+; SIMD-vector RC shape more than once.
+(rule
+ (targets simd_vector_escape_arg_o2 simd_vector_escape_arg_o2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_escape_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o simd_vector_escape_arg_o2
+        native/simd_vector_escape_arg.march)
+   (with-stdout-to simd_vector_escape_arg_o2.out
+        (system "./simd_vector_escape_arg_o2")))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/simd_vector_escape_arg.expected simd_vector_escape_arg_o2.out)))
 
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)

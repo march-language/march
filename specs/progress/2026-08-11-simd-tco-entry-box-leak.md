@@ -25,6 +25,51 @@ so the box cannot escape into it and releasing after the call is sound.
 Committed as a dune `runtest` rule asserting max RSS < 32 MB (Darwin-gated:
 `/usr/bin/time -l` is macOS-specific, the rule skips with exit 0 elsewhere).
 
+### Ownership map — which call shapes transfer vs. retain
+
+The table the design turns on. "Boxed by the caller" means the argument's
+emitted type was a native `<N x T>` (an `ELet` vector slot or a SIMD builtin
+result) and `coerce`'s `(vec, "ptr")` arm allocated a fresh `march_simd_alloc`
+cell with rc = 1. Established by reading `perceus.ml` / `borrow.ml` /
+`rc_types.ml` and confirmed against emitted IR for each row.
+
+| # | Callee shape | What the callee does with the incoming box | Who releases it | Caller-release verdict |
+|---|---|---|---|---|
+| A | self-TCO fn with a vector param (`native_vec_slot`) | GEP + load of the payload at entry; pointer never stored | **nobody → this leak** | **safe — what we now do** |
+| B | non-TCO fn, vector param slot stays `ptr`, param only read | unboxes at each use; no `EDecRC` emitted in any branch | **nobody → leaks too** | safe in principle, NOT done (see scope below) |
+| C | non-TCO fn whose vector param **escapes** into an ADT / list / closure field | `store ptr %v.arg, ptr %field` — the aggregate takes ownership | the aggregate's drop | **DOUBLE FREE / UAF — must not release** |
+| D | apply fn / closure ABI ("Boundary B") | B or C depending on the body | same as B/C | same as B/C |
+
+Supporting facts: `Rc_types.needs_rc (TCon "F32x4") = true` and
+`borrow_eligible = true` (the generic `TCon _` arms), so a vector is an ordinary
+RC'd heap value to Perceus and Borrow; `llvm_ty (TCon "F32x4") = "ptr"`, so a
+slot is native only where the emitter deliberately makes it so (`ELet` vector
+RHS, and this native TCO slot); every RC arm in `llvm_emit.ml` is guarded by
+`if ty = "ptr"`, so RC ops on a native slot are inert — which is what ate the
+one dec that would otherwise have balanced row A. The borrow map is not
+reachable from the LLVM layer at all, which is why the answer had to come from a
+shape the emitter can see rather than from a borrow query.
+
+Row C is what makes the narrow scope mandatory rather than conservative, and it
+is reachable from plain March (`fn wrap(v, k) = Cons(v, ...)`).
+
+### Call paths deliberately EXCLUDED from the release
+
+Even for a row-A callee, the release is emitted only on the two plain call arms
+of `llvm_emit.ml`'s `EApp` (void and value-returning). Three paths are skipped
+and still leak:
+
+- **`raises`-extern wrapper** (`emit_raises_wrapper`) — the call is wrapped in
+  error-routing scaffolding rather than emitted inline.
+- **blocking extern** (`Llvm_calls.emit_blocking_call`) — likewise.
+- **hot-reload dispatch** — the call is split across two basic blocks
+  (`hr_direct` / `hr_disp`) and merged by a phi, so "same block as the call"
+  does not hold without picking a merge point.
+
+Skipping them keeps today's behavior (leak, never crash), which is the safe
+direction. Adding them means reasoning about a second control-flow shape; folded
+into the follow-up item rather than done blind.
+
 **Scope — the leak is NOT fully closed.** A vector parameter that does *not* get
 a native slot (any non-tail-recursive fn, apply fn/closure, mutual-TCO member)
 still leaks one box per call when the callee only reads it: neither side

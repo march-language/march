@@ -3438,9 +3438,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        nor callee releases) — that needs Perceus-level accounting, tracked in
        specs/todos/2026-08-12-simd-nontco-vector-param-leak.md. *)
     let native_vec_idxs =
+      (* ARITY GUARD, not a formality: the indices are positional, so they only
+         mean anything if this call site passes exactly the callee's declared
+         parameter list.  The top_fn_param_tys coercion branch below already
+         refuses to coerce on a length mismatch; the apply-fn (Boundary B)
+         branch indexes positionally with no such check, so the guard lives
+         here, where BOTH branches inherit it.  On any mismatch we record
+         nothing and simply keep leaking — the safe direction. *)
       match Hashtbl.find_opt ctx.native_vec_params resolved_name with
-      | Some idxs -> idxs
-      | None -> []
+      | Some idxs
+        when Hashtbl.find_opt ctx.top_fn_nparams resolved_name
+             = Some (List.length arg_pairs) -> idxs
+      | Some _ | None -> []
     in
     let temp_boxes : string list ref = ref [] in
     let record_temp_box i ~from_ty ~to_ty boxed =

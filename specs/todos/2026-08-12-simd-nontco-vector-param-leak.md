@@ -65,6 +65,26 @@ The principled fix is ownership accounting, not another emitter special case:
    TIR variable and no pass accounts for it. Materializing it as a real TIR
    binding would let ordinary Perceus RC insertion handle every shape uniformly.
 
+## Also open: three call paths excluded even for native-slot callees
+
+The narrow fix emits its release only on the two plain call arms of
+`llvm_emit.ml`'s `EApp` (void and value-returning). A call to a native-slot
+callee that goes through any of these three paths still leaks one box per call:
+
+- **`raises`-extern wrapper** (`emit_raises_wrapper`) — the call is wrapped in
+  error-routing scaffolding instead of being emitted inline.
+- **blocking extern** (`Llvm_calls.emit_blocking_call`) — same.
+- **hot-reload dispatch** (`needs_dispatch`, `--hot-reload` / `--compile-so`) —
+  the call is split across two basic blocks (`hr_direct` / `hr_disp`) and merged
+  by a phi, so the "release in the same block as the call" invariant needs a
+  chosen merge point (`hr_cont` is the obvious one: both predecessors pass the
+  same box and neither can skip it).
+
+These were skipped deliberately — leaking is the safe direction, and each adds a
+control-flow shape to reason about — not overlooked. Whoever fixes the general
+case should sweep them in the same pass; the hot-reload one is the only one
+needing real thought.
+
 ## Measurement shape
 
 Same as the TCO variant: a driver loop calling the kernel N times,
