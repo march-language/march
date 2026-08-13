@@ -181,6 +181,7 @@ end
 - **Perceus reference counting** — deterministic, no tracing collector; freeing is inline work at a point you choose ([memory model]({{ site.baseurl }}/docs/memory-model/))
 - **FBIP** — in-place reuse of memory when the compiler can prove unique ownership
 - **LLVM backend** — whole-program monomorphization, defunctionalization, native binaries
+- **SIMD & native arrays** — auto-vectorized `NativeArray` numeric loops plus explicit 128-bit `Simd` vector types, competitive with NumPy on the operations that vectorize ([guide]({{ site.baseurl }}/docs/simd/))
 - **Work-stealing scheduler** — cooperative + preemptive, scales across cores
 - **WebAssembly target** — compile to `.wasm` via `--target wasm64-wasi`
 - **Linux cross-compilation** — build `linux/amd64` + `linux/arm64` binaries from any host via `zig cc`, Go's `GOOS=linux` style ([guide](tooling.md#cross-compiling-to-linux))
