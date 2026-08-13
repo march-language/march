@@ -1780,15 +1780,57 @@ typedef struct {
     int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
                                   state fields; this child's Int-encoded pid lives at
                                   ((int64_t*)supervisor)[4 + word_idx] */
+    /* Task 16: exponential restart backoff. Zeroed at registration
+     * (march_actor_register_child — sup_children grows via realloc, which
+     * does NOT zero new memory, so these two fields are set explicitly
+     * there). Both are only ever touched from march_supervisor_notify,
+     * which Task 16 serializes with g_supervise_mu — see that function's
+     * comment for the concurrent-crash race this closes. */
+    int32_t crash_streak;     /* consecutive crashes without surviving a full
+                                  supervisor_window_secs window */
+    int64_t last_crash_ms;    /* march_now_ms() at the most recent crash; 0
+                                  means "never crashed yet" */
 } march_sup_child;
 
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
 typedef struct march_actor_meta {
     void                      *actor;
-    march_proc                *green_thread;  /* Green thread running this actor's loop */
-    struct march_actor_meta    *tbl_next;   /* Hash-table chain                */
-    int64_t                     pid_index;  /* Sequential spawn index for Pid(n) display */
+    /* _Atomic: written at spawn (march_spawn) and at green-thread exit
+     * (actor_green_thread, both the normal-exit and crash-trap paths),
+     * read lock-free from march_send / march_actor_call / do_actor_death /
+     * mailbox_size / set_mbox_limit. Release-store on every write, acquire-
+     * load on every read — see the Task 10 commit message for the full
+     * site table. */
+    _Atomic(march_proc *)      green_thread;  /* Green thread running this actor's loop */
+    struct march_actor_meta    *tbl_next;   /* Hash-table chain (by actor ptr) */
+    struct march_actor_meta    *pididx_next; /* Hash-table chain (by pid_index) */
+    /* Sequential spawn index for Pid(n) display. _Atomic: written once by
+     * march_spawn (before the meta is reachable via g_pididx_tbl, and
+     * before any other actor could hold a Pid/Cap referencing it — March's
+     * spawn is synchronous and returns only after this write), but read by
+     * OTHER actors' threads through foreign-meta paths that don't go
+     * through the pididx table's release/acquire pair (march_get_cap,
+     * march_send_checked's cap check, march_value_to_string's Pid(n)
+     * display) — see the Task 15 commit message's pid_index reader audit.
+     * Plain read/write of that field by a different thread than the writer
+     * is a data race (formally UB) even though the write always happens
+     * before the pid becomes observable elsewhere in practice; _Atomic with
+     * relaxed ops closes that gap for free. */
+    _Atomic int64_t             pid_index;
+    /* Set under g_tbl_mu the first (and only) time this meta is linked into
+     * g_pididx_tbl (see pididx_insert / march_spawn). g_pididx_tbl is
+     * insert-only, so a meta may be linked into it AT MOST ONCE ever — a
+     * second pididx_insert on an already-linked meta would overwrite its
+     * pididx_next, silently splicing two buckets' chains together (a
+     * lock-free walker of the first bucket would wander into the second
+     * bucket's tail; repeated occurrences could even close a cycle and
+     * hang find_meta_by_pid_index). march_spawn checks this flag to detect
+     * actor heap-address reuse (a dead actor's meta being handed back by
+     * find_or_create_meta for a NEW actor at the same freed address) and
+     * allocates a fresh meta instead of re-linking the stale one — see the
+     * Task 15 fix-up commit message for the full argument. */
+    int                          pididx_linked;
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
     _Atomic int64_t             down_count;   /* Down messages received (watcher side) */
@@ -1824,14 +1866,92 @@ typedef struct march_actor_meta {
      * throttling; valid only when this actor IS a supervisor. */
     double                      *sup_restart_ts;
     int                          sup_restart_len;
+    /* Task 16 fix-up (Important 2): set (under g_supervise_mu) when a
+     * one_for_all/rest_for_one delayed batch restart has been scheduled but
+     * not yet run, cleared by delayed_restart_thread immediately before it
+     * runs the strategy. While set, a DIFFERENT child of this supervisor
+     * crashing (whether its own first crash or a repeat) must not schedule
+     * or run another batch restart — the pending one is widened (see
+     * pending_min_child_idx below) to cover every child that crashed during
+     * the pending window, including this newly-crashed one, once it fires.
+     * Never touched for one_for_one (a dead slot can't re-crash, so there's
+     * nothing to double-restart). Zeroed by calloc at meta creation. */
+    int                          delayed_batch_pending;
+    /* Task 16 fix-up (review round 2): the lowest sup_children index among
+     * all crashes that occurred while a batch restart was pending —
+     * initialized to the index that CLAIMED delayed_batch_pending, then
+     * lowered (never raised) by every crash that arrives while it's set.
+     * one_for_all ignores this (it always restarts every child regardless
+     * of index); rest_for_one's restart window is [child_idx, n), so a
+     * lower-index intervening crash MUST widen the eventual restart down to
+     * its own index or that child is silently skipped by the batch
+     * restart's index range and, since a dead slot never crashes again on
+     * its own, stays dead forever. Read (and reset) by delayed_restart_
+     * thread under the same leaf-lock section that clears
+     * delayed_batch_pending, immediately before running the strategy.
+     * Meaningless while delayed_batch_pending is 0; zeroed by calloc. */
+    int                          pending_min_child_idx;
+    /* Task 16 fix-up (review round 3): incremented under g_supervise_mu on
+     * EVERY crash dropped via skip_due_to_pending while a batch restart is
+     * pending — not just ones that lower pending_min_child_idx. A crash of
+     * a slot at an index >= the index the in-flight strategy pass is
+     * about to use (e.g. a freshly-respawned sibling from an EARLIER pass
+     * of the SAME in-flight restart, crashing again before the flag is
+     * cleared) is a real drop that needs its own follow-up pass, but it
+     * does NOT lower pending_min_child_idx — the min-idx-only absorb check
+     * missed exactly this case (that incarnation stayed dead forever,
+     * uncovered by any restart window, the same symptom class the
+     * min-idx widening fixed, just at same/higher indexes). delayed_
+     * restart_thread snapshots this counter before each strategy pass and
+     * compares it after; any advance means loop again. Meaningless while
+     * delayed_batch_pending is 0; zeroed by calloc. */
+    int64_t                      pending_drop_count;
 } march_actor_meta;
 
-/* Global side table: actor ptr → march_actor_meta */
-static march_actor_meta  *g_actor_tbl[MARCH_SCHED_BUCKETS];
+/* Global side table: actor ptr → march_actor_meta.
+ * _Atomic bucket heads: metas are NEVER unlinked from their chain and NEVER
+ * freed (verified — see Task 10 commit message for the grep evidence), so a
+ * reader that acquire-loads a bucket head and walks tbl_next needs no lock:
+ * every node it can reach was fully constructed before the release store
+ * that published it (tbl_next is written before the head pointer is
+ * swung). find_meta takes this lock-free path; so (since Task 15) does
+ * find_meta_by_pid_index, over the separate g_pididx_tbl chain below. Every
+ * OTHER chain walker (find_or_create_meta as writer, the
+ * broadcast_migrate snapshot loop, demonitor, unlink, the monitor sweep)
+ * still takes g_tbl_mu because they also touch mutable per-meta fields
+ * (monitor_head, supervisor, ...) that are not lock-free. */
+static _Atomic(march_actor_meta *) g_actor_tbl[MARCH_SCHED_BUCKETS];
 static pthread_mutex_t    g_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Sequential Pid index counter: each spawned actor gets a unique integer. */
 static _Atomic int64_t g_next_pid_index = 0;
+
+/* Task 15: pid_index -> meta side table. Same insert-only, lock-free-read
+ * discipline as g_actor_tbl above: metas are never unlinked or freed, so a
+ * reader that acquire-loads a bucket head and walks pididx_next needs no
+ * lock — every node it reaches was fully published (pididx_next written,
+ * then the head swung with a release store) before it became visible.
+ * Inserted once, by march_spawn, immediately after meta->pid_index is
+ * assigned — see pididx_insert. pid_index is unique (drawn from
+ * g_next_pid_index, an atomic counter), so unlike g_actor_tbl's
+ * actor-pointer chains (which can in principle alias) this table never has
+ * duplicate keys; the old linear-scan implementation's "last match wins
+ * when duplicates exist" behavior was therefore always equivalent to
+ * first-match, which is what the O(1) lookup below returns. */
+#define MARCH_PIDIDX_BUCKETS 256
+static _Atomic(march_actor_meta *) g_pididx_tbl[MARCH_PIDIDX_BUCKETS];
+
+/* Links `m` into g_pididx_tbl. Caller must hold g_tbl_mu, and must call
+ * this AT MOST ONCE per meta — see march_actor_meta's pididx_linked field
+ * comment for why a second call corrupts the table. march_spawn is the
+ * only caller, and enforces the once-only invariant by checking/setting
+ * pididx_linked itself under the same lock acquisition. */
+static void pididx_insert_locked(march_actor_meta *m) {
+    int64_t pid_index = atomic_load_explicit(&m->pid_index, memory_order_relaxed);
+    unsigned b = (unsigned)(pid_index % MARCH_PIDIDX_BUCKETS);
+    m->pididx_next = atomic_load_explicit(&g_pididx_tbl[b], memory_order_relaxed);
+    atomic_store_explicit(&g_pididx_tbl[b], m, memory_order_release);
+}
 
 /* Sequential monitor ref counter. */
 static _Atomic int64_t g_next_monitor_ref = 0;
@@ -2123,17 +2243,19 @@ static unsigned int actor_bucket(void *actor) {
     return (unsigned int)(((uintptr_t)actor >> 4) % MARCH_SCHED_BUCKETS);
 }
 
-/* Look up meta entry for an actor without creating (returns NULL if not found). */
+/* Look up meta entry for an actor without creating (returns NULL if not
+ * found). Lock-free: acquire-load the bucket head and walk tbl_next, which
+ * is safe because insertion never unlinks/frees a node and always writes
+ * tbl_next before the release store that publishes the new head (see
+ * find_or_create_meta). */
 static march_actor_meta *find_meta(void *actor) {
     if (!IS_HEAP_PTR(actor)) return NULL;
     unsigned int b = actor_bucket(actor);
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *m = g_actor_tbl[b];
-    while (m) {
-        if (m->actor == actor) { pthread_mutex_unlock(&g_tbl_mu); return m; }
-        m = m->tbl_next;
+    for (march_actor_meta *m = atomic_load_explicit(&g_actor_tbl[b],
+                                                     memory_order_acquire);
+         m; m = m->tbl_next) {
+        if (m->actor == actor) return m;
     }
-    pthread_mutex_unlock(&g_tbl_mu);
     return NULL;
 }
 
@@ -2150,9 +2272,81 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     if (!m) { fputs("march: out of memory (actor meta)\n", stderr); exit(1); }
     m->actor = actor;
     atomic_init(&m->down_count, 0);
-    m->tbl_next = g_actor_tbl[b];
-    g_actor_tbl[b] = m;
+    atomic_init(&m->green_thread, NULL);
+    /* tbl_next is written BEFORE the release store below publishes `m` as
+     * the new bucket head, so any lock-free find_meta reader that observes
+     * `m` via the acquire load also observes a fully-initialized node
+     * (including this tbl_next write) and a correctly-linked rest of the
+     * chain. */
+    m->tbl_next = atomic_load_explicit(&g_actor_tbl[b], memory_order_relaxed);
+    atomic_store_explicit(&g_actor_tbl[b], m, memory_order_release);
     pthread_mutex_unlock(&g_tbl_mu);
+    return m;
+}
+
+/* Task 15 fix: actor heap addresses can be reused after a dead actor's meta
+ * has already been linked into g_pididx_tbl — march-heap objects are plain
+ * malloc/free, and a kill/respawn churn loop (exactly the crashloop shape)
+ * makes same-size reuse likely. find_or_create_meta matches purely by
+ * pointer, so it can hand back a DEAD incarnation's meta for a brand-new
+ * actor born at the same freed address. g_pididx_tbl is insert-only — a
+ * meta may be linked into it at MOST ONCE, ever (see pididx_linked) — so
+ * reusing that stale meta directly and calling pididx_insert_locked on it
+ * again would silently splice two pididx buckets' chains together (a
+ * lock-free walker of the first bucket wanders into the second bucket's
+ * tail; repeated reuse across enough respawns could even close a cycle and
+ * hang find_meta_by_pid_index forever). The old O(n) scan never had this
+ * problem — it walked g_actor_tbl and compared the field, finding
+ * whichever meta the pointer currently mapped to with whatever pid_index
+ * it currently held, no linking involved.
+ *
+ * Fix: give the new incarnation a FRESH meta instead of re-linking the
+ * stale one, and PREPEND it to actor's g_actor_tbl bucket — never
+ * unlinking the stale meta, so g_actor_tbl's own insert-only invariant
+ * (Task 10) is preserved end to end. find_meta always returns the FIRST
+ * match walking from a bucket's head, so the fresh meta immediately
+ * shadows the stale one for every future actor-pointer lookup (find_meta,
+ * find_or_create_meta, march_send, march_actor_call, ...).
+ *
+ * Safety during the shadow window: any lock-free reader still mid-walk
+ * from an acquire-load taken just before this prepend can still reach the
+ * stale meta. That's fine — the stale meta's green_thread was already
+ * release-stored NULL when its actor died (actor_green_thread clears it on
+ * BOTH the normal-exit and the crash-trap path, before do_actor_death ever
+ * runs, and do_actor_death is what lets the actor's memory become
+ * eligible for the free+reuse this function is guarding against), so a
+ * march_send/march_actor_call routed via the stale meta during any overlap
+ * sees "no green thread" and returns None — identical to how any other
+ * already-dead actor behaves. march_actor_set_dispatch_id and
+ * march_actor_set_call_base run in the compiled lowering immediately after
+ * the actor record's alloc, before march_spawn (see their own comments);
+ * both resolve their meta by actor pointer via find_or_create_meta, so for
+ * THIS incarnation they land on `stale` (the only meta the pointer
+ * resolved to at the time they ran) — carry those two fields forward so
+ * the fresh meta doesn't lose them. No other field needs carrying: every
+ * other march_actor_meta field compiled code can set before march_spawn
+ * goes through one of those same two setters or through march_spawn
+ * itself.
+ *
+ * Caller must hold g_tbl_mu (march_spawn is the only caller, inside the
+ * same locked section that checks/sets pididx_linked and calls
+ * pididx_insert_locked, so the whole reuse-detection-and-replace sequence
+ * is atomic). */
+static march_actor_meta *replace_stale_meta_locked(void *actor,
+                                                     march_actor_meta *stale) {
+    unsigned int b = actor_bucket(actor);
+    march_actor_meta *m = (march_actor_meta *)calloc(1, sizeof(march_actor_meta));
+    if (!m) { fputs("march: out of memory (actor meta)\n", stderr); exit(1); }
+    m->actor = actor;
+    atomic_init(&m->down_count, 0);
+    atomic_init(&m->green_thread, NULL);
+    atomic_init(&m->pid_index, 0);
+    m->dispatch_name_id = stale->dispatch_name_id;
+    m->call_tag_base    = stale->call_tag_base;
+    /* tbl_next written before the release store, matching
+     * find_or_create_meta's publication discipline above. */
+    m->tbl_next = atomic_load_explicit(&g_actor_tbl[b], memory_order_relaxed);
+    atomic_store_explicit(&g_actor_tbl[b], m, memory_order_release);
     return m;
 }
 
@@ -2160,20 +2354,26 @@ static march_actor_meta *find_or_create_meta(void *actor) {
  * code below: locate an actor's meta entry by its sequential spawn index —
  * the value a compiled Int field uses to encode a Pid (see
  * march_actor_register_child). Returns NULL if no actor was ever assigned
- * this index. */
+ * this index.
+ *
+ * O(1) via g_pididx_tbl (Task 15) instead of the old O(total actors) scan
+ * over every g_actor_tbl bucket. Lock-free: acquire-load the bucket head
+ * and walk pididx_next (see g_pididx_tbl's comment for why that's safe).
+ * The pid_index field itself only needs a relaxed load here: every meta
+ * reachable via this chain was inserted by pididx_insert AFTER its
+ * pid_index write (same thread, program order), and the chain's
+ * release/acquire pair already orders that write before this read —
+ * pid_index being _Atomic is for the OTHER (non-pididx) reader sites, not
+ * this one. */
 static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *m = NULL;
-    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
-        march_actor_meta *cur = g_actor_tbl[i];
-        while (cur) {
-            if (cur->pid_index == pid_index) { m = cur; break; }
-            cur = cur->tbl_next;
-        }
-        if (m) break;
+    unsigned b = (unsigned)(pid_index % MARCH_PIDIDX_BUCKETS);
+    for (march_actor_meta *m = atomic_load_explicit(&g_pididx_tbl[b],
+                                                     memory_order_acquire);
+         m; m = m->pididx_next) {
+        if (atomic_load_explicit(&m->pid_index, memory_order_relaxed) == pid_index)
+            return m;
     }
-    pthread_mutex_unlock(&g_tbl_mu);
-    return m;
+    return NULL;
 }
 
 /* ── Actor green thread loop ─────────────────────────────────────── */
@@ -2221,9 +2421,12 @@ static void actor_green_thread(void *arg) {
          * crash-notify parity with the interpreter's kill = crash_actor. */
         self->crash_jmp = saved_jmp;
         do_actor_death(actor);
-        pthread_mutex_lock(&g_tbl_mu);
-        meta->green_thread = NULL;
-        pthread_mutex_unlock(&g_tbl_mu);
+        /* green_thread is now _Atomic — this critical section protected
+         * nothing else, so the mutex is dropped in favor of a release
+         * store (paired with the acquire loads in march_send /
+         * march_actor_call / do_actor_death / mailbox_size /
+         * set_mbox_limit). */
+        atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
         return;
     }
 
@@ -2339,12 +2542,65 @@ static void actor_green_thread(void *arg) {
      * sched_loop.  Clear the meta handle so march_kill / march_send observe
      * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
     if (self) self->crash_jmp = saved_jmp;
-    pthread_mutex_lock(&g_tbl_mu);
-    meta->green_thread = NULL;
-    pthread_mutex_unlock(&g_tbl_mu);
+    /* Same rationale as the crash-trap exit above: the mutex protected only
+     * this field, now converted to a release store. */
+    atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */
+
+/* Task 16 (with a Critical fix-up — see the review that produced this
+ * comment): serializes ONLY the small handful of shared supervisor fields
+ * touched by concurrent crashes — march_restart_budget_ok's sup_restart_ts
+ * realloc, march_supervisor_notify's child->crash_streak/last_crash_ms
+ * read-modify-write, and sup_meta->delayed_batch_pending. Supervision is
+ * control-plane — restarts are rare relative to steady-state message
+ * traffic — so a single global mutex here is deliberately simple rather
+ * than per-supervisor.
+ *
+ * LEAF-LOCK CONTRACT — load-bearing, not a style choice: g_supervise_mu
+ * must NEVER be held across do_actor_death, march_respawn_child, or any
+ * call into a March closure (a supervisor's spawn_clo, a cleanup callback,
+ * anything reachable from user code). Every critical section under this
+ * mutex must be a short, self-contained read/write of plain C fields with
+ * no possibility of the calling green thread yielding (no swapcontext) or
+ * re-entering march_supervisor_notify while the lock is held.
+ *
+ * This contract exists because an earlier version of this mutex (held
+ * across the restart-strategy dispatch) was a live deadlock: the restart
+ * strategies call do_actor_death (budget-exhaustion kills the supervisor;
+ * one_for_all kills live siblings before respawning), and do_actor_death
+ * calls march_supervisor_notify AGAIN when the actor being killed is
+ * itself supervised (nested supervision — a real, tested configuration) —
+ * on the SAME thread, into the SAME non-recursive mutex. do_actor_death
+ * also runs arbitrary March cleanup closures; any cleanup that calls
+ * kill() on any supervised actor hit the identical self-deadlock. Worse,
+ * march_respawn_child's spawn_clo call and any cleanup closure are
+ * compiled March code that can yield on cooperative preemption —
+ * swapcontext with the mutex held either re-dispatches another crashing
+ * actor onto the SAME OS thread (relock deadlock) or migrates this green
+ * thread to a DIFFERENT OS thread, so the eventual unlock happens from a
+ * non-owner thread (undefined behavior; the mutex ends up permanently
+ * wedged either way). Every current use below is a leaf: no do_actor_death,
+ * no march_respawn_child, no March closure ever runs while g_supervise_mu
+ * is held.
+ *
+ * PRE-EXISTING HAZARD this closes (was never safe before Task 16 either):
+ * do_actor_death calls march_supervisor_notify with no lock held, and
+ * do_actor_death can run on the crashing actor's own scheduler thread (the
+ * crash trap in actor_green_thread) or on any foreign thread (march_kill
+ * from an evloop) — so two children of the SAME supervisor crashing
+ * concurrently on different threads could run march_restart_budget_ok's
+ * sup_restart_ts realloc concurrently, which is heap corruption. Task 16
+ * added child->crash_streak/last_crash_ms writes to that same
+ * unsynchronized surface, which is why closing the race landed here.
+ *
+ * Lock ordering: g_supervise_mu is OUTER, g_tbl_mu is INNER wherever both
+ * are used in the same call chain — but per the leaf-lock contract above,
+ * nothing that itself takes g_tbl_mu (find_or_create_meta,
+ * march_respawn_child) ever runs while g_supervise_mu is held, so in
+ * practice the two mutexes are never nested at all. */
+static pthread_mutex_t g_supervise_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Returns 1 (and appends `now` to sup_meta's restart history) if a restart
  * is currently permitted under its max_restarts-within-window budget;
@@ -2352,10 +2608,23 @@ static void actor_green_thread(void *arg) {
  * otherwise. Mirrors the identical window-check inlined in all three of
  * eval.ml's one_for_one_restart / one_for_all_restart / rest_for_one_restart. */
 static int march_restart_budget_ok(march_actor_meta *sup_meta) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    double now = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    /* Task 14: march_now_ms() is CLOCK_MONOTONIC-backed (see its definition
+     * in march_scheduler.c), unlike gettimeofday's wall clock, which an NTP
+     * step or manual clock change can jump backward or forward — either
+     * direction corrupts this budget: a backward step makes `now -
+     * sup_restart_ts[i]` go negative (never prunes old entries, so the
+     * budget can never refill), and a forward step silently discards recent
+     * restarts as "outside the window" too early, letting a crash loop
+     * through the budget it exists to stop. */
+    double now = (double)march_now_ms() / 1000.0;
     double window = (double)sup_meta->supervisor_window_secs;
+    /* Task 16 fix-up (Critical 1/2): g_supervise_mu is a LEAF lock — see its
+     * declaration comment. This is its only remaining use in the restart
+     * path: it protects the sup_restart_ts realloc against two children of
+     * the same supervisor crashing concurrently on different threads (the
+     * original motivation for the mutex). No user code (no do_actor_death,
+     * no march_respawn_child, no March closure) runs under it. */
+    pthread_mutex_lock(&g_supervise_mu);
     int kept = 0;
     for (int i = 0; i < sup_meta->sup_restart_len; i++) {
         if (now - sup_meta->sup_restart_ts[i] < window) {
@@ -2363,11 +2632,15 @@ static int march_restart_budget_ok(march_actor_meta *sup_meta) {
         }
     }
     sup_meta->sup_restart_len = kept;
-    if (kept >= sup_meta->supervisor_max_restarts) return 0;
+    if (kept >= sup_meta->supervisor_max_restarts) {
+        pthread_mutex_unlock(&g_supervise_mu);
+        return 0;
+    }
     sup_meta->sup_restart_ts = realloc(sup_meta->sup_restart_ts,
                                         (size_t)(kept + 1) * sizeof(double));
     sup_meta->sup_restart_ts[kept] = now;
     sup_meta->sup_restart_len = kept + 1;
+    pthread_mutex_unlock(&g_supervise_mu);
     return 1;
 }
 
@@ -2397,7 +2670,8 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     new_meta->supervisor = supervisor;
     new_meta->sup_child_index = child_idx;
     new_meta->epoch = inherited_epoch;
-    ((int64_t *)supervisor)[4 + child->word_idx] = new_meta->pid_index;
+    ((int64_t *)supervisor)[4 + child->word_idx] =
+        atomic_load_explicit(&new_meta->pid_index, memory_order_relaxed);
     return new_child;
 }
 
@@ -2474,16 +2748,301 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
     }
 }
 
+typedef struct {
+    void   *supervisor;
+    int     child_idx;
+    int     strategy;       /* 0/1/2 — mirrors supervisor_strategy */
+    int64_t not_before_ms;
+} march_delayed_restart;
+
+/* Runs on its own dedicated green thread (spawned by march_supervisor_notify
+ * below), never on the crashing actor's scheduler thread. Parks until the
+ * backoff deadline, then re-validates the supervisor is still alive before
+ * running the (possibly budget-gated) restart strategy.
+ *
+ * Critical 1/2 fix-up: g_supervise_mu is never held across
+ * march_one_for_one_restart/march_one_for_all_restart/march_rest_for_one_
+ * restart, which run March closures (march_respawn_child's spawn_clo) and
+ * can call do_actor_death (budget exhaustion, one_for_all's sibling kills)
+ * — see g_supervise_mu's leaf-lock contract above march_restart_budget_ok.
+ *
+ * Review round 3 fix-up (found while validating round 2's widening fix,
+ * under MARCH_NUM_SCHEDULERS>1 — this codebase's default, true OS-thread
+ * parallelism across actors): an earlier version of this function cleared
+ * delayed_batch_pending BEFORE calling the strategy, then called it with
+ * the lock released. That opened a real window: a DIFFERENT child crashing
+ * on another OS thread, between the clear and the strategy call actually
+ * finishing, would see delayed_batch_pending already 0 and — for a
+ * first-time (streak==1) crash — take the synchronous immediate-restart
+ * path itself, launching a SECOND, fully concurrent, unsynchronized
+ * march_one_for_all_restart/march_rest_for_one_restart racing this one.
+ * The race itself is established by code-level argument (the window is
+ * real and reachable, independent of any specific empirical outcome); the
+ * uncaught-panic crashes observed while chasing it down were confounded
+ * with a separate, pre-existing bug (see
+ * specs/todos/2026-08-12-supervised-child-registration-race.md) that also
+ * needs true parallelism to trigger, so they aren't offered as a clean
+ * reproduction of THIS race specifically — MARCH_NUM_SCHEDULERS=1 making
+ * the crashes disappear is consistent with either bug being the cause,
+ * since both require real OS-thread concurrency.
+ *
+ * Fixed by keeping delayed_batch_pending SET for the entire in-flight
+ * duration of the strategy call (batch strategies only), not just up to
+ * the moment it starts, and looping: after each strategy call returns,
+ * re-check whether any crash was DROPPED (skip_due_to_pending) while the
+ * strategy was running — such a crash can only arrive as a drop, never as
+ * a competing restart, because the flag never went false during that
+ * window. If so, some child was not covered by the pass that just ran, so
+ * loop and restart again (no additional delay: the point of backoff is
+ * per-crash pacing, already served by the original park). Only once a
+ * pass completes with no further drops is the flag finally cleared.
+ * one_for_one needs none of this — a dead slot cannot crash again, so
+ * there is only ever the one child_idx to restart, no pending flag, and
+ * no race to close.
+ *
+ * Round-3 correction: checking only "did pending_min_child_idx get
+ * LOWER" (round 2's original absorb condition) undercounts drops. A
+ * sibling at index >= the idx this pass is about to use — e.g. a
+ * freshly-respawned incarnation from an EARLIER pass of this SAME
+ * in-flight restart, crashing again before the flag is cleared — is
+ * dropped via skip_due_to_pending exactly like a lower-index one, but
+ * widening pending_min_child_idx against it is a no-op (it's already <=
+ * the new index), so the old min-idx-only check saw no change and cleared
+ * the flag, stranding that incarnation dead forever — the identical
+ * symptom class round 2 fixed, just at same/higher indexes instead of
+ * lower ones. sup_meta->pending_drop_count (incremented on EVERY drop,
+ * not just ones that lower the min) is what the loop actually compares
+ * now: snapshot it before the pass, and after the pass, in the same
+ * critical section that would otherwise clear the flag, re-run if it
+ * advanced (using whatever pending_min_child_idx reads at that point —
+ * the widening logic for the index itself is unchanged). */
+static void delayed_restart_thread(void *arg) {
+    march_delayed_restart *dr = (march_delayed_restart *)arg;
+    while (march_now_ms() < dr->not_before_ms)
+        march_sched_park_self_until(dr->not_before_ms);
+    void *supervisor = dr->supervisor;
+    int child_idx = dr->child_idx, strategy = dr->strategy;
+    free(dr);
+    /* Note: if the supervisor is already dead here, we return without
+     * touching delayed_batch_pending — it stays set on this (now orphaned)
+     * meta forever. That's intentional, not an oversight: clearing it would
+     * let some LATER, unrelated crash of a child that still (incorrectly)
+     * points at this dead supervisor run a restart strategy against it.
+     * Leaving it set instead just means march_supervisor_notify's
+     * skip_due_to_pending path keeps dropping such crashes — a no-op
+     * against a supervisor nothing can ever revive, not a leak of live
+     * behavior. */
+    if (!march_is_alive(supervisor)) return;   /* supervisor died meanwhile */
+    march_actor_meta *sup_meta = find_meta(supervisor);
+    if (!sup_meta) return;
+
+    if (strategy == 0) {
+        if (!march_is_alive(supervisor)) return;   /* Minor 1 TOCTOU recheck */
+        march_one_for_one_restart(supervisor, sup_meta, child_idx);
+        return;
+    }
+
+    for (;;) {
+        /* Minor 1 (TOCTOU): re-check liveness on every pass, not just the
+         * first — the supervisor can die while an earlier pass's strategy
+         * call was running. Same "leave the flag set" reasoning as above
+         * applies here too. */
+        pthread_mutex_lock(&g_supervise_mu);
+        int alive = march_is_alive(supervisor);
+        int idx = sup_meta->pending_min_child_idx;
+        int64_t drops_before = sup_meta->pending_drop_count;
+        pthread_mutex_unlock(&g_supervise_mu);
+        if (!alive) return;
+
+        switch (strategy) {
+            case 1: march_one_for_all_restart(supervisor, sup_meta, idx); break;
+            case 2: march_rest_for_one_restart(supervisor, sup_meta, idx); break;
+            default: return;
+        }
+
+        /* delayed_batch_pending is STILL SET here — any crash that arrived
+         * while the strategy call above was running could only be DROPPED
+         * (skip_due_to_pending) and bump pending_drop_count, never start a
+         * competing restart of its own. Comparing pending_drop_count
+         * (round 3) rather than just pending_min_child_idx (round 2) is
+         * required: a drop at an index >= idx widens nothing (the min-idx
+         * check alone would see no change and wrongly conclude nothing
+         * happened), but it's still a real drop of a child that this pass
+         * did not cover — the SAME incarnation this pass may have just
+         * respawned, if it crashed again before we get here. Any advance
+         * means loop again, using whatever pending_min_child_idx reads now
+         * (the widening logic for the index is unchanged from round 2). */
+        pthread_mutex_lock(&g_supervise_mu);
+        if (sup_meta->pending_drop_count != drops_before) {
+            pthread_mutex_unlock(&g_supervise_mu);
+            continue;
+        }
+        sup_meta->delayed_batch_pending = 0;
+        pthread_mutex_unlock(&g_supervise_mu);
+        return;
+    }
+}
+
+/* Task 16: exponential backoff with jitter on repeat crashes of the same
+ * child slot. The FIRST crash of a slot (crash_streak becomes 1) keeps the
+ * pre-Task-16 synchronous, zero-delay restart exactly — this is what keeps
+ * every existing supervision golden (examples/supervision_strategies.march,
+ * the native supervision tests) byte-identical, since they each crash a
+ * given child once. Only a REPEAT crash (streak > 1) takes the delayed
+ * green-thread path, delaying the whole batch (one_for_all/rest_for_one
+ * included) by the crashed child's streak delay.
+ *
+ * Important 2 fix-up: for the batch strategies (one_for_all/rest_for_one),
+ * sup_meta->delayed_batch_pending prevents a SECOND batch restart —
+ * synchronous or delayed — from being scheduled while one is already
+ * pending. Without this, a delayed batch restart for child A racing an
+ * intervening synchronous (first-crash) restart for child B would let the
+ * later-firing one re-kill the freshly-respawned children from the earlier
+ * one and double-charge the restart budget. An intervening crash (of
+ * either child) while a batch restart is pending simply waits — for
+ * one_for_all the pending restart already covers every child regardless.
+ * For rest_for_one that is NOT automatically true: its restart window is
+ * [child_idx, n), so an intervening crash of a LOWER-index sibling would be
+ * silently outside that window and left dead forever (nothing else will
+ * ever crash it again to trigger a fresh restart). sup_meta->
+ * pending_min_child_idx tracks the lowest index that crashed during the
+ * pending window (seeded from the index that claimed the flag, then only
+ * ever lowered) and delayed_restart_thread uses it — not the original
+ * claimant's own index — as the child_idx it hands to the strategy, so the
+ * eventual restart widens down to cover every child that crashed in the
+ * window. one_for_one is exempt from all of this — a dead slot cannot
+ * crash again, so there is no batch to double and no widening needed. */
 static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
     march_actor_meta *sup_meta = find_meta(supervisor);
     if (!sup_meta) return;
     int child_idx = crashed_meta->sup_child_index;
-    switch (sup_meta->supervisor_strategy) {
-        case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
-        case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
-        case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
-        default: break;
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
+    march_sup_child *child = &sup_meta->sup_children[child_idx];
+    int strategy = sup_meta->supervisor_strategy;
+    int is_batch = (strategy == 1 || strategy == 2);
+
+    /* Leaf-lock section: streak/last_crash_ms read-modify-write, the
+     * pending-batch check, and (if this crash is the one that will own the
+     * delayed restart) claiming delayed_batch_pending — all decided
+     * atomically in ONE critical section so two children racing into
+     * streak>1 concurrently can't both see "not pending" and both schedule
+     * a batch restart. No user code runs here. */
+    int64_t now;
+    int32_t streak;
+    int skip_due_to_pending, claimed_batch;
+    pthread_mutex_lock(&g_supervise_mu);
+    now = march_now_ms();
+    int64_t window_ms = (int64_t)sup_meta->supervisor_window_secs * 1000;
+    if (child->last_crash_ms != 0 && now - child->last_crash_ms > window_ms)
+        child->crash_streak = 0;           /* survived a full window: healed */
+    child->crash_streak++;
+    child->last_crash_ms = now;
+    streak = child->crash_streak;
+    skip_due_to_pending = is_batch && sup_meta->delayed_batch_pending;
+    claimed_batch = 0;
+    if (skip_due_to_pending) {
+        /* Review round 2 fix: this crash is being dropped (no restart of
+         * its own — the pending batch restart will cover it), but for
+         * rest_for_one that pending restart's window only reaches down to
+         * pending_min_child_idx. Widen it (never narrow) so this child
+         * isn't left outside the eventual restart's [idx, n) range. */
+        if (child_idx < sup_meta->pending_min_child_idx)
+            sup_meta->pending_min_child_idx = child_idx;
+        /* Review round 3 fix: EVERY drop counts here, regardless of
+         * whether it widened pending_min_child_idx — delayed_restart_
+         * thread's absorb loop needs to know a drop happened even when
+         * child_idx >= the current min (e.g. a freshly-respawned sibling
+         * from an earlier in-flight pass crashing again), since that drop
+         * still leaves a child uncovered by the pass that's using the
+         * unchanged min. See pending_drop_count's field comment. */
+        sup_meta->pending_drop_count++;
+    } else if (is_batch && streak > 1) {
+        sup_meta->delayed_batch_pending = 1;
+        sup_meta->pending_min_child_idx = child_idx;
+        claimed_batch = 1;
     }
+    pthread_mutex_unlock(&g_supervise_mu);
+
+    int64_t delay = 0;
+    if (streak > 1) {
+        int shift = streak > 8 ? 7 : streak - 1;
+        delay = 25LL << shift;             /* 50,100,...,3200 */
+        if (delay > 5000) delay = 5000;
+        /* ±25% jitter, seeded off a process-wide counter — Math.random is
+         * not available here and rand() is process-global anyway; a weak
+         * LCG is plenty for de-synchronizing a crash-storm's retries. */
+        static _Atomic uint32_t jitter_seed = 0x9E3779B9u;
+        uint32_t s = atomic_fetch_add_explicit(&jitter_seed, 0x9E3779B9u,
+                                               memory_order_relaxed);
+        s ^= s >> 16; s *= 0x45d9f3bu; s ^= s >> 16;
+        delay += (int64_t)(s % (uint32_t)(delay / 2 + 1)) - delay / 4;
+    }
+    if (getenv("MARCH_SUP_TRACE"))
+        fprintf(stderr, "march: supervisor backoff child=%d streak=%d delay_ms=%lld%s\n",
+                child_idx, streak, (long long)delay,
+                skip_due_to_pending
+                    ? " (batch restart already pending, skipped)" : "");
+
+    if (skip_due_to_pending) return;
+
+    if (delay == 0) {
+        switch (strategy) { /* today's immediate path */
+            case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
+            case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
+            case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
+            default: break;
+        }
+        return;
+    }
+    march_delayed_restart *dr = malloc(sizeof *dr);
+    if (!dr) {
+        if (getenv("MARCH_SUP_TRACE"))
+            fprintf(stderr,
+                    "march: supervisor backoff child=%d streak=%d delay_ms=%lld"
+                    " -- malloc failed, restart ABANDONED%s\n",
+                    child_idx, streak, (long long)delay,
+                    claimed_batch
+                        ? " (any lower-index siblings that crashed and were"
+                          " skipped while this batch restart was pending are"
+                          " dropped along with it -- they stay dead until a"
+                          " future crash schedules a new restart covering"
+                          " their index)"
+                        : "");
+        /* Minor 2 aside: if this crash claimed delayed_batch_pending above
+         * but the restart never actually gets scheduled, nothing would ever
+         * clear the flag (delayed_restart_thread, the only clearer, never
+         * runs) — every future crash of this supervisor's other children
+         * would see skip_due_to_pending forever and the supervisor would
+         * stop healing entirely. Roll the claim back so a later crash can
+         * retry.
+         *
+         * Low (review round 2): between this crash claiming
+         * delayed_batch_pending (in the earlier, now-released critical
+         * section) and this rollback, some OTHER child could have crashed,
+         * observed skip_due_to_pending, been dropped (no restart of its
+         * own), and widened pending_min_child_idx down to its index — all
+         * on the assumption that THIS crash's now-failing restart would
+         * cover it. Rolling back loses that widening along with the flag,
+         * so that child is stranded dead until some later crash (of any
+         * child, anywhere at or below its index) schedules a fresh restart.
+         * Under sustained OOM this is already a supervisor in serious
+         * trouble; a full fix would mean re-deriving and re-dispatching for
+         * every child crashed during the doomed window, which is not a
+         * one-line change — documented here and in the trace above rather
+         * than implemented, since OOM-at-malloc(sizeof(a few words)) is an
+         * extreme, already-degraded scenario. */
+        if (claimed_batch) {
+            pthread_mutex_lock(&g_supervise_mu);
+            sup_meta->delayed_batch_pending = 0;
+            pthread_mutex_unlock(&g_supervise_mu);
+        }
+        return;
+    }
+    dr->supervisor = supervisor;
+    dr->child_idx = child_idx;
+    dr->strategy = strategy;
+    dr->not_before_ms = now + delay;
+    march_sched_spawn(delayed_restart_thread, dr);
 }
 
 /* Mark `actor` dead, run its cleanup callbacks and monitor Down-notifications,
@@ -2542,15 +3101,22 @@ static void do_actor_death(void *actor) {
 
     /* Fire MONITOR_FIRE to any remote (cross-node) watchers of this pid. */
     if (meta) {
-        march_dist_monitor_fire_pid(meta->pid_index,
+        march_dist_monitor_fire_pid(
+            atomic_load_explicit(&meta->pid_index, memory_order_relaxed),
                                      MARCH_DIST_REASON_NORMAL, NULL);
     }
 
     fields[3] = 0;   /* $alive flag at byte offset 24 */
 
-    /* Wake the actor's green thread so it can notice death and exit. */
-    if (meta && meta->green_thread) {
-        march_sched_wake(meta->green_thread);
+    /* Wake the actor's green thread so it can notice death and exit.
+     * This read was already unsynchronized before Task 10 (no g_tbl_mu
+     * here); the _Atomic conversion turns that pre-existing gap into a
+     * proper acquire load, paired with the release stores in march_spawn
+     * and actor_green_thread's exit paths. */
+    if (meta) {
+        march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                              memory_order_acquire);
+        if (gt) march_sched_wake(gt);
     }
 
     if (meta && meta->supervisor) {
@@ -2566,25 +3132,107 @@ int64_t march_is_alive(void *actor) {
     return ((int64_t *)actor)[3];
 }
 
+/* Dispose an undelivered/overflow-dropped/orphaned actor message. Registered
+ * with the scheduler (march_sched_set_msg_dtor) below, at scheduler
+ * lazy-init time, so it is called for: MARCH_MBOX_DROP_NEW's rejected
+ * message, MARCH_MBOX_DROP_OLD's evicted message, and every message still
+ * queued in a proc's mailbox when the scheduler reaps it dead.
+ *
+ * Two message shapes exist, matching actor_green_thread's receive loop
+ * (which performs the identical discrimination — see its Phase 5 comment,
+ * just above where it checks `((int64_t *)msg)[1] == MARCH_MIGRATE_TAG`):
+ *   - the malloc'd migrate control message (march_migrate_msg_t): a
+ *     standard 16-byte march object header shape (rc at word 0, tag at
+ *     word 1) but allocated with malloc(), not march-heap-allocated, so it
+ *     must be freed with free(), never march_decrc. MARCH_MIGRATE_TAG
+ *     (0x4D494752, "MIGR") is chosen far outside the range of real ADT
+ *     constructor tags (typically < 1000 — see its definition in
+ *     march_runtime.h), so an ordinary march-heap value's tag word can
+ *     never collide with it in practice, the same assumption the receive
+ *     loop already relies on.
+ *   - everything else: an ordinary march-heap value (or a tagged
+ *     immediate, which IS_HEAP_PTR rejects, making march_decrc's own
+ *     IS_HEAP_PTR guard a safe no-op for it) — disposed via march_decrc.
+ *
+ * Deliberately narrower than the receive loop's full gate: the receive loop
+ * additionally requires `meta->dispatch_name_id` (only hot-reload actors
+ * ever receive migrate messages — march_actor_broadcast_migrate only
+ * targets them), but this dtor is actor-agnostic (the scheduler calls it
+ * with only the message pointer, no actor context) and migrate messages are
+ * never sent to non-hot-reload actors in the first place, so omitting that
+ * gate here does not admit any message the receive loop's gate would have
+ * rejected. */
+static void march_actor_msg_dispose(void *msg) {
+    if (IS_HEAP_PTR(msg) && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+        free(msg);
+        return;
+    }
+    march_decrc(msg);
+}
+
 /* Register an actor with the scheduler and return it unchanged.
  * Called from generated ActorName_spawn() wrappers:
  *   let $raw = ActorName_spawn()
  *   march_spawn($raw)            -- returns $raw */
 void *march_spawn(void *actor) {
     march_actor_meta *meta = find_or_create_meta(actor);
-    meta->pid_index = atomic_fetch_add_explicit(&g_next_pid_index, 1,
+    /* Task 15 fix: one locked section does reuse-detection, pid_index
+     * assignment, and the pididx_tbl publish together, so nothing else can
+     * observe `meta` between the pididx_linked check and the insert. See
+     * replace_stale_meta_locked's comment for why the check is needed at
+     * all (actor heap-address reuse after a dead actor's meta was already
+     * linked into g_pididx_tbl) and pididx_linked's field comment for why a
+     * second link on the same meta would corrupt the table. */
+    pthread_mutex_lock(&g_tbl_mu);
+    if (meta->pididx_linked) meta = replace_stale_meta_locked(actor, meta);
+    int64_t pid_index = atomic_fetch_add_explicit(&g_next_pid_index, 1,
                                                 memory_order_relaxed);
+    atomic_store_explicit(&meta->pid_index, pid_index, memory_order_relaxed);
+    meta->pididx_linked = 1;
+    /* Publish this meta into the pid_index -> meta table now that
+     * pid_index is assigned (pididx_insert_locked reads meta->pid_index to
+     * pick the bucket) and before the green thread starts, matching
+     * find_or_create_meta's existing "insert" discipline. */
+    pididx_insert_locked(meta);
+    pthread_mutex_unlock(&g_tbl_mu);
     /* Initialize scheduler lazily. */
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* Task 14: give the scheduler a real disposer for messages it never
+         * delivers (mailbox-overflow drops, and every message still queued
+         * in a proc's mailbox when it is reaped dead) instead of leaking
+         * them. See march_actor_msg_dispose's own comment for the two
+         * message shapes it discriminates between, and the re-entrancy
+         * contract on march_sched_set_msg_dtor for why the scheduler always
+         * calls this with no scheduler lock held. */
+        march_sched_set_msg_dtor(march_actor_msg_dispose);
     }
     /* Daemon: an actor recv loop parks forever unless killed; it must not
      * keep the scheduler (and thus the process) alive once main and all
      * task procs have finished — see wake_idle_daemons in march_scheduler.c. */
-    meta->green_thread = march_sched_spawn_daemon(actor_green_thread, meta);
+    /* This write was already unsynchronized before Task 10 (no g_tbl_mu
+     * around it, despite every other write site taking the lock) — a
+     * pre-existing hole carried forward from Task 5's review. The _Atomic
+     * conversion fixes it properly: readers now see either NULL or a fully
+     * constructed march_proc via this release store. */
+    void *green_thread = march_sched_spawn_daemon(actor_green_thread, meta);
+    atomic_store_explicit(&meta->green_thread, green_thread, memory_order_release);
+    if (!green_thread) {
+        /* Task 12 made exhaustion unlikely (stack recycling + on-demand
+         * growth); this makes it LOUD instead of silently dropping the
+         * actor on the floor. march_spawn holds no locks here, so a plain
+         * one-shot atomic flag is enough to avoid spamming stderr under
+         * sustained exhaustion. */
+        static _Atomic int warned = 0;
+        if (!atomic_exchange(&warned, 1))
+            fprintf(stderr,
+                    "march: FAILED to start actor green thread "
+                    "(stack allocation) — this actor will drop all "
+                    "messages; see Scheduler.stat(3)\n");
+    }
     /* Start the scheduler in a background thread so actor green threads run
      * even when the main thread is blocked inside the HTTP event loop.
      * For non-HTTP programs this is harmless: march_run_scheduler() joins
@@ -3037,14 +3685,38 @@ void *march_send(void *actor, void *msg) {
         return none;
     }
 
-    march_actor_meta *meta = find_or_create_meta(actor);
-    if (!meta->green_thread) {
+    /* find_meta, not find_or_create_meta: a send can only race spawn if the
+     * pid escaped before march_spawn returned, which the lowering forbids
+     * (march_spawn creates the meta before returning the pid) — so a NULL
+     * meta here means the actor was never spawned; treat it the same as
+     * "no green thread yet". This is what takes march_send off g_tbl_mu
+     * entirely (find_meta is lock-free; the green_thread field is
+     * _Atomic). */
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
+                                                  memory_order_acquire)
+                          : NULL;
+    if (!gt) {
         march_decrc(msg);
         void *none = march_alloc(16);
         return none;
     }
 
-    march_sched_send(meta->green_thread, msg);
+    int send_rc = march_sched_send(gt, msg);
+    if (send_rc == MARCH_SEND_DEAD) {
+        /* Actor died in the window between the checks above and the send;
+         * march_sched_send did not enqueue or dispose the message (dead
+         * targets are rejected before either happens), so we still own the
+         * one reference we were given. */
+        march_decrc(msg);
+        void *none = march_alloc(16);
+        return none;
+    }
+    /* MARCH_SEND_OK or MARCH_SEND_DROPPED: fire-and-forget semantics are
+     * preserved either way — on DROPPED the mailbox's overflow policy already
+     * handed the message to march_sched_send's registered disposer (Task 14),
+     * so we must NOT decrc it again here. Shedding is observable via
+     * Scheduler.dropped_messages(), not via this return value. */
 
     /* Return Some(()). */
     void *some = march_alloc(16 + 8);
@@ -3062,24 +3734,75 @@ void *march_send(void *actor, void *msg) {
 #define MARCH_SET_TAG(obj, t) (((march_hdr *)(obj))->tag = (int32_t)(t))
 
 /* ── Actor.call / Actor.reply (synchronous messaging) ────────────────── */
+
+/* Correlation-checked replies (actor-system hardening, task 4): a call that
+ * times out leaves its reply-in-flight — the handler may still deliver a
+ * late reply after the caller has moved on to a SECOND call. Without a
+ * correlation id, that late reply lands in the (still-live, per-call-owning)
+ * caller's mailbox and is handed back as the answer to the unrelated second
+ * call. Every reply is now wrapped in an envelope carrying the correlation
+ * id minted for that specific march_actor_call invocation, and the receive
+ * loop discards any envelope whose corr doesn't match the call it belongs to.
+ *
+ * Tag choice: 0x00CA11ED sits below the F19 global ctor-tag floor
+ * (0x01000000 — see the call_tag_base comment above) so it can never collide
+ * with a real user/stdlib constructor tag, and it doesn't collide with the
+ * other reserved sentinel tags either: MARCH_STRING_TAG/-1, MARCH_RESOURCE_TAG/-2,
+ * and MARCH_FLOAT_TAG/-3 (all negative int32, checked as literal != this one)
+ * or MARCH_MIGRATE_TAG (0x4D494752, a different int64-typed protocol tag on
+ * migration messages, not on this struct's int32 header tag field). */
+#define MARCH_CALL_REPLY_TAG 0x00CA11ED
+static _Atomic int64_t g_next_call_corr = 1;
+
+/* Shared unwrap for march_actor_call's receive loops (both the wait-forever
+ * and the deadline-bounded path funnel through here). Returns:
+ *   1  -> matched envelope; *out_payload holds the (ref-owned) reply value
+ *   0  -> stale/mismatched envelope, already discarded — caller should retry
+ *  -1  -> msg was not one of our envelopes (legacy/raw send) — pass through
+ * raw via *out_payload unchanged. */
+static int march_actor_call_unwrap(void *msg, int64_t corr, void **out_payload) {
+    if (IS_HEAP_PTR(msg) && ((march_hdr *)msg)->tag == MARCH_CALL_REPLY_TAG) {
+        int64_t got_corr = MARCH_FIELD(msg, 0);
+        void *payload = (void *)(uintptr_t)MARCH_FIELD(msg, 1);
+        march_decrc(msg);
+        if (got_corr != corr) {
+            march_decrc(payload);   /* stale reply: drop it, keep waiting */
+            return 0;
+        }
+        *out_payload = payload;
+        return 1;
+    }
+    *out_payload = msg;
+    return -1;
+}
+
 /*
- * march_actor_call: synchronous call — builds a wrapped message containing the
- * calling green-thread pointer as the reply channel (field 0), then sends it to
- * the actor and blocks until the actor calls march_actor_reply.
+ * march_actor_call: synchronous call — builds a wrapped message containing a
+ * heap-allocated reply-ref (caller proc + correlation id) as the reply
+ * channel (field 0), then sends it to the actor and blocks until the actor
+ * calls march_actor_reply.
  *
  * Protocol:
  *   1. Read the tag from inner_msg (the zero-arg constructor like GetCount).
- *   2. Build a new heap struct with the same tag + one extra field: the calling
- *      proc pointer (the "reply channel").  The actor handler receives this as
- *      its first parameter (e.g., `on GetCount(reply_to)`).
+ *   2. Mint a correlation id and build the reply-ref; build a new heap struct
+ *      with the same tag + one extra field: the reply-ref.  The actor handler
+ *      receives this reply-ref as its first parameter (e.g.,
+ *      `on GetCount(reply_to)`) and hands it back verbatim to Actor.reply.
  *   3. Send the augmented message to the actor's green thread.
  *   4. Wait for the reply: timeout_ms <= 0 blocks forever via
  *      march_sched_recv(); a positive timeout_ms does a deadline-bounded
- *      yield-poll and returns Err("actor_call: timeout") past the deadline.
+ *      park-with-timeout and returns Err("no reply (timeout or unhandled
+ *      Call)") past the deadline. Any reply whose correlation id doesn't
+ *      match this call's is discarded (see march_actor_call_unwrap above)
+ *      instead of being handed back as this call's answer.
  *   5. Return Ok(reply_value).
  *
  * RC contract: we consume one reference to inner_msg (via march_decrc after
- * reading the tag) and transfer ownership of the new call_msg to the actor.
+ * reading the tag) and transfer ownership of the new call_msg (and the
+ * reply-ref it carries) to the actor. The reply-ref is march-heap-allocated
+ * with rc=1; march_actor_reply reads it and march_decrc's it (on the
+ * envelope path). If the handler never calls Actor.reply, the reply-ref
+ * leaks with the message — same as today's leaked raw result, no new hazard.
  */
 void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     int64_t *a = (int64_t *)actor;
@@ -3088,8 +3811,16 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         return mk_err_cstr("actor not alive");
     }
 
-    march_actor_meta *meta = find_or_create_meta(actor);
-    if (!meta->green_thread) {
+    /* find_meta, not find_or_create_meta — same reasoning as march_send:
+     * a NULL meta here means the pid was never spawned (can't legitimately
+     * happen given the lowering, but is handled identically to "no green
+     * thread yet" either way). Lock-free lookup + atomic green_thread load
+     * takes march_actor_call off g_tbl_mu too. */
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
+                                                  memory_order_acquire)
+                          : NULL;
+    if (!gt) {
         march_decrc(inner_msg);
         return mk_err_cstr("actor not found");
     }
@@ -3129,51 +3860,86 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     if (meta->call_tag_base && msg_tag < 0x01000000)
         msg_tag = (int32_t)(meta->call_tag_base + msg_tag);
 
-    /* Build the augmented call message: same tag, field 0 = caller proc ptr.
+    int64_t corr = atomic_fetch_add_explicit(&g_next_call_corr, 1,
+                                             memory_order_relaxed);
+    /* reply-ref: heap obj, field0 = caller proc, field1 = corr. */
+    void *reply_ref = march_alloc(16 + 16);
+    MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
+    MARCH_FIELD(reply_ref, 0) = (int64_t)(uintptr_t)caller;
+    MARCH_FIELD(reply_ref, 1) = corr;
+
+    /* Build the augmented call message: same tag, field 0 = reply-ref.
      * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
     void *call_msg = march_alloc(24);
     MARCH_SET_TAG(call_msg, msg_tag);
-    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)reply_ref;
 
-    march_sched_send(meta->green_thread, call_msg);
+    march_sched_send(gt, call_msg);
 
     if (timeout_ms <= 0) {
-        /* Preserve wait-forever semantics for callers that opt out. */
-        void *result = march_sched_recv();
-        if (result == MARCH_RECV_NO_MSG)
-            return mk_err_cstr("no reply (timeout or unhandled Call)");
-        return mk_ok(result);
+        /* Preserve wait-forever semantics for callers that opt out. Still
+         * loop on a mismatched correlation: a wait-forever call can also
+         * receive a stale envelope left over from an EARLIER timed-out call
+         * on the same green thread. */
+        for (;;) {
+            void *result = march_sched_recv();
+            if (result == MARCH_RECV_NO_MSG)
+                return mk_err_cstr("no reply (timeout or unhandled Call)");
+            void *payload;
+            int rc = march_actor_call_unwrap(result, corr, &payload);
+            if (rc == 0)
+                continue;             /* stale envelope: discarded, keep waiting */
+            return mk_ok(payload);    /* matched envelope, or non-envelope passthrough */
+        }
     }
 
-    /* Timed wait: poll the mailbox with cooperative yields until the
-     * deadline.  A parked-with-deadline mechanism needs timer support the
-     * scheduler doesn't have; replies are normally immediate, so the yield
-     * loop only spins for the (rare) slow-actor case, bounded by timeout_ms.
+    /* Timed wait: park with a deadline instead of busy yield-polling. The
+     * scheduler wakes us early on reply (march_actor_reply's march_sched_send
+     * → march_sched_wake) or lets the timer service fire at the deadline, so
+     * a pending timed call no longer consumes a dispatch slot every turn.
+     *
+     * march_sched_recv_until (not march_sched_try_recv2 +
+     * march_sched_park_self_until) is deliberate: it holds the mailbox lock
+     * across both the emptiness check and the PROC_PARKED store, closing a
+     * lost-wakeup window where march_sched_send could observe this proc as
+     * still PROC_RUNNING between an unlocked emptiness check and a separate
+     * PROC_PARKED store, and skip the wake — deferring delivery of an
+     * already-arrived reply until the full timeout elapsed. See
+     * march_sched_recv_until's doc comment in march_scheduler.h/.c.
      *
      * The Err payloads match the interpreter's no-reply message exactly so
      * both backends surface the same value.
      *
-     * Known limitation: on timeout, a late reply still lands in the
-     * caller's mailbox. Safe for per-call task green threads (the thread
-     * exits and sends to dead procs are dropped); a long-lived green thread
-     * mixing Actor.call and raw receive could observe a stale reply after
-     * a timeout. */
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    int64_t deadline_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000
-                          + timeout_ms;
+     * On timeout, a late reply CAN still land in the caller's mailbox (we
+     * give up waiting, not the handler up replying) — but it now carries a
+     * correlation id that no longer matches any call this green thread is
+     * waiting on, so a SUBSEQUENT Actor.call on the same thread discards it
+     * via march_actor_call_unwrap above instead of misdelivering it as that
+     * later call's answer. (We don't merge this branch with the wait-forever
+     * one above into a single march_sched_recv_until(INT64_MAX) path: recv_until
+     * registers a timer-heap entry for its deadline, and a deadline of
+     * INT64_MAX would never fire and never get removed — one leaked heap
+     * slot per wait-forever call, unbounded for a call-heavy long-lived
+     * server. Two branches, one shared unwrap helper, is the right split.) */
+    int64_t deadline_ms = march_now_ms() + timeout_ms;
     for (;;) {
-        void *msg = NULL;
-        if (march_sched_try_recv2(&msg)) {
-            if (msg == MARCH_RECV_NO_MSG)
-                return mk_err_cstr("no reply (timeout or unhandled Call)");
-            return mk_ok(msg);
+        void *msg = march_sched_recv_until(deadline_ms);
+        if (msg != MARCH_RECV_NO_MSG) {
+            void *payload;
+            int rc = march_actor_call_unwrap(msg, corr, &payload);
+            if (rc == 0) {
+                /* stale envelope discarded; deadline may have passed while
+                 * we were draining it, so re-check before looping. */
+                if (march_now_ms() >= deadline_ms)
+                    return mk_err_cstr("no reply (timeout or unhandled Call)");
+                continue;
+            }
+            return mk_ok(payload);
         }
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        if (now_ms >= deadline_ms)
+        if (march_now_ms() >= deadline_ms)
             return mk_err_cstr("no reply (timeout or unhandled Call)");
-        march_sched_yield();
+        /* Woken with an empty mailbox but time remains (spurious, or the
+         * no-preempt-daemon degrade-to-yield path) — loop and try again. */
     }
 }
 
@@ -3181,16 +3947,41 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
 /*
  * march_actor_reply: send a reply back to the caller blocked in actor_call.
  *
- * ref_ptr is the calling green-thread proc pointer that was injected as field 0
- * of the call message.  We cast it back to march_proc * and enqueue result in
- * that proc's mailbox, waking it from march_sched_recv().
+ * ref_ptr is the reply-ref built by march_actor_call: a heap struct with
+ * field0 = caller proc, field1 = correlation id (tag MARCH_CALL_REPLY_TAG).
+ * We wrap result in an envelope carrying that corr and send it to the
+ * caller's mailbox, waking it from march_sched_recv()/march_sched_recv_until().
+ * The caller's unwrap (march_actor_call_unwrap) compares corr against the
+ * one it is waiting on and discards the envelope if they don't match.
+ *
+ * Legacy path: if ref_ptr isn't one of our envelope-tagged reply-refs (e.g.
+ * a raw proc pointer from an older caller, or interpreter-parity code that
+ * still hands march_actor_reply a bare proc), send result directly with no
+ * envelope — preserves old (uncorrelated) behavior for that caller.
  *
  * RC contract: march_actor_reply does NOT incrc result; it transfers the
- * caller's reference (the handler's Perceus instrumentation already owns it).
+ * caller's reference (the handler's Perceus instrumentation already owns
+ * it) into the envelope's field 1. On the envelope path we also consume the
+ * reply-ref's own reference via march_decrc(ref_ptr) — march_actor_call
+ * handed it off to the actor with rc=1 and this is the only place that
+ * reference is ever retired; a handler that never replies simply leaks it
+ * along with the unhandled message, same as an unreplied raw result today.
  */
 void march_actor_reply(void *ref_ptr, void *result) {
-    march_proc *caller = (march_proc *)ref_ptr;
-    march_sched_send(caller, result);
+    if (!IS_HEAP_PTR(ref_ptr)
+            || ((march_hdr *)ref_ptr)->tag != MARCH_CALL_REPLY_TAG) {
+        /* Legacy path: raw proc ptr (interpreter parity / old callers). */
+        march_sched_send((march_proc *)ref_ptr, result);
+        return;
+    }
+    march_proc *caller = (march_proc *)(uintptr_t)MARCH_FIELD(ref_ptr, 0);
+    int64_t corr = MARCH_FIELD(ref_ptr, 1);
+    void *env = march_alloc(16 + 16);
+    MARCH_SET_TAG(env, MARCH_CALL_REPLY_TAG);
+    MARCH_FIELD(env, 0) = corr;
+    MARCH_FIELD(env, 1) = (int64_t)(uintptr_t)result;
+    march_decrc(ref_ptr);
+    march_sched_send(caller, env);
 }
 
 /* ── Float builtins ──────────────────────────────────────────────────── */
@@ -4654,6 +5445,8 @@ void march_actor_register_child(void *supervisor, void *child,
                                       (size_t)(idx + 1) * sizeof(march_sup_child));
     sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
+    sup_meta->sup_children[idx].crash_streak = 0;
+    sup_meta->sup_children[idx].last_crash_ms = 0;
     sup_meta->sup_num_children = idx + 1;
 }
 
@@ -4661,7 +5454,8 @@ void march_actor_register_child(void *supervisor, void *child,
  * to represent a just-spawned child's Pid (see march_pid_of_int for the
  * reverse direction). */
 int64_t march_pid_index_of(void *actor) {
-    return find_or_create_meta(actor)->pid_index;
+    return atomic_load_explicit(&find_or_create_meta(actor)->pid_index,
+                                 memory_order_relaxed);
 }
 
 /* monitor: establish a monitor link from watcher to target.
@@ -4697,13 +5491,35 @@ int64_t march_monitor(void *watcher, void *target) {
     return ref;
 }
 
-/* mailbox_size: return count of Down messages delivered to this actor's
-   "down_count" (watcher side only — regular actor messages are not counted). */
+/* mailbox_size: live queue depth (pending, undelivered actor messages) plus
+   "down_count" (pending Down notifications). The interpreter materializes
+   Down notifications as real mailbox messages, so this sum is the
+   parity-correct meaning across both backends. */
 int64_t march_mailbox_size(void *pid) {
     if (!IS_HEAP_PTR(pid)) return 0;
     march_actor_meta *meta = find_meta(pid);
     if (!meta) return 0;
-    return atomic_load_explicit(&meta->down_count, memory_order_relaxed);
+    int64_t depth = 0;
+    /* Lock only ever protected this field read; now an acquire load. */
+    march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                          memory_order_acquire);
+    if (gt) depth = march_sched_mbox_count(gt);
+    return depth + atomic_load_explicit(&meta->down_count,
+                                        memory_order_relaxed);
+}
+
+/* actor_set_mailbox_limit: bind a mailbox capacity + overflow policy to the
+   green thread backing this actor. limit <= 0 means unbounded; policy is a
+   march_mbox_policy value (0 unbounded, 1 drop_new, 2 drop_old, 3 block).
+   No-op if the actor has no meta entry or no running green thread yet. */
+void march_actor_set_mbox_limit(void *actor, int64_t limit, int64_t policy) {
+    if (!IS_HEAP_PTR(actor)) return;
+    march_actor_meta *meta = find_meta(actor);
+    if (!meta) return;
+    /* Lock only ever protected this field read; now an acquire load. */
+    march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                          memory_order_acquire);
+    if (gt) march_sched_set_mbox_limit(gt, limit, (march_mbox_policy)policy);
 }
 
 /* run_until_idle: flush the async message queue.
@@ -4783,7 +5599,7 @@ void *march_get_cap(void *pid) {
     void *cap = march_alloc(40);
     int64_t *w = (int64_t *)cap;
     w[2] = (int64_t)(uintptr_t)pid;
-    w[3] = meta->pid_index;
+    w[3] = atomic_load_explicit(&meta->pid_index, memory_order_relaxed);
     w[4] = meta->epoch;
     return cap;
 }
@@ -4888,7 +5704,9 @@ int64_t march_send_checked(void *cap, void *msg) {
         return march_atom_of_name("error");
     }
     march_actor_meta *meta = find_meta(actor);
-    if (!meta || meta->pid_index != pidx || meta->epoch != epoch
+    if (!meta ||
+        atomic_load_explicit(&meta->pid_index, memory_order_relaxed) != pidx ||
+        meta->epoch != epoch
         || !march_is_alive(actor)) {
         march_decrc(msg);
         return march_atom_of_name("error");
@@ -5001,7 +5819,9 @@ void *march_value_to_string(void *v) {
     march_actor_meta *meta = find_meta(v);
     if (meta) {
         char buf[64];
-        int n = snprintf(buf, sizeof(buf), "Pid(%lld)", (long long)meta->pid_index);
+        int n = snprintf(buf, sizeof(buf), "Pid(%lld)",
+                          (long long)atomic_load_explicit(&meta->pid_index,
+                                                            memory_order_relaxed));
         return march_string_lit(buf, n);
     }
     march_hdr *h = (march_hdr *)v;

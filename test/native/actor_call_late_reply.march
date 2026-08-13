@@ -1,0 +1,34 @@
+-- Correlation-checked Actor.call replies (actor-system hardening, task 4):
+-- a first call times out (the handler replies late); the caller then issues
+-- a second call. Without correlation checking, the stale first reply is
+-- returned as the second call's answer. With it, the second call gets the
+-- second reply.
+mod Main do
+  needs IO.Console
+  type GetReq = GetReq
+
+  actor Echo do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Get(reply_to) do
+      -- burn time so call #1's 1ms timeout expires before this reply lands
+      let _ = List.fold_left(Range.to_list(Range.new(0, 20000000)), 0, fn (a, b) -> a + b)
+      Actor.reply(reply_to, state.n)
+      { n: state.n + 1 }
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let pid = spawn(Echo)
+    let first = Actor.call(pid, GetReq, 1)      -- times out; reply n=0 arrives late
+    match first do
+      Ok(_)  -> println("first: unexpected ok")
+      Err(_) -> println("first: timeout")
+    end
+    match Actor.call(pid, GetReq, 10000) do      -- must get n=1, not stale n=0
+      Ok(n)  -> println("second: " ++ int_to_string(n))
+      Err(e) -> println("second err: " ++ e)
+    end
+  end
+end

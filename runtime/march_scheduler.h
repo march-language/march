@@ -128,6 +128,19 @@ typedef struct march_mbox_node {
     struct march_mbox_node *next;
 } march_mbox_node;
 
+/* ── Mailbox capacity + overflow policy ─────────────────────────────────
+ * mbox_limit == 0 means unbounded (today's behavior, unchanged default). */
+typedef enum {
+    MARCH_MBOX_UNBOUNDED  = 0,   /* default: today's behavior */
+    MARCH_MBOX_DROP_NEW   = 1,   /* reject the incoming message */
+    MARCH_MBOX_DROP_OLD   = 2,   /* evict the oldest queued message */
+    MARCH_MBOX_BLOCK      = 3,   /* Task 8: park the sender */
+} march_mbox_policy;
+
+#define MARCH_SEND_OK       0
+#define MARCH_SEND_DEAD    (-1)
+#define MARCH_SEND_DROPPED  1    /* message NOT enqueued (DROP_NEW) */
+
 /* Forward-declare scheduler so march_proc can hold a pointer to it. */
 struct march_scheduler;
 
@@ -142,8 +155,40 @@ typedef struct march_proc {
     size_t                     stack_alloc;     /* Total mmap size: MARCH_STACK_MAX + one guard page */
     march_mbox_node           *mailbox;      /* Head of message queue (FIFO)             */
     march_mbox_node           *mbox_tail;    /* Tail of message queue (for O(1) enqueue) */
-    int64_t                    mbox_count;   /* Number of messages in mailbox            */
+    _Atomic int64_t             mbox_count;  /* Number of messages in mailbox. Atomic:
+                                                 writers (mbox_push/mbox_pop) always run
+                                                 under mbox_lock, but wake_idle_daemons /
+                                                 march_sched_wait_idle / march_sched_mbox_count
+                                                 read it from other OS threads without
+                                                 the lock. */
+    int64_t                    mbox_limit;   /* 0 = unbounded (default). Plain field: only
+                                                 read/written under mbox_lock (set by
+                                                 march_sched_set_mbox_limit, read by
+                                                 march_sched_send). calloc in sched_spawn_common
+                                                 zero-initializes this to 0 = unbounded. */
+    int32_t                    mbox_policy;  /* march_mbox_policy. Same lock discipline as
+                                                 mbox_limit above; calloc zero-inits to
+                                                 MARCH_MBOX_UNBOUNDED (=0). */
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
+    struct march_proc         *mbox_send_waiters; /* Task 8 (MARCH_MBOX_BLOCK): intrusive
+                                                 singly-linked list of sender procs parked
+                                                 on THIS proc's full mailbox, threaded
+                                                 through send_wait_next below. Read/written
+                                                 only under this proc's own mbox_lock (both
+                                                 by senders registering in march_sched_send
+                                                 and by the receive-side drain-wake in
+                                                 mbox_take_waiters_if_low / the PROC_DEAD
+                                                 reap branch in sched_loop). calloc
+                                                 zero-inits to NULL. */
+    struct march_proc         *send_wait_next;     /* Intrusive link for the above list on
+                                                 THIS proc when IT is a parked sender
+                                                 waiting on some OTHER proc's mailbox.
+                                                 Deliberately NOT p->next (the global-runq
+                                                 link) -- a blocked sender gets pushed to
+                                                 the runq by march_sched_wake while still
+                                                 linked into the target's waiter list, so
+                                                 sharing one field would corrupt both
+                                                 lists. */
     /* Wake permit (LockSupport/park-unpark style).  march_sched_wake deposits
      * one BEFORE it inspects `status`; march_sched_park_self consumes one
      * INSTEAD of parking.  Closes the wake-while-RUNNING window in lock-free
@@ -159,6 +204,23 @@ typedef struct march_proc {
      * check and its PROC_PARKED store, so a sender can never observe it as
      * RUNNING after seeing an empty mailbox. */
     _Atomic int                wake_pending;
+    /* Task 16 fix-up (Important 1): bumped on every entry to and exit from
+     * march_sched_park_self_until / march_sched_recv_until's real-park
+     * branch (relaxed — this only needs to be a monotonically-increasing
+     * tag, not a synchronization point; the actual synchronization is the
+     * existing status/mbox_lock machinery). A march_timer_ent stamped with
+     * the post-entry-increment value is LIVE only while this counter still
+     * reads that same value — a wake for any other reason (a message
+     * arriving, a spurious wake, or a later park call entirely) advances
+     * this counter and makes the earlier timer entry a ghost. Lets
+     * march_sched_wait_idle (and, optionally, timer_service) distinguish a
+     * genuinely-still-parked proc from one that already woke early but
+     * whose heap entry lingers until its original deadline (no-cancellation
+     * heap by design — see the timer comment below). Without this, a
+     * successfully-answered Actor.call(...,5000) that replies in 1ms would
+     * still make run_until_idle() block for the full 5000ms. calloc
+     * zero-inits this to 0, matching "never parked yet." */
+    _Atomic int64_t             park_gen;
     ucontext_t                 ctx;          /* Saved execution context (makecontext/swap) */
     void                     (*fn)(void *);  /* Entry function */
     void                      *arg;          /* Argument passed to fn */
@@ -293,8 +355,58 @@ int64_t      march_sched_total_spawned(void);
 
 /* Send a message to a process. Enqueues msg and wakes the target if WAITING.
  * Safe to call from any process or from the scheduler context.
- * Returns 0 on success, -1 if target is NULL or DEAD. */
+ * Returns MARCH_SEND_OK (0) on success, MARCH_SEND_DEAD (-1) if target is
+ * NULL or DEAD, or MARCH_SEND_DROPPED (1) if the target's mailbox is at
+ * capacity under MARCH_MBOX_DROP_NEW (message was NOT enqueued). Every
+ * pre-Task-7 caller treats the return as "!= 0 means didn't enqueue"/ignores
+ * it outright; MARCH_SEND_DROPPED is only ever produced once a caller has
+ * opted in via march_sched_set_mbox_limit. */
 int          march_sched_send(march_proc *target, void *msg);
+
+/* Set a mailbox capacity + overflow policy on a process. limit <= 0 means
+ * unbounded (MARCH_MBOX_UNBOUNDED is the default set at spawn). Safe to call
+ * while senders are concurrently active — both fields are written under
+ * mbox_lock. */
+void         march_sched_set_mbox_limit(march_proc *p, int64_t limit,
+                                        march_mbox_policy policy);
+
+/* Register the disposer called for a message dropped by mailbox-overflow
+ * policies (DROP_NEW's rejected message, DROP_OLD's evicted message) and for
+ * every message still queued in a dead proc's mailbox at reap time. The full
+ * runtime (march_runtime.c) registers a real march_decrc-based dtor (Task
+ * 14); until then, or in the standalone scheduler unit tests that link
+ * march_scheduler.c alone, dropped/orphaned messages are leaked-with-count
+ * (see MARCH_STAT_MSGS_DROPPED) rather than freed — the default is a no-op.
+ *
+ * Re-entrancy contract: the dtor MAY re-enter scheduler send/recv paths; it
+ * is never called with any scheduler lock held. This is load-bearing, not a
+ * nicety — march_decrc's free path can invoke an arbitrary FFI-registered C
+ * dtor (march_run_resource_dtor), and a dtor that sends a message or
+ * otherwise touches a mailbox on cleanup would deadlock (or, on a
+ * non-reentrant spinlock, corrupt state) if it were called while this
+ * module's own mbox_lock were held. Every call site collects the message(s)
+ * to dispose under the lock, releases the lock, and only then invokes the
+ * dtor. */
+void         march_sched_set_msg_dtor(void (*fn)(void *));
+
+/* Return the current mailbox depth (number of undelivered messages) for a
+ * process. Relaxed atomic read — safe to call from any thread without
+ * mbox_lock. Returns 0 if p is NULL. */
+int64_t      march_sched_mbox_count(march_proc *p);
+
+/* ── Cross-file stat counters (indices 3-5 of march_sched_stat) ─────────
+ * Reserved slots bumped from outside march_scheduler.c (march_runtime.c and
+ * later scheduler features) — exposed as a raw array so new counters don't
+ * need new symbols, just a new reserved index. */
+extern _Atomic int64_t march_stat_counters[8];
+#define MARCH_STAT_STACK_FAIL       3
+#define MARCH_STAT_MSGS_DROPPED     4
+#define MARCH_STAT_STACKS_RECYCLED  5
+
+/* Observability: a single raw stat read by index. See the index contract in
+ * march_stat_counters' comment above and stdlib/scheduler.march's `stat`
+ * doc. Unknown indices return 0 (forward-compatible with new counters). */
+int64_t      march_sched_stat(int64_t which);
 
 /* Sentinel returned by march_sched_recv when the process was woken without a
  * message (killed or spurious wakeup).  This is the address of a static C
@@ -341,6 +453,29 @@ void         march_sched_wake(march_proc *target);
  * spurious in current callers; still, don't assume the condition changed
  * without checking). */
 void         march_sched_park_self(void);
+
+#define MARCH_PARK_WOKEN   0
+#define MARCH_PARK_TIMEOUT 1
+/* CLOCK_MONOTONIC milliseconds. */
+int64_t march_now_ms(void);
+/* Park until woken or deadline (march_now_ms clock). Spurious returns
+ * possible with either code; callers loop on their own condition. */
+int march_sched_park_self_until(int64_t deadline_ms);
+
+/* Like march_sched_recv, but bounded by a deadline (march_now_ms clock)
+ * instead of blocking forever: holds the mailbox lock across BOTH the
+ * emptiness check and the PROC_PARKED store (same discipline as
+ * march_sched_recv) so a concurrent march_sched_send can never observe this
+ * process as PROC_RUNNING in the gap between the two -- unlike pairing
+ * march_sched_try_recv2 with march_sched_park_self_until, which has exactly
+ * that lost-wakeup window.
+ *
+ * Returns the message pointer on success, or MARCH_RECV_NO_MSG if the
+ * deadline passed OR the process was woken spuriously with an empty
+ * mailbox before the deadline -- callers must re-check march_now_ms()
+ * against their own deadline to tell the two apart and loop if time
+ * remains (same contract as march_sched_park_self_until). */
+void *march_sched_recv_until(int64_t deadline_ms);
 
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */

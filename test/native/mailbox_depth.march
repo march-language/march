@@ -1,0 +1,30 @@
+mod Main do
+  needs IO.Console
+
+actor Sink do
+  state { n : Int }
+  init  { n: 0 }
+  on Bump() do { n: state.n + 1 } end
+end
+
+fn flood(pid, k) do
+  if k == 0 do () else
+    send(pid, Bump())
+    flood(pid, k - 1)
+  end
+end
+
+fn main(_cap_console : Cap(IO.Console)) do
+  let pid = spawn(Sink)
+  flood(pid, 100)
+  run_until_idle()
+  -- after idle the mailbox MUST be drained: today's compiled runtime
+  -- reports down_count here (0 by luck); the real assertion is the C
+  -- unit level + the kill case below
+  println("after idle: " ++ int_to_string(mailbox_size(pid)))
+  kill(pid)
+  run_until_idle()
+  println("after kill: " ++ int_to_string(mailbox_size(pid)))
+end
+
+end

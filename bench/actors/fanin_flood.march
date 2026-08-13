@@ -1,0 +1,61 @@
+-- N tasks flood one consumer actor. Gate: process RSS stays bounded (the
+-- harness enforces it); program itself just reports what was delivered.
+--
+-- Deviations from the task-1 brief's sketch:
+--   - Added `needs IO.Console` (required for println/Actor.call diagnostics
+--     -- any module using them without declaring the capability is a
+--     compile error).
+--   - The `GetSeen` handler must be declared FIRST in Sink so it lands at
+--     ctor tag 0, which is what `Actor.call`'s zero-arg sentinel routes to
+--     (see specs/lang/actors.md's Actor.call section). The brief declared
+--     `Tick` first; reordered here.
+--   - Task.async takes a zero-arg function (`fn -> ...`), so the producer
+--     closures use the short zero-arg lambda form, matching stdlib/task.march.
+mod FaninFlood do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Sink do
+    state { seen : Int }
+    init  { seen: 0 }
+
+    on GetSeen(reply_to) do
+      Actor.reply(reply_to, state.seen)
+      state
+    end
+
+    on Tick(n : Int) do
+      { seen: state.seen + n }
+    end
+  end
+
+  type GetSeenReq = GetSeenReq
+
+  fn producer(pid, count) do
+    if count == 0 do
+      ()
+    else
+      send(pid, Tick(1))
+      producer(pid, count - 1)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    let pid = spawn(Sink)
+    -- Task 9: bound the mailbox with the block policy — senders park instead
+    -- of growing the queue unboundedly, so RSS stays flat under fan-in load
+    -- while every message is still guaranteed delivery (no drops).
+    Actor.set_queue_limit(pid, 1024, 3)
+    let msgs_per_producer = 50000
+    let producers = List.map(Range.to_list(Range.new(0, 8)), fn _ ->
+      Task.async(fn ->
+        producer(pid, msgs_per_producer)
+        1))
+    let _ = List.map(producers, fn t -> Task.await(t))
+    run_until_idle()
+    match Actor.call(pid, GetSeenReq, 30000) do
+      Ok(n)  -> println("delivered " ++ int_to_string(n))
+      Err(e) -> println("call failed: " ++ e)
+    end
+  end
+end
