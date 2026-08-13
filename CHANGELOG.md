@@ -90,6 +90,20 @@ git log is authoritative for exact commits.
   `eq_u8x16` / `first_set_u8x16`), previously reachable only from
   hand-built `NativeU8Arr` literals. High bytes (0x80-0xFF) round-trip as
   128-255, never negative.
+- **`NativeArray.fold_int` / `fold_float` now work under `--compile`, and
+  `NativeArray.fold_f32` / `fold_i32` / `fold_u8` are new** — `fold_int` and
+  `fold_float` previously typechecked and evaluated interpreted only; a
+  compiled program calling either failed to link (no C runtime symbol). All
+  five widths now fold via a `call_closure_2`-based loop mirroring
+  `TypedArray.fold`'s RC discipline. Also fixes a memory leak this same
+  change introduced during development and caught before merge: the
+  generic accumulator crossing the closure boundary needed the compiled
+  call site to box/tag a literal initial value (e.g. `fold_int(arr, 3, ...)`)
+  the same way `RingBuf.push` already does for its erased element, and the
+  float-family folds needed to release the per-element box they allocate
+  each iteration (confirmed safe — not a use-after-free — by inspecting the
+  compiled closure's `-emit-llvm` output, which always allocates a fresh box
+  when storing an element rather than aliasing the one passed in).
 - **Runtime enforcement tests for `--cap-sandbox`** — compiled fixtures now
   verify that a withheld capability's syscall is actually denied at runtime
   (Linux seccomp-bpf, macOS Seatbelt), not just that the embedded policy

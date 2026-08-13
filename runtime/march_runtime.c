@@ -6613,7 +6613,22 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
 
 /* fold: element is a raw double, materialised via march_alloc_float (boxed) —
  * unlike native_int_arr_fold's wire-tagged scalar. Same RC discipline and
- * (acc, arr, f) argument order as native_int_arr_fold above. */
+ * (acc, arr, f) argument order as native_int_arr_fold above.
+ *
+ * march_decrc(elem) after the call releases the FRESH per-element box we
+ * just allocated. Confirmed safe (not a use-after-free) by inspecting
+ * -emit-llvm for the compiled closure's apply fn: the erased-ptr calling
+ * convention treats a Float argument as borrowed/read-only — the callee
+ * only ever calls march_unbox_float(x.arg) to read the double value, never
+ * stores x.arg itself. Even a closure that stores the element (e.g. cons it
+ * into a List(Float)) allocates a FRESH march_alloc_float box from the
+ * unboxed double for storage rather than aliasing our box — so our box has
+ * no surviving alias once the call returns and is always safe to drop.
+ * Without this decrc, elem leaks: ~32B/element, unbounded in loop length
+ * (confirmed via RSS measurement — see task-2-report.md). The accumulator
+ * (result) has the identical borrowed-argument shape and also isn't freed
+ * by the callee, but that half of the leak is inherited from the reference
+ * march_typed_array_fold (:6191) and is out of scope here. */
 void *native_float_arr_fold(void *acc, void *arr, void *f) {
     int64_t len = native_float_arr_length(arr);
     void *result = acc;
@@ -6623,6 +6638,7 @@ void *native_float_arr_fold(void *acc, void *arr, void *f) {
         void *elem = march_alloc_float(x);
         march_incrc(f);
         result = call_closure_2(f, result, elem);
+        march_decrc(elem);
     }
     march_decrc(f);
     return result;
@@ -6862,7 +6878,10 @@ void *native_f32_arr_map2(void *arr1, void *arr2, void *f) {
 /* fold: element is a stored float, widened to double and materialised via
  * march_alloc_float (the wire ABI has no native f32 box — see the ABI
  * comment above clo_apply_ptr). Same RC discipline and (acc, arr, f)
- * argument order as native_int_arr_fold above. */
+ * argument order as native_int_arr_fold above. march_decrc(elem) after the
+ * call releases our per-element box — see native_float_arr_fold's comment
+ * above for why this is confirmed safe (borrowed-argument convention, no
+ * alias survives the call) rather than a use-after-free. */
 void *native_f32_arr_fold(void *acc, void *arr, void *f) {
     int64_t len = native_f32_arr_length(arr);
     void *result = acc;
@@ -6871,6 +6890,7 @@ void *native_f32_arr_fold(void *acc, void *arr, void *f) {
         void *elem = march_alloc_float(x);
         march_incrc(f);
         result = call_closure_2(f, result, elem);
+        march_decrc(elem);
     }
     march_decrc(f);
     return result;
