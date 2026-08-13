@@ -4046,6 +4046,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/simd_vector_core.expected simd_vector_core.out)))
 
+; Compiled/interpreted parity witness for the Bytes <-> NativeU8Arr bridge
+; (Bytes.to_u8_arr / Bytes.from_u8_arr): round-trip identity, the empty
+; case, high bytes (0x80-0xFF must zero-extend to 128-255), and the
+; motivating end-to-end case of feeding real byte data to the Simd byte
+; scanner. .expected is interpreter-produced; the compiled binary must
+; match byte-for-byte.
+(rule
+ (targets bytes_u8_bridge bytes_u8_bridge.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/bytes_u8_bridge.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o bytes_u8_bridge
+        native/bytes_u8_bridge.march)
+   (with-stdout-to bytes_u8_bridge.out
+        (system "./bytes_u8_bridge")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_u8_bridge.expected bytes_u8_bridge.out)))
+
 ; Rounding-parity fuzz for Simd.fma_f32x4: 100k deterministic LCG iterations x
 ; 4 lanes, folded into an integer checksum, half of them drawn from a family
 ; whose product lands exactly on a binary32 midpoint. The interpreter now

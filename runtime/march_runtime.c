@@ -6201,17 +6201,9 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
 }
 
 /* ── Native int/float arrays ──────────────────────────────────────────── */
-/* Layout (ALL element widths share it — phase C's vector loads depend on
- * elem_kind and the 16-byte data alignment):
- *   march_hdr(16) + int64_t len(8) + uint8_t elem_kind(1) + pad(7)
- *   + elements(len * elem_size), data 16-byte aligned.
- * elem_kind: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8. */
-#define NATIVE_ARR_HDR 32
-#define NATIVE_ELEM_I64 0
-#define NATIVE_ELEM_F64 1
-#define NATIVE_ELEM_F32 2
-#define NATIVE_ELEM_I32 3
-#define NATIVE_ELEM_U8  4
+/* NATIVE_ARR_HDR / NATIVE_ELEM_* and the layout they describe are declared
+ * once in march_runtime.h so march_extras.c can share them without a second
+ * #define. */
 
 static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     if (len < 0) { fputs("march: native array: negative length\n", stderr); exit(1); }

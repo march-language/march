@@ -264,6 +264,32 @@ static uint8_t *bytes_to_raw(void *bytes_val, size_t *out_len) {
     return buf;
 }
 
+/* Bytes -> NativeU8Arr.  A COPY, not a view: march_string keeps its data at
+ * +24 and is malloc'd, while native arrays put data at +32 with a 16-byte
+ * alignment guarantee and an elem_kind byte.  The layouts cannot be aliased;
+ * see specs/plans/2026-08-10-array-backed-bytes-design.md. O(n) memcpy.
+ * Not static: called directly as a March builtin (bytes_to_u8_arr), matching
+ * the native_*_arr_* naming convention (llvm_builtins.ml, c_name = None). */
+void *bytes_to_u8_arr(void *b) {
+    march_string *s = *(march_string **)((char *)b + 16); /* Bytes payload */
+    int64_t len = s ? s->len : 0;
+    void *arr = native_u8_arr_alloc_raw(len);
+    if (len > 0) memcpy((char *)arr + NATIVE_ARR_HDR, s->data, (size_t)len);
+    return arr;
+}
+
+/* NativeU8Arr -> Bytes.  MUST wrap through bytes_wrap: the one-field boxed
+ * cell shape is load-bearing for repr.ml / llvm_case.ml / drop.ml, and
+ * hand-rolling it previously produced a compiled-only Bytes.concat
+ * miscompile. Not static, for the same reason as bytes_to_u8_arr above. */
+void *u8_arr_to_bytes(void *arr) {
+    int64_t len = *(int64_t *)((char *)arr + 16);
+    march_string *s = march_string_alloc(len);
+    if (len > 0) memcpy(s->data, (char *)arr + NATIVE_ARR_HDR, (size_t)len);
+    s->data[len] = '\0';
+    return bytes_wrap(s);
+}
+
 /* Extract bytes from a march_string.  Returns malloc'd buffer. */
 static uint8_t *string_to_raw(void *str, size_t *out_len) {
     march_string *ms = (march_string *)str;

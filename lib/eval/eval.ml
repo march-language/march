@@ -5989,6 +5989,22 @@ let base_env : env =
                 eval_error "random_bytes: cannot read /dev/urandom: %s" msg);
             march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "random_bytes(n: Int): Bytes"))
+    (* ---- Bytes <-> NativeU8Arr bridge: an O(n) copy each way (the two
+       layouts cannot be aliased — see runtime/march_extras.c). High bytes
+       (0x80-0xFF) must land as 128-255, i.e. zero-extended, never negative. *)
+  ; ("bytes_to_u8_arr", VBuiltin ("bytes_to_u8_arr", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VNativeU8Arr (Array.init (String.length s)
+                       (fun i -> Char.code s.[i]))
+           | Error e -> eval_error "bytes_to_u8_arr: %s" e)
+        | _ -> eval_error "bytes_to_u8_arr(b: Bytes): NativeU8Arr"))
+  ; ("u8_arr_to_bytes", VBuiltin ("u8_arr_to_bytes", function
+        | [VNativeU8Arr a] ->
+          let buf = Bytes.create (Array.length a) in
+          Array.iteri (fun i v -> Bytes.set buf i (Char.chr (v land 0xff))) a;
+          march_bytes_of_string (Bytes.to_string buf)
+        | _ -> eval_error "u8_arr_to_bytes(a: NativeU8Arr): Bytes"))
     (* ---- stdlib_* aliases: allow Crypto module to call builtins without shadowing ---- *)
   ; ("stdlib_sha256", VBuiltin ("stdlib_sha256", function
         | [v] ->

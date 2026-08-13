@@ -84,6 +84,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Bytes.to_u8_arr` / `Bytes.from_u8_arr`** — an O(n)-copy bridge between
+  `Bytes` and `NativeU8Arr`, so byte data from files, sockets, or
+  `Bytes.from_hex` can reach the SIMD byte scanner (`Simd.load_u8x16` /
+  `eq_u8x16` / `first_set_u8x16`), previously reachable only from
+  hand-built `NativeU8Arr` literals. High bytes (0x80-0xFF) round-trip as
+  128-255, never negative.
 - **Runtime enforcement tests for `--cap-sandbox`** — compiled fixtures now
   verify that a withheld capability's syscall is actually denied at runtime
   (Linux seccomp-bpf, macOS Seatbelt), not just that the embedded policy

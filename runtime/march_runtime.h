@@ -302,6 +302,24 @@ static inline const char *march_sso_selftest(void) {
  * site can leave the discriminator tag unset. */
 void *march_string_alloc(int64_t len);
 void *march_string_lit(const char *utf8, int64_t len);
+/* Native int/float/u8 array layout (ALL element widths share it — phase C's
+ * vector loads depend on elem_kind and the 16-byte data alignment):
+ *   march_hdr(16) + int64_t len(8) + uint8_t elem_kind(1) + pad(7)
+ *   + elements(len * elem_size), data 16-byte aligned.
+ * elem_kind: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8.
+ * Declared here (single definition) so cross-file callers such as
+ * march_extras.c never re-#define a second copy — that's exactly how layout
+ * drift starts. */
+#define NATIVE_ARR_HDR 32
+#define NATIVE_ELEM_I64 0
+#define NATIVE_ELEM_F64 1
+#define NATIVE_ELEM_F32 2
+#define NATIVE_ELEM_I32 3
+#define NATIVE_ELEM_U8  4
+/* Allocate a fresh, uninitialised NativeU8Arr of [len] bytes. Non-static so
+ * march_extras.c can build one directly instead of duplicating
+ * native_arr_alloc (which stays static/private to this file). */
+void *native_u8_arr_alloc_raw(int64_t len);
 /* An "immortal" refcount: a starting rc so far above any reachable reference
  * count that no sequence of decrements can drive the cell to zero, so it is
  * never freed and never mistaken for uniquely-owned.  Used for cells that

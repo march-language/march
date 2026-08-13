@@ -360,6 +360,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_random_bytes(i64 %n)" };
   { march_name = "stdlib_random_bytes"; c_name = Some "march_random_bytes"; ret_ty = Some (Tir.TCon ("Bytes", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_random_bytes(i64 %n)" };
+  { march_name = "bytes_to_u8_arr"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @bytes_to_u8_arr(ptr %b)" };
+  { march_name = "u8_arr_to_bytes"; c_name = None; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @u8_arr_to_bytes(ptr %arr)" };
   { march_name = "stdlib_gzip_encode"; c_name = Some "march_gzip_encode"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_gzip_encode(ptr %b, i64 %level)" };
   { march_name = "stdlib_gzip_decode"; c_name = Some "march_gzip_decode"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
@@ -1196,6 +1200,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_base64_encode";
   PDeclare "march_base64_decode";
   PDeclare "march_random_bytes";
+  PDeclare "bytes_to_u8_arr";
+  PDeclare "u8_arr_to_bytes";
   PComment "; Compression builtins (runtime/march_compress.c)";
   PDeclare "march_gzip_encode";
   PDeclare "march_gzip_decode";

@@ -2731,6 +2731,9 @@ let builtin_bindings : (string * scheme) list =
     ("base64_decode",   Mono (TArrow (t_string,
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     ("random_bytes",    Mono (TArrow (t_int, TCon ("Bytes", []))));
+    (* Bytes <-> NativeU8Arr bridge: pure data movement, not a capability. *)
+    ("bytes_to_u8_arr", Mono (TArrow (TCon ("Bytes", []), TCon ("NativeU8Arr", []))));
+    ("u8_arr_to_bytes", Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("Bytes", []))));
     (* stdlib_* variants — used by module wrappers that shadow the base names.
        stdlib_base64_encode accepts String only at the type-checker level;
        callers should convert Bytes to String with bytes_to_string first. *)

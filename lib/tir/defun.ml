@@ -234,6 +234,7 @@ let builtin_names : StringSet.t =
       "sha256"; "sha512";
       "base64_encode"; "base64_decode";
       "random_bytes";
+      "bytes_to_u8_arr"; "u8_arr_to_bytes";
       "stdlib_sha256"; "stdlib_sha512";
       "stdlib_base64_encode"; "stdlib_base64_decode";
       "stdlib_random_bytes";
