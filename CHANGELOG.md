@@ -254,6 +254,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Simd.fma_f32x4` now gives the same answer interpreted and compiled.** The
+  compiled path emits `llvm.fma.v4f32` — one binary32 rounding — while the
+  interpreter computed a binary64 fused multiply-add and then narrowed it, two
+  roundings, which really did differ in the last ulp: about 1 random binary32
+  triple in 20 million, and *systematically* whenever `a * b` lands exactly on
+  a binary32 midpoint (e.g. `24929.0 * 673.0 = 2^24 + 1` with any tiny positive
+  `c`, where the compiled path gave `16777218` and the interpreter `16777216`).
+  The interpreter now emulates a genuine single-rounded binary32 fused
+  multiply-add, so both backends run the same operation by construction. Boundary
+  triples are pinned as tests and the two paths are fuzzed against each other
+  over 400,000 boundary-heavy lanes.
 - **Calling a SIMD kernel no longer leaks 32 bytes per call.** A
   self-tail-recursive function with a SIMD-vector parameter keeps that
   parameter in a native vector register, so the compiler boxes the argument at

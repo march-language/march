@@ -338,14 +338,14 @@ feature needs to replace.
   every call, same as before the TCO optimization landed.
 - **`fma` is a true fused multiply-add** (`llvm.fma.v4f32`/`v2f64`, one
   rounding) — it can differ from a separate multiply followed by an add in
-  the last ulp. For `f64x2` the interpreter runs the identical operation
-  (OCaml's `Float.fma`, binary64-fused). For `f32x4` it does *not*: the
-  interpreter computes a binary64 fused multiply-add and then rounds the
-  result to binary32 (a double rounding), while the compiled path is a
-  single binary32-fused rounding. These are formally different operations
-  and a last-ulp divergence is not ruled out; none has been observed over
-  the parity fixtures. Tracked in
-  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`.
+  the last ulp. Both backends run the same operation on both widths: for
+  `f64x2` the interpreter uses OCaml's `Float.fma` (binary64-fused), and for
+  `f32x4` it emulates a *single*-rounded binary32 fma (round-to-odd over
+  binary64, `eval.ml`'s `fma32_single_round`) rather than double-rounding a
+  binary64 `Float.fma`, which is what it did until 2026-08-13 and which
+  genuinely diverged in the last ulp on rounding-boundary triples. Pinned by
+  test t15 of the `simd_vector` suite and fuzzed compiled-vs-interpreted over
+  400k boundary-heavy lanes by `test/native/simd_fma_fuzz.march`.
 - **`i64x2` interpreter parity edge:** lane values beyond ±2^62 lose their
   top bit under the interpreter only, because OCaml's native `int` is
   63-bit. Compiled `i64x2` uses a true 64-bit lane and has no such limit.

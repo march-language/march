@@ -4046,6 +4046,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/simd_vector_core.expected simd_vector_core.out)))
 
+; Rounding-parity fuzz for Simd.fma_f32x4: 100k deterministic LCG iterations x
+; 4 lanes, folded into an integer checksum, half of them drawn from a family
+; whose product lands exactly on a binary32 midpoint. The interpreter now
+; emulates a SINGLE-rounded binary32 fma (eval.ml's fma32_single_round) to
+; match llvm.fma.v4f32; it used to double-round a binary64 Float.fma, which
+; diverged in the last ulp. .expected is interpreter-produced; the compiled
+; binary must match byte-for-byte.
+; Verified non-vacuous: the pre-fix compiler prints checksum
+; 7748989859602766 against this fixture's 7748989891677518 -- a delta of
+; 32074752, i.e. 125292 of the 400000 lanes rounding differently -- and its
+; second sample line reads [2., 2., 2., 2.] instead of
+; [2.00000023842, 2., 2.00000023842, 2.].
+(rule
+ (targets simd_fma_fuzz simd_fma_fuzz.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_fma_fuzz.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_fma_fuzz
+        native/simd_fma_fuzz.march)
+   (with-stdout-to simd_fma_fuzz.out
+        (system "./simd_fma_fuzz")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_fma_fuzz.expected simd_fma_fuzz.out)))
+
 ; SIMD-across-actor-messages smoke test (review finding #2's witness attempt):
 ; sends an I32x4 to an actor, which extracts a lane and replies with it via
 ; Actor.call. NOTE (see march_message.c's copy_value MARCH_SIMD_TAG arm):

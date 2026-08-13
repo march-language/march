@@ -1,0 +1,115 @@
+-- Compiled-vs-interpreted fuzz witness for Simd.fma_f32x4's rounding.
+--
+-- The compiled path lowers to llvm.fma.v4f32: ONE binary32-fused rounding.
+-- The interpreter emulates exactly that (eval.ml's fma32_single_round,
+-- round-to-odd over binary64) rather than double-rounding a binary64
+-- Float.fma, which is what it used to do and which really did differ in the
+-- last ulp. This fixture drives both paths over the same deterministic
+-- pseudo-random triples and folds every lane into an integer checksum whose
+-- units are ~2^-30-of-a-lane-value, so a SINGLE last-ulp difference in a
+-- single lane in a single iteration moves the printed checksum by hundreds.
+-- .expected is interpreter-produced; the compiled binary must match it
+-- byte-for-byte.
+--
+-- Two generators are interleaved (a HIGH bit of the LCG draw picks between
+-- them -- not its low bit: this LCG's low bit strictly alternates, and each
+-- iteration consumes a fixed four draws, so a low-bit selector picks the same
+-- branch every single iteration and the boundary leg never runs at all. It
+-- did exactly that in the first version of this fixture, whose checksum
+-- matched under the OLD double-rounding interpreter):
+--   mode A - ordinary operands, a,b in [1,2), c in [-4,4). Random binary32
+--            triples diverge only about 1 in 20M, so this leg is a broad
+--            agreement check, not a boundary probe.
+--   mode B - the boundary family. a*b is EXACTLY 2 + 2^-23, a binary32
+--            midpoint (24929 * 673 = 2^24+1, scaled by powers of two, all
+--            exact), and c is ~2^-61: far below half an ulp of the binary64
+--            product, so a double rounding lands back on the midpoint and
+--            ties-to-even walks it DOWN, while the single rounding follows
+--            c's sign. Roughly half of these lanes diverge under the old
+--            formula, which is what makes this fixture non-vacuous. Lane 3
+--            uses a much larger c (~2^-41, still tiny but above the binary64
+--            rounding threshold) as an in-family control that must agree
+--            under either formula.
+mod Main do
+  needs IO.Console
+
+  -- 31-bit LCG (glibc constants); deterministic across both backends.
+  pfn nxt(s : Int) : Int do (s * 1103515245 + 12345) % 2147483648 end
+
+  pfn unit_of(r : Int) : Float do int_to_float(r) /. 2147483648.0 end
+
+  -- ~2^-61 and ~2^-41: the two c magnitudes of mode B.
+  pfn tiny_c() : Float do 0.0000000000000000004336808689942018 end
+  pfn small_c() : Float do 0.00000000000045474735088646412 end
+
+  -- Checksum contribution of one lane: shifted positive (mode A results live
+  -- in [-4, 8]) then scaled by 2^30 and truncated. One binary32 ulp at these
+  -- magnitudes is >= 2^-22, i.e. >= 256 checksum units.
+  pfn lane_sum(v) : Int do
+    float_to_int((Simd.extract_f32x4(v, 0) +. 16.0) *. 1073741824.0) +
+    float_to_int((Simd.extract_f32x4(v, 1) +. 16.0) *. 1073741824.0) +
+    float_to_int((Simd.extract_f32x4(v, 2) +. 16.0) *. 1073741824.0) +
+    float_to_int((Simd.extract_f32x4(v, 3) +. 16.0) *. 1073741824.0)
+  end
+
+  pfn step(s : Int) do
+    let s1 = nxt(s)
+    let s2 = nxt(s1)
+    let s3 = nxt(s2)
+    let s4 = nxt(s3)
+    let u1 = unit_of(s2)
+    let u2 = unit_of(s3)
+    let u3 = unit_of(s4)
+    let r =
+      if (s1 / 65536) % 2 == 0 do
+        -- mode A: ordinary operands
+        let a = Simd.make_f32x4(1.0 +. u1, 1.0 +. u2, 1.0 +. u3, 1.0 +. u1 *. u2)
+        let b = Simd.make_f32x4(1.0 +. u2, 1.0 +. u3, 1.0 +. u1, 1.0 +. u2 *. u3)
+        let c = Simd.make_f32x4(u1 *. 8.0 -. 4.0, u2 *. 8.0 -. 4.0,
+                                u3 *. 8.0 -. 4.0, (u1 +. u2) *. 4.0 -. 4.0)
+        Simd.fma_f32x4(a, b, c)
+      else
+        -- mode B: a*b lands exactly on the binary32 midpoint 2 + 2^-23
+        let a = Simd.splat_f32x4(24929.0 /. 16384.0)
+        let b = Simd.splat_f32x4(673.0 /. 512.0)
+        -- lanes 0 and 2 keep c strictly positive, so the exact value is
+        -- strictly above the midpoint and the single rounding MUST go up
+        -- (2.00000023842) where the old double rounding went to the even
+        -- neighbour (2.); lane 1's sign varies with the draw; lane 3 is the
+        -- agreeing control.
+        let c = Simd.make_f32x4((u1 +. 0.25) *. tiny_c(),
+                                (u2 -. 0.5) *. tiny_c(),
+                                (u3 +. 0.25) *. tiny_c(),
+                                (u1 -. 0.5) *. small_c())
+        Simd.fma_f32x4(a, b, c)
+      end
+    (s4, r)
+  end
+
+  pfn walk(i : Int, n : Int, s : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let (s2, r) = step(s)
+      walk(i + 1, n, s2, acc + lane_sum(r))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    -- Two draws printed verbatim, so a divergence is readable and not just a
+    -- checksum delta: seed 1 takes the mode-A branch, seed 3 the mode-B
+    -- (boundary) branch, whose lanes are exactly where the old
+    -- double-rounding formula printed 2. instead of 2.00000023842.
+    let (_s0, r0) = step(1)
+    println([Simd.extract_f32x4(r0, 0), Simd.extract_f32x4(r0, 1),
+             Simd.extract_f32x4(r0, 2), Simd.extract_f32x4(r0, 3)])
+    let (_s1, r1) = step(3)
+    println([Simd.extract_f32x4(r1, 0), Simd.extract_f32x4(r1, 1),
+             Simd.extract_f32x4(r1, 2), Simd.extract_f32x4(r1, 3)])
+    -- 100k iterations x 4 lanes = 400k fma lanes, ~half of them on the
+    -- boundary family. Kept at 100k (not 1M) because .expected has to be
+    -- produced by the tree-walking interpreter, which runs this at roughly
+    -- 500 iterations/second; the compiled binary does the same work in
+    -- milliseconds.
+    println(walk(0, 100000, 1, 0))
+  end
+end

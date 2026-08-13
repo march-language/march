@@ -3058,13 +3058,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        emit ctx (Printf.sprintf "%s = call %s @%s(%s %s, %s %s)" r v_ty name v_ty av v_ty bv);
        (v_ty, r)
      | "fma" ->
-       (* f32x4: llvm.fma.v4f32 is a SINGLE binary32-fused rounding, whereas
-          the interpreter (eval.ml's simd_f32x4_fma) computes a binary64
-          Float.fma and then rounds to binary32 — a double rounding. Not
-          formally the same operation; no divergence observed over the
-          parity leg, but a last-ulp difference is not ruled out. See
-          specs/todos/2026-08-12-simd-fma-rounding-parity.md.
-          f64x2 has no such asymmetry. *)
+       (* f32x4: llvm.fma.v4f32 is a SINGLE binary32-fused rounding. The
+          interpreter matches it by construction — eval.ml's
+          [fma32_single_round] emulates a single-rounded binary32 fma via
+          round-to-odd rather than double-rounding a binary64 Float.fma (which
+          it used to do, and which diverged in the last ulp; boundary triples
+          are pinned by t15 in test/test_stdlib_suite.ml and fuzzed against
+          this lowering by test/native/simd_fma_fuzz.march).
+          f64x2 needs no emulation: Float.fma IS binary64-fused. *)
        let av = vec_arg 0 and bv = vec_arg 1 and cv = vec_arg 2 in
        let name = Printf.sprintf "llvm.fma.%s" (simd_intrinsic_suffix sty) in
        ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "%s @%s(%s, %s, %s)" v_ty name v_ty v_ty v_ty);
