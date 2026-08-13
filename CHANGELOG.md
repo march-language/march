@@ -11,6 +11,10 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared lock, writes an exclusive one.
+
 ### Fixed
 
 - **`if` and `match do` now treat their branches as mutually exclusive for

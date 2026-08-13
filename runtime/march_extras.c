@@ -26,6 +26,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <stdatomic.h>
+#include <sched.h>
 
 #ifdef __APPLE__
 #  include <sys/sysctl.h>
@@ -615,8 +617,65 @@ typedef struct vault_node {
     struct vault_node *next;
 } vault_node;
 
+/* Reads take a SHARED lock so concurrent lookups do not serialise — Vault is
+ * documented as the shared-across-actors store, and its advertised uses (rate
+ * limiting, shed-decision state, the actor name registry) are read-heavy.
+ *
+ * Not lock-free: march_vault_drop is the one place a node is unlinked and
+ * freed, so lock-free readers would need retire-in-place (which leaks a node
+ * per distinct key, unacceptable for a high-cardinality cache) or epoch
+ * reclamation. A shared lock buys the concurrency with no change to deletion.
+ *
+ * Writer starvation under sustained read load is possible and platform-
+ * dependent; Vault's writes are rare relative to reads, and the registry's
+ * writes (register/unregister) are rarer still. Revisit with striped
+ * per-bucket locks if measurement ever shows otherwise.
+ *
+ * A hand-rolled atomic reader-count lock, not pthread_rwlock_t: measured on
+ * this repo's dev/CI macOS boxes, Darwin's pthread_rwlock serialises
+ * concurrent readers far worse than a plain pthread_mutex_t does (4 threads
+ * doing read-only Vault.get ran ~15-20x a single thread's time under
+ * pthread_rwlock, vs ~9-10x under the exclusive mutex it replaced) — a
+ * documented Darwin pathology (WebKit carries its own ReadWriteLock for the
+ * same reason). The state word below is a single _Atomic int32_t: 0 = free,
+ * N>0 = N readers held, -1 = a writer holds it. CAS-retry with sched_yield
+ * backoff, no fairness queue, so it is genuinely reader-cheap on both Darwin
+ * and Linux. */
 typedef struct {
-    pthread_mutex_t mutex;
+    _Atomic int32_t state;
+} vault_rwlock_t;
+
+static inline void vault_rd_lock(vault_rwlock_t *l) {
+    for (;;) {
+        int32_t s = atomic_load_explicit(&l->state, memory_order_relaxed);
+        if (s >= 0 &&
+            atomic_compare_exchange_weak_explicit(&l->state, &s, s + 1,
+                memory_order_acquire, memory_order_relaxed))
+            return;
+        sched_yield();
+    }
+}
+
+static inline void vault_rd_unlock(vault_rwlock_t *l) {
+    atomic_fetch_sub_explicit(&l->state, 1, memory_order_release);
+}
+
+static inline void vault_wr_lock(vault_rwlock_t *l) {
+    for (;;) {
+        int32_t expect = 0;
+        if (atomic_compare_exchange_weak_explicit(&l->state, &expect, -1,
+                memory_order_acquire, memory_order_relaxed))
+            return;
+        sched_yield();
+    }
+}
+
+static inline void vault_wr_unlock(vault_rwlock_t *l) {
+    atomic_store_explicit(&l->state, 0, memory_order_release);
+}
+
+typedef struct {
+    vault_rwlock_t rwlock;
     vault_node     *buckets[VAULT_BUCKETS];
     int64_t         count;
 } vault_data;
@@ -659,7 +718,7 @@ static char *vault_key_cstr(void *key) {
 /* Create a new vault_data wrapped in a March heap handle. */
 static void *vault_new_handle(void) {
     vault_data *vd = calloc(1, sizeof(vault_data));
-    pthread_mutex_init(&vd->mutex, NULL);
+    vd->rwlock.state = 0;
     /* Wrap in a March heap object: [rc=1][tag=0][pad=0][ptr_to_vd] */
     void *handle = march_alloc(16 + 8);
     *(void **)((char *)handle + 16) = vd;
@@ -741,7 +800,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
-    pthread_mutex_lock(&vd->mutex);
+    vault_wr_lock(&vd->rwlock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
@@ -751,7 +810,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
             n->value      = value;
             n->expires_ms = 0;
             (void)now;
-            pthread_mutex_unlock(&vd->mutex);
+            vault_wr_unlock(&vd->rwlock);
             free(key);
             return march_alloc(16); /* Unit */
         }
@@ -766,7 +825,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
     vd->count++;
-    pthread_mutex_unlock(&vd->mutex);
+    vault_wr_unlock(&vd->rwlock);
     return march_alloc(16); /* Unit */
 }
 
@@ -777,7 +836,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t expires = vault_now_ms() + ttl_secs * 1000LL;
-    pthread_mutex_lock(&vd->mutex);
+    vault_wr_lock(&vd->rwlock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
@@ -785,7 +844,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
             march_incrc(value);
             n->value      = value;
             n->expires_ms = expires;
-            pthread_mutex_unlock(&vd->mutex);
+            vault_wr_unlock(&vd->rwlock);
             free(key);
             return march_alloc(16);
         }
@@ -799,7 +858,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
     vd->count++;
-    pthread_mutex_unlock(&vd->mutex);
+    vault_wr_unlock(&vd->rwlock);
     return march_alloc(16);
 }
 
@@ -814,13 +873,13 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
     int64_t expires = (ttl_secs > 0) ? (now + ttl_secs * 1000LL) : 0;
-    pthread_mutex_lock(&vd->mutex);
+    vault_wr_lock(&vd->rwlock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
             if (n->expires_ms == 0 || now <= n->expires_ms) {
                 /* live entry already present — do not overwrite */
-                pthread_mutex_unlock(&vd->mutex);
+                vault_wr_unlock(&vd->rwlock);
                 free(key);
                 return 0;
             }
@@ -829,7 +888,7 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
             march_incrc(value);
             n->value      = value;
             n->expires_ms = expires;
-            pthread_mutex_unlock(&vd->mutex);
+            vault_wr_unlock(&vd->rwlock);
             free(key);
             return 1;
         }
@@ -844,7 +903,7 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
     vd->count++;
-    pthread_mutex_unlock(&vd->mutex);
+    vault_wr_unlock(&vd->rwlock);
     return 1;
 }
 
@@ -859,7 +918,7 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
-    pthread_mutex_lock(&vd->mutex);
+    vault_wr_lock(&vd->rwlock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
@@ -870,7 +929,7 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
             int64_t nv = cur + delta;
             n->value = (void *)(((uint64_t)nv << 1) | 1u);
             if (!live) n->expires_ms = 0;
-            pthread_mutex_unlock(&vd->mutex);
+            vault_wr_unlock(&vd->rwlock);
             free(key);
             return nv;
         }
@@ -885,7 +944,7 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
     vd->count++;
-    pthread_mutex_unlock(&vd->mutex);
+    vault_wr_unlock(&vd->rwlock);
     return nv;
 }
 
@@ -900,7 +959,7 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
-    pthread_mutex_lock(&vd->mutex);
+    vault_wr_lock(&vd->rwlock);
 
     vault_node *match = NULL;
     for (vault_node *p = vd->buckets[h]; p; p = p->next) {
@@ -947,7 +1006,7 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
         march_decrc(match->value);
         match->value = list;
         if (!live) match->expires_ms = 0;
-        pthread_mutex_unlock(&vd->mutex);
+        vault_wr_unlock(&vd->rwlock);
         free(key);
     } else {
         vault_node *nn = malloc(sizeof(vault_node));
@@ -957,7 +1016,7 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
         nn->next       = vd->buckets[h];
         vd->buckets[h] = nn;
         vd->count++;
-        pthread_mutex_unlock(&vd->mutex);
+        vault_wr_unlock(&vd->rwlock);
     }
     return march_alloc(16); /* Unit */
 }
@@ -968,16 +1027,20 @@ void *march_vault_get(void *handle, void *key_val) {
     vault_data *vd = vault_get_data(handle);
     char *key = vault_key_cstr(key_val);
     int64_t now = vault_now_ms();
-    pthread_mutex_lock(&vd->mutex);
+    vault_rd_lock(&vd->rwlock);
     vault_node *n = vault_find(vd, key, now);
     void *result;
     if (n) {
+        /* march_incrc must stay inside the lock: a concurrent drop could free
+         * n->value between the read and the incrc otherwise. Safe under a
+         * shared/read lock because march_incrc is an atomic RMW on the
+         * value's own rc field, not a mutation of the table. */
         march_incrc(n->value);
         result = make_some(n->value);
     } else {
         result = make_none();
     }
-    pthread_mutex_unlock(&vd->mutex);
+    vault_rd_unlock(&vd->rwlock);
     free(key);
     return result;
 }
@@ -988,7 +1051,7 @@ void *march_vault_drop(void *handle, void *key_val) {
     vault_data *vd = vault_get_data(handle);
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
-    pthread_mutex_lock(&vd->mutex);
+    vault_wr_lock(&vd->rwlock);
     vault_node **pp = &vd->buckets[h];
     while (*pp) {
         if (strcmp((*pp)->key, key) == 0) {
@@ -1002,7 +1065,7 @@ void *march_vault_drop(void *handle, void *key_val) {
         }
         pp = &(*pp)->next;
     }
-    pthread_mutex_unlock(&vd->mutex);
+    vault_wr_unlock(&vd->rwlock);
     free(key);
     return march_alloc(16);
 }
@@ -1052,7 +1115,7 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
 int64_t march_vault_size(void *handle) {
     vault_data *vd = vault_get_data(handle);
     int64_t now = vault_now_ms();
-    pthread_mutex_lock(&vd->mutex);
+    vault_rd_lock(&vd->rwlock);
     /* Count live entries */
     int64_t count = 0;
     for (int i = 0; i < VAULT_BUCKETS; i++) {
@@ -1062,7 +1125,7 @@ int64_t march_vault_size(void *handle) {
             n = n->next;
         }
     }
-    pthread_mutex_unlock(&vd->mutex);
+    vault_rd_unlock(&vd->rwlock);
     return count;
 }
 
@@ -1071,7 +1134,7 @@ int64_t march_vault_size(void *handle) {
 void *march_vault_keys(void *handle) {
     vault_data *vd = vault_get_data(handle);
     int64_t now = vault_now_ms();
-    pthread_mutex_lock(&vd->mutex);
+    vault_rd_lock(&vd->rwlock);
     /* Build a March List of key strings */
     void *list = march_alloc(16); /* Nil */
     for (int i = VAULT_BUCKETS - 1; i >= 0; i--) {
@@ -1089,7 +1152,7 @@ void *march_vault_keys(void *handle) {
             n = n->next;
         }
     }
-    pthread_mutex_unlock(&vd->mutex);
+    vault_rd_unlock(&vd->rwlock);
     return list;
 }
 
