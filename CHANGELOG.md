@@ -11,6 +11,34 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`if` and `match do` now treat their branches as mutually exclusive for
+  linear values, the way `match` arms already did.** Consuming the same
+  linear or affine value once in each branch is legal — at most one branch
+  runs — but only `match` implemented the rule; `if`/`else` and
+  `match do cond ->` checked their branches against one shared use-flag, so
+  the second branch saw the first's consumption and reported a spurious
+  "used more than once". This was most visible with session-typed channels,
+  where branching on a protocol decision (`Chan.choose` in each arm) is the
+  normal shape. A value consumed in the CONDITION still counts on every path,
+  so a genuine double-use is unaffected.
+- **A record field passed to a refined parameter is now checked instead of
+  silently skipped.** `takepos(a.rem)` reflected the field access through a
+  resolver that always declined, so the obligation came out "unreflectable"
+  and — since March reports only definite failures — was accepted in silence;
+  the workaround was to bind the field to a local first. The guard and the
+  goal now meet on the same symbol, so `if a.rem >= 0 do takepos(a.rem)`
+  proves, while an unguarded call, or one guarded on a *sibling* field, is
+  still reported.
+- **`match cond do true -> … false -> … end` now establishes the same path
+  facts as the equivalent `if`.** Match narrowing only ever fired for
+  constructor patterns over a variable scrutinee, so a Bool-literal arm
+  contributed nothing and an obligation the `if` spelling discharges came
+  back solver-undecided. The `true` arm learns the scrutinee holds, the
+  `false` arm (and a `_` fallback after a Bool-literal arm) learns its
+  negation. An earlier arm carrying a guard still licenses nothing.
+
 ### Changed
 
 - **BREAKING: a program that performs IO must declare the grant it performs
@@ -40,6 +68,64 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Exponential supervisor restart backoff with jitter (runtime-internal)** —
+  a supervised child that crashes repeatedly no longer gets respawned
+  immediately every time: from the second consecutive crash of the same
+  child slot onward, the restart is delayed by
+  `25 << min(streak-1, 7)` ms — 50, 100, 200, ... capped at 3200ms
+  pre-jitter (the shift saturates at 7) — `±25%` jitter on top (observed
+  max ~4000ms) (streak resets once
+  the child survives a full `supervisor_window_secs` window), running on a
+  dedicated green thread so the crashing actor's own scheduler thread is
+  never blocked. The first crash of a slot still restarts synchronously
+  with zero delay, matching prior behavior exactly. `MARCH_SUP_TRACE=1`
+  prints `march: supervisor backoff child=<idx> streak=<n> delay_ms=<d>` to
+  stderr for observability. Also fixes a related scheduler gap:
+  `march_sched_wait_idle` (`run_until_idle()`) could return "idle" while a
+  green thread was still parked on a real timer (only actor-mailbox waits
+  were recognized as busy), which the new delayed-restart thread exposed.
+- **Bounded actor mailboxes with overflow policies (runtime-internal)** —
+  `march_sched_set_mbox_limit(proc, limit, policy)` caps a process's mailbox
+  at `limit` messages under `MARCH_MBOX_DROP_NEW` (reject the incoming
+  message) or `MARCH_MBOX_DROP_OLD` (evict the oldest queued message); the
+  default remains `MARCH_MBOX_UNBOUNDED` (`limit == 0`), so no existing
+  program's behavior changes. `march_sched_send` now returns
+  `MARCH_SEND_OK`/`MARCH_SEND_DEAD`/`MARCH_SEND_DROPPED` instead of a bare
+  0/-1; every dropped message bumps `MARCH_STAT_MSGS_DROPPED` (visible via
+  `Scheduler.dropped_messages()`, Task 6) and is handed to a disposer hook
+  registered via `march_sched_set_msg_dtor` (a real March-value dtor lands in
+  Task 14; until then dropped messages are leaked-with-count).
+  `MARCH_MBOX_BLOCK` (Task 8) parks a green-thread sender until the target's
+  mailbox drains below the low-water mark (`limit/2`), guaranteeing delivery
+  (`MARCH_SEND_OK`) unless the target dies while blocked (`MARCH_SEND_DEAD`);
+  a foreign-thread sender sleep-polls instead of parking. No stdlib/language
+  surface yet — this is the C substrate a later task will expose.
+- **`Actor.set_queue_limit(pid, limit, policy)`** — the March-facing surface
+  for bounded mailboxes: bind a mailbox capacity and overflow policy
+  (`0` unbounded, `1` drop_new, `2` drop_old, `3` block_sender) to a running
+  actor. Backed by a new `actor_set_mailbox_limit` builtin and the
+  `march_actor_set_mbox_limit` runtime bridge (pid → green thread →
+  `march_sched_set_mbox_limit`); dropped messages are counted in
+  `Scheduler.dropped_messages()`. The interpreter supports drop_new/drop_old
+  at its own mailbox enqueue point but treats block (`3`) as unbounded — its
+  single-threaded eager scheduler cannot park a sender without deadlocking.
+  Under a drop policy, a dropped `Actor.call` request or reply is
+  indistinguishable from a lost reply at the caller (surfaces as a timeout);
+  callers relying on `Actor.call` against a bounded actor should prefer the
+  block policy.
+- **`Scheduler` stdlib module + `sched_stat` builtin** — runtime observability
+  for the actor/task scheduler: `Scheduler.live_procs()`, `total_spawned()`,
+  `runq_depth()`, `dropped_messages()`, and a raw `stat(i : Int) : Int`
+  escape hatch. Backed by `march_sched_stat(which)` in the C runtime, which
+  reads `g_live_procs`/`g_next_pid`/a new `g_runq_len` counter/the Task 2
+  timer heap length directly; indices 3-5 (stack-alloc failures, dropped
+  messages, recycled stacks) are reserved for later tasks and read 0 until
+  wired up. This is the load-shedding substrate: a supervisor or ingress
+  actor can poll these counters to decide when to shed. The interpreter
+  reports the subset meaningful without the C scheduler (live/spawned actor
+  counts); unknown indices read 0 on both backends.
+- Scheduler timers: green threads can park with a deadline (runtime-internal;
+  enables Actor.call deadline waits and supervisor backoff).
 - **Capability grants now compose per function, not just per program.**
   Any function that takes a concrete capability parameter is checked against
   it: `fn log(cap : Cap(IO.Console), msg : String)` may reach nothing beyond
@@ -149,6 +235,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Mailbox node allocation moved outside the mbox spinlock.** `march_sched_send`
+  now allocates the mailbox node before acquiring the lock and reuses it across
+  retry loops (BLOCK policy), reducing contention on the spinlock hot path.
+  Nodes are freed on paths that do not enqueue (early DEAD return, DROP_NEW
+  policy, dead-during-registration race), matching mbox_pop's existing free
+  discipline.
 - **The structural-recursion warning no longer prescribes an accumulator for
   constructor-wrapped recursion.** For a body like `Succ(bump(k))`, TRMC
   compiles the recursion into a loop, so the old "uses O(depth) stack space"
@@ -164,6 +256,29 @@ git log is authoritative for exact commits.
   spelling of the default. **This is a breaking change** for code written
   before it: the fix is one `needs` line per named module, and the error names
   the module and the capability.
+- **`march_send`/`Actor.call`/`mailbox_size` no longer take the global
+  actor-table mutex on their hot path.** The actor-table hash chain is never
+  unlinked or freed (metas live for the process lifetime), so `find_meta`
+  now walks it lock-free — acquire-loading the bucket head and following
+  `tbl_next`, paired with a release-store publish at insertion — instead of
+  holding `g_tbl_mu` for the lookup. Combined with the `green_thread`
+  atomicity fix above, per-message sends no longer contend with concurrent
+  spawns/lookups on other actors.
+- **`find_meta_by_pid_index` (supervisor-restart Pid→actor lookup) is now
+  O(1) instead of O(total actors ever spawned).** A new insert-only
+  `pid_index -> meta` side table (same lock-free-read discipline as the
+  actor-pointer table above) replaces the old full scan of every actor-table
+  bucket taken under the global table lock. Also closes a pre-existing,
+  formally-racy plain (non-atomic, unlocked) write to `meta->pid_index` in
+  `march_spawn` against unsynchronized cross-thread reads in
+  `march_get_cap`, `march_send_checked`, and Pid `Show` formatting —
+  `pid_index` is now `_Atomic`. The new side table correctly handles
+  actor heap-address reuse (a dead actor's freed address handed to a new
+  actor, likely under kill/respawn churn): `march_spawn` detects when
+  `find_or_create_meta` returned an already-linked (stale) meta and
+  allocates a fresh one for the new incarnation rather than re-linking the
+  stale one, which would have corrupted the insert-only side table's
+  chains.
 
 ### Fixed
 
@@ -178,7 +293,90 @@ git log is authoritative for exact commits.
   specialized the function to a concrete type. Hit any generic helper whose
   body called `to_string` on its parameter, most visibly
   `examples/csv_example.march`'s per-row callback.
-
+- **Killing (or crashing) a busy actor no longer leaks its queued mailbox.**
+  Undelivered messages sitting in a dead process's mailbox were never
+  disposed — `sched_loop`'s `PROC_DEAD` reap branch freed the mailbox
+  *nodes* but not the message payloads they pointed at, so every message
+  still in flight to an actor that died before receiving it leaked for the
+  life of the program. The reap branch now drains the mailbox and disposes
+  each message via the same disposer hook Task 7 introduced for
+  overflow-dropped messages (`march_sched_set_msg_dtor`); the runtime
+  registers a real dtor (`free()` for the malloc'd hot-reload migrate
+  message, `march_decrc` for everything else) at scheduler init. To keep
+  this safe under a dtor that itself calls back into the scheduler (e.g. an
+  FFI resource cleanup that sends a message), both this reap-time drain and
+  `MARCH_MBOX_DROP_OLD`'s existing evicted-message dispose now collect the
+  message(s) under the mailbox lock and only invoke the dtor after releasing
+  it — `march_sched_set_msg_dtor`'s contract now says explicitly that the
+  dtor may re-enter scheduler send/recv paths and is never called with any
+  scheduler lock held.
+- **Supervisor restart-budget windows are now immune to wall-clock steps.**
+  `march_restart_budget_ok` timestamped each restart with `gettimeofday`
+  (wall-clock), so an NTP correction or manual clock change could jump the
+  window backward (restart budget never refills) or forward (recent
+  restarts silently age out of the window early, letting a crash loop
+  through the budget meant to stop it). It now uses `march_now_ms()`
+  (`CLOCK_MONOTONIC`), which cannot be stepped by wall-clock adjustments.
+- **The process registry no longer has a fixed 65536-pid lifetime cliff, and
+  a green thread that fails to spawn now warns loudly instead of dropping
+  an actor's messages silently.** `march_sched_find`, `wake_idle_daemons`,
+  and `march_sched_wait_idle` used a fixed-size `g_proc_registry[65536]`
+  array: once a program had spawned 65536 procs (over its lifetime, not
+  concurrently), any later pid silently fell off the registry — `find`
+  returned `NULL` for a live proc, and the idle-detection walkers never saw
+  it, so `wait_idle`/daemon-wake logic could go blind for long-running or
+  high-churn programs. The registry is now a single header-prefixed
+  allocation behind one atomic pointer (`{cap; slots[cap]}`) that doubles
+  under a lock when a pid outgrows it; unlocked readers (`march_sched_find`
+  and the `MARCH_DEBUG` SIGSEGV-handler stack walker, which runs in signal
+  context and cannot take a lock) load the pointer once and bound every
+  access by that snapshot's own embedded `cap`, so a growth racing a reader
+  is safe — the reader just doesn't see the newest pids yet. Old arrays are
+  intentionally leaked on growth (same discipline as retired procs), and
+  since capacity doubles, growth produces O(log N) leaked arrays total, not
+  one per pid. A failed growth allocation now aborts loudly with a
+  `march_sched: out of memory (registry alloc)` message instead of the old
+  fixed-size array's silent pid-lifetime cliff. Separately, `march_spawn`
+  now emits a one-shot stderr warning (pointing at `Scheduler.stat(3)`) when
+  the green thread's stack allocation or `getcontext` fails, instead of
+  silently returning an actor that drops
+  every message sent to it; both failure paths now also bump
+  `MARCH_STAT_STACK_FAIL`.
+- **A burst of >4096 spawns or yields from one scheduler thread silently
+  dropped runnable green threads (local-deque overflow) — spawn-churn
+  workloads no longer deadlock.** `march_deque_push`'s bounded-capacity
+  return value (-1 when the owner's Chase-Lev local deque is at
+  `MARCH_DEQUE_CAPACITY`, 4096) was ignored at both call sites in
+  `march_scheduler.c` (spawn-from-scheduler-thread, and the yield-repush
+  path); the dropped proc stayed `RUNNABLE` and counted in `g_live_procs`
+  but was never queued anywhere, so it was never dispatched and the
+  scheduler could never reach quiescence — every worker thread eventually
+  idle-parks forever. Both sites now overflow to the (unbounded) global
+  run queue instead of dropping the proc.
+- **Dead green-thread stacks are recycled instead of leaked — spawn-churn
+  workloads no longer exhaust address space.** Every dead proc used to leak
+  its ~1MiB+guard mmap stack reservation forever; dying procs now return
+  their reservation to a free-list that new spawns draw from first, capping
+  live reservations near the concurrency level instead of growing 1:1 with
+  total-procs-ever-spawned. Disabled under ASan builds (which keep leaking,
+  as before) since ASan's fake-stack fiber tracking assumes a stack address
+  range is never reused by a different fiber.
+- **An actor's `green_thread` field was written at spawn without holding the
+  actor-table lock, racing any concurrent reader (`march_send`,
+  `march_actor_call`, `mailbox_size`, `set_mbox_limit`).** The field is now
+  `_Atomic`, written with a release store at spawn and at green-thread exit,
+  and read with an acquire load everywhere — closing a pre-existing data
+  race rather than introducing a new lock.
+- **`mailbox_size` on compiled binaries returned only the monitor Down
+  count, not the actual mailbox depth — the two backends now agree.**
+- Actor.call with a timeout no longer busy-polls the scheduler while
+  waiting — N pending callers no longer steal CPU from the actor they are
+  waiting on.
+- **A late reply from a timed-out `Actor.call` could be delivered as the
+  answer to a later, unrelated call on the same green thread.** Replies are
+  now wrapped in a runtime envelope carrying the correlation id of the call
+  they belong to; a reply whose id doesn't match the call currently waiting
+  is discarded instead of being handed back as that call's result.
 - **String literals now carry their full source span.** A string literal's AST
   span collapsed to a single column — the closing quote — so anything that
   sliced source text by span got a lone `"` back whenever the expression was
@@ -3746,6 +3944,14 @@ git log is authoritative for exact commits.
   return type. `check_redundant_arms` ran only on the type-inference path, so
   any `match` in checking position — which is every `match` in a function with
   a return annotation, i.e. most of them — silently skipped the analysis.
+
+- The Zed extension's tree-sitter grammar was pinned to a commit from
+  2026-03-26, four and a half months before `pfn` (private function) and
+  `needs` (capability declaration) support were added to the grammar
+  (#175, 2026-08-04). Editors built against the stale pin showed `pfn` and
+  `needs` as unhighlighted plain text instead of keywords. `rev` in
+  `zed-march/extension.toml` now points at current `main`; reload the dev
+  extension in Zed to pick it up.
 
 ### Documentation
 

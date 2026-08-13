@@ -4303,6 +4303,106 @@ let refine_error_texts src =
    Verified empirically by running this group with z3 removed from PATH:
      env PATH=/usr/bin:/bin ./_build/default/test/test_refinecheck.exe \
        test cap-verified -e *)
+(* A record FIELD as the actual argument of a refined parameter.  `r.count` is
+   an ordinary pure read of an immutable record, and a guard on it is the same
+   evidence a guard on a plain local is — but the argument side used to reflect
+   through [smt_of]'s DEFAULT field resolver, which always answers None, so the
+   whole goal came out unreflectable and the obligation was skipped in silence.
+   The guard and the goal must meet on ONE symbol for the proof to close, which
+   is what these two cases pin: the guarded call verifies, and the UNguarded
+   one is still reported (so the first is not passing because field access
+   quietly proves everything). *)
+let field_actual_suite =
+  [ gated "a guarded record field discharges a precondition" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod F1 do\n\
+             \  cap verified\n\
+             \  type Acct = { rem : Int }\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn go(a : Acct) : Int do\n\
+             \    if a.rem >= 0 do takepos(a.rem) else 0 end\n\
+             \  end\n\
+              end\n"));
+
+    gated "an UNguarded record field is still reported" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod F2 do\n\
+             \  cap verified\n\
+             \  type Acct = { rem : Int }\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn go(a : Acct) : Int do takepos(a.rem) end\n\
+              end\n"));
+
+    (* The guard is about a DIFFERENT field, so it proves nothing about this
+       one: field symbols must be per-field, not per-record. *)
+    gated "a guard on a sibling field proves nothing" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod F3 do\n\
+             \  cap verified\n\
+             \  type Acct = { rem : Int, other : Int }\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn go(a : Acct) : Int do\n\
+             \    if a.other >= 0 do takepos(a.rem) else 0 end\n\
+             \  end\n\
+              end\n"));
+  ]
+
+(* `match cond do true -> … false -> … end` is the same branch on the same
+   Bool as `if cond do … else … end`, so it must establish the same facts. It
+   used to establish NONE: the match path-narrowing only ever fired for
+   CONSTRUCTOR patterns over a variable scrutinee, so a Bool-literal arm
+   contributed nothing and an obligation the `if` spelling discharges was
+   reported as solver-undecided. *)
+let bool_match_path_suite =
+  [ gated "a true-arm learns its Bool scrutinee holds" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod B1 do\n\
+             \  cap verified\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn go(n : Int) : Int do\n\
+             \    match n >= 0 do\n\
+             \      true -> takepos(n)\n\
+             \      false -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    (* The negation half: reaching `_` means the guard was false. *)
+    gated "a wildcard arm after a true-arm learns the negation" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod B2 do\n\
+             \  cap verified\n\
+             \  fn takeneg(k : {Int | _ < 0}) : Int do k end\n\
+             \  fn go(n : Int) : Int do\n\
+             \    match n >= 0 do\n\
+             \      true -> 0\n\
+             \      _ -> takeneg(n)\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    (* Guard against proving too much: the arm that does NOT establish the
+       fact must still be reported. *)
+    gated "the false-arm does not inherit the true-arm's fact" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod B3 do\n\
+             \  cap verified\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn go(n : Int) : Int do\n\
+             \    match n >= 0 do\n\
+             \      true -> 0\n\
+             \      false -> takepos(n)\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+  ]
+
 let cap_verified_suite =
   [ Alcotest.test_case "cap verified: an unreflectable predicate is an ERROR" `Quick
       (fun () ->
@@ -9493,6 +9593,8 @@ let () =
       ("obligations", obligation_suite);
       ("obligation-reasons", reason_suite);
       ("cap-verified", cap_verified_suite);
+      ("field-actual", field_actual_suite);
+      ("bool-match-path", bool_match_path_suite);
       ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);

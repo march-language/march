@@ -122,6 +122,63 @@
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
 
+; ── C scheduler timer tests (min-heap timers + timed park) ──────────────
+; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1): timers must work across the
+; work-stealing/global-runq machinery, not just the single-scheduler path.
+(rule
+ (targets test_scheduler_timer_runner)
+ (deps    test_scheduler_timer.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_timer.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_timer_runner))
+ (action  (run ./test_scheduler_timer_runner)))
+
+; ── C scheduler mailbox capacity + drop-policy tests (Task 7) ───────────
+; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer rule
+; above: deterministic by construction (scheduler is never run), so the
+; multi-thread machinery is present but never actually contended here.
+(rule
+ (targets test_scheduler_mbox_runner)
+ (deps    test_scheduler_mbox.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_mbox.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_mbox_runner))
+ (action  (run ./test_scheduler_mbox_runner)))
+
+; ── C scheduler stack-recycling / churn test (Task 12) ───────────────────
+; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer/mbox
+; rules above: churns 3000+100 procs through spawn->run->death and asserts
+; via march_stat_counters[MARCH_STAT_STACKS_RECYCLED] that dead stacks are
+; recycled instead of leaked.
+(rule
+ (targets test_scheduler_churn_runner)
+ (deps    test_scheduler_churn.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_churn.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_churn_runner))
+ (action  (run ./test_scheduler_churn_runner)))
+
 ; ── HCR versioned dispatch table unit test ───────────────────────────────
 (rule
  (targets test_dispatch_runner)
@@ -1048,6 +1105,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/nested_derive_json.expected native_nested_derive_json.out)))
+
+; ── Regression: Actor.call replies must be correlation-checked ──
+; A first call times out (its handler replies late); the caller then issues a
+; second call. Without correlating the reply to the call that's actually
+; waiting, the stale first reply is delivered as the second call's answer.
+; This fixture burns time in the handler so the first call's 1ms deadline
+; expires before the reply lands, then makes a second call and checks it
+; gets the SECOND reply (n=1), not the stale first one (n=0). Needs the real
+; stdlib (List.fold_left, Range), hence (source_tree ../stdlib). Compile
+; natively, run, diff.
+(rule
+ (targets native_actor_call_late_reply native_actor_call_late_reply.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_call_late_reply.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_call_late_reply
+        native/actor_call_late_reply.march)
+   (with-stdout-to native_actor_call_late_reply.out
+        (system "./native_actor_call_late_reply")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_late_reply.expected native_actor_call_late_reply.out)))
 
 ; ── Regression: burst-of-task_spawn must not race the Task object ──
 ; march_task_spawn_thunk initialised the Task's proc-handle/result/done-flag
@@ -4865,6 +4955,99 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/h_css_url_context.expected native_h_css_url_context.out)))
 
+; ── mailbox_size reports real queue depth (compiled) ──────────────────
+; march_mailbox_size used to return only the monitor Down count, so a flooded
+; actor's live mailbox depth was invisible on the compiled backend even
+; though the interpreter's mailbox_size (Queue.length) reported it correctly.
+; This fixture floods 100 messages, drains via run_until_idle, then kills the
+; actor and drains again — both cases should read back 0 once idle. The
+; deterministic non-idle depth assertion lives at the C unit level in
+; test/test_scheduler_timer.c (march_sched_mbox_count), since a compiled
+; March program has no way to observe mailbox depth before the scheduler
+; drains it. Compile natively, run, diff.
+(rule
+ (targets native_mailbox_depth native_mailbox_depth.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/mailbox_depth.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mailbox_depth
+        native/mailbox_depth.march)
+   (with-stdout-to native_mailbox_depth.out
+        (system "./native_mailbox_depth")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mailbox_depth.expected native_mailbox_depth.out)))
+
+; ── sched_stat builtin + Scheduler module reads real scheduler counters ──
+; (compiled) ────────────────────────────────────────────────────────────
+; march_sched_stat exposes live-proc/spawn/runq/timer counters by index;
+; Scheduler wraps it as stdlib surface. A running compiled program always
+; has >=1 live proc (main itself) and >=1 total spawn, and an unknown index
+; must read 0 (forward-compatible with later-task counters). Compile
+; natively, run, diff stdout.
+(rule
+ (targets native_sched_stats native_sched_stats.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/sched_stats.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_sched_stats
+        native/sched_stats.march)
+   (with-stdout-to native_sched_stats.out
+        (system "./native_sched_stats")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/sched_stats.expected native_sched_stats.out)))
+
+; ── Task 9: Actor.set_queue_limit — bounded mailboxes with drop policies ──
+; (compiled) ────────────────────────────────────────────────────────────
+; A slow actor with a drop_new mailbox limit of 8 is flooded with 5000
+; messages via a fast (main-thread) sender while the actor drains slowly.
+; Some messages must be dropped (Scheduler.dropped_messages() > 0), and the
+; number the actor actually processed must never exceed the number sent.
+; Uses List/Range/Actor/Scheduler stdlib modules, hence source_tree ../stdlib.
+(rule
+ (targets native_mailbox_bounded native_mailbox_bounded.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/mailbox_bounded.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mailbox_bounded
+        native/mailbox_bounded.march)
+   (with-stdout-to native_mailbox_bounded.out
+        (system "./native_mailbox_bounded")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mailbox_bounded.expected native_mailbox_bounded.out)))
 
 ; ── Previously-unwired test/stdlib/*.march describe/test corpus ──────────
 ; 37 of the 94 files in test/stdlib/ had real, substantial describe/test

@@ -228,6 +228,33 @@ This prevents restart storms from grinding the system to a halt. The escalation 
 
 ---
 
+## Restart Backoff
+
+A child's **first** crash restarts immediately (zero added delay) — the same
+synchronous, zero-delay behavior as before backoff existed, so a single
+crash-and-recover cycle is unaffected. Only a **repeat** crash of the same
+child slot (its `crash_streak` exceeds 1) is delayed: the delay is
+`25ms << min(streak - 1, 7)` — 50, 100, 200, 400, 800, 1600, then capped at
+3200ms pre-jitter (the shift itself saturates at 7, so 3200ms is the true
+ceiling, not 5000ms) — with ±25% jitter on top (observed max ~4000ms) to
+de-synchronize a crash storm's retries. The streak resets to
+0 once the child survives a full `max_restarts ... within N` window without
+crashing again — a healed child goes back to immediate-restart behavior on
+its next isolated crash.
+
+For the batch strategies (`one_for_all`/`rest_for_one`), a pending delayed
+restart absorbs any further crashes among covered children that arrive
+before it fires, instead of scheduling a second overlapping restart; the
+restart's child range widens (never narrows) to cover every sibling that
+crashed during the pending window.
+
+Set `MARCH_SUP_TRACE=1` to print each restart decision to stderr —
+`march: supervisor backoff child=<idx> streak=<n> delay_ms=<ms>`, plus a
+` (batch restart already pending, skipped)` suffix when a crash was absorbed
+into an already-pending batch restart instead of scheduling its own.
+
+---
+
 ## Supervision Strategies Compared
 
 ```

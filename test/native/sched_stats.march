@@ -1,0 +1,13 @@
+mod Main do
+  needs IO.Console
+
+fn main(_cap_console : Cap(IO.Console)) do
+  let live_before = Scheduler.live_procs()
+  let spawned_before = Scheduler.total_spawned()
+  -- both are >= 1 in a running compiled program (main itself is a proc)
+  println("live>=1: " ++ bool_to_string(live_before >= 1))
+  println("spawned>=1: " ++ bool_to_string(spawned_before >= 1))
+  println("unknown idx: " ++ int_to_string(Scheduler.stat(99)))
+end
+
+end

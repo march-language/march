@@ -2454,6 +2454,10 @@ let builtin_bindings : (string * scheme) list =
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));
     ("mailbox_size", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
+    (* Task 6: scheduler observability — raw stat read by index. *)
+    ("sched_stat",   Mono (TArrow (t_int, t_int)));
+    (* Task 9: bind a mailbox capacity + overflow policy to an actor. *)
+    ("actor_set_mailbox_limit", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_int, TArrow (t_int, t_unit)))));
     (* Phase 4: Actor state introspection — reads a named field from actor state *)
     ("get_actor_field", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_option b))));
     (* Phase 4: Flush the async message queue — runs all pending handlers *)
@@ -6561,10 +6565,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── if/do/else/end ───────────────────────────────────────────── *)
     | Ast.EIf (cond, then_, else_, _sp) ->
+      (* The condition runs on BOTH paths, so it is checked before the
+         mutual-exclusion snapshot below: a linear value consumed here is
+         still consumed inside either branch. *)
       check_expr env cond t_bool
         ~reason:(Some (RBuiltin "The condition of an if expression must be Bool."));
-      let t_then = infer_expr env then_ in
-      let t_else = infer_expr env else_ in
+      (* The two branches are mutually exclusive, so each may consume the same
+         outer linear value once — the same rule match arms get. *)
+      let r_then = ref TError and r_else = ref TError in
+      iter_paths_linear env
+        [ (fun () -> r_then := infer_expr env then_);
+          (fun () -> r_else := infer_expr env else_) ];
+      let t_then = !r_then in
+      let t_else = !r_else in
       (* Point primary error at the else branch; label points at then branch
          (the source of the expected type), making both branches visible. *)
       let then_sp = span_of_expr then_ in
@@ -6583,15 +6596,51 @@ let rec infer_expr env (e : Ast.expr) : ty =
            "A `match do` expression needs at least one arm.";
          TError
        | (first_cond, first_body) :: rest ->
+         (* Only the BODIES are mutually exclusive here, so this cannot use
+            [iter_paths_linear] wholesale. The conditions are evaluated in
+            order until one holds, so a later condition genuinely co-occurs
+            with every earlier one on the fall-through path and they must
+            share linear-use state. A body, by contrast, runs only when its
+            own condition was the first true one — at which point no later
+            condition is ever evaluated — so each body is its own path,
+            starting from the state its own condition left behind.
+
+            Hence: check conditions against the shared state, run each body
+            rolled back, and apply the union of what the bodies consumed
+            once at the end. *)
+         let body_acc =
+           List.map (fun le -> (le, ref false, ref (None : Ast.span option)))
+             env.lin
+         in
+         let run_body body_e =
+           let saved =
+             List.map (fun le -> (le, !(le.le_used), !(le.le_first_use)))
+               env.lin
+           in
+           let ty = infer_expr env body_e in
+           List.iter (fun (le, acc, acc_span) ->
+               if !(le.le_used) then begin
+                 acc := true;
+                 if !acc_span = None then acc_span := !(le.le_first_use)
+               end) body_acc;
+           List.iter (fun (le, was, was_span) ->
+               le.le_used := was; le.le_first_use := was_span) saved;
+           ty
+         in
          check_expr env first_cond t_bool
            ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
-         let result_ty = infer_expr env first_body in
+         let result_ty = run_body first_body in
          List.iter (fun (cond_e, body_e) ->
              check_expr env cond_e t_bool
                ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
-             let arm_ty = infer_expr env body_e in
+             let arm_ty = run_body body_e in
              unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
            ) rest;
+         List.iter (fun (le, acc, acc_span) ->
+             if !acc && not !(le.le_used) then begin
+               le.le_used := true;
+               if !(le.le_first_use) = None then le.le_first_use := !acc_span
+             end) body_acc;
          result_ty)
 
     (* ── Pipes / Sigils — must be desugared before reaching us ───── *)
@@ -7021,30 +7070,47 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     mutable flag would otherwise raise across arms, while still catching a
     genuine double-use WITHIN a single arm. *)
 and iter_arms_linear env (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
-  (* For each outer linear entry track (entry, pre-match flag, union accumulator). *)
+  iter_paths_linear env (List.map (fun br () -> f br) branches)
+
+(** The mutual-exclusion discipline itself, over an arbitrary list of paths.
+    Every branching construct in the language shares it — [EMatch] arms via
+    [iter_arms_linear], the two branches of an [EIf], and the bodies of an
+    [ECond] — because "at most one of these runs" is the only property it
+    needs.  Each path is run with the linear-use flags reset to their state
+    on entry, and the union of what the paths consumed is applied once at the
+    end.
+
+    What this deliberately does NOT cover is code that runs on EVERY path: an
+    [EIf]'s condition, or an [ECond]'s conditions, must be checked OUTSIDE the
+    paths (before the relevant snapshot is taken), so that a value consumed
+    there is still seen as consumed inside each branch.  Resetting around the
+    condition too would turn a genuine double-use into an accepted program —
+    the one way this helper can be misused. *)
+and iter_paths_linear env (paths : (unit -> unit) list) : unit =
+  (* For each outer linear entry track (entry, pre-branch flag, union accumulator). *)
   (* [le_first_use] is saved and restored alongside [le_used]. If it were not,
-     the first arm to consume a value would leave its span behind, and a genuine
-     double-use in a LATER arm would point at a line in a sibling arm that never
-     ran on the same path — a confidently wrong "already consumed here". *)
+     the first path to consume a value would leave its span behind, and a genuine
+     double-use in a LATER path would point at a line in a sibling path that never
+     ran on the same execution — a confidently wrong "already consumed here". *)
   let snapshot =
     List.map (fun le ->
         (le, !(le.le_used), ref !(le.le_used),
              !(le.le_first_use), ref !(le.le_first_use)))
       env.lin
   in
-  List.iter (fun br ->
-      (* Reset each entry to its pre-match state so this arm sees a fresh path. *)
+  List.iter (fun run_path ->
+      (* Reset each entry to its pre-branch state so this path starts fresh. *)
       List.iter (fun (le, was, _acc, was_span, _acc_span) ->
           le.le_used := was; le.le_first_use := was_span) snapshot;
-      f br;
-      (* Fold whatever this arm consumed into the union accumulator. *)
+      run_path ();
+      (* Fold whatever this path consumed into the union accumulator. *)
       List.iter (fun (le, _was, acc, _was_span, acc_span) ->
           if !(le.le_used) then begin
             acc := true;
             if !acc_span = None then acc_span := !(le.le_first_use)
           end) snapshot
-    ) branches;
-  (* Final: consumed iff consumed before the match OR in some arm. *)
+    ) paths;
+  (* Final: consumed iff consumed before the branch OR on some path. *)
   List.iter (fun (le, _was, acc, _was_span, acc_span) ->
       le.le_used := !acc; le.le_first_use := !acc_span) snapshot
 
