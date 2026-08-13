@@ -503,6 +503,108 @@ mod Json do
       Json.parse("[1, 2, 3]")      -- Ok(Array([Number(1.0), ...]))
       Json.parse("{\"x\": 1}")     -- Ok(Object([("x", Number(1.0))]))
   """
+  -- ── Combinator parser (plan step 2 A/B) ─────────────────────────────────
+  --
+  -- A second, independent implementation of `parse`, written with the `Parse`
+  -- combinators, kept ALONGSIDE the hand-written one so the two can be
+  -- compared on the same inputs in the same process.
+  --
+  -- It deliberately reuses `scan_string` and `parse_number` — the two
+  -- byte-level token scanners — so the comparison isolates the variable
+  -- actually under test: STRUCTURAL parsing (dispatch, nesting, separators,
+  -- whitespace, error reporting). Re-deriving `\uXXXX` surrogate decoding in
+  -- combinators would measure escape handling, which is a subroutine either
+  -- way and identical in both.
+
+  pfn c_is_ws(b : Int) : Bool do
+    b == 32 || b == 9 || b == 10 || b == 13
+  end
+
+  pfn c_ws() : Parse.Parser(String) do
+    Parse.take_while(fn b -> c_is_ws(b))
+  end
+
+  -- A token is a lexeme plus the whitespace after it, so only the top level
+  -- needs to think about leading whitespace.
+  pfn c_tok(p : Parse.Parser(a)) : Parse.Parser(a) do
+    Parse.skip_then(p, c_ws())
+  end
+
+  pfn c_fail(i : Int, what : String) : Parse.ParseErr do
+    { pos: i, expected: Cons(ExpLabel(what), Nil), context: Nil }
+  end
+
+  -- Lift the existing string scanner into a Parser.
+  pfn c_string_raw() : Parse.Parser(String) do
+    Parser(fn (input, i) ->
+      if string_byte_at(input, i) == 34 do
+        match scan_string(input, i + 1, i + 1, Nil) do
+          Ok((sv, j)) -> ROk(sv, j, i)
+          Err(_)      -> RFail(c_fail(i, "a string"))
+        end
+      else RFail(c_fail(i, "a string")) end)
+  end
+
+  pfn c_number() : Parse.Parser(JsonValue) do
+    Parser(fn (input, i) ->
+      match parse_number(input, i) do
+        Ok((v, j)) -> ROk(v, j, i)
+        Err(_)     -> RFail(c_fail(i, "a number"))
+      end)
+  end
+
+  pfn c_array() : Parse.Parser(JsonValue) do
+    Parse.ctx("array",
+      Parse.map(
+        Parse.skip_first(c_tok(Parse.lit("[")),
+          Parse.skip_then(
+            Parse.sep_by(Parse.delay(fn -> c_value()), c_tok(Parse.lit(","))),
+            Parse.commit(c_tok(Parse.lit("]"))))),
+        fn xs -> Array(xs)))
+  end
+
+  pfn c_member() : Parse.Parser((String, JsonValue)) do
+    Parse.ctx("object member",
+      Parse.and_then(
+        Parse.skip_then(c_tok(c_string_raw()),
+                        Parse.commit(c_tok(Parse.lit(":")))),
+        Parse.delay(fn -> c_value())))
+  end
+
+  pfn c_object() : Parse.Parser(JsonValue) do
+    Parse.ctx("object",
+      Parse.map(
+        Parse.skip_first(c_tok(Parse.lit("{")),
+          Parse.skip_then(
+            Parse.sep_by(c_member(), c_tok(Parse.lit(","))),
+            Parse.commit(c_tok(Parse.lit("}"))))),
+        fn ms -> Object(ms)))
+  end
+
+  pfn c_value() : Parse.Parser(JsonValue) do
+    Parse.label("a JSON value",
+      Parse.alt(c_tok(c_number()),
+        Parse.alt(Parse.map(c_tok(c_string_raw()), fn s -> Str(s)),
+          Parse.alt(Parse.map(c_tok(Parse.lit("true")),  fn _ -> Bool(true)),
+            Parse.alt(Parse.map(c_tok(Parse.lit("false")), fn _ -> Bool(false)),
+              Parse.alt(Parse.map(c_tok(Parse.lit("null")), fn _ -> Null),
+                Parse.alt(c_array(), c_object())))))))
+  end
+
+  doc """
+  Parse a JSON document using the parser combinators.
+
+  Same contract as `parse`, except the error is a rendered diagnostic with a
+  line:column and, inside a committed construct, the construct's name.
+  """
+  fn parse_c(s : String) : Result(JsonValue, String) do
+    let p = Parse.skip_first(c_ws(), Parse.skip_then(c_value(), Parse.eof()))
+    match Parse.run(p, s) do
+      Ok(v)  -> Ok(v)
+      Err(e) -> Err(Parse.render(s, e))
+    end
+  end
+
   fn parse(s) do
     match parse_value(s, 0) do
     Err(e) -> Err(e)

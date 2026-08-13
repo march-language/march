@@ -6,6 +6,18 @@
 
 mod TestParse do
 
+-- A self-referential grammar: `nested := "(" nested ")" | "x"`, returning the
+-- nesting depth. Written with `delay` so mentioning `nested()` inside its own
+-- definition does not recurse at construction time.
+pfn nested() : Parse.Parser(Int) do
+  Parse.alt(
+    Parse.map(
+      Parse.skip_first(Parse.lit("("),
+        Parse.skip_then(Parse.delay(fn -> nested()), Parse.lit(")"))),
+      fn n -> n + 1),
+    Parse.map(Parse.lit("x"), fn _ -> 0))
+end
+
 describe "Parse" do
 
   describe "lit" do
@@ -293,6 +305,64 @@ describe "Parse" do
       match Parse.run(Parse.sep_by(Parse.lit("a"), Parse.lit(",")), "") do
         Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
+      end
+    end
+
+  end
+
+  describe "delay" do
+
+    -- Combinators are VALUES, built eagerly. A grammar rule that mentions
+    -- itself (or a mutually recursive partner) would therefore recurse while
+    -- being CONSTRUCTED, before any input is read. `delay` defers the
+    -- construction into the parse itself.
+    test "allows a self-referential grammar to terminate" do
+      match Parse.run(nested(), "((x))") do
+        Ok(n)  -> assert (n == 2)
+        Err(_) -> assert false
+      end
+    end
+
+    test "still reports failures from inside the deferred parser" do
+      match Parse.run(nested(), "((x)") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 4)
+      end
+    end
+
+  end
+
+  describe "take_while1" do
+
+    test "returns the matched run as one string" do
+      match Parse.run(Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57), "123ab") do
+        Ok(s)  -> assert (s == "123")
+        Err(_) -> assert false
+      end
+    end
+
+    test "fails when the first byte does not match" do
+      match Parse.run(Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57), "ab") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 0)
+      end
+    end
+
+  end
+
+  describe "optional" do
+
+    test "yields Some when the parser matches" do
+      match Parse.run(Parse.optional(Parse.lit("-")), "-1") do
+        Ok(Some(s)) -> assert (s == "-")
+        _           -> assert false
+      end
+    end
+
+    test "yields None without consuming when it does not" do
+      match Parse.run(Parse.and_then(Parse.optional(Parse.lit("-")), Parse.lit("1")), "1") do
+        Ok((None, d)) -> assert (d == "1")
+        _             -> assert false
       end
     end
 

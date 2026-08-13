@@ -98,6 +98,7 @@ let all_stdlib_decls =
     (* Loaded before iolist/msgpack so their same-named constructors (Str,
        Array, ...) keep winning bare lookups exactly as they did before
        json.march joined this list. *)
+    "parse.march";
     "json.march";
     "json_stream.march";
     "iolist.march";
@@ -173,7 +174,6 @@ let all_stdlib_decls =
     "cluster.march";
     "rrb_vec.march";
     "parallel.march";
-    "parse.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 

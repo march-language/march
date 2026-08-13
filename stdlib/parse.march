@@ -22,8 +22,9 @@
 --   RFail  soft — `alt` may try the next alternative
 --   RCut   hard — a commit point was passed; propagate, do not backtrack
 --
--- Primitives:      lit, byte, byte_if, eof, pure
--- Sequencing:      and_then, skip_then, skip_first, map, flat_map
+-- Primitives:      lit, byte, byte_if, take_while, take_while1, eof, pure
+-- Sequencing:      and_then, skip_then, skip_first, map, flat_map, delay
+-- Optionality:     optional
 -- Choice:          alt
 -- Repetition:      many, many1, repeat, sep_by, sep_by1
 -- Error control:   commit, ctx, label, fence, recover
@@ -176,6 +177,15 @@ mod Parse do
     end
   end
 
+  -- Scan forward while `pred` holds; returns the offset one past the run.
+  -- Tail-recursive. `string_byte_at` returns -1 past the end and a byte
+  -- predicate rejects that, so end-of-input needs no special case.
+  pfn scan_while(input : String, i : Int, pred : Int -> Bool) : Int do
+    let b = string_byte_at(input, i)
+    if b >= 0 && pred(b) do scan_while(input, i + 1, pred)
+    else i end
+  end
+
   -- `repeat`'s loop. Counts DOWN rather than checking a zero-width guard like
   -- `many_go`: a fixed count terminates on its own, and a zero-width `p` here
   -- should still produce `n` results rather than stopping early.
@@ -309,6 +319,74 @@ mod Parse do
           match pf(input, i) do
             ROk(x, j, fp) -> ROk(f(x), j, fp)
             RFail(e)      -> RFail(e)
+            RCut(e)       -> RCut(e)
+          end)
+    end
+  end
+
+  doc """
+  Defer building a parser until it is run.
+
+  Combinators are ordinary VALUES, built eagerly, so a rule that mentions
+  itself would recurse while being *constructed* — before a byte of input is
+  read — and never return. Every recursive or mutually recursive grammar
+  therefore needs its back-edge wrapped:
+
+      pfn value() : Parser(Json) do
+        alt(number(), array_of(delay(fn -> value())))
+      end
+
+  This is not a March quirk; every combinator library in a strict language
+  needs the same device (Scala's `P(...)`, OCaml's `fix`). It is the one piece
+  of ceremony a grammar DSL would remove, since a DSL can see the recursion.
+  """
+  fn delay(thunk : Unit -> Parser(a)) : Parser(a) do
+    Parser(fn (input, i) ->
+      match thunk() do
+        Parser(f) -> f(input, i)
+      end)
+  end
+
+  doc """
+  Match a run of one or more bytes satisfying `pred`, returned as one String.
+
+  The reason this exists rather than `many(byte_if(...))`: that spelling
+  allocates a list cell per byte and then needs a second pass to rebuild a
+  string. This scans to the end of the run and takes a single slice — one
+  allocation per token instead of one per character, which is the difference
+  between a combinator lexer being usable and being a toy.
+  """
+  fn take_while1(name : String, pred : Int -> Bool) : Parser(String) do
+    Parser(fn (input, i) ->
+      let j = scan_while(input, i, pred)
+      if j > i do ROk(string_slice(input, i, j - i), j, i)
+      else RFail(fail_at(i, ExpLabel(name))) end)
+  end
+
+  doc """
+  Match a run of zero or more bytes satisfying `pred`, returned as one String.
+
+  Never fails, so it is the right shape for optional whitespace.
+  """
+  fn take_while(pred : Int -> Bool) : Parser(String) do
+    Parser(fn (input, i) ->
+      let j = scan_while(input, i, pred)
+      ROk(string_slice(input, i, j - i), j, i))
+  end
+
+  doc """
+  Try `p`; on a soft failure succeed with `None`, consuming nothing.
+
+  A hard failure still propagates: past a commit point the construct was not
+  optional.
+  """
+  fn optional(p : Parser(a)) : Parser(Option(a)) do
+    match p do
+      Parser(f) ->
+        Parser(fn (input, i) ->
+          match f(input, i) do
+            ROk(x, j, fp) -> ROk(Some(x), j, fp)
+            RFail(e)      -> ROk(None, i, e.pos)
             RCut(e)       -> RCut(e)
           end)
     end
