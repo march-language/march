@@ -28,11 +28,22 @@ one, which is backwards.
 
 ## Sketch
 
-Full design in the spec above. In brief: a C-runtime name table beside
-`g_actor_tbl` (so lookups don't need a message round-trip and can be reached
-from the send path), automatic unregistration in `do_actor_death`, and
-re-registration inside `march_respawn_child` so a restart reuses the crashed
-incarnation's name without any child-spec syntax change.
+Full design in the spec above. In brief, mirroring Elixir's `Registry`
+(which is built on ETS, not a bespoke structure): the data lives in **Vault**
+— two tables, `name -> pid` and `pid -> names` — the policy lives in stdlib,
+and only the cleanup *trigger* lives in the runtime, where `do_actor_death`
+drops the entries. That last part is a deliberate divergence from Elixir, whose
+EXIT-signal cleanup leaves a window in which a lookup can return a dead pid.
+
+Restart survival needs no child-spec syntax change: `march_respawn_child`
+carries the crashed incarnation's names forward.
+
+**Depends on** `specs/todos/2026-08-12-vault-toward-ets-semantics.md` —
+concurrent reads (lookups land on the send path) and typed handles (an erased
+`Option(ptr)` would let a mistyped read be dereferenced as an actor record).
+The capability question — every Vault op currently requires `IO.Mut` — is
+answered for this feature by having the runtime own the well-known tables, so
+`Actor.whereis` needs no capability at all.
 
 ## Acceptance
 
