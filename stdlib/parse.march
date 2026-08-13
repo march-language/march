@@ -27,7 +27,7 @@
 -- Optionality:     optional
 -- Choice:          alt
 -- Repetition:      many, many1, repeat, sep_by, sep_by1
--- Error control:   commit, ctx, label, fence, recover
+-- Error control:   commit, then_commit, ctx, label, fence, recover
 -- Running:         run
 -- Rendering:       render, line_col
 --
@@ -523,6 +523,32 @@ mod Parse do
             RCut(e)       -> RCut(e)
           end)
     end
+  end
+
+  doc """
+  Run `p`, then commit to `q` — the correct shape for "past this token, the
+  construct is no longer optional".
+
+  **Where a commit sits decides whether a later failure is reported at all**,
+  and getting it wrong is silent. `commit(delimiter)` makes only the
+  DELIMITER's own failure hard; everything sequenced after it stays soft, so
+  an enclosing `sep_by` or `alt` quietly backtracks and replaces the real
+  error with a shallow one:
+
+      -- WRONG: commit on the ":" only
+      and_then(key, and_then(commit(lit(":")), value))
+      "{a:}"  ->  1:2: I was expecting `}`
+
+      -- RIGHT: commit on everything after the key
+      then_commit(key, skip_first(lit(":"), value))
+      "{a:}"  ->  1:4: I was expecting a value in the member that started at 1:2
+
+  Both accept `{}`, so the difference never shows up on valid input — only on
+  the malformed input where the message mattered. This combinator exists so
+  the right shape is the short one.
+  """
+  fn then_commit(p : Parser(a), q : Parser(b)) : Parser((a, b)) do
+    and_then(p, commit(q))
   end
 
   doc """

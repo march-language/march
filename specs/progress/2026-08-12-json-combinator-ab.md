@@ -83,17 +83,15 @@ was expected**:
 | `tru` | unexpected end of input, expected: true | 1:1: I was expecting a JSON value |
 | `[1] x` | unexpected character after JSON value: 'x' | 1:5: I was expecting end of input |
 
-Rows 3 and 4 are regressions. `{"a":}` should say a value is missing after
-`:`; instead the deeper failure is lost because `sep_by` ends in
-`alt(sep_by1, pure(Nil))`, the empty alternative succeeds, and **`and_then`'s
-failure path keeps only the second parser's error** — discarding the furthest
-position threaded through the success reply.
+Rows 3 and 4 are regressions.
 
-That is exactly the KNOWN LIMITATION documented on the Int-only success
-channel, and this is the real grammar the plan said to revisit it against. The
-evidence is now in: **widen the success channel to carry `(pos, expected)`**
-and pay the allocation, or accept that ordered choice will sometimes report
-the shallow error. `tru` is a separate, milder case — the label's
+**Row 3 was later root-caused and is NOT a library limitation** — see
+`2026-08-12-parse-commit-placement-not-a-channel-limit.md`. The grammar
+committed the `:` delimiter instead of the tail after it, so the value parser
+stayed soft and `sep_by` backtracked over the whole member. Committing the
+tail yields `1:4: I was expecting a value in the member that started at 1:2`,
+which is the message that was wanted. The Int-only success channel was
+blameless; `then_commit` now makes the correct shape the short one. `tru` is a separate, milder case — the label's
 consumed-input rule correctly replaces the expected-set, but `true`/`false`/
 `null` failing without consuming means the label hides which keyword was closest.
 
@@ -118,8 +116,16 @@ correct and its authoring story works — a complete JSON grammar is ~80 lines
 against 400+ hand-written — while its execution model needs two specific,
 identified fixes before it can carry a hot path:
 
-1. memoizing `delay`, so the grammar is built once rather than per descent;
-2. a wider success channel, so ordered choice stops losing the deeper error.
+1. ~~memoizing `delay`~~ — **measured at 1.6×, not the ~10× assumed**, so the
+   dominant cost is per-step allocation in the execution model, not grammar
+   reconstruction (`2026-08-12-parse-rebuild-cost-measured.md`);
+2. ~~a wider success channel~~ — **the motivating bad message was commit
+   placement**, fixed by `then_commit` with no change to the reply type
+   (`2026-08-12-parse-commit-placement-not-a-channel-limit.md`).
+
+Both filed causes turned out to be wrong, which is worth stating plainly: the
+16.5× is still unexplained, and the remaining suspect is the one thing neither
+investigation touched — one `ParseReply` allocation per combinator step.
 
 Both are worth doing before any further format is ported, and both are filed:
 

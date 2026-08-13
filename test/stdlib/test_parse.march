@@ -154,6 +154,50 @@ describe "Parse" do
 
   end
 
+  describe "then_commit" do
+
+    -- WHERE a commit sits decides whether a later failure is reported at all.
+    -- Committing the delimiter makes only the DELIMITER's failure hard;
+    -- everything after it stays soft, so an enclosing `sep_by`/`alt` quietly
+    -- backtracks and the real error is replaced by a shallow one.
+    test "committing the tail reports the real failure, not a shallow one" do
+      let member =
+        Parse.ctx("member",
+          Parse.then_commit(Parse.take_while1("a key", fn b -> b >= 97 && b <= 122),
+            Parse.skip_first(Parse.lit(":"),
+              Parse.label("a value",
+                Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)))))
+      let obj =
+        Parse.skip_first(Parse.lit("{"),
+          Parse.skip_then(Parse.sep_by(member, Parse.lit(",")),
+                          Parse.commit(Parse.lit("}"))))
+      match Parse.run(obj, "{a:}") do
+        Ok(_) -> assert false
+        Err(e) ->
+          let msg = Parse.render("{a:}", e)
+          assert (msg == "1:4: I was expecting a value in the member that started at 1:2")
+      end
+    end
+
+    -- The commit must not fire before anything was consumed, or a genuinely
+    -- empty construct stops parsing.
+    test "an empty construct still parses" do
+      let member =
+        Parse.then_commit(Parse.take_while1("a key", fn b -> b >= 97 && b <= 122),
+          Parse.skip_first(Parse.lit(":"),
+            Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)))
+      let obj =
+        Parse.skip_first(Parse.lit("{"),
+          Parse.skip_then(Parse.sep_by(member, Parse.lit(",")),
+                          Parse.commit(Parse.lit("}"))))
+      match Parse.run(obj, "{}") do
+        Ok(xs) -> assert (List.length(xs) == 0)
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
   describe "ctx" do
 
     test "names the construct a committed failure happened inside" do
