@@ -1,0 +1,5 @@
+register a: true
+listed before kill: true
+listed after kill: false
+register b: true
+resolved after reuse: true

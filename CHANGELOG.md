@@ -22,6 +22,7 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A killed actor's registered names are now reclaimed, not left occupying the registry forever.** `do_actor_death` (and the interpreter's matching `crash_actor` path) now retires all of the dying actor's names — dropping the forward-table entry and the per-actor reverse index — before any monitor `Down` notification is delivered, so a watcher woken by the death can never observe a name still mapped to the dead incarnation. Previously only the runtime's own `$alive`-flag re-check kept `whereis`/`registered` correct at lookup time; the table entry itself, and the interpreter's `named_registry` map, held on to the name indefinitely unless a later registration happened to overwrite it. `Actor.registered()` in the interpreter no longer lists a name after its actor is killed.
 - **`if` and `match do` now treat their branches as mutually exclusive for
   linear values, the way `match` arms already did.** Consuming the same
   linear or affine value once in each branch is legal — at most one branch

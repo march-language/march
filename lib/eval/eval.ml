@@ -2449,6 +2449,20 @@ and crash_actor (pid : int) (reason : string) : unit =
           pid (Printexc.to_string exn)
     ) (List.rev inst.ai_linear_values);
     inst.ai_linear_values <- [];  (* clear to prevent re-run on double-crash *)
+    (* Task 5: retire this actor's registered names from [named_registry]
+       BEFORE any Down notification is delivered below (mirrors the
+       runtime's do_actor_death -> registry_retire_actor placement, and the
+       same reasoning: a watcher woken by a Down that immediately calls
+       Actor.whereis/Actor.registered must not see the name still mapped to
+       this dead pid). Compare-and-drop by pid, not by name alone, so a name
+       already reassigned to a different live pid (stale-overwrite) is left
+       untouched. *)
+    let dead_names =
+      Hashtbl.fold
+        (fun name owner acc -> if owner = pid then name :: acc else acc)
+        named_registry []
+    in
+    List.iter (Hashtbl.remove named_registry) dead_names;
     (* Deliver Down(mon_ref, reason) to each watcher's mailbox *)
     List.iter (fun (mon_ref, watcher_pid) ->
       match Hashtbl.find_opt actor_registry watcher_pid with

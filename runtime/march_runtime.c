@@ -3323,6 +3323,19 @@ static void do_actor_death(void *actor) {
         meta->cleanup_head = NULL;
     }
 
+    /* Retire this actor's registered names BEFORE any Down notification
+     * fires (below). A watcher woken by a Down that immediately calls
+     * whereis/registered must not observe a name still mapped to this dead
+     * incarnation — placing the retire here, ahead of the monitor walk,
+     * closes that window entirely rather than merely narrowing it (unlike
+     * Elixir, which relies on an EXIT signal racing a separate registry
+     * process). registry_retire_actor re-resolves find_meta(actor)
+     * internally even though we already have [meta] here — an accepted
+     * redundant lock-free bucket walk, kept for the C-level test's ability
+     * to call it without march_actor_meta's (private-to-this-file) layout;
+     * see registry_retire_actor's own comment. */
+    registry_retire_actor(actor);
+
     /* Deliver Down notifications to all local watchers. */
     if (meta && meta->monitor_head) {
         march_monitor_node *mn = meta->monitor_head;
