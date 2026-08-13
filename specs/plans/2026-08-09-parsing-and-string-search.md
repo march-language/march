@@ -346,7 +346,27 @@ therefore gated on a significant language feature whose costs (formatter, LSP,
 error messages for precedence mistakes) extend far beyond parsing. Ranked
 last unless user-defined operators are wanted on independent grounds.
 
-### 4.3 Monadic binding sugar — the recommended target
+### 4.3 Monadic binding sugar — CHOSEN (2026-08-12)
+
+**Decision: build `let*`.** Rejected `~p` and confirmed `<|>` blocked; the
+evidence and costs are below and in §9 decisions 1, 5 and 6.
+
+The mechanism is settled too, and it is *not* the obvious one. A general
+`Bind`/`Monad` interface would need `Self(a) -> (a -> Self(b)) -> Self(b)`, and
+March cannot express that: `interface Name(param)` takes exactly ONE type
+parameter (`lib/parser/parser.mly:838`), `Self` is never applied to a type
+argument anywhere in the stdlib or the language specs, and there is no
+higher-kinded machinery. `Iterable`'s own interface sketch
+(`stdlib/iterable.march`) is commented out as "future" and sidesteps this by
+fixing the element type.
+
+So `let*` must be what `let?` already is: a **native AST node, typechecked
+natively**, resolving `flat_map` from the inferred type of its right-hand side.
+`let?` is the worked precedent — `ELetQ`, hardwired to `Result` in
+`typecheck.ml`'s `infer_expr` — so the shape, the cost, and the diagnostic
+style are all known rather than speculative. `Parse.flat_map` now exists, so
+the parser side is ready for it.
+
 
 **This is the option the type system chooses for us.** The argument is not
 primarily about reuse (that comes second); it is that static typing forecloses
@@ -833,10 +853,23 @@ case is the one with a concrete forcing argument (§3) behind it.
 4. **Fate of `stdlib/regex.march`'s engine** (§6.0): swap to linear engine
    under the same API (working assumption), parallel module, or pattern-class
    gating. Decide before, not after, `Regex` grows more callers.
-5. **`let*` vs `let?`** (§4.3): does general bind sugar subsume Result
-   propagation or coexist with it?
-6. **Sigil compile-time expansion** (§4.4): does the existing sigil mechanism
-   support compile-time desugaring, or is that new machinery?
+5. ~~`let*` vs `let?`~~ **Closed 2026-08-12: they CAN be one mechanism, but
+   ship them coexisting.** `let? x = e` is exactly `let* x = e` resolved at
+   `Result`, since `Result.flat_map` gives precisely the Err-propagating
+   semantics. But `let?` is shipped, conformance-tested, and carries three
+   bespoke diagnostics; re-expressing it in terms of a new general mechanism
+   would put those messages at risk for no user-visible gain. Build `let*`
+   alongside, and only fold `let?` into it if the diagnostics survive.
+6. ~~Sigil compile-time expansion~~ **Closed 2026-08-12: it is new machinery,
+   and more than the plan assumed.** Sigils are NOT a general expansion
+   mechanism. Every sigil except `~H` desugars to a runtime call —
+   `~xml"..."` becomes `Sigil.xml(content)`, handed one already-concatenated
+   string that the handler parses at runtime (and interpolation into those is
+   refused outright, since a spliced value would change the parsed structure).
+   `~H` alone does compile-time work, and it does so as a **hardcoded special
+   case** in `desugar.ml`'s `ESigil` arm. A compile-time `~p` therefore means
+   adding a PEG-grammar parser to the compiler's desugar pass and emitting
+   well-typed combinator calls from it — not reusing anything.
 7. ~~Commit model.~~ **Closed 2026-08-09: PEG + explicit cut**, with a
    `commit_on_consume` opt-in for shared-prefix grammars, since the reply
    type must track consumption anyway for §3.4's label rule. Rationale in

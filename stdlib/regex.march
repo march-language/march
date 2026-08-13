@@ -129,6 +129,208 @@ mod Regex do
     go(pos, 0)
   end
 
+  -- ── Linear-time matcher (NFA simulation) ─────────────────────────────────
+  --
+  -- `match_at` above is a BACKTRACKING matcher: each quantifier tries its
+  -- longest run first and retries shorter ones on failure, and `find_match`
+  -- retries every start position. Repeated quantifiers over the same class
+  -- followed by a byte that never matches therefore cost O(n^k). Measured on
+  -- `a*a*a*a*b` against a run of `a` (compiled, --opt 2):
+  --
+  --     n=20  0.013s     n=40  0.22s     n=60  1.40s     n=80  5.67s
+  --
+  -- 80 bytes of input, five seconds. That is a denial of service reachable
+  -- from a pattern in a config file plus a short user-supplied string. Note
+  -- it is POLYNOMIAL, not the exponential of the classic `(a+)+$` — that
+  -- pattern is not even expressible here, because this engine has neither
+  -- groups nor alternation.
+  --
+  -- That same narrowness is what makes the linear matcher small. The language
+  -- is a FLAT sequence of quantified atoms, so the NFA is a line of states:
+  -- state `i` means "items[0..i) have been consumed". No general Thompson
+  -- construction is needed.
+  --
+  --   epsilon : i -> i+1   when item i may match zero times
+  --   byte c  : i -> i+1   when atom i matches c and the quantifier is spent
+  --             i -> i     when atom i matches c and may repeat
+  --
+  -- Simulating the SET of reachable states costs O(n * m) and cannot blow up:
+  -- there are only m+1 states, so no amount of adversarial input can make the
+  -- work per byte grow.
+
+  -- Rewrite `X+` as `X X*` so the simulation only has to handle three
+  -- quantifiers instead of four. `X+` is exactly one mandatory occurrence
+  -- followed by any number of optional ones.
+  pfn expand_plus(items, acc) do
+    match items do
+    Nil -> rev(acc, Nil)
+    Cons(RegexItem(atom, quant), rest) ->
+      match quant do
+      QOneOrMore ->
+        expand_plus(rest, Cons(RegexItem(atom, QZeroOrMore),
+                               Cons(RegexItem(atom, QOne), acc)))
+      _ -> expand_plus(rest, Cons(RegexItem(atom, quant), acc))
+      end
+    end
+  end
+
+  -- Sorted insert, skipping duplicates: the active set must not grow past
+  -- m+1 entries or the linear bound is lost.
+  pfn set_add(xs, v) do
+    match xs do
+    Nil -> Cons(v, Nil)
+    Cons(h, t) ->
+      if v < h do Cons(v, Cons(h, t))
+      else if v == h do Cons(h, t)
+      else Cons(h, set_add(t, v)) end end
+    end
+  end
+
+  pfn list_len(xs, n) do
+    match xs do
+    Nil -> n
+    Cons(_, t) -> list_len(t, n + 1)
+    end
+  end
+
+  pfn item_at(items, i) do
+    match items do
+    Nil -> None
+    Cons(h, t) -> if i <= 0 do Some(h) else item_at(t, i - 1) end
+    end
+  end
+
+  -- Whether item i may match zero times, i.e. whether state i has an epsilon
+  -- edge to i+1.
+  pfn skippable(items, i) do
+    match item_at(items, i) do
+    None -> false
+    Some(RegexItem(_, quant)) ->
+      match quant do
+      QZeroOrMore -> true
+      QOptional -> true
+      _ -> false
+      end
+    end
+  end
+
+  -- Add `i` and everything reachable from it by epsilon edges.
+  pfn eclose_from(items, m, i, acc) do
+    if i > m do
+      acc
+    else
+      if list_contains_int(acc, i) do
+        acc
+      else
+        let acc2 = set_add(acc, i)
+        if i < m && skippable(items, i) do
+          eclose_from(items, m, i + 1, acc2)
+        else
+          acc2
+        end
+      end
+    end
+  end
+
+  pfn eclose(items, m, states, acc) do
+    match states do
+    Nil -> acc
+    Cons(h, t) -> eclose(items, m, t, eclose_from(items, m, h, acc))
+    end
+  end
+
+  -- One byte step: advance every active state that can consume `c`.
+  pfn step_states(items, m, states, c, acc) do
+    match states do
+    Nil -> acc
+    Cons(i, t) ->
+      let acc2 = step_one(items, m, i, c, acc)
+      step_states(items, m, t, c, acc2)
+    end
+  end
+
+  pfn step_one(items, m, i, c, acc) do
+    if i >= m do
+      acc
+    else
+      match item_at(items, i) do
+      None -> acc
+      Some(RegexItem(atom, quant)) ->
+        if !atom_matches_byte(atom, c) do
+          acc
+        else
+          match quant do
+          QZeroOrMore -> set_add(acc, i)
+          _ -> set_add(acc, i + 1)
+          end
+        end
+      end
+    end
+  end
+
+  -- Byte-level atom test, shared with the backtracking matcher's semantics.
+  pfn atom_matches_byte(atom, c) do
+    if c < 0 do false
+    else match atom do
+    RALit(lit) -> c == lit
+    RAAny -> true
+    RADigit -> is_digit_byte(c)
+    RAWord -> is_word_byte(c)
+    RASpace -> is_space_byte(c)
+    RANotDigit -> !is_digit_byte(c)
+    RANotWord -> !is_word_byte(c)
+    RANotSpace -> !is_space_byte(c)
+    RAClass(negated, class_bytes) -> do
+      let found = list_contains_int(class_bytes, c)
+      if negated do !found else found end
+    end
+    end
+    end
+  end
+
+  pfn nfa_loop(items, m, s, slen, pos, active, astart, aend) do
+    if accepts_here(active, m, pos, slen, aend) do
+      true
+    else
+      if pos >= slen do
+        false
+      else
+        let c = string_byte_at(s, pos)
+        let stepped = step_states(items, m, active, c, Nil)
+        let seeded = if astart do stepped else set_add(stepped, 0) end
+        nfa_loop(items, m, s, slen, pos + 1,
+                 eclose(items, m, seeded, Nil), astart, aend)
+      end
+    end
+  end
+
+  pfn accepts_here(active, m, pos, slen, aend) do
+    if !list_contains_int(active, m) do
+      false
+    else
+      if aend do pos == slen else true end
+    end
+  end
+
+  doc """
+  Whether `pattern` matches anywhere in `s`, in time linear in the input.
+
+  Same answer as `matches`, without the backtracking blowup: this simulates
+  the set of reachable NFA states, so the work per input byte is bounded by
+  the pattern length no matter what the input is.
+  """
+  fn matches_linear(pattern : String, s : String) : Bool do
+    match compile(pattern) do
+    Err(_) -> false
+    Ok(RegexPattern(astart, items0, aend)) -> do
+      let items = expand_plus(items0, Nil)
+      let m = list_len(items, 0)
+      nfa_loop(items, m, s, string_byte_length(s), 0,
+               eclose(items, m, Cons(0, Nil), Nil), astart, aend)
+    end
+    end
+  end
+
   -- Try to match items starting at position pos in string s.
   -- anchor_end: if true, the match must consume the rest of the string.
   -- Returns Some(end_pos) on success, None on failure.
@@ -394,12 +596,28 @@ mod Regex do
       -- true
   """
   fn matches_opts(pattern, string, opts) do
+    -- Routed through the NFA simulation, not the backtracking matcher: a
+    -- boolean "does it match" needs no match positions, so the linear engine
+    -- answers it exactly and cannot be made to blow up. `fold_case` is a
+    -- pre-transform on the pattern and subject, so the option flags compose
+    -- with either engine unchanged.
     let (p, s) = fold_case(opts, pattern, string)
-    match compile(p) do
+    matches_linear(p, s)
+  end
+
+  doc """
+  The original backtracking `matches`, retained for differential testing.
+
+  Kept public and named so the parity tests can compare the two engines; a
+  test that compared the linear engine against itself would prove nothing.
+  Do not use it on untrusted input — see `matches_linear` for why.
+  """
+  fn matches_backtracking(pattern : String, string : String) : Bool do
+    match compile(pattern) do
     Err(_) -> false
     Ok(rpat) -> do
-      let slen = string_byte_length(s)
-      match find_match(rpat, s, slen, 0) do
+      let slen = string_byte_length(string)
+      match find_match(rpat, string, slen, 0) do
       None -> false
       Some(_) -> true
       end
