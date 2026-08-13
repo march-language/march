@@ -37,7 +37,7 @@ mod ShadowSelfrefLet do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(int_to_string(single(10)))
     println(int_to_string(chained(3)))
     println(int_to_string(arm(7)))

@@ -8,7 +8,7 @@ mod Main do
     let? _ = f()
     Ok(0)
   end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     match run() do
       Ok(v)  -> println(int_to_string(v))
       Err(_) -> println("err")

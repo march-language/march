@@ -13,7 +13,7 @@ mod Inner do
   end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(Inner.greet3("NoDef", true, "!"))
   println(Inner.greet_d("Def", true, "!"))
 end

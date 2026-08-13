@@ -31,7 +31,7 @@ mod SimdActorMsg do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let pid = spawn(Worker)
     let v = Simd.make_i32x4(10, 20, 30, 40)
     let _ = send(pid, Extract(v))

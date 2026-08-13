@@ -88,6 +88,7 @@ let stdlib_file_list = [
   "work_dispatch.march";
   "logger.march";
   "actor.march";
+  "scheduler.march";
   "flow.march";
   "json.march";
   "json_stream.march";

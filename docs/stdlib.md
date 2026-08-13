@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 114 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 115 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -36,6 +36,36 @@ You know the task; this maps it to the module(s) that do it. (Don't see your tas
 | Structured logging | `Logger` | — |
 | Run work concurrently | `Task`, `actor`, `Flow` | [Concurrency](/docs/cookbook/concurrency/) |
 | Transform a big collection in parallel | `List.pmap` / `pmap_n` | — |
+| Process a large numeric array fast | `NativeArray`, `Simd` | [Numeric Data](/docs/cookbook/numeric-data/) |
+
+---
+
+## NativeArray and Simd
+
+For numeric hot loops — summing a column, scaling an array, scanning bytes —
+reach for `NativeArray` instead of `List`/`Array`. It's a flat, contiguous
+numeric array (`Int`/`Float`/`f32`/`i32`/`u8` element widths) that
+`march --compile` can auto-vectorize: `NativeArray.sum_float`,
+`NativeArray.map_int`, `NativeArray.map2_f32`, and friends compile to real
+SIMD instructions on a compiled build, no ceremony required.
+
+```march
+let arr = NativeArray.make_float(1_000_000, 0.0)
+let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
+let total = NativeArray.sum_float(doubled)
+```
+
+When you need guaranteed vector codegen rather than an optimizer decision —
+cross-lane structure (masks, `select`), a fused multiply-add, or byte-level
+scanning — reach for the `Simd` module instead: five 128-bit vector types
+(`F32x4`, `F64x2`, `I32x4`, `I64x2`, `U8x16`) with 127 operations between
+them, register-resident in compiled code.
+
+See [SIMD & Native Arrays](/docs/simd/) for the full guide (what vectorizes,
+how to trigger it, the honest performance story) and
+[SIMD Benchmarks](/docs/simd-benchmarks/) for the numbers, or jump straight
+to the API references: [`NativeArray`](/docs/stdlib/NativeArray.html),
+[`Simd`](/docs/stdlib/Simd.html).
 
 ---
 

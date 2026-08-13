@@ -74,4 +74,21 @@ mod Actor do
     actor_reply(ref_id, result)
   end
 
+  doc """
+  Bound this actor's mailbox. policy: 0 unbounded (default), 1 drop_new,
+  2 drop_old, 3 block_sender (compiled backend; interpreted treats 3 as 0 —
+  the interpreter's single-threaded eager scheduler cannot park a sender
+  without deadlocking).
+  Dropped messages are counted in Scheduler.dropped_messages().
+
+  Under a drop policy (1 or 2), a dropped Actor.call request or its reply is
+  indistinguishable from a lost reply at the caller — both surface as a
+  timeout Err from Actor.call. Callers that rely on Actor.call against a
+  bounded actor should prefer the block policy (3) instead, so no request
+  or reply is ever silently discarded.
+  """
+  fn set_queue_limit(pid, limit, policy) do
+    actor_set_mailbox_limit(pid, limit, policy)
+  end
+
 end

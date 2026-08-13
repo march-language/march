@@ -73,7 +73,7 @@ mod HttpExample do
     print("")
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect)) do
     print("March HTTP Library Demo")
     print("=======================")
     print("")

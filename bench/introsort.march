@@ -20,7 +20,7 @@ pfn head(xs : List(Int)) : Int do
   end
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let xs     = gen_list(10000, 42, Nil)
   let cmp    = fn x -> fn y -> x <= y
   let sorted = Sort.introsort_by(xs, cmp)

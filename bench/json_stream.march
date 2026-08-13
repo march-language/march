@@ -19,7 +19,7 @@ pfn build_records(n, acc) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let n = 20000
   let src = string_join(build_records(n, Nil), "")
   let t0 = System.monotonic_time()

@@ -64,7 +64,7 @@ end
 
 -- ─── Main ───────────────────────────────────────────────────────────────────
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   println("=== Spawning actors ===")
   let counter = spawn(Counter)
   let logger  = spawn(Logger)

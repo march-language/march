@@ -22,7 +22,7 @@ mod ScrutineeBorrowedConservatism do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(first_or_recheck(Cons(1, Nil), true))
   end
 end

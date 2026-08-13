@@ -14,7 +14,7 @@ mod P21TransitionsStateMachine do
     ConnTag: Closed -> Open via open_conn
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let h = Handle(0)
     let h2 = open_conn(h)
     match h2 do

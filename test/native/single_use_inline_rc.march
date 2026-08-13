@@ -7,7 +7,7 @@ mod SingleUseInlineRc do
     n
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let xs = [10, 20, 30]
     let n = helper(xs)
     println(n)

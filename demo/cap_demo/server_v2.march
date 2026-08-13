@@ -18,7 +18,7 @@ mod App do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite), _cap_netlisten : Cap(IO.NetListen)) do
     println("cap-demo server up")
     let _ = Server.handle(1)
     match tcp_listen(9099) do

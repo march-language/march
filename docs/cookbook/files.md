@@ -89,6 +89,11 @@ column or `None`, so a missing column is a clean `Err`, not a crash.
 parse. Pulling the fold into small `pfn` helpers keeps each `match` arm a single
 expression, which reads more clearly than one deeply nested expression.
 
+For a large column, the [Numeric Data cookbook]({{ site.baseurl
+}}/docs/cookbook/numeric-data/#aggregating-a-csv-column-the-fast-path-way)
+has a fast-path version of `sum_column` that hands the reduction to
+`NativeArray.sum_int` instead of `List.fold_left`.
+
 ---
 
 ## Processing every CSV in a folder

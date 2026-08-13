@@ -7,7 +7,7 @@ mod RecordUpdate do
     { p with x: p.x + 1 }
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let p = { x: 1, y: 2 }
     let moved = move_right(p)
     println(moved.x)

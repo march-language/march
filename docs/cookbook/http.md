@@ -96,6 +96,7 @@ end
 
 ```march
 mod EchoServer do
+  needs IO.NetListen
   needs IO.Console
 
   fn handle(conn) do
@@ -115,7 +116,7 @@ mod EchoServer do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) do
     println("Listening on :8080")
     HttpServer.new(8080)
     |> HttpServer.plug(handle)

@@ -2,7 +2,7 @@ mod P12NestedConstructorTuplePattern do
   needs IO.Console
   type Shape = Pair(Int, (Int, Int)) | Solo(Int)
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let s = Pair(2, (3, 4))
     match s do
       Pair(scale, (a, b)) -> println(scale * (a + b))

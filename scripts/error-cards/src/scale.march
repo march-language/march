@@ -10,7 +10,7 @@ mod RefineErr do
     safe_div(100, divisor)
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(compute(5)))
   end
 

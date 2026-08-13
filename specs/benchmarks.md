@@ -1195,3 +1195,4 @@ to the features it exercises. Quick reference:
 | `RRB.*` / `Parallel.*` / `task_await_unwrap` i64 | `rrb_bench` |
 | `lib/tir/trmc.ml` / TRMC / `lib/tir/perceus_fbip.ml` | `list_producers` |
 | JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |
+| actor / mailbox / scheduler / supervision changes | `scripts/actor-load.sh` (all four scenarios: `fanin`, `churn`, `callstorm`, `crashloop`) |

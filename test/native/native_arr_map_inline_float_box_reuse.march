@@ -13,7 +13,7 @@
 -- element.
 mod Main do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     let arr = NativeArray.from_list_float(Cons(-3.5, Cons(-1.0, Cons(0.0, Cons(1.0, Cons(3.5, Nil))))))
     let arr2 = NativeArray.map_float(arr, fn x -> x *. 2.0 +. 1.0)
     println(NativeArray.to_list_float(arr2))   -- [-6., -1., 1., 3., 8.]

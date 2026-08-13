@@ -39,7 +39,7 @@ negate(1)
 panic("non-exhaustive pattern match")
 
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t15 : Int = let $t14 : List(Int) = let $t13 : List(Int) = alloc List.Nil(Int)() in
 alloc List.Cons(1, $t13) in
 first_or_recheck($t14, true) in

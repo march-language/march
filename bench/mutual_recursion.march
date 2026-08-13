@@ -65,7 +65,7 @@ end
 
 -- ── Main ────────────────────────────────────────────────────────────────
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   let n = 10000000
 
   -- Even/odd: n = 10M

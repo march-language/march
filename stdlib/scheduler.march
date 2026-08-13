@@ -1,0 +1,26 @@
+-- Scheduler: runtime observability for the actor/task scheduler.
+--
+-- These counters are the load-shedding substrate: a supervisor or ingress
+-- actor polls them to decide when to shed. Interpreted backend reports the
+-- subset that is meaningful without the C scheduler (live actor count);
+-- unknown/unsupported indices read 0 on both backends.
+mod Scheduler do
+
+  doc "Raw stat by index. 0=live procs, 1=total spawned, 2=global runq depth, 3=stack-alloc failures, 4=messages dropped by mailbox policy, 5=stacks recycled, 6=pending timers. Unknown index reads 0."
+  fn stat(i : Int) : Int do
+    sched_stat(i)
+  end
+
+  doc "Green-thread processes currently alive (actors + tasks + main)."
+  fn live_procs() : Int do sched_stat(0) end
+
+  doc "Processes ever spawned over the program lifetime."
+  fn total_spawned() : Int do sched_stat(1) end
+
+  doc "Cross-thread global run-queue depth (instantaneous)."
+  fn runq_depth() : Int do sched_stat(2) end
+
+  doc "Messages dropped by bounded-mailbox overflow policies."
+  fn dropped_messages() : Int do sched_stat(4) end
+
+end

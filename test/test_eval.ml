@@ -2442,6 +2442,7 @@ let test_fusion_no_fuse_multi_use () =
 (** Purity constraint: calls with IO must not be fused. *)
 let test_fusion_no_fuse_impure () =
   let m = fusion_module {|mod Test do
+  needs IO.Console
     type IntList = INil | ICons(Int, IntList)
 
     fn imap_print(xs : IntList, f : Int -> Int) : IntList do
@@ -2461,7 +2462,7 @@ let test_fusion_no_fuse_impure () =
       end
     end
 
-    fn main() : Int do
+    fn main(_cap_console : Cap(IO.Console)) : Int do
       let xs = ICons(1, ICons(2, INil))
       let ys = imap_print(xs, fn x -> x * 2)
       ifold(ys, 0, fn (a, b) -> a + b)
@@ -4163,6 +4164,7 @@ let test_perceus_record_param_multi_call_no_rc_underflow () =
    zero, and List.nth read freed memory → "local RC underflow". *)
 let test_perceus_list_length_then_nth_incrc () =
   let m = perceus_module {|mod Test do
+  needs IO.Console
 
     pfn check(xs : List(String)) : Bool do
       let n = List.length(xs)
@@ -4170,7 +4172,7 @@ let test_perceus_list_length_then_nth_incrc () =
       n == 1 && first == "hello"
     end
 
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let xs = Cons("hello", Nil)
       let ok = check(xs)
       if ok do println("pass") else println("fail") end
@@ -4213,6 +4215,7 @@ let test_perceus_list_length_then_nth_incrc () =
    the loop then reads a freed String field. *)
 let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
   let m = perceus_module {|mod Test do
+  needs IO.Console
 
     pfn use_first(pair : (String, String)) : Int do
       let a = match pair do (x, _) -> x end
@@ -4228,7 +4231,7 @@ let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
       end
     end
 
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       let pair = ("hello", "world")
       println(process_pairs(pair, 3, 0))
     end
@@ -4270,6 +4273,7 @@ let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
     freed.  After the fix, t is correctly in _borrowed_field_vars → post_dec suppressed. *)
 let test_perceus_local_record_field_no_spurious_decrc () =
   let m = perceus_module {|mod Test do
+  needs IO.Console
 
     type Meta = { draft: Bool, title: String }
 
@@ -4283,7 +4287,7 @@ let test_perceus_local_record_field_no_spurious_decrc () =
       String.byte_size(t)
     end
 
-    fn main() do
+    fn main(_cap_console : Cap(IO.Console)) do
       println(render("hello"))
     end
 
@@ -4586,7 +4590,8 @@ let test_main_cap_io_runs () =
     arity-aware dispatch added for the `Cap(IO)` case). *)
 let test_main_zero_arity_still_runs () =
   let src = {|mod Test do
-    fn main() : () do
+  needs IO.Console
+    fn main(_cap_console : Cap(IO.Console)) : () do
       println("zero-arity main ran")
     end
   end|} in

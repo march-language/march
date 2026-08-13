@@ -13,7 +13,7 @@ mod Test do
     fn translate(p: Point, dx: Int, dy: Int): Point = "ffi_codec_translate"
     fn widen(s: Shape): Shape = "ffi_codec_widen"
   end
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(area(Circle(5))))      -- decode Circle: 3*5*5 = 75
     println(int_to_string(area(Rect(4, 6))))     -- decode Rect:  4*6   = 24
     let q = translate({ x: 1, y: 2 }, 10, 20)    -- decode Point, encode new Point

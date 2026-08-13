@@ -18,7 +18,7 @@
 -- ones), plus a float map/sum round-trip that previously crashed outright.
 mod Main do
   needs IO.Console
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     let ints = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
     let ints2 = NativeArray.map_int(ints, fn x -> x * 2)
     println(int_to_string(NativeArray.sum_int(ints2)))   -- 20

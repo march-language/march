@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let specs = [Cli.value_flag("name", "the name"), Cli.flag("verbose", "verbose mode")]
     match Cli.parse(specs, ["--name", "alice", "--verbose", "input.txt"]) do
       Ok(p) ->

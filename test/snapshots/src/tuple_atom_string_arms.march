@@ -26,7 +26,7 @@ mod TupleAtomStringArms do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(describe((0, 0)))
     println(tag_name(:ok))
     println(word("yes"))

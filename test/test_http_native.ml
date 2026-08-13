@@ -106,7 +106,7 @@ let server_src = {|mod HttpNativeE2e do
     end
   end
 
-  fn main() do
+  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process)) do
     let port = port_from_env()
     if port == 0 do
       process_exit(2)
@@ -507,6 +507,32 @@ let run_http_e2e ~variant ~slug ~evloop () =
         ~exp_status:200 ~exp_body:(Printf.sprintf "pipelined-%d" i)
         (read_response pl_fd pending ~deadline)
     done);
+
+  (* ── Phase C2: bodies larger than one read buffer ────────────────────── *)
+  (* Regression guard. The event-loop server read into a FIXED 64 KB inline
+     buffer. A body larger than that filled it, failed to parse, and returned
+     IO_PARTIAL — and because the loop is edge-triggered, no further readable
+     event was ever delivered for the bytes still sitting in the socket. The
+     request was never dispatched: no response, no log line, connection hung
+     until the peer gave up. Every upload over 64 KB was affected, which in
+     practice meant every package publish to a registry.
+
+     64 KB is the exact boundary, so probe either side of it and well past it.
+     /echo returns the body verbatim, so a truncated or mis-assembled read
+     shows up as a mismatch rather than merely a non-200. *)
+  List.iter (fun size ->
+    let fd = connect_or_bail (Printf.sprintf "large-body %d" size) in
+    Fun.protect ~finally:(fun () -> try Unix.close fd with _ -> ()) (fun () ->
+      let pending = ref "" in
+      let deadline = Unix.gettimeofday () +. req_timeout in
+      (* Non-repeating payload: a run of one byte would hide an offset error. *)
+      let payload = String.init size (fun i -> Char.chr (33 + (i mod 90))) in
+      send fd (request_bytes ~meth:"POST" ~path:"/echo" ~body:payload
+                 ~keep_alive:false);
+      check_response
+        (Printf.sprintf "%s POST /echo (%d-byte body)" variant size)
+        ~exp_status:200 ~exp_body:payload (read_response fd pending ~deadline)))
+    [ 32 * 1024; 64 * 1024; 65536 + 1; 256 * 1024; 1024 * 1024 ];
 
   (* ── Phase D: still serving, and still ALIVE ─────────────────────────── *)
   let fd = connect_or_bail "final request" in

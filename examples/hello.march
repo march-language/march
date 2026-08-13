@@ -23,7 +23,7 @@ mod Hello do
     |> List.map(fn x -> x * 2)
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(greet("world"))
     println(greet("March"))
 

@@ -24,7 +24,7 @@ mod Main do
     Logger -> Client : String
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let (cc, sc, lc) = MPST.new(Relay)
     println("mpst protocol projected and typechecked")
   end

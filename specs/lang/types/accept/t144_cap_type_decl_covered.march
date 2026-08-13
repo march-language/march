@@ -23,7 +23,7 @@ mod CoveredDecls do
   type Conn = Idle | Live(Cap(IO.NetConnect))
   type Bag = { label : String, items : List(Cap(IO.FileRead)) }
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println("every capability named here is declared")
   end
 end

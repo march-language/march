@@ -147,6 +147,13 @@ type actor_inst = {
   (** Linear values owned by this actor: (value, drop_fn) pairs in acquisition order.
       drop_fn is a March callable (VClosure or VBuiltin) : value -> value.
       Walked in reverse and called at crash time (Phase 6b). *)
+  (* Task 9: bounded mailboxes — Actor.set_queue_limit surface.
+     mbox_limit <= 0 means unbounded (default). mbox_policy: 0 unbounded,
+     1 drop_new, 2 drop_old, 3 block (the interpreter's single-threaded
+     eager scheduler cannot park a sender without deadlocking, so block is
+     treated as unbounded here — see stdlib/actor.march's doc string). *)
+  mutable ai_mbox_limit  : int;
+  mutable ai_mbox_policy : int;
 }
 
 (** Actor definitions registered by [DActor] — reset per module eval. *)
@@ -988,7 +995,9 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_restart_count = [];
                      ai_epoch = 0;
                      ai_resources = [];
-                     ai_linear_values = [] } in
+                     ai_linear_values = [];
+                     ai_mbox_limit = 0;
+                     ai_mbox_policy = 0 } in
         Hashtbl.add actor_registry pid inst
     ) snap.ass_instances;
   next_pid := snap.ass_next_pid
@@ -2163,7 +2172,8 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [];
-      ai_linear_values = [] } in
+      ai_linear_values = [];
+      ai_mbox_limit = 0; ai_mbox_policy = 0 } in
     Hashtbl.add actor_registry child_pid child_inst;
     (* Re-register in process registry if the crashed actor had a name *)
     (match crashed_pid with
@@ -2453,6 +2463,41 @@ and crash_actor (pid : int) (reason : string) : unit =
     (match supervisor with
      | Some sup_pid -> notify_supervisor sup_pid pid
      | None -> ())
+
+(** Task 9: interpreter-side counter for messages dropped by bounded-mailbox
+    overflow policies. Mirrors the compiled runtime's
+    MARCH_STAT_MSGS_DROPPED / march_stat_counters[4], surfaced to March via
+    sched_stat(4) / Scheduler.dropped_messages(). *)
+let dropped_messages_count = ref 0
+
+(** Task 9: enqueue [msg] onto [inst]'s mailbox, honoring its bounded-mailbox
+    policy (set via actor_set_mailbox_limit / Actor.set_queue_limit).
+    - limit <= 0 (default): unbounded, always enqueue.
+    - policy 3 (block): the interpreter's single-threaded eager scheduler
+      cannot park a sender without deadlocking, so block is treated as
+      unbounded here (documented divergence — see stdlib/actor.march).
+    - policy 1 (drop_new): reject the incoming message when at capacity.
+    - policy 2 (drop_old): evict the oldest queued message to make room.
+    - unrecognized policy: falls back to unbounded (defensive default). *)
+let mailbox_enqueue (inst : actor_inst) (msg : value) : unit =
+  let limit = inst.ai_mbox_limit in
+  if limit <= 0 then
+    Queue.push msg inst.ai_mailbox
+  else
+    match inst.ai_mbox_policy with
+    | 3 -> Queue.push msg inst.ai_mailbox (* block: unbounded in the interpreter *)
+    | 1 ->
+      if Queue.length inst.ai_mailbox < limit then
+        Queue.push msg inst.ai_mailbox
+      else
+        incr dropped_messages_count (* drop_new: reject the incoming message *)
+    | 2 ->
+      if Queue.length inst.ai_mailbox >= limit && not (Queue.is_empty inst.ai_mailbox) then begin
+        ignore (Queue.pop inst.ai_mailbox);
+        incr dropped_messages_count
+      end;
+      Queue.push msg inst.ai_mailbox (* drop_old: evict oldest, then enqueue *)
+    | _ -> Queue.push msg inst.ai_mailbox
 
 (** Register a monitor: watcher_pid observes target_pid. Returns monitor_ref. *)
 let monitor_actor ~watcher_pid ~target_pid : int =
@@ -4199,6 +4244,29 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  ; ("sched_stat", VBuiltin ("sched_stat", function
+        (* No C scheduler in the interpreter; report what's meaningful:
+           0 = live actors, 1 = total actors ever spawned, 4 = messages
+           dropped by bounded-mailbox overflow policies (Task 9). Everything
+           else (runq depth, recycled stacks, timer heap) has no interpreted
+           analogue, so it reads 0 like an unknown index. *)
+        | [VInt 0] -> VInt (Hashtbl.length actor_registry)
+        | [VInt 1] -> VInt !next_pid
+        | [VInt 4] -> VInt !dropped_messages_count
+        | [VInt _] -> VInt 0
+        | _ -> eval_error "sched_stat: expected Int"))
+  ; ("actor_set_mailbox_limit", VBuiltin ("actor_set_mailbox_limit", function
+        (* Task 9: bind a mailbox capacity + overflow policy to an actor.
+           policy: 0 unbounded, 1 drop_new, 2 drop_old, 3 block (treated as
+           unbounded in the interpreter — see mailbox_enqueue above). *)
+        | [VPid pid; VInt limit; VInt policy] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst ->
+             inst.ai_mbox_limit <- limit;
+             inst.ai_mbox_policy <- policy
+           | None -> ());
+          VUnit
+        | _ -> eval_error "actor_set_mailbox_limit: expected (Pid, Int, Int)"))
   ; ("actor_get_int", VBuiltin ("actor_get_int", function
         (* Access actor state by field index and return the Int value.
            Mirrors the compiled-mode march_actor_get_int(actor_ptr, index).
@@ -4365,7 +4433,7 @@ let base_env : env =
              (* Valid cap: enqueue and return :ok immediately *)
              (match msg with
               | VCon _ | VAtom _ ->
-                Queue.push msg inst.ai_mailbox;
+                mailbox_enqueue inst msg;
                 VAtom "ok"
               | _ ->
                 eval_error "send_checked: message must be a constructor value, got %s"
@@ -7743,7 +7811,7 @@ let base_env : env =
            | Some inst when not inst.ai_alive -> VUnit
            | Some inst ->
              (match msg with
-              | VCon _ | VAtom _ -> Queue.push msg inst.ai_mailbox; VUnit
+              | VCon _ | VAtom _ -> mailbox_enqueue inst msg; VUnit
               | _ -> eval_error "actor_cast: message must be a constructor, got %s"
                        (value_to_string msg)))
         | _ -> eval_error "actor_cast: expected (Pid, message)"))
@@ -7808,7 +7876,7 @@ let base_env : env =
               | None ->
                 VCon ("Err", [VString "no reply (timeout or unhandled Call)"])
               | Some hname ->
-                Queue.push (VCon (hname, [VInt ref_id])) inst.ai_mailbox;
+                mailbox_enqueue inst (VCon (hname, [VInt ref_id]));
                 !run_scheduler_hook ();
                 (match Hashtbl.find_opt pending_replies ref_id with
                  | Some result ->
@@ -9488,7 +9556,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
                  ai_resources = [];
-                 ai_linear_values = [] } in
+                 ai_linear_values = [];
+                 ai_mbox_limit = 0; ai_mbox_policy = 0 } in
                Hashtbl.add actor_registry child_pid child_inst;
                (sf.sf_name.txt, child_pid)
            ) sup_cfg.sc_fields in
@@ -9518,7 +9587,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
-                    ai_linear_values = [] } in
+                    ai_linear_values = [];
+                    ai_mbox_limit = 0; ai_mbox_policy = 0 } in
        Hashtbl.add actor_registry pid inst;
        VPid pid)
 
@@ -9536,7 +9606,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
              Only constructor values (VCon/VAtom) are valid messages. *)
           (match msg_val with
            | VCon _ | VAtom _ ->
-             Queue.push msg_val inst.ai_mailbox;
+             mailbox_enqueue inst msg_val;
              VCon ("Some", [VUnit])
            | _ ->
              eval_error "send: message must be a constructor value, got %s"
@@ -9554,7 +9624,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
         | Some inst ->
           (match msg_val with
            | VCon _ | VAtom _ ->
-             Queue.push msg_val inst.ai_mailbox;
+             mailbox_enqueue inst msg_val;
              VCon ("Some", [VUnit])
            | _ ->
              eval_error "send: message must be a constructor value, got %s"
@@ -9759,6 +9829,7 @@ let reset_scheduler_state () : unit =
   current_pid := None;
   reduction_ctx := None;
   last_reduction_count := 0;
+  dropped_messages_count := 0;
   Hashtbl.clear process_registry;
   Hashtbl.clear pid_to_registry_name;
   Hashtbl.clear dyn_sup_registry;
@@ -10398,7 +10469,8 @@ let spawn_from_spec (spec : value) : unit =
                 ai_state = init_state; ai_alive = true;
                 ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
-                ai_resources = []; ai_linear_values = [] } in
+                ai_resources = []; ai_linear_values = [];
+                ai_mbox_limit = 0; ai_mbox_policy = 0 } in
               Hashtbl.add actor_registry pid inst;
               app_spawn_order := !app_spawn_order @ [pid];
               (* Register named children in the process registry *)
@@ -10924,6 +10996,7 @@ let eval_module_env (m : module_) : env =
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
   next_pid := 0;
+  dropped_messages_count := 0;
   Hashtbl.clear task_registry;
   next_task_id := 0;
   Hashtbl.clear dyn_sup_registry;
@@ -11244,14 +11317,27 @@ let run_module (m : module_) : unit =
     match List.assoc_opt "main" env with
     | None   -> ()
     | Some v ->
-      (* [main] may be declared 0-arity or take a single [Cap(IO)] parameter
-         (checked at desugar time by [Desugar.check_main_signature]); the
-         latter receives the erased root capability, matching [root_cap]'s
-         own runtime representation ([VUnit], see the initial env binding
-         above). Top-level functions are bound to a [VBuiltin] recursion
-         wrapper (see the [DFn] case of [eval_decl], the "<rec:name/arity>"
-         closure), not directly to a [VClosure], so arity can't be read off
-         [v] itself — read it from the entry module's own AST instead. *)
+      (* [main] may be declared 0-arity or take ANY NUMBER of [Cap(P)]
+         parameters (checked at desugar time by
+         [Desugar.check_main_signature]; R1 stage D made the grant a SET so a
+         program needing e.g. console AND spawn can state a narrow grant
+         instead of widening to `Cap(IO)`). Each receives the erased
+         capability, matching [root_cap]'s own runtime representation
+         ([VUnit], see the initial env binding above).
+
+         This MUST track the compiled path's entry adapter
+         (lib/tir/llvm_toplevel.ml, which supplies the same number of erased
+         nulls). The two are the same contract in two backends, and the
+         compiled-and-run parity tests in test_codegen's [main_cap_adapter]
+         group exist because only running BOTH catches a divergence — this
+         arm silently passed 0 args to a 2-parameter `main` and produced
+         "arity mismatch: expected 2 args, got 0" while the compiled side was
+         fine.
+
+         Top-level functions are bound to a [VBuiltin] recursion wrapper (see
+         the [DFn] case of [eval_decl], the "<rec:name/arity>" closure), not
+         directly to a [VClosure], so arity can't be read off [v] itself —
+         read it from the entry module's own AST instead. *)
       let main_arity = List.find_map (function
           | DFn (def, _) when def.fn_name.txt = "main" ->
             (match def.fn_clauses with
@@ -11261,7 +11347,7 @@ let run_module (m : module_) : unit =
         ) m.mod_decls
       in
       let args = match main_arity with
-        | Some 1 -> [VUnit]
+        | Some n when n > 0 -> List.init n (fun _ -> VUnit)
         | _ -> []
       in
       let _ = apply v args in

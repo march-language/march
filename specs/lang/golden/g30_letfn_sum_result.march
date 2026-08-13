@@ -5,7 +5,7 @@ mod Main do
   -- block — proving the ELetFn binding is visible to the block continuation
   -- (like `let`: eval.ml:6884 evaluates `rest` in the extended env `env'`),
   -- not just callable from within its own body.
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     fn go(n) do
       if n == 0 do
         0

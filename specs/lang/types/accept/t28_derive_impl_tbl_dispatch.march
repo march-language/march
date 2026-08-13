@@ -11,7 +11,7 @@ mod M do
 
   derive Show, Eq for Color
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(show(Red))
     println(Green == Green)
     println(Red == Blue)

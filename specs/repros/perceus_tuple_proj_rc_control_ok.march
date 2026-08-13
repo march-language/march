@@ -23,7 +23,7 @@ fn run(conn) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let conn = { ct : "multipart/form-data; boundary=" ++ String.trim("  Xbnd  ") }
   println(run(conn))
 end

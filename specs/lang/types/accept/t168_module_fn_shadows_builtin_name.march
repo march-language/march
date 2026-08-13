@@ -18,7 +18,7 @@ mod Main do
     x + 100
   end
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     println(int_to_string(file_read(1)))
   end
 end

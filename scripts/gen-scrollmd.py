@@ -196,7 +196,12 @@ def build_runner(cells):
     prog = ["mod NotebookRunner do", "  needs IO", ""]
     for m in mods:
         prog += [m, ""]
-    prog.append("fn main() do")
+    # R1 stage D (2026-08-10): a program that performs IO must declare the
+    # grant it runs under, so the synthesized `main` takes the root capability
+    # matching the `needs IO` above. Same reasoning as that declaration — the
+    # wrapper covers arbitrary doc code, so the root is the only grant that
+    # cannot under-declare. `_`-prefixed because the cells never name it.
+    prog.append("fn main(_cap_io : Cap(IO)) do")
     for c in inlines:
         for line in c.split("\n"):
             prog.append("  " + line if line.strip() else line)

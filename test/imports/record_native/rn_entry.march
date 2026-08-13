@@ -82,7 +82,7 @@ fn update_dyn_string_field() do
   { built with name: "Bob" }
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let r = { name: "Alice", age: 30 }
   let nums = { x: 10, y: 20 }
 

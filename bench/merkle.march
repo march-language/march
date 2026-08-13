@@ -50,7 +50,7 @@ pfn bench_loop(n : Int, acc : Int) : Int do
   end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(bench_loop(50, 0)))
 end
 

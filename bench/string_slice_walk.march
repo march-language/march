@@ -67,7 +67,7 @@ pfn go(buf : String, i : Int, n : Int, total_fields : Int, acc : Int) : Int do
   else go(buf, i + 1, n, total_fields, acc + walk(buf, 0, total_fields, 0)) end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   let buf = String.repeat("aaa,bbb,ccc,ddd\n", rows())
   let total_fields = rows() * fields_per_row()
   println("checksum=" ++ to_string(go(buf, 0, iterations(), total_fields, 0)))

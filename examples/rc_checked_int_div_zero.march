@@ -22,7 +22,7 @@ pfn outcome(r : Result(Bool, String)) : String do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   println(outcome(__try_call(fn _ ->
     let _ = int_div(100, 0)
     true

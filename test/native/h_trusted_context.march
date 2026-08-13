@@ -17,7 +17,7 @@
 -- here is a real cross-check rather than a formality.
 mod HTrustedContext do
   needs IO.Console
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     -- HTML trust: verbatim in element content, escaped in an href.
     let h = Html.trust_html("<b>hi</b>")
     println("html_in_html: " ++ IOList.to_string(~H"<p>${h}</p>"))

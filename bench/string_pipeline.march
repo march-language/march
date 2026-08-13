@@ -40,7 +40,7 @@ pfn map_strings(xs : List(String)) : List(String) do
   go(xs, Nil)
 end
 
-pfn main() : Unit do
+pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let n       = 100000
   let pieces  = build_list(1, n, Nil)
   let doubled = map_strings(pieces)

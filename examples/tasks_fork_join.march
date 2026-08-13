@@ -69,7 +69,7 @@ fn max_collatz(lo : Int, hi : Int, threshold : Int) : Int do
   end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   println("--- Fork-join examples ---")
 
   -- Sum 1..10000 using fork-join (threshold=500)

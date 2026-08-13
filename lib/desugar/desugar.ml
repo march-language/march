@@ -1148,6 +1148,7 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
       ; fc_guard  = None
       ; fc_body   = body
       ; fc_span   = fn_span
+      ; fc_params_span = fn_span
       }
     in
     { def with fn_clauses = [merged_clause] }
@@ -1255,6 +1256,7 @@ let rec desugar_decl (d : decl) : decl =
         fc_guard  = None;
         fc_body   = result_expr;
         fc_span   = sp;
+        fc_params_span = sp;
       }];
     } in
     DFn (init_fn, sp)
@@ -1310,6 +1312,7 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                    fc_guard = None;
                    fc_body = clause_body;
                    fc_span = m.md_name.span;
+                   fc_params_span = m.md_name.span;
                  }];
                  fn_bounds = [];
                } in
@@ -1347,6 +1350,7 @@ let mk_fn_def name params body : fn_def =
       fc_guard  = None;
       fc_body   = body;
       fc_span   = dummy_span;
+      fc_params_span = dummy_span;
     }] }
 
 (* ── Derive-expansion span uniquification ──────────────────────────────
@@ -1469,7 +1473,8 @@ let respan_fn_def (fd : fn_def) : fn_def =
         { fc_params = List.map respan_fn_param c.fc_params;
           fc_guard  = Option.map respan_expr c.fc_guard;
           fc_body   = respan_expr c.fc_body;
-          fc_span   = fresh_synthetic_span () }) fd.fn_clauses }
+          fc_span   = fresh_synthetic_span ();
+          fc_params_span = fresh_synthetic_span () }) fd.fn_clauses }
 
 (** Uniquify every span inside a derive-generated decl (the decl's own
     top-level span — the derive site — is kept: it is a real user span used
@@ -2564,18 +2569,43 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
         (match def.fn_clauses with
          | [] -> ()
          | clause :: _ ->
+           (* R1 stage D
+              (specs/2026-08-10-r1-stage-d-grant-required-design.md): `main`
+              may take ANY NUMBER of capability parameters, and the grant is
+              their union — the same rule [Typecheck.check_fn_grants] already
+              applies to ordinary functions.
+
+              This is a prerequisite for requiring a grant at all, not a
+              convenience. Before it, `main` could hold exactly ONE capability,
+              so a program needing (say) both `IO.Console` and `IO.Spawn` could
+              not state a narrow grant and had to widen to `Cap(IO)` — 30% of
+              the programs the stage-D migration touches. Flipping the default
+              without this would push a third of the ecosystem to the full
+              grant and earn a WEAKER guarantee than the ambient state it
+              replaced.
+
+              The relaxation is "one cap parameter" → "any number of cap
+              parameters", NOT "arbitrary parameters": every parameter must
+              still be a capability, so a MIXED list is rejected exactly as a
+              non-capability one is. A grant that described only some of what
+              `main` receives would not be a grant. *)
+           let cap_param = function
+             | FPNamed p | FPDefault (p, _) -> is_cap_io_ty p.param_ty
+             | FPPat _ -> false
+           in
            match clause.fc_params with
            | [] -> ()
-           | [ FPNamed p ] when is_cap_io_ty p.param_ty -> ()
-           | [ FPDefault (p, _) ] when is_cap_io_ty p.param_ty -> ()
+           | params when List.for_all cap_param params -> ()
            | params ->
              let n = List.length params in
+             let n_caps = List.length (List.filter cap_param params) in
              Err.error errors ~span:clause.fc_span
                (Printf.sprintf
-                  "`main` must take zero arguments, or exactly one argument of type `Cap(IO)` (or a narrower point of the IO lattice, e.g. `Cap(IO.Console)`) — the capability the runtime GRANTS the program at startup; the whole program is then held to it.\n\
-                   Found %d parameter%s instead.\n\
-                   help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(cap : Cap(IO.Console)) : () do ... end` to prove the program touches nothing beyond the console."
-                  n (if n = 1 then "" else "s")))
+                  "`main` must take zero arguments, or only arguments of type `Cap(IO)` (or narrower points of the IO lattice, e.g. `Cap(IO.Console)`) — the capabilities the runtime GRANTS the program at startup; the whole program is then held to their union.\n\
+                   Found %d parameter%s, %d of which %s a capability.\n\
+                   help: use `fn main() : () do ... end`, `fn main(cap : Cap(IO)) : () do ... end` for full IO, or e.g. `fn main(console : Cap(IO.Console), spawn : Cap(IO.Spawn)) : () do ... end` to grant exactly what the program needs."
+                  n (if n = 1 then "" else "s")
+                  (n - n_caps) (if n - n_caps = 1 then "is not" else "are not")))
       | _ -> ()
     ) decls
 
@@ -2627,6 +2657,7 @@ let gen_island_bridges (sp : span) : decl list =
         fc_guard  = None;
         fc_body   = body;
         fc_span   = sp;
+        fc_params_span = sp;
       }] }
   in
   (* update_json(state_json, msg_json) : String
@@ -2783,7 +2814,7 @@ let rec expand_defaults_decl (d : decl) : decl list =
            let all_call_args = req_args @ passed_default_args @ remaining_default_exprs in
            (* Call the full mangled version, not the original name *)
            let body = EApp (mk_var full_mangled, all_call_args, sp) in
-           let short_clause = { fc_params = short_params; fc_guard = None; fc_body = body; fc_span = sp } in
+           let short_clause = { fc_params = short_params; fc_guard = None; fc_body = body; fc_span = sp; fc_params_span = sp } in
            let short_def = { def with fn_clauses = [short_clause]; fn_ret_ty = None;
                                       fn_name = { def.fn_name with txt = mangled_name } } in
            DFn (short_def, sp)

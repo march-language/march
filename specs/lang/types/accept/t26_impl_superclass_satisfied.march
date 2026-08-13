@@ -32,7 +32,7 @@ mod M do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(greet(Dog("Rex")))
   end
 end

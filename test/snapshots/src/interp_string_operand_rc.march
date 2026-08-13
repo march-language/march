@@ -19,7 +19,7 @@ mod InterpStringOperandRc do
     "a" ++ s ++ "b"
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(interp("x"))
     println(chain("x"))
   end

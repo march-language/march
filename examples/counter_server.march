@@ -70,7 +70,7 @@ fn router(counter, conn) do
   else HttpServer.text(conn, 405, "Method Not Allowed") end end
 end
 
-fn main() : Unit do
+fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) : Unit do
   let counter = spawn(Counter)
   println("Counter server on http://localhost:8080")
   println("  GET  /count     - read counter")

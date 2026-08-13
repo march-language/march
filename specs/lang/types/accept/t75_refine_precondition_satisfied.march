@@ -10,7 +10,7 @@
 mod M do
   needs IO.Console
   fn take_n(n : {Int | _ >= 0}) : Int do n end
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(take_n(5)))
   end
 end

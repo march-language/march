@@ -8,7 +8,7 @@ mod Main do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(bool_to_string(classify(0) == :zero))
     match classify(5) do
       :zero -> println("was zero")

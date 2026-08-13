@@ -1,7 +1,7 @@
 -- types (0) --
 -- fns (2) --
 ## main
-fn main() : () =
+fn main(_cap_console : Cap(IO.Console)) : () =
   let $t1 : String = pick(true, "value") in
 println($t1)
 

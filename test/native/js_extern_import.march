@@ -15,7 +15,7 @@ mod JsExternImport do
     fn dirname(path: String) : String
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(js_path_basename("/a/b/hello.march"))
     println(js_path_extname("/a/b/hello.march"))
     println(dirname("/a/b/hello.march"))

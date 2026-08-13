@@ -15,7 +15,7 @@ mod P16InterfaceImplPair do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     println(describe(Circle(5)))
     println(describe(Square(3)))
   end

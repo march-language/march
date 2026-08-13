@@ -1,6 +1,162 @@
-<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VectorClock — March Docs</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style>:root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;--acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;--faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}[data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;--acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;--faint:#6a96b5;--bright:#071828;--code:#ddeaf5;--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}*{box-sizing:border-box;margin:0;padding:0}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:60px;background:var(--bg-nav);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}#topbar .brand{font-family:'Lora',Georgia,serif;font-size:18px;font-weight:600;color:var(--text);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}#topbar .brand svg{width:20px;height:20px}#topbar .actions{display:flex;align-items:center;gap:12px}#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px;transition:all .15s}#theme-toggle:hover{color:var(--text);border-color:var(--acc)}#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}#search-trigger:hover{border-color:var(--acc);color:var(--text)}#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}.content-wrap{display:flex;flex:1;overflow:hidden}code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}p{margin:8px 0}#sb{width:248px;min-width:208px;background:var(--sb);border-right:1px solid var(--bdr);padding:8px 10px 28px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;flex-shrink:0}#sb::-webkit-scrollbar{width:5px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}#sb::-webkit-scrollbar-thumb:hover{background:var(--dim)}.sb-section{padding:0}.sb-heading{font-family:'JetBrains Mono','Fira Code',monospace;font-size:10px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.16em;padding:20px 10px 8px;user-select:none}.sl{display:block;padding:5px 10px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--dim);transition:color .12s,background .12s}.sl:hover{background:color-mix(in oklab,var(--acc) 9%,transparent);color:var(--text);text-decoration:none}.sl.active{color:var(--acc);font-weight:500}.sb-section>.sl.active,.sb-sub .sl.active{background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}.sb-group{margin:1px 0}.sb-group-hdr{display:flex;align-items:center;border-radius:6px;cursor:pointer;user-select:none;transition:background .12s}.sb-group-hdr:hover{background:color-mix(in oklab,var(--acc) 9%,transparent)}.sb-group-hdr:hover .sl,.sb-group-hdr:hover .sb-chevron{color:var(--text)}.sb-group-hdr:has(.sl.active){background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}.sb-group-hdr .sl{flex:1;padding-left:1px}.sb-chevron{font-size:9px;transition:transform .15s,color .12s;width:20px;align-self:stretch;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--faint)}.sb-group.open>.sb-group-hdr .sb-chevron{transform:rotate(90deg);color:var(--acc)}.sb-sub{display:none;margin:1px 0 6px 19px;padding-left:8px;border-left:1px solid var(--bdr)}.sb-group.open .sb-sub{display:block}.sb-sub .sl{font-size:12px;padding:3px 8px;color:var(--dim)}.sb-sub .sl:hover{color:var(--text)}.sb-kind{display:inline-block;width:12px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.03em;margin-right:8px;text-transform:uppercase;text-align:center}#main{flex:1;padding:40px max(52px,calc(50% - 574px));min-width:0;overflow-y:auto;height:calc(100vh - 60px)}.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}.breadcrumb .sep{color:var(--bdr)}.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}.badge{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.08em;padding:2px 9px;border-radius:100px;text-transform:uppercase;flex-shrink:0;border:1px solid transparent}.bfn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn);border-color:color-mix(in oklab,var(--fn) 24%,transparent)}.bpfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 30%,transparent)}.bty{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty);border-color:color-mix(in oklab,var(--ty) 24%,transparent)}.bpt{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 26%,transparent)}.bif{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if);border-color:color-mix(in oklab,var(--if) 24%,transparent)}.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}.ib.open{display:block}.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}.mc:hover{border-color:var(--acc);transform:translateY(-1px)}.mc h3{font-family:'Lora',Georgia,serif;color:var(--acc);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}.mc p{font-size:13px;color:var(--dim);margin-top:6px}.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}.st span{display:flex;align-items:center;gap:4px}.pre-wrap{position:relative}.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}.pre-wrap:hover .copy-btn{opacity:1}.copy-btn:hover{color:var(--text);border-color:var(--acc)}.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}#search-overlay.open{display:flex}#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}#search-input::placeholder{color:var(--dim)}#sr{max-height:50vh;overflow-y:auto;padding:8px}#sr:empty{display:none}.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}.sr-item:hover{background:var(--card);text-decoration:none}.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}.sr-fn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn)}.sr-type{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty)}.sr-interface{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if)}.sr-module{background:color-mix(in oklab,var(--acc) 13%,transparent);color:var(--acc)}.sr-pfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv)}.sr-ptype{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv)}.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}.admonition.warning{border-left-color:var(--ty)}.admonition.note{border-left-color:var(--acc2)}ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}.guide-body{line-height:1.8;font-size:15px}.guide-body h3{font-family:'Lora',Georgia,serif;font-size:1.4rem;margin:30px 0 12px;color:var(--bright);font-weight:600;letter-spacing:-.01em}.guide-body h4{font-family:'Lora',Georgia,serif;font-size:1.1rem;margin:24px 0 10px;color:var(--bright);font-weight:600}@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
+<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VectorClock — March Docs</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style>
+/* Dark theme (default) — deep navy with cyan accent, matching the March homepage */
+:root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
+--acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
+--faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+
+/* Light theme overrides */
+[data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
+--acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
+--faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+
+/* Reset + base */
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}
+
+/* Top bar */
+#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:60px;background:var(--bg-nav);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}
+#topbar .brand{font-family:'Lora',Georgia,serif;font-size:18px;font-weight:600;color:var(--text);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
+#topbar .brand svg{width:20px;height:20px}
+#topbar .actions{display:flex;align-items:center;gap:12px}
+#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px;transition:all .15s}
+#theme-toggle:hover{color:var(--text);border-color:var(--acc)}
+#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}
+#search-trigger:hover{border-color:var(--acc);color:var(--text)}
+#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}
+
+/* Content wrapper (sidebar + main) */
+.content-wrap{display:flex;flex:1;overflow:hidden}
+
+/* Typography */
+code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
+pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
+code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
+h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
+p{margin:8px 0}
+
+/* Sidebar */
+#sb{width:248px;min-width:208px;background:var(--sb);border-right:1px solid var(--bdr);padding:8px 10px 28px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;flex-shrink:0}
+#sb::-webkit-scrollbar{width:5px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}#sb::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+.sb-section{padding:0}
+.sb-heading{font-family:'JetBrains Mono','Fira Code',monospace;font-size:10px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.16em;padding:20px 10px 8px;user-select:none}
+
+/* Generic nav link (top-level + sub-items) */
+.sl{display:block;padding:5px 10px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--dim);transition:color .12s,background .12s}
+.sl:hover{background:color-mix(in oklab,var(--acc) 9%,transparent);color:var(--text);text-decoration:none}
+.sl.active{color:var(--acc);font-weight:500}
+.sb-section>.sl.active,.sb-sub .sl.active{background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+
+/* Hierarchical sidebar groups */
+.sb-group{margin:1px 0}
+.sb-group-hdr{display:flex;align-items:center;border-radius:6px;cursor:pointer;user-select:none;transition:background .12s}
+.sb-group-hdr:hover{background:color-mix(in oklab,var(--acc) 9%,transparent)}
+.sb-group-hdr:hover .sl,.sb-group-hdr:hover .sb-chevron{color:var(--text)}
+.sb-group-hdr:has(.sl.active){background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+.sb-group-hdr .sl{flex:1;padding-left:1px}
+.sb-chevron{font-size:9px;transition:transform .15s,color .12s;width:20px;align-self:stretch;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--faint)}
+.sb-group.open>.sb-group-hdr .sb-chevron{transform:rotate(90deg);color:var(--acc)}
+.sb-sub{display:none;margin:1px 0 6px 19px;padding-left:8px;border-left:1px solid var(--bdr)}
+.sb-group.open .sb-sub{display:block}
+.sb-sub .sl{font-size:12px;padding:3px 8px;color:var(--dim)}
+.sb-sub .sl:hover{color:var(--text)}
+.sb-kind{display:inline-block;width:12px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.03em;margin-right:8px;text-transform:uppercase;text-align:center}
+
+/* Main content */
+#main{flex:1;padding:40px max(52px,calc(50% - 574px));min-width:0;overflow-y:auto;height:calc(100vh - 60px)}
+
+/* Breadcrumb */
+.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}
+.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}
+.breadcrumb .sep{color:var(--bdr)}
+
+/* Module doc card */
+.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}
+
+/* Items */
+.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}
+.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}
+.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}
+.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}
+
+/* Badges */
+.badge{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.08em;padding:2px 9px;border-radius:100px;text-transform:uppercase;flex-shrink:0;border:1px solid transparent}
+.bfn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn);border-color:color-mix(in oklab,var(--fn) 24%,transparent)}
+.bpfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 30%,transparent)}
+.bty{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty);border-color:color-mix(in oklab,var(--ty) 24%,transparent)}
+.bpt{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 26%,transparent)}
+.bif{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if);border-color:color-mix(in oklab,var(--if) 24%,transparent)}
+
+/* Item content */
+.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}
+.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}
+.ib.open{display:block}
+
+/* Source + anchor links */
+.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}
+.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}
+.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}
+.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}
+
+/* Module cards (index page) */
+.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}
+.mc:hover{border-color:var(--acc);transform:translateY(-1px)}
+.mc h3{font-family:'Lora',Georgia,serif;color:var(--acc);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}
+.mc p{font-size:13px;color:var(--dim);margin-top:6px}
+.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}
+.st span{display:flex;align-items:center;gap:4px}
+
+/* Copy button */
+.pre-wrap{position:relative}
+.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}
+.pre-wrap:hover .copy-btn{opacity:1}
+.copy-btn:hover{color:var(--text);border-color:var(--acc)}
+.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}
+
+/* Search overlay (Cmd+K) */
+#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}
+#search-overlay.open{display:flex}
+#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}
+#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}
+#search-input::placeholder{color:var(--dim)}
+#sr{max-height:50vh;overflow-y:auto;padding:8px}
+#sr:empty{display:none}
+.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}
+.sr-item:hover{background:var(--card);text-decoration:none}
+.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}
+.sr-fn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn)}.sr-type{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty)}
+.sr-interface{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if)}.sr-module{background:color-mix(in oklab,var(--acc) 13%,transparent);color:var(--acc)}
+.sr-pfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv)}.sr-ptype{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv)}
+.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}
+.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}
+.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}
+
+/* Admonitions */
+.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}
+.admonition.warning{border-left-color:var(--ty)}
+.admonition.note{border-left-color:var(--acc2)}
+
+/* Lists */
+ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
+
+/* Guide body */
+.guide-body{line-height:1.8;font-size:15px}
+.guide-body h3{font-family:'Lora',Georgia,serif;font-size:1.4rem;margin:30px 0 12px;color:var(--bright);font-weight:600;letter-spacing:-.01em}
+.guide-body h4{font-family:'Lora',Georgia,serif;font-size:1.1rem;margin:24px 0 10px;color:var(--bright);font-weight:600}
+
+/* Code blocks follow theme tokens (light code surface in light mode, like the main page) */
+
+/* Responsive */
+@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}
+</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
 <a class="sl" href="Actor.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
-<a class="sl" href="Actor.html#fn-reply"><span class="sb-kind" style="color:var(--fn)">F</span>reply</a></div></div>
+<a class="sl" href="Actor.html#fn-reply"><span class="sb-kind" style="color:var(--fn)">F</span>reply</a>
+<a class="sl" href="Actor.html#fn-set_queue_limit"><span class="sb-kind" style="color:var(--fn)">F</span>set_queue_limit</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Array.html">Array</a></div><div class="sb-sub"><a class="sl" href="Array.html#type-TrieNode"><span class="sb-kind" style="color:var(--ty)">T</span>TrieNode</a>
 <a class="sl" href="Array.html#type-PVec"><span class="sb-kind" style="color:var(--ty)">T</span>PVec</a>
 <a class="sl" href="Array.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
@@ -1391,6 +1547,32 @@
 <a class="sl" href="Parallel.html#fn-preduce_n"><span class="sb-kind" style="color:var(--fn)">F</span>preduce_n</a>
 <a class="sl" href="Parallel.html#fn-psum"><span class="sb-kind" style="color:var(--fn)">F</span>psum</a>
 <a class="sl" href="Parallel.html#fn-psum_float"><span class="sb-kind" style="color:var(--fn)">F</span>psum_float</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Parse.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Parse.html">Parse</a></div><div class="sb-sub"><a class="sl" href="Parse.html#type-Expected"><span class="sb-kind" style="color:var(--ty)">T</span>Expected</a>
+<a class="sl" href="Parse.html#type-ParseErr"><span class="sb-kind" style="color:var(--ty)">T</span>ParseErr</a>
+<a class="sl" href="Parse.html#type-ParseReply"><span class="sb-kind" style="color:var(--ty)">T</span>ParseReply</a>
+<a class="sl" href="Parse.html#type-Parser"><span class="sb-kind" style="color:var(--ty)">T</span>Parser</a>
+<a class="sl" href="Parse.html#fn-alt"><span class="sb-kind" style="color:var(--fn)">F</span>alt</a>
+<a class="sl" href="Parse.html#fn-and_then"><span class="sb-kind" style="color:var(--fn)">F</span>and_then</a>
+<a class="sl" href="Parse.html#fn-byte"><span class="sb-kind" style="color:var(--fn)">F</span>byte</a>
+<a class="sl" href="Parse.html#fn-byte_if"><span class="sb-kind" style="color:var(--fn)">F</span>byte_if</a>
+<a class="sl" href="Parse.html#fn-commit"><span class="sb-kind" style="color:var(--fn)">F</span>commit</a>
+<a class="sl" href="Parse.html#fn-ctx"><span class="sb-kind" style="color:var(--fn)">F</span>ctx</a>
+<a class="sl" href="Parse.html#fn-eof"><span class="sb-kind" style="color:var(--fn)">F</span>eof</a>
+<a class="sl" href="Parse.html#fn-fence"><span class="sb-kind" style="color:var(--fn)">F</span>fence</a>
+<a class="sl" href="Parse.html#fn-label"><span class="sb-kind" style="color:var(--fn)">F</span>label</a>
+<a class="sl" href="Parse.html#fn-line_col"><span class="sb-kind" style="color:var(--fn)">F</span>line_col</a>
+<a class="sl" href="Parse.html#fn-lit"><span class="sb-kind" style="color:var(--fn)">F</span>lit</a>
+<a class="sl" href="Parse.html#fn-many"><span class="sb-kind" style="color:var(--fn)">F</span>many</a>
+<a class="sl" href="Parse.html#fn-many1"><span class="sb-kind" style="color:var(--fn)">F</span>many1</a>
+<a class="sl" href="Parse.html#fn-map"><span class="sb-kind" style="color:var(--fn)">F</span>map</a>
+<a class="sl" href="Parse.html#fn-pure"><span class="sb-kind" style="color:var(--fn)">F</span>pure</a>
+<a class="sl" href="Parse.html#fn-recover"><span class="sb-kind" style="color:var(--fn)">F</span>recover</a>
+<a class="sl" href="Parse.html#fn-render"><span class="sb-kind" style="color:var(--fn)">F</span>render</a>
+<a class="sl" href="Parse.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
+<a class="sl" href="Parse.html#fn-sep_by"><span class="sb-kind" style="color:var(--fn)">F</span>sep_by</a>
+<a class="sl" href="Parse.html#fn-sep_by1"><span class="sb-kind" style="color:var(--fn)">F</span>sep_by1</a>
+<a class="sl" href="Parse.html#fn-skip_first"><span class="sb-kind" style="color:var(--fn)">F</span>skip_first</a>
+<a class="sl" href="Parse.html#fn-skip_then"><span class="sb-kind" style="color:var(--fn)">F</span>skip_then</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Path.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Path.html">Path</a></div><div class="sb-sub"><a class="sl" href="Path.html#fn-assert_no_traversal"><span class="sb-kind" style="color:var(--fn)">F</span>assert_no_traversal</a>
 <a class="sl" href="Path.html#fn-basename"><span class="sb-kind" style="color:var(--fn)">F</span>basename</a>
 <a class="sl" href="Path.html#fn-components"><span class="sb-kind" style="color:var(--fn)">F</span>components</a>
@@ -1629,6 +1811,11 @@
 <a class="sl" href="RingBuf.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
 <a class="sl" href="RingBuf.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
 <a class="sl" href="RingBuf.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Scheduler.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Scheduler.html">Scheduler</a></div><div class="sb-sub"><a class="sl" href="Scheduler.html#fn-dropped_messages"><span class="sb-kind" style="color:var(--fn)">F</span>dropped_messages</a>
+<a class="sl" href="Scheduler.html#fn-live_procs"><span class="sb-kind" style="color:var(--fn)">F</span>live_procs</a>
+<a class="sl" href="Scheduler.html#fn-runq_depth"><span class="sb-kind" style="color:var(--fn)">F</span>runq_depth</a>
+<a class="sl" href="Scheduler.html#fn-stat"><span class="sb-kind" style="color:var(--fn)">F</span>stat</a>
+<a class="sl" href="Scheduler.html#fn-total_spawned"><span class="sb-kind" style="color:var(--fn)">F</span>total_spawned</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Seq.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Seq.html">Seq</a></div><div class="sb-sub"><a class="sl" href="Seq.html#type-Step"><span class="sb-kind" style="color:var(--ty)">T</span>Step</a>
 <a class="sl" href="Seq.html#type-Seq"><span class="sb-kind" style="color:var(--ty)">T</span>Seq</a>
 <a class="sl" href="Seq.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
@@ -1683,6 +1870,133 @@
 <a class="sl" href="Signal.html#fn-raise"><span class="sb-kind" style="color:var(--fn)">F</span>raise</a>
 <a class="sl" href="Signal.html#fn-unwatch"><span class="sb-kind" style="color:var(--fn)">F</span>unwatch</a>
 <a class="sl" href="Signal.html#fn-watch"><span class="sb-kind" style="color:var(--fn)">F</span>watch</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Simd.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Simd.html">Simd</a></div><div class="sb-sub"><a class="sl" href="Simd.html#fn-add_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>add_f32x4</a>
+<a class="sl" href="Simd.html#fn-add_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>add_f64x2</a>
+<a class="sl" href="Simd.html#fn-add_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>add_i32x4</a>
+<a class="sl" href="Simd.html#fn-add_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>add_i64x2</a>
+<a class="sl" href="Simd.html#fn-all_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>all_f32x4</a>
+<a class="sl" href="Simd.html#fn-all_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>all_f64x2</a>
+<a class="sl" href="Simd.html#fn-all_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>all_i32x4</a>
+<a class="sl" href="Simd.html#fn-all_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>all_i64x2</a>
+<a class="sl" href="Simd.html#fn-all_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>all_u8x16</a>
+<a class="sl" href="Simd.html#fn-and_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>and_f32x4</a>
+<a class="sl" href="Simd.html#fn-and_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>and_f64x2</a>
+<a class="sl" href="Simd.html#fn-and_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>and_i32x4</a>
+<a class="sl" href="Simd.html#fn-and_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>and_i64x2</a>
+<a class="sl" href="Simd.html#fn-and_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>and_u8x16</a>
+<a class="sl" href="Simd.html#fn-any_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>any_f32x4</a>
+<a class="sl" href="Simd.html#fn-any_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>any_f64x2</a>
+<a class="sl" href="Simd.html#fn-any_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>any_i32x4</a>
+<a class="sl" href="Simd.html#fn-any_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>any_i64x2</a>
+<a class="sl" href="Simd.html#fn-any_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>any_u8x16</a>
+<a class="sl" href="Simd.html#fn-div_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>div_f32x4</a>
+<a class="sl" href="Simd.html#fn-div_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>div_f64x2</a>
+<a class="sl" href="Simd.html#fn-eq_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>eq_f32x4</a>
+<a class="sl" href="Simd.html#fn-eq_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>eq_f64x2</a>
+<a class="sl" href="Simd.html#fn-eq_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>eq_i32x4</a>
+<a class="sl" href="Simd.html#fn-eq_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>eq_i64x2</a>
+<a class="sl" href="Simd.html#fn-eq_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>eq_u8x16</a>
+<a class="sl" href="Simd.html#fn-extract_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>extract_f32x4</a>
+<a class="sl" href="Simd.html#fn-extract_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>extract_f64x2</a>
+<a class="sl" href="Simd.html#fn-extract_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>extract_i32x4</a>
+<a class="sl" href="Simd.html#fn-extract_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>extract_i64x2</a>
+<a class="sl" href="Simd.html#fn-extract_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>extract_u8x16</a>
+<a class="sl" href="Simd.html#fn-first_set_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>first_set_f32x4</a>
+<a class="sl" href="Simd.html#fn-first_set_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>first_set_f64x2</a>
+<a class="sl" href="Simd.html#fn-first_set_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>first_set_i32x4</a>
+<a class="sl" href="Simd.html#fn-first_set_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>first_set_i64x2</a>
+<a class="sl" href="Simd.html#fn-first_set_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>first_set_u8x16</a>
+<a class="sl" href="Simd.html#fn-fma_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>fma_f32x4</a>
+<a class="sl" href="Simd.html#fn-fma_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>fma_f64x2</a>
+<a class="sl" href="Simd.html#fn-gt_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>gt_f32x4</a>
+<a class="sl" href="Simd.html#fn-gt_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>gt_f64x2</a>
+<a class="sl" href="Simd.html#fn-gt_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>gt_i32x4</a>
+<a class="sl" href="Simd.html#fn-gt_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>gt_i64x2</a>
+<a class="sl" href="Simd.html#fn-gt_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>gt_u8x16</a>
+<a class="sl" href="Simd.html#fn-hmax_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>hmax_f32x4</a>
+<a class="sl" href="Simd.html#fn-hmax_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>hmax_f64x2</a>
+<a class="sl" href="Simd.html#fn-hmax_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>hmax_i32x4</a>
+<a class="sl" href="Simd.html#fn-hmax_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>hmax_i64x2</a>
+<a class="sl" href="Simd.html#fn-hmin_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>hmin_f32x4</a>
+<a class="sl" href="Simd.html#fn-hmin_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>hmin_f64x2</a>
+<a class="sl" href="Simd.html#fn-hmin_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>hmin_i32x4</a>
+<a class="sl" href="Simd.html#fn-hmin_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>hmin_i64x2</a>
+<a class="sl" href="Simd.html#fn-load_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>load_f32x4</a>
+<a class="sl" href="Simd.html#fn-load_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>load_f64x2</a>
+<a class="sl" href="Simd.html#fn-load_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>load_i32x4</a>
+<a class="sl" href="Simd.html#fn-load_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>load_i64x2</a>
+<a class="sl" href="Simd.html#fn-load_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>load_u8x16</a>
+<a class="sl" href="Simd.html#fn-lt_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>lt_f32x4</a>
+<a class="sl" href="Simd.html#fn-lt_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>lt_f64x2</a>
+<a class="sl" href="Simd.html#fn-lt_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>lt_i32x4</a>
+<a class="sl" href="Simd.html#fn-lt_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>lt_i64x2</a>
+<a class="sl" href="Simd.html#fn-lt_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>lt_u8x16</a>
+<a class="sl" href="Simd.html#fn-make_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>make_f32x4</a>
+<a class="sl" href="Simd.html#fn-make_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>make_f64x2</a>
+<a class="sl" href="Simd.html#fn-make_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>make_i32x4</a>
+<a class="sl" href="Simd.html#fn-make_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>make_i64x2</a>
+<a class="sl" href="Simd.html#fn-make_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>make_u8x16</a>
+<a class="sl" href="Simd.html#fn-max_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>max_f32x4</a>
+<a class="sl" href="Simd.html#fn-max_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>max_f64x2</a>
+<a class="sl" href="Simd.html#fn-max_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>max_i32x4</a>
+<a class="sl" href="Simd.html#fn-max_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>max_i64x2</a>
+<a class="sl" href="Simd.html#fn-min_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>min_f32x4</a>
+<a class="sl" href="Simd.html#fn-min_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>min_f64x2</a>
+<a class="sl" href="Simd.html#fn-min_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>min_i32x4</a>
+<a class="sl" href="Simd.html#fn-min_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>min_i64x2</a>
+<a class="sl" href="Simd.html#fn-mul_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>mul_f32x4</a>
+<a class="sl" href="Simd.html#fn-mul_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>mul_f64x2</a>
+<a class="sl" href="Simd.html#fn-mul_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>mul_i32x4</a>
+<a class="sl" href="Simd.html#fn-mul_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>mul_i64x2</a>
+<a class="sl" href="Simd.html#fn-not_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>not_f32x4</a>
+<a class="sl" href="Simd.html#fn-not_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>not_f64x2</a>
+<a class="sl" href="Simd.html#fn-not_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>not_i32x4</a>
+<a class="sl" href="Simd.html#fn-not_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>not_i64x2</a>
+<a class="sl" href="Simd.html#fn-not_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>not_u8x16</a>
+<a class="sl" href="Simd.html#fn-or_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>or_f32x4</a>
+<a class="sl" href="Simd.html#fn-or_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>or_f64x2</a>
+<a class="sl" href="Simd.html#fn-or_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>or_i32x4</a>
+<a class="sl" href="Simd.html#fn-or_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>or_i64x2</a>
+<a class="sl" href="Simd.html#fn-or_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>or_u8x16</a>
+<a class="sl" href="Simd.html#fn-replace_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>replace_f32x4</a>
+<a class="sl" href="Simd.html#fn-replace_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>replace_f64x2</a>
+<a class="sl" href="Simd.html#fn-replace_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>replace_i32x4</a>
+<a class="sl" href="Simd.html#fn-replace_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>replace_i64x2</a>
+<a class="sl" href="Simd.html#fn-replace_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>replace_u8x16</a>
+<a class="sl" href="Simd.html#fn-select_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>select_f32x4</a>
+<a class="sl" href="Simd.html#fn-select_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>select_f64x2</a>
+<a class="sl" href="Simd.html#fn-select_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>select_i32x4</a>
+<a class="sl" href="Simd.html#fn-select_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>select_i64x2</a>
+<a class="sl" href="Simd.html#fn-select_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>select_u8x16</a>
+<a class="sl" href="Simd.html#fn-shl_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>shl_i32x4</a>
+<a class="sl" href="Simd.html#fn-shl_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>shl_i64x2</a>
+<a class="sl" href="Simd.html#fn-shr_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>shr_i32x4</a>
+<a class="sl" href="Simd.html#fn-shr_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>shr_i64x2</a>
+<a class="sl" href="Simd.html#fn-splat_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>splat_f32x4</a>
+<a class="sl" href="Simd.html#fn-splat_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>splat_f64x2</a>
+<a class="sl" href="Simd.html#fn-splat_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>splat_i32x4</a>
+<a class="sl" href="Simd.html#fn-splat_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>splat_i64x2</a>
+<a class="sl" href="Simd.html#fn-splat_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>splat_u8x16</a>
+<a class="sl" href="Simd.html#fn-sqrt_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>sqrt_f32x4</a>
+<a class="sl" href="Simd.html#fn-sqrt_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>sqrt_f64x2</a>
+<a class="sl" href="Simd.html#fn-store_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>store_f32x4</a>
+<a class="sl" href="Simd.html#fn-store_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>store_f64x2</a>
+<a class="sl" href="Simd.html#fn-store_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>store_i32x4</a>
+<a class="sl" href="Simd.html#fn-store_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>store_i64x2</a>
+<a class="sl" href="Simd.html#fn-store_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>store_u8x16</a>
+<a class="sl" href="Simd.html#fn-sub_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>sub_f32x4</a>
+<a class="sl" href="Simd.html#fn-sub_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>sub_f64x2</a>
+<a class="sl" href="Simd.html#fn-sub_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>sub_i32x4</a>
+<a class="sl" href="Simd.html#fn-sub_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>sub_i64x2</a>
+<a class="sl" href="Simd.html#fn-sum_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32x4</a>
+<a class="sl" href="Simd.html#fn-sum_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f64x2</a>
+<a class="sl" href="Simd.html#fn-sum_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>sum_i32x4</a>
+<a class="sl" href="Simd.html#fn-sum_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>sum_i64x2</a>
+<a class="sl" href="Simd.html#fn-xor_f32x4"><span class="sb-kind" style="color:var(--fn)">F</span>xor_f32x4</a>
+<a class="sl" href="Simd.html#fn-xor_f64x2"><span class="sb-kind" style="color:var(--fn)">F</span>xor_f64x2</a>
+<a class="sl" href="Simd.html#fn-xor_i32x4"><span class="sb-kind" style="color:var(--fn)">F</span>xor_i32x4</a>
+<a class="sl" href="Simd.html#fn-xor_i64x2"><span class="sb-kind" style="color:var(--fn)">F</span>xor_i64x2</a>
+<a class="sl" href="Simd.html#fn-xor_u8x16"><span class="sb-kind" style="color:var(--fn)">F</span>xor_u8x16</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Socket.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Socket.html">Socket</a></div><div class="sb-sub"><a class="sl" href="Socket.html#type-SocketError"><span class="sb-kind" style="color:var(--ty)">T</span>SocketError</a>
 <a class="sl" href="Socket.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
 <a class="sl" href="Socket.html#fn-connect"><span class="sb-kind" style="color:var(--fn)">F</span>connect</a>
@@ -2013,4 +2327,133 @@
 <div class="item" id="fn-increment"><div class="ih"><span class="badge bfn">fn</span><span class="name">increment</span><span class="sig">increment(vc : <a href="#type-VectorClock">VectorClock</a>, actor_id : String) : <a href="#type-VectorClock">VectorClock</a></span><a class="anchor-link" href="#fn-increment" title="Link">#</a></div><div class="ib"><p>Increment the slot for actor_id, returning the updated clock.</p></div></div>
 <div class="item" id="fn-merge"><div class="ih"><span class="badge bfn">fn</span><span class="name">merge</span><span class="sig">merge(a : <a href="#type-VectorClock">VectorClock</a>, b : <a href="#type-VectorClock">VectorClock</a>) : <a href="#type-VectorClock">VectorClock</a></span><a class="anchor-link" href="#fn-merge" title="Link">#</a></div><div class="ib"><p>Component-wise maximum: keep the higher timestamp for each slot.</p></div></div>
 <div class="item" id="fn-new"><div class="ih"><span class="badge bfn">fn</span><span class="name">new</span><span class="sig">new() : <a href="#type-VectorClock">VectorClock</a></span><a class="anchor-link" href="#fn-new" title="Link">#</a></div><div class="ib"><p>An empty vector clock (all timestamps implicitly 0).</p></div></div>
-<div class="item" id="fn-sum"><div class="ih"><span class="badge bfn">fn</span><span class="name">sum</span><span class="sig">sum(vc : <a href="#type-VectorClock">VectorClock</a>) : Int</span><a class="anchor-link" href="#fn-sum" title="Link">#</a></div><div class="ib"><p>Sum of all timestamps (useful as a monotone scalar counter).</p></div></div></main></div><script>function getTheme(){var t=localStorage.getItem('march-doc-theme');if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}function applyTheme(t){document.documentElement.setAttribute('data-theme',t);var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';localStorage.setItem('march-doc-theme',t);applyTheme(t);}applyTheme(getTheme());function openSearch(){document.getElementById('search-overlay').classList.add('open');var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}function closeSearch(){document.getElementById('search-overlay').classList.remove('open');var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}document.addEventListener('DOMContentLoaded',function(){document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){if(e.target.classList.contains('anchor-link'))return;var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});var path=window.location.pathname;document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});document.querySelectorAll('.ib pre').forEach(function(pre){var wrap=document.createElement('div');wrap.className='pre-wrap';pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';btn.addEventListener('click',function(e){e.stopPropagation();var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;navigator.clipboard.writeText(text).then(function(){btn.textContent='Copied!';btn.classList.add('copied');setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});wrap.appendChild(btn);});if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}document.addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}if(e.key==='Escape')closeSearch();});});var SI=null;fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;}).catch(function(){});function ld(a,b){if(!a.length)return b.length;if(!b.length)return a.length;var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];for(var j=0;j<=a.length;j++)m[0][j]=j;for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);}return m[b.length][a.length];}function fs(q,t){if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();if(tl===ql)return 10000;if(tl.indexOf(ql)===0)return 5000-tl.length;var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}return 0;}function scoreEntry(q,e){return Math.max(fs(q,e.n)*4,fs(q,e.s)*2,fs(q,e.m)*2,fs(q,e.d));}function renderSR(results){var el=document.getElementById('sr');if(!el)return;if(!results.length){el.className='';el.innerHTML='';return;}el.className='open';var h='';for(var i=0;i<results.length;i++){var e=results[i].entry,k=e.k,href=e.m+'.html';if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);var kc='sr-'+k;h+='<a class="sr-item" href="'+href+'">'+'<span class="sr-kind '+kc+'">'+k+'</span>'+'<span class="sr-name">'+esc(e.n)+'</span>'+'<span class="sr-mod">'+esc(e.m)+'</span></a>';if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';if(i<results.length-1)h+='<div class="sr-sep"></div>';}el.innerHTML=h;}function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}var si=document.getElementById('search-input');if(si)si.addEventListener('input',function(){var q=this.value.trim();if(!q||!SI){renderSR([]);return;}var results=[];for(var i=0;i<SI.length;i++){var sc=scoreEntry(q,SI[i]);if(sc>0)results.push({entry:SI[i],score:sc});}results.sort(function(a,b){return b.score-a.score;});renderSR(results.slice(0,25));});</script></body></html>
+<div class="item" id="fn-sum"><div class="ih"><span class="badge bfn">fn</span><span class="name">sum</span><span class="sig">sum(vc : <a href="#type-VectorClock">VectorClock</a>) : Int</span><a class="anchor-link" href="#fn-sum" title="Link">#</a></div><div class="ib"><p>Sum of all timestamps (useful as a monotone scalar counter).</p></div></div></main></div><script>
+/* Theme toggle */
+function getTheme(){var t=localStorage.getItem('march-doc-theme');
+if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);
+var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');
+if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}
+function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';localStorage.setItem('march-doc-theme',t);applyTheme(t);}
+applyTheme(getTheme());
+
+/* Search overlay */
+function openSearch(){document.getElementById('search-overlay').classList.add('open');
+var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}
+function closeSearch(){document.getElementById('search-overlay').classList.remove('open');
+var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}
+
+/* DOMContentLoaded */
+document.addEventListener('DOMContentLoaded',function(){
+
+/* Collapsible items */
+document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){
+if(e.target.classList.contains('anchor-link'))return;
+var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});
+
+/* Active sidebar link + auto-expand current module group */
+var path=window.location.pathname;
+document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});
+
+/* Sidebar group toggle (chevron click expands/collapses) */
+document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){
+if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});
+
+/* Copy buttons on pre blocks */
+document.querySelectorAll('.ib pre').forEach(function(pre){
+var wrap=document.createElement('div');wrap.className='pre-wrap';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);
+var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';
+btn.addEventListener('click',function(e){e.stopPropagation();
+var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;
+navigator.clipboard.writeText(text).then(function(){
+btn.textContent='Copied!';btn.classList.add('copied');
+setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);
+}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});
+wrap.appendChild(btn);});
+
+/* Open anchor from URL hash */
+if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}
+
+/* Cmd+K search shortcut */
+document.addEventListener('keydown',function(e){
+if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}
+if(e.key==='Escape')closeSearch();});
+
+});
+
+/* Cross-module search: loads search-index.json, fuzzy matches, renders results */
+var SI=null;
+fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;}).catch(function(){});
+
+/* Levenshtein distance */
+function ld(a,b){
+if(!a.length)return b.length;if(!b.length)return a.length;
+var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];
+for(var j=0;j<=a.length;j++)m[0][j]=j;
+for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){
+m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);
+}return m[b.length][a.length];}
+
+/* Fuzzy scoring: returns 0 if no match */
+function fs(q,t){
+if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();
+/* Exact match */
+if(tl===ql)return 10000;
+/* Starts with */
+if(tl.indexOf(ql)===0)return 5000-tl.length;
+/* Substring */
+var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;
+/* Word boundary match (camelCase, snake_case) */
+var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');
+for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}
+/* Levenshtein for short queries */
+if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));
+if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}
+return 0;}
+
+/* Score an entry against a query */
+function scoreEntry(q,e){
+return Math.max(
+fs(q,e.n)*4, /* name match (highest weight) */
+fs(q,e.s)*2, /* signature match */
+fs(q,e.m)*2, /* module name match */
+fs(q,e.d) /* doc string match (lowest weight) */
+);}
+
+/* Render search results */
+function renderSR(results){
+var el=document.getElementById('sr');if(!el)return;
+if(!results.length){el.className='';el.innerHTML='';return;}
+el.className='open';var h='';
+for(var i=0;i<results.length;i++){
+var e=results[i].entry,k=e.k,href=e.m+'.html';
+if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);
+else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);
+else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);
+var kc='sr-'+k;
+h+='<a class="sr-item" href="'+href+'">'+
+'<span class="sr-kind '+kc+'">'+k+'</span>'+
+'<span class="sr-name">'+esc(e.n)+'</span>'+
+'<span class="sr-mod">'+esc(e.m)+'</span></a>';
+if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';
+if(i<results.length-1)h+='<div class="sr-sep"></div>';
+}el.innerHTML=h;}
+
+/* HTML escape helper */
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+/* Search handler — uses the modal search input */
+var si=document.getElementById('search-input');
+if(si)si.addEventListener('input',function(){
+var q=this.value.trim();
+if(!q||!SI){renderSR([]);return;}
+var results=[];
+for(var i=0;i<SI.length;i++){
+var sc=scoreEntry(q,SI[i]);
+if(sc>0)results.push({entry:SI[i],score:sc});
+}
+results.sort(function(a,b){return b.score-a.score;});
+renderSR(results.slice(0,25));
+});
+</script></body></html>

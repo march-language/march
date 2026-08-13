@@ -5,7 +5,7 @@ mod Main do
     true
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     -- Both `&&`/`||` operands are ALWAYS evaluated (strict builtins, not
     -- short-circuit special forms — see core-march.md §4.4.1). A
     -- short-circuiting `||` would never evaluate `side(...)` here because

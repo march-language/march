@@ -11,7 +11,7 @@
 -- pins cross-run determinism.
 mod JsRandomDeterminism do
   needs IO.Console
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
     let rng = Random.seed(42)
     let (a, rng2) = Random.range(rng, 0, 1000000)
     let (b, rng3) = Random.range(rng2, 0, 1000000)

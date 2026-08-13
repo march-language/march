@@ -51,7 +51,7 @@ fn compile(e, st) do
   end
 end
 
-fn main() do
+fn main(_cap_console : Cap(IO.Console)) do
   match compile(MyParam(1), MyS(0, "")) do
     (s, _) -> println(s)
   end

@@ -10,7 +10,7 @@ mod NestedGenericAdt do
     end
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     match head_opt(Cons(3, Nil)) do
       Some(v) -> println(v)
       None -> println(0)

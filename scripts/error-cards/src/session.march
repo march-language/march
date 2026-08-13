@@ -5,7 +5,7 @@ mod LinErr do
     String.byte_size(s)
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     linear let token = "secret"
     let a = consume(token)
     let b = consume(token)

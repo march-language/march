@@ -1,0 +1,49 @@
+mod Main do
+  needs IO.Console
+
+-- Task 9: bounded mailbox surface — Actor.set_queue_limit with drop_new.
+-- A slow actor with a small mailbox limit floods far more messages than it
+-- can drain; some must be dropped, and the processed count must never
+-- exceed the number sent.
+--
+-- GetN (the Actor.call handler) is declared FIRST (tag 0) per the call
+-- protocol in stdlib/actor.march's doc string — the sentinel GetNReq has no
+-- same-named handler to match by name, so routing falls back to the
+-- sentinel's own (single) constructor index, which must line up with the
+-- target handler's declaration order.
+actor Slow do
+  state { n : Int }
+  init  { n: 0 }
+  on GetN(reply_to) do
+    Actor.reply(reply_to, state.n)
+    state
+  end
+  on Bump() do
+    let _ = List.fold_left(Range.to_list(Range.new(0, 1000)), 0, fn (a, b) -> a + b)
+    { n: state.n + 1 }
+  end
+end
+
+type GetNReq = GetNReq
+
+fn flood(pid, k) do
+  if k == 0 do () else
+    send(pid, Bump())
+    flood(pid, k - 1)
+  end
+end
+
+fn main(_cap_console : Cap(IO.Console)) do
+  let pid = spawn(Slow)
+  Actor.set_queue_limit(pid, 8, 1)   -- drop_new
+  flood(pid, 5000)
+  run_until_idle()
+  let dropped = Scheduler.dropped_messages()
+  println("some dropped: " ++ bool_to_string(dropped > 0))
+  match Actor.call(pid, GetNReq, 10000) do
+    Ok(n)  -> println("processed <= sent: " ++ bool_to_string(n <= 5000))
+    Err(e) -> println("err: " ++ e)
+  end
+end
+
+end

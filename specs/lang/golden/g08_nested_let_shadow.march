@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let x = 1
     let y = do
       let x = 10

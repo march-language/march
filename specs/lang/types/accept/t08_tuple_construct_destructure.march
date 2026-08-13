@@ -5,7 +5,7 @@ mod M do
     a + b
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let triple = (1, 2, 3)
     match triple do
       (x, y, z) -> println(int_to_string(x + y + z))

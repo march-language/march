@@ -110,7 +110,7 @@ mod NodeDiscovery do
 
   -- ── main ─────────────────────────────────────────────────────────────────
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_random : Cap(IO.Random), _cap_spawn : Cap(IO.Spawn)) do
     -- Bind the listen socket in the main task so it is ready before we spawn.
     -- Port 0 = an OS-assigned ephemeral port, read back via tcp_local_port, so
     -- two concurrent runs on a shared host never collide on a fixed port.

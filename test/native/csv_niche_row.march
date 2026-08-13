@@ -29,7 +29,7 @@ mod Test do
     end
   end
 
-  fn main() : Unit do
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite)) : Unit do
     let path = "/tmp/march_native_csv_niche_row.csv"
     match File.write(path, "name,amount\nalice,10\nbob,20\ncarol,5\n") do
     Err(e) -> panic("write failed")

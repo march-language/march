@@ -13,7 +13,7 @@ mod Main do
   needs IO.Console
   type Row = Row(List(Int))
 
-  fn main() : () do
+  fn main(_cap_console : Cap(IO.Console)) : () do
     let rows = Cons(Row(Cons(1, Cons(2, Nil))),
                Cons(Row(Cons(3, Nil)), Nil))
     match rows do

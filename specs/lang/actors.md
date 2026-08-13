@@ -274,13 +274,16 @@ There is no `Call` wrapper constructor, and the call handler takes exactly one a
 (the reply channel).
 
 > **Two notes (both resolved 2026-07-13).** (1) `timeout_ms` **is enforced in the
-> compiled runtime** via a deadline-bounded yield-poll (`march_actor_call`,
-> `runtime/march_runtime.c`); a `call` that never receives a reply returns `Err(...)`
-> once the deadline passes, and `timeout_ms <= 0` means wait forever. Known caveat: a
-> late reply arriving after the timeout still lands in the caller's mailbox — safe for
-> per-call task green threads (the thread exits and sends to dead procs are dropped),
-> but a long-lived green thread mixing `Actor.call` and raw `receive` could observe a
-> stale reply after a timeout. (2) The **interpreter now dispatches `Actor.call`
+> compiled runtime** via a deadline-bounded park (`march_actor_call`,
+> `runtime/march_runtime.c`) — the caller's green thread parks on the scheduler rather
+> than busy-polling, and wakes on reply delivery or at the deadline; a `call` that never
+> receives a reply returns `Err(...)` once the deadline passes, and `timeout_ms <= 0`
+> means wait forever. **Correlation-checked replies (actor-system hardening, task 4):**
+> every reply is wrapped in an envelope carrying the correlation id minted for that
+> specific `march_actor_call` invocation; the receive loop discards any envelope whose
+> correlation id doesn't match — a late reply from a timed-out first call can no longer
+> be misdelivered as the answer to a second, unrelated call (`march_actor_call_unwrap`,
+> `runtime/march_runtime.c`). (2) The **interpreter now dispatches `Actor.call`
 > identically to the compiled runtime**: it tag-routes the zero-arg sentinel to the
 > handler at the same ctor index and binds the caller as the handler's single argument
 > (`lib/eval/eval.ml` `actor_call`). The historical interp-only `on Call(ref, msg)`
@@ -540,6 +543,62 @@ Rules of thumb:
 
 ---
 
+## Mailbox Limits and Backpressure
+
+By default an actor's mailbox is unbounded — a producer that outruns its consumer grows
+the mailbox without limit. `Actor.set_queue_limit(pid, limit, policy)` bounds it:
+
+```march
+Actor.set_queue_limit(pid, 1000, 3)   -- cap at 1000, block_sender policy
+```
+
+`policy` is one of:
+
+| Value | Policy | Behavior when the mailbox is full |
+|-------|--------|------------------------------------|
+| `0` | unbounded (default) | never rejects |
+| `1` | `drop_new` | the incoming message is discarded |
+| `2` | `drop_old` | the oldest queued message is evicted to make room |
+| `3` | `block_sender` | the sender parks until space frees up (compiled backend only) |
+
+Dropped messages (policies `1`/`2`) are counted in `Scheduler.dropped_messages()`. The
+interpreter's single-threaded eager scheduler cannot park a sender without deadlocking, so
+it treats policy `3` the same as `0` (unbounded) — a native/interpreted behavior gap
+tracked as a follow-up (see `specs/todos/`).
+
+Under a drop policy, a dropped `Actor.call` request or its reply is indistinguishable from
+a lost reply at the caller — both surface as a timeout `Err` from `Actor.call`. Callers
+that rely on `Actor.call` against a bounded actor should prefer the `block_sender` policy
+(`3`) instead, so no request or reply is ever silently discarded.
+
+---
+
+## Scheduler Observability
+
+The `Scheduler` module exposes runtime counters for load-shedding decisions — a
+supervisor or ingress actor can poll them to decide when to shed:
+
+```march
+if Scheduler.live_procs() > 10000 do
+  println("shedding: too many live actors")
+else
+  dispatch_work()
+end
+```
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `Scheduler.live_procs()` | `Int` | Green-thread processes currently alive (actors + tasks + main) |
+| `Scheduler.total_spawned()` | `Int` | Processes ever spawned over the program lifetime |
+| `Scheduler.runq_depth()` | `Int` | Cross-thread global run-queue depth (instantaneous) |
+| `Scheduler.dropped_messages()` | `Int` | Messages dropped by bounded-mailbox overflow policies |
+| `Scheduler.stat(i)` | `Int` | Raw stat by index (`0`=live procs, `1`=total spawned, `2`=runq depth, `3`=stack-alloc failures, `4`=dropped messages, `5`=stacks recycled, `6`=pending timers; unknown index reads `0`) |
+
+The interpreted backend reports the subset that's meaningful without the C scheduler
+(live actor count); everything else reads `0` on both backends rather than erroring.
+
+---
+
 ## Builtins Reference
 
 Backends: **both** = byte-identical interpreted vs compiled. As of 2026-07-18 this covers
@@ -563,6 +622,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
+| `Actor.set_queue_limit(pid, limit, policy)` | `→ ()` | both (policy `3` is compiled-only; interpreted treats it as unbounded) | Bound an actor's mailbox — see [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure) |
 
 ---
 
