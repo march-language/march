@@ -40,6 +40,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Runtime enforcement tests for `--cap-sandbox`** — compiled fixtures now
+  verify that a withheld capability's syscall is actually denied at runtime
+  (Linux seccomp-bpf, macOS Seatbelt), not just that the embedded policy
+  strings agree between builders.
 - **Exponential supervisor restart backoff with jitter (runtime-internal)** —
   a supervised child that crashes repeatedly no longer gets respawned
   immediately every time: from the second consecutive crash of the same

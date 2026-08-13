@@ -48,3 +48,57 @@ Extend this test as `IO.NetListen`/Landlock work lands (see the Tier 5
 investigation doc) rather than only after — ideally this CI job exists
 BEFORE either of those ships, so they land with real proof rather than a
 plausible-looking diff.
+
+## Resolution (2026-08-12)
+
+Landed as `test/test_cap_sandbox_runtime.ml`, riding the existing
+`march_test_compiler` dune library / `run_compiler` binary / `compiler_suites`
+list rather than a new CI job — so it runs automatically via `dune runtest` /
+`scripts/run-tests.sh` on both legs of CI's existing `test` matrix job with
+no new YAML. Covers both platforms (the original todo only asked for Linux):
+
+- **Linux** (seccomp-bpf): `IO.Network` withheld denies `socket`/`socketpair`,
+  `IO.Process` withheld denies `execve`/`execveat`, `IO.FileWrite` withheld
+  denies the write-flagged `openat` path — each verified with the other two
+  classes held, confirming class-independence as well as the deny/allow
+  directions.
+- **macOS** (Seatbelt): same three classes, but `IO.Process` gates `fork`
+  there, not `exec` — the profile's `process-exec` is unconditionally
+  allowed regardless of capability. The test documents this as-is rather
+  than treating it as a bug to fix; see the follow-up filed at
+  `specs/todos/2026-08-12-cap-sandbox-macos-process-exec-not-gated.md`.
+
+Several things only surfaced empirically, by inspecting the compiled
+binary's embedded profile directly (`strings <bin> | grep '(version 1)'`)
+rather than trusting the design's predictions — all documented in the design
+doc and in `test/test_cap_sandbox_runtime.ml`'s own comments:
+
+- The SBPL/`-D`-flag derivation (`own_caps_of_this_module`) is driven by
+  actual capability *usage*, not `needs` declarations alone, and an `extern`
+  block's declared `Cap(X)` does not count as a use for that purpose. Each
+  fixture makes a throwaway anchor call to a real capability-tagged builtin
+  for each class meant to stay held.
+- macOS's `network*` deny does not gate `socket()` creation, only
+  `bind()`/`connect()` — the macOS network probe binds to loopback instead.
+- `main` must declare an explicit `Cap` parameter for every capability the
+  program reaches (matching `CHANGELOG.md`'s already-documented "main may
+  now hold several capabilities" — Sandbox ladder R1 stage D); fixtures
+  thread one `Cap(IO.X)` per reached class rather than the zero-arg form.
+
+One apparatus trap along the way, worth recording since it cost real time:
+an early build against a **stale, dune-shared-cache-served `bin/main.exe`**
+produced a DIFFERENT, misleading error ("`main` must take zero arguments, or
+exactly one argument") that looked like a real, separate pre-existing
+regression contradicting the CHANGELOG — enough to justify its own todo file
+at one point during this work. `DUNE_CACHE=disabled dune build --root .
+--force bin/main.exe` produced the correct, CHANGELOG-consistent error
+instead, and `test_cap_sandbox_profile.ml` (initially suspected broken) in
+fact passes cleanly against a properly rebuilt compiler. The todo was
+deleted once this was confirmed rather than left as a false lead.
+
+Design: `specs/2026-08-12-cap-sandbox-runtime-enforcement-test-design.md`.
+
+Still open, unchanged by this work: `IO.NetListen` (`bind`/`listen`) and
+Landlock (`IO.FileRead`) are not currently-implemented deny classes on either
+platform — extend this same test file when they land, per the Tier 5
+investigation doc, rather than writing a new one.
