@@ -26,18 +26,25 @@ let find_march_doc_root () =
   match from_candidates with
   | Some d -> Some d
   | None ->
-    (* Fall back to global archive store *)
+    (* Fall back to global archive store. The package publishes to forgepm as
+       "march-doc" (registry names forbid underscores) but pre-rename installs
+       were keyed "march_doc" — accept both. *)
     let entries = Archive_store.load_registry () in
-    (match List.assoc_opt "march_doc" entries with
-     | None -> None
-     | Some entry ->
-       let root = match entry.Archive_store.source with
-         | Archive_store.Path p -> p
-         | _ -> Archive_store.archive_dir "march_doc"
-       in
-       if Sys.file_exists (Filename.concat root "forge.toml")
-       then Some root
-       else None)
+    let lookup name =
+      match List.assoc_opt name entries with
+      | None -> None
+      | Some entry ->
+        let root = match entry.Archive_store.source with
+          | Archive_store.Path p -> p
+          | _ -> Archive_store.archive_dir name
+        in
+        if Sys.file_exists (Filename.concat root "forge.toml")
+        then Some root
+        else None
+    in
+    (match lookup "march-doc" with
+     | Some root -> Some root
+     | None -> lookup "march_doc")
 
 (* ------------------------------------------------------------------ *)
 (* Command                                                             *)
@@ -46,7 +53,7 @@ let find_march_doc_root () =
 let run ?(output_dir = "doc") ?(include_private = false) ?(stdlib_only = false) () =
   match find_march_doc_root () with
   | None ->
-    Error "march_doc archive not found. Install it with: forge install march_doc"
+    Error "march_doc archive not found. Install it with: forge install march-doc"
   | Some root ->
     (* Build args list matching what the task expects *)
     let args =

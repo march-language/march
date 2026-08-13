@@ -37,4 +37,20 @@ docs/docs/stdlib/", and the regenerated output is byte-identical to the
 committed pages (empty `git status docs/docs/stdlib`).
 
 Note: the nightly guard clones march_doc from GitHub, so it stays red until
-the march_doc fix is pushed to `march-language/march_doc` main.
+the march_doc fix is pushed to `march-language/march_doc` main. (Pushed
+2026-08-12.)
+
+## Follow-ups landed the same day
+
+- **Package renamed `march_doc` → `march-doc`** for forgepm publication
+  (registry `valid_name` forbids underscores: `^[a-z0-9][a-z0-9-]*[a-z0-9]$`).
+  `forge doc`'s registry-store fallback in `forge/lib/cmd_doc.ml` now accepts
+  both keys (directory discovery was never name-dependent). Released as
+  march-doc v0.1.1.
+- **march_doc's static CSS/JS blobs rewritten with `~H` sigils** —
+  `page_css`/`page_js`/`search_js` were ~278 `"..." ++` single-line segments;
+  each is now one triple-quoted `~H` template (IOList-backed, no intermediate
+  concatenation). Generated pages change only by newlines inside
+  `<style>`/`<script>`, so the committed `docs/docs/stdlib/` pages needed one
+  regeneration (via the Regenerate Stdlib Docs workflow, which also rebuilds
+  the pagefind digest).
