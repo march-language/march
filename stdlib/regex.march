@@ -312,6 +312,149 @@ mod Regex do
     end
   end
 
+  -- ── Linear-time SEARCH (match positions, not just a boolean) ────────────
+  --
+  -- `matches_linear` answers "is there a match" and needs no positions. The
+  -- find/replace/split family needs a (start, end) span, so each active state
+  -- additionally carries the EARLIEST input offset that reached it. When the
+  -- accepting state is live, that offset is the match start.
+  --
+  -- Semantics: leftmost, then longest. Once a match starting at s0 is known,
+  -- no new start states are seeded — a later start cannot be more leftmost —
+  -- and the end is extended while states carrying s0 keep accepting. That is
+  -- asserted to agree with the backtracking engine's answers by differential
+  -- test rather than assumed; greedy backtracking and leftmost-longest are
+  -- not the same rule in general.
+
+  -- One entry per state, keeping the SMALLEST start offset seen for it.
+  pfn ins_state(xs, st, sp) do
+    match xs do
+    Nil -> Cons((st, sp), Nil)
+    Cons((s0, p0), t) ->
+      if st < s0 do
+        Cons((st, sp), Cons((s0, p0), t))
+      else
+        if st == s0 do
+          if sp < p0 do Cons((st, sp), t) else Cons((s0, p0), t) end
+        else
+          Cons((s0, p0), ins_state(t, st, sp))
+        end
+      end
+    end
+  end
+
+  pfn lookup_state(xs, st) do
+    match xs do
+    Nil -> None
+    Cons((s0, p0), t) -> if s0 == st do Some(p0) else lookup_state(t, st) end
+    end
+  end
+
+  pfn eclose_run(items, m, st, sp, acc) do
+    if st > m do
+      acc
+    else
+      let acc2 = ins_state(acc, st, sp)
+      if st < m && skippable(items, st) do
+        eclose_run(items, m, st + 1, sp, acc2)
+      else
+        acc2
+      end
+    end
+  end
+
+  pfn eclose2(items, m, xs, acc) do
+    match xs do
+    Nil -> acc
+    Cons((st, sp), t) -> eclose2(items, m, t, eclose_run(items, m, st, sp, acc))
+    end
+  end
+
+  pfn step2_one(items, m, st, sp, c, acc) do
+    if st >= m do
+      acc
+    else
+      match item_at(items, st) do
+      None -> acc
+      Some(RegexItem(atom, quant)) ->
+        if !atom_matches_byte(atom, c) do
+          acc
+        else
+          match quant do
+          QZeroOrMore -> ins_state(acc, st, sp)
+          _ -> ins_state(acc, st + 1, sp)
+          end
+        end
+      end
+    end
+  end
+
+  pfn step2(items, m, xs, c, acc) do
+    match xs do
+    Nil -> acc
+    Cons((st, sp), t) -> step2(items, m, t, c, step2_one(items, m, st, sp, c, acc))
+    end
+  end
+
+  -- Leftmost wins; at the same start, longest wins.
+  pfn best_update(active, m, pos, slen, aend, best) do
+    match lookup_state(active, m) do
+    None -> best
+    Some(sp) ->
+      if aend && pos != slen do
+        best
+      else
+        match best do
+        None -> Some((sp, pos))
+        Some((bs, be)) ->
+          if sp < bs do
+            Some((sp, pos))
+          else
+            if sp == bs && pos > be do Some((sp, pos)) else Some((bs, be)) end
+          end
+        end
+      end
+    end
+  end
+
+  pfn nfa_find_loop(items, m, s, slen, pos, active, astart, aend, best) do
+    let best2 = best_update(active, m, pos, slen, aend, best)
+    if pos >= slen do
+      best2
+    else
+      let c = string_byte_at(s, pos)
+      let stepped = step2(items, m, active, c, Nil)
+      -- Seed a fresh start at pos+1 only while no match is known: once one
+      -- starts at s0, a later start can never be more leftmost.
+      let seeded =
+        if astart do
+          stepped
+        else
+          match best2 do
+          Some(_) -> stepped
+          None -> ins_state(stepped, 0, pos + 1)
+          end
+        end
+      nfa_find_loop(items, m, s, slen, pos + 1,
+                    eclose2(items, m, seeded, Nil), astart, aend, best2)
+    end
+  end
+
+  -- Same contract as `find_match`: Some((match_start, match_end)) or None.
+  pfn find_match_linear(rpat, s, slen, start) do
+    match rpat do
+    RegexPattern(astart, items0, aend) ->
+      let items = expand_plus(items0, Nil)
+      let m = list_len(items, 0)
+      if astart && start > 0 do
+        None
+      else
+        let start_states = eclose2(items, m, Cons((0, start), Nil), Nil)
+        nfa_find_loop(items, m, s, slen, start, start_states, astart, aend, None)
+      end
+    end
+  end
+
   doc """
   Whether `pattern` matches anywhere in `s`, in time linear in the input.
 
@@ -612,6 +755,36 @@ mod Regex do
   test that compared the linear engine against itself would prove nothing.
   Do not use it on untrusted input — see `matches_linear` for why.
   """
+  fn find_backtracking(pattern : String, string : String) : Option(String) do
+    match compile(pattern) do
+    Err(_) -> None
+    Ok(rpat) -> do
+      let slen = string_byte_length(string)
+      match find_match(rpat, string, slen, 0) do
+      None -> None
+      Some((ms, me)) -> Some(string_slice(string, ms, me - ms))
+      end
+    end
+    end
+  end
+
+  doc """
+  The original backtracking `find`, retained for differential testing only.
+  Do not use it on untrusted input.
+  """
+  fn find_linear(pattern : String, string : String) : Option(String) do
+    match compile(pattern) do
+    Err(_) -> None
+    Ok(rpat) -> do
+      let slen = string_byte_length(string)
+      match find_match_linear(rpat, string, slen, 0) do
+      None -> None
+      Some((ms, me)) -> Some(string_slice(string, ms, me - ms))
+      end
+    end
+    end
+  end
+
   fn matches_backtracking(pattern : String, string : String) : Bool do
     match compile(pattern) do
     Err(_) -> false
@@ -637,7 +810,7 @@ mod Regex do
     Err(_) -> None
     Ok(rpat) -> do
       let slen = string_byte_length(string)
-      match find_match(rpat, string, slen, 0) do
+      match find_match_linear(rpat, string, slen, 0) do
       None -> None
       Some((s, e)) -> Some(string_slice(string, s, e - s))
       end
@@ -658,7 +831,7 @@ mod Regex do
       let slen = string_byte_length(string)
       fn go(pos, acc) do
         if pos > slen do rev(acc, Nil)
-        else match find_match(rpat, string, slen, pos) do
+        else match find_match_linear(rpat, string, slen, pos) do
           None -> rev(acc, Nil)
           Some((s, e)) -> do
             let matched = string_slice(string, s, e - s)
@@ -685,7 +858,7 @@ mod Regex do
     Err(_) -> string
     Ok(rpat) -> do
       let slen = string_byte_length(string)
-      match find_match(rpat, string, slen, 0) do
+      match find_match_linear(rpat, string, slen, 0) do
       None -> string
       Some((s, e)) ->
         string_slice(string, 0, s) ++ replacement ++ string_slice(string, e, slen - e)
@@ -709,7 +882,7 @@ mod Regex do
         if pos > slen do
           let parts = rev(acc_parts, Nil)
           string_join(parts, "")
-        else match find_match(rpat, string, slen, pos) do
+        else match find_match_linear(rpat, string, slen, pos) do
           None -> do
             let tail = string_slice(string, pos, slen - pos)
             let parts = rev(Cons(tail, acc_parts), Nil)
@@ -742,7 +915,7 @@ mod Regex do
       let slen = string_byte_length(string)
       fn go(pos, acc) do
         if pos > slen do rev(acc, Nil)
-        else match find_match(rpat, string, slen, pos) do
+        else match find_match_linear(rpat, string, slen, pos) do
           None -> do
             let tail = string_slice(string, pos, slen - pos)
             rev(Cons(tail, acc), Nil)
