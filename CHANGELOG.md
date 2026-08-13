@@ -3906,6 +3906,14 @@ git log is authoritative for exact commits.
   any `match` in checking position — which is every `match` in a function with
   a return annotation, i.e. most of them — silently skipped the analysis.
 
+- The Zed extension's tree-sitter grammar was pinned to a commit from
+  2026-03-26, four and a half months before `pfn` (private function) and
+  `needs` (capability declaration) support were added to the grammar
+  (#175, 2026-08-04). Editors built against the stale pin showed `pfn` and
+  `needs` as unhighlighted plain text instead of keywords. `rev` in
+  `zed-march/extension.toml` now points at current `main`; reload the dev
+  extension in Zed to pick it up.
+
 ### Documentation
 
 - Migrated 14 language-reference chapters (Type System, Pattern Matching,
