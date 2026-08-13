@@ -1,0 +1,31 @@
+-- Correctness pin for the mutual-TCO boxed-vector-slot path.
+--
+-- `even_step`/`odd_step` mutually tail-call each other, each threading a
+-- Simd.F32x4 accumulator. Unlike a SELF-tail-recursive function (see
+-- test/native/simd_leak_probe.march), a MUTUAL-recursion group's combined
+-- llvm_tco.ml dispatcher keeps vector-typed params in a uniform boxed `ptr`
+-- slot rather than promoting them to a native <4 x float> register slot --
+-- deliberately unaccelerated, not a bug (see the comment at the mutual-TCO
+-- param-slot alloca site in lib/tir/llvm_tco.ml). This fixture pins that the
+-- boxed path still produces the CORRECT numeric result, so a future change
+-- to the mutual-TCO slot strategy can't silently corrupt it.
+--
+-- specs/progress/2026-08-12-simd-closeouts-task-3-mutual-tco-pin.md
+mod SimdMutualTco do
+  needs IO.Console
+
+  pfn even_step(a, i : Int, n : Int, acc) : Float do
+    if i >= n do Simd.sum_f32x4(acc)
+    else odd_step(a, i + 4, n, Simd.add_f32x4(acc, Simd.load_f32x4(a, i))) end
+  end
+
+  pfn odd_step(a, i : Int, n : Int, acc) : Float do
+    if i >= n do Simd.sum_f32x4(acc)
+    else even_step(a, i + 4, n, Simd.mul_f32x4(acc, Simd.splat_f32x4(1.0))) end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    let a = NativeArray.make_f32(16, 2.0)
+    println(even_step(a, 0, 16, Simd.splat_f32x4(0.0)))
+  end
+end

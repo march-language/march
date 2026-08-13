@@ -127,10 +127,8 @@ git log is authoritative for exact commits.
   high-bit rule.
   `F32x4`/`F64x2` arithmetic is bit-exact single/double precision (verified
   against the true-f32-vs-double-then-round distinction) and `fma` is a
-  true fused multiply-add on both paths (for `f32x4` the interpreter's is a
-  binary64 fusion rounded to binary32 — no divergence observed, formal
-  equivalence tracked in
-  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`);
+  true fused multiply-add on both paths, interpreted and compiled (see the
+  Fixed entry below for the single-rounding fix this required);
   `min`/`max`/`hmin`/`hmax` on floats use minNum/maxNum
   semantics; integer arithmetic wraps mod 2^w. Each type implements
   `Show`/`Eq`/`Hash` (lane-wise; a NaN lane is unequal to itself, matching
@@ -164,12 +162,11 @@ git log is authoritative for exact commits.
   width of `i64x2`/`f64x2` caps the ceiling even after that overhead is
   fixed (see `bench/RESULTS.md`'s simd-kernels section).
 
-  Known limitations: a self-tail-recursive vector accumulator leaks one
-  32-byte box per **call** (not per iteration — the loop body itself is
-  allocation-free), unbounded for a long-lived process
-  (`specs/todos/2026-08-11-simd-tco-entry-box-leak.md`); mutual-recursion
-  accumulator groups still box the vector on every iteration (correct, just
-  not accelerated); `i64x2` lane values beyond ±2^62 lose their top bit
+  Known limitations: mutual-recursion accumulator groups still box the
+  vector on every call (correct, just not accelerated — see the Fixed entry
+  below for the self-tail-recursive case, which *is* accelerated and does
+  not have this box; pinned by `test/native/simd_mutual_tco.march`);
+  `i64x2` lane values beyond ±2^62 lose their top bit
   under the **interpreter only** (OCaml's 63-bit boxed int), a parity edge
   confined to that range; and `==`/`show` under a polymorphic/erased-type-
   variable context fall back to the generic runtime helpers rather than the

@@ -4102,6 +4102,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/simd_actor_msg.expected simd_actor_msg.out)))
 
+; Mutual-TCO vector correctness pin (Task 3, closeouts): even_step/odd_step
+; mutually tail-call each other threading a Simd.F32x4 accumulator. The
+; combined llvm_tco.ml dispatcher for a MUTUAL-recursion group keeps
+; vector-typed params in a uniform boxed `ptr` slot (unlike a self-tail-
+; recursive function's native <4 x float> register slot -- see
+; simd_leak_probe.march) -- correct, just unaccelerated, per the comment at
+; the mutual-TCO param-slot alloca site in lib/tir/llvm_tco.ml. This fixture
+; pins that the boxed path still produces the CORRECT result so a future
+; change to the mutual-TCO slot strategy can't silently corrupt it.
+(rule
+ (targets simd_mutual_tco simd_mutual_tco.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_mutual_tco.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_mutual_tco
+        native/simd_mutual_tco.march)
+   (with-stdout-to simd_mutual_tco.out
+        (system "./simd_mutual_tco")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_mutual_tco.expected simd_mutual_tco.out)))
+
 ; Witness for the march_poly_eq/march_poly_compare MARCH_SIMD_TAG fix
 ; (review finding #1): List.member's `y == x` compares two generically-typed
 ; (TVar) closure-captured operands, so both arrive boxed `ptr` and the

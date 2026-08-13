@@ -325,17 +325,27 @@ feature needs to replace.
 
 ### Known limitations
 
-- **TCO-entry box leak:** a self-tail-recursive function's vector
-  accumulator leaks one 32-byte box per **call** (not per loop iteration —
-  the loop body itself, per the register-residency contract above, is
-  allocation-free). Bounded and harmless for a program that calls such a
-  kernel a handful of times; unbounded for a long-lived process calling one
-  per request or tick. See
-  `specs/todos/2026-08-11-simd-tco-entry-box-leak.md`.
+- **TCO-entry box leak — fixed 2026-08-11.** A self-tail-recursive function's
+  vector accumulator used to leak one 32-byte box per **call** (not per loop
+  iteration — the loop body itself, per the register-residency contract
+  above, is allocation-free). The call site now releases the caller-created
+  temp box for callees with a native vector TCO slot; measured RSS on a
+  2,000,000-call probe went from ~64 MB to ~2.7 MB. The fix is narrow —
+  non-TCO vector params still leak per call, and three call paths
+  (raises-wrapper, blocking-extern, hot-reload dispatch) are deliberately
+  excluded; see `specs/todos/2026-08-12-simd-nontco-vector-param-leak.md` for
+  the still-open generalization. Pinned by
+  `test/native/simd_leak_probe.march` (leak must happen) and
+  `test/native/simd_vector_escape_arg.march` (release must NOT happen for an
+  escaping vector). See `specs/progress/2026-08-11-simd-tco-entry-box-leak.md`.
 - **Mutual-recursion accumulators stay boxed.** The register-residency
   optimization above covers self-tail-recursion only; a vector threaded
   through a mutual-recursion group is still correct but boxes/unboxes on
-  every call, same as before the TCO optimization landed.
+  every call, same as before the TCO optimization landed. This is a
+  deliberate wontfix-until-demand, not a gap-in-waiting: pinned correct by
+  `test/native/simd_mutual_tco.march`, so a future change to the mutual-TCO
+  slot strategy can't silently corrupt it. See
+  `specs/progress/2026-08-13-simd-closeouts-task3-mutual-tco-pin.md`.
 - **`fma` is a true fused multiply-add** (`llvm.fma.v4f32`/`v2f64`, one
   rounding) — it can differ from a separate multiply followed by an add in
   the last ulp. Both backends run the same operation on both widths: for
