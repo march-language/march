@@ -167,6 +167,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `to_string(x)` inside a generic function printed `#<tag:N>`
+  garbage for non-primitive `x` (Lists, records, user ADTs) instead of the
+  real value**, diverging from the interpreter. `to_string` on a concretely-
+  typed argument already dispatched to the matching `Show` implementation;
+  a `to_string` call inside a still-generic function (argument type an
+  unresolved type variable at that function's own lowering time) stayed a
+  bare runtime fallback that only understands a handful of primitive
+  representations, and was never revisited once monomorphization later
+  specialized the function to a concrete type. Hit any generic helper whose
+  body called `to_string` on its parameter, most visibly
+  `examples/csv_example.march`'s per-row callback.
+
 - **String literals now carry their full source span.** A string literal's AST
   span collapsed to a single column — the closing quote — so anything that
   sliced source text by span got a lone `"` back whenever the expression was
