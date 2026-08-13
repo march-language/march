@@ -255,6 +255,19 @@ git log is authoritative for exact commits.
   `march --check`, the interpreter, and the compiler. (Sandbox ladder R1
   stages A+B; per-function grants are future work.)
 
+### Documentation
+
+- **Capability enforcement assurance-tier table, and an OS-primitive-by-capability
+  reference, added to the Capabilities and Capability Enforcement pages.** A
+  quick-reference table (type system → `forge cap inspect` → `--cap-sandbox` →
+  `forge cap run` → `forge cap run --allow-only`) makes the assurance/effort
+  tradeoff legible at a glance, backed by a full capability-to-OS-primitive
+  mapping for both `--cap-sandbox` (seccomp-bpf/Seatbelt) and `forge cap run`
+  (bubblewrap/sandbox-exec). Also documents two platform asymmetries verified
+  against real running binaries: macOS's `IO.Network` gates `bind`/`connect`
+  but not `socket()` creation, and macOS's `IO.Process` gates `fork` but not
+  `exec` — both differ from Linux, which is stricter on each.
+
 ### Changed
 
 - **Mailbox node allocation moved outside the mbox spinlock.** `march_sched_send`
