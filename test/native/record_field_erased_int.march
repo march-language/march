@@ -1,0 +1,39 @@
+mod RecordFieldErasedInt do
+
+-- A record REBUILT inside a generic `List.map` lambda and then read by a
+-- separate function.  The rebuilding lambda is monomorphised (it knows the
+-- fields are Int and stores them raw, `store i64`), but the consumer's view of
+-- that field is still an unresolved `TVar` — monomorphisation never reaches it.
+--
+-- llvm_emit used to GEP straight through that TVar field: the slot was loaded
+-- as `ptr` and the ptr->i64 coercion then applied its conditional untag
+-- (`select (v & 1), v >> 1, v`).  That heuristic assumes an erased slot holds
+-- either a TAGGED int (odd) or a heap pointer (even), so a raw untagged int
+-- whose value happens to be ODD was silently HALVED: 35 read back as 17, 51 as
+-- 25, while even values came through intact.
+--
+-- Parity is the tell, and it makes the bug survive casual testing — half of
+-- every sample looks correct.  It reached production in forgepm, where a page
+-- that cites the source line of a capability declaration pointed readers at
+-- line 17 of a file whose declaration is on line 35.
+--
+-- A TVar says nothing about a field's representation, so the read now goes
+-- through march_record_field_dyn, which consults the shape recorded at
+-- construction and returns ints low-bit tagged — exactly what the consuming
+-- coercion expects.
+pfn rebuild(rows, flag) do
+  List.map(rows, fn r ->
+    { name: r.name, odd: r.odd, even: r.even, flag: flag })
+end
+
+pfn describe(r) do
+  r.name ++ " odd=" ++ int_to_string(r.odd) ++ " even=" ++ int_to_string(r.even)
+end
+
+fn main() : Unit do
+  let rows = [{ name: "a", odd: 35, even: 32 },
+              { name: "b", odd: 51, even: 54 }]
+  List.each(rows, fn r -> println("direct " ++ describe(r)))
+  List.each(rebuild(rows, true), fn r -> println("rebuilt " ++ describe(r)))
+end
+end

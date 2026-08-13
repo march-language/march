@@ -4950,9 +4950,32 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         ("ptr", res)
       | _ ->
         let (idx, field_ty) = field_index_for ctx obj_ty field_name in
-        let (_, obj_val) = emit_atom ctx obj_atom in
-        let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
-        (llvm_ty field_ty, fv)
+        (match field_ty with
+         | Tir.TVar _ when ctx.shape_meta ->
+           (* The record's shape is statically known but THIS field's type is
+              still an unresolved type variable — monomorphisation did not
+              reach it (e.g. a record rebuilt inside a generic `List.map`
+              lambda and consumed by a separate function).  A TVar says
+              nothing about the field's representation, so a direct typed load
+              is unsound: emitting one loads the slot as `ptr` and the ptr->i64
+              coercion then untags it, which silently HALVES any odd integer
+              (35 read back as 17) while leaving even ones intact.
+
+              Fall back to the by-name shape lookup used for wholly-unknown
+              records.  It consults the runtime shape recorded at construction
+              and returns ints low-bit tagged, which is exactly the generic
+              ADT-slot convention the consuming coercion expects. *)
+           let (_, obj_val) = emit_atom ctx obj_atom in
+           let ng = intern_string ctx field_name in
+           let res = fresh ctx "cr" in
+           emit ctx (Printf.sprintf
+             "%s = call ptr @march_record_field_dyn(ptr %s, ptr %s, i64 %d)"
+             res obj_val ng (String.length field_name));
+           ("ptr", res)
+         | _ ->
+           let (_, obj_val) = emit_atom ctx obj_atom in
+           let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
+           (llvm_ty field_ty, fv))
     end
 
   (* ── Record update ─────────────────────────────────────────────────── *)
