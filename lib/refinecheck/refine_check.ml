@@ -2793,17 +2793,36 @@ let reflect_scalar
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     ?(foreign_var : (string -> (Smt.term * (string * Smt.sort)) option) option)
     ?(foreign_measure : (string -> string -> Smt.term option) option)
+    ?(foreign_field :
+        (string -> string -> (Smt.term * (string * Smt.sort) list) option) option)
     ?(sort : Smt.sort = Smt.SInt) (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   let foreign_var = Option.value foreign_var ~default:(fun _ -> None) in
   let foreign_measure =
     Option.value foreign_measure ~default:(fun _ _ -> None)
   in
+  (* A field read in ACTUAL position — `takepos(a.rem)`.  The caller supplies
+     the same selector term its PATH conditions reflect `a.rem` to, so a guard
+     (`if a.rem >= 0`) and this goal meet on one symbol; without it the field
+     access reached [smt_of]'s default resolver, came back None, and took the
+     whole obligation down with it as "unreflectable" — silently, since an
+     undecidable obligation is accepted. Callers that cannot model the record
+     leave it unset and get exactly the old behaviour. *)
+  let foreign_field = Option.value foreign_field ~default:(fun _ _ -> None) in
   (* Reflect an expression with no scope help — also the fallback for a call
      whose callee has no usable postcondition. *)
   let plain e =
-    match smt_of ~resolve_var:(fun _ -> None) ~resolve_measure:(fun _ _ -> None) e with
-    | Some t -> Some (t, [], [])
+    let extra = ref [] in
+    let resolve_field x fname =
+      match foreign_field x fname with
+      | Some (t, ds) ->
+        List.iter (fun d -> if not (List.mem d !extra) then extra := d :: !extra) ds;
+        Some t
+      | None -> None
+    in
+    match smt_of ~resolve_var:(fun _ -> None) ~resolve_measure:(fun _ _ -> None)
+            ~resolve_field e with
+    | Some t -> Some (t, !extra, [])
     | None -> None
   in
   match actual with
@@ -3629,6 +3648,27 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
       | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
       | None -> None
     in
+    (* `a.rem` appearing as an ACTUAL argument.  Deliberately the same
+       construction [path_resolve_field] uses below for `a.rem` in a PATH
+       CONDITION — the record's SMT selector applied to `Const a` — because the
+       guard and the goal only meet if both sides land on the identical term.
+       The declaration is RETURNED (via [reflect_scalar]'s decls channel and
+       [absorb]) rather than pushed straight onto [decls], so a field read that
+       never makes it into the goal contributes no stray declaration.
+       A receiver outside [recenv] (no known record sort) stays None: the
+       obligation is skipped exactly as before, never guessed. *)
+    let arg_resolve_field varname fname =
+      match List.assoc_opt varname re with
+      | None -> None
+      | Some sort_name ->
+        (match make_field_resolver varname sort_name (Smt.Const varname)
+                 varname fname with
+         | None -> None
+         | Some t ->
+           if not (List.mem sort_name !adt_sorts) then
+             adt_sorts := sort_name :: !adt_sorts;
+           Some (t, [ (varname, Smt.SData sort_name) ]))
+    in
     (* Reflection must be stable per binder within one [check_call]: two
        syntactic occurrences of the same binder (or the same cross-argument
        parameter name) in a predicate denote the same value, so they must
@@ -3880,6 +3920,7 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
         absorb
           (reflect_cached "$self" (fun () ->
                reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                 ~foreign_field:arg_resolve_field
                  ~sort:self_scalar sc self_actual))
       else
         match actual_of_name name with
@@ -3887,6 +3928,7 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
           absorb
             (reflect_cached name (fun () ->
                  reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                   ~foreign_field:arg_resolve_field
                    ~sort:(scalar_of_name name) sc a))
         | None ->
           (* a caller-scope variable from the path context *)
@@ -5896,6 +5938,22 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             (tester, false) :: p
           | _ -> p
         in
+        (* A Bool-literal arm — `match cond do true -> … false -> … end`.
+           This is the same branch on the same Bool as an [A.EIf], so it earns
+           the same fact, and it is recorded in the same (condition, negated)
+           form the [A.EIf] arm below uses: the `true` arm learns the
+           scrutinee holds, the `false` arm learns its negation.
+
+           Unlike the constructor narrowing above this needs NO stable name
+           for the scrutinee — a path condition is an arbitrary expression, so
+           an inline `match a >= b do` works exactly as `if a >= b do` does.
+           Gating on the PATTERN being a Bool literal is what keeps it typed:
+           only a Bool scrutinee can be matched against `true`/`false`. *)
+        let p =
+          match br.A.branch_pat with
+          | A.PatLit (A.LitBool bv, _) -> (subj, not bv) :: p
+          | _ -> p
+        in
         (* Arm-order exclusion.  Reaching this arm means every EARLIER arm
            failed to match, so for each of those whose failure is decided purely
            by the tag ([arm_excludes_tag]), the scrutinee is known NOT to carry
@@ -5926,6 +5984,21 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                 | _ -> p)
               p earlier
           | _ -> p
+        in
+        (* Arm-order exclusion for Bool-literal arms, the counterpart of the
+           tag exclusion above: reaching this arm means every earlier
+           `true ->` / `false ->` failed to match, so the scrutinee is known
+           NOT to be that literal — which is what gives the `_` arm of
+           `match cond do true -> … _ -> … end` the negated guard, exactly as
+           an `if`'s else-branch gets it.  An earlier arm carrying a GUARD
+           licenses nothing: it can fail with the literal still matching. *)
+        let p =
+          List.fold_left
+            (fun p (prev : A.branch) ->
+              match prev.A.branch_pat, prev.A.branch_guard with
+              | A.PatLit (A.LitBool bv, _), None -> (subj, bv) :: p
+              | _ -> p)
+            p earlier
         in
         visit ~root errctx defs ctx p lets sc re cb br.A.branch_body;
         br :: earlier)
