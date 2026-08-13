@@ -2510,6 +2510,14 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_string, TArrow (TArrow (t_unit, t_unit), t_unit)))));
     (* Phase 6b: Register a linear value with an actor; Drop impl resolved at runtime *)
     ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
+    (* Named registry (Task 4): register/unregister/whereis/registered over the
+       runtime-owned name table. No capability — the runtime owns the table,
+       so no March-level naming call happens. Arg order matches monitor/kill
+       (pid first). *)
+    ("actor_register",   poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_bool))));
+    ("actor_unregister", Mono (TArrow (t_string, t_bool)));
+    ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
+    ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));
     (* Phase 3: Epoch-based capability builtins *)
     (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
        a revocable, epoch-checked reference to a live actor, represented at run

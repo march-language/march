@@ -11,6 +11,10 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`Actor.register(pid, name)` / `Actor.unregister(name)` / `Actor.whereis(name)` / `Actor.registered()`** — a named process registry over the runtime's `march_actor_*` C API. `register` fails (returns `false`) if the name is already held by a live actor, or if `pid` is dead; a stale entry left by a dead actor is silently reusable. `whereis` re-checks liveness at lookup time, so a name whose actor died resolves to `None` even before any restart-carry-forward cleanup runs. No capability is required — the registry table is owned by the runtime, so no March-level naming call happens. Identical semantics in both the compiled and interpreted backends.
+
 ### Changed
 
 - Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared, striped reader-count lock (`set`/`set_ttl`/`put_new`/`incr`/`push_capped`/`drop` still take it exclusively). Concurrent reads of *distinct* keys now scale close to linearly with thread count; concurrent reads of the *same* key are still bounded by reference-count contention on that key's one shared value, an orthogonal cost the lock change doesn't touch.
