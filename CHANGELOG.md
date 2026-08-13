@@ -13,6 +13,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Regex` no longer has a denial-of-service on adversarial input.** The
+  engine matched by backtracking, so repeated quantifiers over one character
+  class followed by a byte that never matches cost O(n^k): the pattern
+  `a*a*a*a*b` against 80 bytes of `a` took **5.7 seconds** compiled at
+  `--opt 2`, and the cost is reachable from a pattern in a config file plus a
+  short user-supplied string. (Note this is *polynomial*, not the exponential
+  of the classic `(a+)+$` — that pattern is not expressible here, since the
+  engine has neither groups nor alternation.) `matches`, `matches_opts`,
+  `find`, `find_all`, `replace`, `replace_all` and `split` now all simulate
+  the set of reachable NFA states instead, which is linear in the input and
+  cannot blow up: the same 80-byte case is now 0.0004s, and 2000 bytes takes
+  0.0096s. Behaviour is unchanged — the new engine is asserted to return the
+  same booleans *and* the same matched substrings as the old one across the
+  supported syntax, and `matches_backtracking`/`find_backtracking` are
+  retained so that comparison has something to compare against.
+
 - **`if` and `match do` now treat their branches as mutually exclusive for
   linear values, the way `match` arms already did.** Consuming the same
   linear or affine value once in each branch is legal — at most one branch
