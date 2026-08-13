@@ -32,11 +32,23 @@
  *
  * 9x is roughly the ORIGINAL mutex's ratio: the bar here is "never worse
  * than where we started," not "scales well" — that claim belongs to
- * test_vault_distinct_keys_scale.c. */
+ * test_vault_distinct_keys_scale.c.
+ *
+ * ROUND 3 — median-of-N, not a single sample: a single (solo, four-thread)
+ * pair is vulnerable to a load spike on either side landing at exactly the
+ * wrong moment — measured 2/40 spurious failures across two 20-run batches
+ * of the sibling distinct-key test, both coinciding with `uptime` load
+ * averages of ~19-20 on this 14-core box (other sessions benchmarking
+ * concurrently). Loosening the bound to paper over that would hide a real
+ * regression just as easily as a load spike, so instead both phases run
+ * N=5 times and the assertion compares MEDIANS — immune to any single run
+ * (in either the solo or four-thread phase) landing during a spike, without
+ * touching the bound itself. */
 #include <assert.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <time.h>
 
 extern void *march_vault_new(void *name);
@@ -46,6 +58,7 @@ extern void *march_alloc(int64_t);
 extern void *march_string_lit(const char *utf8, int64_t len);
 
 #define READS 1000000
+#define NSAMPLES 5
 
 static void *g_table;
 static void *g_key;
@@ -61,26 +74,69 @@ static void *reader(void *arg) {
     return NULL;
 }
 
+static int64_t run_solo(void) {
+    int64_t t0 = now_ms();
+    reader(NULL);
+    return now_ms() - t0;
+}
+
+static int64_t run_four_threads(void) {
+    pthread_t th[4];
+    int64_t t0 = now_ms();
+    for (int i = 0; i < 4; i++) pthread_create(&th[i], NULL, reader, NULL);
+    for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
+    return now_ms() - t0;
+}
+
+static int cmp_i64(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+static int64_t median_of(int64_t *samples, int n) {
+    /* n is small (NSAMPLES) — sort in place, samples[] is a scratch copy
+     * owned by the caller. */
+    qsort(samples, (size_t)n, sizeof(int64_t), cmp_i64);
+    return samples[n / 2];
+}
+
+static void print_samples(const char *label, int64_t *samples, int n) {
+    fprintf(stderr, "%s samples (ms):", label);
+    for (int i = 0; i < n; i++) fprintf(stderr, " %lld", (long long)samples[i]);
+    fprintf(stderr, "\n");
+}
+
 int main(void) {
     g_table = march_vault_new(march_string_lit("bench", 5));
     g_key   = march_string_lit("k", 1);
     march_vault_set(g_table, g_key, march_string_lit("v", 1));
 
-    int64_t t0 = now_ms();
-    reader(NULL);
-    int64_t solo = now_ms() - t0;
+    int64_t solo_samples[NSAMPLES], four_samples[NSAMPLES];
+    for (int i = 0; i < NSAMPLES; i++) solo_samples[i] = run_solo();
+    for (int i = 0; i < NSAMPLES; i++) four_samples[i] = run_four_threads();
 
-    pthread_t th[4];
-    t0 = now_ms();
-    for (int i = 0; i < 4; i++) pthread_create(&th[i], NULL, reader, NULL);
-    for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
-    int64_t four = now_ms() - t0;
+    /* median_of() sorts in place; keep unsorted copies for the failure
+     * diagnostic printout below. */
+    int64_t solo_sorted[NSAMPLES], four_sorted[NSAMPLES];
+    for (int i = 0; i < NSAMPLES; i++) solo_sorted[i] = solo_samples[i];
+    for (int i = 0; i < NSAMPLES; i++) four_sorted[i] = four_samples[i];
+    int64_t solo_med = median_of(solo_sorted, NSAMPLES);
+    int64_t four_med = median_of(four_sorted, NSAMPLES);
 
-    fprintf(stderr, "solo=%lldms four-threads=%lldms\n",
-            (long long)solo, (long long)four);
+    fprintf(stderr, "solo_median=%lldms four_median=%lldms\n",
+            (long long)solo_med, (long long)four_med);
     /* Guard against a zero-length solo run on a very fast box. */
-    if (solo < 5) { printf("test_vault_concurrency: skipped (too fast to time)\n"); return 0; }
-    assert(four < solo * 9);
+    if (solo_med < 5) { printf("test_vault_concurrency: skipped (too fast to time)\n"); return 0; }
+
+    int ok = (four_med < solo_med * 9);
+    if (!ok) {
+        fprintf(stderr, "test_vault_concurrency: FAILED — four_median (%lldms) "
+                "not < solo_median (%lldms) * 9\n",
+                (long long)four_med, (long long)solo_med);
+        print_samples("solo", solo_samples, NSAMPLES);
+        print_samples("four-threads", four_samples, NSAMPLES);
+    }
+    assert(ok);
     printf("test_vault_concurrency: all passed\n");
     return 0;
 }

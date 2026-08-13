@@ -236,6 +236,12 @@
 ; march_vault_* lives in march_extras.c, which needs the same full runtime
 ; link set as test_float_box_runner above (march_extras.c pulls in
 ; march_compress.c -> -lz, plus the rest of the runtime object graph).
+;
+; This one STAYS in `runtest` (unlike its distinct-key sibling below, which
+; moved to its own `vault-scale` alias): it is 20/20 stable and is the
+; catastrophic-regression guard (never worse than the original exclusive
+; mutex), not a scaling benchmark — see its own header comment for why its
+; bound is loose and what it does/doesn't measure.
 (rule
  (targets test_vault_concurrency_runner)
  (deps    test_vault_concurrency.c
@@ -267,13 +273,30 @@
  (action  (run ./test_vault_concurrency_runner)))
 
 ; ── Vault distinct-key read-scaling test (named-registry plan, task 1,
-; fix round 2) ────────────────────────────────────────────────────────────
+; fix round 4) ────────────────────────────────────────────────────────────
 ; Companion to test_vault_concurrency_runner above: that one shares a single
 ; key across all reader threads and is dominated by march_incrc contention
 ; on the shared value, not the table lock (see its comment). This one gives
 ; each thread a distinct key, isolating what the striped table lock actually
-; governs, with a correspondingly tight scaling assertion. Same link set as
+; governs, with a correspondingly tight scaling assertion (median-of-5,
+; four-thread median < 3x the solo median). Same link set as
 ; test_vault_concurrency_runner (march_extras.c's full dependency graph).
+;
+; A SCALING ASSERTION IS A BENCHMARK, NOT A UNIT TEST, so — same precedent as
+; `types-check`/`grammar-check` above and `stdlib-march-properties` below —
+; this is its OWN alias (`vault-scale`), NOT folded into `runtest`. It
+; measures parallel wall-clock scaling across 4 real OS threads, so it is
+; sensitive to core availability: on a box running other CPU-bound sessions
+; concurrently it can and does flake even with the median-of-5 built in — a
+; whole-run contention window (all 5 samples elevated together, not just one)
+; isn't something a within-run median can filter, and this repo's dev boxes
+; regularly run several other sessions' compiles/benchmarks at once (see
+; "bench load contamination" in project memory). `runtest` runs on every PR
+; and must stay green regardless of host load, so this can't live there.
+; Run it deliberately, ideally on an otherwise-quiet box:
+;   dune build @vault-scale
+; A failure here on a loaded box is expected and, by itself, is not evidence
+; of a regression — re-run on a quiet one before concluding anything.
 (rule
  (targets test_vault_distinct_keys_scale_runner)
  (deps    test_vault_distinct_keys_scale.c
@@ -300,7 +323,7 @@
                -lpthread -lz -lm)))
 
 (rule
- (alias   runtest)
+ (alias   vault-scale)
  (deps    (file test_vault_distinct_keys_scale_runner))
  (action  (run ./test_vault_distinct_keys_scale_runner)))
 
