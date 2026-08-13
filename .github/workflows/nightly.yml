@@ -57,6 +57,37 @@ jobs:
             echo "::notice::All quarantined tests passed — consider un-quarantining them in test/dune."
           fi
 
+  # Smoke-test the stdlib doc generator against the current compiler. The
+  # external march_doc tool (auto-cloned by the script) is compiled by THIS
+  # repo's compiler, so a language-rule change here can break it silently:
+  # gen-stdlib-docs.yml only triggers on stdlib/** pushes, so the breakage
+  # would otherwise surface weeks later on an unrelated stdlib change (this is
+  # exactly how the strict main-capability-grant rule broke march_doc in
+  # 2026-08). A red run here means march_doc needs updating for a compiler
+  # change — fix it in the march_doc repo, not here.
+  stdlib-docs-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Generate stdlib docs (march_doc compile + run smoke)
+        run: |
+          eval $(opam env)
+          scripts/gen-stdlib-docs.sh
+
+      - name: Check generated docs match committed pages
+        run: |
+          # A diff here means gen-stdlib-docs.yml didn't run (or its commit
+          # didn't land) after the last stdlib change — the published site is
+          # stale. Re-run that workflow (workflow_dispatch) to fix.
+          git diff --exit-code --stat docs/docs/stdlib \
+            || { echo "::error::committed docs/docs/stdlib is stale — dispatch the 'Regenerate Stdlib Docs' workflow"; exit 1; }
+
   version:
     runs-on: ubuntu-24.04
     outputs:
