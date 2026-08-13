@@ -4,7 +4,98 @@
 
 mod TestRegex do
 
+-- The linear matcher must give the SAME answer as the backtracking one for
+-- every pattern the engine supports; a disagreement would make swapping it a
+-- silent behaviour change rather than a performance fix.
+pfn agree(pat : String, s : String) : Bool do
+  Regex.matches_backtracking(pat, s) == Regex.matches_linear(pat, s)
+end
+
+-- Spans, not just booleans: the find family needs (start, end), and greedy
+-- backtracking is not the same rule as leftmost-longest in general. This
+-- compares the actual matched substring.
+pfn agree_find(pat : String, s : String) : Bool do
+  Regex.find_backtracking(pat, s) == Regex.find_linear(pat, s)
+end
+
+
 describe "Regex" do
+
+  -- The linear matcher must agree with the backtracking one on every pattern
+  -- the engine supports, or replacing it would be a silent behaviour change.
+  describe "matches_linear parity with matches" do
+
+    test "agrees on literals, anchors, classes and quantifiers" do
+      assert agree("hello", "hello world")
+      assert agree("hello", "say hello")
+      assert agree("xyz", "hello world")
+      assert agree("h.llo", "hello")
+      assert agree("^hello", "hello world")
+      assert agree("^hello", "say hello")
+      assert agree("world$", "hello world")
+      assert agree("world$", "world peace")
+      assert agree("^abc$", "abc")
+      assert agree("^abc$", "abcd")
+      assert agree("ab*c", "ac")
+      assert agree("ab*c", "abbbc")
+      assert agree("ab+c", "ac")
+      assert agree("ab+c", "abbbc")
+      assert agree("ab?c", "ac")
+      assert agree("ab?c", "abc")
+      assert agree("ab?c", "abbc")
+      assert agree("[abc]+", "xbz")
+      assert agree("[a-z]+", "ABC")
+      assert agree("[^0-9]+", "123")
+      assert agree("\\d+", "abc123")
+      assert agree("\\w+", "  ")
+      assert agree("\\s", "ab cd")
+      assert agree("\\D", "123")
+      assert agree("a*", "")
+      assert agree("", "abc")
+    end
+
+    test "agrees on the patterns that make the old engine blow up" do
+      assert agree("a*a*b", "aaaa")
+      assert agree("a*a*a*b", "aaaaaa")
+      assert agree("a*a*a*a*b", "aaaaaaaa")
+      assert agree("a*a*a*a*b", "aaaaaaaab")
+    end
+
+    -- The whole point: bounded work per byte. The backtracking matcher needs
+    -- ~5.7s for 80 bytes of this; if the NFA were not linear this test would
+    -- not finish either.
+    test "find agrees with backtracking on the matched substring" do
+      assert agree_find("hello", "say hello world")
+      assert agree_find("l+", "hello")
+      assert agree_find("a*", "aaa")
+      assert agree_find("a*", "bbb")
+      assert agree_find("a*b", "aaab")
+      assert agree_find("a*a", "aaa")
+      assert agree_find("a*ab", "aab")
+      assert agree_find("ab?", "ab")
+      assert agree_find("ab?", "a")
+      assert agree_find("[0-9]+", "abc123def456")
+      assert agree_find("\\d+", "price: 42 dollars")
+      assert agree_find("\\w+", "  hi there")
+      assert agree_find("^ab", "abc")
+      assert agree_find("^ab", "xabc")
+      assert agree_find("bc$", "abc")
+      assert agree_find("bc$", "abcd")
+      assert agree_find("^a*$", "aaa")
+      assert agree_find("x", "abc")
+      assert agree_find(".", "abc")
+      assert agree_find(".*", "abc")
+      assert agree_find("a.c", "xxabcxx")
+    end
+
+    test "stays fast on input that is catastrophic for backtracking" do
+      let long = String.repeat("a", 400)
+      assert (Regex.matches_linear("a*a*a*a*b", long) == false)
+      assert (Regex.matches_linear("a*a*a*a*b", long ++ "b") == true)
+    end
+
+  end
+
 
   describe "matches" do
 

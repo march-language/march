@@ -3927,6 +3927,59 @@ let rec show_dispatch (v : value) : string =
 (* ------------------------------------------------------------------ *)
 
 let f32_round (v : float) : float = Int32.float_of_bits (Int32.bits_of_float v)
+
+(* Single-rounded binary32 fused multiply-add, emulated in binary64 via the
+   round-to-odd technique (Boldo-Melquiond). [a], [b], [c] must already be
+   binary32-representable (every f32 lane store goes through [f32_round], so
+   the SIMD f32x4 lanes are); the result is bit-identical to hardware [fmaf] /
+   [llvm.fma.f32], i.e. RN32(a*b + c) with ONE rounding.
+
+   Why not [f32_round (Float.fma a b c)]: that is a binary64 fused multiply-add
+   NARROWED to binary32 -- two roundings -- and it really does differ in the
+   last ulp. Witness: a = 24929, b = 673 (a*b = 2^24+1 exactly, a binary32
+   midpoint), c = 1e-30. The exact value sits just above the midpoint, so one
+   rounding gives 2^24+2, but the binary64 intermediate swallows c, lands back
+   on the midpoint, and ties-to-even then gives 2^24. Random binary32 triples
+   diverge about 1 in 20M.
+
+   How this works: [a *. b] is EXACT in binary64 (24+24 = 48 <= 53 significand
+   bits), so the only rounding is the final add. TwoSum recovers that add's
+   exact residual; when the binary64 sum is inexact and has an even significand,
+   stepping one ulp toward the residual makes it odd, which is round-to-odd of
+   the exact value -- and rounding an odd binary64 to nearest binary32 is
+   equivalent to rounding the exact value once (53 >= 24+2).
+
+   Oracle: llvm.fma.v4f32 on the compiled path. Validated against hardware
+   [fmaf] over >100M binary32 triples (full range, subnormal operands with 3.8M
+   subnormal results, overflow zone, and 20M midpoint-product constructions) with
+   zero mismatches; the compiled-vs-interpreted fuzz witness lives in
+   test/native/simd_fma_fuzz.march. *)
+let fma32_single_round (a : float) (b : float) (c : float) : float =
+  let p = a *. b in                                   (* exact *)
+  let s = p +. c in
+  if Float.is_nan s || s = Float.infinity || s = Float.neg_infinity then
+    f32_round s
+  else begin
+    let bv = s -. p in
+    let err = (p -. (s -. bv)) +. (c -. bv) in        (* TwoSum residual *)
+    let s' =
+      if err = 0.0 then s                             (* the add was exact *)
+      else if s = 0.0 then err   (* unreachable here: p+c cannot underflow to
+                                    zero for binary32 operands -- kept so the
+                                    helper is total if it is ever reused *)
+      else
+        let bits = Int64.bits_of_float s in
+        if Int64.logand bits 1L = 0L then
+          (* even significand: step one ulp toward the exact value (increasing
+             |s| when the residual has the same sign as s), giving round-to-odd *)
+          let away_from_zero = (err > 0.0) = (s >= 0.0) in
+          Int64.float_of_bits
+            (if away_from_zero then Int64.add bits 1L else Int64.sub bits 1L)
+        else s
+    in
+    f32_round s'
+  end
+
 let i32_wrap (v : int) : int = Int32.to_int (Int32.of_int v)
 let u8_wrap (v : int) : int = v land 0xff
 
@@ -8469,17 +8522,18 @@ let base_env : env =
         | [VF32x4 a; VF32x4 b] ->
           VF32x4 (Array.init 4 (fun i -> f32_round (simd_maxnum_f a.(i) b.(i))))
         | _ -> eval_error "simd_f32x4_max: bad arguments"))
-  (* f32x4 fma is NOT formally identical to the compiled path: this is a
-     binary64 fused multiply-add rounded to binary32 (double rounding),
-     while llvm_emit.ml lowers to llvm.fma.v4f32 (a single binary32-fused
-     rounding). No divergence has been observed over the parity leg, but
-     the two operations are different roundings and could differ in the
-     last ulp. Open question + closure conditions:
-     specs/todos/2026-08-12-simd-fma-rounding-parity.md.
-     f64x2 below has no such asymmetry (Float.fma IS binary64-fused). *)
+  (* f32x4 fma runs the SAME operation as the compiled path by construction:
+     [fma32_single_round] is a single-rounded binary32 fused multiply-add
+     (round-to-odd emulation; see its definition above), bit-identical to
+     llvm_emit.ml's llvm.fma.v4f32. The old formula here,
+     [f32_round (Float.fma a b c)], was binary64-fused then narrowed -- two
+     roundings -- and diverged in the last ulp (~1 random triple in 20M);
+     test t15 in test/test_stdlib_suite.ml pins the boundary triples and
+     test/native/simd_fma_fuzz.march is the compiled-vs-interpreted fuzz.
+     f64x2 below needs no emulation (Float.fma IS binary64-fused). *)
   ; ("simd_f32x4_fma", VBuiltin ("simd_f32x4_fma", function
         | [VF32x4 a; VF32x4 b; VF32x4 c] ->
-          VF32x4 (Array.init 4 (fun i -> f32_round (Float.fma a.(i) b.(i) c.(i))))
+          VF32x4 (Array.init 4 (fun i -> fma32_single_round a.(i) b.(i) c.(i)))
         | _ -> eval_error "simd_f32x4_fma: bad arguments"))
   ; ("simd_f32x4_sqrt", VBuiltin ("simd_f32x4_sqrt", function
         | [VF32x4 a] -> VF32x4 (Array.map (fun x -> f32_round (sqrt x)) a)

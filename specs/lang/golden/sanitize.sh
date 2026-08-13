@@ -34,12 +34,6 @@ fi
 export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"
 export MARCH_STDLIB="${MARCH_STDLIB:-$root/stdlib}"
 
-# TRMC mode is inherited from the environment so the caller can run this
-# script twice — once per mode — and get separately attributable output.
-# Without the label a failure in one mode is indistinguishable from the other.
-mode_label="trmc=${MARCH_TRMC:-off}"
-echo "=== golden sanitize ($mode_label) ==="
-
 pass=0; fail=0
 for f in "$here"/*.march; do
   b="$(basename "$f" .march)"
@@ -54,5 +48,5 @@ for f in "$here"/*.march; do
   fi
 done
 
-echo "=== golden sanitize ($mode_label): $pass clean, $fail failed ==="
+echo "=== golden sanitize: $pass clean, $fail failed ==="
 [ $fail -eq 0 ]

@@ -1,0 +1,56 @@
+-- Ownership canary for SIMD vector ARGUMENTS whose box escapes into the callee.
+--
+-- `wrap` is structurally (NOT tail) recursive, so it gets no native vector TCO
+-- slot and its `v` parameter stays a `ptr`. Its body stores that exact incoming
+-- pointer into the cons cells it returns -- i.e. the CALLER's freshly-created
+-- march_simd_alloc box escapes into a heap aggregate that then owns it.
+--
+-- `drive` calls it with `Simd.splat_f32x4(2.0)`: a native `<4 x float>` SSA
+-- value, so the call site boxes it via coerce's (vec, "ptr") arm. If the
+-- emitter releases such call-scoped boxes indiscriminately after the call
+-- (rather than only for callees with a native vector TCO slot, which provably
+-- do not retain the pointer), the list elements are freed while still
+-- reachable and every later read is a use-after-free -- measured as a
+-- reproducible exit 138/139 while every other simd fixture still passed.
+--
+-- The loop reads each surviving element back (sum_all) and repeats, so a freed
+-- box is actually dereferenced rather than merely leaked. .expected is
+-- interpreter-produced; compiled must match byte-for-byte.
+mod SimdVectorEscapeArg do
+  needs IO.Console
+
+  fn wrap(v, k : Int) : List(F32x4) do
+    if k <= 0 do Cons(v, Nil)
+    else Cons(v, wrap(v, k - 1)) end
+  end
+
+  pfn sum_all(xs : List(F32x4), acc : Float) : Float do
+    match xs do
+      Cons(h, t) -> sum_all(t, acc +. Simd.sum_f32x4(h))
+      Nil        -> acc
+    end
+  end
+
+  pfn drive(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      -- k = 0 on purpose: the callee takes the base-case branch, which stores
+      -- the incoming box into ONE cons cell with no incrc. The list therefore
+      -- holds the box's only reference (rc = 1), so a spurious caller-side
+      -- release frees it outright instead of merely under-counting a
+      -- multiply-referenced cell -- that is what makes this fixture actually
+      -- fail (a k = 3 version leaves rc > 0 after the bad dec and passes).
+      let l = wrap(Simd.splat_f32x4(2.0), 0)
+      let s = sum_all(l, 0.0)
+      -- read the list a SECOND time: a released-too-early element would have
+      -- been freed by the first traversal's RC accounting.
+      let s2 = sum_all(l, 0.0)
+      drive(n - 1, acc +. s +. s2)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    -- 1 cell x 4 lanes x 2.0 = 8.0 per traversal, twice per round, 200 rounds
+    println(drive(200, 0.0))
+  end
+end
