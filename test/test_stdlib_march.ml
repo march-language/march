@@ -445,6 +445,10 @@ let () =
       Alcotest.test_case "DistSupervisor module"
         `Quick (run_stdlib_test "test_dist_supervisor.march" "TestDistSupervisor");
     ]);
+    ("regex", [
+      Alcotest.test_case "Regex module"
+        `Quick (run_stdlib_test "test_regex.march" "TestRegex");
+    ]);
     ("parse", [
       Alcotest.test_case "Parse module"
         `Quick (run_stdlib_test "test_parse.march" "TestParse");
