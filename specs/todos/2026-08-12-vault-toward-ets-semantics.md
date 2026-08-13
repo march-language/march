@@ -59,6 +59,13 @@ has to line up with `v` too.
 
 ## 4. Capability shape — `IO.Mut` on every operation
 
+**Decided 2026-08-12:** reads are capability-free — `get`/`size`/`keys` lose the
+requirement; `new`/`whereis`/`set`/`set_ttl`/`drop`/`update` keep `IO.Mut`.
+`whereis` keeps it because it mints a handle from a string (the ambient-authority
+case), not because it writes. Scheduled as Task 2 of
+`docs/superpowers/plans/2026-08-12-named-registry.md`. The rest of this section
+records the reasoning and the accepted costs.
+
 Every `vault_*` builtin requires `IO.Mut` (`lib/caps/cap_symbols.ml:96-…`,
 `lib/typecheck/typecheck.ml:1947-1960`). So *reading* an in-memory table
 demands a mutation capability, and any module that so much as looks something
