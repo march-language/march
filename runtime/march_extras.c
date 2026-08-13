@@ -697,36 +697,73 @@ static inline unsigned vault_stripe_of_self(void) {
     return (unsigned)(h >> 60) & (VAULT_RD_STRIPES - 1);
 }
 
+/* EXCLUSION MEMORY ORDERING (fix round 5, I-1): the reader's increment +
+ * re-check and the writer's flag-store + drain form a Dekker / store-
+ * buffering pair — reader does W(rd[i].readers) then R(writer); writer does
+ * W(writer) then R(rd[i].readers) — and it needs the SAME treatment as the
+ * SB pair in runtime/march_runtime.c's task_wait_done / march_thunk_trampoline
+ * (search for "SEQ_CST ON THE NEXT TWO OPERATIONS IS THE WHOLE FIX"), which
+ * hit exactly this hazard in production as a ~1-in-20 missed-wakeup deadlock.
+ * That comment's finding applies verbatim here: release/acquire does NOT
+ * order a store before a subsequent load of a DIFFERENT location, so "the
+ * writer's drain misses this increment AND this reader's re-check misses the
+ * writer flag" is an ALLOWED execution under acq_rel/acquire — putting a
+ * reader and a writer inside the table at the same time, and
+ * march_vault_drop frees nodes out from under a live reader in exactly that
+ * window. It is unreachable in practice only because x86's `lock xadd` is a
+ * full fence and Apple Silicon's acq_rel RMW mapping happens to give RCsc —
+ * an accident of codegen, not something the C11 abstract machine promises.
+ * All four operations of the pair (this increment, this re-check, the
+ * writer's flag store, and the writer's drain load below) are seq_cst,
+ * matching the cited precedent exactly. Cost is nil: the re-check runs once
+ * per acquisition and the drain only while a writer is pending. */
+
 /* Returns the stripe index used — pass it unchanged to vault_rd_unlock. */
 static inline unsigned vault_rd_lock(vault_rwlock_t *l) {
     unsigned i = vault_stripe_of_self();
     for (;;) {
         /* Writer preference: don't even try to acquire while one is
          * pending/active, so writers aren't starved by a steady stream of
-         * new readers. */
+         * new readers. This first check is a fast-path hint only — it is
+         * the re-check below (after the increment) that is exclusion-
+         * critical, so plain acquire is fine here. */
         while (atomic_load_explicit(&l->writer, memory_order_acquire))
             sched_yield();
-        atomic_fetch_add_explicit(&l->rd[i].readers, 1, memory_order_acq_rel);
+        /* seq_cst: see the EXCLUSION MEMORY ORDERING comment above this
+         * function. */
+        atomic_fetch_add_explicit(&l->rd[i].readers, 1, memory_order_seq_cst);
         /* Re-check: a writer may have set the flag between our load above
          * and our increment. If so, back off and retry rather than let the
-         * writer wait on a reader that arrived after it announced intent. */
-        if (!atomic_load_explicit(&l->writer, memory_order_acquire))
+         * writer wait on a reader that arrived after it announced intent.
+         * seq_cst: see the EXCLUSION MEMORY ORDERING comment above. */
+        if (!atomic_load_explicit(&l->writer, memory_order_seq_cst))
             return i;
         atomic_fetch_sub_explicit(&l->rd[i].readers, 1, memory_order_release);
     }
 }
 
 /* `i` MUST be the value vault_rd_lock returned for this critical section —
- * see INVARIANT 1 above. */
+ * see INVARIANT 1 above. Plain release: unlike the increment/re-check pair
+ * above, this decrement is not part of the Dekker exclusion argument — the
+ * writer's drain loop observes it via an ordinary release/acquire edge on
+ * the SAME atomic object (rd[i].readers), which release/acquire always
+ * orders correctly; the SB hazard only arises across two DIFFERENT objects
+ * (rd[i].readers vs. writer), which is what the lock/re-check pair above
+ * exists to close. */
 static inline void vault_rd_unlock(vault_rwlock_t *l, unsigned i) {
     atomic_fetch_sub_explicit(&l->rd[i].readers, 1, memory_order_release);
 }
 
 static inline void vault_wr_lock(vault_rwlock_t *l) {
     pthread_mutex_lock(&l->wmutex);
+    /* seq_cst: see the EXCLUSION MEMORY ORDERING comment above
+     * vault_rd_lock. */
     atomic_store_explicit(&l->writer, 1, memory_order_seq_cst);
     for (int i = 0; i < VAULT_RD_STRIPES; i++) {
-        while (atomic_load_explicit(&l->rd[i].readers, memory_order_acquire) != 0)
+        /* seq_cst: see the EXCLUSION MEMORY ORDERING comment above
+         * vault_rd_lock — this drain load is the writer's half of the same
+         * Dekker pair as the reader's re-check. */
+        while (atomic_load_explicit(&l->rd[i].readers, memory_order_seq_cst) != 0)
             sched_yield();
     }
 }
@@ -1137,7 +1174,21 @@ void *march_vault_drop(void *handle, void *key_val) {
 
 /* ── march_vault_update ───────────────────────────────────────────────── */
 
-/* Applies function f to the current value and stores the result. */
+/* Applies function f to the current value and stores the result.
+ *
+ * NOT ATOMIC, despite calling into the exclusively-locked march_vault_set:
+ * this is read (lock, unlock) — apply f UNLOCKED — write (lock, unlock), so
+ * a concurrent writer can interleave between the read and the write, and
+ * the read-modify-write as a whole can race and lose an update. The lock is
+ * never held across the closure call `f` on purpose — holding the write
+ * lock across arbitrary user code would mean this thread could park
+ * (allocate, block, panic, call back into March) while holding a Vault
+ * lock, which is exactly INVARIANT 2 on vault_rwlock_t above (a green
+ * thread must never park while holding a lock) forbidding it. If you need
+ * an atomic read-modify-write, use march_vault_incr (integer add),
+ * march_vault_put_new (insert-if-absent), or march_vault_push_capped
+ * (bounded list push) — each does its read-modify-write under ONE lock
+ * acquisition with no user code in between. */
 void *march_vault_update(void *handle, void *key_val, void *f) {
     /* march_vault_get returns a niche-encoded Option(ptr) — see make_some/
      * make_none above: None = NULL, Some(v) = v itself.  There is no boxed

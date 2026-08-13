@@ -327,6 +327,46 @@
  (deps    (file test_vault_distinct_keys_scale_runner))
  (action  (run ./test_vault_distinct_keys_scale_runner)))
 
+; ── Vault reader/writer correctness hammer (named-registry plan, task 1,
+; fix round 5, I-3) ────────────────────────────────────────────────────────
+; 3 reader threads loop march_vault_get() against 1 writer thread looping
+; march_vault_set()/march_vault_drop(), all over the same small key set —
+; the lock's only novel path, and untested until now. NO TIMING ASSERTION
+; (unlike the vault-scale rule above), so — unlike that one — this belongs
+; in `runtest`: the oracles are the runtime's own safety checks (RC
+; underflow aborts, a UAF crashes), which don't depend on host load. Same
+; link set as the other two vault tests (march_extras.c's full dependency
+; graph).
+(rule
+ (targets test_vault_hammer_runner)
+ (deps    test_vault_hammer.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_vault_hammer.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_vault_hammer_runner))
+ (action  (run ./test_vault_hammer_runner)))
+
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
 ; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the
