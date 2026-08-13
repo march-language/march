@@ -4021,6 +4021,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
+; Compiled/interpreted parity witness for NativeArray.fold_int/fold_float/
+; fold_f32/fold_i32/fold_u8 (SIMD follow-ups Task 2). fold_int/fold_float
+; previously had no compiled implementation (link error); fold_f32/fold_i32/
+; fold_u8 didn't exist at all. Every case uses a NON-COMMUTATIVE fold so the
+; (init, arr, f) vs. march_typed_array_fold's (arr, acc, f) vs. the stdlib
+; wrapper's (arr, acc, f) argument-order landmine can't hide behind a
+; commutative operator. Also proves the accumulator crosses the closure
+; boundary correctly in its erased/boxed representation via the trailing
+; fold-into-a-List case.
+(rule
+ (targets native_arr_fold native_arr_fold.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_fold
+        native/native_arr_fold.march)
+   (with-stdout-to native_arr_fold.out
+        (system "./native_arr_fold")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_fold.expected native_arr_fold.out)))
+
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
 ; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,
 ; pulled forward from the original Task 3 split; see llvm_emit.ml's SIMD

@@ -2843,9 +2843,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (TCon ("TypedArray", [t_bool]), TCon ("NativeFloatArr", [])))));
     (* Narrow-width NativeArray families — f32/i32/u8 (P10 narrow types).
        Opaque 0-arity types, same shape as NativeIntArr/NativeFloatArr above.
-       Interpreter-path only; compiled (LLVM/runtime) support is a later task.
-       No alloc_raw / fold / min / max / sumsq_dev / filter_mask for these
-       widths -- only the 9-op family + conversions. *)
+       No min / max / sumsq_dev / filter_mask for these widths -- only the
+       9-op family + fold + conversions. *)
     (* f32 *)
     ("native_f32_arr_make",
        Mono (TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", [])))));
@@ -2865,6 +2864,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeF32Arr", []),
              TArrow (TCon ("NativeF32Arr", []),
              TArrow (TArrow (t_float, TArrow (t_float, t_float)), TCon ("NativeF32Arr", []))))));
+    ("native_f32_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeF32Arr", []),
+                   TArrow (TArrow (a, TArrow (t_float, a)), a)))));
     ("native_f32_arr_from_list",
        Mono (TArrow (t_list t_float, TCon ("NativeF32Arr", []))));
     ("native_f32_arr_to_list",
@@ -2888,6 +2891,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeI32Arr", []),
              TArrow (TCon ("NativeI32Arr", []),
              TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeI32Arr", []))))));
+    ("native_i32_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeI32Arr", []),
+                   TArrow (TArrow (a, TArrow (t_int, a)), a)))));
     ("native_i32_arr_from_list",
        Mono (TArrow (t_list t_int, TCon ("NativeI32Arr", []))));
     ("native_i32_arr_to_list",
@@ -2911,6 +2918,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeU8Arr", []),
              TArrow (TCon ("NativeU8Arr", []),
              TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeU8Arr", []))))));
+    ("native_u8_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeU8Arr", []),
+                   TArrow (TArrow (a, TArrow (t_int, a)), a)))));
     ("native_u8_arr_from_list",
        Mono (TArrow (t_list t_int, TCon ("NativeU8Arr", []))));
     ("native_u8_arr_to_list",

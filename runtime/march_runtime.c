@@ -6415,6 +6415,25 @@ void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
     return new_arr;
 }
 
+/* fold: the accumulator is a GENERIC 'a, so it stays in the erased/boxed
+ * representation for the whole loop and the caller's codegen owns boxing it
+ * in and out.  RC discipline copied verbatim from march_typed_array_fold
+ * (:6191 above) — incrc(f) per element, one decrc(f) after the loop.
+ * ARG ORDER IS (acc, arr, f) — matching the March builtin, NOT
+ * march_typed_array_fold's (arr, acc, f). */
+void *native_int_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_int_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        void *elem = (void *)(intptr_t)((x << 1) | 1);   /* wire-tag */
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+    }
+    march_decrc(f);
+    return result;
+}
+
 /* Length-mismatch panic shared by the compiled map2 INLINE loop
  * (lib/tir/native_map_inline.ml / llvm_emit.ml's emit_native_map2_inline_loop).
  * That loop bypasses native_int_arr_map2/native_float_arr_map2 entirely
@@ -6592,6 +6611,23 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
     return new_arr;
 }
 
+/* fold: element is a raw double, materialised via march_alloc_float (boxed) —
+ * unlike native_int_arr_fold's wire-tagged scalar. Same RC discipline and
+ * (acc, arr, f) argument order as native_int_arr_fold above. */
+void *native_float_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_float_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        double x;
+        memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        void *elem = march_alloc_float(x);
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+    }
+    march_decrc(f);
+    return result;
+}
+
 void *native_float_arr_from_list(void *lst) {
     int64_t n = 0;
     void *tmp = lst;
@@ -6702,6 +6738,23 @@ void *PREFIX##_map2(void *arr1, void *arr2, void *f) {                        \
     march_decrc(f);                                                           \
     return new_arr;                                                           \
 }                                                                             \
+/* fold: (int64_t)*(CTYPE *)... already sign-extends int32_t and             \
+ * zero-extends uint8_t exactly like PREFIX##_get above, so one shared       \
+ * fold body is correct for both instantiations without a per-width         \
+ * materialisation branch. Same RC discipline and (acc, arr, f) argument     \
+ * order as native_int_arr_fold above. */                                    \
+void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
+    int64_t len = PREFIX##_length(arr);                                      \
+    void *result = acc;                                                      \
+    for (int64_t i = 0; i < len; i++) {                                      \
+        int64_t x = (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+        void *elem = (void *)(intptr_t)((x << 1) | 1);                       \
+        march_incrc(f);                                                      \
+        result = call_closure_2(f, result, elem);                            \
+    }                                                                        \
+    march_decrc(f);                                                          \
+    return result;                                                           \
+}                                                                             \
 void *PREFIX##_from_list(void *lst) {                                         \
     int64_t n = 0;                                                            \
     void *tmp = lst;                                                          \
@@ -6804,6 +6857,23 @@ void *native_f32_arr_map2(void *arr1, void *arr2, void *f) {
     }
     march_decrc(f);
     return new_arr;
+}
+
+/* fold: element is a stored float, widened to double and materialised via
+ * march_alloc_float (the wire ABI has no native f32 box — see the ABI
+ * comment above clo_apply_ptr). Same RC discipline and (acc, arr, f)
+ * argument order as native_int_arr_fold above. */
+void *native_f32_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_f32_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        double x = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+        void *elem = march_alloc_float(x);
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+    }
+    march_decrc(f);
+    return result;
 }
 
 void *native_f32_arr_from_list(void *lst) {

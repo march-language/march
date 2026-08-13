@@ -8254,6 +8254,14 @@ let base_env : env =
           done;
           VNativeF32Arr out
         | _ -> eval_error "native_f32_arr_map2: expected (NativeF32Arr, NativeF32Arr, fn)"))
+  ; ("native_f32_arr_fold", VBuiltin ("native_f32_arr_fold", function
+        | [acc0; VNativeF32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VFloat a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_f32_arr_fold: expected (init, NativeF32Arr, fn)"))
   ; ("native_f32_arr_from_list", VBuiltin ("native_f32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8323,6 +8331,14 @@ let base_env : env =
           done;
           VNativeI32Arr out
         | _ -> eval_error "native_i32_arr_map2: expected (NativeI32Arr, NativeI32Arr, fn)"))
+  ; ("native_i32_arr_fold", VBuiltin ("native_i32_arr_fold", function
+        | [acc0; VNativeI32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_i32_arr_fold: expected (init, NativeI32Arr, fn)"))
   ; ("native_i32_arr_from_list", VBuiltin ("native_i32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8392,6 +8408,14 @@ let base_env : env =
           done;
           VNativeU8Arr out
         | _ -> eval_error "native_u8_arr_map2: expected (NativeU8Arr, NativeU8Arr, fn)"))
+  ; ("native_u8_arr_fold", VBuiltin ("native_u8_arr_fold", function
+        | [acc0; VNativeU8Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_u8_arr_fold: expected (init, NativeU8Arr, fn)"))
   ; ("native_u8_arr_from_list", VBuiltin ("native_u8_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function

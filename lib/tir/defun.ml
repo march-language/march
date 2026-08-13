@@ -154,13 +154,13 @@ let builtin_names : StringSet.t =
       (* Narrow-width native array builtins — f32/i32/u8 (P10 narrow types) *)
       "native_f32_arr_make"; "native_f32_arr_get"; "native_f32_arr_set";
       "native_f32_arr_length"; "native_f32_arr_from_list"; "native_f32_arr_to_list";
-      "native_f32_arr_map"; "native_f32_arr_map2"; "native_f32_arr_sum";
+      "native_f32_arr_map"; "native_f32_arr_map2"; "native_f32_arr_sum"; "native_f32_arr_fold";
       "native_i32_arr_make"; "native_i32_arr_get"; "native_i32_arr_set";
       "native_i32_arr_length"; "native_i32_arr_from_list"; "native_i32_arr_to_list";
-      "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_sum";
+      "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_sum"; "native_i32_arr_fold";
       "native_u8_arr_make"; "native_u8_arr_get"; "native_u8_arr_set";
       "native_u8_arr_length"; "native_u8_arr_from_list"; "native_u8_arr_to_list";
-      "native_u8_arr_map"; "native_u8_arr_map2"; "native_u8_arr_sum";
+      "native_u8_arr_map"; "native_u8_arr_map2"; "native_u8_arr_sum"; "native_u8_arr_fold";
       "native_float_to_f32_arr"; "native_f32_to_float_arr";
       "native_int_to_i32_arr"; "native_i32_to_int_arr";
       "native_int_to_u8_arr"; "native_u8_to_int_arr";
