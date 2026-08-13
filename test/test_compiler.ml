@@ -1597,6 +1597,87 @@ let test_linear_match_arms_each_consume_once_ok () =
   end|} in
   Alcotest.(check bool) "one consumption per arm is accepted" false (has_errors ctx)
 
+(* Same mutual-exclusion rule as the match-arm guard above, for the OTHER two
+   branching constructs. `if`/`else` and `match do cond ->` are exactly as
+   mutually exclusive as match arms, so consuming an outer linear value once
+   per branch is equally legal. Both used to infer their branches against the
+   shared [le_used] flag, so the else-branch saw the then-branch's
+   consumption and reported a spurious "used more than once". *)
+let test_linear_if_branches_each_consume_once_ok () =
+  let ctx = typecheck {|mod Test do
+  needs IO.Console
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main(_cap_console : Cap(IO.Console)) do
+      linear let token = "secret"
+      let flag = true
+      let r = if flag do consume(token) else consume(token) end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "one consumption per if-branch is accepted" false
+    (has_errors ctx)
+
+let test_linear_cond_arms_each_consume_once_ok () =
+  let ctx = typecheck {|mod Test do
+  needs IO.Console
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main(_cap_console : Cap(IO.Console)) do
+      linear let token = "secret"
+      let flag = true
+      let r = match do
+        flag -> consume(token)
+        true -> consume(token)
+      end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "one consumption per `match do` arm is accepted" false
+    (has_errors ctx)
+
+(* The other half of the contract: branch exclusivity must NOT weaken the
+   check. A value consumed in the CONDITION is consumed on every path, so a
+   further use inside either branch is a genuine double-use and must still be
+   rejected. This is what distinguishes "reset the flag per branch" (correct)
+   from "reset the flag around the whole if" (unsound). *)
+let test_linear_use_in_if_condition_then_branch_is_error () =
+  let ctx = typecheck {|mod Test do
+  needs IO.Console
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main(_cap_console : Cap(IO.Console)) do
+      linear let token = "secret"
+      let r = if consume(token) > 0 do consume(token) else 0 end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "condition use + branch use is still a double use" true
+    (has_errors ctx)
+
+let test_linear_double_use_within_if_branch_is_error () =
+  let ctx = typecheck {|mod Test do
+  needs IO.Console
+    fn consume(s : String) : Int do
+      String.byte_size(s)
+    end
+
+    fn main(_cap_console : Cap(IO.Console)) do
+      linear let token = "secret"
+      let flag = true
+      let r = if flag do consume(token) + consume(token) else 0 end
+      println(int_to_string(r))
+    end
+  end|} in
+  Alcotest.(check bool) "two uses within one branch is still an error" true
+    (has_errors ctx)
+
 let test_linear_double_use_within_arm_labels_same_arm () =
   (* The arrangement that actually catches a missing save/restore: an EARLIER
      arm consumes the value legally (line 10), and a LATER arm double-uses it
@@ -13744,6 +13825,7 @@ let compiler_suites =
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
+      ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);
       ( "match_diagnostics",
         [
           Alcotest.test_case "or-pattern binding accepted" `Quick
@@ -14072,6 +14154,10 @@ let compiler_suites =
           Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;
           Alcotest.test_case "double use labels first use"   `Quick test_linear_double_use_points_at_first_use;
           Alcotest.test_case "match arms each consume once"  `Quick test_linear_match_arms_each_consume_once_ok;
+          Alcotest.test_case "if branches each consume once" `Quick test_linear_if_branches_each_consume_once_ok;
+          Alcotest.test_case "match-do arms each consume once" `Quick test_linear_cond_arms_each_consume_once_ok;
+          Alcotest.test_case "if condition use + branch use errors" `Quick test_linear_use_in_if_condition_then_branch_is_error;
+          Alcotest.test_case "double use within if branch errors" `Quick test_linear_double_use_within_if_branch_is_error;
           Alcotest.test_case "double use in arm stays in arm" `Quick test_linear_double_use_within_arm_labels_same_arm;
           Alcotest.test_case "linear closure capture"        `Quick test_linear_closure_capture_error;
           Alcotest.test_case "linear field let binding"       `Quick test_linear_field_let_binding;

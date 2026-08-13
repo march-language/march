@@ -1,0 +1,35 @@
+-- Regression: `to_string(x)` called INSIDE a still-generic function body
+-- (x's type unresolved at that function's own lowering time) must still
+-- reach the real `Show$T.show` once monomorphization later specializes the
+-- function to a concrete, non-primitive argument type — not fall through to
+-- the generic runtime `march_value_to_string`, which prints "#<tag:N>" for
+-- anything beyond Int/Float/Bool/String/Pid.
+--
+-- `to_string_show.march` already pins the lower-time case (a concrete type
+-- known where `to_string` is written). This pins the SEPARATE mono-time
+-- case: `to_string` is lowered as the bare `to_string` builtin (no concrete
+-- type to resolve against yet) inside a generic `pfn`, and only becomes
+-- concretely typed later, when monomorphization specializes that `pfn` for
+-- a caller passing a List. Reproduces the `examples/csv_example.march`
+-- divergence (`Csv.each_row`'s row callback printed `#<tag:1>` compiled,
+-- the real row interpreted) with a minimal, self-contained repro — see
+-- specs/progress/ for the fix (lib/tir/mono.ml's `find_iface_impls`).
+mod Main do
+  needs IO.Console
+
+pfn show_it(x) do
+  print(to_string(x))
+end
+
+fn call_with_list(callback) do
+  callback(Cons("a", Cons("b", Nil)))
+end
+
+fn main(_cap : Cap(IO.Console)) do
+  show_it(Cons("a", Cons("b", Nil)))
+  println("")
+  call_with_list(fn x -> show_it(x))
+  println("")
+end
+
+end

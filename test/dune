@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_attrib_agreement test_cap_sandbox_profile test_ctxesc)
+ (modules test_compiler test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -4862,6 +4862,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/float_generic_field_abi.expected native_float_generic_field_abi.out)))
+
+(rule
+ (targets native_generic_fn_to_string_specialize native_generic_fn_to_string_specialize.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/generic_fn_to_string_specialize.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_generic_fn_to_string_specialize
+        native/generic_fn_to_string_specialize.march)
+   (with-stdout-to native_generic_fn_to_string_specialize.out
+        (system "./native_generic_fn_to_string_specialize")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/generic_fn_to_string_specialize.expected native_generic_fn_to_string_specialize.out)))
 
 (rule
  (targets native_string_to_float_option native_string_to_float_option.out)

@@ -11,6 +11,34 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`if` and `match do` now treat their branches as mutually exclusive for
+  linear values, the way `match` arms already did.** Consuming the same
+  linear or affine value once in each branch is legal — at most one branch
+  runs — but only `match` implemented the rule; `if`/`else` and
+  `match do cond ->` checked their branches against one shared use-flag, so
+  the second branch saw the first's consumption and reported a spurious
+  "used more than once". This was most visible with session-typed channels,
+  where branching on a protocol decision (`Chan.choose` in each arm) is the
+  normal shape. A value consumed in the CONDITION still counts on every path,
+  so a genuine double-use is unaffected.
+- **A record field passed to a refined parameter is now checked instead of
+  silently skipped.** `takepos(a.rem)` reflected the field access through a
+  resolver that always declined, so the obligation came out "unreflectable"
+  and — since March reports only definite failures — was accepted in silence;
+  the workaround was to bind the field to a local first. The guard and the
+  goal now meet on the same symbol, so `if a.rem >= 0 do takepos(a.rem)`
+  proves, while an unguarded call, or one guarded on a *sibling* field, is
+  still reported.
+- **`match cond do true -> … false -> … end` now establishes the same path
+  facts as the equivalent `if`.** Match narrowing only ever fired for
+  constructor patterns over a variable scrutinee, so a Bool-literal arm
+  contributed nothing and an obligation the `if` spelling discharges came
+  back solver-undecided. The `true` arm learns the scrutinee holds, the
+  `false` arm (and a `_` fallback after a Bool-literal arm) learns its
+  negation. An earlier arm carrying a guard still licenses nothing.
+
 ### Changed
 
 - **BREAKING: a program that performs IO must declare the grant it performs
@@ -40,6 +68,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Runtime enforcement tests for `--cap-sandbox`** — compiled fixtures now
+  verify that a withheld capability's syscall is actually denied at runtime
+  (Linux seccomp-bpf, macOS Seatbelt), not just that the embedded policy
+  strings agree between builders.
 - **Exponential supervisor restart backoff with jitter (runtime-internal)** —
   a supervised child that crashes repeatedly no longer gets respawned
   immediately every time: from the second consecutive crash of the same
@@ -274,6 +306,17 @@ git log is authoritative for exact commits.
   where the callee may store the vector into a list, record, or closure that
   then owns it — are deliberately left alone; those shapes still leak one box
   per call and are tracked separately.
+- **Compiled `to_string(x)` inside a generic function printed `#<tag:N>`
+  garbage for non-primitive `x` (Lists, records, user ADTs) instead of the
+  real value**, diverging from the interpreter. `to_string` on a concretely-
+  typed argument already dispatched to the matching `Show` implementation;
+  a `to_string` call inside a still-generic function (argument type an
+  unresolved type variable at that function's own lowering time) stayed a
+  bare runtime fallback that only understands a handful of primitive
+  representations, and was never revisited once monomorphization later
+  specialized the function to a concrete type. Hit any generic helper whose
+  body called `to_string` on its parameter, most visibly
+  `examples/csv_example.march`'s per-row callback.
 - **Killing (or crashing) a busy actor no longer leaks its queued mailbox.**
   Undelivered messages sitting in a dead process's mailbox were never
   disposed — `sched_loop`'s `PROC_DEAD` reap branch freed the mailbox
