@@ -422,6 +422,12 @@ int64_t march_actor_register(void *name_str, void *actor);   /* 1 ok, 0 taken/de
 int64_t march_actor_unregister(void *name_str);               /* 1 removed, 0 absent */
 void   *march_actor_whereis(void *name_str);   /* Option(actor): niche-encoded */
 void   *march_actor_registered(void);          /* List(String) of live names */
+/* do_actor_death (Task 5) calls this on a dying actor to drop every name it
+ * still holds from the forward table (compare-and-drop: only if the table
+ * still maps the name to THIS actor — see the definition in
+ * march_runtime.c). Exported so a C-level test can exercise the Critical
+ * fix-up (stale-overwrite vs. retire ordering) directly. */
+void    registry_retire_actor(void *actor);
 /* Spawn a no-arg C function as a green thread (for the main entrypoint). */
 /* Self-imposed capability sandbox (opt-in, --cap-sandbox). No-op unless
  * MARCH_CAP_PROFILE was defined at build time. See runtime/march_sandbox.c. */

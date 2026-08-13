@@ -2419,6 +2419,23 @@ static void *registry_tbl(void) {
     return g_registry_tbl;
 }
 
+/* Serializes march_actor_register, march_actor_unregister, and
+ * registry_retire_actor — the three operations that mutate a reg_names
+ * array (realloc/free) or need register's get-then-set to be atomic
+ * (otherwise two threads racing to register the same absent name can both
+ * observe "absent" and both return 1, leaving two LIVE actors both
+ * believing they hold the name — see the Task 3 review's Critical/
+ * Important fix-up). A STRICT LEAF LOCK: everything called while it is
+ * held — Vault ops (march_vault_get/set/drop, all pure C per Task 1's
+ * invariant), malloc/strdup/free — is plain C that cannot park a green
+ * thread, so this never nests under or interleaves with a scheduler
+ * yield. Same shape as g_supervise_mu serializing sup_children (another
+ * realloc-grown per-meta array). march_actor_whereis and
+ * march_actor_registered are reads and stay OUTSIDE this lock on purpose,
+ * to keep Vault's own striped-read concurrency (Task 1) intact for the
+ * hot lookup path. */
+static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
+
 /* Append a strdup'd copy of [name] to [m]'s reverse index. */
 static void meta_add_name(march_actor_meta *m, const char *name) {
     m->reg_names = (char **)realloc(m->reg_names,
@@ -2442,32 +2459,64 @@ static void meta_remove_name(march_actor_meta *m, const char *name) {
 /* march_actor_register(name, actor) -> 1 on success, 0 if the name is held
  * by a LIVE actor, or if [actor] itself is dead. A stale entry left behind
  * by a dead actor is silently overwritten (that's what makes the name
- * reusable after the incarnation that held it dies). */
+ * reusable after the incarnation that held it dies) — and the whole
+ * get-then-set-then-reindex sequence runs under g_registry_mu so the
+ * overwrite is atomic with respect to a second racing register AND with
+ * respect to registry_retire_actor running for the stale actor. Critically,
+ * the overwrite path also removes the name from the STALE actor's own
+ * reverse index before handing it to the new actor: without that, the
+ * stale actor's eventual retire would still find the name in its index and
+ * drop it from the table out from under the new (live) actor that now
+ * legitimately owns it — see the Task 3 review's Critical fix-up. */
 int64_t march_actor_register(void *name_str, void *actor) {
     if (!IS_HEAP_PTR(actor) || !((int64_t *)actor)[3]) return 0;   /* dead/invalid */
+
+    pthread_mutex_lock(&g_registry_mu);
 
     void *existing = march_vault_get(registry_tbl(), name_str);
     if (existing != NULL) {
         int taken = IS_HEAP_PTR(existing) && ((int64_t *)existing)[3];
+        if (taken) {
+            march_decrc(existing);
+            pthread_mutex_unlock(&g_registry_mu);
+            return 0;
+        }
+        /* stale entry for a dead actor: retire it from ITS OWN reverse
+         * index first (belt), then fall through and overwrite the table
+         * entry. registry_retire_actor's compare-and-drop (braces) is the
+         * other half of closing this race for any path that isn't this
+         * one. */
+        march_actor_meta *stale_m = find_meta(existing);
+        if (stale_m) {
+            char stale_scratch[MARCH_SSO_MAX + 1];
+            meta_remove_name(stale_m, march_str_data(name_str, stale_scratch));
+        }
         march_decrc(existing);
-        if (taken) return 0;
-        /* stale entry for a dead actor: fall through and overwrite */
     }
 
     march_vault_set(registry_tbl(), name_str, actor);
 
     char scratch[MARCH_SSO_MAX + 1];
     meta_add_name(find_or_create_meta(actor), march_str_data(name_str, scratch));
+
+    pthread_mutex_unlock(&g_registry_mu);
     return 1;
 }
 
 /* march_actor_unregister(name) -> 1 if a mapping was removed, 0 otherwise.
  * Removes the forward-table entry regardless of the owning actor's
  * liveness, and drops the name from that actor's reverse index if it still
- * has one. */
+ * has one. Runs under g_registry_mu: without it, the get-then-drop here
+ * could race a concurrent register's get-then-set on the same name (TOCTOU
+ * — see the Task 3 review's Important fix-up). */
 int64_t march_actor_unregister(void *name_str) {
+    pthread_mutex_lock(&g_registry_mu);
+
     void *existing = march_vault_get(registry_tbl(), name_str);
-    if (existing == NULL) return 0;
+    if (existing == NULL) {
+        pthread_mutex_unlock(&g_registry_mu);
+        return 0;
+    }
 
     if (IS_HEAP_PTR(existing)) {
         march_actor_meta *m = find_meta(existing);
@@ -2479,6 +2528,7 @@ int64_t march_actor_unregister(void *name_str) {
     march_decrc(existing);   /* release our extra ref from march_vault_get */
 
     march_vault_drop(registry_tbl(), name_str);
+    pthread_mutex_unlock(&g_registry_mu);
     return 1;
 }
 
@@ -2527,20 +2577,43 @@ void *march_actor_registered(void) {
     return result;
 }
 
-/* Used by Task 5's do_actor_death: walk [m]'s reverse index, drop each name
- * from the forward table, and free the index. Internal (static) because
- * do_actor_death lives in this same translation unit. */
-static void registry_retire_actor(march_actor_meta *m) {
-    if (!m->reg_names) return;
+/* Used by Task 5's do_actor_death: walk [actor]'s reverse index, drop each
+ * name from the forward table, and free the index. No-op if [actor] has no
+ * meta or never registered anything.
+ *
+ * COMPARE-AND-DROP: a name is only dropped if the table's CURRENT value
+ * for it is still [actor]. Ownership of a name can move to a different
+ * (live) actor between this actor's death and retire actually running —
+ * march_actor_register's stale-overwrite path — and blindly dropping by
+ * name alone would then delete the NEW live actor's mapping out from under
+ * it (see the Task 3 review's Critical fix-up; register's belt-side fix
+ * removes the name from the stale actor's index at overwrite time, this is
+ * the braces-side fix for every other path, including any future one).
+ *
+ * Takes the actor pointer (not a march_actor_meta *, despite the design
+ * sketch) rather than a meta pointer so a C-level test can call it without
+ * needing march_actor_meta's layout, which is private to this file; Task
+ * 5's do_actor_death already resolves `meta = find_meta(actor)` at its own
+ * top and can pass `actor` through unchanged. Exported (not static) for
+ * that same reason — do_actor_death is still its real caller, from this
+ * same translation unit. */
+void registry_retire_actor(void *actor) {
+    march_actor_meta *m = find_meta(actor);
+    if (!m) return;
+
+    pthread_mutex_lock(&g_registry_mu);
     for (int i = 0; i < m->reg_name_count; i++) {
         void *key = march_string_lit(m->reg_names[i], (int64_t)strlen(m->reg_names[i]));
-        march_vault_drop(registry_tbl(), key);
+        void *cur = march_vault_get(registry_tbl(), key);
+        if (cur == actor) march_vault_drop(registry_tbl(), key);
+        if (cur != NULL) march_decrc(cur);
         march_decrc(key);   /* release our own ref from march_string_lit */
         free(m->reg_names[i]);
     }
-    free(m->reg_names);
+    free(m->reg_names);   /* no-op if NULL */
     m->reg_names = NULL;
     m->reg_name_count = 0;
+    pthread_mutex_unlock(&g_registry_mu);
 }
 
 /* ── Actor green thread loop ─────────────────────────────────────── */

@@ -22,6 +22,7 @@ extern int64_t march_actor_register(void *name, void *actor);
 extern int64_t march_actor_unregister(void *name);
 extern void   *march_actor_whereis(void *name);
 extern void   *march_actor_registered(void);
+extern void    registry_retire_actor(void *actor);
 
 static void *fake_actor(void) {
     void *a = march_alloc(48);
@@ -81,6 +82,50 @@ int main(void) {
     }
     assert(seen_alpha);
     assert(!seen_beta);
+
+    /* march_actor_register on an already-dead actor must fail directly —
+     * the brief's interface line ("or if `actor` is dead"), not previously
+     * exercised on its own. */
+    void *dead_from_start = fake_actor();
+    ((int64_t *)dead_from_start)[3] = 0;
+    assert(march_actor_register(str("nobody"), dead_from_start) == 0);
+    assert(!is_some(march_actor_whereis(str("nobody"))));
+
+    /* Re-register after an explicit UNREGISTER (not just after death): the
+     * name must be fully reusable, by the SAME or a different actor. */
+    void *e = fake_actor();
+    assert(march_actor_register(str("gamma"), e) == 1);
+    assert(march_actor_unregister(str("gamma")) == 1);
+    void *f = fake_actor();
+    assert(march_actor_register(str("gamma"), f) == 1);
+    assert(is_some(march_actor_whereis(str("gamma"))));
+
+    /* ── Critical regression: stale-overwrite must not let a later retire
+     * of the OLD (dead) actor silently unregister the NEW (live) one.
+     *
+     * Scenario (from the Task 3 review): actor A registers "n"; A dies
+     * (word 3 -> 0) but nothing has retired it yet — the race window the
+     * design comments call out as open by nature; actor B registers "n"
+     * via the stale-overwrite path (A is dead, so this succeeds); THEN
+     * A's death cleanup finally runs registry_retire_actor(A). Before the
+     * fix, retire dropped "n" unconditionally because A's own reg_names
+     * still listed it, deleting B's live mapping. After the fix, register's
+     * overwrite path retires "n" from A's index up front (belt), and
+     * retire itself only drops a name if the table still maps it to the
+     * actor being retired (braces) — so either fix alone closes this
+     * scenario; both are in place. */
+    void *A = fake_actor();
+    assert(march_actor_register(str("n"), A) == 1);
+    ((int64_t *)A)[3] = 0;   /* A dies before its own retire runs */
+
+    void *B = fake_actor();
+    assert(march_actor_register(str("n"), B) == 1);   /* stale overwrite */
+
+    registry_retire_actor(A);   /* A's belated death cleanup */
+
+    void *looked_up = march_actor_whereis(str("n"));
+    assert(is_some(looked_up));
+    assert(looked_up == B);   /* NOT None — B must still be registered */
 
     printf("test_actor_registry: all passed\n");
     return 0;
