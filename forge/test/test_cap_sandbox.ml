@@ -202,6 +202,23 @@ let test_forge_fix_applies_capability_errors () =
   Alcotest.(check bool) "grant parameter inserted" true
     (has_deny content "Cap(IO.Console)")
 
+let test_scaffolded_app_builds_clean () =
+  let dir = Filename.concat (Filename.get_temp_dir_name ()) "forge_new_clean" in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)));
+  let rc_new = Sys.command
+    (Printf.sprintf "cd %s && forge new %s > /dev/null 2>&1"
+       (Filename.quote (Filename.get_temp_dir_name ())) "forge_new_clean") in
+  Alcotest.(check int) "forge new succeeds" 0 rc_new;
+  let rc_check = Sys.command
+    (Printf.sprintf "cd %s && forge check > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "a freshly scaffolded app checks clean" 0 rc_check;
+  let rc_build = Sys.command
+    (Printf.sprintf "cd %s && forge build > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "a freshly scaffolded app builds" 0 rc_build;
+  let rc_test = Sys.command
+    (Printf.sprintf "cd %s && forge test > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "a freshly scaffolded app's tests run" 0 rc_test
+
 let tests =
   [
     Alcotest.test_case "bwrap read scoping" `Quick test_bwrap_read_scoping;
@@ -224,6 +241,8 @@ let tests =
       test_unenforceable_caps_are_declared_advisory;
     Alcotest.test_case "forge fix applies capability errors" `Quick
       test_forge_fix_applies_capability_errors;
+    Alcotest.test_case "scaffolded app builds clean" `Quick
+      test_scaffolded_app_builds_clean;
   ]
 
 let () = Alcotest.run "cap_sandbox" [ ("cap_sandbox", tests) ]

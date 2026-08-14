@@ -18,6 +18,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `forge new` now scaffolds capability-correct projects. The generated `app`/`tool` entry
+  point and test module declared no `needs` and took no grant, so a freshly created project
+  failed `forge build` with two capability errors.
+
 - `forge fix` now applies capability fixes. It previously refused to run whenever any
   error-severity diagnostic carried a machine-applicable fix — which is exactly what the
   missing-`needs` and missing-grant errors emit, so the fix those errors advertised could
