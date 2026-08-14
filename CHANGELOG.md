@@ -14,6 +14,7 @@ git log is authoritative for exact commits.
 ### Added
 
 - **`Actor.register(pid, name)` / `Actor.unregister(name)` / `Actor.whereis(name)` / `Actor.registered()`** — a named process registry over the runtime's `march_actor_*` C API. `register` fails (returns `false`) if the name is already held by a live actor, or if `pid` is dead; a stale entry left by a dead actor is silently reusable. `whereis` re-checks liveness at lookup time, so a name whose actor died resolves to `None` even before any restart-carry-forward cleanup runs. No capability is required — the registry table is owned by the runtime, so no March-level naming call happens. Identical semantics in both the compiled and interpreted backends.
+- **A registered name now survives a supervisor restart.** `do_actor_death` snapshots a supervised actor's registered names onto its (never-freed) meta immediately before `registry_retire_actor` wipes them, and `march_respawn_child` re-registers each carried name on the replacement child — including across the up-to-~3.2s exponential-backoff delay a repeat crash can take. A holder outside the supervision tree that only ever knew the name, never any specific Pid, keeps resolving to whichever incarnation is currently alive. If a different live actor claims the same name during the restart window, the carried-forward registration is dropped for that name rather than stealing it back — the name legitimately belongs to its new, live owner. Unsupervised actors are unaffected: their names are simply dropped on death, as before.
 
 ### Changed
 

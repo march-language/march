@@ -5270,6 +5270,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_registry_retire.expected native_actor_registry_retire.out)))
 
+; ── Named registry (Task 6): a name survives a supervisor restart ────────
+; (compiled) ───────────────────────────────────────────────────────────
+; The point of the entire named-registry plan. Registers a supervised
+; child under a name, crashes it (panic in a handler, not kill(), so the
+; supervisor's restart path is exercised), and resolves by NAME from a
+; holder that never saw the replacement's Pid -- twice, to prove the
+; carry-forward re-establishes itself on every restart, not just once.
+; Uses Actor + supervise, hence source_tree ../stdlib.
+(rule
+ (targets native_actor_registry_restart native_actor_registry_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_registry_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_restart
+        native/actor_registry_restart.march)
+   (with-stdout-to native_actor_registry_restart.out
+        (system "./native_actor_registry_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_restart.expected native_actor_registry_restart.out)))
+
 ; ── Previously-unwired test/stdlib/*.march describe/test corpus ──────────
 ; 37 of the 94 files in test/stdlib/ had real, substantial describe/test
 ; coverage (237 describe blocks) but ran under NO automated runner -- only

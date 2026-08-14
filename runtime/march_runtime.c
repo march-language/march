@@ -1915,6 +1915,30 @@ typedef struct march_actor_meta {
      * table scan. Zeroed by calloc at meta creation. */
     char                       **reg_names;
     int                          reg_name_count;
+    /* Task 6: a snapshot of reg_names taken by do_actor_death IMMEDIATELY
+     * before it calls registry_retire_actor (which frees reg_names and
+     * drops every name from the forward table). registry_retire_actor's
+     * whole point is to make the name available again right away — Down
+     * notifications and a racing march_actor_register both depend on that
+     * happening promptly — so retire itself is untouched; this is a
+     * SEPARATE copy, taken only when meta->supervisor is non-NULL (only a
+     * supervised actor can possibly be respawned, so an unsupervised death
+     * never bothers capturing one). march_respawn_child is the sole
+     * consumer: it re-registers each name for the replacement child and
+     * frees this array. If the crashed child is never respawned (restart
+     * budget exhausted, the supervisor itself dies before a delayed
+     * restart fires, malloc failure aborting a delayed restart, ...) this
+     * stays set and is never freed — same "leak-don't-free" shape as the
+     * meta it lives on (never unlinked/freed either, see g_actor_tbl's
+     * comment above), bounded to one capture per supervised actor that
+     * held names and failed to respawn, and intentional for the same
+     * reason delayed_batch_pending is sometimes left set forever (see
+     * delayed_restart_thread): correctness (never dropping a name that
+     * SHOULD carry forward) matters more here than reclaiming a few
+     * strdup'd C strings in an already-degraded path. Zeroed by calloc at
+     * meta creation. */
+    char                       **reg_names_pending;
+    int                          reg_name_count_pending;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta.
@@ -2912,6 +2936,38 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     new_meta->epoch = inherited_epoch;
     ((int64_t *)supervisor)[4 + child->word_idx] =
         atomic_load_explicit(&new_meta->pid_index, memory_order_relaxed);
+
+    /* Task 6: carry the crashed incarnation's registered names forward onto
+     * the replacement. old_meta is never NULL here when there is anything
+     * to carry — do_actor_death only populates reg_names_pending on the
+     * meta belonging to the actor that just died, which is exactly the one
+     * old_pid_index resolves to (metas are never freed or re-linked for a
+     * different actor — see g_actor_tbl's comment — so old_meta is stable
+     * across the whole respawn, including the up-to-~3.2s backoff delay).
+     *
+     * march_actor_register's normal get-then-set contract decides each name
+     * individually: if nothing else claimed it while this child was down,
+     * the replacement gets it, indistinguishable from the crashed
+     * incarnation having held it the whole time; if some OTHER live actor
+     * registered that exact name during the gap (a real race, however
+     * unlikely inside a restart window), register returns 0 and that name
+     * is deliberately DROPPED here rather than stolen back — the name
+     * legitimately belongs to whoever holds it now, the same "first live
+     * claim wins" rule that governs every other registration. Not logged:
+     * this is not an error, just the registry's normal contract playing out. */
+    if (old_meta && old_meta->reg_names_pending) {
+        for (int i = 0; i < old_meta->reg_name_count_pending; i++) {
+            const char *name = old_meta->reg_names_pending[i];
+            void *key = march_string_lit(name, (int64_t)strlen(name));
+            march_actor_register(key, new_child);
+            march_decrc(key);   /* release our own ref from march_string_lit */
+            free(old_meta->reg_names_pending[i]);
+        }
+        free(old_meta->reg_names_pending);
+        old_meta->reg_names_pending = NULL;
+        old_meta->reg_name_count_pending = 0;
+    }
+
     return new_child;
 }
 
@@ -3333,7 +3389,30 @@ static void do_actor_death(void *actor) {
      * internally even though we already have [meta] here — an accepted
      * redundant lock-free bucket walk, kept for the C-level test's ability
      * to call it without march_actor_meta's (private-to-this-file) layout;
-     * see registry_retire_actor's own comment. */
+     * see registry_retire_actor's own comment.
+     *
+     * Task 6: before that retire wipes meta->reg_names, snapshot it onto
+     * reg_names_pending IF this actor is supervised (meta->supervisor !=
+     * NULL) — only a supervised actor can possibly be respawned, so an
+     * unsupervised actor's names are simply dropped as before, no capture.
+     * This must run strictly before registry_retire_actor: that call is
+     * what frees reg_names, so capturing any later would copy nothing.
+     * march_respawn_child (which may run synchronously right after this
+     * function returns, or up to ~3.2s later on the delayed-restart green
+     * thread — see march_supervisor_notify's backoff) is the sole
+     * consumer/freer; see reg_names_pending's field comment for what
+     * happens when respawn never comes. */
+    if (meta && meta->supervisor && meta->reg_name_count > 0) {
+        meta->reg_names_pending = (char **)malloc(
+            sizeof(char *) * (size_t)meta->reg_name_count);
+        if (!meta->reg_names_pending) {
+            fputs("march: out of memory (registry carry-forward)\n", stderr);
+            exit(1);
+        }
+        for (int i = 0; i < meta->reg_name_count; i++)
+            meta->reg_names_pending[i] = strdup(meta->reg_names[i]);
+        meta->reg_name_count_pending = meta->reg_name_count;
+    }
     registry_retire_actor(actor);
 
     /* Deliver Down notifications to all local watchers. */
