@@ -57,6 +57,16 @@ mod Main do
     let first_int = current_child(boss)
     let first = pid_of_int(first_int)
     println("registered: " ++ bool_to_string(Actor.register(first, "fragile")))
+    -- A SECOND name on the same actor. This is the case that used to crash the
+    -- process outright (EXC_BAD_ACCESS in strdup, under march_respawn_child,
+    -- deterministically) -- not because carrying two names is hard, but because
+    -- the crash below left the actor's refcount claiming a single owner, the
+    -- registry's forward table dropped the last "reference" to a live record,
+    -- and the second name's carry-forward then allocated on top of the freed
+    -- block. One name hid it: nothing touched the record again before exit.
+    -- See specs/progress/2026-08-13-actor-crash-trap-epilogue.md.
+    println("registered second name: "
+            ++ bool_to_string(Actor.register(first, "fragile2")))
 
     -- Kill it via a crash (panic in a handler) so the supervisor restarts
     -- it with a NEW Pid -- not an explicit kill().
@@ -74,6 +84,19 @@ mod Main do
         match Actor.call(p, PingReq, 5000) do
           Ok(_)  -> println("reached by name after restart")
           Err(e) -> println("call failed: " ++ e)
+        end
+    end
+
+    -- BOTH names must survive, and both must land on the SAME replacement:
+    -- the reply carries `handled`, which the call above already bumped to 1,
+    -- so a 1 here proves it is that same actor and not a second incarnation.
+    match Actor.whereis("fragile2") do
+      None -> println("second name lost after restart")
+      Some(p2) ->
+        match Actor.call(p2, PingReq, 5000) do
+          Ok(n)  -> println("second name reaches the same replacement: "
+                            ++ bool_to_string(n == 1))
+          Err(e) -> println("second name call failed: " ++ e)
         end
     end
 

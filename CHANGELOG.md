@@ -23,6 +23,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A `panic()` inside a hot-reload actor's message handler no longer pins its
+  code version forever.** A hot-reload dispatch is bracketed by
+  `march_dispatch_enter`/`march_dispatch_leave`, whose reference count stops a
+  concurrent publish from unloading code that is currently executing. The crash
+  trap's `longjmp` jumped over the `leave`, so every crash left that version's
+  count permanently above zero and its ring slot unreclaimable — a crash-looping
+  supervised actor burned one slot per crash. The crash path now releases the pin
+  before running the death/restart sequence.
+
 - **Fixed a use-after-free that could crash any multi-scheduler program whose actors are reachable from more than one owner** — a monitor, a `Pid` stored in a `Vault` table, a `Pid` passed to another actor, or (most visibly, and how this was found) an actor registered under a name, since `Actor.register` makes the registry a second owner. The defect long predates the registry; the registry is simply the easiest way to give an actor a second owner. If a concurrent program of yours has ever "flaked mysteriously" with a `SIGBUS` or an RC underflow, it is worth re-checking against this fix rather than assuming it was unrelated. While an actor's green thread ran a message handler, the runtime overwrote that actor's refcount word with `1` and restored it afterwards — a leftover from before codegen learned to update actor structs in place unconditionally. The forced `1` was visible to every other thread, so a concurrent drop of a `Pid` observed "last reference" and freed an actor record that still had live owners; the registry was then left pointing at freed memory, and the next lookup or death-cleanup read a garbage refcount (`march: RC underflow (rc was -6899412650951359789)`, `SIGBUS`, or `SIGTRAP`). Concurrent *increments* during the same window were silently lost. Single-scheduler runs were never affected. The spawn-and-kill churn scenario failed on 6 of 30 runs before the fix and 0 of 60 after.
 - **A killed actor's registered names are now reclaimed, not left occupying the registry forever.** `do_actor_death` (and the interpreter's matching `crash_actor` path) now retires all of the dying actor's names — dropping the forward-table entry and the per-actor reverse index — before any monitor `Down` notification is delivered, so a watcher woken by the death can never observe a name still mapped to the dead incarnation. Previously only the runtime's own `$alive`-flag re-check kept `whereis`/`registered` correct at lookup time; the table entry itself, and the interpreter's `named_registry` map, held on to the name indefinitely unless a later registration happened to overwrite it. `Actor.registered()` in the interpreter no longer lists a name after its actor is killed.
 - **A top-level function in your program can no longer silently replace a

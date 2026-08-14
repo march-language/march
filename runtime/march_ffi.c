@@ -590,3 +590,29 @@ int64_t ffi_count_matching(march_value pred, int64_t n) {
     }
     return count;
 }
+
+/* ── Test-only probe: an actor record's refcount ──────────────────────────
+ * Used by test/native/actor_crash_rc_restore.march, which needs to observe
+ * something the March surface deliberately does not expose — the RC of the
+ * actor record behind a Pid — to pin the invariant that a panic inside a
+ * supervised actor's handler leaves that RC exactly as it found it.  The
+ * green-thread loop clobbers the RC to 1 for the duration of each message
+ * (FBIP in-place reuse) and restores it afterwards; when march_panic
+ * longjmp'd out of the middle of a handler that restore used to be skipped,
+ * leaving a live, multiply-owned record claiming a single owner, so the next
+ * drop freed it out from under its other owners (see actor_green_thread's
+ * crash branch).  Lives here beside the other ffi_test_* helpers because the
+ * native FFI tests are already wired to call runtime symbols directly.
+ *
+ * Takes the Int a compiled Pid field holds (march_pid_index_of's encoding),
+ * NOT an actor pointer — March has no way to hand one over.  Returns -1 for
+ * a pid that never named an actor; march_pid_of_int answers for a DEAD
+ * actor too (metas outlive their actors), which is the whole point: the
+ * probe runs after the crash. */
+extern void *march_pid_of_int(int64_t n);
+
+int64_t ffi_test_actor_rc(int64_t pid_index) {
+    void *actor = march_pid_of_int(pid_index);
+    if (!IS_HEAP_PTR(actor)) return -1;
+    return ((int64_t *)actor)[0];
+}

@@ -6,7 +6,25 @@ regression test**. If someone reintroduces an RC-conditional reuse of the actor
 record — the exact thing the deleted `a[0] = 1` clobber existed to enable — the
 suite will stay green.
 
-## Why there is no test
+## Partially covered as of 2026-08-14 — the deterministic red now exists
+
+`test/native/actor_crash_rc_restore.march` asserts, through the test-only
+`ffi_test_actor_rc` probe, that a supervised actor's refcount is unchanged
+across a `panic()` in its handler. Reintroducing the `a[0] = 1` /
+`a[0] = saved_rc` pair turns it red on **every** run (verified 3/3), because the
+crash trap's `longjmp` skips the restore and the probe reads the forced `1`
+directly. That satisfies this file's original acceptance criterion, and it needs
+no race to observe: the crash path is a deterministic way to catch the window
+open.
+
+What it does NOT cover is the sharper invariant below — a *concurrent* reader
+observing the forced `1` mid-dispatch. A future clobber that restores correctly
+on every exit path (including the crash trap) would pass the new test and still
+be unsafe on a multi-scheduler run. Options (1) and (2) below remain the real
+ask; this file stays open for them, with the "there is no deterministic test at
+all" part now resolved.
+
+## Why there was no test
 
 The reproducer is statistical: `bench/actors/spawn_churn.march` failed **6 of 30**
 runs pre-fix and 0 of 60 post-fix. Instrumentation showed the crash rate
@@ -55,7 +73,12 @@ instance was found (`native_int_arr_set` and friends *read* `->rc` rather than
 forging it), but the pattern is attractive enough to recur, and a guard of shape
 (2) would catch the next one for free.
 
-## Acceptance
+## Acceptance (revised 2026-08-14)
 
-Reverting `a9032530` (restoring the `a[0] = 1` / `a[0] = saved_rc` pair in
-`actor_green_thread`) turns something red **deterministically**, not 1 run in 5.
+Original criterion — "reverting `a9032530` turns something red deterministically"
+— is **met** by `test/native/actor_crash_rc_restore.march`.
+
+Remaining: a test that fails when the refcount word is written non-atomically
+even if every exit path restores it correctly — i.e. one that observes the
+window from another thread (option 1), and/or a guard that rejects the pattern
+in source (option 2).

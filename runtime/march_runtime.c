@@ -2741,6 +2741,16 @@ static void actor_green_thread(void *arg) {
     pthread_mutex_lock(&g_tbl_mu);
     int has_supervisor = meta->supervisor != NULL;
     pthread_mutex_unlock(&g_tbl_mu);
+
+    /* The hot-reload dispatch pin, hoisted above the setjmp so the crash
+     * branch can release a pin the longjmp jumped over — see that branch.
+     * `volatile` is load-bearing, not decoration: an automatic object
+     * modified between setjmp and longjmp has an INDETERMINATE value in the
+     * branch the longjmp lands in unless it is volatile (C17 7.13.2.1p3),
+     * and these are written on every message of a hot-reload actor. */
+    volatile uint32_t  pinned_version  = 0;
+    volatile int       dispatch_pinned = 0;
+
     if (has_supervisor && self) {
         /* Only a supervised child gets crash-isolated — an unsupervised
          * actor's panic keeps today's exit(1) behavior (see march_panic). */
@@ -2752,6 +2762,45 @@ static void actor_green_thread(void *arg) {
          * (since this actor has a supervisor) triggers a restart — kill/
          * crash-notify parity with the interpreter's kill = crash_actor. */
         self->crash_jmp = saved_jmp;
+
+        /* Release the code-version pin the longjmp jumped over, BEFORE
+         * do_actor_death and the restart it triggers run.  A hot-reload
+         * actor's dispatch is bracketed by march_dispatch_enter /
+         * march_dispatch_leave, which hold a refs count on one ring slot so
+         * a concurrent publish cannot dlclose the code being executed.  A
+         * panic out of the middle of that handler skips the leave, leaving
+         * refs permanently above zero: that version's slot can never be
+         * reclaimed, and a crash-looping hot-reload actor burns one slot per
+         * crash until the ring is exhausted.  Unlike an ordinary leak this
+         * one is not reachable-and-forgotten memory — it is a live counter
+         * that blocks a runtime mechanism, so it is repaired here rather
+         * than accepted.
+         *
+         * dispatch_pinned is the "the leave never ran" flag: a panic can
+         * also longjmp here from OUTSIDE the dispatch call (e.g. out of a
+         * migrate_fn), and a non-hot-reload actor never pins at all.
+         *
+         * Not repaired here: the message itself.  The dispatch function
+         * owns and consumes msg, and a longjmp out of its middle leaves no
+         * way to know whether it already did — so msg is leaked on this
+         * path rather than risking a double free.
+         *
+         * Nothing else needs undoing: this loop deliberately no longer
+         * clobbers the actor's refcount around a dispatch (see the "NO RC
+         * CLOBBER HERE" comment below for why that is load-bearing), so a
+         * crash cannot leave a[0] lying about its owner count.  Before that
+         * clobber was removed, this longjmp also skipped its `a[0] =
+         * saved_rc` restore, which left a live multiply-owned record
+         * claiming a single owner — the next drop by any other owner freed
+         * it, and the damage surfaced as an EXC_BAD_ACCESS inside an
+         * unrelated malloc.  test/native/actor_crash_rc_restore.march pins
+         * that a crash leaves the refcount untouched, so reintroducing a
+         * clobber here fails a test instead of corrupting a heap. */
+        if (dispatch_pinned) {
+            march_dispatch_leave(meta->dispatch_name_id, pinned_version);
+            dispatch_pinned = 0;
+        }
+
         do_actor_death(actor);
         /* green_thread is now _Atomic — this critical section protected
          * nothing else, so the mutex is dropped in favor of a release
@@ -2855,7 +2904,12 @@ static void actor_green_thread(void *arg) {
              * Counter_dispatch(actor, msg) — NOT a closure wrapper.
              * Call it directly without a closure env arg. */
             typedef void (*dispatch_fn_t)(void *, void *);
+            /* march_dispatch_enter takes a plain uint32_t* out-param, so the
+             * pin's version lands in a non-volatile local first and is then
+             * published to the volatile copy the crash branch reads. */
             void *fn_raw = march_dispatch_enter(meta->dispatch_name_id, &tbl_version);
+            pinned_version = tbl_version;
+            dispatch_pinned = 1;
             dispatch_fn_t dispatch_fn;
             memcpy(&dispatch_fn, &fn_raw, sizeof(dispatch_fn));
             dispatch_fn(actor, msg);
@@ -2906,6 +2960,7 @@ static void actor_green_thread(void *arg) {
 
         if (meta->dispatch_name_id) {
             march_dispatch_leave(meta->dispatch_name_id, tbl_version);
+            dispatch_pinned = 0;   /* pin released: nothing for the crash branch to do */
         }
 
         march_sched_tick();

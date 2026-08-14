@@ -1,5 +1,7 @@
 registered: true
+registered second name: true
 respawned with new pid: true
 reached by name after restart
+second name reaches the same replacement: true
 respawned again with new pid: true
 reached by name after second restart

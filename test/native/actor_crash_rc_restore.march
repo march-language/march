@@ -1,0 +1,87 @@
+-- Regression: a panic inside a SUPERVISED actor's message handler must leave
+-- the actor record's refcount exactly as the dispatch loop found it.
+--
+-- actor_green_thread used to clobber the record's RC to 1 around every message
+-- (so codegen's generic reuse path would accept the handler's state write-back)
+-- and restore the real count afterwards.  Two ways that bit:  a concurrent drop
+-- on another scheduler thread saw the forced 1 and freed a record with live
+-- owners (fixed by deleting the clobber outright — see the "NO RC CLOBBER HERE"
+-- comment in actor_green_thread), and march_panic's crash-trap longjmp jumped
+-- straight over the restore, leaving a crashed child claiming a single owner
+-- single-threaded too.  Measured on the reported repro: rc 6 going into the
+-- handler, rc 1 coming out of the trap, then a free of the still-reachable
+-- record and an EXC_BAD_ACCESS inside an unrelated malloc.
+--
+-- With the clobber gone there is nothing for the crash path to restore, which
+-- is exactly the invariant worth pinning: this test fails if anyone
+-- reintroduces an RC lie around the dispatch, rather than letting it come back
+-- as heap corruption.  The crash path itself is what makes it a sharp probe —
+-- a longjmp out of a handler skips whatever epilogue a future clobber adds.
+--
+-- `ffi_test_actor_rc` is a test-only runtime probe (runtime/march_ffi.c): the
+-- RC is invisible from the March surface, and every March-level symptom of the
+-- bug is a use-after-free — i.e. undefined behavior, which makes for a flaky
+-- test.  The RC itself is the invariant, so assert on it directly.
+--
+-- The first line is the non-vacuity guard: this test only means anything while
+-- the crashed child genuinely has more than one owner.  If it ever prints
+-- false, the second line has stopped proving anything and this test needs a
+-- new shape, not a new .expected.
+mod Main do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+
+  extern "rt" : Cap(Ffi) do
+    fn actor_rc(pid : Int) : Int = "ffi_test_actor_rc"
+  end
+
+  actor Fragile do
+    state { handled : Int }
+    init  { handled: 0 }
+
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile child
+    end
+  end
+
+  fn current_child(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
+    let boss = spawn(Boss)
+    let victim = current_child(boss)
+    let rc_before = actor_rc(victim)
+    println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
+
+    -- Crash it from inside a handler (the setjmp/longjmp trap path), NOT via
+    -- kill() -- kill runs the death sequence from outside the dispatch, so it
+    -- never exercises the window this test is about.
+    send(pid_of_int(victim), Poison())
+    run_until_idle()
+
+    println("rc preserved across crash: "
+            ++ bool_to_string(actor_rc(victim) == rc_before))
+
+    -- The supervisor still restarts it: nothing here changes what a crash
+    -- means for supervision.
+    let replacement = current_child(boss)
+    println("restarted: " ++ bool_to_string(replacement != victim))
+    println("replacement alive: " ++ bool_to_string(is_alive(pid_of_int(replacement))))
+  end
+end
