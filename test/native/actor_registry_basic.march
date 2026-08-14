@@ -1,0 +1,25 @@
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let pid = spawn(Counter)
+    println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
+    match Actor.whereis("counter") do
+      Some(_) -> println("found")
+      None    -> println("missing")
+    end
+    println("dup: " ++ bool_to_string(Actor.register(pid, "counter")))
+    kill(pid)
+    run_until_idle()
+    match Actor.whereis("counter") do
+      Some(_) -> println("still there")
+      None    -> println("gone after kill")
+    end
+  end
+end

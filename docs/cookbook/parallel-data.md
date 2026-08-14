@@ -284,6 +284,54 @@ whole input (assuming an associative, identity-having `merge`).
 
 ---
 
+## SIMD within, parallel across
+
+Vectorizing and parallelizing are different axes: `Simd`/`NativeArray`
+speed up work *within* one core, `Parallel`/`Task` spread work *across*
+cores. They compose — split a `Vec` into chunks with `RRB.chunk`, spawn one
+task per chunk, and let each task reduce its chunk with the vectorized
+`NativeArray` fast path instead of a plain fold:
+
+```march
+mod ChunkSum do
+  needs IO.Console
+  needs IO.Spawn
+
+  -- Sum one chunk with the vectorized NativeArray fast path.
+  pfn sum_slice(s) : Float do
+    let xs = RRB.fold(s, Nil, fn (acc, x) -> Cons(x, acc))
+    NativeArray.sum_float(NativeArray.from_list_float(xs))
+  end
+
+  fn parallel_sum(v : RRB.Vec(Float), workers : Int) : Float do
+    let slices = Array.to_list(RRB.chunk(v, workers))
+    let tasks = List.map(slices, fn s -> Task.async(fn () -> sum_slice(s)))
+    let partials = Task.await_many(tasks)
+    List.fold_left(partials, 0.0, fn (acc, r) ->
+      match r do
+        Ok(x)  -> acc +. x
+        Err(_) -> acc
+      end)
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    let v = RRB.from_list([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+    println(float_to_string(parallel_sum(v, 4)))   -- 36.
+  end
+end
+```
+
+`RRB.chunk(v, workers)` does the same "one contiguous slice per worker"
+split `Parallel`'s own functions do internally, but as a zero-copy `Slice`
+per chunk rather than a scalar-only reduction — that's what leaves room to
+plug in a vectorized reduction per chunk. Reach for this combination when
+each chunk's per-element work is itself the kind of tight numeric loop
+`NativeArray`/`Simd` speed up (see the [Numeric Data
+cookbook]({{ site.baseurl }}/docs/cookbook/numeric-data/)); for everything
+else, `Parallel.psum`/`preduce` above are simpler and already parallel.
+
+---
+
 ## Interpreter vs. compiled
 
 | Feature | Interpreter | Compiled |

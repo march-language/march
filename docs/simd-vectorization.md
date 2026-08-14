@@ -87,11 +87,11 @@ pipeline.
 `map_f32`/`map2_f32`/`sum_f32` get the identical inline-loop vectorization
 treatment described above for `map_float`/`map2_float`/`sum_float` —
 confirmed via `-emit-llvm` to compile to real `<4 x float>` NEON vector
-instructions, not just scalar unrolling. `fold_i32`/`fold_u8`/`fold_f32` do
-not exist yet at all (interpreted or compiled) — deliberately scoped out,
-since giving them a compiled implementation would mean solving the same
-linkage problem that blocks `fold_int`/`fold_float` today (see Known
-limitations below); they'll be added once that gap closes.
+instructions, not just scalar unrolling. `fold_i32`/`fold_u8`/`fold_f32`
+(along with `fold_int`/`fold_float`) all have compiled implementations —
+the fold accumulator is a generic `'a` that crosses the closure boundary in
+the erased/boxed representation, so fold is a correctness-first scalar loop
+rather than a vectorized one; see Known limitations below.
 
 Same-box, same-build f32-vs-f64 comparison at N=5M (median of 6 samples,
 two opposite orderings to cancel first-position warmup bias — see
@@ -156,11 +156,23 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
 
 ## Known limitations
 
-- **`fold_int` / `fold_float` have no compiled implementation yet** — calling
-  either from a `--compile` build fails to link. Use `sum`/`map` or a manual
-  index loop until this lands. The narrow-width equivalents
-  (`fold_f32`/`fold_i32`/`fold_u8`) don't exist at all yet — interpreted or
-  compiled — and will be added once this linkage gap closes.
+- **`fold_int` / `fold_float` / `fold_f32` / `fold_i32` / `fold_u8`** all have
+  compiled implementations, but fold is not vectorized — the accumulator is a
+  generic `'a` that must stay boxed/erased across the closure boundary for
+  the whole loop, so it's a correctness-first scalar loop, not a SIMD one.
+  Use `sum`/`map` if you need the auto-vectorized path and your reduction
+  fits their shape.
+- **`fold_float` / `fold_f32` with a `Float` accumulator leak ~32 B per
+  element** (a known, still-open bug — the result is correct, only memory
+  residency is affected). Each iteration's accumulator box is never released,
+  so folding a 50M-element `NativeFloatArr` into a `Float` costs ~1.6 GB of
+  peak RSS. Measured at 5M elements: 193.6 MB with a `Float` accumulator vs
+  40.4 MB for the `fold_int` control. **Folds with an `Int` accumulator —
+  including `fold_int`, `fold_i32` and `fold_u8` — are unaffected**, because a
+  wire-tagged `Int` is never heap-allocated. Workaround for large arrays: use
+  `sum_float`/`sum_f32`, or fold with an `Int` accumulator, or chunk the array.
+  Tracked in
+  `specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md`.
 - **`DataFrame`**: `Sum`/`Mean` aggregation and `col_add_col` (column-column
   arithmetic, via `map2_int`/`map2_float`) use the vectorized `NativeArray`
   primitives above under the hood. `Min`/`Max`/`Std`/`Variance`/`Median`
@@ -325,27 +337,44 @@ feature needs to replace.
 
 ### Known limitations
 
-- **TCO-entry box leak:** a self-tail-recursive function's vector
-  accumulator leaks one 32-byte box per **call** (not per loop iteration —
-  the loop body itself, per the register-residency contract above, is
-  allocation-free). Bounded and harmless for a program that calls such a
-  kernel a handful of times; unbounded for a long-lived process calling one
-  per request or tick. See
-  `specs/todos/2026-08-11-simd-tco-entry-box-leak.md`.
+- **TCO-entry box leak — fixed 2026-08-11.** A self-tail-recursive function's
+  vector accumulator used to leak one 32-byte box per **call** (not per loop
+  iteration — the loop body itself, per the register-residency contract
+  above, is allocation-free). The call site now releases the caller-created
+  temp box for callees with a native vector TCO slot; measured RSS on a
+  2,000,000-call probe went from ~64 MB to ~2.7 MB. The fix is narrow —
+  non-TCO vector params still leak per call, and three call paths
+  (raises-wrapper, blocking-extern, hot-reload dispatch) are deliberately
+  excluded; see `specs/todos/2026-08-12-simd-nontco-vector-param-leak.md` for
+  the still-open generalization. Pinned by
+  `test/native/simd_leak_probe.march` (leak must happen) and
+  `test/native/simd_vector_escape_arg.march` (release must NOT happen for an
+  escaping vector). See `specs/progress/2026-08-11-simd-tco-entry-box-leak.md`.
 - **Mutual-recursion accumulators stay boxed.** The register-residency
   optimization above covers self-tail-recursion only; a vector threaded
   through a mutual-recursion group is still correct but boxes/unboxes on
-  every call, same as before the TCO optimization landed.
+  every call, same as before the TCO optimization landed. This is a
+  deliberate wontfix-until-demand, not a gap-in-waiting. `test/native/
+  simd_mutual_tco.march` pins it two ways: an output diff (the boxed path
+  still computes the right answer) and an IR-shape rule
+  (`simd_mutual_tco_llvm_check` in `test/dune`) asserting a `@__mutco_*`
+  dispatcher is emitted at all with both accumulator slots boxed as
+  `alloca ptr`. The second rule is not redundant — the two lowerings print
+  the same number, and the fixture was briefly vacuous because the TIR
+  inliner collapsed the mutual pair into self-recursion. So a change to the
+  mutual-TCO slot strategy can neither silently corrupt the result nor
+  silently stop being tested. See
+  `specs/progress/2026-08-13-simd-closeouts-task3-mutual-tco-pin.md`.
 - **`fma` is a true fused multiply-add** (`llvm.fma.v4f32`/`v2f64`, one
   rounding) — it can differ from a separate multiply followed by an add in
-  the last ulp. For `f64x2` the interpreter runs the identical operation
-  (OCaml's `Float.fma`, binary64-fused). For `f32x4` it does *not*: the
-  interpreter computes a binary64 fused multiply-add and then rounds the
-  result to binary32 (a double rounding), while the compiled path is a
-  single binary32-fused rounding. These are formally different operations
-  and a last-ulp divergence is not ruled out; none has been observed over
-  the parity fixtures. Tracked in
-  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`.
+  the last ulp. Both backends run the same operation on both widths: for
+  `f64x2` the interpreter uses OCaml's `Float.fma` (binary64-fused), and for
+  `f32x4` it emulates a *single*-rounded binary32 fma (round-to-odd over
+  binary64, `eval.ml`'s `fma32_single_round`) rather than double-rounding a
+  binary64 `Float.fma`, which is what it did until 2026-08-13 and which
+  genuinely diverged in the last ulp on rounding-boundary triples. Pinned by
+  test t15 of the `simd_vector` suite and fuzzed compiled-vs-interpreted over
+  400k boundary-heavy lanes by `test/native/simd_fma_fuzz.march`.
 - **`i64x2` interpreter parity edge:** lane values beyond ±2^62 lose their
   top bit under the interpreter only, because OCaml's native `int` is
   63-bit. Compiled `i64x2` uses a true 64-bit lane and has no such limit.
@@ -368,4 +397,5 @@ feature needs to replace.
 - [Standard Library → NativeArray]({{ site.baseurl }}/docs/stdlib/NativeArray.html) — full API reference.
 - [Standard Library → DataFrame]({{ site.baseurl }}/docs/stdlib/DataFrame.html) — columnar data built on `NativeArray`.
 - [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — parallelizing across cores, a different axis from vectorizing within one core.
-- [Memory Model]({{ site.baseurl }}/docs/memory-model/) — how March values are represented, including the float-boxing tradeoff mentioned above.
+- [Value Representation]({{ site.baseurl }}/docs/value-representation/) — how March values are represented at the bit level, including the float-boxing tradeoff mentioned above.
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/) — Perceus reference counting and FBIP, the allocation model underneath the register-residency contract above.

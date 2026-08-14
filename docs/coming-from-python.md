@@ -217,6 +217,39 @@ See [Actors](actors.md) and [Choosing a concurrency primitive](actors.md#choosin
 
 ---
 
+## Numeric arrays (NumPy users)
+
+Python's list comprehensions are fine for everyday code, but for large
+numeric workloads you reach for NumPy. March's equivalent is `NativeArray` —
+a flat, contiguous array (not `List`'s linked cells or `Array`'s trie) that
+`march --compile` can auto-vectorize into real SIMD instructions:
+
+```python
+# Python / NumPy
+arr = np.arange(1_000_000, dtype=np.float64)
+doubled = arr * 2.0
+total = doubled.sum()
+```
+
+```march
+let arr = NativeArray.make_float(1_000_000, 0.0)
+let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
+let total = NativeArray.sum_float(doubled)
+```
+
+The honest comparison, not an overclaim: on a same-machine benchmark at 5M
+elements, March **ties or beats** NumPy on `sum` and is **competitive**
+(within 3x, and beating hand-written OCaml/Rust) on `map`; narrowing to
+`NativeArray`'s `f32` element width — half the bytes, double the SIMD lanes
+— closes most of the remaining gap, beating NumPy on `sum` and `map` and
+reaching parity on `map2`. See [SIMD Benchmarks](/docs/simd-benchmarks/) for
+the full numbers and methodology, and [SIMD & Native Arrays](/docs/simd/)
+for what does and doesn't vectorize. There's also an explicit `Simd` module
+(128-bit vector types) for when you need guaranteed vector codegen instead
+of an optimizer decision — covered in the same guide.
+
+---
+
 ## What's the same
 
 - `println(...)` for output

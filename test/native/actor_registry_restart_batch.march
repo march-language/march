@@ -1,0 +1,78 @@
+-- Named registry (Task 6, round-1 review fix): a name survives a
+-- one_for_all batch restart even when its actor is NOT the one that
+-- crashed.
+--
+-- march_one_for_all_restart / march_rest_for_one_restart null out a live
+-- sibling's meta->supervisor field before calling do_actor_death(sibling),
+-- purely to suppress a recursive march_supervisor_notify -- but the Task 6
+-- capture used to be gated on meta->supervisor being set, so a sibling's
+-- names were silently dropped forever on every batch restart even though
+-- the sibling itself is unconditionally respawned two lines later. This
+-- golden is the regression test for that: two children under one_for_all,
+-- each registered under its own name; crash ONE of them; after the batch
+-- restart, BOTH names must still resolve and answer, not just the one that
+-- actually crashed.
+mod Main do
+  needs IO.Console
+
+  type PingReq = PingReq
+
+  actor Fragile do
+    state { handled : Int }
+    init  { handled: 0 }
+
+    on Ping(reply_to) do
+      Actor.reply(reply_to, state.handled)
+      { handled: state.handled + 1 }
+    end
+
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  actor Boss do
+    state { a : Int, b : Int }
+    init  { a: 0, b: 0 }
+
+    supervise do
+      strategy one_for_all
+      max_restarts 10 within 60
+      Fragile a
+      Fragile b
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn resolve_and_call(name) do
+    match Actor.whereis(name) do
+      None -> println(name ++ ": lost after restart")
+      Some(p) ->
+        match Actor.call(p, PingReq, 5000) do
+          Ok(_)  -> println(name ++ ": reached by name after restart")
+          Err(e) -> println(name ++ ": call failed: " ++ e)
+        end
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let boss = spawn(Boss)
+    let a1 = pid_of_int(child_int(boss, "a"))
+    let b1 = pid_of_int(child_int(boss, "b"))
+    println("registered a: " ++ bool_to_string(Actor.register(a1, "child-a")))
+    println("registered b: " ++ bool_to_string(Actor.register(b1, "child-b")))
+
+    -- Crash only B; one_for_all kills and respawns BOTH children.
+    send(b1, Poison())
+    run_until_idle()
+
+    resolve_and_call("child-a")
+    resolve_and_call("child-b")
+  end
+end

@@ -1943,11 +1943,15 @@ let builtin_cap_table : (string * string) list = [
   ("task_spawn_steal",      "IO.Spawn");
   ("task_spawn_with_cancel","IO.Spawn");
   ("get_work_pool",         "IO.Spawn");
+  (* Vault is IN MEMORY: nothing a read does escapes the process, so a lookup
+     carries no ambient authority and needs no capability. What IS authority is
+     (a) turning a NAME into a table handle — vault_new/vault_whereis, the
+     File.open(path) shape — and (b) mutating state other actors observe.
+     Those keep IO.Mut. See lib/caps/cap_symbols.ml for the full note. *)
   (* IO.Mut — shared mutable state via Vault *)
   ("vault_new",             "IO.Mut");
   ("vault_set",             "IO.Mut");
   ("vault_set_ttl",         "IO.Mut");
-  ("vault_get",             "IO.Mut");
   ("vault_drop",            "IO.Mut");
   ("vault_update",          "IO.Mut");
   ("vault_put_new",         "IO.Mut");
@@ -1956,9 +1960,7 @@ let builtin_cap_table : (string * string) list = [
   ("vault_ns_set",          "IO.Mut");
   ("vault_ns_get",          "IO.Mut");
   ("vault_ns_drop",         "IO.Mut");
-  ("vault_keys",            "IO.Mut");
   ("vault_whereis",         "IO.Mut");
-  ("vault_size",            "IO.Mut");
   (* IO.NetConnect.TLS — encrypted transport; tls_close/tls_ctx_free are cleanup, no cap *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
@@ -2213,6 +2215,13 @@ let builtin_bindings : (string * scheme) list =
     let b = fresh_var 0 in
     Poly ([get_id a; get_id b], [], f a b)
   in
+  (* ∀a b c. f(a, b, c) — three unconstrained type variables *)
+  let poly3 f =
+    let a = fresh_var 0 in
+    let b = fresh_var 0 in
+    let c = fresh_var 0 in
+    Poly ([get_id a; get_id b; get_id c], [], f a b c)
+  in
   [
     (* Arithmetic: Num-constrained so they work on Int and Float *)
     ("+",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
@@ -2297,6 +2306,40 @@ let builtin_bindings : (string * scheme) list =
     ("record_put",       poly2 (fun a b -> TArrow (a, TArrow (t_string, TArrow (b, a)))));
     ("record_has_key",   poly1 (fun a -> TArrow (a, TArrow (t_string, t_bool))));
     ("record_from_list", poly2 (fun a b -> TArrow (t_list (TTuple [t_string; a]), b)));
+    (* Vault (in-memory key-value table) — raw C-runtime entry points backing
+       the typed wrapper module [stdlib/vault.march] (`Vault.new`, `Vault.get`,
+       …). Deliberately near-fully-generic, like [record_get]/[record_put]
+       above: a table holds arbitrary March values under arbitrary keys, so
+       there is no meaningful static element type to enforce here — the typed
+       surface is [Vault.*], not these raw names.
+
+       Needed so a BARE call to one of these resolves at all. Before this they
+       were simply UNBOUND — every call site (including inside
+       [stdlib/vault.march] and [stdlib/config.march] themselves) hit "I
+       cannot find `vault_get`", tolerated for years only because a
+       diagnostic whose span lands in a stdlib file never reaches CLI output
+       (see [bin/main.ml]'s `is_user_file` filter) and [TError] unifies
+       permissively downstream. Surfaced by the vault-read capability test in
+       test/test_caps.ml, which typechecks a bare `vault_get`/`vault_set`
+       call directly (no stdlib loaded) and got "I cannot find" for BOTH,
+       masking the real capability check either way.
+
+       Return shapes mirror the actual [VBuiltin] cases in lib/eval/eval.ml. *)
+    ("vault_new",          poly1 (fun a -> TArrow (t_string, a)));
+    ("vault_whereis",      poly1 (fun a -> TArrow (t_string, t_option a)));
+    ("vault_set",          poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, t_unit)))));
+    ("vault_set_ttl",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
+    ("vault_get",          poly3 (fun t k v -> TArrow (t, TArrow (k, t_option v))));
+    ("vault_drop",         poly2 (fun t k -> TArrow (t, TArrow (k, t_unit))));
+    ("vault_update",       poly3 (fun t k f -> TArrow (t, TArrow (k, TArrow (f, t_unit)))));
+    ("vault_put_new",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_bool))))));
+    ("vault_incr",         poly2 (fun t k -> TArrow (t, TArrow (k, TArrow (t_int, t_int)))));
+    ("vault_push_capped",  poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
+    ("vault_keys",         poly2 (fun t k -> TArrow (t, t_list k)));
+    ("vault_size",         poly1 (fun t -> TArrow (t, t_int)));
+    ("vault_ns_set",       poly2 (fun k v -> TArrow (t_string, TArrow (k, TArrow (v, t_unit)))));
+    ("vault_ns_get",       poly2 (fun k v -> TArrow (t_string, TArrow (k, t_option v))));
+    ("vault_ns_drop",      poly1 (fun k -> TArrow (t_string, TArrow (k, t_unit))));
     (* Generic to_json/from_json: fully polymorphic — runtime dispatches via impl_tbl.
        ∀a b. a -> b  — this avoids shadowing when multiple types derive Json. *)
     ("to_json",   poly2 (fun a b -> TArrow (a, b)));
@@ -2346,6 +2389,21 @@ let builtin_bindings : (string * scheme) list =
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
+    (* peak_rss_bytes: process self-inspection (peak resident set size, in
+       bytes, on both platforms). Deliberately NOT in the capability table
+       below — it performs no IO and observes nothing outside this process,
+       so unlike unix_time (gated to IO.Clock right next to this entry) it
+       needs no capability grant. Don't "fix" that by copying unix_time's
+       cap-table entry. *)
+    ("peak_rss_bytes",  Mono (TArrow (t_unit,  t_int)));
+    (* live_allocs: net count of live March heap objects (march_alloc minus
+       free-on-rc-zero). Same ambient, non-capability-gated rationale as
+       peak_rss_bytes directly above — it reads one process-local counter and
+       observes nothing outside this process. Unlike peak_rss_bytes it is
+       exact and platform-independent (a plain atomic counter, no getrusage,
+       no allocator or OS accounting in the path), which is why the RSS leak
+       probes now assert on it instead. *)
+    ("live_allocs",     Mono (TArrow (t_unit,  t_int)));
     ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
     ("uuid_v7_at",      Mono (TArrow (t_int,   t_string)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));
@@ -2467,6 +2525,14 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_string, TArrow (TArrow (t_unit, t_unit), t_unit)))));
     (* Phase 6b: Register a linear value with an actor; Drop impl resolved at runtime *)
     ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
+    (* Named registry (Task 4): register/unregister/whereis/registered over the
+       runtime-owned name table. No capability — the runtime owns the table,
+       so no March-level naming call happens. Arg order matches monitor/kill
+       (pid first). *)
+    ("actor_register",   poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_bool))));
+    ("actor_unregister", Mono (TArrow (t_string, t_bool)));
+    ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
+    ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));
     (* Phase 3: Epoch-based capability builtins *)
     (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
        a revocable, epoch-checked reference to a live actor, represented at run
@@ -2731,6 +2797,9 @@ let builtin_bindings : (string * scheme) list =
     ("base64_decode",   Mono (TArrow (t_string,
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     ("random_bytes",    Mono (TArrow (t_int, TCon ("Bytes", []))));
+    (* Bytes <-> NativeU8Arr bridge: pure data movement, not a capability. *)
+    ("bytes_to_u8_arr", Mono (TArrow (TCon ("Bytes", []), TCon ("NativeU8Arr", []))));
+    ("u8_arr_to_bytes", Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("Bytes", []))));
     (* stdlib_* variants — used by module wrappers that shadow the base names.
        stdlib_base64_encode accepts String only at the type-checker level;
        callers should convert Bytes to String with bytes_to_string first. *)
@@ -2840,9 +2909,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (TCon ("TypedArray", [t_bool]), TCon ("NativeFloatArr", [])))));
     (* Narrow-width NativeArray families — f32/i32/u8 (P10 narrow types).
        Opaque 0-arity types, same shape as NativeIntArr/NativeFloatArr above.
-       Interpreter-path only; compiled (LLVM/runtime) support is a later task.
-       No alloc_raw / fold / min / max / sumsq_dev / filter_mask for these
-       widths -- only the 9-op family + conversions. *)
+       No min / max / sumsq_dev / filter_mask for these widths -- only the
+       9-op family + fold + conversions. *)
     (* f32 *)
     ("native_f32_arr_make",
        Mono (TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", [])))));
@@ -2862,6 +2930,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeF32Arr", []),
              TArrow (TCon ("NativeF32Arr", []),
              TArrow (TArrow (t_float, TArrow (t_float, t_float)), TCon ("NativeF32Arr", []))))));
+    ("native_f32_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeF32Arr", []),
+                   TArrow (TArrow (a, TArrow (t_float, a)), a)))));
     ("native_f32_arr_from_list",
        Mono (TArrow (t_list t_float, TCon ("NativeF32Arr", []))));
     ("native_f32_arr_to_list",
@@ -2885,6 +2957,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeI32Arr", []),
              TArrow (TCon ("NativeI32Arr", []),
              TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeI32Arr", []))))));
+    ("native_i32_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeI32Arr", []),
+                   TArrow (TArrow (a, TArrow (t_int, a)), a)))));
     ("native_i32_arr_from_list",
        Mono (TArrow (t_list t_int, TCon ("NativeI32Arr", []))));
     ("native_i32_arr_to_list",
@@ -2908,6 +2984,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeU8Arr", []),
              TArrow (TCon ("NativeU8Arr", []),
              TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeU8Arr", []))))));
+    ("native_u8_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeU8Arr", []),
+                   TArrow (TArrow (a, TArrow (t_int, a)), a)))));
     ("native_u8_arr_from_list",
        Mono (TArrow (t_list t_int, TCon ("NativeU8Arr", []))));
     ("native_u8_arr_to_list",
@@ -6565,10 +6645,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── if/do/else/end ───────────────────────────────────────────── *)
     | Ast.EIf (cond, then_, else_, _sp) ->
+      (* The condition runs on BOTH paths, so it is checked before the
+         mutual-exclusion snapshot below: a linear value consumed here is
+         still consumed inside either branch. *)
       check_expr env cond t_bool
         ~reason:(Some (RBuiltin "The condition of an if expression must be Bool."));
-      let t_then = infer_expr env then_ in
-      let t_else = infer_expr env else_ in
+      (* The two branches are mutually exclusive, so each may consume the same
+         outer linear value once — the same rule match arms get. *)
+      let r_then = ref TError and r_else = ref TError in
+      iter_paths_linear env
+        [ (fun () -> r_then := infer_expr env then_);
+          (fun () -> r_else := infer_expr env else_) ];
+      let t_then = !r_then in
+      let t_else = !r_else in
       (* Point primary error at the else branch; label points at then branch
          (the source of the expected type), making both branches visible. *)
       let then_sp = span_of_expr then_ in
@@ -6587,15 +6676,51 @@ let rec infer_expr env (e : Ast.expr) : ty =
            "A `match do` expression needs at least one arm.";
          TError
        | (first_cond, first_body) :: rest ->
+         (* Only the BODIES are mutually exclusive here, so this cannot use
+            [iter_paths_linear] wholesale. The conditions are evaluated in
+            order until one holds, so a later condition genuinely co-occurs
+            with every earlier one on the fall-through path and they must
+            share linear-use state. A body, by contrast, runs only when its
+            own condition was the first true one — at which point no later
+            condition is ever evaluated — so each body is its own path,
+            starting from the state its own condition left behind.
+
+            Hence: check conditions against the shared state, run each body
+            rolled back, and apply the union of what the bodies consumed
+            once at the end. *)
+         let body_acc =
+           List.map (fun le -> (le, ref false, ref (None : Ast.span option)))
+             env.lin
+         in
+         let run_body body_e =
+           let saved =
+             List.map (fun le -> (le, !(le.le_used), !(le.le_first_use)))
+               env.lin
+           in
+           let ty = infer_expr env body_e in
+           List.iter (fun (le, acc, acc_span) ->
+               if !(le.le_used) then begin
+                 acc := true;
+                 if !acc_span = None then acc_span := !(le.le_first_use)
+               end) body_acc;
+           List.iter (fun (le, was, was_span) ->
+               le.le_used := was; le.le_first_use := was_span) saved;
+           ty
+         in
          check_expr env first_cond t_bool
            ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
-         let result_ty = infer_expr env first_body in
+         let result_ty = run_body first_body in
          List.iter (fun (cond_e, body_e) ->
              check_expr env cond_e t_bool
                ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
-             let arm_ty = infer_expr env body_e in
+             let arm_ty = run_body body_e in
              unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
            ) rest;
+         List.iter (fun (le, acc, acc_span) ->
+             if !acc && not !(le.le_used) then begin
+               le.le_used := true;
+               if !(le.le_first_use) = None then le.le_first_use := !acc_span
+             end) body_acc;
          result_ty)
 
     (* ── Pipes / Sigils — must be desugared before reaching us ───── *)
@@ -7025,30 +7150,47 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     mutable flag would otherwise raise across arms, while still catching a
     genuine double-use WITHIN a single arm. *)
 and iter_arms_linear env (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
-  (* For each outer linear entry track (entry, pre-match flag, union accumulator). *)
+  iter_paths_linear env (List.map (fun br () -> f br) branches)
+
+(** The mutual-exclusion discipline itself, over an arbitrary list of paths.
+    Every branching construct in the language shares it — [EMatch] arms via
+    [iter_arms_linear], the two branches of an [EIf], and the bodies of an
+    [ECond] — because "at most one of these runs" is the only property it
+    needs.  Each path is run with the linear-use flags reset to their state
+    on entry, and the union of what the paths consumed is applied once at the
+    end.
+
+    What this deliberately does NOT cover is code that runs on EVERY path: an
+    [EIf]'s condition, or an [ECond]'s conditions, must be checked OUTSIDE the
+    paths (before the relevant snapshot is taken), so that a value consumed
+    there is still seen as consumed inside each branch.  Resetting around the
+    condition too would turn a genuine double-use into an accepted program —
+    the one way this helper can be misused. *)
+and iter_paths_linear env (paths : (unit -> unit) list) : unit =
+  (* For each outer linear entry track (entry, pre-branch flag, union accumulator). *)
   (* [le_first_use] is saved and restored alongside [le_used]. If it were not,
-     the first arm to consume a value would leave its span behind, and a genuine
-     double-use in a LATER arm would point at a line in a sibling arm that never
-     ran on the same path — a confidently wrong "already consumed here". *)
+     the first path to consume a value would leave its span behind, and a genuine
+     double-use in a LATER path would point at a line in a sibling path that never
+     ran on the same execution — a confidently wrong "already consumed here". *)
   let snapshot =
     List.map (fun le ->
         (le, !(le.le_used), ref !(le.le_used),
              !(le.le_first_use), ref !(le.le_first_use)))
       env.lin
   in
-  List.iter (fun br ->
-      (* Reset each entry to its pre-match state so this arm sees a fresh path. *)
+  List.iter (fun run_path ->
+      (* Reset each entry to its pre-branch state so this path starts fresh. *)
       List.iter (fun (le, was, _acc, was_span, _acc_span) ->
           le.le_used := was; le.le_first_use := was_span) snapshot;
-      f br;
-      (* Fold whatever this arm consumed into the union accumulator. *)
+      run_path ();
+      (* Fold whatever this path consumed into the union accumulator. *)
       List.iter (fun (le, _was, acc, _was_span, acc_span) ->
           if !(le.le_used) then begin
             acc := true;
             if !acc_span = None then acc_span := !(le.le_first_use)
           end) snapshot
-    ) branches;
-  (* Final: consumed iff consumed before the match OR in some arm. *)
+    ) paths;
+  (* Final: consumed iff consumed before the branch OR on some path. *)
   List.iter (fun (le, _was, acc, _was_span, acc_span) ->
       le.le_used := !acc; le.le_first_use := !acc_span) snapshot
 

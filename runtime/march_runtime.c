@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -1906,6 +1907,41 @@ typedef struct march_actor_meta {
      * compares it after; any advance means loop again. Meaningless while
      * delayed_batch_pending is 0; zeroed by calloc. */
     int64_t                      pending_drop_count;
+    /* Named-registry reverse index (Task 3): every name currently registered
+     * to THIS actor, as plain strdup'd C strings — NOT a March List(String),
+     * see the design comment above registry_init_once for why. Grown one at
+     * a time via realloc (a handful of names per actor, not a hot path).
+     * Walked by registry_retire_actor (Task 5) so a dying actor's names are
+     * dropped from the forward table in O(names held) rather than a full
+     * table scan. Zeroed by calloc at meta creation. */
+    char                       **reg_names;
+    int                          reg_name_count;
+    /* Task 6: a snapshot of reg_names taken by capture_reg_names_pending
+     * (see its own comment) before something frees the original —
+     * registry_retire_actor for a directly-crashed/killed actor, or the
+     * same call for a batch-restart sibling whose supervisor field is
+     * about to be nulled out. registry_retire_actor's whole point is to
+     * make the name available again right away — Down notifications and a
+     * racing march_actor_register both depend on that happening promptly
+     * — so retire itself is untouched; this is a SEPARATE copy, taken only
+     * for an actor that IS about to be respawned (never for a plain
+     * unsupervised death, which never bothers capturing one).
+     * march_respawn_child is the sole consumer: it re-registers each name
+     * for the replacement child and frees this array. If the crashed
+     * child is never actually respawned (restart budget exhausted, the
+     * supervisor itself dies before a delayed restart fires, malloc
+     * failure aborting a delayed restart, ...) this stays set and is
+     * never freed — same "leak-don't-free" shape as the meta it lives on
+     * (never unlinked/freed either, see g_actor_tbl's comment above),
+     * bounded to one capture per actor that held names and failed to
+     * respawn, and intentional for the same reason delayed_batch_pending
+     * is sometimes left set forever (see delayed_restart_thread):
+     * correctness (never dropping a name that SHOULD carry forward)
+     * matters more here than reclaiming a few strdup'd C strings in an
+     * already-degraded path. Mutated only under g_registry_mu (see
+     * capture_reg_names_pending). Zeroed by calloc at meta creation. */
+    char                       **reg_names_pending;
+    int                          reg_name_count_pending;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta.
@@ -2376,6 +2412,302 @@ static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
     return NULL;
 }
 
+/* ── Named process registry ───────────────────────────────────────────────
+ * Forward mapping (name -> actor) lives in a Vault table the RUNTIME owns, so
+ * it inherits Vault's concurrent reads and is inspectable by the same tooling
+ * as any other table — and so `Actor.whereis` needs no capability, since no
+ * March-level naming call happens.
+ *
+ * The reverse index (actor -> its names) is the march_actor_meta.reg_names
+ * array above, NOT a second Vault table: it exists only so death cleanup is
+ * O(names held) instead of a full table walk per death (the churn scenario
+ * kills 40k actors), no user inspects it, and building/refcounting a
+ * List(String) from C to store as a Vault value is real machinery for no
+ * gain.
+ *
+ * march_vault_get returns a NICHE-encoded Option(ptr): None = NULL,
+ * Some(v) = v itself, incrc'd by the callee (see march_vault_get / the
+ * march_vault_update comment on the same convention). Every use below that
+ * receives a non-NULL result therefore owns exactly one extra reference that
+ * must be either handed onward (as a return value) or explicitly decrc'd. */
+#define MARCH_REGISTRY_TABLE_NAME "$actor_registry"
+
+static void *g_registry_tbl = NULL;
+static pthread_once_t g_registry_once = PTHREAD_ONCE_INIT;
+
+static void registry_init_once(void) {
+    g_registry_tbl = march_vault_new(march_string_lit(MARCH_REGISTRY_TABLE_NAME,
+                                                        (int64_t)strlen(MARCH_REGISTRY_TABLE_NAME)));
+    /* registry table itself is never released for the process lifetime. */
+    march_incrc(g_registry_tbl);
+}
+static void *registry_tbl(void) {
+    pthread_once(&g_registry_once, registry_init_once);
+    return g_registry_tbl;
+}
+
+/* Serializes march_actor_register, march_actor_unregister, and
+ * registry_retire_actor — the three operations that mutate a reg_names
+ * array (realloc/free) or need register's get-then-set to be atomic
+ * (otherwise two threads racing to register the same absent name can both
+ * observe "absent" and both return 1, leaving two LIVE actors both
+ * believing they hold the name — see the Task 3 review's Critical/
+ * Important fix-up). A STRICT LEAF LOCK: everything called while it is
+ * held — Vault ops (march_vault_get/set/drop, all pure C per Task 1's
+ * invariant), malloc/strdup/free — is plain C that cannot park a green
+ * thread, so this never nests under or interleaves with a scheduler
+ * yield. Same shape as g_supervise_mu serializing sup_children (another
+ * realloc-grown per-meta array). march_actor_whereis and
+ * march_actor_registered are reads and stay OUTSIDE this lock on purpose,
+ * to keep Vault's own striped-read concurrency (Task 1) intact for the
+ * hot lookup path. */
+static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Append a strdup'd copy of [name] to [m]'s reverse index. */
+static void meta_add_name(march_actor_meta *m, const char *name) {
+    m->reg_names = (char **)realloc(m->reg_names,
+                                     sizeof(char *) * (size_t)(m->reg_name_count + 1));
+    if (!m->reg_names) { fputs("march: out of memory (registry)\n", stderr); exit(1); }
+    m->reg_names[m->reg_name_count++] = strdup(name);
+}
+
+/* Remove [name] from [m]'s reverse index, if present (order not preserved). */
+static void meta_remove_name(march_actor_meta *m, const char *name) {
+    for (int i = 0; i < m->reg_name_count; i++) {
+        if (strcmp(m->reg_names[i], name) == 0) {
+            free(m->reg_names[i]);
+            m->reg_names[i] = m->reg_names[m->reg_name_count - 1];
+            m->reg_name_count--;
+            return;
+        }
+    }
+}
+
+/* march_actor_register(name, actor) -> 1 on success, 0 if the name is held
+ * by a LIVE actor, or if [actor] itself is dead. A stale entry left behind
+ * by a dead actor is silently overwritten (that's what makes the name
+ * reusable after the incarnation that held it dies) — and the whole
+ * get-then-set-then-reindex sequence runs under g_registry_mu so the
+ * overwrite is atomic with respect to a second racing register AND with
+ * respect to registry_retire_actor running for the stale actor. Critically,
+ * the overwrite path also removes the name from the STALE actor's own
+ * reverse index before handing it to the new actor: without that, the
+ * stale actor's eventual retire would still find the name in its index and
+ * drop it from the table out from under the new (live) actor that now
+ * legitimately owns it — see the Task 3 review's Critical fix-up. */
+int64_t march_actor_register(void *name_str, void *actor) {
+    if (!IS_HEAP_PTR(actor) || !((int64_t *)actor)[3]) return 0;   /* dead/invalid */
+
+    pthread_mutex_lock(&g_registry_mu);
+
+    void *existing = march_vault_get(registry_tbl(), name_str);
+    if (existing != NULL) {
+        int taken = IS_HEAP_PTR(existing) && ((int64_t *)existing)[3];
+        if (taken) {
+            march_decrc(existing);
+            pthread_mutex_unlock(&g_registry_mu);
+            return 0;
+        }
+        /* stale entry for a dead actor: retire it from ITS OWN reverse
+         * index first (belt), then fall through and overwrite the table
+         * entry. registry_retire_actor's compare-and-drop (braces) is the
+         * other half of closing this race for any path that isn't this
+         * one. */
+        march_actor_meta *stale_m = find_meta(existing);
+        if (stale_m) {
+            char stale_scratch[MARCH_SSO_MAX + 1];
+            meta_remove_name(stale_m, march_str_data(name_str, stale_scratch));
+        }
+        march_decrc(existing);
+    }
+
+    march_vault_set(registry_tbl(), name_str, actor);
+
+    char scratch[MARCH_SSO_MAX + 1];
+    meta_add_name(find_or_create_meta(actor), march_str_data(name_str, scratch));
+
+    pthread_mutex_unlock(&g_registry_mu);
+    return 1;
+}
+
+/* march_actor_unregister(name) -> 1 if a mapping was removed, 0 otherwise.
+ * Removes the forward-table entry regardless of the owning actor's
+ * liveness, and drops the name from that actor's reverse index if it still
+ * has one. Runs under g_registry_mu: without it, the get-then-drop here
+ * could race a concurrent register's get-then-set on the same name (TOCTOU
+ * — see the Task 3 review's Important fix-up). */
+int64_t march_actor_unregister(void *name_str) {
+    pthread_mutex_lock(&g_registry_mu);
+
+    void *existing = march_vault_get(registry_tbl(), name_str);
+    if (existing == NULL) {
+        pthread_mutex_unlock(&g_registry_mu);
+        return 0;
+    }
+
+    if (IS_HEAP_PTR(existing)) {
+        march_actor_meta *m = find_meta(existing);
+        if (m) {
+            char scratch[MARCH_SSO_MAX + 1];
+            meta_remove_name(m, march_str_data(name_str, scratch));
+        }
+    }
+    march_decrc(existing);   /* release our extra ref from march_vault_get */
+
+    march_vault_drop(registry_tbl(), name_str);
+    pthread_mutex_unlock(&g_registry_mu);
+    return 1;
+}
+
+/* march_actor_whereis(name) -> Some(actor) if registered AND alive, else
+ * None. Liveness is checked here (not just table membership) because
+ * cleanup and lookup race by nature — a stale entry for an actor that died
+ * without deregistering must resolve to None, not a dangling handle. */
+void *march_actor_whereis(void *name_str) {
+    void *val = march_vault_get(registry_tbl(), name_str);
+    if (val != NULL && IS_HEAP_PTR(val) && ((int64_t *)val)[3]) {
+        return val;   /* Some(actor): niche encoding, ref transferred to caller */
+    }
+    if (val != NULL) march_decrc(val);
+    return NULL;   /* None */
+}
+
+/* march_actor_registered() -> List(String) of every currently-live
+ * registered name. Walks the forward table's keys and filters to entries
+ * whose actor is still alive, discarding stale ones (does not clean them
+ * up — that's registry_retire_actor's job, driven by actual death). */
+void *march_actor_registered(void) {
+    void *keys = march_vault_keys(registry_tbl());   /* owned List(String) */
+    void *result = march_alloc(16);                  /* Nil */
+
+    void *p = keys;
+    while (p && ((march_hdr *)p)->tag == 1) {
+        void *next = *(void **)((char *)p + 24);
+        void *key  = *(void **)((char *)p + 16);
+
+        void *val = march_vault_get(registry_tbl(), key);
+        int live = val != NULL && IS_HEAP_PTR(val) && ((int64_t *)val)[3];
+        if (val != NULL) march_decrc(val);
+
+        if (live) {
+            /* Reuse this Cons cell as the new head of [result] — we already
+             * own both it and [key] from march_vault_keys, so no
+             * incrc/decrc needed, just relink the tail. */
+            *(void **)((char *)p + 24) = result;
+            result = p;
+        } else {
+            march_decrc(key);
+            march_decrc(p);
+        }
+        p = next;
+    }
+    return result;
+}
+
+/* Used by Task 5's do_actor_death: walk [actor]'s reverse index, drop each
+ * name from the forward table, and free the index. No-op if [actor] has no
+ * meta or never registered anything.
+ *
+ * COMPARE-AND-DROP: a name is only dropped if the table's CURRENT value
+ * for it is still [actor]. Ownership of a name can move to a different
+ * (live) actor between this actor's death and retire actually running —
+ * march_actor_register's stale-overwrite path — and blindly dropping by
+ * name alone would then delete the NEW live actor's mapping out from under
+ * it (see the Task 3 review's Critical fix-up; register's belt-side fix
+ * removes the name from the stale actor's index at overwrite time, this is
+ * the braces-side fix for every other path, including any future one).
+ *
+ * Takes the actor pointer (not a march_actor_meta *, despite the design
+ * sketch) rather than a meta pointer so a C-level test can call it without
+ * needing march_actor_meta's layout, which is private to this file; Task
+ * 5's do_actor_death already resolves `meta = find_meta(actor)` at its own
+ * top and can pass `actor` through unchanged. Exported (not static) for
+ * that same reason — do_actor_death is still its real caller, from this
+ * same translation unit. */
+void registry_retire_actor(void *actor) {
+    march_actor_meta *m = find_meta(actor);
+    if (!m) return;
+
+    pthread_mutex_lock(&g_registry_mu);
+    for (int i = 0; i < m->reg_name_count; i++) {
+        void *key = march_string_lit(m->reg_names[i], (int64_t)strlen(m->reg_names[i]));
+        void *cur = march_vault_get(registry_tbl(), key);
+        if (cur == actor) march_vault_drop(registry_tbl(), key);
+        if (cur != NULL) march_decrc(cur);
+        march_decrc(key);   /* release our own ref from march_string_lit */
+        free(m->reg_names[i]);
+    }
+    free(m->reg_names);   /* no-op if NULL */
+    m->reg_names = NULL;
+    m->reg_name_count = 0;
+    pthread_mutex_unlock(&g_registry_mu);
+}
+
+/* Task 6: snapshot [actor]'s reg_names onto reg_names_pending, so a
+ * restart can carry them forward onto a replacement after
+ * registry_retire_actor frees the original. Two callers:
+ *   - do_actor_death, for an actor dying with meta->supervisor still set
+ *     (a directly-crashed/killed supervised actor — including the
+ *     originally-crashed child of a one_for_all/rest_for_one batch, whose
+ *     own supervisor field is untouched).
+ *   - march_one_for_all_restart / march_rest_for_one_restart, for each
+ *     LIVE SIBLING they are about to kill-and-respawn. Those two null out
+ *     cm->supervisor right before calling do_actor_death(sibling), purely
+ *     to suppress the recursive march_supervisor_notify that would
+ *     otherwise fire for it — an implementation detail of how they
+ *     suppress double-notification, not a signal that the sibling won't
+ *     be restarted (it unconditionally will be, two loops down, once
+ *     budget has already been confirmed OK by the caller). Gating this
+ *     capture on meta->supervisor (as do_actor_death alone does) would
+ *     silently miss every such sibling, since by the time do_actor_death
+ *     runs for it supervisor is already NULL — round-1 review finding:
+ *     confirmed via a two-named-children one_for_all golden that the
+ *     non-crashed sibling's name was lost forever without this. Calling
+ *     capture explicitly here, before the null-out, is simpler and more
+ *     local than teaching do_actor_death's gate some other "will this be
+ *     restarted" signal (sup_child_index survives the null-out and could
+ *     serve as one, but would need its own reasoning about why it's safe
+ *     to trust independent of supervisor — capturing at the one call site
+ *     that already knows for certain avoids inventing that).
+ *
+ * MUST run under g_registry_mu: reg_names is a realloc'd array mutated by
+ * march_actor_register/unregister/registry_retire_actor on OTHER
+ * scheduler threads, and at the point every caller above runs, the dying
+ * actor can still read alive ($alive/fields[3] is cleared later in
+ * do_actor_death, and arbitrary user cleanup closures run before that) —
+ * round-1 review finding: without the lock, a concurrent
+ * march_actor_register(name, this_actor) racing in on another thread
+ * passes its own liveness check and meta_add_name's realloc can move or
+ * free reg_names out from under this loop's strdup, a use-after-free. Safe
+ * to take here: g_registry_mu is documented as a strict leaf lock (nothing
+ * under it can park a green thread), do_actor_death does not hold it at
+ * this point, and the batch-restart call sites above don't either
+ * (g_supervise_mu, the only other lock in play near them, is never held
+ * across a March closure call or do_actor_death per its own contract, and
+ * this call happens outside any g_supervise_mu section regardless).
+ *
+ * Guards against a pending stash already being set (defensive — no
+ * current caller can run twice for the same meta, since each meta dies
+ * exactly once, but a future caller doing so should extend the existing
+ * stash's lifetime rather than silently leak the first one). */
+static void capture_reg_names_pending(void *actor) {
+    march_actor_meta *m = find_meta(actor);
+    if (!m) return;
+    pthread_mutex_lock(&g_registry_mu);
+    if (m->reg_name_count > 0 && !m->reg_names_pending) {
+        m->reg_names_pending = (char **)malloc(
+            sizeof(char *) * (size_t)m->reg_name_count);
+        if (!m->reg_names_pending) {
+            fputs("march: out of memory (registry carry-forward)\n", stderr);
+            exit(1);
+        }
+        for (int i = 0; i < m->reg_name_count; i++)
+            m->reg_names_pending[i] = strdup(m->reg_names[i]);
+        m->reg_name_count_pending = m->reg_name_count;
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+}
+
 /* ── Actor green thread loop ─────────────────────────────────────── */
 
 /* Each actor runs as a green thread that loops on recv→dispatch.
@@ -2471,8 +2803,52 @@ static void actor_green_thread(void *arg) {
 
         uint32_t tbl_version = 0;
 
-        int64_t saved_rc = a[0];
-        a[0] = 1;  /* FBIP: force RC=1 for in-place reuse */
+        /* NO RC CLOBBER HERE — deliberately, and load-bearing.
+         *
+         * This loop used to bracket the dispatch call with
+         *     int64_t saved_rc = a[0];
+         *     a[0] = 1;              // "FBIP: force RC=1 for in-place reuse"
+         *     ...dispatch...
+         *     a[0] = saved_rc;
+         * to defeat the RC==1 uniqueness check that llvm_emit's generic
+         * EReuse path used to apply to the handler's state write-back.
+         *
+         * That is a use-after-free generator, and the codegen no longer needs
+         * it. Two independent reasons it must stay gone:
+         *
+         * 1. It is not needed. llvm_emit.ml's EReuse arm special-cases actor
+         *    structs ([Repr.is_actor_struct_type], gated structurally on field
+         *    0 being "$d_dispatch") and ALWAYS mutates the actor in place — no
+         *    RC load, no branch, no fresh alloc. Nothing in the emitted
+         *    handler reads a[0] at all.
+         *
+         * 2. It is unsafe. a[0] is the actor record's refcount, shared with
+         *    every other thread via the atomic march_incrc/march_decrc. The
+         *    plain stores above are not atomic with those, and worse, they
+         *    LIE: while the window is open every other thread sees rc == 1.
+         *    A concurrent march_incrc is then silently lost by the blind
+         *    `a[0] = saved_rc` restore, and — the fatal one — a concurrent
+         *    march_decrc observes prev == 1 and FREES an actor record that
+         *    still has other live owners.
+         *
+         *    Observed, not theorized (bench/actors/spawn_churn.march, which
+         *    registers each churned actor under a name before killing it):
+         *    an actor opened this window with a true rc of 4 on one scheduler
+         *    thread while another thread's decrc saw the forced 1 and freed
+         *    the record. The registry's forward table (march_vault_set incrc's
+         *    the stored actor, so a registered actor's rc is > 1 by
+         *    construction) was left pointing at freed memory, and the
+         *    subsequent registry_retire_actor read a garbage refcount out of
+         *    the reallocated block: "RC underflow (rc was
+         *    -6899412650951359789)", SIGBUS, or SIGTRAP, on ~20% of runs.
+         *    Single-scheduler runs never failed, because main and the actor's
+         *    green thread cannot then overlap.
+         *
+         * If a future actor lowering ever reintroduces an RC-conditional
+         * reuse of the actor record, fix it in llvm_emit by keeping the
+         * unconditional in-place store — do NOT reintroduce a refcount lie
+         * here. There is no way to make it safe: the window has to publish a
+         * false rc to a word other threads are concurrently RMW'ing. */
 
         if (meta->dispatch_name_id) {
             /* Hot-reload actor: the dispatch fn is a bare 2-arg function
@@ -2527,8 +2903,6 @@ static void actor_green_thread(void *arg) {
             march_incrc(closure);
             fn((void *)(uintptr_t)a[2], actor, msg);
         }
-
-        a[0] = saved_rc;
 
         if (meta->dispatch_name_id) {
             march_dispatch_leave(meta->dispatch_name_id, tbl_version);
@@ -2672,6 +3046,38 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     new_meta->epoch = inherited_epoch;
     ((int64_t *)supervisor)[4 + child->word_idx] =
         atomic_load_explicit(&new_meta->pid_index, memory_order_relaxed);
+
+    /* Task 6: carry the crashed incarnation's registered names forward onto
+     * the replacement. old_meta is never NULL here when there is anything
+     * to carry — do_actor_death only populates reg_names_pending on the
+     * meta belonging to the actor that just died, which is exactly the one
+     * old_pid_index resolves to (metas are never freed or re-linked for a
+     * different actor — see g_actor_tbl's comment — so old_meta is stable
+     * across the whole respawn, including the up-to-~3.2s backoff delay).
+     *
+     * march_actor_register's normal get-then-set contract decides each name
+     * individually: if nothing else claimed it while this child was down,
+     * the replacement gets it, indistinguishable from the crashed
+     * incarnation having held it the whole time; if some OTHER live actor
+     * registered that exact name during the gap (a real race, however
+     * unlikely inside a restart window), register returns 0 and that name
+     * is deliberately DROPPED here rather than stolen back — the name
+     * legitimately belongs to whoever holds it now, the same "first live
+     * claim wins" rule that governs every other registration. Not logged:
+     * this is not an error, just the registry's normal contract playing out. */
+    if (old_meta && old_meta->reg_names_pending) {
+        for (int i = 0; i < old_meta->reg_name_count_pending; i++) {
+            const char *name = old_meta->reg_names_pending[i];
+            void *key = march_string_lit(name, (int64_t)strlen(name));
+            march_actor_register(key, new_child);
+            march_decrc(key);   /* release our own ref from march_string_lit */
+            free(old_meta->reg_names_pending[i]);
+        }
+        free(old_meta->reg_names_pending);
+        old_meta->reg_names_pending = NULL;
+        old_meta->reg_name_count_pending = 0;
+    }
+
     return new_child;
 }
 
@@ -2708,6 +3114,16 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
          * only respawned (not double-killed) in the loop below. */
         if (cm && march_is_alive(cm->actor)) {
             live_children[i] = cm->actor;
+            /* Task 6, round-1 review fix: capture this sibling's
+             * registered names BEFORE nulling supervisor below — we
+             * already know for certain it's about to be killed and
+             * respawned (the budget check above already passed), but
+             * do_actor_death's own capture is gated on meta->supervisor,
+             * which the next line clears purely to suppress a recursive
+             * notify. Without this explicit call here, a live sibling's
+             * names were silently dropped forever on every one_for_all
+             * restart. See capture_reg_names_pending's comment. */
+            capture_reg_names_pending(cm->actor);
             cm->supervisor = NULL;
         }
     }
@@ -2737,6 +3153,11 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
         march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
         if (cm && march_is_alive(cm->actor)) {
             live_children[i] = cm->actor;
+            /* See march_one_for_all_restart's identical comment — same
+             * fix, same reasoning: capture before the null-out, since
+             * do_actor_death's own capture won't see supervisor set by
+             * the time it runs for this sibling. */
+            capture_reg_names_pending(cm->actor);
             cm->supervisor = NULL;
         }
     }
@@ -3082,6 +3503,46 @@ static void do_actor_death(void *actor) {
         }
         meta->cleanup_head = NULL;
     }
+
+    /* Retire this actor's registered names BEFORE any Down notification
+     * fires (below). A watcher woken by a Down that immediately calls
+     * whereis/registered must not observe a name still mapped to this dead
+     * incarnation — placing the retire here, ahead of the monitor walk,
+     * closes that window entirely rather than merely narrowing it (unlike
+     * Elixir, which relies on an EXIT signal racing a separate registry
+     * process). registry_retire_actor re-resolves find_meta(actor)
+     * internally even though we already have [meta] here — an accepted
+     * redundant lock-free bucket walk, kept for the C-level test's ability
+     * to call it without march_actor_meta's (private-to-this-file) layout;
+     * see registry_retire_actor's own comment.
+     *
+     * Task 6: before that retire wipes meta->reg_names, snapshot it onto
+     * reg_names_pending IF this actor is supervised (meta->supervisor !=
+     * NULL) — only a supervised actor can possibly be respawned, so an
+     * unsupervised actor's names are simply dropped as before, no capture.
+     * This must run strictly before registry_retire_actor: that call is
+     * what frees reg_names, so capturing any later would copy nothing.
+     * march_respawn_child (which may run synchronously right after this
+     * function returns, or up to ~3.2s later on the delayed-restart green
+     * thread — see march_supervisor_notify's backoff) is the sole
+     * consumer/freer; see reg_names_pending's field comment for what
+     * happens when respawn never comes.
+     *
+     * NOTE this gate only covers an actor dying with its supervisor field
+     * still set — a directly-crashed/killed actor, including the
+     * originally-crashed child of a one_for_all/rest_for_one batch. A live
+     * SIBLING being killed as part of that same batch restart has its
+     * supervisor field nulled out (to suppress a recursive notify)
+     * *before* do_actor_death runs on it, so this gate is false for it by
+     * the time we get here — march_one_for_all_restart /
+     * march_rest_for_one_restart call capture_reg_names_pending directly,
+     * earlier, while they still know for certain the sibling is about to
+     * be restarted. See that function's own comment for why (round-1
+     * review finding: without it, every non-crashed sibling in a batch
+     * restart lost its name forever). */
+    if (meta && meta->supervisor)
+        capture_reg_names_pending(actor);
+    registry_retire_actor(actor);
 
     /* Deliver Down notifications to all local watchers. */
     if (meta && meta->monitor_head) {
@@ -5861,6 +6322,20 @@ double march_unix_time(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/* Peak resident set size of this process, in BYTES on every platform.
+ * getrusage reports ru_maxrss in BYTES on macOS and KILOBYTES on Linux;
+ * normalising here means no caller can repeat the 1024x error that
+ * bench/run_string_bench.sh documents. */
+int64_t march_peak_rss_bytes(void) {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+#if defined(__APPLE__)
+    return (int64_t)ru.ru_maxrss;
+#else
+    return (int64_t)ru.ru_maxrss * 1024;
+#endif
+}
+
 /* ── TypedArray builtins ─────────────────────────────────────────────── */
 /* TypedArray is a heap object with layout:
  *   [rc:i64][tag:i32][pad:i32][len:i64][cap:i64][elements: void*[]]
@@ -6201,17 +6676,9 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
 }
 
 /* ── Native int/float arrays ──────────────────────────────────────────── */
-/* Layout (ALL element widths share it — phase C's vector loads depend on
- * elem_kind and the 16-byte data alignment):
- *   march_hdr(16) + int64_t len(8) + uint8_t elem_kind(1) + pad(7)
- *   + elements(len * elem_size), data 16-byte aligned.
- * elem_kind: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8. */
-#define NATIVE_ARR_HDR 32
-#define NATIVE_ELEM_I64 0
-#define NATIVE_ELEM_F64 1
-#define NATIVE_ELEM_F32 2
-#define NATIVE_ELEM_I32 3
-#define NATIVE_ELEM_U8  4
+/* NATIVE_ARR_HDR / NATIVE_ELEM_* and the layout they describe are declared
+ * once in march_runtime.h so march_extras.c can share them without a second
+ * #define. */
 
 static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     if (len < 0) { fputs("march: native array: negative length\n", stderr); exit(1); }
@@ -6423,6 +6890,26 @@ void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
     return new_arr;
 }
 
+/* fold: the accumulator is a GENERIC 'a, so it stays in the erased/boxed
+ * representation for the whole loop and the caller's codegen owns boxing it
+ * in and out.  RC discipline copied verbatim from march_typed_array_fold
+ * (above in this file; grep the name rather than trusting a line number)
+ * — incrc(f) per element, one decrc(f) after the loop.
+ * ARG ORDER IS (acc, arr, f) — matching the March builtin, NOT
+ * march_typed_array_fold's (arr, acc, f). */
+void *native_int_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_int_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        void *elem = (void *)(intptr_t)((x << 1) | 1);   /* wire-tag */
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+    }
+    march_decrc(f);
+    return result;
+}
+
 /* Length-mismatch panic shared by the compiled map2 INLINE loop
  * (lib/tir/native_map_inline.ml / llvm_emit.ml's emit_native_map2_inline_loop).
  * That loop bypasses native_int_arr_map2/native_float_arr_map2 entirely
@@ -6600,6 +7087,47 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
     return new_arr;
 }
 
+/* fold: element is a raw double, materialised via march_alloc_float (boxed) —
+ * unlike native_int_arr_fold's wire-tagged scalar. Same RC discipline and
+ * (acc, arr, f) argument order as native_int_arr_fold above.
+ *
+ * march_decrc(elem) after the call releases the FRESH per-element box we
+ * just allocated. Confirmed safe (not a use-after-free) by inspecting
+ * -emit-llvm for the compiled closure's apply fn: the erased-ptr calling
+ * convention treats a Float argument as borrowed/read-only — the callee
+ * only ever calls march_unbox_float(x.arg) to read the double value, never
+ * stores x.arg itself. Even a closure that stores the element (e.g. cons it
+ * into a List(Float)) allocates a FRESH march_alloc_float box from the
+ * unboxed double for storage rather than aliasing our box — so our box has
+ * no surviving alias once the call returns and is always safe to drop.
+ * Without this decrc, elem leaks: ~32B/element, unbounded in loop length
+ * (confirmed via RSS measurement — see task-2-report.md). This decrc is
+ * pinned by test/native/native_arr_fold_leak_probe.march; deleting it takes
+ * that fixture's peak RSS from 48 MB to 171 MB.
+ *
+ * STILL OPEN — the accumulator (result) has the identical borrowed-argument
+ * shape and also isn't freed by the callee, so a fold whose accumulator is
+ * itself a Float leaks a SECOND ~32B/element as each iteration's
+ * march_alloc_float becomes the next accumulator. That half is inherited
+ * from the reference march_typed_array_fold (above in this file) and is out
+ * of scope here; it is measured and tracked in
+ * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md, and
+ * the fix most likely belongs in march_typed_array_fold rather than here. */
+void *native_float_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_float_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        double x;
+        memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        void *elem = march_alloc_float(x);
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+        march_decrc(elem);
+    }
+    march_decrc(f);
+    return result;
+}
+
 void *native_float_arr_from_list(void *lst) {
     int64_t n = 0;
     void *tmp = lst;
@@ -6710,6 +7238,23 @@ void *PREFIX##_map2(void *arr1, void *arr2, void *f) {                        \
     march_decrc(f);                                                           \
     return new_arr;                                                           \
 }                                                                             \
+/* fold: (int64_t)*(CTYPE *)... already sign-extends int32_t and             \
+ * zero-extends uint8_t exactly like PREFIX##_get above, so one shared       \
+ * fold body is correct for both instantiations without a per-width         \
+ * materialisation branch. Same RC discipline and (acc, arr, f) argument     \
+ * order as native_int_arr_fold above. */                                    \
+void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
+    int64_t len = PREFIX##_length(arr);                                      \
+    void *result = acc;                                                      \
+    for (int64_t i = 0; i < len; i++) {                                      \
+        int64_t x = (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+        void *elem = (void *)(intptr_t)((x << 1) | 1);                       \
+        march_incrc(f);                                                      \
+        result = call_closure_2(f, result, elem);                            \
+    }                                                                        \
+    march_decrc(f);                                                          \
+    return result;                                                           \
+}                                                                             \
 void *PREFIX##_from_list(void *lst) {                                         \
     int64_t n = 0;                                                            \
     void *tmp = lst;                                                          \
@@ -6812,6 +7357,31 @@ void *native_f32_arr_map2(void *arr1, void *arr2, void *f) {
     }
     march_decrc(f);
     return new_arr;
+}
+
+/* fold: element is a stored float, widened to double and materialised via
+ * march_alloc_float (the wire ABI has no native f32 box — see the ABI
+ * comment above clo_apply_ptr). Same RC discipline and (acc, arr, f)
+ * argument order as native_int_arr_fold above. march_decrc(elem) after the
+ * call releases our per-element box — see native_float_arr_fold's comment
+ * above for why this is confirmed safe (borrowed-argument convention, no
+ * alias survives the call) rather than a use-after-free. Pinned by
+ * test/native/native_arr_fold_leak_probe.march's f32 leg. The accumulator
+ * chain leaks the same way here as there when the accumulator is a Float —
+ * still open, see that comment and
+ * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md. */
+void *native_f32_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_f32_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        double x = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+        void *elem = march_alloc_float(x);
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+        march_decrc(elem);
+    }
+    march_decrc(f);
+    return result;
 }
 
 void *native_f32_arr_from_list(void *lst) {

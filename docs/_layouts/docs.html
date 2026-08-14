@@ -131,7 +131,13 @@
     .d-sidebar-link.active { background: var(--active-bg); color: var(--active-color); font-weight: 500; }
 
     /* ── MAIN ────────────────────────────────────────────────────────────── */
+    /* 740px suits prose but cramps wide reference tables (see Capability
+       Enforcement's OS-primitive tables) into tall, heavily-wrapped rows.
+       Widen on screens with room to spare; prose readability is unaffected
+       below 1280px, where this never applies. */
     .d-main { flex: 1; min-width: 0; padding: 52px 64px; max-width: 740px; }
+    @media (min-width: 1280px) { .d-main { max-width: 960px; } }
+    @media (min-width: 1600px) { .d-main { max-width: 1100px; } }
 
     /* ── PROSE ───────────────────────────────────────────────────────────── */
     .d-content { line-height: 1.8; }

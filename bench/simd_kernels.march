@@ -135,19 +135,21 @@ mod SimdKernels do
   --
   -- A deterministic LCG (the repo's standard `(seed*1664525+1013904223) %
   -- modulus` generator, see bench/heapsort.march etc.) drives N pseudo-random
-  -- f32 triples through fma_f32x4, extracting lane 0 each time and folding
-  -- into a running checksum. Interpreter fma is `f32_round(Float.fma a b c)`
-  -- (double FMA then round to binary32); compiled emits `llvm.fma.v4f32`
-  -- directly. Comparing PARITY_CHECKSUM between `march file.march` (eval)
-  -- and the --compile binary is the parity evidence for that discrepancy.
+  -- f32 triples through fma_f32x4 and folds the result into a checksum.
+  -- Both backends now run the SAME operation: the compiled path emits
+  -- llvm.fma.v4f32 (one binary32-fused rounding) and the interpreter emulates
+  -- exactly that (eval.ml's fma32_single_round). Comparing PARITY_CHECKSUM
+  -- between `march file.march` (eval) and the --compile binary is a
+  -- whole-kernel witness of that equality.
   --
-  -- The leg is LANE-BLIND on purpose: it prints only the summed checksum,
-  -- so a divergence shows up as two different totals and says nothing about
-  -- WHICH triple diverged (and, in principle, two opposite-signed last-ulp
-  -- differences could cancel within the sum). Localizing a divergence means
-  -- bisecting N by hand. Accepted as-is; see
-  -- specs/todos/2026-08-12-simd-fma-rounding-parity.md, which asks for a
-  -- targeted rounding-boundary fixture rather than more machinery here.
+  -- The leg is PER-LANE: each iteration builds four distinct triples and folds
+  -- all four result lanes, so a lane-specific lowering bug cannot hide behind
+  -- lane 0. It is still a summed checksum, so it localizes nothing (bisect N
+  -- by hand) and, in principle, opposite-signed last-ulp differences could
+  -- cancel. The targeted rounding-boundary coverage lives elsewhere and is
+  -- what actually pins this down: test/native/simd_fma_fuzz.march (100k
+  -- boundary-family iterations, diffed compiled-vs-interpreted by dune) and
+  -- test t15 of test_stdlib_suite.ml's simd_vector group.
 
   pfn lcg_next(seed : Int) : Int do
     (seed * 1664525 + 1013904223) % 2147483647
@@ -165,12 +167,19 @@ mod SimdKernels do
         let s1 = lcg_next(seed)
         let s2 = lcg_next(s1)
         let s3 = lcg_next(s2)
-        let a = to_small_float(s1)
-        let b = to_small_float(s2)
-        let c = to_small_float(s3)
-        let v = Simd.fma_f32x4(Simd.splat_f32x4(a), Simd.splat_f32x4(b), Simd.splat_f32x4(c))
-        let lane0 = Simd.extract_f32x4(v, 0)
-        go(i + 1, s3, acc +. lane0)
+        let s4 = lcg_next(s3)
+        let s5 = lcg_next(s4)
+        let s6 = lcg_next(s5)
+        let a = Simd.make_f32x4(to_small_float(s1), to_small_float(s2),
+                                to_small_float(s3), to_small_float(s4))
+        let b = Simd.make_f32x4(to_small_float(s2), to_small_float(s3),
+                                to_small_float(s4), to_small_float(s5))
+        let c = Simd.make_f32x4(to_small_float(s3), to_small_float(s4),
+                                to_small_float(s5), to_small_float(s6))
+        let v = Simd.fma_f32x4(a, b, c)
+        let lanes = Simd.extract_f32x4(v, 0) +. Simd.extract_f32x4(v, 1) +.
+                    Simd.extract_f32x4(v, 2) +. Simd.extract_f32x4(v, 3)
+        go(i + 1, s6, acc +. lanes)
       end
     end
     go(0, 12345, 0.0)

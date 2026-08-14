@@ -1,0 +1,53 @@
+-- Compiled/interpreted parity fixture for the Bytes <-> NativeU8Arr bridge
+-- (Bytes.to_u8_arr / Bytes.from_u8_arr, backed by the C bytes_to_u8_arr /
+-- u8_arr_to_bytes runtime helpers). Covers round-trip identity, the empty
+-- case, high bytes (0x80-0xFF must zero-extend to 128-255, never go
+-- negative), and the motivating end-to-end case: scanning real byte data
+-- with the Simd byte scanner (the codebase's best-measured SIMD win, which
+-- previously had no data source).
+mod BytesU8Bridge do
+  needs IO.Console
+
+  -- Build a 16-element NativeU8Arr with the first N bytes of [a] copied in
+  -- (zero-padded), for feeding a short buffer to Simd.load_u8x16.
+  pfn pad16_go(a, src, i, n) do
+    if i >= 16 do
+      a
+    else if i < n do
+      pad16_go(NativeArray.set_u8(a, i, NativeArray.get_u8(src, i)), src, i + 1, n)
+    else
+      a
+    end end
+  end
+
+  pfn pad16(src) do
+    let n = NativeArray.length_u8(src)
+    pad16_go(NativeArray.make_u8(16, 0), src, 0, n)
+  end
+
+  fn main(_cap : Cap(IO.Console)) do
+    let b = Bytes.from_string("hi there")
+    let a = Bytes.to_u8_arr(b)
+    println(NativeArray.length_u8(a))              -- 8
+    println(NativeArray.get_u8(a, 0))               -- 104 ('h')
+    println(NativeArray.get_u8(a, 3))               -- 116 ('t')
+    -- round-trip identity
+    println(Bytes.to_string(Bytes.from_u8_arr(a)))  -- hi there
+    -- empty case
+    let e = Bytes.to_u8_arr(Bytes.empty())
+    println(NativeArray.length_u8(e))               -- 0
+    println(Bytes.to_string(Bytes.from_u8_arr(e)))  -- (blank line)
+    -- high bytes: 0xFF must come back as 255, not -1 (zero-extend path)
+    let hi = match Bytes.from_hex("00ff80") do
+      Ok(b) -> b
+      Err(_) -> Bytes.empty()
+    end
+    let ha = Bytes.to_u8_arr(hi)
+    println(NativeArray.get_u8(ha, 1))              -- 255
+    println(NativeArray.get_u8(ha, 2))              -- 128
+    println(Bytes.to_hex(Bytes.from_u8_arr(ha)))    -- 00ff80
+    -- the motivating case: scan for a delimiter with Simd
+    let hay = Bytes.to_u8_arr(Bytes.from_string("key=value"))
+    println(Simd.first_set_u8x16(Simd.eq_u8x16(Simd.load_u8x16(pad16(hay), 0), Simd.splat_u8x16(61))))  -- 3 ('=')
+  end
+end
