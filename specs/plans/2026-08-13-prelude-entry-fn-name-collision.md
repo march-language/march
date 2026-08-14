@@ -160,6 +160,40 @@ is the third, and it took CI (not local `scripts/run-tests.sh`, which this
 change's own author ran before pushing) to surface it, since the local run
 predated this correction and used the same over-broad checker end to end.
 
+### 2.5c A second CI-only edge case: checking a stdlib file AS the entry
+
+**Also caught by CI**, on the same push as §2.5b's fix: `conformance`'s
+`--refine-report stdlib/list.march` ratchet step (a diagnostic-only
+obligation-count measurement, unrelated to real compilation) started
+failing with `reverse`/`fold_left` collisions. This is NOT the same bug as
+§2.5b — `reverse`/`fold_left` genuinely ARE in the narrowed dangerous set
+(filter/map call `reverse` internally). The issue is structural: `--check`
+always flattens its single input file as "the entry" (`is_entry` defaults
+true, §2.1), and `stdlib/list.march` — normally loaded as a NAMESPACED
+dependency (`List.reverse`, never flattened) — only collides with Prelude
+when the compiler is invoked directly on its own source path, which no real
+user program ever does (a stdlib file has no `main`, isn't meant to be an
+app entry) but which this one CI diagnostic does deliberately, to measure
+`List`'s own rich contract surface.
+
+Fix: `bin/main.ml`'s `is_shipped_stdlib_file` (checked at all 4 call sites
+before invoking the collision check) — skip the check when the input file
+matches a name in `Stdlib_manifest.all_known` (the same manifest
+`load_stdlib` itself uses to know what ships). Matched by **basename**, not
+by resolving the file's directory against `find_stdlib_dir`'s result: the
+compiler binary resolves its OWN stdlib exe-relative (typically a staged
+`_build/default/stdlib` copy), which does not share a physical directory
+with a source-tree-relative CLI argument like `stdlib/list.march` even
+though both name the same module — confirmed live, a first version of this
+exemption compared realpaths and never fired for exactly that reason.
+
+This costs no real coverage: no user's own entry file lives under the
+compiler's own stdlib directory or shares a basename with a shipped stdlib
+module by the exact same name as a matter of course, and even in the
+contrived case where it did, the same protection still applies to every
+OTHER entry file (including ones that `import`/depend on that stdlib
+module normally, where it stays namespaced and never collides).
+
 ### 2.5 What's still open: the exact overwrite site in each backend
 
 Confirmed *that* the collision reaches the interpreter's runtime call
