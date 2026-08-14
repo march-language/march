@@ -1,0 +1,3 @@
+register a: true
+raw table has key before kill: true
+raw table has key after kill: false

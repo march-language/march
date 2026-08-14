@@ -10481,7 +10481,11 @@ let shutdown_actor_pid (pid : int) : unit =
           end
       end
     end;
-    (* Force-kill the actor *)
+    (* Force-kill the actor. Deliberately bypasses crash_actor (and so its
+       Task 5 named_registry retire mirror too): this is process-teardown-
+       only, called from graceful_shutdown as the app exits, with no
+       watcher left to observe a stale name and no further named_registry
+       lookups expected afterward — not an oversight. *)
     (match Hashtbl.find_opt actor_registry pid with
      | Some inst2 -> inst2.ai_alive <- false
      | None -> ())

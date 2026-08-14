@@ -5238,14 +5238,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/actor_registry_basic.expected native_actor_registry_basic.out)))
 
 ; ── Named registry (Task 5): registry_retire_actor on actor death ────────
-; (compiled) ───────────────────────────────────────────────────────────
+; (compiled + interpreted parity) ─────────────────────────────────────
 ; What actor_registry_basic.march does NOT cover: a killed actor's name
 ; must be fully RECLAIMED, not just resolve to None at lookup time (that
 ; part is march_actor_whereis's own $alive re-check, present since Task 4,
 ; independent of retire). Registers "worker" to actor a, kills a, confirms
-; the name drops out of Actor.registered() (not merely out of whereis),
-; then registers a DIFFERENT actor b under the same name and confirms it
-; succeeds and resolves. Uses Actor, hence source_tree ../stdlib.
+; the name drops out of Actor.registered(), then registers a DIFFERENT
+; actor b under the same name and confirms it succeeds and resolves.
+; Uses Actor, hence source_tree ../stdlib.
+;
+; CORRECTION (fix round 1, review finding): this fixture's assertions do
+; NOT actually discriminate whether do_actor_death's retire call ran, on
+; the COMPILED backend — march_actor_registered/whereis filter on the
+; $alive flag regardless of the forward-table entry, and name reuse
+; succeeds via Task 3's stale-overwrite branch regardless of retire too.
+; Verified by temporarily deleting the C call: this fixture's output was
+; unchanged. It DOES discriminate the interpreter's `crash_actor`, whose
+; `named_registry` Hashtbl has no such $alive-style filter of its own —
+; verified by temporarily reverting the `Hashtbl.remove` loop there and
+; re-running this file interpreted (not dune-wired; see
+; test/native/actor_registry_retire.march's usage note and the Task 5
+; report for the before/after). The genuine COMPILED-side discriminator
+; is the sibling fixture below, actor_registry_retire_vault.march, which
+; reads the raw (non-liveness-filtered) registry table directly.
 (rule
  (targets native_actor_registry_retire native_actor_registry_retire.out)
  (deps (file %{exe:../bin/main.exe})
@@ -5269,6 +5284,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_registry_retire.expected native_actor_registry_retire.out)))
+
+; ── Named registry (Task 5 fix round 1): retire, observed on the RAW table
+; (compiled-only — see the .march file's own header comment for why this
+; has no interpreted counterpart). Reads the runtime's forward registry
+; table ("$actor_registry") directly via Vault.whereis/Vault.keys, which
+; are NOT liveness-filtered — the one assertion that actually fails if
+; do_actor_death's registry_retire_actor(actor) call is removed (verified:
+; commenting it out flips "raw table has key after kill" from false to
+; true; see the Task 5 report for the full before/after). Needs IO.Mut
+; (Vault.whereis is a naming op), hence the 2-cap main signature.
+(rule
+ (targets native_actor_registry_retire_vault native_actor_registry_retire_vault.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_registry_retire_vault.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_retire_vault
+        native/actor_registry_retire_vault.march)
+   (with-stdout-to native_actor_registry_retire_vault.out
+        (system "./native_actor_registry_retire_vault")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_retire_vault.expected native_actor_registry_retire_vault.out)))
 
 ; ── Named registry (Task 6): a name survives a supervisor restart ────────
 ; (compiled) ───────────────────────────────────────────────────────────

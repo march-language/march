@@ -1,0 +1,46 @@
+-- Compiled-backend-only: directly observes the runtime's forward registry
+-- table ("$actor_registry", a plain named Vault table) via Vault.whereis/
+-- Vault.keys, which are NOT liveness-filtered the way march_actor_whereis/
+-- march_actor_registered are. This is the one assertion that actually
+-- discriminates whether do_actor_death's registry_retire_actor(actor) call
+-- ran: Actor.registered()/Actor.whereis stay correct via the $alive-flag
+-- check alone, and name reuse succeeds via Task 3's stale-overwrite branch
+-- regardless of retire — so neither proves retire ran. A stale
+-- "worker" -> dead_actor entry in the raw table does, because only retire
+-- removes it.
+--
+-- Has NO interpreted counterpart: the interpreter's named registry
+-- (lib/eval/eval.ml's `named_registry`) is a plain OCaml Hashtbl, not
+-- backed by Vault at all, so Vault.whereis("$actor_registry") would
+-- return None there regardless of retirement — it would not discriminate
+-- anything, just always print the same "table not found" result. The
+-- interpreter side is covered separately (see
+-- .superpowers/sdd/2026-08-12-named-registry/task-5-report.md's
+-- "Verifying the golden actually catches something" section: reverting
+-- the `Hashtbl.remove` loop in `crash_actor` and re-running
+-- actor_registry_retire.march interpreted reproduces the regression).
+mod Main do
+  needs IO.Console
+  needs IO.Mut
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+    let a = spawn(Counter)
+    println("register a: " ++ bool_to_string(Actor.register(a, "worker")))
+    match Vault.whereis("$actor_registry") do
+      Some(t) ->
+        println("raw table has key before kill: "
+          ++ bool_to_string(List.member(Vault.keys(t), "worker")))
+        kill(a)
+        run_until_idle()
+        println("raw table has key after kill: "
+          ++ bool_to_string(List.member(Vault.keys(t), "worker")))
+      None -> println("no table")
+    end
+  end
+end
