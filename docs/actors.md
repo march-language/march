@@ -659,6 +659,7 @@ The concurrency and distribution docs form a journey — actors are the foundati
 - [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — fault-tolerant hierarchies with automatic restart, ending in a capstone crash-tolerant job processor.
 - [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — `pmap` / `pmap_n` for data-parallel work on the same scheduler.
 - [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming pipelines when a fast producer outruns a slow consumer.
+- [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/) — the practical guide to mailbox limits, load shedding, deadlines, and restart backoff working together.
 - [Session Types]({{ site.baseurl }}/docs/session-types/) — typed two-party protocols whose message order the compiler enforces.
 - [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised actor app from one node to a cluster with cross-node calls.
 - [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) — deploy new code to a running server without restarting; actors migrate their state on the fly.

@@ -286,6 +286,70 @@ The mental model: **an actor's mailbox guarantees each message is well-typed; a 
 
 **The two do not layer as freely as they might first appear.** An actor's mailbox is backed by the scheduler — `receive()` genuinely suspends the actor's green thread until a message arrives, so two actors can `send`/`receive` in whatever order and the scheduler sorts it out. A session channel has no such backing: `Chan.recv` never suspends (see the Runtime note above), so a session conducted between two actor handlers still needs its `send`s and `recv`s to land in the right order relative to each other — the channel does not gain scheduler-backed blocking just because its endpoints happen to live inside actors. An actor handler *can* open a session channel to conduct a typed sub-conversation with another actor, but only if the two handlers' message-driven control flow already guarantees each `send` happens before its matching `recv` is attempted.
 
+### Worked example: handing an endpoint to an actor
+
+An endpoint is an ordinary (linear) value, so it can ride inside an actor message. This
+is the safe composition pattern, verified on both backends: the requester advances its
+side of the session *before* handing the peer endpoint over, so mailbox causality —
+messages are processed after they are sent — guarantees the responder's `recv` finds its
+value waiting:
+
+```march
+mod Main do
+  needs IO.Console
+
+  type Alice = Alice
+  type Bob = Bob
+
+  protocol Echo do
+    Alice -> Bob : String
+    Bob -> Alice : String
+  end
+
+  actor Responder do
+    state { done : Int }
+    init  { done: 0 }
+
+    on Serve(ch : Chan(Bob, Echo)) do
+      let (msg, ch2) = Chan.recv(ch)          -- safe: sent before Serve was
+      let ch3 = Chan.send(ch2, "echo: " ++ msg)
+      Chan.close(ch3)
+      { done: 1 }
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let (alice, bob) = Chan.new(Echo)
+    let pid = spawn(Responder)
+    let alice2 = Chan.send(alice, "hello")    -- 1: advance OUR side first
+    send(pid, Serve(bob))                     -- 2: then hand Bob's end over
+    run_until_idle()                          -- 3: responder has now replied
+    let (reply, alice3) = Chan.recv(alice2)   -- safe: causally after the send
+    Chan.close(alice3)
+    println(reply)
+  end
+end
+```
+
+Two disciplines make this correct, and both generalize:
+
+1. **Send-before-handoff.** Every `Chan.send` the receiving handler will `recv` must
+   happen *before* the actor message that delivers the endpoint. The mailbox's
+   sent-before-processed ordering then does the work a channel scheduler would.
+2. **Synchronize before the reply direction.** The requester must not `Chan.recv` the
+   response until the responder has demonstrably run — here `run_until_idle()` provides
+   that; in a live system, an `Actor.call` round-trip to the responder (or a completion
+   message back) is the equivalent causal fence.
+
+Linearity survives the handoff: after `send(pid, Serve(bob))`, the endpoint is consumed —
+any further use of `bob` in the sender is rejected at compile time (`The linear value
+`bob` is used more than once`), so the protocol's exactly-once discipline holds even
+though the conversation now spans two actors. What the compiler does *not* check is the
+causal ordering itself: skip discipline 1 or 2 and the program still typechecks, then
+dies at runtime with `Chan.recv: … no pending value` — that footgun is the scope
+boundary described above, restated concretely.
+
+
 ---
 
 ## See also
