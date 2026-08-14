@@ -162,6 +162,60 @@ let actor_defs_tbl : (string, actor_def * env ref) Hashtbl.t = Hashtbl.create 8
 (** Live actor instances — reset per module eval. *)
 let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
 
+(** Named registry (Task 4): name -> pid, mirroring the runtime's
+    march_actor_register/unregister/whereis/registered C API. Reset per
+    module eval, same lifecycle as [actor_registry]. Semantics matched to
+    the C side: register fails if the name is held by a LIVE actor or if
+    the registering actor is itself dead; whereis re-checks [ai_alive] at
+    lookup time (a stale entry for a dead actor resolves to None) rather
+    than requiring proactive cleanup on death. *)
+let named_registry  : (string, int) Hashtbl.t = Hashtbl.create 16
+
+(** Registry carry-forward stash: pid of a dying actor -> the names it held
+    in [named_registry] at the moment of death. Mirrors the runtime's
+    [march_actor_meta.reg_names_pending] (see
+    runtime/march_runtime.c:capture_reg_names_pending), keyed by pid rather
+    than hung off a meta record because the interpreter has no per-actor
+    meta that outlives the instance — pids are handed out monotonically from
+    [next_pid] and never reused, so a pid key is as stable as the C side's
+    never-freed meta.
+
+    Populated by [capture_reg_names_pending] and consumed exactly once by
+    [spawn_child_actor] when it replaces that pid. An entry left behind
+    (actor died supervised but the supervisor gave up rather than
+    respawning, e.g. max_restarts exceeded) is inert: nothing reads it, and
+    it dies with the table on the next module eval. *)
+let reg_names_pending : (int, string list) Hashtbl.t = Hashtbl.create 8
+
+(** Snapshot [pid]'s registered names into [reg_names_pending] so a restart
+    can re-establish them on the replacement, before [crash_actor] drops
+    them from [named_registry].
+
+    Two call sites, matching the runtime's two:
+      - [crash_actor], for an actor dying with [ai_supervisor] still set;
+      - [one_for_all_restart] / [rest_for_one_restart], explicitly, for each
+        LIVE SIBLING they are about to kill and respawn. Those two set
+        [ci.ai_supervisor <- None] before crashing the sibling — solely to
+        stop [crash_actor] re-entering [notify_supervisor] for it — so by
+        the time [crash_actor] runs, its own supervisor gate is already
+        false. Gating capture on the supervisor field ALONE therefore drops
+        every batch-restarted sibling's names, even though the sibling is
+        unconditionally respawned a few lines later. That exact bug shipped
+        on the compiled side and was caught in review; test/native/
+        actor_registry_restart_batch.march is its regression test.
+
+    Guards an existing stash rather than overwriting it, mirroring the C
+    side: no current caller can run twice for one pid, but a future one
+    doing so should not lose the first snapshot. *)
+let capture_reg_names_pending (pid : int) : unit =
+  if not (Hashtbl.mem reg_names_pending pid) then begin
+    let names =
+      Hashtbl.fold (fun name owner acc -> if owner = pid then name :: acc else acc)
+        named_registry []
+    in
+    if names <> [] then Hashtbl.replace reg_names_pending pid names
+  end
+
 (* ------------------------------------------------------------------ *)
 (* Dynamic Supervisor state                                            *)
 (* ------------------------------------------------------------------ *)
@@ -2185,6 +2239,31 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
           Hashtbl.remove pid_to_registry_name old_pid;
           Hashtbl.replace process_registry name child_pid;
           Hashtbl.replace pid_to_registry_name child_pid name));
+    (* Carry the crashed incarnation's [named_registry] names forward onto
+       the replacement (mirrors march_respawn_child's reg_names_pending
+       consume). Each name is decided individually by the same "first live
+       claim wins" rule [actor_register] enforces: if some OTHER live actor
+       claimed that exact name during the restart window, the carried
+       registration is DROPPED rather than stealing it back — that is the
+       registry's normal contract, not an error, so it isn't reported. *)
+    (match crashed_pid with
+     | None -> ()
+     | Some old_pid ->
+       (match Hashtbl.find_opt reg_names_pending old_pid with
+        | None -> ()
+        | Some names ->
+          Hashtbl.remove reg_names_pending old_pid;
+          List.iter (fun name ->
+            let held_by_live_other =
+              match Hashtbl.find_opt named_registry name with
+              | Some owner when owner <> child_pid ->
+                (match Hashtbl.find_opt actor_registry owner with
+                 | Some inst -> inst.ai_alive
+                 | None      -> false)
+              | _ -> false
+            in
+            if not held_by_live_other then
+              Hashtbl.replace named_registry name child_pid) names));
     child_pid
 
 (** Restart a supervisor's crashed child under one_for_one strategy.
@@ -2267,6 +2346,10 @@ and one_for_all_restart (sup_pid : int) (_crashed_pid : int) : unit =
          List.iter (fun cpid ->
            match Hashtbl.find_opt actor_registry cpid with
            | Some ci when ci.ai_alive ->
+             (* Capture BEFORE the detach below: clearing [ai_supervisor]
+                makes crash_actor's own capture gate false, and this sibling
+                is unconditionally respawned a few lines down. *)
+             capture_reg_names_pending cpid;
              ci.ai_supervisor <- None;  (* detach before crashing to prevent re-entry *)
              crash_actor cpid "one_for_all restart"
            | _ -> ()
@@ -2336,6 +2419,10 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
              if cpid >= 0 then
                (match Hashtbl.find_opt actor_registry cpid with
                 | Some ci when ci.ai_alive ->
+                  (* Same reason as one_for_all_restart's identical call:
+                     capture before the detach, or this sibling's names are
+                     lost even though it is respawned below. *)
+                  capture_reg_names_pending cpid;
                   ci.ai_supervisor <- None;
                   crash_actor cpid "rest_for_one restart"
                 | _ -> ())
@@ -2440,6 +2527,28 @@ and crash_actor (pid : int) (reason : string) : unit =
           pid (Printexc.to_string exn)
     ) (List.rev inst.ai_linear_values);
     inst.ai_linear_values <- [];  (* clear to prevent re-run on double-crash *)
+    (* Task 5: retire this actor's registered names from [named_registry]
+       BEFORE any Down notification is delivered below (mirrors the
+       runtime's do_actor_death -> registry_retire_actor placement, and the
+       same reasoning: a watcher woken by a Down that immediately calls
+       Actor.whereis/Actor.registered must not see the name still mapped to
+       this dead pid). Compare-and-drop by pid, not by name alone, so a name
+       already reassigned to a different live pid (stale-overwrite) is left
+       untouched.
+
+       Task 6 parity: snapshot the names FIRST if this actor is supervised,
+       so a restart can re-establish them on the replacement. Unsupervised
+       actors' names are simply dropped, as before. Siblings killed by
+       one_for_all / rest_for_one have already had their [ai_supervisor]
+       cleared by the time they get here, which is why those two strategies
+       call [capture_reg_names_pending] themselves before clearing it. *)
+    if supervisor <> None then capture_reg_names_pending pid;
+    let dead_names =
+      Hashtbl.fold
+        (fun name owner acc -> if owner = pid then name :: acc else acc)
+        named_registry []
+    in
+    List.iter (Hashtbl.remove named_registry) dead_names;
     (* Deliver Down(mon_ref, reason) to each watcher's mailbox *)
     List.iter (fun (mon_ref, watcher_pid) ->
       match Hashtbl.find_opt actor_registry watcher_pid with
@@ -4291,6 +4400,41 @@ let base_env : env =
   ; ("link", VBuiltin ("link", function
         | [VPid a; VPid b] -> link_actors a b; VUnit
         | _ -> eval_error "link: expected two pids"))
+    (* Named registry (Task 4) — interpreter parity with
+       march_actor_register/unregister/whereis/registered. [named_registry]
+       maps name -> pid, mirroring the runtime's forward Vault table. *)
+  ; ("actor_register", VBuiltin ("actor_register", function
+        | [VPid pid; VString name] ->
+          let live pid' = match Hashtbl.find_opt actor_registry pid' with
+            | Some inst -> inst.ai_alive
+            | None      -> false
+          in
+          if not (live pid) then VBool false
+          else
+            (match Hashtbl.find_opt named_registry name with
+             | Some existing when live existing -> VBool false  (* held by a live actor *)
+             | _ -> Hashtbl.replace named_registry name pid; VBool true)
+        | _ -> eval_error "actor_register: expected (Pid, String)"))
+  ; ("actor_unregister", VBuiltin ("actor_unregister", function
+        | [VString name] ->
+          if Hashtbl.mem named_registry name then begin
+            Hashtbl.remove named_registry name; VBool true
+          end else VBool false
+        | _ -> eval_error "actor_unregister: expected String"))
+  ; ("actor_whereis", VBuiltin ("actor_whereis", function
+        | [VString name] ->
+          (match Hashtbl.find_opt named_registry name with
+           | Some pid ->
+             (match Hashtbl.find_opt actor_registry pid with
+              | Some inst when inst.ai_alive -> VCon ("Some", [VPid pid])
+              | _ -> VCon ("None", []))
+           | None -> VCon ("None", []))
+        | _ -> eval_error "actor_whereis: expected String"))
+  ; ("actor_registered", VBuiltin ("actor_registered", function
+        | [] ->
+          Hashtbl.fold (fun name _pid acc -> VString name :: acc) named_registry []
+          |> List.fold_left (fun acc v -> VCon ("Cons", [v; acc])) (VCon ("Nil", []))
+        | _ -> eval_error "actor_registered: expected unit"))
   ; ("mailbox_size", VBuiltin ("mailbox_size", function
         | [VPid pid] ->
           (match Hashtbl.find_opt actor_registry pid with
@@ -5723,6 +5867,37 @@ let base_env : env =
         | [VUnit] -> VFloat (Unix.gettimeofday ())
         | _ -> eval_error "unix_time: takes no arguments"))
 
+    (* ---- peak_rss_bytes(): process self-inspection ----
+       OCaml has no getrusage binding, so the interpreter approximates with
+       Gc.quick_stat()'s top_heap_words converted to bytes. This measures the
+       OCaml *interpreter's* heap, not the compiled process's resident set —
+       the two are not comparable in magnitude or units. Only ORDERING
+       (a later call >= an earlier one, modulo GC compaction) is guaranteed
+       to agree with the compiled `march_peak_rss_bytes` path; do not expect
+       or assert equal raw numbers between interpreted and compiled runs. *)
+  ; ("peak_rss_bytes", VBuiltin ("peak_rss_bytes", function
+        | [] | [VUnit] ->
+          let stat = Gc.quick_stat () in
+          VInt (stat.Gc.top_heap_words * (Sys.word_size / 8))
+        | _ -> eval_error "peak_rss_bytes: takes no arguments"))
+
+    (* ---- live_allocs(): net count of live March heap objects ----
+       In a COMPILED program this reads march_live_allocs() — the runtime's
+       always-on alloc/free-on-rc-zero counter — and is exact.  The tree-walker
+       has no such objects at all: interpreted values are OCaml values managed
+       by the OCaml GC, and no march_alloc ever runs.  There is no meaningful
+       approximation, so this returns a constant 0 rather than inventing a
+       number that could be mistaken for a real measurement.
+       CONSEQUENCE, and it is deliberate: a leak guard built on live_allocs is
+       only falsifiable in the COMPILED path.  test/native's leak probes print
+       it to STDERR and let the dune threshold rule read it from the compiled
+       binary's captured stderr, keeping STDOUT (which IS diffed against an
+       interpreter-produced .expected) free of it.  Do not assert on this
+       value from an interpreted test. *)
+  ; ("live_allocs", VBuiltin ("live_allocs", function
+        | [] | [VUnit] -> VInt 0
+        | _ -> eval_error "live_allocs: takes no arguments"))
+
     (* ---- TCP socket builtins ---- *)
   ; ("tcp_connect", VBuiltin ("tcp_connect", function
         | [VString host; VInt port] ->
@@ -5989,6 +6164,22 @@ let base_env : env =
                 eval_error "random_bytes: cannot read /dev/urandom: %s" msg);
             march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "random_bytes(n: Int): Bytes"))
+    (* ---- Bytes <-> NativeU8Arr bridge: an O(n) copy each way (the two
+       layouts cannot be aliased — see runtime/march_extras.c). High bytes
+       (0x80-0xFF) must land as 128-255, i.e. zero-extended, never negative. *)
+  ; ("bytes_to_u8_arr", VBuiltin ("bytes_to_u8_arr", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VNativeU8Arr (Array.init (String.length s)
+                       (fun i -> Char.code s.[i]))
+           | Error e -> eval_error "bytes_to_u8_arr: %s" e)
+        | _ -> eval_error "bytes_to_u8_arr(b: Bytes): NativeU8Arr"))
+  ; ("u8_arr_to_bytes", VBuiltin ("u8_arr_to_bytes", function
+        | [VNativeU8Arr a] ->
+          let buf = Bytes.create (Array.length a) in
+          Array.iteri (fun i v -> Bytes.set buf i (Char.chr (v land 0xff))) a;
+          march_bytes_of_string (Bytes.to_string buf)
+        | _ -> eval_error "u8_arr_to_bytes(a: NativeU8Arr): Bytes"))
     (* ---- stdlib_* aliases: allow Crypto module to call builtins without shadowing ---- *)
   ; ("stdlib_sha256", VBuiltin ("stdlib_sha256", function
         | [v] ->
@@ -8238,6 +8429,14 @@ let base_env : env =
           done;
           VNativeF32Arr out
         | _ -> eval_error "native_f32_arr_map2: expected (NativeF32Arr, NativeF32Arr, fn)"))
+  ; ("native_f32_arr_fold", VBuiltin ("native_f32_arr_fold", function
+        | [acc0; VNativeF32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VFloat a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_f32_arr_fold: expected (init, NativeF32Arr, fn)"))
   ; ("native_f32_arr_from_list", VBuiltin ("native_f32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8307,6 +8506,14 @@ let base_env : env =
           done;
           VNativeI32Arr out
         | _ -> eval_error "native_i32_arr_map2: expected (NativeI32Arr, NativeI32Arr, fn)"))
+  ; ("native_i32_arr_fold", VBuiltin ("native_i32_arr_fold", function
+        | [acc0; VNativeI32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_i32_arr_fold: expected (init, NativeI32Arr, fn)"))
   ; ("native_i32_arr_from_list", VBuiltin ("native_i32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8376,6 +8583,14 @@ let base_env : env =
           done;
           VNativeU8Arr out
         | _ -> eval_error "native_u8_arr_map2: expected (NativeU8Arr, NativeU8Arr, fn)"))
+  ; ("native_u8_arr_fold", VBuiltin ("native_u8_arr_fold", function
+        | [acc0; VNativeU8Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_u8_arr_fold: expected (init, NativeU8Arr, fn)"))
   ; ("native_u8_arr_from_list", VBuiltin ("native_u8_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -9863,6 +10078,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear task_registry;
   next_task_id := 0;
   Hashtbl.clear actor_registry;
+  Hashtbl.clear named_registry;
+  Hashtbl.clear reg_names_pending;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
@@ -10476,7 +10693,11 @@ let shutdown_actor_pid (pid : int) : unit =
           end
       end
     end;
-    (* Force-kill the actor *)
+    (* Force-kill the actor. Deliberately bypasses crash_actor (and so its
+       Task 5 named_registry retire mirror too): this is process-teardown-
+       only, called from graceful_shutdown as the app exits, with no
+       watcher left to observe a stale name and no further named_registry
+       lookups expected afterward — not an oversight. *)
     (match Hashtbl.find_opt actor_registry pid with
      | Some inst2 -> inst2.ai_alive <- false
      | None -> ())
@@ -11049,6 +11270,8 @@ let eval_module_env (m : module_) : env =
   Hashtbl.clear module_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
+  Hashtbl.clear named_registry;
+  Hashtbl.clear reg_names_pending;
   next_pid := 0;
   dropped_messages_count := 0;
   Hashtbl.clear task_registry;

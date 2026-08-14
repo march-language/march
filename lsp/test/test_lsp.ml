@@ -182,6 +182,53 @@ end|} in
   (* Valid code should have zero errors — we care about count only *)
   Alcotest.(check int) "no errors" 0 (count_errors a)
 
+(* LSP parity with the compiler's prelude-collision check
+   (bin/main.ml / lib/modules/prelude_collision.ml, specs/plans/
+   2026-08-13-prelude-entry-fn-name-collision.md §4.2 Stage 2). Before this,
+   `march --compile`/`--check` rejected a top-level fn colliding with a name
+   Prelude relies on internally, but the LSP's own independent
+   parse/desugar/stdlib-merge pipeline never ran the same check — so the
+   editor showed no diagnostic at all for code the compiler now hard-rejects,
+   a compiler/LSP disagreement this codebase treats as a real bug class. *)
+let test_analyse_prelude_collision_produces_diagnostic () =
+  (* `print` is in the true "Prelude calls this internally" set: println's
+     own body calls it bare. A same-named user fn hijacks that call
+     program-wide — see the two original repros in
+     specs/progress/2026-08-14-prelude-entry-fn-name-collision.md.
+     Filename deliberately NOT "test.march" — that basename collides with
+     the real shipped `stdlib/test.march` (the `Test` module) and would
+     trip the shipped-stdlib-file exemption meant for exactly that file,
+     silently suppressing this check (confirmed live: this test read
+     `is_shipped=true` for "test.march" the first time it was written). *)
+  let src = {|mod Shadow do
+  fn print(x : Int) : Unit do
+    ()
+  end
+end|} in
+  let a = An.analyse ~filename:"shadow_repro.march" ~src in
+  Alcotest.(check bool) "collision on `print` is reported" true
+    (count_errors a > 0);
+  Alcotest.(check bool) "message names the collision" true
+    (List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+         match d.message with
+         | `String s ->
+           (try ignore (Str.search_forward (Str.regexp_string "redefines") s 0); true
+            with Not_found -> false)
+         | _ -> false)
+       a.diagnostics)
+
+let test_analyse_safe_shadow_no_collision_diagnostic () =
+  (* `head` is declared by Prelude but never called FROM WITHIN another
+     Prelude function's own body — shadowing it is a documented, intentional,
+     already-regression-tested feature (specs/lang/types/accept/
+     t126_entry_module_shadows_list_length.march), not a collision. *)
+  let src = {|mod Shadow do
+  fn head(xs : List(Int)) : List(Int) do xs end
+end|} in
+  let a = An.analyse ~filename:"shadow_safe.march" ~src in
+  Alcotest.(check int) "no collision diagnostic for a safe shadow" 0
+    (count_errors a)
+
 let test_analyse_notes_appended_to_message () =
   (* A diagnostic with notes should include "note:" in its message. *)
   (* We can't easily manufacture a note without triggering a specific
@@ -6764,6 +6811,8 @@ let () =
       Alcotest.test_case "arity mismatch has relatedInformation" `Quick test_analyse_arity_mismatch_has_related_information;
       Alcotest.test_case "diagnostics from user file"            `Quick test_multiple_errors_all_from_user_file;
       Alcotest.test_case "src field matches input"               `Quick test_analyse_src_field_matches_input;
+      Alcotest.test_case "prelude collision → diagnostic"         `Quick test_analyse_prelude_collision_produces_diagnostic;
+      Alcotest.test_case "safe builtin shadow → no diagnostic"    `Quick test_analyse_safe_shadow_no_collision_diagnostic;
     ];
     "document-symbols", [
       Alcotest.test_case "fn name in symbols"            `Quick test_document_symbols_fn;

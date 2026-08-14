@@ -19,6 +19,11 @@ mod SpawnChurn do
       ()
     else
       let pid = spawn(Cell)
+      -- Register under a per-iteration name so every one of the 40k deaths
+      -- exercises the registry's death cleanup (registry_retire_actor). If
+      -- cleanup were a full table walk instead of O(names held), this
+      -- scenario's wall time would blow past its gate.
+      let _ = Actor.register(pid, "w" ++ int_to_string(i))
       let _ = send(pid, Set(i))
       kill(pid)
       churn(i + 1, limit)

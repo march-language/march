@@ -155,8 +155,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 @media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}
 </style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
 <a class="sl" href="Actor.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
+<a class="sl" href="Actor.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
+<a class="sl" href="Actor.html#fn-registered"><span class="sb-kind" style="color:var(--fn)">F</span>registered</a>
 <a class="sl" href="Actor.html#fn-reply"><span class="sb-kind" style="color:var(--fn)">F</span>reply</a>
-<a class="sl" href="Actor.html#fn-set_queue_limit"><span class="sb-kind" style="color:var(--fn)">F</span>set_queue_limit</a></div></div>
+<a class="sl" href="Actor.html#fn-set_queue_limit"><span class="sb-kind" style="color:var(--fn)">F</span>set_queue_limit</a>
+<a class="sl" href="Actor.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
+<a class="sl" href="Actor.html#fn-whereis"><span class="sb-kind" style="color:var(--fn)">F</span>whereis</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Array.html">Array</a></div><div class="sb-sub"><a class="sl" href="Array.html#type-TrieNode"><span class="sb-kind" style="color:var(--ty)">T</span>TrieNode</a>
 <a class="sl" href="Array.html#type-PVec"><span class="sb-kind" style="color:var(--ty)">T</span>PVec</a>
 <a class="sl" href="Array.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
@@ -206,13 +210,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Bytes.html#fn-from_hex"><span class="sb-kind" style="color:var(--fn)">F</span>from_hex</a>
 <a class="sl" href="Bytes.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
 <a class="sl" href="Bytes.html#fn-from_string"><span class="sb-kind" style="color:var(--fn)">F</span>from_string</a>
+<a class="sl" href="Bytes.html#fn-from_u8_arr"><span class="sb-kind" style="color:var(--fn)">F</span>from_u8_arr</a>
 <a class="sl" href="Bytes.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Bytes.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="Bytes.html#fn-length"><span class="sb-kind" style="color:var(--fn)">F</span>length</a>
 <a class="sl" href="Bytes.html#fn-slice"><span class="sb-kind" style="color:var(--fn)">F</span>slice</a>
 <a class="sl" href="Bytes.html#fn-to_hex"><span class="sb-kind" style="color:var(--fn)">F</span>to_hex</a>
 <a class="sl" href="Bytes.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a>
-<a class="sl" href="Bytes.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
+<a class="sl" href="Bytes.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
+<a class="sl" href="Bytes.html#fn-to_u8_arr"><span class="sb-kind" style="color:var(--fn)">F</span>to_u8_arr</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="CRDT.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="CRDT.html">CRDT</a></div><div class="sb-sub"><a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
 <a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
 <a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
@@ -1417,8 +1423,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Msgpack.html#fn-str"><span class="sb-kind" style="color:var(--fn)">F</span>str</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div><div class="sb-sub"><a class="sl" href="NativeArray.html#fn-f32_to_float_arr"><span class="sb-kind" style="color:var(--fn)">F</span>f32_to_float_arr</a>
 <a class="sl" href="NativeArray.html#fn-float_to_f32_arr"><span class="sb-kind" style="color:var(--fn)">F</span>float_to_f32_arr</a>
+<a class="sl" href="NativeArray.html#fn-fold_f32"><span class="sb-kind" style="color:var(--fn)">F</span>fold_f32</a>
 <a class="sl" href="NativeArray.html#fn-fold_float"><span class="sb-kind" style="color:var(--fn)">F</span>fold_float</a>
+<a class="sl" href="NativeArray.html#fn-fold_i32"><span class="sb-kind" style="color:var(--fn)">F</span>fold_i32</a>
 <a class="sl" href="NativeArray.html#fn-fold_int"><span class="sb-kind" style="color:var(--fn)">F</span>fold_int</a>
+<a class="sl" href="NativeArray.html#fn-fold_u8"><span class="sb-kind" style="color:var(--fn)">F</span>fold_u8</a>
 <a class="sl" href="NativeArray.html#fn-from_list_f32"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_f32</a>
 <a class="sl" href="NativeArray.html#fn-from_list_float"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_float</a>
 <a class="sl" href="NativeArray.html#fn-from_list_i32"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_i32</a>
@@ -2141,6 +2150,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="System.html#fn-exit"><span class="sb-kind" style="color:var(--fn)">F</span>exit</a>
 <a class="sl" href="System.html#fn-exit_code"><span class="sb-kind" style="color:var(--fn)">F</span>exit_code</a>
 <a class="sl" href="System.html#fn-mem_available_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_available_bytes</a>
+<a class="sl" href="System.html#fn-mem_peak_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_peak_bytes</a>
 <a class="sl" href="System.html#fn-mem_total_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_total_bytes</a>
 <a class="sl" href="System.html#fn-monotonic_time"><span class="sb-kind" style="color:var(--fn)">F</span>monotonic_time</a>
 <a class="sl" href="System.html#fn-ok"><span class="sb-kind" style="color:var(--fn)">F</span>ok</a>

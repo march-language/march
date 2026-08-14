@@ -1008,9 +1008,10 @@ let emit_native_map_inline_loop ctx ~(width : nmap_width) ~unboxed ~arr_atom ~ap
 
   emit_label ctx body_lbl;
   (* Both source and dest arrays share the same NATIVE_ARR_HDR=32 layout
-     (march_runtime.c), so one offset serves both GEPs. The multiplier and
-     the load/store alignment are the width's own element size (8 for the
-     legacy i64/f64 widths -- unchanged -- 4 for f32/i32, 1 for u8). *)
+     (the #define lives in march_runtime.h), so one offset serves both
+     GEPs. The multiplier and the load/store alignment are the width's own
+     element size (8 for the legacy i64/f64 widths -- unchanged -- 4 for
+     f32/i32, 1 for u8). *)
   let soff = fresh ctx "nmap_soff" in
   emit ctx (Printf.sprintf "%s = mul i64 %s, %d" soff i elem_size);
   let byte_off = fresh ctx "nmap_off" in
@@ -1153,8 +1154,8 @@ let emit_native_map2_inline_loop ctx ~(width : nmap_width) ~unboxed ~arr1_atom ~
 
   emit_label ctx body_lbl;
   (* Both source arrays and the dest array share the same
-     NATIVE_ARR_HDR=32 layout (march_runtime.c), so one offset serves all
-     three GEPs. The multiplier and the load/store alignment are the
+     NATIVE_ARR_HDR=32 layout (the #define lives in march_runtime.h), so one
+     offset serves all three GEPs. The multiplier and the load/store alignment are the
      width's own element size (8 for the legacy i64/f64 widths --
      unchanged -- 4 for f32/i32, 1 for u8). *)
   let soff = fresh ctx "nmap2_soff" in
@@ -2710,6 +2711,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       "%s = call i64 @march_vault_put_new(ptr %s, ptr %s, ptr %s, i64 %s)" r vt vk vv vttl);
     ("i64", r)
 
+  (* ── actor_register: March-level arg order is (pid, name) — matching
+     monitor/kill — but the C entry point is march_actor_register(name,
+     actor): NAME FIRST.  The general EApp path below passes args in TIR
+     order unchanged, which would swap the two pointers at the C ABI
+     boundary (the runtime would read the Pid as the name string and vice
+     versa). Swap explicitly here, same shape as the vault_set arm above. *)
+  | Tir.EApp (f, [pid; name])
+    when f.Tir.v_name = "actor_register" ->
+    let vp = emit_atom_as ctx "ptr" pid in
+    let vn = emit_atom_as ctx "ptr" name in
+    let r  = fresh ctx "ar" in
+    emit ctx (Printf.sprintf
+      "%s = call i64 @march_actor_register(ptr %s, ptr %s)" r vn vp);
+    ("i64", r)
+
   | Tir.EApp (f, [tbl; key; value; maxn])
     when f.Tir.v_name = "vault_push_capped" ->
     let vt = emit_atom_as ctx "ptr" tbl in
@@ -3248,10 +3264,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      | "load" ->
        (* Bounds check (0 <= i && i + lanes <= len), matching
           [simd_bounds_check] in eval.ml, then a plain GEP+load at
-          arr+32+i*elem_size (NATIVE_ARR_HDR=32, march_runtime.c). Every
-          `native_<w>_arr_length` used here is unconditionally declared in
-          the native preamble (llvm_builtins.ml's [native_net_io_items]),
-          same as every other NativeArray builtin call site. *)
+          arr+32+i*elem_size (NATIVE_ARR_HDR=32, #define'd in
+          march_runtime.h). Every `native_<w>_arr_length` used here is
+          unconditionally declared in the native preamble
+          (llvm_builtins.ml's [native_net_io_items]), same as every other
+          NativeArray builtin call site. *)
        let (arr_ty0, arr_v0) = List.nth arg_pairs 0 in
        let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
        let iv = idx_arg 1 in

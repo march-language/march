@@ -1,0 +1,119 @@
+-- Named registry (Task 6): a registered name survives a supervisor restart.
+-- This is the point of the entire named-registry plan: a holder OUTSIDE the
+-- supervision tree, who never learns the replacement child's Pid, keeps
+-- resolving the same name after a crash-restart and reaches whichever
+-- incarnation is current.
+--
+-- Syntax corrected against the real grammar (examples/supervision_strategies.
+-- march, test/native/supervisor_one_for_one_restart.march, bench/actors/
+-- crash_loop.march) rather than the task brief's best-effort sketch:
+--   - `supervise do strategy one_for_one / max_restarts N within S / Fragile
+--     child end`, not `supervise one_for_one max_restarts N within S do ...`.
+--   - The supervisor's child field is a plain Int state field; the
+--     supervisor machinery overwrites it with the live child's pid.
+--   - `get_actor_field` returns `Option(a)` keyed by the field NAME string.
+--   - `Ping` (the Actor.call target) must be declared FIRST in Fragile so it
+--     lands at ctor tag 0 -- Actor.call routes its zero-arg sentinel to
+--     whichever handler occupies tag 0.
+mod Main do
+  needs IO.Console
+
+  type PingReq = PingReq
+
+  actor Fragile do
+    state { handled : Int }
+    init  { handled: 0 }
+
+    on Ping(reply_to) do
+      Actor.reply(reply_to, state.handled)
+      { handled: state.handled + 1 }
+    end
+
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile child
+    end
+  end
+
+  fn current_child(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let boss = spawn(Boss)
+    let first_int = current_child(boss)
+    let first = pid_of_int(first_int)
+    println("registered: " ++ bool_to_string(Actor.register(first, "fragile")))
+    -- A SECOND name on the same actor. This is the case that used to crash the
+    -- process outright (EXC_BAD_ACCESS in strdup, under march_respawn_child,
+    -- deterministically) -- not because carrying two names is hard, but because
+    -- the crash below left the actor's refcount claiming a single owner, the
+    -- registry's forward table dropped the last "reference" to a live record,
+    -- and the second name's carry-forward then allocated on top of the freed
+    -- block. One name hid it: nothing touched the record again before exit.
+    -- See specs/progress/2026-08-13-actor-crash-trap-epilogue.md.
+    println("registered second name: "
+            ++ bool_to_string(Actor.register(first, "fragile2")))
+
+    -- Kill it via a crash (panic in a handler) so the supervisor restarts
+    -- it with a NEW Pid -- not an explicit kill().
+    send(first, Poison())
+    run_until_idle()
+
+    let second_int = current_child(boss)
+    let second = pid_of_int(second_int)
+    println("respawned with new pid: " ++ bool_to_string(second_int != first_int))
+
+    -- Resolve by NAME, from a holder ("fragile") that never saw `second`.
+    match Actor.whereis("fragile") do
+      None -> println("lost after restart")
+      Some(p) ->
+        match Actor.call(p, PingReq, 5000) do
+          Ok(_)  -> println("reached by name after restart")
+          Err(e) -> println("call failed: " ++ e)
+        end
+    end
+
+    -- BOTH names must survive, and both must land on the SAME replacement:
+    -- the reply carries `handled`, which the call above already bumped to 1,
+    -- so a 1 here proves it is that same actor and not a second incarnation.
+    match Actor.whereis("fragile2") do
+      None -> println("second name lost after restart")
+      Some(p2) ->
+        match Actor.call(p2, PingReq, 5000) do
+          Ok(n)  -> println("second name reaches the same replacement: "
+                            ++ bool_to_string(n == 1))
+          Err(e) -> println("second name call failed: " ++ e)
+        end
+    end
+
+    -- A second crash: the carried-forward name must be re-established on
+    -- the THIRD incarnation too, proving the stash isn't a one-shot thing.
+    send(second, Poison())
+    run_until_idle()
+    let third_int = current_child(boss)
+    println("respawned again with new pid: " ++ bool_to_string(third_int != second_int))
+
+    match Actor.whereis("fragile") do
+      None -> println("lost after second restart")
+      Some(p2) ->
+        match Actor.call(p2, PingReq, 5000) do
+          Ok(_)  -> println("reached by name after second restart")
+          Err(e) -> println("call failed: " ++ e)
+        end
+    end
+  end
+end

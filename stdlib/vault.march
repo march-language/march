@@ -6,9 +6,30 @@
 -- the same data.
 --
 -- Keys can be any plain value: Int, String, Bool, Atom, Tuple, or Ctor.
--- Function values, Pids, and Tasks cannot be used as keys.
+-- Function values, Pids, and Tasks cannot be used as keys.  Keys are
+-- STRINGIFIED on the way in, which is why the handle is not parameterised by
+-- a key type: `set(t, 1, v)` and `set(t, "1", v)` address the same entry, and
+-- `keys(t)` gives back `List(String)`, never the original key values.
 --
--- Values are arbitrary March values.
+-- A table handle is `Vault(v)`, phantom in the type of the values it holds:
+--
+--     let counters = Vault.new("counters")   -- Vault(v), v not yet chosen
+--     Vault.set(counters, "hits", 1)         -- v := Int
+--     Vault.get(counters, "hits")            -- Option(Int)
+--
+-- The element type is fixed at the binding (Vault handles do not
+-- let-generalize — see `demote_vault_handle_vars` in the typechecker), so
+-- storing an `Int` and reading it back at some other type is a type error
+-- instead of a value reinterpreted at the wrong type.
+--
+-- Two doors are still untyped, deliberately:
+--   * `new`/`open`/`whereis` MINT a handle from a name, so they choose `v`
+--     rather than check it — a name-keyed global table cannot do better.
+--   * `ns_set`/`ns_get`/`ns_drop` take a namespace STRING instead of a
+--     handle, so there is no handle to carry `v`.  Prefer the handle API.
+--
+-- Writing the type out (`fn table() : Vault(v)`) is the explicit opt back
+-- into an element-erased table, which `Config` uses on purpose.
 --
 -- Basic operations:
 --   Vault.new(name)                      — create a named table
@@ -25,8 +46,19 @@
 mod Vault do
   needs IO.Mut
 
-  doc "Create a new named vault table.  Returns an opaque table handle."
-  fn new(name) do
+  doc """
+  Create a new named vault table.  Returns a `Vault(v)` handle, where `v` is
+  the type of the values the table holds.
+
+      let counters = Vault.new("counters")
+      Vault.set(counters, "hits", 1)
+      Vault.get(counters, "hits")   -- Some(1) : Option(Int)
+
+  The element type is fixed at the binding, so reading the table back at a
+  different type is a type error rather than a value reinterpreted at the
+  wrong type.
+  """
+  fn new(name) : Vault(v) do
     vault_new(name)
   end
 
@@ -35,8 +67,13 @@ mod Vault do
   this name already exists; otherwise creates a new empty table.
 
       let rate_table = Vault.open("rate_limits")
+
+  Like `new` and `whereis`, this MINTS a handle from a string, so it is where
+  the element type is chosen rather than checked: two `Vault.open` calls on
+  the same name may pick different `v`. Bind the handle once and pass it
+  around — that is what makes the element type stick.
   """
-  fn open(name) do
+  fn open(name) : Vault(v) do
     match vault_whereis(name) do
     Some(t) -> t
     None    -> vault_new(name)
@@ -86,6 +123,9 @@ mod Vault do
   doc """
   Apply `f` to the current value stored at `key` and replace it with the result.
   No-op if the key is absent or expired.
+
+  `f` must be `(v) -> v` for a `Vault(v)` — an update cannot change the
+  table's element type.
   """
   fn update(table, key, f) do
     vault_update(table, key, f)
@@ -114,7 +154,9 @@ mod Vault do
 
   doc """
   Atomically add `delta` to the integer stored at `key` and return the new
-  value. A missing or non-integer entry is treated as 0. Any existing TTL on
+  value. Requires a `Vault(Int)` — the runtime reads and writes an integer
+  cell, so the element type is pinned rather than generic.
+  A missing or non-integer entry is treated as 0. Any existing TTL on
   the key is preserved. Concurrent increments do not lose updates (unlike a
   `get` + `set` pair).
   """
@@ -124,7 +166,8 @@ mod Vault do
 
   doc """
   Atomically append `value` to the list stored at `key` (newest at the tail)
-  and keep only the last `max` elements. The whole read-append-trim-write runs
+  and keep only the last `max` elements. Requires a `Vault(List(e))`; `value`
+  is an `e`. The whole read-append-trim-write runs
   under the shard lock, so concurrent pushes to the same bounded buffer do not
   clobber each other (unlike a `get` + `List.append` + `set`). A missing or
   non-list entry starts from the empty list; `max <= 0` keeps everything. Any
@@ -151,8 +194,11 @@ mod Vault do
   Look up a vault table by its registered name.
   Returns Some(table) if a table with that name exists, None otherwise.
   Any actor can call this — no handle required.
+
+  Mints a handle from a string, so like `new`/`open` it chooses the element
+  type rather than checking it.
   """
-  fn whereis(name) do
+  fn whereis(name) : Option(Vault(v)) do
     vault_whereis(name)
   end
 
@@ -166,6 +212,8 @@ mod Vault do
 
   doc """
   Return all live (non-expired) keys in the table as a List(String).
+  Always `List(String)`, whatever was passed as a key — keys are stringified
+  on insert.
 
       let t = Vault.new("ex")
       Vault.set(t, "a", 1)
@@ -193,6 +241,10 @@ mod Vault do
   Auto-creates the named vault if it does not yet exist.
   Useful when you store a namespace string rather than a vault handle.
 
+  ELEMENT-ERASED: there is no handle here to carry the element type, so
+  `ns_get` will hand back whatever type the caller asks for. Prefer
+  `open` + `get`/`set` when you can.
+
       Vault.ns_set("my_ns", "key", 42)
   """
   fn ns_set(ns, key, value) do
@@ -202,6 +254,9 @@ mod Vault do
   doc """
   Look up a key using a string namespace name.
   Returns None if the namespace does not exist or the key is absent.
+
+  ELEMENT-ERASED, like `ns_set` — the result type is whatever the caller
+  expects, not what was stored.
 
       Vault.ns_get("my_ns", "key")  -- Some(42) or None
   """

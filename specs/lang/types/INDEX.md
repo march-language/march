@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 291/291 — 139 accept, 152
+Exit 0 iff every program behaves as declared (currently 293/293 — 140 accept, 153
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -567,7 +567,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t177_main_mixed_param_list` | **R1 STAGE D — the signature relaxation is bounded (2026-08-10).** "one capability parameter" became "any number of capability parameters", NOT "arbitrary parameters": a mixed list is rejected because a grant describing only SOME of what `main` receives would not be a grant, and the runtime has no value to supply for a non-capability parameter | ``only arguments of type `Cap(IO)` `` |
 | `t178_grant_violated_through_stdlib` | **Task 8, capability-UX plan (2026-08-14) — the grant violation names the user's own call chain, not just the stdlib leaf.** `t166` already pins the through-a-helper shape, but its helper calls the builtin `file_write` directly, and every unit-test fixture in `test_compiler.ml`'s `cap_grant` suite does the same — the bare `parse_and_desugar` test harness loads no stdlib source, so a real stdlib call (`File.read`) silently exercises nothing there. This witness runs the real compiled binary against its real bundled stdlib: `main` (narrow `Cap(IO.Console)`) calls `slurp`, which calls the real `File.read`, which reaches `IO.FileRead`. Before this task the diagnostic named only `` (reached in `File.read`) `` — the stdlib leaf, useless to a reader who cannot act on it. After: the full chain, `main` included, down through `slurp` to `File.read` | ``reached from `main`: main → slurp`` |
 
-**Result: 291 / 291 (139 accept, 152 reject).** `reject/t169`–`t170`
+**Result: 293 / 293 (140 accept, 153 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries — they mirror the existing `t164`/`t165` pattern

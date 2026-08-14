@@ -190,6 +190,74 @@ The operational rules for `kill`/`is_alive` are in [`core-march.md`](https://git
 
 ---
 
+## Named Actors
+
+A Pid is not stable. When a supervisor restarts a crashed child, the replacement gets a
+*new* Pid, and everyone still holding the old one is talking to a corpse. The named
+registry hands out a stable string name instead:
+
+```march
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let pid = spawn(Counter)
+    println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
+    println("names: " ++ int_to_string(List.length(Actor.registered())))
+
+    -- Resolve the name once, then reuse the Pid for the whole burst.
+    match Actor.whereis("counter") do
+      None -> println("counter is unavailable right now — retry")
+      Some(here) ->
+        let _ = send(here, Bump())
+        let _ = send(here, Bump())
+        println("sent")
+    end
+
+    println("unregistered: " ++ bool_to_string(Actor.unregister("counter")))
+  end
+end
+```
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `Actor.register(pid, name)` | `Bool` | Bind `name` to `pid`. `false` if `pid` is already dead, or if `name` is currently held by a *live* actor. |
+| `Actor.unregister(name)` | `Bool` | Release the name. `false` if it was not registered. |
+| `Actor.whereis(name)` | `Option(Pid)` | The actor currently holding `name`. |
+| `Actor.registered()` | `List(String)` | Every name currently bound; order unspecified. |
+
+A name is released automatically when its actor dies, so a name never resolves to a dead
+Pid and you do not have to unregister from a crash path.
+
+`whereis` returns an `Option` because a name can be *momentarily* unresolvable. While a
+supervised child is being respawned — in particular while it waits out its restart backoff
+— the old actor is gone and its replacement does not exist yet. `None` there is the honest
+signal that the service is mid-restart, not that the name was never registered; retry
+rather than treating it as a permanent error.
+
+Names survive supervisor restarts, on **both** backends: the crashing child's names are
+carried forward and re-established on its replacement, so a holder outside the supervision
+tree keeps reaching whichever incarnation is current without ever learning the new Pid.
+**Hold names, not Pids, across a restart boundary.** This includes a live sibling killed by
+a `one_for_all` / `rest_for_one` batch restart, not only the child that actually crashed.
+If a *different* live actor claims the name during the restart window, the carried-forward
+registration is dropped for that name rather than stolen back. Unsupervised actors are
+unaffected — their names are simply dropped on death.
+
+On a hot path, resolve a name **once and cache the Pid** instead of calling `whereis` per
+message. Concurrent lookups of the *same* name all bump the refcount on the one stored
+value, and that contention — not the registry's table lock — is what bounds same-name
+resolution; `send` itself takes no registry lock. Re-resolve when a send fails or a monitor
+fires, not on every message.
+
+---
+
 ## Capability-Based Messaging
 
 For supervision-safe message delivery, use capabilities (`Cap`). A capability encodes the actor's identity and current *epoch* — it becomes stale (and is rejected) if the actor restarts:

@@ -24,6 +24,16 @@ git log is authoritative for exact commits.
   to take parameters for every other capability it reached, forcing callers to thread
   capabilities through the call graph. Capabilities are module-scoped: `needs`, the module
   ceiling, and `main`'s grant are the checks. `main`'s grant is unchanged.
+- **`Actor.register(pid, name)` / `Actor.unregister(name)` / `Actor.whereis(name)` / `Actor.registered()`** — a named process registry over the runtime's `march_actor_*` C API. `register` fails (returns `false`) if the name is already held by a live actor, or if `pid` is dead; a stale entry left by a dead actor is silently reusable. `whereis` re-checks liveness at lookup time, so a name whose actor died resolves to `None` even before any restart-carry-forward cleanup runs. No capability is required — the registry table is owned by the runtime, so no March-level naming call happens. These four operations behave identically in the compiled and interpreted backends, and so does carrying a name across a supervisor **restart** (below). For a hot lookup, resolve a name once and cache the `Pid`, re-resolving on `None`: repeated lookups of the *same* name contend on the reference count of the single stored value, and `send` itself takes no registry lock.
+- **A registered name now survives a supervisor restart.** `do_actor_death` snapshots a supervised actor's registered names onto its (never-freed) meta immediately before `registry_retire_actor` wipes them, and `march_respawn_child` re-registers each carried name on the replacement child — including across the up-to-~3.2s exponential-backoff delay a repeat crash can take. A holder outside the supervision tree that only ever knew the name, never any specific Pid, keeps resolving to whichever incarnation is currently alive. If a different live actor claims the same name during the restart window, the carried-forward registration is dropped for that name rather than stealing it back — the name legitimately belongs to its new, live owner. Unsupervised actors are unaffected: their names are simply dropped on death, as before. The interpreter now does the same thing, so this is backend parity rather than a compiled-only feature: `crash_actor` stashes a supervised actor's `named_registry` names before retiring them and `spawn_child_actor` re-establishes them on the replacement, under the same first-live-claim-wins rule. That includes a live sibling killed by a `one_for_all` / `rest_for_one` batch restart — those strategies clear the sibling's supervisor field before crashing it, so they capture its names explicitly rather than relying on that field as a gate. `test/native/actor_registry_restart.march` and `actor_registry_restart_batch.march` now run interpreted as well as compiled and diff against the same expected output.
+
+### Changed
+
+- **Vault table handles are now typed: `Vault(v)`, phantom in the type of the values the table holds.** `Vault.new`/`Vault.open` hand back a `Vault(v)`; `set`/`set_ttl`/`put_new`/`get`/`get_or`/`has`/`update`/`drop`/`all` all speak the same `v`, so storing an `Int` and reading it back as a `Pid` is now a type error instead of a value reinterpreted at the wrong type (which the runtime then dereferenced as an actor record on the next `send`). `Vault.update`'s callback is `(v) -> v`; `Vault.incr` requires a `Vault(Int)` and `Vault.push_capped` a `Vault(List(e))`, matching what the C runtime actually reads and writes; `Vault.keys` is now `List(String)` rather than a caller-chosen key type, because keys are stringified on insert.
+
+  Handles do not let-generalize — a Vault is a process-global mutable cell, i.e. exactly ML's `ref []` case — so the element type is fixed where the handle is bound and every later use is checked against it. Two doors stay element-erased on purpose and are documented as such: `new`/`open`/`whereis` mint a handle from a *name*, so they choose `v` rather than check it (a name-keyed global table cannot do better), and `ns_set`/`ns_get`/`ns_drop` take a namespace string with no handle to carry `v`. Writing a return annotation (`fn table() : Vault(v)`) is the explicit opt-out; `Config`, which is a heterogeneous store by design, uses it and stays as erased as it was.
+
+  Compatibility: code that keeps one element type per table needs no change. Code that stored several unrelated types in one table under a single bound handle now needs either separate tables or the explicit `: Vault(v)` annotation. Nothing changes at runtime — no representation, layout, or codegen change — and the runtime-owned `$actor_registry` table, which C reads and writes directly without passing through the typechecker, is untouched.
 - Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared, striped reader-count lock (`set`/`set_ttl`/`put_new`/`incr`/`push_capped`/`drop` still take it exclusively). Concurrent reads of *distinct* keys now scale close to linearly with thread count; concurrent reads of the *same* key are still bounded by reference-count contention on that key's one shared value, an orthogonal cost the lock change doesn't touch.
 - **`vault_get`/`vault_size`/`vault_keys` no longer require `needs IO.Mut`.** A Vault table is in-memory, so a lookup carries no ambient authority — only naming a table (`vault_new`/`vault_whereis`, mints a handle from a string) and mutating one (`vault_set`/`vault_set_ttl`/`vault_drop`/`vault_update`/`vault_put_new`/`vault_incr`/`vault_push_capped`) still do. Source-compatible: an existing module that declared `needs IO.Mut` only to read now over-declares (harmless; the checked stdlib carried no such module). Accepted trade-off: a reader of shared mutable state is now non-deterministic without saying so in its `needs` — authority remains auditable at the boundary, since some module still had to name/write the table under a declared capability.
 - Missing `needs` declarations are now reported as one aggregated error per module listing
@@ -77,6 +87,51 @@ git log is authoritative for exact commits.
   error-severity diagnostic carried a machine-applicable fix — which is exactly what the
   missing-`needs` and missing-grant errors emit, so the fix those errors advertised could
   never be applied.
+- **A `panic()` inside a hot-reload actor's message handler no longer pins its
+  code version forever.** A hot-reload dispatch is bracketed by
+  `march_dispatch_enter`/`march_dispatch_leave`, whose reference count stops a
+  concurrent publish from unloading code that is currently executing. The crash
+  trap's `longjmp` jumped over the `leave`, so every crash left that version's
+  count permanently above zero and its ring slot unreclaimable — a crash-looping
+  supervised actor burned one slot per crash. The crash path now releases the pin
+  before running the death/restart sequence.
+
+- **Fixed a use-after-free that could crash any multi-scheduler program whose actors are reachable from more than one owner** — a monitor, a `Pid` stored in a `Vault` table, a `Pid` passed to another actor, or (most visibly, and how this was found) an actor registered under a name, since `Actor.register` makes the registry a second owner. The defect long predates the registry; the registry is simply the easiest way to give an actor a second owner. If a concurrent program of yours has ever "flaked mysteriously" with a `SIGBUS` or an RC underflow, it is worth re-checking against this fix rather than assuming it was unrelated. While an actor's green thread ran a message handler, the runtime overwrote that actor's refcount word with `1` and restored it afterwards — a leftover from before codegen learned to update actor structs in place unconditionally. The forced `1` was visible to every other thread, so a concurrent drop of a `Pid` observed "last reference" and freed an actor record that still had live owners; the registry was then left pointing at freed memory, and the next lookup or death-cleanup read a garbage refcount (`march: RC underflow (rc was -6899412650951359789)`, `SIGBUS`, or `SIGTRAP`). Concurrent *increments* during the same window were silently lost. Single-scheduler runs were never affected. The spawn-and-kill churn scenario failed on 6 of 30 runs before the fix and 0 of 60 after.
+- **A killed actor's registered names are now reclaimed, not left occupying the registry forever.** `do_actor_death` (and the interpreter's matching `crash_actor` path) now retires all of the dying actor's names — dropping the forward-table entry and the per-actor reverse index — before any monitor `Down` notification is delivered, so a watcher woken by the death can never observe a name still mapped to the dead incarnation. Previously only the runtime's own `$alive`-flag re-check kept `whereis`/`registered` correct at lookup time; the table entry itself, and the interpreter's `named_registry` map, held on to the name indefinitely unless a later registration happened to overwrite it. `Actor.registered()` in the interpreter no longer lists a name after its actor is killed.
+- **A top-level function in your program can no longer silently replace a
+  name the March Prelude relies on internally.** `println` calls `print` and
+  `show` unqualified (also `panic`, `reverse`, and `to_string`, each called
+  from inside another Prelude function's own body), and all of them sat in a
+  flat, unprotected namespace shared with your program's own entry-module
+  declarations. A private helper named `print` or `show` (or any of the
+  others Prelude actually calls internally) silently took over that name for
+  the *whole program*, including inside Prelude's own code, with no error at
+  any compiler stage. Depending on how the two definitions' types happened to
+  line up this surfaced as a misattributed runtime arity error, a **compiled
+  SIGBUS with no diagnostic**, or a **fully silent no-op** — `println`
+  printing nothing at all, with no error and no crash. Now rejected as a
+  compile error naming the colliding function and why it matters, across
+  `march file.march`, `march --check`, `march --compile`, `march check`, and
+  `march dap`. Shadowing a Prelude/builtin name Prelude never calls
+  internally — `head`, `map`, `unwrap`, `file_read`, and most of the rest —
+  remains legal and unaffected; that's a documented, separately-tested
+  feature, not part of this bug. **The editor (LSP) now reports this the
+  same way `march --compile`/`--check` do** — previously the language
+  server's own independent analysis pipeline didn't run this check, so a
+  colliding function showed no squiggle at all until you actually compiled.
+- **`simd_leak_probe`'s CI leak guard no longer false-positives on Linux.**
+  The guard for the per-call SIMD vector temp-box leak
+  (`test/native/simd_leak_probe.march`) asserted an absolute peak-RSS
+  threshold (< 32 MB) calibrated on macOS's ~2.7 MB healthy baseline; Linux's
+  ~122 MB process baseline made that threshold unreachable, so the guard
+  went RED on a healthy binary (measured 128,761,856 B) the first time CI's
+  ubuntu leg ran it. Converted to the same fix already applied to the
+  sibling `native_arr_fold_leak_probe` guard: assert a `live_allocs()`
+  delta instead of RSS, which counts leaked `march_simd_alloc` cells
+  directly and needs no platform calibration. Healthy delta is now ~1
+  object (threshold `< 1000`); a regression adds exactly 2,000,000 —
+  confirmed by reverting the caller-side release in
+  `lib/tir/llvm_emit.ml` and remeasuring.
 
 - **`Regex` no longer has a denial-of-service on adversarial input.** The
   engine matched by backtracking, so repeated quantifiers over one character
@@ -149,6 +204,37 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Bytes.to_u8_arr` / `Bytes.from_u8_arr`** — an O(n)-copy bridge between
+  `Bytes` and `NativeU8Arr`, so byte data from files, sockets, or
+  `Bytes.from_hex` can reach the SIMD byte scanner (`Simd.load_u8x16` /
+  `eq_u8x16` / `first_set_u8x16`), previously reachable only from
+  hand-built `NativeU8Arr` literals. High bytes (0x80-0xFF) round-trip as
+  128-255, never negative.
+- **`NativeArray.fold_int` / `fold_float` now work under `--compile`, and
+  `NativeArray.fold_f32` / `fold_i32` / `fold_u8` are new** — `fold_int` and
+  `fold_float` previously typechecked and evaluated interpreted only; a
+  compiled program calling either failed to link (no C runtime symbol). All
+  five widths now fold via a `call_closure_2`-based loop mirroring
+  `TypedArray.fold`'s RC discipline. Also fixes a memory leak this same
+  change introduced during development and caught before merge: the
+  generic accumulator crossing the closure boundary needed the compiled
+  call site to box/tag a literal initial value (e.g. `fold_int(arr, 3, ...)`)
+  the same way `RingBuf.push` already does for its erased element, and the
+  float-family folds needed to release the per-element box they allocate
+  each iteration (confirmed safe — not a use-after-free — by inspecting the
+  compiled closure's `-emit-llvm` output, which always allocates a fresh box
+  when storing an element rather than aliasing the one passed in); that
+  release is pinned by `test/native/native_arr_fold_leak_probe.march`, a
+  live-object-count guard, since an output diff cannot see a leak.
+  **A second, separate leak remains open:** `fold_float` / `fold_f32` with a
+  `Float` **accumulator** leak a further ~32 B per element, because each
+  iteration's accumulator box is never released — 5M elements cost 193.6 MB
+  of peak RSS against 40.4 MB for the `fold_int` control. Results are
+  correct; only memory residency is affected, and folds with an `Int`
+  accumulator (`fold_int`/`fold_i32`/`fold_u8`) are unaffected. The bug is
+  inherited from `TypedArray.fold`, not new to these helpers. See
+  `docs/simd-vectorization.md`'s "Known limitations" and
+  `specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md`.
 - **Runtime enforcement tests for `--cap-sandbox`** — compiled fixtures now
   verify that a withheld capability's syscall is actually denied at runtime
   (Linux seccomp-bpf, macOS Seatbelt), not just that the embedded policy
@@ -314,6 +400,49 @@ git log is authoritative for exact commits.
   reachable-from-`main` function that uses it. Enforced identically by
   `march --check`, the interpreter, and the compiler. (Sandbox ladder R1
   stages A+B; per-function grants are future work.)
+- **`peak_rss_bytes` builtin** — process self-inspection returning peak
+  resident set size in bytes on both macOS and Linux (`getrusage`'s
+  `ru_maxrss` is bytes on macOS, kilobytes on Linux; normalized to bytes at
+  the C boundary). **Compiled builds only** report a true RSS: the
+  interpreter has no `getrusage` binding and returns a `Gc.quick_stat`
+  `top_heap_words` approximation of the *interpreter's own* OCaml heap, which
+  is not comparable in magnitude to the compiled figure. Only the ordering
+  (a later call >= an earlier one) agrees across the two paths — never assert
+  equal raw numbers. Ambient, no capability grant required — it performs no
+  IO and observes nothing outside the process. `System.mem_peak_bytes()` is
+  the stdlib wrapper (named to avoid shadowing the builtin it calls). The
+  SIMD-vector-temp-box leak guard (`test/native/simd_leak_probe.march`,
+  `test/dune`) now uses it to measure its own RSS from inside the process,
+  replacing a Darwin-only `/usr/bin/time -l` check — the guard runs on both
+  CI legs for the first time.
+- **FFI extern binding a C symbol the runtime preamble already declares no
+  longer fails to compile.** An `extern` whose C name matched a preamble
+  declare (e.g. `fn live_allocs(): Int = "march_live_allocs"`) emitted a
+  second `declare` for the same symbol, which LLVM rejects outright as
+  `invalid redefinition of function` — the whole module failed to build. The
+  extern's declare is now suppressed when the preamble already emitted one.
+  The skip set is computed from the preamble text actually emitted for the
+  current target, so a native-only symbol is still declared normally when
+  compiling to WASM. Surfaced by adding `live_allocs` as a builtin, which
+  moved `march_live_allocs` into the preamble while `test/native/ffi_leak.march`
+  and `ffi_resource.march` were already binding it as an extern.
+- **`live_allocs` builtin** — process self-inspection returning the net count
+  of live March heap objects (every `march_alloc` increments, every
+  free-on-refcount-zero decrements; an always-on relaxed atomic, not gated
+  behind a stats flag). Like `peak_rss_bytes` it is ambient and needs no
+  capability grant — it reads one process-local counter and observes nothing
+  outside the process. **Compiled builds only** report a real count: the
+  tree-walking interpreter allocates no March heap objects at all (its values
+  are OCaml values under the OCaml GC), so it returns a constant `0` rather
+  than an approximation that could be mistaken for a measurement — never
+  assert on it from an interpreted test. Because a leak is exactly "allocated
+  and never freed", this measures leaks directly and exactly, with no
+  allocator, page-rounding, or OS-baseline noise, which makes it portable
+  where an absolute RSS threshold is not. The fold per-element-float-box leak
+  guard (`test/native/native_arr_fold_leak_probe.march`, `test/dune`) now
+  asserts on it instead of peak RSS, after the RSS band — calibrated on macOS
+  — reported a false leak on CI's Linux leg, where the process baseline alone
+  is ~122 MB.
 
 ### Documentation
 

@@ -35,7 +35,19 @@ mod Config do
 
   -- Get or create the global config vault.
   -- First call creates the table; subsequent calls retrieve it by name.
-  pfn global_table() do
+  --
+  -- The `: Vault(v)` return annotation is deliberate and is Config's
+  -- documented opt-out from Vault's typed handles: a config store is
+  -- heterogeneous BY DESIGN (an Int port and a String host live under
+  -- (:bastion, :port) and (:bastion, :host) in this one table), so its
+  -- element type cannot be pinned. Annotating keeps the factory polymorphic;
+  -- an unannotated handle factory is monomorphic — see
+  -- `demote_vault_handle_vars` in lib/typecheck/typecheck.ml.
+  --
+  -- The consequence is that Config.get is as element-erased as Vault.get was
+  -- before typed handles: `Config.get(:ns, :key)` returns whatever the caller
+  -- asks for. Use a real Vault(v) handle when you want the check.
+  pfn global_table() : Vault(v) do
     match vault_whereis("__march_config__") do
     Some(tbl) -> tbl
     None      -> vault_new("__march_config__")
@@ -220,10 +232,13 @@ mod Config do
     Config.put_endpoint(4000, "localhost", secret)
   """
   fn put_endpoint(port, host, secret) do
-    let tbl = global_table()
-    vault_set(tbl, (:bastion, :port), port)
-    vault_set(tbl, (:bastion, :host), host)
-    vault_set(tbl, (:bastion, :secret_key_base), secret)
+    -- Three separate `global_table()` calls rather than one `let tbl = …`:
+    -- these three values have three different types (Int, String, String) and
+    -- a bound handle has ONE element type. Each call re-instantiates the
+    -- erased factory, which is the escape hatch this module opted into above.
+    vault_set(global_table(), (:bastion, :port), port)
+    vault_set(global_table(), (:bastion, :host), host)
+    vault_set(global_table(), (:bastion, :secret_key_base), secret)
   end
 
   doc "Get the configured HTTP port. Returns default_port if not set."
@@ -256,8 +271,11 @@ mod Config do
   Create an isolated named config store.
   Useful for testing or multi-tenant configurations.
   Returns an opaque store handle (a Vault table).
+
+  Element-erased for the same reason as `global_table` — a config store holds
+  values of many types.
   """
-  fn new_store(name) do
+  fn new_store(name) : Vault(v) do
     match vault_whereis(name) do
     Some(tbl) -> tbl
     None      -> vault_new(name)
