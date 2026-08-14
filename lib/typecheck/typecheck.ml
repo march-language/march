@@ -853,16 +853,21 @@ type env = {
       rather than a second implementation.  See
       [specs/2026-08-10-r1-stage-c-effect-rows-design.md]. *)
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
-  (** R1 stage C: functions whose signature makes them a DISCHARGE POINT —
+  (** Functions whose signature carries a concrete [Cap(P)] parameter —
       qualified name → (the concrete capability paths their PARAMETERS grant,
       the span to report against).  Recorded by [check_module_needs] (which
       already owns the [cap_qname] convention and already runs for nested
-      modules), consumed once by [check_fn_grants] at the end of
-      [check_module_core], after every module's recording has happened.
+      modules).
 
-      Parameter caps only: a returned [Cap(X)] is not a capability the
-      function was HANDED.  [main] is excluded — [check_main_grant] owns it,
-      and reporting both would double every whole-program violation. *)
+      R1 stage C (2026-08-10) once consumed this at the end of
+      [check_module_core] to make every [Cap(P)]-parameter function its own
+      grant-discharge point.  That check ([check_fn_grants]) was REMOVED
+      2026-08-13: it made any capability parameter a ceiling over everything
+      the function transitively reached, forcing every caller to thread
+      capabilities the module-scoped design does not require.  This table is
+      still populated — Task 8 reads it to attribute a whole-program grant
+      violation to the user's call chain — but nothing currently checks it.
+      [main] is excluded regardless — [check_main_grant] owns it. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -8965,15 +8970,15 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let refs = List.concat_map (fun (bound, e) -> free_vars_expr bound e) bodies in
     let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
     Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior));
-    (* R1 stage C: retain the same (params, body) pairs the reference walk
-       used, so a row SEED can be derived from them later. Deliberately not
-       walked here: the seed walk is a second full pass over every function
-       body, and its output ([deps]/[unknown]) is read only by
-       [check_fn_grants], which does nothing unless the program declares a
-       capability parameter. Doing it eagerly cost ~18% of `--check`
-       wall-clock across the conformance corpus for a result almost every
-       program discards. Storing the pairs is O(1) — they are already-built
-       AST nodes. *)
+    (* R1 stage C (now removed, 2026-08-13 — see [check_fn_grants]'s deletion
+       note near [fn_grant_points]): retain the same (params, body) pairs the
+       reference walk used, so a row SEED can be derived from them later.
+       Deliberately not walked here: the seed walk is a second full pass over
+       every function body, and its output ([deps]/[unknown]) is read only by
+       [dump_cap_rows]'s debug dump — nothing enforces on it anymore. Doing it
+       eagerly cost ~18% of `--check` wall-clock across the conformance corpus
+       for a result almost every program discards. Storing the pairs is
+       O(1) — they are already-built AST nodes. *)
     let prior_bodies =
       Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies fn_qname)
     in
@@ -9164,18 +9169,18 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
       let qname = cap_qname def.fn_name.txt in
       record_fn_caps qname sig_caps;
-      (* R1 stage C: a concrete [Cap(P)] PARAMETER makes this function a
-         discharge point.  Recorded here, checked once at the end of
-         [check_module_core] (see [check_fn_grants]) — recording and checking
-         must not be the same pass, because a module checked early would judge
-         itself against a closure the later modules have not contributed to
-         yet.
+      (* Record which functions carry a concrete [Cap(P)] PARAMETER.  R1 stage
+         C once made this a discharge point, checked once at the end of
+         [check_module_core] by [check_fn_grants]; that check was REMOVED
+         2026-08-13 (see [fn_grant_points]'s doc comment) because it made a
+         capability parameter a per-function ceiling, forcing threading.  This
+         recording step stays — Task 8 reads [fn_grant_points] — but nothing
+         currently checks it.
 
          Parameters only, not [ret_tys]: returning a [Cap(X)] is minting or
          forwarding one, not being handed one to spend.
 
-         [main] is skipped — [check_main_grant] is its discharge point, and
-         claiming it here would report every whole-program violation twice.
+         [main] is skipped — [check_main_grant] is its discharge point.
          [Cap(a)] contributes nothing: [caps_in_ty] yields no path for a type
          VARIABLE, so capability-polymorphic plumbing like [cap_narrow]'s
          signature creates no gate. *)
@@ -13066,7 +13071,13 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
      end-of-module consumer ([check_fn_grants]) — so without sharing, every
      `--check` ran the fixpoint twice over the whole stdlib-prepended program.
      That cost ~10% of wall-clock per file and pushed CI's @types-check step
-     (288 files, a 10-minute budget it was already using 9 of) over the limit. *)
+     (288 files, a 10-minute budget it was already using 9 of) over the limit.
+     [check_fn_grants] was REMOVED 2026-08-13 (see [fn_grant_points]'s doc
+     comment), so [check_module_core] is [rows]'s only caller now — but the
+     parameter stays, both as the cheapest way to keep this signature stable
+     for any future second consumer, and because [rows] is still how the
+     caller controls [~with_rows] (see its own call site: this function never
+     reads [deps]/[unknown], so it is solved caps-only there). *)
   (* R1 stage D: `main`'s grant is the UNION over ALL of its capability
      parameters, not the head of the first one's caps.  Same rule as
      [check_fn_grants]; [Desugar.check_main_signature] guarantees every
@@ -13357,6 +13368,11 @@ let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
   done;
   !result
 
+(* Kept unused after R1 stage C's removal (2026-08-13, the [check_fn_grants]
+   that used to call this was deleted) — Task 8 needs this to attribute a
+   grant violation to the user's call chain. Do not delete. *)
+let _ = cap_reach_chain
+
 (* [MARCH_DUMP_CAP_ROWS=1] prints the solved row table to stderr, one function
    per line, sorted.  This exists to make the `unknown` REFUSAL's blast radius
    measurable rather than assumed: the design gate for stage C was "count how
@@ -13383,94 +13399,6 @@ let dump_cap_rows (env : env) : unit =
       rows;
     Printf.eprintf "cap-row-summary total=%d unknown=%d\n" (List.length rows)
       unknown_count
-
-let check_fn_grants ?rows (env : env) : unit =
-  dump_cap_rows env;
-  if Hashtbl.length env.fn_grant_points > 0 then begin
-    let rows =
-      match rows with Some r -> r | None -> fn_capability_rows_tbl env
-    in
-    Hashtbl.iter
-      (fun qname (grants, span) ->
-         let row =
-           Option.value ~default:March_caps.Cap_rows.empty_row
-             (Hashtbl.find_opt rows qname)
-         in
-         let covered c = List.exists (fun g -> cap_subsumes g c) grants in
-         let grants_io = List.exists (fun g -> cap_subsumes "IO" g) grants in
-         let full_io = List.mem "IO" grants in
-         let show_grants =
-           String.concat " + "
-             (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
-         in
-         (* An untraceable invocation cannot be bounded, so a narrow grant
-            over it is refused outright.  Only when the function holds a
-            NARROW IO grant is there anything to refuse: `Cap(IO)` claims no
-            bound within the IO lattice, and a purely non-IO grant (an FFI
-            root) is governed by the extern checks, not this lattice. *)
-         if row.March_caps.Cap_rows.unknown && grants_io && not full_io then
-           Err.error env.errors ~span
-             (Printf.sprintf
-                "`%s` is granted %s, but its body invokes a function value \
-                 whose origin the capability analysis cannot trace, so no \
-                 caller can be held responsible for what it does. A narrow \
-                 grant cannot be certified over it.\n\
-                 help: grant `Cap(IO)` instead, or restructure so the invoked \
-                 function arrives as a parameter or a named function."
-                qname show_grants);
-         List.iter
-           (fun c ->
-              if not (cap_subsumes "IO" c) then ()  (* FFI root; not this lattice *)
-              else if covered c then ()
-              (* Stage B refuses `IO.Foreign` under ANY grant but `Cap(IO)`,
-                 because `main` holds exactly one capability and certifying a
-                 console bound over an extern block would be a lie.  At
-                 function granularity the same reasoning gives a different
-                 rule: a parameter of type `Cap(IO.Foreign)` IS an explicit
-                 grant of the unbounded thing, and the caller supplying it
-                 knows exactly what it is authorizing.  So the refusal applies
-                 only where the grant does NOT cover it — where it would
-                 otherwise be an ordinary violation, and this message is the
-                 more informative one to give.  (Pinned by
-                 [test_cap_hierarchy_args_ok], which takes four narrow caps
-                 including `Cap(IO.Foreign)` and must stay clean.) *)
-              else if cap_subsumes "IO.Foreign" c then
-                Err.error env.errors ~span
-                  (Printf.sprintf
-                     "`%s` is granted %s, but reaches `%s` — linked C code, \
-                      whose behavior the capability lattice cannot bound. A \
-                      narrow grant cannot be certified over an `extern` \
-                      block.\n\
-                      help: grant `Cap(IO)` or `Cap(IO.Foreign)` explicitly, \
-                      or remove the extern dependency from everything `%s` \
-                      reaches."
-                     qname show_grants c qname)
-              else
-                Err.error env.errors ~span
-                  (Printf.sprintf
-                     "`%s` is granted %s, but reaches `%s`%s. The grant is a \
-                      ceiling on everything `%s` can reach — declaring \
-                      `needs %s` does not raise it.\n\
-                      help: widen the parameter's capability, or remove the \
-                      use."
-                     qname show_grants c
-                     (match cap_reach_chain env ~from:qname ~cap:c with
-                      | Some (_ :: _ as chain) ->
-                        let shown =
-                          if List.length chain > 4 then
-                            "… -> "
-                            ^ String.concat " -> "
-                                (List.filteri
-                                   (fun i _ -> i >= List.length chain - 3)
-                                   chain)
-                          else String.concat " -> " chain
-                        in
-                        Printf.sprintf " (via %s)" shown
-                      | _ -> "")
-                     qname c))
-           (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
-      env.fn_grant_points
-  end
 
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
@@ -13772,18 +13700,17 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
     ~cap_qname_prefix:"";
   (* R1: hold the program's capability closure under main's grant. *)
-  (* Rows (deps/unknown) are only READ by [check_fn_grants], which does
-     nothing unless the program declares a capability parameter. Solving
-     caps-only otherwise keeps `--check` at its pre-stage-C cost. *)
-  let cap_rows =
-    fn_capability_rows_tbl
-      ~with_rows:(Hashtbl.length final_env.fn_grant_points > 0) final_env
-  in
+  (* [check_main_grant] deliberately does not consult [deps]/[unknown] (see
+     its own comment on the [unknown]-ignoring arm), and after stage C's
+     removal nothing else reads them from THIS table either — [dump_cap_rows]
+     solves its own copy independently, gated behind [MARCH_DUMP_CAP_ROWS], so
+     it does not benefit from (or need) this one being solved with rows.
+     [~with_rows:false] keeps this call at the caps-only fixpoint, which is
+     what [check_main_grant] actually reads — this was the pre-stage-C cost
+     and stays that with stage C gone. *)
+  let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
+  dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
-  (* R1 stage C: and each Cap-parameter function's row under its own grant.
-     After [check_module_needs] for every module, so the closure every
-     discharge point is judged against is complete. *)
-  check_fn_grants ~rows:cap_rows final_env;
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;

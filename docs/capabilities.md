@@ -16,9 +16,11 @@ March is a **capability-based language**: side effects are **visible in your typ
 > custom effects with row-polymorphic inference. What exists is a fixed,
 > closed lattice of IO/behavioral capabilities (`IO.Network`, `IO.FileWrite`,
 > `cap pure`, …), checked structurally by tracing which of them a function's
-> reachable call graph touches. A true per-function effect-row system is a
-> documented future direction, not something that exists today. See "effect
-> rows... stage C and not built" under [The grant](#grant), below.
+> reachable call graph touches. A true per-function effect-row system is
+> deliberately **not** built: it would make a `Cap(X)` parameter a ceiling
+> over everything a function reaches, forcing every caller to thread
+> capabilities it does not otherwise need — the opposite of March's
+> module-scoped design. See [The grant](#grant), below.
 
 ---
 
@@ -441,8 +443,13 @@ Two deliberate edges:
 
 The grant is `needs`' missing other half: `needs` says what a *module*
 touches, and the grant bounds what the *program* may. Sandbox ladder stages A/B/D
-are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`); per-function
-grants (effect rows) are stage C and not built.
+are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`). Per-function
+grants (effect rows) are stage C and deliberately **not** built: making a
+`Cap(X)` parameter a ceiling over everything a function reaches would force
+every caller to thread capabilities it does not otherwise need, which is the
+opposite of March's module-scoped design. A `Cap(X)` parameter is an authority
+marker at a module boundary; the *checks* are `needs`, the module ceiling, and
+`main`'s grant.
 
 ### When *not* to use IO capabilities
 

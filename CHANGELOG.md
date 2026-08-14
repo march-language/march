@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A `Cap(X)` parameter on a non-`main` function is no longer a ceiling on everything that
+  function transitively reaches. Taking one capability parameter used to oblige a function
+  to take parameters for every other capability it reached, forcing callers to thread
+  capabilities through the call graph. Capabilities are module-scoped: `needs`, the module
+  ceiling, and `main`'s grant are the checks. `main`'s grant is unchanged.
 - Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared, striped reader-count lock (`set`/`set_ttl`/`put_new`/`incr`/`push_capped`/`drop` still take it exclusively). Concurrent reads of *distinct* keys now scale close to linearly with thread count; concurrent reads of the *same* key are still bounded by reference-count contention on that key's one shared value, an orthogonal cost the lock change doesn't touch.
 - **`vault_get`/`vault_size`/`vault_keys` no longer require `needs IO.Mut`.** A Vault table is in-memory, so a lookup carries no ambient authority — only naming a table (`vault_new`/`vault_whereis`, mints a handle from a string) and mutating one (`vault_set`/`vault_set_ttl`/`vault_drop`/`vault_update`/`vault_put_new`/`vault_incr`/`vault_push_capped`) still do. Source-compatible: an existing module that declared `needs IO.Mut` only to read now over-declares (harmless; the checked stdlib carried no such module). Accepted trade-off: a reader of shared mutable state is now non-deterministic without saying so in its `needs` — authority remains auditable at the boundary, since some module still had to name/write the table under a declared capability.
 
