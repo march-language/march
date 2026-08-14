@@ -1987,36 +1987,91 @@ let internal_compiler_error_exit_code = 3
     module's --cap-strict ceiling owner name (the same keying
     [March_typecheck.Typecheck.module_caps] uses: the entry module's own TIR
     name, and both the bare and fully-qualified spelling of every nested
-    [DMod]) to the span [March_caps.Cap_ceiling.check] should attribute an
-    [Undeclared] violation to — that module's first [DNeeds] span if it
+    [DMod]) to (a) the span [March_caps.Cap_ceiling.check] should attribute
+    an [Undeclared] violation to — that module's first [DNeeds] span if it
     declares one, otherwise its own header span ([entry_span] for the entry
-    module, the [DMod]'s name span for a nested one).  Mirrors
-    [Typecheck.check_module_needs]'s [cap_qname_prefix] accumulation (empty
-    at the entry level) so a violation on a doubly-nested module resolves to
-    the SAME qualified key the ceiling matches attribution against. *)
+    module, the [DMod]'s own declaration span for a nested one) — and (b)
+    whether that span is a HEADER (no existing [DNeeds]) as opposed to an
+    existing [DNeeds] line, which [cap_ceiling_fix_indent] below needs to
+    pick the right indent for an inserted `needs` line.
+
+    Mirrors [Typecheck.check_module_needs]'s [cap_qname_prefix] accumulation
+    (empty at the entry level) so a violation on a doubly-nested module
+    resolves to the SAME qualified key the ceiling matches attribution
+    against. *)
 let cap_ceiling_module_spans ~entry_owner ~entry_span
-    (decls : March_ast.Ast.decl list) : (string * March_ast.Ast.span) list =
+    (decls : March_ast.Ast.decl list)
+    : (string * March_ast.Ast.span) list * (string * bool) list =
   let first_needs_span decls =
     List.find_map (function
         | March_ast.Ast.DNeeds (_, sp) -> Some sp
         | _ -> None)
       decls
   in
-  let acc = ref [ (entry_owner, Option.value ~default:entry_span (first_needs_span decls)) ] in
+  let span_and_is_header ~header decls =
+    match first_needs_span decls with
+    | Some sp -> (sp, false)
+    | None -> (header, true)
+  in
+  let spans = ref [] and is_header = ref [] in
+  let add name sp hdr =
+    spans := (name, sp) :: !spans;
+    is_header := (name, hdr) :: !is_header
+  in
+  let (entry_sp, entry_hdr) = span_and_is_header ~header:entry_span decls in
+  add entry_owner entry_sp entry_hdr;
   let rec walk ~prefix decls =
     List.iter (function
-        | March_ast.Ast.DMod (n, _, inner, _) ->
+        | March_ast.Ast.DMod (n, _, inner, decl_span) ->
           let qname = if prefix = "" then n.March_ast.Ast.txt
                       else prefix ^ "." ^ n.March_ast.Ast.txt in
-          let sp = Option.value ~default:n.March_ast.Ast.span (first_needs_span inner) in
-          acc := (qname, sp) :: !acc;
-          if qname <> n.March_ast.Ast.txt then acc := (n.March_ast.Ast.txt, sp) :: !acc;
+          (* [decl_span], not [n.span] — [n] is only the module NAME token
+             ("Dep" in "mod Dep do"), whose column is well past the line's
+             actual leading indentation.  [decl_span] (parser.mly:
+             [mk_span ($loc)] over the whole [mod ... end] production)
+             starts at the `mod` keyword itself, which IS the line's
+             indentation. *)
+          let (sp, hdr) = span_and_is_header ~header:decl_span inner in
+          add qname sp hdr;
+          if qname <> n.March_ast.Ast.txt then add n.March_ast.Ast.txt sp hdr;
           walk ~prefix:qname inner
         | _ -> ())
       decls
   in
   walk ~prefix:"" decls;
-  !acc
+  (!spans, !is_header)
+
+(** [cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header span] is the
+    column an inserted `needs` line for [span]'s module should start at:
+    the ACTUAL leading whitespace of [span]'s own source line (read from
+    [src], or from [read_file span.file] when the span points into a
+    different file than the one being compiled — a sibling module pulled in
+    via [MARCH_LIB_PATH]) when [span] is an existing [DNeeds] line (a new
+    line is a peer of it, same column); that plus 2 when [span] is a module
+    HEADER instead — the module's body, where the fix lands, is indented one
+    step deeper than its own header line. (This codebase's own convention;
+    March is not indentation-sensitive, so a wrong answer here is cosmetic,
+    never a build break — confirmed by [test_ceiling_violation_carries_a_span_and_a_fix],
+    which does not assert on indent width.) Reading the source line directly,
+    rather than trusting a token's [start_col], is deliberate: the natural
+    candidate span for a header ([DMod]'s NAME token) sits well past the
+    line's real indentation, which is exactly the bug this function fixes. *)
+let cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header
+    (span : March_ast.Ast.span) : int =
+  let file_src =
+    if span.March_ast.Ast.file = filename || span.March_ast.Ast.file = "" then src
+    else (try read_file span.March_ast.Ast.file with Sys_error _ -> src)
+  in
+  let lines = String.split_on_char '\n' file_src in
+  let base =
+    match List.nth_opt lines (span.March_ast.Ast.start_line - 1) with
+    | None -> 0
+    | Some line ->
+      let n = String.length line in
+      let rec count i = if i < n && line.[i] = ' ' then count (i + 1) else i in
+      count 0
+  in
+  if is_header then base + 2 else base
 
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
@@ -3041,7 +3096,7 @@ let compile filename =
          typecheck_env.March_typecheck.Typecheck.mod_needs)
         :: typecheck_env.March_typecheck.Typecheck.module_caps
       in
-      let module_spans = cap_ceiling_module_spans
+      let (module_spans, module_is_header) = cap_ceiling_module_spans
           ~entry_owner:pre_opt_tir.March_tir.Tir.tm_name
           ~entry_span:desugared.March_ast.Ast.mod_name.March_ast.Ast.span
           desugared.March_ast.Ast.mod_decls
@@ -3053,13 +3108,21 @@ let compile filename =
       if violations <> [] then begin
         (* Undeclared violations carry a span and a name to their own owning
            module (from [module_spans] above), so they render through the
-           SAME diagnostic pipeline as every other capability error — visible
-           to the LSP and machine-applicable by `forge fix` — rather than
-           the bespoke, file-less "-- CAPABILITY CEILING --" block this
-           replaces (see the same [vectorize_diags] pattern just below for
-           the render precedent: a fresh [Err.ctx], not the shared
-           typecheck [errors], since this runs after that context has
-           already been drained and printed).
+           SAME diagnostic pipeline as every other capability error — with
+           a real span, a source excerpt, and a machine-applicable [FInsert]
+           fix — rather than the bespoke, file-less
+           "-- CAPABILITY CEILING --" block this replaces (see the same
+           [vectorize_diags] pattern just below for the render precedent: a
+           fresh [Err.ctx], not the shared typecheck [errors], since this
+           runs after that context has already been drained and printed).
+
+           This does NOT yet make the violation visible to the LSP or
+           applicable by `forge fix` — this only runs on the [--compile]
+           path, which `--check`/`--check-json` (forge fix's only input,
+           see [run_check_cmd]) never reaches. The fix payload is real and
+           ready; it has no consumer until the ceiling also runs under
+           [--check] (tracked in
+           specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md).
 
            [Unattributed] violations name no module and therefore have no
            span to point at — the ceiling's own [.mli] documents why this
@@ -3070,11 +3133,18 @@ let compile filename =
           (fun v ->
              match v with
              | March_caps.Cap_ceiling.Undeclared { cap; owner; span } ->
+               let is_header =
+                 match List.assoc_opt owner module_is_header with
+                 | Some h -> h | None -> true
+               in
+               let indent =
+                 cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header span
+               in
                March_errors.Errors.error_with_fix ctx ~span
                  ~code:("cap_ceiling:" ^ cap)
                  ~fix:(March_errors.Errors.FInsert {
                    after_line = span.March_ast.Ast.start_line;
-                   text = "  needs " ^ cap })
+                   text = String.make indent ' ' ^ "needs " ^ cap })
                  (Printf.sprintf
                     "module `%s` uses `%s` but does not declare `needs %s`.\n\
                      help: add `needs %s` to the module body."

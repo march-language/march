@@ -10,9 +10,11 @@ landed" section below.**
 The `--cap-strict` ceiling (`lib/caps/cap_ceiling.ml`, `--compile`-only) used
 to be reported via a bespoke `-- CAPABILITY CEILING --` block in
 `bin/main.ml`: no file, no line, no source excerpt, no machine-applicable
-fix. Every other capability diagnostic in the compiler goes through `Err`
-and is therefore visible to the LSP and fixable by `forge fix`; the ceiling
-was the one exception.
+fix. Every other capability diagnostic in the compiler goes through `Err`,
+which is what makes it visible to the LSP and fixable by `forge fix`; the
+ceiling was the one exception. It will become visible to the LSP and
+applicable by `forge fix` once the ceiling also runs under `--check` (see
+"Step 5: not landed" below) — until then the fix payload has no consumer.
 
 1. **`lib/caps/cap_ceiling.ml`/`.mli`**: `Undeclared` now carries a
    `span : March_ast.Ast.span` — the owning module's first `DNeeds` span, or
@@ -34,10 +36,16 @@ was the one exception.
    point) and emits each `Undeclared` violation via
    `Err.error_with_fix ~span ~code:("cap_ceiling:" ^ cap) ~fix:(FInsert ...)`,
    then renders through the same `render_diagnostic` pipeline every other
-   diagnostic uses (file/line resolution, source excerpt, `forge fix`
-   compatibility). `Unattributed` violations (no owner, no span) keep the
-   old bespoke `eprintf` line — see below for why. The trailing summary line
-   and the `--no-cap-strict` mention are unchanged, per the brief.
+   diagnostic uses (file/line resolution, source excerpt) and carries a
+   machine-applicable `FInsert` fix payload in the same shape `forge fix`
+   already knows how to apply. That payload has no consumer YET, though —
+   this only runs on the `--compile` path, and `forge fix`'s only input is
+   `march --check-json`, which exits before this code ever runs (see "Step
+   5: not landed" below and
+   `specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md`).
+   `Unattributed` violations (no owner, no span) keep the old bespoke
+   `eprintf` line — see below for why. The trailing summary line and the
+   `--no-cap-strict` mention are unchanged, per the brief.
 
 3. **`forge/lib/cmd_cap.ml`**: `ceiling_violations` (the `forge cap inspect
    --strict` re-check against a built artifact) passes `~module_spans:[]` —
@@ -134,10 +142,14 @@ it never flipped an accepting program to a rejecting one in testing. But
 `own_cap_closures`'s reference edges (`env.fn_refs`, built from
 `free_vars_expr`) are deliberately over-inclusive by a documented design
 decision one layer down: they record a reference to a capability-typed
-function whether or not it is ever actually CALLED (see the "cardinal sin"
-comment on `record_fn_refs` in `typecheck.ml`, ~line 9007 — precisely so a
-function merely passed around as a *value* isn't falsely treated as pure).
-Combined with signature pollution, this means a module that references
+function whether or not it is ever actually CALLED (see `record_fn_refs`'s
+doc comment in `typecheck.ml`, ~8990-8996 — precisely so a function merely
+passed around as a *value* isn't falsely treated as pure; that same
+over-inclusion is also the OPPOSITE-direction failure that comment's own
+"cardinal sin" remark two paragraphs later, ~line 9009, is about — a false
+POSITIVE from a sibling merely sharing scope, not the false negative this
+citation is making). Combined with signature pollution, this means a module
+that references
 (but never calls) another module's `Cap(X)`-parameterized helper —
 `let f = Utils.demo` and nothing more, no independent `Cap(X)` obligation of
 its own — would inherit `X` into its transitive closure and could be

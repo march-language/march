@@ -37,6 +37,18 @@ currently checks `Dep`'s manifest against `Dep`'s own use). `--compile`
 correctly rejects it: `` module `Dep` uses `IO.FileRead` but does not
 declare `needs IO.FileRead` ``.
 
+**A second, independent reason to land this**: Task 7 Steps 3-4 already gave
+each `Undeclared` violation a real span and a machine-applicable `FInsert`
+fix (see `specs/progress/2026-08-13-capability-ceiling-second-class-and-compile-only.md`).
+That payload is unconsumed today — `forge fix`'s only input is `march
+--check-json` (`forge/lib/cmd_cap.ml` is unrelated; the relevant call site
+is `forge/lib/cmd_fix.ml:52`), and `bin/main.ml`'s `--check-json` branch
+prints and exits well before the `--compile`-only ceiling block ever runs,
+so the fix currently reaches neither `forge fix` nor the LSP. Landing this
+item doesn't just close the detection gap — it is also what turns an
+already-built, already-tested fix payload into something a user can
+actually apply.
+
 **Why the obvious fix (reuse `Typecheck.own_cap_closures`) is unsound**:
 `own_cap_closures` is fed both a function's body-scanned capabilities AND
 its SIGNATURE capabilities (`record_fn_caps qname sig_caps`, typecheck.ml
@@ -62,13 +74,20 @@ each independently buggy; two prior signature-vs-body confusions in this
 same subsystem).
 
 **Also note**: `env.fn_refs` is deliberately over-inclusive by design one
-layer below this (a function referenced as a value, not just called, must
-still count — see the "cardinal sin" comment on `record_fn_refs`,
-typecheck.ml ~line 9007, guarding against the OPPOSITE false-negative bug).
-Whatever seeds a body-only table still walks that same over-inclusive edge
-set, so a module that merely holds a reference to (without ever calling) a
-`Cap(X)`-parameterized helper elsewhere could still inherit `X` falsely.
-Worth an explicit test case before this ships, not just the `main`-shape
+layer below this — see `record_fn_refs`'s doc comment, typecheck.ml
+~8990-8996: `free_vars_expr` is used instead of a calls-only walker
+specifically because a function referenced as a *value*, not just called,
+must still contribute its capabilities, or they "silently vanish from the
+caller's closure" (that comment's own words for the false-NEGATIVE this
+guards against). The SEPARATE "cardinal sin" remark two paragraphs later
+(~line 9009) is the opposite-direction failure this same over-inclusion can
+cause — a sibling function merely sharing scope inheriting capabilities it
+never uses — which is a false POSITIVE, not the false negative. Both are
+real and both matter here: whatever seeds a body-only table still walks
+that same over-inclusive edge set, so a module that merely holds a
+reference to (without ever calling) a `Cap(X)`-parameterized helper
+elsewhere could still inherit `X` falsely. Worth an explicit test case
+before this ships, not just the `main`-shape
 regression test the 2026-08-08 fix already has.
 
 Not urgent — under-reporting (this gap) is the tolerable failure mode per

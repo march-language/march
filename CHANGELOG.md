@@ -30,9 +30,12 @@ git log is authoritative for exact commits.
   every missing capability, with a single fix that inserts them all, instead of one error
   per offending call site.
 - A `--cap-strict` capability ceiling violation is now reported as an ordinary diagnostic —
-  file, line, source excerpt, and an applicable fix that inserts the missing `needs` line —
-  instead of a bespoke `-- CAPABILITY CEILING --` block with none of those. It is now visible
-  to the LSP and applicable by `forge fix`, like every other capability diagnostic.
+  file, line, source excerpt, and a machine-applicable `FInsert` fix that inserts the missing
+  `needs` line — instead of a bespoke `-- CAPABILITY CEILING --` block with none of those. It
+  will become visible to the LSP and applicable by `forge fix` once the ceiling also runs under
+  `--check` (`forge fix`'s only input is `march --check-json`, which today exits before this
+  diagnostic is ever built, so the fix has no consumer yet — see
+  `specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md`).
   `march --check` still does not run the ceiling (it does not lower to TIR, which the check
   currently requires); a module whose `needs` manifest is falsified only by a stdlib-mediated
   call (`File.read` rather than `file_read`) is still caught only by `march --compile`.
