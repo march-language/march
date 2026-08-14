@@ -18,6 +18,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `forge fix` now applies capability fixes. It previously refused to run whenever any
+  error-severity diagnostic carried a machine-applicable fix — which is exactly what the
+  missing-`needs` and missing-grant errors emit, so the fix those errors advertised could
+  never be applied.
+
 - **`Regex` no longer has a denial-of-service on adversarial input.** The
   engine matched by backtracking, so repeated quantifiers over one character
   class followed by a byte that never matches cost O(n^k): the pattern

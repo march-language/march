@@ -13171,7 +13171,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             The span has to be [fc_params_span] specifically — `main`'s NAME
             span would yield `fn main(…)() : ()`, and the clause span covers
             the body. That is why `fn_clause` grew the field. *)
-         Err.error_with_fix env.errors ~span
+         Err.error_with_fix env.errors ~span ~code:"cap_grant"
            ~fix:(Err.FReplace
                    { span = params_span; text = Printf.sprintf "(%s)" suggested })
            (Printf.sprintf

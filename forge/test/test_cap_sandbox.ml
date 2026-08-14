@@ -174,6 +174,34 @@ let test_filereads_enforceability_matches_backend () =
     Alcotest.(check bool) "Advisory only on a non-bwrap backend" true
       (not (Sys.file_exists "/usr/bin/bwrap" || Sys.file_exists "/bin/bwrap"))
 
+let test_forge_fix_applies_capability_errors () =
+  (* A capability-incorrect module must be repaired by `forge fix`, not
+     refused. Both fixes are error-severity: the missing grant on `main`
+     and the missing `needs` line. `collect_all_fixes` used to set
+     `has_errors` on exactly the diagnostics that carry a fix (the ones
+     `parse_fix_line` doesn't discard), so `forge fix` refused precisely
+     when it had safe work to do. *)
+  let dir = Filename.concat (Filename.get_temp_dir_name ()) "forge_fix_caps" in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)));
+  ignore (Sys.command (Printf.sprintf "mkdir -p %s/lib" (Filename.quote dir)));
+  let src = Filename.concat dir "lib/ffc.march" in
+  let oc = open_out src in
+  output_string oc "mod Ffc do\n  fn main() do\n    println(\"hi\")\n  end\nend\n";
+  close_out oc;
+  let toml = open_out (Filename.concat dir "forge.toml") in
+  output_string toml "[package]\nname = \"ffc\"\nversion = \"0.1.0\"\ntype = \"app\"\n\n[deps]\n";
+  close_out toml;
+  let rc = Sys.command (Printf.sprintf "cd %s && forge fix > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "forge fix succeeds on capability errors" 0 rc;
+  let ic = open_in src in
+  let n = in_channel_length ic in
+  let content = really_input_string ic n in
+  close_in ic;
+  Alcotest.(check bool) "needs line inserted" true
+    (has_deny content "needs IO.Console");
+  Alcotest.(check bool) "grant parameter inserted" true
+    (has_deny content "Cap(IO.Console)")
+
 let tests =
   [
     Alcotest.test_case "bwrap read scoping" `Quick test_bwrap_read_scoping;
@@ -194,6 +222,8 @@ let tests =
       test_target_binary_always_launchable;
     Alcotest.test_case "unenforceable caps declared advisory" `Quick
       test_unenforceable_caps_are_declared_advisory;
+    Alcotest.test_case "forge fix applies capability errors" `Quick
+      test_forge_fix_applies_capability_errors;
   ]
 
 let () = Alcotest.run "cap_sandbox" [ ("cap_sandbox", tests) ]
