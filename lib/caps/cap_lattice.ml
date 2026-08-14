@@ -115,9 +115,18 @@ let leaf c =
     [Some known] naming the closest known capability when it is not.
 
     A path rooted at [IO] must appear in [hierarchy] — that lattice is closed.
-    Any other root is an FFI capability (see the header comment) and is legal,
-    UNLESS its leaf matches a known capability's leaf case-insensitively, which
-    is the `needs Network` case: a real capability written without its path. *)
+    Any other root is an FFI/proof capability (see the header comment) and is
+    legal, INCLUDING a dotted one like [Db.Migrated] or [MyLib.Clock] — a
+    dotted non-[IO] path is never mistaken for a mistyped [IO] capability,
+    because it is unambiguously its own namespaced root.
+
+    The leaf-collision rule (a leaf matching a known capability's leaf
+    case-insensitively is rejected in favor of the known capability) applies
+    ONLY to a bare, single-segment name: that's the `needs Network` case, a
+    real capability written without its `IO.` path. Gating it on "no dot"
+    keeps it from misfiring on a legitimate dotted FFI root whose last
+    segment happens to coincide with an IO leaf (e.g. [MyLib.Clock],
+    [Vendor.Random] — these must stay legal, exactly like [Db.Migrated]). *)
 let suggest_cap cap =
   if List.mem cap known_caps then None
   else begin
@@ -125,13 +134,15 @@ let suggest_cap cap =
     let is_io_rooted =
       cap = "IO" || (String.length cap > 3 && String.sub cap 0 3 = "IO.")
     in
+    let is_dotted = String.contains cap '.' in
     let leaf_match =
-      List.find_opt (fun k -> lower (leaf k) = lower (leaf cap)) known_caps
+      if is_dotted && not is_io_rooted then None
+      else List.find_opt (fun k -> lower (leaf k) = lower (leaf cap)) known_caps
     in
     match leaf_match with
     | Some k -> Some k
     | None ->
-      if not is_io_rooted then None   (* an FFI root; legal *)
+      if not is_io_rooted then None   (* an FFI/proof root; legal *)
       else
         let scored =
           List.map (fun k -> (edit_distance (lower cap) (lower k), k)) known_caps

@@ -10049,6 +10049,35 @@ let test_ffi_capability_root_still_accepted () =
   Alcotest.(check bool) "an FFI capability root is not reported unknown"
     false (has_error_with ctx "is not a known capability")
 
+(* Fix round 1: the leaf-collision rule (a bare `needs Network` suggesting
+   `IO.Network`) was firing on any non-IO-rooted path, not just a bare
+   single-segment one — so a legitimate DOTTED FFI/proof capability whose
+   last segment happens to coincide with a known IO capability's leaf
+   (`MyLib.Clock`, `Vendor.Random`) was wrongly rejected and pointed at an
+   unrelated IO capability. A dotted non-IO root is unambiguously its own
+   namespace (exactly like `Db.Migrated`/`Db.P`, which the sweep found
+   already in the corpus) and must stay legal regardless of what its leaf
+   happens to spell. *)
+let test_dotted_ffi_capability_with_io_leaf_collision_still_accepted () =
+  let ctx = typecheck {|mod DottedFfiClock do
+    needs MyLib.Clock
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a dotted FFI capability is not reported unknown"
+    false (has_error_with ctx "is not a known capability")
+
+let test_dotted_ffi_capability_with_io_leaf_collision_still_accepted_2 () =
+  let ctx = typecheck {|mod DottedFfiRandom do
+    needs Vendor.Random
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a dotted FFI capability is not reported unknown"
+    false (has_error_with ctx "is not a known capability")
+
 (* ── R1 stages A+B: main's capability parameter IS the grant ──────────────
    specs/2026-08-08-r1-no-ambient-io-design.md.
 
@@ -14613,6 +14642,8 @@ let compiler_suites =
           Alcotest.test_case "wrong-case capability rejected"              `Quick test_wrong_case_capability_is_rejected;
           Alcotest.test_case "bare leaf capability rejected"               `Quick test_bare_leaf_capability_is_rejected;
           Alcotest.test_case "FFI capability root still accepted"          `Quick test_ffi_capability_root_still_accepted;
+          Alcotest.test_case "dotted FFI cap with IO-leaf collision (Clock) accepted"  `Quick test_dotted_ffi_capability_with_io_leaf_collision_still_accepted;
+          Alcotest.test_case "dotted FFI cap with IO-leaf collision (Random) accepted" `Quick test_dotted_ffi_capability_with_io_leaf_collision_still_accepted_2;
         ] );
       ( "cap_grant", [
           Alcotest.test_case "narrow grant covers console"        `Quick test_grant_narrow_covers_console;
