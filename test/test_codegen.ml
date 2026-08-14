@@ -12593,6 +12593,7 @@ declare ptr    @ring_buf_to_list(ptr %rb)
 ; Time builtins
 declare double @march_unix_time()
 declare i64  @march_peak_rss_bytes()
+declare i64  @march_live_allocs()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
 ; HTTP client builtins
 declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)

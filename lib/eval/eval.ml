@@ -5737,6 +5737,23 @@ let base_env : env =
           VInt (stat.Gc.top_heap_words * (Sys.word_size / 8))
         | _ -> eval_error "peak_rss_bytes: takes no arguments"))
 
+    (* ---- live_allocs(): net count of live March heap objects ----
+       In a COMPILED program this reads march_live_allocs() — the runtime's
+       always-on alloc/free-on-rc-zero counter — and is exact.  The tree-walker
+       has no such objects at all: interpreted values are OCaml values managed
+       by the OCaml GC, and no march_alloc ever runs.  There is no meaningful
+       approximation, so this returns a constant 0 rather than inventing a
+       number that could be mistaken for a real measurement.
+       CONSEQUENCE, and it is deliberate: a leak guard built on live_allocs is
+       only falsifiable in the COMPILED path.  test/native's leak probes print
+       it to STDERR and let the dune threshold rule read it from the compiled
+       binary's captured stderr, keeping STDOUT (which IS diffed against an
+       interpreter-produced .expected) free of it.  Do not assert on this
+       value from an interpreted test. *)
+  ; ("live_allocs", VBuiltin ("live_allocs", function
+        | [] | [VUnit] -> VInt 0
+        | _ -> eval_error "live_allocs: takes no arguments"))
+
     (* ---- TCP socket builtins ---- *)
   ; ("tcp_connect", VBuiltin ("tcp_connect", function
         | [VString host; VInt port] ->

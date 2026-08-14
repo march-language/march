@@ -5,10 +5,31 @@
 -- table next to the gated `unix_time`).
 --
 -- Only ORDER-STABLE facts are printed, never raw byte counts: RSS varies by
--- run, allocator, and platform. The two bounds on the delta are the actual
--- unit assertion -- a Linux kilobytes-vs-bytes mistake would make the delta
+-- run, allocator, and platform. The two bounds on `after` are the actual
+-- unit assertion -- a Linux kilobytes-vs-bytes mistake would make the value
 -- ~1024x too small and fail the lower bound; mistakenly treating macOS bytes
--- as kilobytes would fail the upper bound.
+-- as kilobytes would make it ~1024x too large and fail the upper bound.
+--
+-- THE BOUNDS ARE ON THE ABSOLUTE VALUE, NOT THE DELTA, and that is
+-- deliberate. This test first asserted `after - before > 32000000` and went
+-- RED on CI's ubuntu leg while staying green on macOS. That was NOT a unit
+-- bug: 128,143,360 == 125,140 * 1024, so the Linux `* 1024` normalisation in
+-- march_peak_rss_bytes had fired correctly and the process really did have a
+-- ~122 MB resident peak before this fixture allocated anything. peak RSS is a
+-- HIGH-WATER MARK, so when the baseline peak already exceeds what the test
+-- allocates, the delta saturates at 0 no matter how correct the units are.
+--
+-- The two platforms' baselines are what diverge, measured on this fixture:
+--   Darwin arm64   before =   2,211,840 B (2.1 MB)  -> delta ~64 MB, passed
+--   ubuntu (CI)    before ~ 128,143,360 B (122 MB)  -> delta ~0,     failed
+-- A delta lower bound is therefore only meaningful on a platform whose
+-- baseline happens to be small -- i.e. it is not portable. The absolute
+-- value is immune to baseline saturation (a bigger baseline only pushes
+-- `after` further ABOVE the lower bound) while keeping full 1024x
+-- falsifiability in both directions: on Darwin `after` is 66,322,432 B, so a
+-- KB-as-bytes read would report ~64,768 (500x below the lower bound) and a
+-- bytes-scaled-by-1024 read ~6.8e10 (8.5x above the upper bound).
+-- Do not "restore" the delta form.
 mod PeakRss do
   needs IO.Console
   fn main(_cap_console : Cap(IO.Console)) do
@@ -17,10 +38,13 @@ mod PeakRss do
     let after = peak_rss_bytes()
     println(before > 0)                          -- true
     println(after >= before)                      -- true
-    -- 64MB allocated: the delta must be in the tens of MB, NOT ~62 (KB misread)
-    -- nor ~67e9
-    println(after - before > 32000000)            -- true
-    println(after - before < 640000000)           -- true
+    -- 64MB allocated, so peak RSS is at least tens of MB: NOT ~65,000 (a KB
+    -- value misreported as bytes) nor ~7e10 (bytes wrongly scaled by 1024).
+    -- Real peaks here are ~70 MB (macOS) to ~190 MB (Linux, whose baseline
+    -- alone is ~122 MB); 8 GB leaves ~40x headroom over the largest of those
+    -- while sitting ~9x BELOW the smallest value a 1024x error could produce.
+    println(after > 32000000)                     -- true
+    println(after < 8000000000)                   -- true
     println(NativeArray.get_u8(a, 0))              -- 7 (keeps `a` live past the measurement)
   end
 end

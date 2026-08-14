@@ -771,6 +771,10 @@ let builtins : builtin list = [
      typecheck.ml — deliberately absent from the capability table). *)
   { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_peak_rss_bytes()" };
+  (* live_allocs: net live march_alloc count; ambient for the same reason as
+     peak_rss_bytes above. Exact and platform-independent — see typecheck.ml. *)
+  { march_name = "live_allocs"; c_name = Some "march_live_allocs"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_live_allocs()" };
   { march_name = "tcp_connect"; c_name = Some "march_tcp_connect"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_connect(ptr %host, i64 %port)" };
   { march_name = "http_serialize_request"; c_name = Some "march_http_serialize_request"; ret_ty = Some Tir.TString;
@@ -1471,6 +1475,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PComment "; Time builtins";
   PDeclare "march_unix_time";
   PDeclare "march_peak_rss_bytes";
+  PDeclare "march_live_allocs";
   PDeclare "march_tcp_connect";
   PComment "; HTTP client builtins";
   PDeclare "march_http_serialize_request";

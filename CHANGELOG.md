@@ -109,8 +109,8 @@ git log is authoritative for exact commits.
   each iteration (confirmed safe — not a use-after-free — by inspecting the
   compiled closure's `-emit-llvm` output, which always allocates a fresh box
   when storing an element rather than aliasing the one passed in); that
-  release is pinned by `test/native/native_arr_fold_leak_probe.march`, an RSS
-  guard, since an output diff cannot see a leak.
+  release is pinned by `test/native/native_arr_fold_leak_probe.march`, a
+  live-object-count guard, since an output diff cannot see a leak.
   **A second, separate leak remains open:** `fold_float` / `fold_f32` with a
   `Float` **accumulator** leak a further ~32 B per element, because each
   iteration's accumulator box is never released — 5M elements cost 193.6 MB
@@ -300,6 +300,34 @@ git log is authoritative for exact commits.
   `test/dune`) now uses it to measure its own RSS from inside the process,
   replacing a Darwin-only `/usr/bin/time -l` check — the guard runs on both
   CI legs for the first time.
+- **FFI extern binding a C symbol the runtime preamble already declares no
+  longer fails to compile.** An `extern` whose C name matched a preamble
+  declare (e.g. `fn live_allocs(): Int = "march_live_allocs"`) emitted a
+  second `declare` for the same symbol, which LLVM rejects outright as
+  `invalid redefinition of function` — the whole module failed to build. The
+  extern's declare is now suppressed when the preamble already emitted one.
+  The skip set is computed from the preamble text actually emitted for the
+  current target, so a native-only symbol is still declared normally when
+  compiling to WASM. Surfaced by adding `live_allocs` as a builtin, which
+  moved `march_live_allocs` into the preamble while `test/native/ffi_leak.march`
+  and `ffi_resource.march` were already binding it as an extern.
+- **`live_allocs` builtin** — process self-inspection returning the net count
+  of live March heap objects (every `march_alloc` increments, every
+  free-on-refcount-zero decrements; an always-on relaxed atomic, not gated
+  behind a stats flag). Like `peak_rss_bytes` it is ambient and needs no
+  capability grant — it reads one process-local counter and observes nothing
+  outside the process. **Compiled builds only** report a real count: the
+  tree-walking interpreter allocates no March heap objects at all (its values
+  are OCaml values under the OCaml GC), so it returns a constant `0` rather
+  than an approximation that could be mistaken for a measurement — never
+  assert on it from an interpreted test. Because a leak is exactly "allocated
+  and never freed", this measures leaks directly and exactly, with no
+  allocator, page-rounding, or OS-baseline noise, which makes it portable
+  where an absolute RSS threshold is not. The fold per-element-float-box leak
+  guard (`test/native/native_arr_fold_leak_probe.march`, `test/dune`) now
+  asserts on it instead of peak RSS, after the RSS band — calibrated on macOS
+  — reported a false leak on CI's Linux leg, where the process baseline alone
+  is ~122 MB.
 
 ### Documentation
 

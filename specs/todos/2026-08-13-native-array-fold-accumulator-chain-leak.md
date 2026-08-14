@@ -82,6 +82,12 @@ shapes.
 
 `test/native/native_arr_fold_leak_probe.march` already has the apparatus: give
 it a third leg with a **Float** accumulator and extend the dune threshold rule.
+Note that the probe's signal is now `live_allocs()` (net live March objects),
+not peak RSS — the RSS band above was macOS-calibrated and reported a false
+leak on CI's Linux leg, whose process baseline alone is ~122 MB. The new leg
+should assert on the live-object delta too: expect it to add one leaked object
+per element, the same shape as the element box, so the existing `< 1000`
+threshold already catches it once the leg is added.
 Today that leg is deliberately absent, and the two existing legs deliberately
 use an **Int** accumulator, so the existing guard isolates the element box and
 does not fire for this still-open leak. The fixture's header comment says so

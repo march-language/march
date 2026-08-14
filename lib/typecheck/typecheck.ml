@@ -2396,6 +2396,14 @@ let builtin_bindings : (string * scheme) list =
        needs no capability grant. Don't "fix" that by copying unix_time's
        cap-table entry. *)
     ("peak_rss_bytes",  Mono (TArrow (t_unit,  t_int)));
+    (* live_allocs: net count of live March heap objects (march_alloc minus
+       free-on-rc-zero). Same ambient, non-capability-gated rationale as
+       peak_rss_bytes directly above — it reads one process-local counter and
+       observes nothing outside this process. Unlike peak_rss_bytes it is
+       exact and platform-independent (a plain atomic counter, no getrusage,
+       no allocator or OS accounting in the path), which is why the RSS leak
+       probes now assert on it instead. *)
+    ("live_allocs",     Mono (TArrow (t_unit,  t_int)));
     ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
     ("uuid_v7_at",      Mono (TArrow (t_int,   t_string)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));

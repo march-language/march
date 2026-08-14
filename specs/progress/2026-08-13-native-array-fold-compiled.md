@@ -66,11 +66,20 @@ details are load-bearing, not just belt-and-suspenders).
    storage rather than aliasing the box passed in, so the original `elem`
    box has no surviving alias once the call returns and dropping it is
    always safe. Now **pinned** by `test/native/native_arr_fold_leak_probe.march`
-   plus three `test/dune` rules (run / stdout diff / RSS threshold), added at
+   plus three `test/dune` rules (run / stdout diff / leak threshold), added at
    final review: an output diff cannot see a leak, so before that guard
    existed deleting either `march_decrc(elem)` left every gate green.
-   Falsifiability established by sabotage in both directions and both lines —
-   48.1 MB healthy, 170.6 MB with either decrc removed, threshold 96 MB.
+
+   The guard originally asserted an absolute **peak RSS** band calibrated on
+   Darwin (48.1 MB healthy, 170.6 MB with either decrc removed, threshold
+   96 MB). That band was not portable: the first ubuntu CI run reported
+   128,143,360 B on a healthy tree, because Linux's process baseline is
+   ~122 MB by itself. It now asserts on the `live_allocs()` builtin — the
+   runtime's always-on net count of live March objects — which measures the
+   defect exactly and needs no per-platform calibration. Falsifiability
+   re-established by sabotage in both directions and both lines on Darwin
+   arm64: **live_allocs delta 3 healthy, 4,000,003 with either decrc
+   removed** (exactly one leaked box per element), threshold 1000.
 
    The accumulator has the identical borrowed-argument shape and is *also*
    never freed by the callee, but that half of the leak is inherited from the

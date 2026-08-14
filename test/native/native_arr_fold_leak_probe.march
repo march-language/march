@@ -1,4 +1,4 @@
--- RSS guard for the per-ELEMENT float box leak in the compiled
+-- Leak guard for the per-ELEMENT float box leak in the compiled
 -- NativeArray.fold_float / fold_f32 runtime helpers.
 --
 -- native_float_arr_fold / native_f32_arr_fold materialise each stored
@@ -6,38 +6,54 @@
 -- (the wire ABI passes a Float argument as an erased boxed pointer). The
 -- closure treats that argument as borrowed and never releases it, so
 -- without the explicit `march_decrc(elem)` after the call the box leaks:
--- ~32 B per ELEMENT, unbounded in array length. An output diff cannot see
--- this -- the fold returns the right number either way -- so RSS is the
--- only signal, hence this probe. (native_arr_fold.march remains the
--- correctness/parity witness; this file guards only memory.)
+-- one heap object per ELEMENT, unbounded in array length. An output diff
+-- cannot see this -- the fold returns the right number either way -- so a
+-- memory signal is the only one available, hence this probe.
+-- (native_arr_fold.march remains the correctness/parity witness; this file
+-- guards only memory.)
+--
+-- SIGNAL: live_allocs(), NOT RSS. live_allocs() reads the runtime's
+-- always-on march_live_alloc_count -- incremented in march_alloc,
+-- decremented on every free-on-rc-zero path. A leak is exactly "objects
+-- allocated and never freed", so this counts the defect directly: no
+-- allocator free-list behaviour, no page-granularity rounding, no
+-- OS/platform baseline. That last point is why it replaced peak RSS here.
+-- The RSS threshold was calibrated on Darwin (healthy 48 MB, leaked 170 MB,
+-- threshold 96 MB) and went RED the first time CI's ubuntu leg ran it, at
+-- 128,143,360 B -- not a leak, just a ~122 MB Linux process baseline that
+-- the macOS-derived band never accounted for. An absolute-RSS threshold is
+-- not portable; a live-object count needs no calibration at all.
 --
 -- ACCUMULATOR TYPE IS LOAD-BEARING. There is a SECOND, still-open leak in
 -- these same helpers: when the accumulator is itself a Float, each
 -- iteration's march_alloc_float result becomes the next accumulator and is
--- never released either (~32 B/element on top of the element box) --
--- inherited from the reference march_typed_array_fold and tracked in
+-- never released either (one more object per element on top of the element
+-- box) -- inherited from the reference march_typed_array_fold and tracked in
 -- specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md. An
 -- INT accumulator is wire-tagged, never heap-allocated, so it contributes
--- zero bytes and this probe measures the element box in ISOLATION. Do not
--- "simplify" either fold body to `acc +. x` -- that would make the rule
--- fail for the OTHER, known-open leak and destroy its ability to pin this
--- one.
+-- zero live objects and this probe measures the element box in ISOLATION.
+-- Do not "simplify" either fold body to `acc +. x` -- that would make the
+-- rule fail for the OTHER, known-open leak and destroy its ability to pin
+-- this one.
 --
 -- Both legs are needed: the two decrc(elem) calls are separate lines in
--- separate C functions, and deleting either one alone must go RED. Each leg
--- is its own pfn, but note that freeing an array does NOT hand pages back to
--- the OS, so peak RSS is the SUM of the two arrays (32 MB f64 + 16 MB f32),
--- not the max. That is accounted for in the threshold below.
+-- separate C functions, and deleting either one alone must go RED. Because
+-- the signal is a net live count and each leg's array is released when its
+-- pfn returns, the two legs do not interact -- unlike peak RSS, where freed
+-- pages are not handed back to the OS and the two arrays had to be summed.
 --
--- Numbers, measured on this fixture at 4,000,000 elements per leg (Darwin
--- arm64, --opt 2). Both sabotage directions were actually run, not reasoned:
---   both decrc present       peak RSS =  50,397,184 B ( 48.1 MB)
---   f64 decrc(elem) deleted  peak RSS = 178,896,896 B (170.6 MB)
---   f32 decrc(elem) deleted  peak RSS = 178,864,128 B (170.6 MB)
--- Each sabotage adds 128.5 MB == 32.1 B x 4,000,000, i.e. exactly one leaked
--- 32-byte march_alloc_float cell per element. The dune rule asserts < 96 MB:
--- 2.0x above the healthy figure (ample allocator/GC noise headroom) and 1.8x
--- below either leaked figure, so it is falsifiable in both directions.
+-- Numbers, measured on this fixture at 4,000,000 elements per leg
+-- (Darwin arm64, --opt 2). Both sabotage directions were actually run:
+--   both decrc present        live_allocs delta =         3
+--   f64 decrc(elem) deleted   live_allocs delta = 4,000,003
+--   f32 decrc(elem) deleted   live_allocs delta = 4,000,003
+-- Each sabotage adds exactly 4,000,000 == one leaked march_alloc_float cell
+-- per element, which is the defect stated exactly rather than estimated.
+-- The dune rule asserts < 1000: ~333x above the healthy figure (ample room
+-- for incidental runtime objects) and 4000x below either leaked figure, so
+-- it is falsifiable in both directions with an enormous margin. The healthy
+-- delta is a small constant, not a per-element quantity -- if it ever grows
+-- with the element count, that is a real new leak, not drift in this bound.
 --
 -- Init accumulator is 1 (ODD) on purpose, for the same reason as
 -- native_arr_fold.march: an even init can hide a lost
@@ -48,10 +64,13 @@
 -- finite, so compiled/interpreted parity here is a real observation. Do not
 -- scale the element count up much further without rechecking that.
 --
--- The probe prints its own peak RSS to STDERR via IO.warn so stdout stays
--- diffable while the dune rule reads the RSS figure out of the captured
+-- The probe prints its live_allocs delta to STDERR via IO.warn so stdout
+-- stays diffable while the dune rule reads the delta out of the captured
 -- stderr file -- same three-rule structure as simd_leak_probe (run / stdout
--- diff / threshold assertion).
+-- diff / threshold assertion). Note that live_allocs() returns a constant 0
+-- in the INTERPRETER (the tree-walker allocates no march objects at all --
+-- see eval.ml), which is exactly why the delta goes to stderr: the stdout
+-- .expected must stay identical between the two backends.
 mod NativeArrFoldLeakProbe do
   needs IO.Console
 
@@ -70,8 +89,10 @@ mod NativeArrFoldLeakProbe do
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
+    let before = live_allocs()
     println(f64_leg())
     println(f32_leg())
-    IO.warn(int_to_string(peak_rss_bytes()))
+    let after = live_allocs()
+    IO.warn(int_to_string(after - before))
   end
 end

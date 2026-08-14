@@ -130,7 +130,7 @@ let builtin_names : StringSet.t =
       (* Unix/time builtins *)
       "unix_time";
       (* Process self-inspection builtins *)
-      "peak_rss_bytes";
+      "peak_rss_bytes"; "live_allocs";
       (* Comparison / hash builtins *)
       "compare"; "compare_int"; "compare_float"; "compare_string";
       (* Record builtins *)
