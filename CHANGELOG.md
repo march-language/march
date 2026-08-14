@@ -11,6 +11,12 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- An unrecognized capability in `needs` is now an error with a did-you-mean suggestion
+  (`needs IO.FileWrit` → `needs IO.FileWrite`). Typos previously produced only a misleading
+  "declared but no function requires it — remove the unused declaration" warning.
+
 ### Changed
 
 - A `Cap(X)` parameter on a non-`main` function is no longer a ceiling on everything that

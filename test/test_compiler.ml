@@ -9993,6 +9993,62 @@ let test_unrelated_needs_still_warns_with_stdlib_loaded () =
       "needs IO.NetListen with no use of any kind still warns" true
       (has_warning_with errors "unused capability"))
 
+(* ── Unrecognized capability names in `needs` are rejected ────────────────
+   Task 4 of the 2026-08-13 capability UX plan: `needs IO.Filesystem` (wrong
+   case), `needs IO.FileWrit` (typo), and `needs Network` (bare leaf, missing
+   its `IO.` root) were all silently accepted before, producing only a
+   misleading "declared but no function requires it" unused-capability
+   warning. The lattice (`Cap_lattice.hierarchy`) is closed, so any `IO`-rooted
+   path not in it is definitely wrong and can be validated eagerly, with a
+   did-you-mean suggestion. FFI capability roots outside the `IO` lattice
+   (e.g. `Cap(LibC)`) are intentionally not in `hierarchy` and must stay
+   legal — the last test below pins that. *)
+let test_unknown_capability_is_rejected_with_suggestion () =
+  let ctx = typecheck {|mod BadCap do
+    needs IO.FileWrit
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "an unknown capability is an error"
+    true (has_error_with ctx "IO.FileWrit");
+  Alcotest.(check bool) "the closest known capability is suggested"
+    true (has_error_with ctx "IO.FileWrite")
+
+let test_wrong_case_capability_is_rejected () =
+  let ctx = typecheck {|mod BadCase do
+    needs IO.Filesystem
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "wrong case is suggested against"
+    true (has_error_with ctx "IO.FileSystem")
+
+let test_bare_leaf_capability_is_rejected () =
+  let ctx = typecheck {|mod BareLeaf do
+    needs Network
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a bare leaf name suggests the full path"
+    true (has_error_with ctx "IO.Network")
+
+let test_ffi_capability_root_still_accepted () =
+  (* FFI roots are deliberately outside the IO lattice and must stay legal. *)
+  let ctx = typecheck {|mod FfiRoot do
+    needs IO.Foreign
+    extern "libc": Cap(LibC) do
+      fn getpid() : Int
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "an FFI capability root is not reported unknown"
+    false (has_error_with ctx "is not a known capability")
+
 (* ── R1 stages A+B: main's capability parameter IS the grant ──────────────
    specs/2026-08-08-r1-no-ambient-io-design.md.
 
@@ -14551,6 +14607,12 @@ let compiler_suites =
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
           Alcotest.test_case "stdlib-mediated needs is not unused"          `Quick test_stdlib_mediated_needs_is_not_unused;
           Alcotest.test_case "unrelated needs warns with stdlib loaded"     `Quick test_unrelated_needs_still_warns_with_stdlib_loaded;
+        ] );
+      ( "cap_unknown_name", [
+          Alcotest.test_case "unknown capability rejected with suggestion" `Quick test_unknown_capability_is_rejected_with_suggestion;
+          Alcotest.test_case "wrong-case capability rejected"              `Quick test_wrong_case_capability_is_rejected;
+          Alcotest.test_case "bare leaf capability rejected"               `Quick test_bare_leaf_capability_is_rejected;
+          Alcotest.test_case "FFI capability root still accepted"          `Quick test_ffi_capability_root_still_accepted;
         ] );
       ( "cap_grant", [
           Alcotest.test_case "narrow grant covers console"        `Quick test_grant_narrow_covers_console;

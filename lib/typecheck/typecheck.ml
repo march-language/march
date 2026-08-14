@@ -8790,6 +8790,30 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []
   ) decls in
+  (* Check 0: every `needs X` must name a real capability.  The lattice is
+     closed, so an `IO`-rooted path not in it (wrong case, a typo) or a bare
+     leaf standing in for a real capability (`needs Network`) is definitely
+     wrong and is rejected eagerly with a did-you-mean, rather than silently
+     accepted and surfacing later as an unrelated "no function requires it"
+     unused-capability warning or a missing-`needs` error somewhere else.
+     FFI capability roots (e.g. `LibC`) are deliberately outside the lattice
+     and stay legal — see [March_caps.Cap_lattice.suggest_cap]. *)
+  List.iter (function
+    | Ast.DNeeds (caps, sp) ->
+      List.iter (fun (path, _scope) ->
+        let cap_path = cap_path_of_names path in
+        match March_caps.Cap_lattice.suggest_cap cap_path with
+        | None -> ()
+        | Some known ->
+          Err.error_with_fix env.errors ~span:sp
+            ~fix:(Err.FReplace { span = sp; text = "needs " ^ known })
+            (Printf.sprintf
+               "`%s` is not a known capability.\n\
+                help: did you mean `%s`?"
+               cap_path known)
+      ) caps
+    | _ -> ()
+  ) decls;
   (* See [locally_declared_names_of] for why a raw call-name match against
      [builtin_cap_table] must first check for module-local shadowing. *)
   let locally_declared_names = locally_declared_names_of decls in
