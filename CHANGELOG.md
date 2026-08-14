@@ -44,6 +44,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Fixed an internal compiler error (`Invalid_argument("List.nth")`) on the most common
+  project shape: a `MARCH_LIB_PATH` dependency (any file loaded via `use`/import from a
+  separate `.march` file) that violates the `--cap-strict` ceiling but declares no `needs`
+  of its own. Such a module is synthesized with a placeholder span, and the fix-indent
+  helper indexed a negative line number into the wrong file's source. It now falls back to
+  the dependency's own first real declaration for the diagnostic span, and — if no real
+  span can be found at all — to the pre-existing bespoke `-- CAPABILITY CEILING --`
+  rendering rather than ever crashing or pointing at unrelated code.
+- An unknown capability in `needs` (`needs Network`) no longer also produces a contradictory
+  "declares `needs Network` but no function requires it — remove the unused capability
+  declaration" warning on the same line. The two diagnostics gave opposite advice (fix the
+  name vs. delete the line); the unused-capability check now skips any capability path the
+  unknown-capability check already rejected.
+- The aggregated missing-`needs` error no longer proposes a fix that overlaps a capability
+  `Cap(X)` signature parameter is separately demanding. `fn main(cap : Cap(IO))` calling
+  `println`/`unix_time`/`random_bytes` used to get both "add `needs IO`" (from the `Cap(IO)`
+  parameter) and "add `needs IO.Clock`, `needs IO.Console`, `needs IO.Random`" (from the
+  body scan) — `forge fix` applying both wrote four `needs` lines where one suffices. The
+  aggregation now drops any capability already subsumed by a capability Check 1 demands.
+
 - Capability parameters no longer trigger "Unused variable" warnings. A capability value is
   a runtime-erased grant token and is normally never referenced in the body.
 - `fn main(cap : Cap(IO))` no longer emits the "narrow to least-privilege" hint. That is the

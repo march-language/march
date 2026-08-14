@@ -3422,15 +3422,26 @@ let test_actor_handler_cap_needs_ok () =
   end|} in
   Alcotest.(check bool) "actor handler cap with needs: ok" false (has_errors ctx)
 
-(* A `main` that calls several undeclared-capability builtins used to produce
-   one missing-`needs` error PER offending call site — on top of the grant
-   error, which already aggregates every reached capability into one
-   replacement signature. Pin that the body-scan check (Check 1b) now
-   aggregates too: one diagnostic, every missing capability named, one fix
-   that inserts all the `needs` lines at once. *)
+(* A module that calls several undeclared-capability builtins used to
+   produce one missing-`needs` error PER offending call site. Pin that the
+   body-scan check (Check 1b) now aggregates too: one diagnostic, every
+   missing capability named, one fix that inserts all the `needs` lines at
+   once.
+
+   Deliberately a `main`-LESS library module (a plain helper function, no
+   `Cap(...)` signature parameter anywhere): once Check 1 and Check 1b's
+   aggregation stopped proposing overlapping redundant fixes (a Check-1-
+   demanded `Cap(X)` now makes the aggregation drop every capability it
+   subsumes — see [test_check1b_omits_caps_subsumed_by_check1] below), a
+   `main(cap : Cap(IO))` shape here would have every capability in this
+   very aggregation subsumed by Check 1's OWN "add `needs IO`" demand,
+   collapsing Check 1b's error to nothing and testing the wrong thing. A
+   `main`-less module keeps Check 1's [used_caps] empty (no function has a
+   `Cap` parameter) so this test still isolates Check 1b's own
+   aggregation. *)
 let test_missing_needs_reported_once_per_module () =
   let ctx = typecheck {|mod ManyCaps do
-    fn main(cap : Cap(IO)) : () do
+    fn helper() : () do
       println("a")
       match file_write("/tmp/many", "d") do
         Ok(_) -> ()
@@ -3477,9 +3488,14 @@ let test_missing_needs_dedup_no_orphan_hint () =
   else begin
     let src = Filename.temp_file "cap_dedup" ".march" in
     let oc = open_out src in
+    (* Same `main`-less shape as [test_missing_needs_reported_once_per_module]
+       above and for the same reason: a `main(cap : Cap(IO))` signature would
+       make Check 1 demand `needs IO`, which subsumes both IO.Console and
+       IO.FileWrite, collapsing Check 1b's aggregated error (and its
+       `cap_needs:` code, which this dedup relies on) to nothing. *)
     output_string oc
       "mod ManyCaps do\n\
-      \  fn main(cap : Cap(IO)) : () do\n\
+      \  fn helper() : () do\n\
       \    println(\"a\")\n\
       \    match file_write(\"/tmp/many\", \"d\") do\n\
       \      Ok(_) -> ()\n\
@@ -3508,6 +3524,56 @@ let test_missing_needs_dedup_no_orphan_hint () =
       true
       (contains_substring s "IO.Console" && contains_substring s "IO.FileWrite")
   end
+
+(* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
+
+   `fn main(cap : Cap(IO))` makes Check 1 separately demand `needs IO`
+   (the signature's own capability). Before this fix, Check 1b's aggregated
+   error ALSO listed every individual capability the body reaches
+   (IO.Console for `println`, IO.FileWrite for `file_write`) even though
+   `needs IO` already covers both — so `forge fix` applying both
+   diagnostics wrote four `needs` lines (`IO`, then `IO.Console`,
+   `IO.FileWrite`, ...) where the one `needs IO` line already suffices.
+   Pin that the aggregation now DROPS any capability already subsumed by a
+   Cap(X) Check 1 is separately demanding: Check 1's own "add `needs IO`"
+   error still fires, but Check 1b's redundant, narrower echo of the same
+   fix does not. *)
+let test_check1b_omits_caps_subsumed_by_check1 () =
+  let ctx = typecheck {|mod Agg do
+    fn main(cap : Cap(IO)) : () do
+      println("a")
+      match file_write("/tmp/agg", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "Check 1's own `needs IO` demand still fires"
+    true (has_error_with ctx "not declared in `needs`");
+  Alcotest.(check int)
+    "Check 1b's aggregated error is fully subsumed and does not also fire"
+    0 (count_errors_with ctx "declares no matching `needs`")
+
+(* The narrower half: when Check 1 demands a capability that covers only
+   SOME of what Check 1b would otherwise report, the still-uncovered
+   capability must survive in the aggregation — dropping subsumed caps must
+   not turn into dropping everything indiscriminately. `Cap(IO.Console)`
+   subsumes `println`'s IO.Console but not `file_write`'s IO.FileWrite. *)
+let test_check1b_keeps_caps_not_subsumed_by_check1 () =
+  let ctx = typecheck {|mod AggPartial do
+    fn main(cap : Cap(IO.Console)) : () do
+      println("a")
+      match file_write("/tmp/agg_partial", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check int)
+    "Check 1b still aggregates the capability Check 1 does not cover"
+    1 (count_errors_with ctx "declares no matching `needs`");
+  Alcotest.(check bool) "the surviving capability is IO.FileWrite, not IO.Console"
+    true (has_error_with ctx "IO.FileWrite")
 
 let test_actor_handler_cap_missing_needs_error () =
   (* An actor handler with a Cap parameter, but no needs declaration, should error. *)
@@ -10205,6 +10271,26 @@ let test_bare_leaf_capability_is_rejected () =
   Alcotest.(check bool) "a bare leaf name suggests the full path"
     true (has_error_with ctx "IO.Network")
 
+(* Final whole-branch review, Important 2: Check 0 (unknown capability,
+   above) and Check 2 (unused `needs`, lib/typecheck/typecheck.ml's
+   `declared_needs` loop) used to fire on the SAME `needs Network` line and
+   give directly opposing advice — "did you mean `IO.Network`?" (fix the
+   name) vs. "no function requires it — remove the unused capability
+   declaration" (delete the line). A user following the warning would
+   delete the declaration they actually needed. Check 2 must skip any
+   capability path Check 0 already rejected as unknown. *)
+let test_unknown_capability_does_not_also_warn_unused () =
+  let ctx = typecheck {|mod Unk do
+    needs Network
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "the unknown-capability error still fires"
+    true (has_error_with ctx "is not a known capability");
+  Alcotest.(check bool) "no contradictory 'remove the unused declaration' warning"
+    false (has_warning_with ctx "remove the unused capability declaration")
+
 let test_ffi_capability_root_still_accepted () =
   (* FFI roots are deliberately outside the IO lattice and must stay legal. *)
   let ctx = typecheck {|mod FfiRoot do
@@ -14478,6 +14564,8 @@ let compiler_suites =
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "missing needs reported once per module" `Quick test_missing_needs_reported_once_per_module;
           Alcotest.test_case "missing needs dedup: no orphan cap_infer hint" `Quick test_missing_needs_dedup_no_orphan_hint;
+          Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
+          Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
@@ -14845,6 +14933,7 @@ let compiler_suites =
           Alcotest.test_case "unknown capability rejected with suggestion" `Quick test_unknown_capability_is_rejected_with_suggestion;
           Alcotest.test_case "wrong-case capability rejected"              `Quick test_wrong_case_capability_is_rejected;
           Alcotest.test_case "bare leaf capability rejected"               `Quick test_bare_leaf_capability_is_rejected;
+          Alcotest.test_case "unknown capability does not also warn unused" `Quick test_unknown_capability_does_not_also_warn_unused;
           Alcotest.test_case "FFI capability root still accepted"          `Quick test_ffi_capability_root_still_accepted;
           Alcotest.test_case "dotted FFI cap with IO-leaf collision (Clock) accepted"  `Quick test_dotted_ffi_capability_with_io_leaf_collision_still_accepted;
           Alcotest.test_case "dotted FFI cap with IO-leaf collision (Random) accepted" `Quick test_dotted_ffi_capability_with_io_leaf_collision_still_accepted_2;

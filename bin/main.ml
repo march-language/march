@@ -2008,10 +2008,51 @@ let cap_ceiling_module_spans ~entry_owner ~entry_span
         | _ -> None)
       decls
   in
+  (* A module loaded from a separate file via MARCH_LIB_PATH is synthesized
+     as [DMod (..., dummy_span)] (bin/main.ml's lib-path loader never had a
+     real `mod ... end` span to give it) — its OWN header span is useless.
+     Fall back to the first inner declaration that carries a real span, so
+     the ceiling still has somewhere concrete to point at instead of
+     [dummy_span]'s (file="<none>", line=0), which downstream indexes
+     straight into a negative line number. *)
+  let rec first_real_decl_span decls =
+    match decls with
+    | [] -> None
+    | d :: rest ->
+      let sp =
+        match (d : March_ast.Ast.decl) with
+        | March_ast.Ast.DFn (_, sp) | March_ast.Ast.DLet (_, _, sp)
+        | March_ast.Ast.DType (_, _, _, _, sp)
+        | March_ast.Ast.DAlwaysLinearType (_, _, _, _, sp)
+        | March_ast.Ast.DActor (_, _, _, sp) | March_ast.Ast.DProtocol (_, _, sp)
+        | March_ast.Ast.DMod (_, _, _, sp)
+        | March_ast.Ast.DSig (_, _, sp) | March_ast.Ast.DInterface (_, sp)
+        | March_ast.Ast.DImpl (_, sp)
+        | March_ast.Ast.DExtern (_, sp) | March_ast.Ast.DUse (_, sp)
+        | March_ast.Ast.DAlias (_, sp)
+        | March_ast.Ast.DNeeds (_, sp) | March_ast.Ast.DProofCap (_, sp)
+        | March_ast.Ast.DTransitions (_, _, sp)
+        | March_ast.Ast.DApp (_, sp) | March_ast.Ast.DDeriving (_, _, sp)
+        | March_ast.Ast.DSatisfy (_, _, sp)
+        | March_ast.Ast.DTest (_, sp) | March_ast.Ast.DDescribe (_, _, sp)
+        | March_ast.Ast.DSetup (_, sp)
+        | March_ast.Ast.DSetupAll (_, sp) | March_ast.Ast.DOpts (_, sp) -> sp
+      in
+      if sp <> March_ast.Ast.dummy_span then Some sp
+      else first_real_decl_span rest
+  in
   let span_and_is_header ~header decls =
     match first_needs_span decls with
     | Some sp -> (sp, false)
-    | None -> (header, true)
+    | None ->
+      let header =
+        if header = March_ast.Ast.dummy_span then
+          match first_real_decl_span decls with
+          | Some sp -> sp
+          | None -> header
+        else header
+      in
+      (header, true)
   in
   let spans = ref [] and is_header = ref [] in
   let add name sp hdr =
@@ -2063,8 +2104,13 @@ let cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header
     else (try read_file span.March_ast.Ast.file with Sys_error _ -> src)
   in
   let lines = String.split_on_char '\n' file_src in
+  let idx = span.March_ast.Ast.start_line - 1 in
   let base =
-    match List.nth_opt lines (span.March_ast.Ast.start_line - 1) with
+    (* [List.nth_opt] RAISES [Invalid_argument] on a negative index rather
+       than returning [None] — a [dummy_span] (start_line = 0) gives
+       idx = -1, which would otherwise crash the compiler here instead of
+       degrading gracefully. *)
+    match if idx < 0 then None else List.nth_opt lines idx with
     | None -> 0
     | Some line ->
       let n = String.length line in
@@ -3132,6 +3178,18 @@ let compile filename =
         List.iter
           (fun v ->
              match v with
+             | March_caps.Cap_ceiling.Undeclared { cap = _; owner = _; span }
+               when span = March_ast.Ast.dummy_span ->
+               (* No real span was found ANYWHERE for this violation's
+                  owning module — every inner declaration was itself
+                  span-less. Rendering through the normal diagnostic
+                  pipeline with [dummy_span]'s file ("<none>") would raise
+                  [Sys_error] on read, silently fall back to the ENTRY
+                  file's source, and print line 0 of the WRONG file. Fail
+                  back to the bespoke, file-less rendering instead — never
+                  a crash, never a diagnostic pointing at unrelated code. *)
+               Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
+                 (March_caps.Cap_ceiling.describe v)
              | March_caps.Cap_ceiling.Undeclared { cap; owner; span } ->
                let is_header =
                  match List.assoc_opt owner module_is_header with

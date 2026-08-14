@@ -8820,6 +8820,17 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      unused-capability warning or a missing-`needs` error somewhere else.
      FFI capability roots (e.g. `LibC`) are deliberately outside the lattice
      and stay legal — see [March_caps.Cap_lattice.suggest_cap]. *)
+  (* Capability paths Check 0 rejects as unknown.  Check 2 (unused `needs`,
+     below) must skip these: a module with a typo'd `needs Network` used to
+     get BOTH "not a known capability, did you mean `IO.Network`?" AND
+     "declares `needs Network` but no function requires it — help: remove
+     the unused capability declaration" for the very same line — directly
+     opposing advice (fix the name vs. delete the line) on a check that
+     already fixed this exact class of contradiction once between the
+     ceiling and Check 2 (see the comment at Check 2's [own_transitive_caps]
+     above). A capability Check 0 has already rejected is never "unused" in
+     any meaningful sense — it was never a real capability to use. *)
+  let unknown_needs = ref [] in
   List.iter (function
     | Ast.DNeeds (caps, sp) ->
       List.iter (fun (path, _scope) ->
@@ -8827,6 +8838,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         match March_caps.Cap_lattice.suggest_cap cap_path with
         | None -> ()
         | Some known ->
+          unknown_needs := cap_path :: !unknown_needs;
           Err.error_with_fix env.errors ~span:sp
             ~fix:(Err.FReplace { span = sp; text = "needs " ^ known })
             (Printf.sprintf
@@ -8836,6 +8848,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       ) caps
     | _ -> ()
   ) decls;
+  let unknown_needs = !unknown_needs in
   (* See [locally_declared_names_of] for why a raw call-name match against
      [builtin_cap_table] must first check for module-local shadowing. *)
   let locally_declared_names = locally_declared_names_of decls in
@@ -9546,6 +9559,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
      `proof cap X` in mod M auto-covers `needs M.X` so the module needn't repeat itself. *)
+  (* Every [Cap(X)] Check 1 is itself separately demanding (below).  Check
+     1b's aggregation (further down) must drop any capability already
+     SUBSUMED by one of these — else `fn main(cap : Cap(IO))` demands
+     `needs IO` here while Check 1b separately demands `needs IO.Clock`,
+     `needs IO.Console`, `needs IO.Random`, ... for the same body: `needs
+     IO` alone already covers all of them, so `forge fix` applying both
+     diagnostics writes four lines where one suffices. *)
+  let check1_demanded_caps = ref [] in
   List.iter (fun (cap_path, _fn_name, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     let self_declared = match List.assoc_opt cap_path env.proof_caps with
@@ -9553,6 +9574,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       | None -> false
     in
     if not covered && not self_declared then begin
+      check1_demanded_caps := cap_path :: !check1_demanded_caps;
       match List.assoc_opt cap_path env.proof_caps with
       | Some declaring_mod ->
         Err.error env.errors ~span:sp
@@ -9600,7 +9622,16 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         | Some dm -> dm = mod_name.txt
         | None -> false
       in
-      if not covered && not self_declared then Some (cap_path, sp) else None
+      (* Already subsumed by a capability Check 1 is separately demanding
+         (e.g. `Cap(IO)` subsumes `IO.Clock`/`IO.Console`/`IO.Random`) — skip
+         it here so the two checks' fixes do not overlap; Check 1's own
+         diagnostic above already covers this capability. *)
+      let subsumed_by_check1 =
+        List.exists (fun demanded -> cap_subsumes demanded cap_path)
+          !check1_demanded_caps
+      in
+      if not covered && not self_declared && not subsumed_by_check1
+      then Some (cap_path, sp) else None
     ) body_cap_uses
   in
   (match missing_needs with
@@ -9735,7 +9766,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           MPCode ("needs " ^ need); MPText " but no function requires ";
           cap need; MPText " or a sub-capability.";
           MPBreak; MPText "help: remove the unused capability declaration." ])
-  ) declared_needs;
+  ) (List.filter (fun need -> not (List.mem need unknown_needs)) declared_needs);
   (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
      reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
      hinting there tells users to stop following the documented advice. *)

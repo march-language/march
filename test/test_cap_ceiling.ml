@@ -697,9 +697,119 @@ mod CeilImpl do
 end
 |}
 
+(* ── A MARCH_LIB_PATH dependency with NO `needs` line at all ──────────────
+
+   Every module above nests the violator INSIDE the entry file's own `mod
+   ... end`, so it always has a real, parser-assigned [decl_span]. A module
+   loaded from a SEPARATE file via MARCH_LIB_PATH is instead synthesized as
+   [DMod (..., dummy_span)] (bin/main.ml's lib-path loader has no `mod ...
+   end` span of its own to give it), and when that module declares no
+   `needs` at all [cap_ceiling_module_spans] used to fall through to that
+   dummy header span — [dummy_span.start_line = 0] — which
+   [cap_ceiling_fix_indent] indexed into the source lines at [-1],
+   `List.nth_opt`'s documented-but-surprising RAISE (not [None]) on a
+   negative index, an internal compiler error on exactly this shape: a
+   fresh dependency nobody has annotated with `needs` yet. This is
+   deliberately NOT expressible with [compile_with] (single temp file) —
+   the bug is specific to a module arriving from a second file, so the test
+   needs its own two-file harness. *)
+let compile_with_lib_dep ~lib_name ~lib_src entry_src =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  let lib_dir = Filename.temp_file "cap_ceiling_lib" "" in
+  Sys.remove lib_dir;
+  Unix.mkdir lib_dir 0o755;
+  let lib_path = Filename.concat lib_dir lib_name in
+  let oc = open_out lib_path in
+  output_string oc lib_src;
+  close_out oc;
+  let src = Filename.temp_file "cap_ceiling_entry" ".march" in
+  let oc = open_out src in
+  output_string oc entry_src;
+  close_out oc;
+  let out = Filename.temp_file "cap_ceiling" ".out" in
+  let bin = Filename.temp_file "cap_ceiling" ".bin" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "MARCH_LIB_PATH=%s %s --compile -o %s %s > %s 2>&1"
+         (Filename.quote lib_dir) (Filename.quote compiler_exe)
+         (Filename.quote bin) (Filename.quote src) (Filename.quote out))
+  in
+  let ic = open_in out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out; bin ];
+  (try Sys.remove lib_path with Sys_error _ -> ());
+  (try Unix.rmdir lib_dir with Unix.Unix_error _ -> ());
+  (rc, s)
+
+let test_lib_path_dependency_with_no_needs_does_not_crash () =
+  let rc, out =
+    compile_with_lib_dep ~lib_name:"leaky.march"
+      ~lib_src:
+        (* A STDLIB-MEDIATED call (`File.write`, not `file_write`) — same
+           reason as [test_stdlib_route_was_completely_silent] above: a
+           direct builtin call is caught earlier, at typecheck's Check 1b,
+           before compilation ever reaches the ceiling. Only the
+           stdlib-wrapper route is invisible to Check 1b and actually
+           exercises [cap_ceiling_module_spans] on a cross-file module. *)
+        {|
+mod Leaky do
+  fn slurp(p : String) : () do
+    match File.write(p, "d") do
+      Ok(_)  -> ()
+      Err(_) -> ()
+    end
+  end
+end
+|}
+      (* [needs IO] / [Cap(IO)]: broad enough that the entry module's own
+         GRANT check (main's signature vs. what the program reaches) never
+         fires first and masks the ceiling violation this test is after —
+         same shape as the reviewer's own repro. *)
+      {|
+mod CeilLibDepCrash do
+  use Leaky
+
+  needs IO
+
+  fn main(_cap : Cap(IO)) do
+    Leaky.slurp("/tmp/cap_ceiling_lib_dep_crash")
+    println("ok")
+  end
+end
+|}
+  in
+  (* The internal-compiler-error exit code, distinct from both a clean
+     compile (0) and an ordinary rejected-program exit (1) — this is the
+     crash this test exists to rule out. *)
+  if rc = 3 || rc = 2 then
+    Alcotest.failf
+      "MARCH_LIB_PATH dependency with no `needs` crashed the compiler \
+       (rc=%d) instead of reporting a ceiling violation:\n%s"
+      rc out;
+  if rc = 0 then
+    Alcotest.failf
+      "MARCH_LIB_PATH dependency using IO.FileWrite with no `needs` should \
+       have failed --cap-strict but compiled:\n%s"
+      out;
+  (match Str.search_forward (Str.regexp_string "Leaky") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf
+       "ceiling violation did not name the offending dependency `Leaky`:\n%s"
+       out);
+  (match Str.search_forward (Str.regexp_string "capability ceiling violation(s)") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "not reported as a ceiling violation:\n%s" out)
+
 let tests =
   unit_tests
   @ [
+      Alcotest.test_case
+        "MARCH_LIB_PATH dependency with no needs does not crash" `Slow
+        test_lib_path_dependency_with_no_needs_does_not_crash;
       Alcotest.test_case "impl method covered by declaring module" `Slow
         test_impl_method_covered_by_declaring_module;
       Alcotest.test_case "nested actor handler covered by declaring module" `Slow
