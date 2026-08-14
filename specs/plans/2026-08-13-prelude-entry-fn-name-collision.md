@@ -109,6 +109,57 @@ implemented:
    the SAME tables the typechecker itself resolves builtin calls against, so
    this can never drift from what the compiler actually treats as a builtin.
 
+### 2.5b Corrected after CI: "every Prelude name" was still too broad
+
+**Corrected after landing** — PR #274's CI (`conformance`, `sanitize-gate`,
+`test`, both platforms) rejected 9 fixtures that are explicit, intentional,
+already-regression-tested acceptances: `t126_entry_module_shadows_list_length`
+and `t139_...extern` (both shadow `head`), `t168_module_fn_shadows_builtin_name`
+(shadows `file_read`), `g05_adt_payload.march` (shadows `unwrap`), and several
+refinement fixtures. Each fixture's own header comment states the shadow is
+*intentional* and that real name resolution correctly lets the entry module's
+own definition win for calls the entry module itself makes.
+
+The mistake: §2.4's two checks flagged a name if it merely **appeared** in
+`prelude_decls` (as a `DFn`) or in `ordinary_builtin_names`, treating "Prelude
+declares/exposes this name" as equivalent to "shadowing this name is
+dangerous." Those are not the same thing. Reading `stdlib/prelude.march` in
+full shows the actual internal call graph is narrow: `unwrap`/`head`/`tail`
+call `panic` unqualified; `filter`/`map` call `reverse` unqualified;
+`println`/`debug` call `print`/`to_string` unqualified; `println` and every
+`impl Show` body call `show`. Names like `head`, `length`, `map`, `unwrap`,
+`file_read`, and most of the rest of the ~21-name list are **never called
+from within another Prelude function's body** — nothing in prelude.march
+ever writes bare `head(...)` except the user calling the function named
+`head`. Shadowing those is safe, exactly as the rejected fixtures assert,
+because the compiler's real name resolution already lets the entry module's
+own calls resolve to its own definition; the bug only bites when *Prelude's
+own code* reaches for the bare name.
+
+**Fix, implemented in `lib/modules/prelude_collision.ml`:** rather than
+treating every name in `prelude_decls`/`ordinary_builtin_names` as dangerous,
+compute the actual "internally referenced" set — walk every Prelude `DFn`
+body's free identifiers (a small local free-variable walker over
+`Ast.expr`/`Ast.pattern`, params/let/match-bound names excluded) and union
+them. Only names in that set are collision candidates; a name that merely
+exists in Prelude/the builtin table but is never referenced from within
+another Prelude function is left alone. This shrinks the true "dangerous to
+shadow" set to essentially `panic`, `reverse`, `print`, `to_string`, plus
+`show`/`eq`/`compare`/`hash` (still handled separately, arity-gated, per
+§2.4/§3). The 9 bench-file `head`→`first_or_zero` renames and the 2
+`test/native/*.march` `unwrap` renames from §3 were reverted — `head` and
+`unwrap` were never actually dangerous to shadow, so the renames were
+unnecessary once the checker's scope was corrected.
+
+The general lesson repeats one already in §3: **running the fix against the
+real, full corpus — not just the two repros the fix was designed against —
+is what surfaces an over-broad design.** Two rounds of "design review looked
+right, corpus run found a counterexample" preceded this one in the same
+spec (§2.4's DFn-vs-DFn blindness, §3's `iface_method_collision.march`); this
+is the third, and it took CI (not local `scripts/run-tests.sh`, which this
+change's own author ran before pushing) to surface it, since the local run
+predated this correction and used the same over-broad checker end to end.
+
 ### 2.5 What's still open: the exact overwrite site in each backend
 
 Confirmed *that* the collision reaches the interpreter's runtime call

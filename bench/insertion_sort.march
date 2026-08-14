@@ -13,7 +13,7 @@ pfn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   end
 end
 
-pfn first_or_zero(xs : List(Int)) : Int do
+pfn head(xs : List(Int)) : Int do
   match xs do
   Nil        -> 0
   Cons(h, _) -> h
@@ -24,7 +24,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let xs     = gen_list(2000, 42, Nil)
   let cmp    = fn x -> fn y -> x <= y
   let sorted = Sort.insertion_sort_by(xs, cmp)
-  println(int_to_string(first_or_zero(sorted)))
+  println(int_to_string(head(sorted)))
 end
 
 end

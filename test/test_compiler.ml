@@ -227,7 +227,7 @@ let test_prelude_collision_ignores_impl_show_bodies () =
    original minimal repros in the filed todo. *)
 let test_prelude_collision_detects_native_builtin_name () =
   let prelude = unwrap_decls {|mod Prelude do
-    fn println(x) do () end
+    fn println(x) do print(x) end
   end|} in
   let entry = unwrap_decls {|mod Shadow do
     fn print(x) do () end
@@ -296,6 +296,55 @@ let test_prelude_collision_wrong_arity_show_is_flagged () =
     ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
     ~entry_decls:entry errors;
   Alcotest.(check bool) "2-arg show cannot be a Show overload — still a collision" true
+    (March_errors.Errors.has_errors errors)
+
+(* A Prelude DFn that Prelude's OWN code never calls internally (e.g. `head`
+   is only ever an entry point for the user, never referenced from another
+   Prelude function's body) is SAFE to shadow — the compiler's real name
+   resolution lets the entry module's own `head` win for every call the
+   entry module makes, and Prelude never reaches for the bare name itself.
+   specs/lang/types/accept/t126_entry_module_shadows_list_length.march and
+   t168_module_fn_shadows_builtin_name.march are exactly this, verified
+   working end to end; an earlier version of this checker flagged both as
+   collisions purely because the name appeared ANYWHERE in prelude_decls,
+   without checking whether Prelude's own bodies actually call it. *)
+let test_prelude_collision_ignores_prelude_name_never_called_internally () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn head(xs) do xs end
+    fn println(x) do () end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn head(xs) do xs end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool)
+    "shadowing a Prelude name Prelude never calls internally is safe" false
+    (March_errors.Errors.has_errors errors)
+
+(* The flip side: a Prelude name that IS called internally by another
+   Prelude function (here `reverse`, called from inside `filter`'s body,
+   mirroring the real stdlib/prelude.march) must still be flagged — this is
+   the genuine bug, and the internal-call-graph narrowing must not throw it
+   out along with the false positives above. *)
+let test_prelude_collision_detects_internally_called_prelude_name () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn reverse(xs) do xs end
+    fn filter(xs, pred) do reverse(xs) end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn reverse(xs) do xs end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool)
+    "shadowing a name Prelude calls internally is still a collision" true
     (March_errors.Errors.has_errors errors)
 
 (* String-literal spans must cover the literal's full extent — opening quote
@@ -14217,6 +14266,10 @@ let compiler_suites =
             test_prelude_collision_right_arity_show_is_not_flagged;
           Alcotest.test_case "wrong-arity show is still a collision" `Quick
             test_prelude_collision_wrong_arity_show_is_flagged;
+          Alcotest.test_case "a Prelude name never called internally is safe to shadow" `Quick
+            test_prelude_collision_ignores_prelude_name_never_called_internally;
+          Alcotest.test_case "a Prelude name called internally is still a collision" `Quick
+            test_prelude_collision_detects_internally_called_prelude_name;
         ] );
       ( "parser",
         [

@@ -20,10 +20,11 @@ git log is authoritative for exact commits.
 
 - **A top-level function in your program can no longer silently replace a
   name the March Prelude relies on internally.** `println` calls `print` and
-  `show` unqualified, and both — along with ~21 other Prelude functions like
-  `map`/`reverse`/`head` — sat in a flat, unprotected namespace shared with
-  your program's own entry-module declarations. A private helper named
-  `print` or `show` (or any of the others) silently took over that name for
+  `show` unqualified (also `panic`, `reverse`, and `to_string`, each called
+  from inside another Prelude function's own body), and all of them sat in a
+  flat, unprotected namespace shared with your program's own entry-module
+  declarations. A private helper named `print` or `show` (or any of the
+  others Prelude actually calls internally) silently took over that name for
   the *whole program*, including inside Prelude's own code, with no error at
   any compiler stage. Depending on how the two definitions' types happened to
   line up this surfaced as a misattributed runtime arity error, a **compiled
@@ -31,7 +32,10 @@ git log is authoritative for exact commits.
   printing nothing at all, with no error and no crash. Now rejected as a
   compile error naming the colliding function and why it matters, across
   `march file.march`, `march --check`, `march --compile`, `march check`, and
-  `march dap`.
+  `march dap`. Shadowing a Prelude/builtin name Prelude never calls
+  internally — `head`, `map`, `unwrap`, `file_read`, and most of the rest —
+  remains legal and unaffected; that's a documented, separately-tested
+  feature, not part of this bug.
 
 - **`Regex` no longer has a denial-of-service on adversarial input.** The
   engine matched by backtracking, so repeated quantifiers over one character
