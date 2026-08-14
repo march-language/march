@@ -1915,28 +1915,30 @@ typedef struct march_actor_meta {
      * table scan. Zeroed by calloc at meta creation. */
     char                       **reg_names;
     int                          reg_name_count;
-    /* Task 6: a snapshot of reg_names taken by do_actor_death IMMEDIATELY
-     * before it calls registry_retire_actor (which frees reg_names and
-     * drops every name from the forward table). registry_retire_actor's
-     * whole point is to make the name available again right away — Down
-     * notifications and a racing march_actor_register both depend on that
-     * happening promptly — so retire itself is untouched; this is a
-     * SEPARATE copy, taken only when meta->supervisor is non-NULL (only a
-     * supervised actor can possibly be respawned, so an unsupervised death
-     * never bothers capturing one). march_respawn_child is the sole
-     * consumer: it re-registers each name for the replacement child and
-     * frees this array. If the crashed child is never respawned (restart
-     * budget exhausted, the supervisor itself dies before a delayed
-     * restart fires, malloc failure aborting a delayed restart, ...) this
-     * stays set and is never freed — same "leak-don't-free" shape as the
-     * meta it lives on (never unlinked/freed either, see g_actor_tbl's
-     * comment above), bounded to one capture per supervised actor that
-     * held names and failed to respawn, and intentional for the same
-     * reason delayed_batch_pending is sometimes left set forever (see
-     * delayed_restart_thread): correctness (never dropping a name that
-     * SHOULD carry forward) matters more here than reclaiming a few
-     * strdup'd C strings in an already-degraded path. Zeroed by calloc at
-     * meta creation. */
+    /* Task 6: a snapshot of reg_names taken by capture_reg_names_pending
+     * (see its own comment) before something frees the original —
+     * registry_retire_actor for a directly-crashed/killed actor, or the
+     * same call for a batch-restart sibling whose supervisor field is
+     * about to be nulled out. registry_retire_actor's whole point is to
+     * make the name available again right away — Down notifications and a
+     * racing march_actor_register both depend on that happening promptly
+     * — so retire itself is untouched; this is a SEPARATE copy, taken only
+     * for an actor that IS about to be respawned (never for a plain
+     * unsupervised death, which never bothers capturing one).
+     * march_respawn_child is the sole consumer: it re-registers each name
+     * for the replacement child and frees this array. If the crashed
+     * child is never actually respawned (restart budget exhausted, the
+     * supervisor itself dies before a delayed restart fires, malloc
+     * failure aborting a delayed restart, ...) this stays set and is
+     * never freed — same "leak-don't-free" shape as the meta it lives on
+     * (never unlinked/freed either, see g_actor_tbl's comment above),
+     * bounded to one capture per actor that held names and failed to
+     * respawn, and intentional for the same reason delayed_batch_pending
+     * is sometimes left set forever (see delayed_restart_thread):
+     * correctness (never dropping a name that SHOULD carry forward)
+     * matters more here than reclaiming a few strdup'd C strings in an
+     * already-degraded path. Mutated only under g_registry_mu (see
+     * capture_reg_names_pending). Zeroed by calloc at meta creation. */
     char                       **reg_names_pending;
     int                          reg_name_count_pending;
 } march_actor_meta;
@@ -2640,6 +2642,71 @@ void registry_retire_actor(void *actor) {
     pthread_mutex_unlock(&g_registry_mu);
 }
 
+/* Task 6: snapshot [actor]'s reg_names onto reg_names_pending, so a
+ * restart can carry them forward onto a replacement after
+ * registry_retire_actor frees the original. Two callers:
+ *   - do_actor_death, for an actor dying with meta->supervisor still set
+ *     (a directly-crashed/killed supervised actor — including the
+ *     originally-crashed child of a one_for_all/rest_for_one batch, whose
+ *     own supervisor field is untouched).
+ *   - march_one_for_all_restart / march_rest_for_one_restart, for each
+ *     LIVE SIBLING they are about to kill-and-respawn. Those two null out
+ *     cm->supervisor right before calling do_actor_death(sibling), purely
+ *     to suppress the recursive march_supervisor_notify that would
+ *     otherwise fire for it — an implementation detail of how they
+ *     suppress double-notification, not a signal that the sibling won't
+ *     be restarted (it unconditionally will be, two loops down, once
+ *     budget has already been confirmed OK by the caller). Gating this
+ *     capture on meta->supervisor (as do_actor_death alone does) would
+ *     silently miss every such sibling, since by the time do_actor_death
+ *     runs for it supervisor is already NULL — round-1 review finding:
+ *     confirmed via a two-named-children one_for_all golden that the
+ *     non-crashed sibling's name was lost forever without this. Calling
+ *     capture explicitly here, before the null-out, is simpler and more
+ *     local than teaching do_actor_death's gate some other "will this be
+ *     restarted" signal (sup_child_index survives the null-out and could
+ *     serve as one, but would need its own reasoning about why it's safe
+ *     to trust independent of supervisor — capturing at the one call site
+ *     that already knows for certain avoids inventing that).
+ *
+ * MUST run under g_registry_mu: reg_names is a realloc'd array mutated by
+ * march_actor_register/unregister/registry_retire_actor on OTHER
+ * scheduler threads, and at the point every caller above runs, the dying
+ * actor can still read alive ($alive/fields[3] is cleared later in
+ * do_actor_death, and arbitrary user cleanup closures run before that) —
+ * round-1 review finding: without the lock, a concurrent
+ * march_actor_register(name, this_actor) racing in on another thread
+ * passes its own liveness check and meta_add_name's realloc can move or
+ * free reg_names out from under this loop's strdup, a use-after-free. Safe
+ * to take here: g_registry_mu is documented as a strict leaf lock (nothing
+ * under it can park a green thread), do_actor_death does not hold it at
+ * this point, and the batch-restart call sites above don't either
+ * (g_supervise_mu, the only other lock in play near them, is never held
+ * across a March closure call or do_actor_death per its own contract, and
+ * this call happens outside any g_supervise_mu section regardless).
+ *
+ * Guards against a pending stash already being set (defensive — no
+ * current caller can run twice for the same meta, since each meta dies
+ * exactly once, but a future caller doing so should extend the existing
+ * stash's lifetime rather than silently leak the first one). */
+static void capture_reg_names_pending(void *actor) {
+    march_actor_meta *m = find_meta(actor);
+    if (!m) return;
+    pthread_mutex_lock(&g_registry_mu);
+    if (m->reg_name_count > 0 && !m->reg_names_pending) {
+        m->reg_names_pending = (char **)malloc(
+            sizeof(char *) * (size_t)m->reg_name_count);
+        if (!m->reg_names_pending) {
+            fputs("march: out of memory (registry carry-forward)\n", stderr);
+            exit(1);
+        }
+        for (int i = 0; i < m->reg_name_count; i++)
+            m->reg_names_pending[i] = strdup(m->reg_names[i]);
+        m->reg_name_count_pending = m->reg_name_count;
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+}
+
 /* ── Actor green thread loop ─────────────────────────────────────── */
 
 /* Each actor runs as a green thread that loops on recv→dispatch.
@@ -3004,6 +3071,16 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
          * only respawned (not double-killed) in the loop below. */
         if (cm && march_is_alive(cm->actor)) {
             live_children[i] = cm->actor;
+            /* Task 6, round-1 review fix: capture this sibling's
+             * registered names BEFORE nulling supervisor below — we
+             * already know for certain it's about to be killed and
+             * respawned (the budget check above already passed), but
+             * do_actor_death's own capture is gated on meta->supervisor,
+             * which the next line clears purely to suppress a recursive
+             * notify. Without this explicit call here, a live sibling's
+             * names were silently dropped forever on every one_for_all
+             * restart. See capture_reg_names_pending's comment. */
+            capture_reg_names_pending(cm->actor);
             cm->supervisor = NULL;
         }
     }
@@ -3033,6 +3110,11 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
         march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
         if (cm && march_is_alive(cm->actor)) {
             live_children[i] = cm->actor;
+            /* See march_one_for_all_restart's identical comment — same
+             * fix, same reasoning: capture before the null-out, since
+             * do_actor_death's own capture won't see supervisor set by
+             * the time it runs for this sibling. */
+            capture_reg_names_pending(cm->actor);
             cm->supervisor = NULL;
         }
     }
@@ -3401,18 +3483,22 @@ static void do_actor_death(void *actor) {
      * function returns, or up to ~3.2s later on the delayed-restart green
      * thread — see march_supervisor_notify's backoff) is the sole
      * consumer/freer; see reg_names_pending's field comment for what
-     * happens when respawn never comes. */
-    if (meta && meta->supervisor && meta->reg_name_count > 0) {
-        meta->reg_names_pending = (char **)malloc(
-            sizeof(char *) * (size_t)meta->reg_name_count);
-        if (!meta->reg_names_pending) {
-            fputs("march: out of memory (registry carry-forward)\n", stderr);
-            exit(1);
-        }
-        for (int i = 0; i < meta->reg_name_count; i++)
-            meta->reg_names_pending[i] = strdup(meta->reg_names[i]);
-        meta->reg_name_count_pending = meta->reg_name_count;
-    }
+     * happens when respawn never comes.
+     *
+     * NOTE this gate only covers an actor dying with its supervisor field
+     * still set — a directly-crashed/killed actor, including the
+     * originally-crashed child of a one_for_all/rest_for_one batch. A live
+     * SIBLING being killed as part of that same batch restart has its
+     * supervisor field nulled out (to suppress a recursive notify)
+     * *before* do_actor_death runs on it, so this gate is false for it by
+     * the time we get here — march_one_for_all_restart /
+     * march_rest_for_one_restart call capture_reg_names_pending directly,
+     * earlier, while they still know for certain the sibling is about to
+     * be restarted. See that function's own comment for why (round-1
+     * review finding: without it, every non-crashed sibling in a batch
+     * restart lost its name forever). */
+    if (meta && meta->supervisor)
+        capture_reg_names_pending(actor);
     registry_retire_actor(actor);
 
     /* Deliver Down notifications to all local watchers. */
