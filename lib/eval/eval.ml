@@ -3950,6 +3950,59 @@ let rec show_dispatch (v : value) : string =
 (* ------------------------------------------------------------------ *)
 
 let f32_round (v : float) : float = Int32.float_of_bits (Int32.bits_of_float v)
+
+(* Single-rounded binary32 fused multiply-add, emulated in binary64 via the
+   round-to-odd technique (Boldo-Melquiond). [a], [b], [c] must already be
+   binary32-representable (every f32 lane store goes through [f32_round], so
+   the SIMD f32x4 lanes are); the result is bit-identical to hardware [fmaf] /
+   [llvm.fma.f32], i.e. RN32(a*b + c) with ONE rounding.
+
+   Why not [f32_round (Float.fma a b c)]: that is a binary64 fused multiply-add
+   NARROWED to binary32 -- two roundings -- and it really does differ in the
+   last ulp. Witness: a = 24929, b = 673 (a*b = 2^24+1 exactly, a binary32
+   midpoint), c = 1e-30. The exact value sits just above the midpoint, so one
+   rounding gives 2^24+2, but the binary64 intermediate swallows c, lands back
+   on the midpoint, and ties-to-even then gives 2^24. Random binary32 triples
+   diverge about 1 in 20M.
+
+   How this works: [a *. b] is EXACT in binary64 (24+24 = 48 <= 53 significand
+   bits), so the only rounding is the final add. TwoSum recovers that add's
+   exact residual; when the binary64 sum is inexact and has an even significand,
+   stepping one ulp toward the residual makes it odd, which is round-to-odd of
+   the exact value -- and rounding an odd binary64 to nearest binary32 is
+   equivalent to rounding the exact value once (53 >= 24+2).
+
+   Oracle: llvm.fma.v4f32 on the compiled path. Validated against hardware
+   [fmaf] over >100M binary32 triples (full range, subnormal operands with 3.8M
+   subnormal results, overflow zone, and 20M midpoint-product constructions) with
+   zero mismatches; the compiled-vs-interpreted fuzz witness lives in
+   test/native/simd_fma_fuzz.march. *)
+let fma32_single_round (a : float) (b : float) (c : float) : float =
+  let p = a *. b in                                   (* exact *)
+  let s = p +. c in
+  if Float.is_nan s || s = Float.infinity || s = Float.neg_infinity then
+    f32_round s
+  else begin
+    let bv = s -. p in
+    let err = (p -. (s -. bv)) +. (c -. bv) in        (* TwoSum residual *)
+    let s' =
+      if err = 0.0 then s                             (* the add was exact *)
+      else if s = 0.0 then err   (* unreachable here: p+c cannot underflow to
+                                    zero for binary32 operands -- kept so the
+                                    helper is total if it is ever reused *)
+      else
+        let bits = Int64.bits_of_float s in
+        if Int64.logand bits 1L = 0L then
+          (* even significand: step one ulp toward the exact value (increasing
+             |s| when the residual has the same sign as s), giving round-to-odd *)
+          let away_from_zero = (err > 0.0) = (s >= 0.0) in
+          Int64.float_of_bits
+            (if away_from_zero then Int64.add bits 1L else Int64.sub bits 1L)
+        else s
+    in
+    f32_round s'
+  end
+
 let i32_wrap (v : int) : int = Int32.to_int (Int32.of_int v)
 let u8_wrap (v : int) : int = v land 0xff
 
@@ -5728,6 +5781,37 @@ let base_env : env =
         | [VUnit] -> VFloat (Unix.gettimeofday ())
         | _ -> eval_error "unix_time: takes no arguments"))
 
+    (* ---- peak_rss_bytes(): process self-inspection ----
+       OCaml has no getrusage binding, so the interpreter approximates with
+       Gc.quick_stat()'s top_heap_words converted to bytes. This measures the
+       OCaml *interpreter's* heap, not the compiled process's resident set —
+       the two are not comparable in magnitude or units. Only ORDERING
+       (a later call >= an earlier one, modulo GC compaction) is guaranteed
+       to agree with the compiled `march_peak_rss_bytes` path; do not expect
+       or assert equal raw numbers between interpreted and compiled runs. *)
+  ; ("peak_rss_bytes", VBuiltin ("peak_rss_bytes", function
+        | [] | [VUnit] ->
+          let stat = Gc.quick_stat () in
+          VInt (stat.Gc.top_heap_words * (Sys.word_size / 8))
+        | _ -> eval_error "peak_rss_bytes: takes no arguments"))
+
+    (* ---- live_allocs(): net count of live March heap objects ----
+       In a COMPILED program this reads march_live_allocs() — the runtime's
+       always-on alloc/free-on-rc-zero counter — and is exact.  The tree-walker
+       has no such objects at all: interpreted values are OCaml values managed
+       by the OCaml GC, and no march_alloc ever runs.  There is no meaningful
+       approximation, so this returns a constant 0 rather than inventing a
+       number that could be mistaken for a real measurement.
+       CONSEQUENCE, and it is deliberate: a leak guard built on live_allocs is
+       only falsifiable in the COMPILED path.  test/native's leak probes print
+       it to STDERR and let the dune threshold rule read it from the compiled
+       binary's captured stderr, keeping STDOUT (which IS diffed against an
+       interpreter-produced .expected) free of it.  Do not assert on this
+       value from an interpreted test. *)
+  ; ("live_allocs", VBuiltin ("live_allocs", function
+        | [] | [VUnit] -> VInt 0
+        | _ -> eval_error "live_allocs: takes no arguments"))
+
     (* ---- TCP socket builtins ---- *)
   ; ("tcp_connect", VBuiltin ("tcp_connect", function
         | [VString host; VInt port] ->
@@ -5994,6 +6078,22 @@ let base_env : env =
                 eval_error "random_bytes: cannot read /dev/urandom: %s" msg);
             march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "random_bytes(n: Int): Bytes"))
+    (* ---- Bytes <-> NativeU8Arr bridge: an O(n) copy each way (the two
+       layouts cannot be aliased — see runtime/march_extras.c). High bytes
+       (0x80-0xFF) must land as 128-255, i.e. zero-extended, never negative. *)
+  ; ("bytes_to_u8_arr", VBuiltin ("bytes_to_u8_arr", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VNativeU8Arr (Array.init (String.length s)
+                       (fun i -> Char.code s.[i]))
+           | Error e -> eval_error "bytes_to_u8_arr: %s" e)
+        | _ -> eval_error "bytes_to_u8_arr(b: Bytes): NativeU8Arr"))
+  ; ("u8_arr_to_bytes", VBuiltin ("u8_arr_to_bytes", function
+        | [VNativeU8Arr a] ->
+          let buf = Bytes.create (Array.length a) in
+          Array.iteri (fun i v -> Bytes.set buf i (Char.chr (v land 0xff))) a;
+          march_bytes_of_string (Bytes.to_string buf)
+        | _ -> eval_error "u8_arr_to_bytes(a: NativeU8Arr): Bytes"))
     (* ---- stdlib_* aliases: allow Crypto module to call builtins without shadowing ---- *)
   ; ("stdlib_sha256", VBuiltin ("stdlib_sha256", function
         | [v] ->
@@ -8243,6 +8343,14 @@ let base_env : env =
           done;
           VNativeF32Arr out
         | _ -> eval_error "native_f32_arr_map2: expected (NativeF32Arr, NativeF32Arr, fn)"))
+  ; ("native_f32_arr_fold", VBuiltin ("native_f32_arr_fold", function
+        | [acc0; VNativeF32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VFloat a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_f32_arr_fold: expected (init, NativeF32Arr, fn)"))
   ; ("native_f32_arr_from_list", VBuiltin ("native_f32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8312,6 +8420,14 @@ let base_env : env =
           done;
           VNativeI32Arr out
         | _ -> eval_error "native_i32_arr_map2: expected (NativeI32Arr, NativeI32Arr, fn)"))
+  ; ("native_i32_arr_fold", VBuiltin ("native_i32_arr_fold", function
+        | [acc0; VNativeI32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_i32_arr_fold: expected (init, NativeI32Arr, fn)"))
   ; ("native_i32_arr_from_list", VBuiltin ("native_i32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8381,6 +8497,14 @@ let base_env : env =
           done;
           VNativeU8Arr out
         | _ -> eval_error "native_u8_arr_map2: expected (NativeU8Arr, NativeU8Arr, fn)"))
+  ; ("native_u8_arr_fold", VBuiltin ("native_u8_arr_fold", function
+        | [acc0; VNativeU8Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_u8_arr_fold: expected (init, NativeU8Arr, fn)"))
   ; ("native_u8_arr_from_list", VBuiltin ("native_u8_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8527,17 +8651,18 @@ let base_env : env =
         | [VF32x4 a; VF32x4 b] ->
           VF32x4 (Array.init 4 (fun i -> f32_round (simd_maxnum_f a.(i) b.(i))))
         | _ -> eval_error "simd_f32x4_max: bad arguments"))
-  (* f32x4 fma is NOT formally identical to the compiled path: this is a
-     binary64 fused multiply-add rounded to binary32 (double rounding),
-     while llvm_emit.ml lowers to llvm.fma.v4f32 (a single binary32-fused
-     rounding). No divergence has been observed over the parity leg, but
-     the two operations are different roundings and could differ in the
-     last ulp. Open question + closure conditions:
-     specs/todos/2026-08-12-simd-fma-rounding-parity.md.
-     f64x2 below has no such asymmetry (Float.fma IS binary64-fused). *)
+  (* f32x4 fma runs the SAME operation as the compiled path by construction:
+     [fma32_single_round] is a single-rounded binary32 fused multiply-add
+     (round-to-odd emulation; see its definition above), bit-identical to
+     llvm_emit.ml's llvm.fma.v4f32. The old formula here,
+     [f32_round (Float.fma a b c)], was binary64-fused then narrowed -- two
+     roundings -- and diverged in the last ulp (~1 random triple in 20M);
+     test t15 in test/test_stdlib_suite.ml pins the boundary triples and
+     test/native/simd_fma_fuzz.march is the compiled-vs-interpreted fuzz.
+     f64x2 below needs no emulation (Float.fma IS binary64-fused). *)
   ; ("simd_f32x4_fma", VBuiltin ("simd_f32x4_fma", function
         | [VF32x4 a; VF32x4 b; VF32x4 c] ->
-          VF32x4 (Array.init 4 (fun i -> f32_round (Float.fma a.(i) b.(i) c.(i))))
+          VF32x4 (Array.init 4 (fun i -> fma32_single_round a.(i) b.(i) c.(i)))
         | _ -> eval_error "simd_f32x4_fma: bad arguments"))
   ; ("simd_f32x4_sqrt", VBuiltin ("simd_f32x4_sqrt", function
         | [VF32x4 a] -> VF32x4 (Array.map (fun x -> f32_round (sqrt x)) a)

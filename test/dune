@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_attrib_agreement test_cap_sandbox_profile test_ctxesc)
+ (modules test_compiler test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -254,7 +254,13 @@
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
-          ../runtime/march_remote_registry.c)
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
@@ -285,14 +291,22 @@
 ; A SCALING ASSERTION IS A BENCHMARK, NOT A UNIT TEST, so — same precedent as
 ; `types-check`/`grammar-check` above and `stdlib-march-properties` below —
 ; this is its OWN alias (`vault-scale`), NOT folded into `runtest`. It
-; measures parallel wall-clock scaling across 4 real OS threads, so it is
-; sensitive to core availability: on a box running other CPU-bound sessions
-; concurrently it can and does flake even with the median-of-5 built in — a
-; whole-run contention window (all 5 samples elevated together, not just one)
-; isn't something a within-run median can filter, and this repo's dev boxes
-; regularly run several other sessions' compiles/benchmarks at once (see
-; "bench load contamination" in project memory). `runtest` runs on every PR
-; and must stay green regardless of host load, so this can't live there.
+; measures parallel wall-clock scaling across up to 4 real OS threads, so it
+; is sensitive to core availability: on a box running other CPU-bound
+; sessions concurrently it can and does flake even with the median-of-5 built
+; in — a whole-run contention window (all 5 samples elevated together, not
+; just one) isn't something a within-run median can filter, and this repo's
+; dev boxes regularly run several other sessions' compiles/benchmarks at once
+; (see "bench load contamination" in project memory). `runtest` runs on every
+; PR and must stay green regardless of host load, so this can't live there.
+;
+; ROUND 5: the test's own thread count and bound now adapt to
+; sysconf(_SC_NPROCESSORS_ONLN) at runtime — T = min(4, ncores), bound =
+; solo_median * (T * 0.9) — instead of assuming a fixed 4-thread shape. That
+; assumption is what broke this on hosted CI (2-4 core runners can't show
+; 4-thread speedup regardless of lock quality); see the test's own header
+; comment for the full reasoning and measured figures. Below 2 cores the
+; test skips outright rather than asserting anything.
 ; Run it deliberately, ideally on an otherwise-quiet box:
 ;   dune build @vault-scale
 ; A failure here on a loaded box is expected and, by itself, is not evidence
@@ -309,7 +323,13 @@
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
-          ../runtime/march_remote_registry.c)
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
@@ -349,7 +369,13 @@
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
-          ../runtime/march_remote_registry.c)
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
@@ -384,7 +410,13 @@
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
-          ../runtime/march_remote_registry.c)
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
@@ -401,6 +433,7 @@
  (alias   runtest)
  (deps    (file test_actor_registry_runner))
  (action  (run ./test_actor_registry_runner)))
+
 
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
@@ -4200,6 +4233,106 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
+; Compiled/interpreted parity witness for NativeArray.fold_int/fold_float/
+; fold_f32/fold_i32/fold_u8 (SIMD follow-ups Task 2). fold_int/fold_float
+; previously had no compiled implementation (link error); fold_f32/fold_i32/
+; fold_u8 didn't exist at all. Every case uses a NON-COMMUTATIVE fold so the
+; (init, arr, f) vs. march_typed_array_fold's (arr, acc, f) vs. the stdlib
+; wrapper's (arr, acc, f) argument-order landmine can't hide behind a
+; commutative operator. Also proves the accumulator crosses the closure
+; boundary correctly in its erased/boxed representation via the trailing
+; fold-into-a-List case.
+(rule
+ (targets native_arr_fold native_arr_fold.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_fold
+        native/native_arr_fold.march)
+   (with-stdout-to native_arr_fold.out
+        (system "./native_arr_fold")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_fold.expected native_arr_fold.out)))
+
+; ── fold per-element float box: live-object guard ──────────────────────
+; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output
+; diff: native_float_arr_fold / native_f32_arr_fold return the right number
+; whether or not they release the per-element march_alloc_float box they
+; make for each closure call. So the two `march_decrc(elem)` lines in
+; runtime/march_runtime.c were unpinned -- deleting either left every gate
+; green. This is the guard.
+;
+; The signal is live_allocs() -- the runtime's always-on net count of live
+; march objects -- NOT peak RSS. This rule originally asserted an absolute
+; RSS band calibrated on Darwin (healthy 48 MB / leaked 170 MB / threshold
+; 96 MB); the first ubuntu CI run reported 128,143,360 B and went RED on a
+; healthy tree, because Linux's process baseline is ~122 MB on its own. An
+; absolute-RSS threshold is not portable across platforms. A live-object
+; count is: a leak IS "allocated and never freed", so the counter measures
+; the defect exactly, with no allocator, page-rounding, or OS baseline in
+; the path, and the threshold becomes a small exact number.
+;
+; Falsifiability was ESTABLISHED BY SABOTAGE, both directions, both lines
+; (Darwin arm64, --opt 2, 4,000,000 elements per leg):
+;   both decrc present        live_allocs delta         3   -> GREEN
+;   f64 decrc(elem) deleted   live_allocs delta 4,000,003   -> RED
+;   f32 decrc(elem) deleted   live_allocs delta 4,000,003   -> RED
+; Each sabotage adds exactly one leaked object per element. Threshold 1000
+; sits ~333x above the healthy figure and 4000x below either leaked one.
+; The healthy delta is a constant, not a per-element quantity: if it starts
+; tracking the element count, that is a new leak, not drift in this bound.
+;
+; The probe's accumulator is an INT, deliberately. A Float accumulator would
+; also trip this rule, but for a DIFFERENT and still-open reason -- the
+; accumulator-chain leak of
+; specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md -- which
+; would make the rule fire for something it is not guarding. See the header
+; comment in the fixture.
+;
+; Three rules, all load-bearing, for the reasons spelled out at length on
+; simd_leak_probe below: (a) the run's exit status is dune's, (b) stdout is
+; diffed so a crash-after-partial-output cannot pass, (c) only then is the
+; delta read from a captured FILE rather than from a pipeline whose status
+; belongs to its last stage.
+(rule
+ (targets native_arr_fold_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_arr_fold_leak_probe
+       native/native_arr_fold_leak_probe.march)))
+
+(rule
+ (targets native_arr_fold_leak_probe.out native_arr_fold_leak_probe.live)
+ (deps native_arr_fold_leak_probe)
+ (action
+  (with-stdout-to native_arr_fold_leak_probe.out
+   (with-stderr-to native_arr_fold_leak_probe.live
+    (run ./native_arr_fold_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/native_arr_fold_leak_probe.expected
+        native_arr_fold_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_arr_fold_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat native_arr_fold_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from native_arr_fold_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"native_arr_fold_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. Folding 4,000,000 elements must not accumulate per-element march_alloc_float boxes -- healthy is a small constant (~3 objects, independent of element count), each missing march_decrc(elem) adds exactly 4,000,000. Check that native_float_arr_fold and native_f32_arr_fold in runtime/march_runtime.c still call march_decrc(elem) after call_closure_2.\" >&2; exit 1; }; \
+    echo \"native_arr_fold_leak_probe live_allocs delta = ${live} objects\"")))
+
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
 ; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,
 ; pulled forward from the original Task 3 split; see llvm_emit.ml's SIMD
@@ -4224,6 +4357,58 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/simd_vector_core.expected simd_vector_core.out)))
+
+; Compiled/interpreted parity witness for the Bytes <-> NativeU8Arr bridge
+; (Bytes.to_u8_arr / Bytes.from_u8_arr): round-trip identity, the empty
+; case, high bytes (0x80-0xFF must zero-extend to 128-255), and the
+; motivating end-to-end case of feeding real byte data to the Simd byte
+; scanner. .expected is interpreter-produced; the compiled binary must
+; match byte-for-byte.
+(rule
+ (targets bytes_u8_bridge bytes_u8_bridge.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/bytes_u8_bridge.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o bytes_u8_bridge
+        native/bytes_u8_bridge.march)
+   (with-stdout-to bytes_u8_bridge.out
+        (system "./bytes_u8_bridge")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_u8_bridge.expected bytes_u8_bridge.out)))
+
+; Rounding-parity fuzz for Simd.fma_f32x4: 100k deterministic LCG iterations x
+; 4 lanes, folded into an integer checksum, half of them drawn from a family
+; whose product lands exactly on a binary32 midpoint. The interpreter now
+; emulates a SINGLE-rounded binary32 fma (eval.ml's fma32_single_round) to
+; match llvm.fma.v4f32; it used to double-round a binary64 Float.fma, which
+; diverged in the last ulp. .expected is interpreter-produced; the compiled
+; binary must match byte-for-byte.
+; Verified non-vacuous: the pre-fix compiler prints checksum
+; 7748989859602766 against this fixture's 7748989891677518 -- a delta of
+; 32074752, i.e. 125292 of the 400000 lanes rounding differently -- and its
+; second sample line reads [2., 2., 2., 2.] instead of
+; [2.00000023842, 2., 2.00000023842, 2.].
+(rule
+ (targets simd_fma_fuzz simd_fma_fuzz.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_fma_fuzz.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_fma_fuzz
+        native/simd_fma_fuzz.march)
+   (with-stdout-to simd_fma_fuzz.out
+        (system "./simd_fma_fuzz")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_fma_fuzz.expected simd_fma_fuzz.out)))
 
 ; SIMD-across-actor-messages smoke test (review finding #2's witness attempt):
 ; sends an I32x4 to an actor, which extracts a lane and replies with it via
@@ -4251,6 +4436,84 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/simd_actor_msg.expected simd_actor_msg.out)))
+
+; Mutual-TCO vector correctness pin (Task 3, closeouts): even_step/odd_step
+; mutually tail-call each other threading a Simd.F32x4 accumulator. The
+; combined llvm_tco.ml dispatcher for a MUTUAL-recursion group keeps
+; vector-typed params in a uniform boxed `ptr` slot (unlike a self-tail-
+; recursive function's native <4 x float> register slot -- see
+; simd_leak_probe.march) -- correct, just unaccelerated, per the comment at
+; the mutual-TCO param-slot alloca site in lib/tir/llvm_tco.ml. This fixture
+; pins that the boxed path still produces the CORRECT result so a future
+; change to the mutual-TCO slot strategy can't silently corrupt it.
+;
+; The diff rule below is NOT sufficient on its own, and shipped vacuous once:
+; both steps must READ memory (Simd.load_f32x4) to be impure, because a pure
+; step is an inline candidate and lib/tir/inline.ml's SCC exclusion only
+; walks edges BETWEEN candidates -- so a pure `odd_step` got folded into the
+; impure `even_step`, collapsing the mutual recursion into SELF-recursion.
+; The collapsed program prints the same number, so only the IR-shape rule
+; further below (simd_mutual_tco_llvm_check) can tell the two lowerings
+; apart. Keep the two rules together.
+(rule
+ (targets simd_mutual_tco simd_mutual_tco.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_mutual_tco.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_mutual_tco
+        native/simd_mutual_tco.march)
+   (with-stdout-to simd_mutual_tco.out
+        (system "./simd_mutual_tco")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_mutual_tco.expected simd_mutual_tco.out)))
+
+; IR-shape half of the mutual-TCO pin: proves the fixture actually reaches
+; the mutual-TCO lowering it claims to guard. Scoped to the combined
+; dispatcher's own `define`, in the style of simd_nested_closure_acc's check.
+;
+; The contract is a CONJUNCTION; no single count is falsifiable alone:
+;   mutco >= 1 -- a `@__mutco_*` combined dispatcher was emitted at all. If
+;     the inliner ever collapses the pair back into self-recursion (the
+;     regression this rule exists for -- see the comment on the run rule
+;     above) there is no such symbol and the awk body is empty, so this
+;     goes 0.
+;   boxed >= 2 -- both accumulator param slots are the uniform BOXED
+;     `alloca ptr` (%even_step__acc.addr / %odd_step__acc.addr), which is
+;     what the llvm_tco.ml comment documents as the mutual-group strategy.
+;     A future change promoting them to native <4 x float> slots must come
+;     here and re-decide deliberately rather than drift.
+;   vadd >= 1 -- the vector arithmetic survived into the dispatcher, so a
+;     DCE'd or scalarized body cannot satisfy the two counts above
+;     vacuously.
+(rule
+ (targets simd_mutual_tco_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_mutual_tco.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/simd_mutual_tco.march)
+   (with-stdout-to simd_mutual_tco_llvm_check.out
+    (run bash -c
+     "body=$(awk '/^define .*@__mutco_/{f=1} f{print} f && /^}/{exit}' native/simd_mutual_tco.ll); \
+      mutco=$(grep -c '@__mutco_' native/simd_mutual_tco.ll); \
+      boxed=$(printf '%s\\n' \"$body\" | grep -c '__acc\\.addr = alloca ptr'); \
+      vadd=$(printf '%s\\n' \"$body\" | grep -c 'fadd <4 x float>'); \
+      echo \"$mutco $boxed $vadd\"")))))
+
+(rule
+ (alias runtest)
+ (deps simd_mutual_tco_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r mutco boxed vadd < simd_mutual_tco_llvm_check.out; \
+    test \"$mutco\" -ge 1 -a \"$boxed\" -ge 2 -a \"$vadd\" -ge 1 || { echo \"simd_mutual_tco no longer exercises the mutual-TCO boxed-vector-slot path: expected >=1 '@__mutco_' symbol (0 means the inliner collapsed even_step/odd_step into SELF-recursion -- make sure BOTH steps stay impure by loading from the array, see the comment in test/native/simd_mutual_tco.march), >=2 boxed '%<fn>__acc.addr = alloca ptr' accumulator slots inside the combined dispatcher, and >=1 'fadd <4 x float>' (body not DCE'd) -- found mutco=$mutco boxed=$boxed vadd=$vadd\" >&2; exit 1; }")))
 
 ; Witness for the march_poly_eq/march_poly_compare MARCH_SIMD_TAG fix
 ; (review finding #1): List.member's `y == x` compares two generically-typed
@@ -4520,6 +4783,184 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "read -r alloc vstore fma < simd_nested_closure_acc_llvm_check.out; \
     test \"$vstore\" -ge 2 -a \"$alloc\" -eq 1 -a \"$fma\" -ge 1 || { echo \"expected the self-TCO'd simd_acc_go to keep its vector accumulator in a NATIVE slot: >=2 'store <4 x float> ... %acc.addr' (entry unbox + back-edge; 0 means the slot regressed to 'alloca ptr' and the back-edge boxes every iteration), exactly 1 march_simd_alloc (the return-path coercion only), and >=1 fma.v4f32 (body not DCE'd) -- found alloc=$alloc vstore=$vstore fma=$fma\" >&2; exit 1; }")))
+
+; ── Call-scoped SIMD vector temp boxes: the two halves of the contract ──
+;
+; llvm_emit's EApp arm releases a vector argument box the CALL SITE created,
+; but ONLY for callees whose parameter got a native vector TCO slot
+; (ctx.native_vec_params, filled by a pre-pass in emit_module). These two
+; fixtures pin the two directions; neither is meaningful without the other.
+;
+; (1) simd_leak_probe -- the release must HAPPEN. `go` is self-tail-recursive
+; with a vector param, so its entry prologue unboxes one caller-made box per
+; INVOCATION and (pre-fix) never released it: 2,000,000 calls leaked one
+; march_simd_alloc cell each. An output check cannot see a leak, hence the
+; unusual assertion.
+;
+; SIGNAL: live_allocs(), NOT RSS. The original version of this rule asserted
+; an absolute max-RSS threshold (< 32 MB), calibrated on Darwin (healthy
+; ~2.7 MB, leaked ~67 MB). It went RED the first time CI's ubuntu leg ran it
+; (PR #269 removed this probe's prior Darwin-only gate), at max RSS
+; 128,761,856 B -- not a leak, just Linux's ~122 MB process baseline that the
+; macOS-derived band never accounted for. live_allocs() reads the runtime's
+; always-on march_live_alloc_count -- incremented in march_alloc, decremented
+; on every free-on-rc-zero path -- so it counts the defect directly: no
+; allocator free-list behaviour, no page-granularity rounding, no OS/platform
+; baseline. Same conversion, same rationale, as
+; native_arr_fold_leak_probe.march.
+;
+; THREE checks, and all three are load-bearing (unchanged from the RSS-era
+; rule's reasoning). A single check that reads a captured number without
+; independently verifying the run went well can be fooled by a probe that
+; crashes early or corrupts its output -- e.g. macOS /usr/bin/time -l still
+; printing a max RSS for a child that died on SIGSEGV (measured: RSS
+; 1425408, pipeline rc 0), which is why this was never collapsed into one
+; piped command. Hence:
+;   (a) the run's EXIT STATUS is dune's (a `system`/`run` action fails on
+;       nonzero),
+;   (b) stdout is diffed against .expected, so a crash-after-partial-output
+;       or a wrong result cannot pass, and
+;   (c) only then is the live_allocs delta read, from the captured stderr
+;       FILE rather than a pipeline whose status belongs to the last stage.
+;
+; .expected's stdout is NOT interpreter-produced (2,000,000 iterations do not
+; finish under the tree-walker in any reasonable time; same posture as
+; simd_bounds_panic, which is compiled-only by design). The stdout value is
+; arithmetic: 2,000,000 calls x sum of splat(1.0) over 4 lanes = 8000000.
+; live_allocs() itself returns a constant 0 in the INTERPRETER (see
+; eval.ml), which is why the delta goes to stderr rather than stdout: it
+; never has to agree between backends.
+;
+; Numbers, measured on this fixture (Darwin arm64, --opt 2, 2,000,000
+; calls), both sabotage directions actually run:
+;   caller-side release present   live_allocs delta =         1
+;   release deleted (sabotage)    live_allocs delta = 2,000,001
+; The one leftover object is incidental runtime/stdlib state, not a per-call
+; leak; deleting the release adds exactly 2,000,000 -- one leaked
+; march_simd_alloc cell per invocation of `go`, the defect stated exactly
+; rather than estimated. The dune rule asserts < 1000: ~1000x above the
+; healthy figure (ample room for incidental runtime objects) and ~2000x
+; below the leaked figure, so it is falsifiable in both directions with an
+; enormous margin.
+(rule
+ (targets simd_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o simd_leak_probe
+       native/simd_leak_probe.march)))
+
+; Check (a): nonzero exit fails this rule (dune's own `system` semantics -- cf.
+; simd_bounds_panic, which needs an explicit with-accepted-exit-codes to allow
+; its nonzero exit). Stdout (the diffable answer) and stderr (the
+; live_allocs delta the probe prints about itself) land in separate files.
+(rule
+ (targets simd_leak_probe.out simd_leak_probe.live)
+ (deps simd_leak_probe)
+ (action
+  (with-stdout-to simd_leak_probe.out
+   (with-stderr-to simd_leak_probe.live
+    (run ./simd_leak_probe)))))
+
+; Check (b): the probe must actually finish and print the right answer.
+(rule
+ (alias runtest)
+ (action (diff native/simd_leak_probe.expected simd_leak_probe.out)))
+
+; Check (c): the leak assertion proper, read from the probe's own stderr line.
+(rule
+ (alias runtest)
+ (deps simd_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat simd_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from simd_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"simd_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- healthy is a small constant (~1 object, independent of call count), the missing release adds exactly 2,000,000. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that Llvm_toplevel.native_vec_param_idxs is still the single source of truth for that decision.\" >&2; exit 1; }; \
+    echo \"simd_leak_probe live_allocs delta = ${live} objects\"")))
+
+; ── peak_rss_bytes builtin: unit test ──────────────────────────────────
+; Bytes-on-both-platforms sanity check for the builtin the leak guard above
+; relies on. Compile and diff against the interpreter's own output: only
+; ORDER-STABLE facts and a coarse magnitude band are asserted (never raw byte
+; counts, which vary per run/platform), so interpreter/compiled parity holds
+; even though the interpreter's figure (Gc.quick_stat-derived, see eval.ml)
+; and the compiled figure (real getrusage) measure different things.
+(rule
+ (targets peak_rss)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/peak_rss.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o peak_rss
+       native/peak_rss.march)))
+
+(rule
+ (targets peak_rss.out)
+ (deps peak_rss)
+ (action (with-stdout-to peak_rss.out (run ./peak_rss))))
+
+(rule
+ (alias runtest)
+ (action (diff native/peak_rss.expected peak_rss.out)))
+
+; (2) simd_vector_escape_arg -- the release must NOT happen. `wrap` is
+; structurally (not tail) recursive, so it gets NO native slot, its `v`
+; parameter stays `ptr`, and its body stores that incoming pointer straight
+; into the cons cell it returns: the caller's box escapes into a list that
+; then owns it. Releasing it after the call frees a live list element.
+; Verified non-vacuous: with the index guard removed (release every box the
+; call site created -- the design this replaced) this fixture exits 139/133 on
+; every run, while simd_vector_core, simd_nested_closure_acc AND simd_poly_eq
+; all still passed, which is exactly why it had to be added. k = 0 is
+; deliberate: the base-case branch stores the box with no incrc, so the list
+; holds its ONLY reference and the bad dec frees it outright (a k = 3 version
+; leaves rc > 0 after the bad dec and silently passes).
+; .expected is interpreter-produced; compiled must match byte-for-byte.
+(rule
+ (targets simd_vector_escape_arg simd_vector_escape_arg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_escape_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o simd_vector_escape_arg
+        native/simd_vector_escape_arg.march)
+   (with-stdout-to simd_vector_escape_arg.out
+        (system "./simd_vector_escape_arg")))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/simd_vector_escape_arg.expected simd_vector_escape_arg.out)))
+
+; ...and again at --opt 2, which is where the double-free was originally
+; measured. Not redundant with the default-opt run above: at --opt 2 LLVM may
+; inline `wrap` into `drive`, which changes whether the escaping store and the
+; erroneous release end up in the same function -- i.e. exactly the variable
+; that decides whether a bad release is observable. Cheap (the fixture runs in
+; milliseconds) and the two levels have already been seen to disagree on
+; SIMD-vector RC shape more than once.
+(rule
+ (targets simd_vector_escape_arg_o2 simd_vector_escape_arg_o2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/simd_vector_escape_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o simd_vector_escape_arg_o2
+        native/simd_vector_escape_arg.march)
+   (with-stdout-to simd_vector_escape_arg_o2.out
+        (system "./simd_vector_escape_arg_o2")))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/simd_vector_escape_arg.expected simd_vector_escape_arg_o2.out)))
 
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
@@ -4801,6 +5242,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/float_generic_field_abi.expected native_float_generic_field_abi.out)))
+
+(rule
+ (targets native_generic_fn_to_string_specialize native_generic_fn_to_string_specialize.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/generic_fn_to_string_specialize.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_generic_fn_to_string_specialize
+        native/generic_fn_to_string_specialize.march)
+   (with-stdout-to native_generic_fn_to_string_specialize.out
+        (system "./native_generic_fn_to_string_specialize")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/generic_fn_to_string_specialize.expected native_generic_fn_to_string_specialize.out)))
 
 (rule
  (targets native_string_to_float_option native_string_to_float_option.out)

@@ -25,6 +25,36 @@ git log is authoritative for exact commits.
 
 - **Fixed a use-after-free that could crash any multi-scheduler program whose actors are reachable from more than one owner** — a monitor, a `Pid` stored in a `Vault` table, a `Pid` passed to another actor, or (most visibly, and how this was found) an actor registered under a name, since `Actor.register` makes the registry a second owner. The defect long predates the registry; the registry is simply the easiest way to give an actor a second owner. If a concurrent program of yours has ever "flaked mysteriously" with a `SIGBUS` or an RC underflow, it is worth re-checking against this fix rather than assuming it was unrelated. While an actor's green thread ran a message handler, the runtime overwrote that actor's refcount word with `1` and restored it afterwards — a leftover from before codegen learned to update actor structs in place unconditionally. The forced `1` was visible to every other thread, so a concurrent drop of a `Pid` observed "last reference" and freed an actor record that still had live owners; the registry was then left pointing at freed memory, and the next lookup or death-cleanup read a garbage refcount (`march: RC underflow (rc was -6899412650951359789)`, `SIGBUS`, or `SIGTRAP`). Concurrent *increments* during the same window were silently lost. Single-scheduler runs were never affected. The spawn-and-kill churn scenario failed on 6 of 30 runs before the fix and 0 of 60 after.
 - **A killed actor's registered names are now reclaimed, not left occupying the registry forever.** `do_actor_death` (and the interpreter's matching `crash_actor` path) now retires all of the dying actor's names — dropping the forward-table entry and the per-actor reverse index — before any monitor `Down` notification is delivered, so a watcher woken by the death can never observe a name still mapped to the dead incarnation. Previously only the runtime's own `$alive`-flag re-check kept `whereis`/`registered` correct at lookup time; the table entry itself, and the interpreter's `named_registry` map, held on to the name indefinitely unless a later registration happened to overwrite it. `Actor.registered()` in the interpreter no longer lists a name after its actor is killed.
+- **`simd_leak_probe`'s CI leak guard no longer false-positives on Linux.**
+  The guard for the per-call SIMD vector temp-box leak
+  (`test/native/simd_leak_probe.march`) asserted an absolute peak-RSS
+  threshold (< 32 MB) calibrated on macOS's ~2.7 MB healthy baseline; Linux's
+  ~122 MB process baseline made that threshold unreachable, so the guard
+  went RED on a healthy binary (measured 128,761,856 B) the first time CI's
+  ubuntu leg ran it. Converted to the same fix already applied to the
+  sibling `native_arr_fold_leak_probe` guard: assert a `live_allocs()`
+  delta instead of RSS, which counts leaked `march_simd_alloc` cells
+  directly and needs no platform calibration. Healthy delta is now ~1
+  object (threshold `< 1000`); a regression adds exactly 2,000,000 —
+  confirmed by reverting the caller-side release in
+  `lib/tir/llvm_emit.ml` and remeasuring.
+
+- **`Regex` no longer has a denial-of-service on adversarial input.** The
+  engine matched by backtracking, so repeated quantifiers over one character
+  class followed by a byte that never matches cost O(n^k): the pattern
+  `a*a*a*a*b` against 80 bytes of `a` took **5.7 seconds** compiled at
+  `--opt 2`, and the cost is reachable from a pattern in a config file plus a
+  short user-supplied string. (Note this is *polynomial*, not the exponential
+  of the classic `(a+)+$` — that pattern is not expressible here, since the
+  engine has neither groups nor alternation.) `matches`, `matches_opts`,
+  `find`, `find_all`, `replace`, `replace_all` and `split` now all simulate
+  the set of reachable NFA states instead, which is linear in the input and
+  cannot blow up: the same 80-byte case is now 0.0004s, and 2000 bytes takes
+  0.0096s. Behaviour is unchanged — the new engine is asserted to return the
+  same booleans *and* the same matched substrings as the old one across the
+  supported syntax, and `matches_backtracking`/`find_backtracking` are
+  retained so that comparison has something to compare against.
+
 - **`if` and `match do` now treat their branches as mutually exclusive for
   linear values, the way `match` arms already did.** Consuming the same
   linear or affine value once in each branch is legal — at most one branch
@@ -80,6 +110,41 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Bytes.to_u8_arr` / `Bytes.from_u8_arr`** — an O(n)-copy bridge between
+  `Bytes` and `NativeU8Arr`, so byte data from files, sockets, or
+  `Bytes.from_hex` can reach the SIMD byte scanner (`Simd.load_u8x16` /
+  `eq_u8x16` / `first_set_u8x16`), previously reachable only from
+  hand-built `NativeU8Arr` literals. High bytes (0x80-0xFF) round-trip as
+  128-255, never negative.
+- **`NativeArray.fold_int` / `fold_float` now work under `--compile`, and
+  `NativeArray.fold_f32` / `fold_i32` / `fold_u8` are new** — `fold_int` and
+  `fold_float` previously typechecked and evaluated interpreted only; a
+  compiled program calling either failed to link (no C runtime symbol). All
+  five widths now fold via a `call_closure_2`-based loop mirroring
+  `TypedArray.fold`'s RC discipline. Also fixes a memory leak this same
+  change introduced during development and caught before merge: the
+  generic accumulator crossing the closure boundary needed the compiled
+  call site to box/tag a literal initial value (e.g. `fold_int(arr, 3, ...)`)
+  the same way `RingBuf.push` already does for its erased element, and the
+  float-family folds needed to release the per-element box they allocate
+  each iteration (confirmed safe — not a use-after-free — by inspecting the
+  compiled closure's `-emit-llvm` output, which always allocates a fresh box
+  when storing an element rather than aliasing the one passed in); that
+  release is pinned by `test/native/native_arr_fold_leak_probe.march`, a
+  live-object-count guard, since an output diff cannot see a leak.
+  **A second, separate leak remains open:** `fold_float` / `fold_f32` with a
+  `Float` **accumulator** leak a further ~32 B per element, because each
+  iteration's accumulator box is never released — 5M elements cost 193.6 MB
+  of peak RSS against 40.4 MB for the `fold_int` control. Results are
+  correct; only memory residency is affected, and folds with an `Int`
+  accumulator (`fold_int`/`fold_i32`/`fold_u8`) are unaffected. The bug is
+  inherited from `TypedArray.fold`, not new to these helpers. See
+  `docs/simd-vectorization.md`'s "Known limitations" and
+  `specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md`.
+- **Runtime enforcement tests for `--cap-sandbox`** — compiled fixtures now
+  verify that a withheld capability's syscall is actually denied at runtime
+  (Linux seccomp-bpf, macOS Seatbelt), not just that the embedded policy
+  strings agree between builders.
 - **Exponential supervisor restart backoff with jitter (runtime-internal)** —
   a supervised child that crashes repeatedly no longer gets respawned
   immediately every time: from the second consecutive crash of the same
@@ -167,10 +232,8 @@ git log is authoritative for exact commits.
   high-bit rule.
   `F32x4`/`F64x2` arithmetic is bit-exact single/double precision (verified
   against the true-f32-vs-double-then-round distinction) and `fma` is a
-  true fused multiply-add on both paths (for `f32x4` the interpreter's is a
-  binary64 fusion rounded to binary32 — no divergence observed, formal
-  equivalence tracked in
-  `specs/todos/2026-08-12-simd-fma-rounding-parity.md`);
+  true fused multiply-add on both paths, interpreted and compiled (see the
+  Fixed entry below for the single-rounding fix this required);
   `min`/`max`/`hmin`/`hmax` on floats use minNum/maxNum
   semantics; integer arithmetic wraps mod 2^w. Each type implements
   `Show`/`Eq`/`Hash` (lane-wise; a NaN lane is unequal to itself, matching
@@ -204,12 +267,11 @@ git log is authoritative for exact commits.
   width of `i64x2`/`f64x2` caps the ceiling even after that overhead is
   fixed (see `bench/RESULTS.md`'s simd-kernels section).
 
-  Known limitations: a self-tail-recursive vector accumulator leaks one
-  32-byte box per **call** (not per iteration — the loop body itself is
-  allocation-free), unbounded for a long-lived process
-  (`specs/todos/2026-08-11-simd-tco-entry-box-leak.md`); mutual-recursion
-  accumulator groups still box the vector on every iteration (correct, just
-  not accelerated); `i64x2` lane values beyond ±2^62 lose their top bit
+  Known limitations: mutual-recursion accumulator groups still box the
+  vector on every call (correct, just not accelerated — see the Fixed entry
+  below for the self-tail-recursive case, which *is* accelerated and does
+  not have this box; pinned by `test/native/simd_mutual_tco.march`);
+  `i64x2` lane values beyond ±2^62 lose their top bit
   under the **interpreter only** (OCaml's 63-bit boxed int), a parity edge
   confined to that range; and `==`/`show` under a polymorphic/erased-type-
   variable context fall back to the generic runtime helpers rather than the
@@ -244,6 +306,62 @@ git log is authoritative for exact commits.
   reachable-from-`main` function that uses it. Enforced identically by
   `march --check`, the interpreter, and the compiler. (Sandbox ladder R1
   stages A+B; per-function grants are future work.)
+- **`peak_rss_bytes` builtin** — process self-inspection returning peak
+  resident set size in bytes on both macOS and Linux (`getrusage`'s
+  `ru_maxrss` is bytes on macOS, kilobytes on Linux; normalized to bytes at
+  the C boundary). **Compiled builds only** report a true RSS: the
+  interpreter has no `getrusage` binding and returns a `Gc.quick_stat`
+  `top_heap_words` approximation of the *interpreter's own* OCaml heap, which
+  is not comparable in magnitude to the compiled figure. Only the ordering
+  (a later call >= an earlier one) agrees across the two paths — never assert
+  equal raw numbers. Ambient, no capability grant required — it performs no
+  IO and observes nothing outside the process. `System.mem_peak_bytes()` is
+  the stdlib wrapper (named to avoid shadowing the builtin it calls). The
+  SIMD-vector-temp-box leak guard (`test/native/simd_leak_probe.march`,
+  `test/dune`) now uses it to measure its own RSS from inside the process,
+  replacing a Darwin-only `/usr/bin/time -l` check — the guard runs on both
+  CI legs for the first time.
+- **FFI extern binding a C symbol the runtime preamble already declares no
+  longer fails to compile.** An `extern` whose C name matched a preamble
+  declare (e.g. `fn live_allocs(): Int = "march_live_allocs"`) emitted a
+  second `declare` for the same symbol, which LLVM rejects outright as
+  `invalid redefinition of function` — the whole module failed to build. The
+  extern's declare is now suppressed when the preamble already emitted one.
+  The skip set is computed from the preamble text actually emitted for the
+  current target, so a native-only symbol is still declared normally when
+  compiling to WASM. Surfaced by adding `live_allocs` as a builtin, which
+  moved `march_live_allocs` into the preamble while `test/native/ffi_leak.march`
+  and `ffi_resource.march` were already binding it as an extern.
+- **`live_allocs` builtin** — process self-inspection returning the net count
+  of live March heap objects (every `march_alloc` increments, every
+  free-on-refcount-zero decrements; an always-on relaxed atomic, not gated
+  behind a stats flag). Like `peak_rss_bytes` it is ambient and needs no
+  capability grant — it reads one process-local counter and observes nothing
+  outside the process. **Compiled builds only** report a real count: the
+  tree-walking interpreter allocates no March heap objects at all (its values
+  are OCaml values under the OCaml GC), so it returns a constant `0` rather
+  than an approximation that could be mistaken for a measurement — never
+  assert on it from an interpreted test. Because a leak is exactly "allocated
+  and never freed", this measures leaks directly and exactly, with no
+  allocator, page-rounding, or OS-baseline noise, which makes it portable
+  where an absolute RSS threshold is not. The fold per-element-float-box leak
+  guard (`test/native/native_arr_fold_leak_probe.march`, `test/dune`) now
+  asserts on it instead of peak RSS, after the RSS band — calibrated on macOS
+  — reported a false leak on CI's Linux leg, where the process baseline alone
+  is ~122 MB.
+
+### Documentation
+
+- **Capability enforcement assurance-tier table, and an OS-primitive-by-capability
+  reference, added to the Capabilities and Capability Enforcement pages.** A
+  quick-reference table (type system → `forge cap inspect` → `--cap-sandbox` →
+  `forge cap run` → `forge cap run --allow-only`) makes the assurance/effort
+  tradeoff legible at a glance, backed by a full capability-to-OS-primitive
+  mapping for both `--cap-sandbox` (seccomp-bpf/Seatbelt) and `forge cap run`
+  (bubblewrap/sandbox-exec). Also documents two platform asymmetries verified
+  against real running binaries: macOS's `IO.Network` gates `bind`/`connect`
+  but not `socket()` creation, and macOS's `IO.Process` gates `fork` but not
+  `exec` — both differ from Linux, which is stricter on each.
 
 ### Changed
 
@@ -294,6 +412,40 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Simd.fma_f32x4` now gives the same answer interpreted and compiled.** The
+  compiled path emits `llvm.fma.v4f32` — one binary32 rounding — while the
+  interpreter computed a binary64 fused multiply-add and then narrowed it, two
+  roundings, which really did differ in the last ulp: about 1 random binary32
+  triple in 20 million, and *systematically* whenever `a * b` lands exactly on
+  a binary32 midpoint (e.g. `24929.0 * 673.0 = 2^24 + 1` with any tiny positive
+  `c`, where the compiled path gave `16777218` and the interpreter `16777216`).
+  The interpreter now emulates a genuine single-rounded binary32 fused
+  multiply-add, so both backends run the same operation by construction. Boundary
+  triples are pinned as tests and the two paths are fuzzed against each other
+  over 400,000 boundary-heavy lanes.
+- **Calling a SIMD kernel no longer leaks 32 bytes per call.** A
+  self-tail-recursive function with a SIMD-vector parameter keeps that
+  parameter in a native vector register, so the compiler boxes the argument at
+  the call site and unboxes it once on entry — and nothing ever released that
+  box. One 32-byte cell leaked per *invocation*, unbounded: a server calling a
+  vector kernel per request grew without limit (measured 64 MB over 2,000,000
+  calls; now 2.7 MB, guarded by an RSS assertion in the test suite). The call
+  site now releases the box it created, but only for callees whose entry
+  prologue provably cannot retain it. Vector arguments to any other function —
+  where the callee may store the vector into a list, record, or closure that
+  then owns it — are deliberately left alone; those shapes still leak one box
+  per call and are tracked separately.
+- **Compiled `to_string(x)` inside a generic function printed `#<tag:N>`
+  garbage for non-primitive `x` (Lists, records, user ADTs) instead of the
+  real value**, diverging from the interpreter. `to_string` on a concretely-
+  typed argument already dispatched to the matching `Show` implementation;
+  a `to_string` call inside a still-generic function (argument type an
+  unresolved type variable at that function's own lowering time) stayed a
+  bare runtime fallback that only understands a handful of primitive
+  representations, and was never revisited once monomorphization later
+  specialized the function to a concrete type. Hit any generic helper whose
+  body called `to_string` on its parameter, most visibly
+  `examples/csv_example.march`'s per-row callback.
 - **Killing (or crashing) a busy actor no longer leaks its queued mailbox.**
   Undelivered messages sitting in a dead process's mailbox were never
   disposed — `sched_loop`'s `PROC_DEAD` reap branch freed the mailbox

@@ -130,6 +130,14 @@ mod Bytes do
     end
   end
 
+  -- ---- NativeU8Arr bridge ----
+
+  doc "Copy [b]'s bytes into a fresh NativeU8Arr for SIMD/numeric work. O(n) copy — the layouts cannot be shared."
+  fn to_u8_arr(b) do bytes_to_u8_arr(b) end
+
+  doc "Copy [a]'s bytes into a fresh immutable Bytes. O(n) copy."
+  fn from_u8_arr(a) do u8_arr_to_bytes(a) end
+
   -- ---- UTF-8 encoding ----
 
   doc "Encode a String as UTF-8 bytes. Equivalent to from_string for March strings."

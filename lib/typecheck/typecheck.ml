@@ -2389,6 +2389,21 @@ let builtin_bindings : (string * scheme) list =
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
+    (* peak_rss_bytes: process self-inspection (peak resident set size, in
+       bytes, on both platforms). Deliberately NOT in the capability table
+       below — it performs no IO and observes nothing outside this process,
+       so unlike unix_time (gated to IO.Clock right next to this entry) it
+       needs no capability grant. Don't "fix" that by copying unix_time's
+       cap-table entry. *)
+    ("peak_rss_bytes",  Mono (TArrow (t_unit,  t_int)));
+    (* live_allocs: net count of live March heap objects (march_alloc minus
+       free-on-rc-zero). Same ambient, non-capability-gated rationale as
+       peak_rss_bytes directly above — it reads one process-local counter and
+       observes nothing outside this process. Unlike peak_rss_bytes it is
+       exact and platform-independent (a plain atomic counter, no getrusage,
+       no allocator or OS accounting in the path), which is why the RSS leak
+       probes now assert on it instead. *)
+    ("live_allocs",     Mono (TArrow (t_unit,  t_int)));
     ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
     ("uuid_v7_at",      Mono (TArrow (t_int,   t_string)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));
@@ -2782,6 +2797,9 @@ let builtin_bindings : (string * scheme) list =
     ("base64_decode",   Mono (TArrow (t_string,
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     ("random_bytes",    Mono (TArrow (t_int, TCon ("Bytes", []))));
+    (* Bytes <-> NativeU8Arr bridge: pure data movement, not a capability. *)
+    ("bytes_to_u8_arr", Mono (TArrow (TCon ("Bytes", []), TCon ("NativeU8Arr", []))));
+    ("u8_arr_to_bytes", Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("Bytes", []))));
     (* stdlib_* variants — used by module wrappers that shadow the base names.
        stdlib_base64_encode accepts String only at the type-checker level;
        callers should convert Bytes to String with bytes_to_string first. *)
@@ -2891,9 +2909,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (TCon ("TypedArray", [t_bool]), TCon ("NativeFloatArr", [])))));
     (* Narrow-width NativeArray families — f32/i32/u8 (P10 narrow types).
        Opaque 0-arity types, same shape as NativeIntArr/NativeFloatArr above.
-       Interpreter-path only; compiled (LLVM/runtime) support is a later task.
-       No alloc_raw / fold / min / max / sumsq_dev / filter_mask for these
-       widths -- only the 9-op family + conversions. *)
+       No min / max / sumsq_dev / filter_mask for these widths -- only the
+       9-op family + fold + conversions. *)
     (* f32 *)
     ("native_f32_arr_make",
        Mono (TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", [])))));
@@ -2913,6 +2930,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeF32Arr", []),
              TArrow (TCon ("NativeF32Arr", []),
              TArrow (TArrow (t_float, TArrow (t_float, t_float)), TCon ("NativeF32Arr", []))))));
+    ("native_f32_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeF32Arr", []),
+                   TArrow (TArrow (a, TArrow (t_float, a)), a)))));
     ("native_f32_arr_from_list",
        Mono (TArrow (t_list t_float, TCon ("NativeF32Arr", []))));
     ("native_f32_arr_to_list",
@@ -2936,6 +2957,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeI32Arr", []),
              TArrow (TCon ("NativeI32Arr", []),
              TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeI32Arr", []))))));
+    ("native_i32_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeI32Arr", []),
+                   TArrow (TArrow (a, TArrow (t_int, a)), a)))));
     ("native_i32_arr_from_list",
        Mono (TArrow (t_list t_int, TCon ("NativeI32Arr", []))));
     ("native_i32_arr_to_list",
@@ -2959,6 +2984,10 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (TCon ("NativeU8Arr", []),
              TArrow (TCon ("NativeU8Arr", []),
              TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeU8Arr", []))))));
+    ("native_u8_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeU8Arr", []),
+                   TArrow (TArrow (a, TArrow (t_int, a)), a)))));
     ("native_u8_arr_from_list",
        Mono (TArrow (t_list t_int, TCon ("NativeU8Arr", []))));
     ("native_u8_arr_to_list",

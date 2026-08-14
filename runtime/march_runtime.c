@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -6321,6 +6322,20 @@ double march_unix_time(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/* Peak resident set size of this process, in BYTES on every platform.
+ * getrusage reports ru_maxrss in BYTES on macOS and KILOBYTES on Linux;
+ * normalising here means no caller can repeat the 1024x error that
+ * bench/run_string_bench.sh documents. */
+int64_t march_peak_rss_bytes(void) {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+#if defined(__APPLE__)
+    return (int64_t)ru.ru_maxrss;
+#else
+    return (int64_t)ru.ru_maxrss * 1024;
+#endif
+}
+
 /* ── TypedArray builtins ─────────────────────────────────────────────── */
 /* TypedArray is a heap object with layout:
  *   [rc:i64][tag:i32][pad:i32][len:i64][cap:i64][elements: void*[]]
@@ -6661,17 +6676,9 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
 }
 
 /* ── Native int/float arrays ──────────────────────────────────────────── */
-/* Layout (ALL element widths share it — phase C's vector loads depend on
- * elem_kind and the 16-byte data alignment):
- *   march_hdr(16) + int64_t len(8) + uint8_t elem_kind(1) + pad(7)
- *   + elements(len * elem_size), data 16-byte aligned.
- * elem_kind: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8. */
-#define NATIVE_ARR_HDR 32
-#define NATIVE_ELEM_I64 0
-#define NATIVE_ELEM_F64 1
-#define NATIVE_ELEM_F32 2
-#define NATIVE_ELEM_I32 3
-#define NATIVE_ELEM_U8  4
+/* NATIVE_ARR_HDR / NATIVE_ELEM_* and the layout they describe are declared
+ * once in march_runtime.h so march_extras.c can share them without a second
+ * #define. */
 
 static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     if (len < 0) { fputs("march: native array: negative length\n", stderr); exit(1); }
@@ -6883,6 +6890,26 @@ void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
     return new_arr;
 }
 
+/* fold: the accumulator is a GENERIC 'a, so it stays in the erased/boxed
+ * representation for the whole loop and the caller's codegen owns boxing it
+ * in and out.  RC discipline copied verbatim from march_typed_array_fold
+ * (above in this file; grep the name rather than trusting a line number)
+ * — incrc(f) per element, one decrc(f) after the loop.
+ * ARG ORDER IS (acc, arr, f) — matching the March builtin, NOT
+ * march_typed_array_fold's (arr, acc, f). */
+void *native_int_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_int_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        void *elem = (void *)(intptr_t)((x << 1) | 1);   /* wire-tag */
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+    }
+    march_decrc(f);
+    return result;
+}
+
 /* Length-mismatch panic shared by the compiled map2 INLINE loop
  * (lib/tir/native_map_inline.ml / llvm_emit.ml's emit_native_map2_inline_loop).
  * That loop bypasses native_int_arr_map2/native_float_arr_map2 entirely
@@ -7060,6 +7087,47 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
     return new_arr;
 }
 
+/* fold: element is a raw double, materialised via march_alloc_float (boxed) —
+ * unlike native_int_arr_fold's wire-tagged scalar. Same RC discipline and
+ * (acc, arr, f) argument order as native_int_arr_fold above.
+ *
+ * march_decrc(elem) after the call releases the FRESH per-element box we
+ * just allocated. Confirmed safe (not a use-after-free) by inspecting
+ * -emit-llvm for the compiled closure's apply fn: the erased-ptr calling
+ * convention treats a Float argument as borrowed/read-only — the callee
+ * only ever calls march_unbox_float(x.arg) to read the double value, never
+ * stores x.arg itself. Even a closure that stores the element (e.g. cons it
+ * into a List(Float)) allocates a FRESH march_alloc_float box from the
+ * unboxed double for storage rather than aliasing our box — so our box has
+ * no surviving alias once the call returns and is always safe to drop.
+ * Without this decrc, elem leaks: ~32B/element, unbounded in loop length
+ * (confirmed via RSS measurement — see task-2-report.md). This decrc is
+ * pinned by test/native/native_arr_fold_leak_probe.march; deleting it takes
+ * that fixture's peak RSS from 48 MB to 171 MB.
+ *
+ * STILL OPEN — the accumulator (result) has the identical borrowed-argument
+ * shape and also isn't freed by the callee, so a fold whose accumulator is
+ * itself a Float leaks a SECOND ~32B/element as each iteration's
+ * march_alloc_float becomes the next accumulator. That half is inherited
+ * from the reference march_typed_array_fold (above in this file) and is out
+ * of scope here; it is measured and tracked in
+ * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md, and
+ * the fix most likely belongs in march_typed_array_fold rather than here. */
+void *native_float_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_float_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        double x;
+        memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        void *elem = march_alloc_float(x);
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+        march_decrc(elem);
+    }
+    march_decrc(f);
+    return result;
+}
+
 void *native_float_arr_from_list(void *lst) {
     int64_t n = 0;
     void *tmp = lst;
@@ -7170,6 +7238,23 @@ void *PREFIX##_map2(void *arr1, void *arr2, void *f) {                        \
     march_decrc(f);                                                           \
     return new_arr;                                                           \
 }                                                                             \
+/* fold: (int64_t)*(CTYPE *)... already sign-extends int32_t and             \
+ * zero-extends uint8_t exactly like PREFIX##_get above, so one shared       \
+ * fold body is correct for both instantiations without a per-width         \
+ * materialisation branch. Same RC discipline and (acc, arr, f) argument     \
+ * order as native_int_arr_fold above. */                                    \
+void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
+    int64_t len = PREFIX##_length(arr);                                      \
+    void *result = acc;                                                      \
+    for (int64_t i = 0; i < len; i++) {                                      \
+        int64_t x = (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
+        void *elem = (void *)(intptr_t)((x << 1) | 1);                       \
+        march_incrc(f);                                                      \
+        result = call_closure_2(f, result, elem);                            \
+    }                                                                        \
+    march_decrc(f);                                                          \
+    return result;                                                           \
+}                                                                             \
 void *PREFIX##_from_list(void *lst) {                                         \
     int64_t n = 0;                                                            \
     void *tmp = lst;                                                          \
@@ -7272,6 +7357,31 @@ void *native_f32_arr_map2(void *arr1, void *arr2, void *f) {
     }
     march_decrc(f);
     return new_arr;
+}
+
+/* fold: element is a stored float, widened to double and materialised via
+ * march_alloc_float (the wire ABI has no native f32 box — see the ABI
+ * comment above clo_apply_ptr). Same RC discipline and (acc, arr, f)
+ * argument order as native_int_arr_fold above. march_decrc(elem) after the
+ * call releases our per-element box — see native_float_arr_fold's comment
+ * above for why this is confirmed safe (borrowed-argument convention, no
+ * alias survives the call) rather than a use-after-free. Pinned by
+ * test/native/native_arr_fold_leak_probe.march's f32 leg. The accumulator
+ * chain leaks the same way here as there when the accumulator is a Float —
+ * still open, see that comment and
+ * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md. */
+void *native_f32_arr_fold(void *acc, void *arr, void *f) {
+    int64_t len = native_f32_arr_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        double x = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
+        void *elem = march_alloc_float(x);
+        march_incrc(f);
+        result = call_closure_2(f, result, elem);
+        march_decrc(elem);
+    }
+    march_decrc(f);
+    return result;
 }
 
 void *native_f32_arr_from_list(void *lst) {

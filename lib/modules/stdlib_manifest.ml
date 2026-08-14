@@ -64,6 +64,7 @@ let stdlib_file_list = [
   "bytes.march";
   "msgpack.march";
   "compress.march";
+  "parse.march";
   "toml.march";
   "xml.march";
   "yaml.march";
@@ -127,7 +128,6 @@ let stdlib_file_list = [
   "signal.march";
   "rrb_vec.march";
   "parallel.march";
-  "parse.march";
   "uri.march";
   "forge_nb.march";
   "handle.march";

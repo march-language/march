@@ -360,6 +360,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_random_bytes(i64 %n)" };
   { march_name = "stdlib_random_bytes"; c_name = Some "march_random_bytes"; ret_ty = Some (Tir.TCon ("Bytes", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_random_bytes(i64 %n)" };
+  { march_name = "bytes_to_u8_arr"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @bytes_to_u8_arr(ptr %b)" };
+  { march_name = "u8_arr_to_bytes"; c_name = None; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @u8_arr_to_bytes(ptr %arr)" };
   { march_name = "stdlib_gzip_encode"; c_name = Some "march_gzip_encode"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_gzip_encode(ptr %b, i64 %level)" };
   { march_name = "stdlib_gzip_decode"; c_name = Some "march_gzip_decode"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
@@ -610,6 +614,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_map2(ptr %arr1, ptr %arr2, ptr %f)" };
   { march_name = "native_int_arr_to_float_arr"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_to_float_arr(ptr %arr)" };
+  { march_name = "native_int_arr_fold"; c_name = None; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_fold(ptr %acc, ptr %arr, ptr %f)" };
   { march_name = "native_int_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_from_list(ptr %lst)" };
   { march_name = "native_int_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
@@ -636,6 +642,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_float_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_map2(ptr %arr1, ptr %arr2, ptr %f)" };
+  { march_name = "native_float_arr_fold"; c_name = None; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_fold(ptr %acc, ptr %arr, ptr %f)" };
   { march_name = "native_float_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_from_list(ptr %lst)" };
   { march_name = "native_float_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TFloat]));
@@ -657,6 +665,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_f32_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_map2(ptr %a, ptr %b, ptr %f)" };
+  { march_name = "native_f32_arr_fold"; c_name = None; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_fold(ptr %acc, ptr %arr, ptr %f)" };
   { march_name = "native_f32_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_from_list(ptr %lst)" };
   { march_name = "native_f32_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TFloat]));
@@ -675,6 +685,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_i32_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_map2(ptr %a, ptr %b, ptr %f)" };
+  { march_name = "native_i32_arr_fold"; c_name = None; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_fold(ptr %acc, ptr %arr, ptr %f)" };
   { march_name = "native_i32_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_from_list(ptr %lst)" };
   { march_name = "native_i32_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
@@ -693,6 +705,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_u8_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_map2(ptr %a, ptr %b, ptr %f)" };
+  { march_name = "native_u8_arr_fold"; c_name = None; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_fold(ptr %acc, ptr %arr, ptr %f)" };
   { march_name = "native_u8_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_from_list(ptr %lst)" };
   { march_name = "native_u8_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
@@ -753,6 +767,14 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_to_list(ptr %rb)" };
   { march_name = "unix_time"; c_name = Some "march_unix_time"; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
+  (* peak_rss_bytes: process self-inspection, not capability-gated (see
+     typecheck.ml — deliberately absent from the capability table). *)
+  { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_peak_rss_bytes()" };
+  (* live_allocs: net live march_alloc count; ambient for the same reason as
+     peak_rss_bytes above. Exact and platform-independent — see typecheck.ml. *)
+  { march_name = "live_allocs"; c_name = Some "march_live_allocs"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_live_allocs()" };
   { march_name = "tcp_connect"; c_name = Some "march_tcp_connect"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_connect(ptr %host, i64 %port)" };
   { march_name = "http_serialize_request"; c_name = Some "march_http_serialize_request"; ret_ty = Some Tir.TString;
@@ -1214,6 +1236,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_base64_encode";
   PDeclare "march_base64_decode";
   PDeclare "march_random_bytes";
+  PDeclare "bytes_to_u8_arr";
+  PDeclare "u8_arr_to_bytes";
   PComment "; Compression builtins (runtime/march_compress.c)";
   PDeclare "march_gzip_encode";
   PDeclare "march_gzip_decode";
@@ -1391,6 +1415,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_int_arr_map";
   PDeclare "native_int_arr_map2";
   PDeclare "native_int_arr_to_float_arr";
+  PDeclare "native_int_arr_fold";
   PDeclare "native_int_arr_from_list";
   PDeclare "native_int_arr_to_list";
   PDeclare "native_int_arr_filter_mask";
@@ -1405,6 +1430,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_float_arr_sumsq_dev";
   PDeclare "native_float_arr_map";
   PDeclare "native_float_arr_map2";
+  PDeclare "native_float_arr_fold";
   PDeclare "native_float_arr_from_list";
   PDeclare "native_float_arr_to_list";
   PDeclare "native_float_arr_filter_mask";
@@ -1419,6 +1445,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_f32_arr_sum";
   PDeclare "native_f32_arr_map";
   PDeclare "native_f32_arr_map2";
+  PDeclare "native_f32_arr_fold";
   PDeclare "native_f32_arr_from_list";
   PDeclare "native_f32_arr_to_list";
   PDeclare "native_i32_arr_make";
@@ -1428,6 +1455,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_i32_arr_sum";
   PDeclare "native_i32_arr_map";
   PDeclare "native_i32_arr_map2";
+  PDeclare "native_i32_arr_fold";
   PDeclare "native_i32_arr_from_list";
   PDeclare "native_i32_arr_to_list";
   PDeclare "native_u8_arr_make";
@@ -1437,6 +1465,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_u8_arr_sum";
   PDeclare "native_u8_arr_map";
   PDeclare "native_u8_arr_map2";
+  PDeclare "native_u8_arr_fold";
   PDeclare "native_u8_arr_from_list";
   PDeclare "native_u8_arr_to_list";
   PDeclare "native_float_to_f32_arr";
@@ -1463,6 +1492,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "ring_buf_to_list";
   PComment "; Time builtins";
   PDeclare "march_unix_time";
+  PDeclare "march_peak_rss_bytes";
+  PDeclare "march_live_allocs";
   PDeclare "march_tcp_connect";
   PComment "; HTTP client builtins";
   PDeclare "march_http_serialize_request";
@@ -1639,6 +1670,17 @@ let builtin_boxed_generic_params_tbl : (string, int list) Hashtbl.t =
   let tbl = Hashtbl.create 8 in
   (* ring_buf_push(rb, x): x (index 1) is the erased element. *)
   Hashtbl.replace tbl "ring_buf_push" [1];
+  (* native_*_arr_fold(acc, arr, f): acc (index 0) is the generic 'a
+     accumulator — same erased-slot hazard as ring_buf_push's element above.
+     Without this, a literal accumulator argument (e.g. the `0.0` in
+     `fold_float(arr, 0.0, f)`) reaches the C runtime as a raw double bit
+     pattern instead of a march_alloc_float box, and march_unbox_float
+     SIGSEGVs dereferencing it inside the closure. *)
+  Hashtbl.replace tbl "native_int_arr_fold" [0];
+  Hashtbl.replace tbl "native_float_arr_fold" [0];
+  Hashtbl.replace tbl "native_f32_arr_fold" [0];
+  Hashtbl.replace tbl "native_i32_arr_fold" [0];
+  Hashtbl.replace tbl "native_u8_arr_fold" [0];
   tbl
 
 (** True iff parameter [idx] of builtin [name] is a generic erased slot that

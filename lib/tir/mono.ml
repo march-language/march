@@ -680,7 +680,25 @@ let rec rewrite_calls
          | Some impls -> Some impls
          | None ->
            (match String.index_opt name '.' with
-            | None -> None
+            | None ->
+              (* `to_string` is a universal formatter aliased to the Show
+                 interface's `show` method (mirrors lower.ml's lower-time
+                 `to_string` -> `show` redirection, `dispatch_name` a few
+                 hundred lines up in that file).  That redirection only fires
+                 when the argument's type is concretely known AT THE CALLING
+                 FUNCTION'S OWN lowering time — a call inside a still-generic
+                 function (e.g. `pfn print_row(row) = to_string(row)`, row:
+                 TVar then) is left as the literal `to_string` builtin because
+                 there was no concrete type to resolve against yet.  Once mono
+                 specializes such a function to a concrete argument type,
+                 retry the same redirection here so the specialized body
+                 dispatches to the real `Show$T.show` instead of falling
+                 through at codegen to the generic runtime
+                 `march_value_to_string`, which only understands a few
+                 primitive representations and prints "#<tag:N>" for anything
+                 else (every List/record/user ADT). *)
+              if name = "to_string" then Hashtbl.find_opt iface_methods "show"
+              else None
             | Some i ->
               find_iface_impls (String.sub name (i + 1) (String.length name - i - 1)))
        in
@@ -849,7 +867,11 @@ let rec rewrite_calls
             | Some impls -> Some impls
             | None ->
               (match String.index_opt name '.' with
-               | None -> None
+               | None ->
+                 (* `to_string` -> `show` alias — see the twin comment in the
+                    EApp branch above for why this retry is needed. *)
+                 if name = "to_string" then Hashtbl.find_opt iface_methods "show"
+                 else None
                | Some i ->
                  find_iface_impls (String.sub name (i + 1) (String.length name - i - 1)))
           in

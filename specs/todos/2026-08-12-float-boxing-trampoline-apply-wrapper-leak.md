@@ -55,6 +55,11 @@ calling either done.
 
 - `specs/progress/2026-08-12-float-boxing-case-merge-leak-fix.md` — the fixed
   sibling site and full verification detail.
-- `specs/todos/2026-08-11-simd-tco-entry-box-leak.md` — the SIMD-specific
+- `specs/progress/2026-08-11-simd-tco-entry-box-leak.md` — the SIMD-specific
   sibling leak (different erasure boundary, `march_simd_alloc`), independent
-  bug, independent fix, same missing-free root shape.
+  bug, independent fix, same missing-free root shape. **Now FIXED** for
+  callees whose vector param got a native TCO slot; the residual case
+  (vector params on non-TCO callees) is tracked separately in
+  `specs/todos/2026-08-12-simd-nontco-vector-param-leak.md`. The fix there is
+  a useful template for this one: same "the call site owns the temp box"
+  framing.

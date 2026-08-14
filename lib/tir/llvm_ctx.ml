@@ -54,6 +54,19 @@ type ctx = {
      the callee reads it as a native double, silently corrupting the value
      (the Array.from_list$..$Float compiled-wrong-value bug). *)
   top_fn_param_tys : (string, Tir.ty list) Hashtbl.t;
+  (* Per-callee list of parameter INDICES that [Llvm_toplevel.emit_fn] gives a
+     NATIVE `<N x T>` SIMD-vector TCO slot (the `native_vec_slot` arm).  Filled
+     by a pre-pass in [emit_module] before ANY function body is emitted, so a
+     call site is never asked about a callee that has not been emitted yet.
+
+     Consumed by llvm_emit's EApp arm to decide whether a vector argument box
+     the CALL SITE just created may be released after the call: a native-slot
+     callee provably uses the incoming pointer for exactly one GEP + load in
+     its entry prologue and never stores it anywhere, so the temp box cannot
+     escape into the callee.  Any other callee shape (a `ptr` vector param)
+     may store the pointer into a heap aggregate that then owns it — releasing
+     there is a use-after-free.  See the invariant comment at the EApp arm. *)
+  native_vec_params : (string, int list) Hashtbl.t;
   (* Set of zero-argument top-level functions (module-level `let` constants
      compiled as zero-arg functions).  When emit_atom encounters an AVar
      referencing one of these, it calls the function to obtain the value
@@ -242,6 +255,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   top_fn_ret_ty = Hashtbl.create 64;
   top_fn_nparams = Hashtbl.create 64;
   top_fn_param_tys = Hashtbl.create 64;
+  native_vec_params = Hashtbl.create 8;
   zero_arg_fns  = Hashtbl.create 16;
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;

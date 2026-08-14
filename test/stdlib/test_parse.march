@@ -6,6 +6,18 @@
 
 mod TestParse do
 
+-- A self-referential grammar: `nested := "(" nested ")" | "x"`, returning the
+-- nesting depth. Written with `delay` so mentioning `nested()` inside its own
+-- definition does not recurse at construction time.
+pfn nested() : Parse.Parser(Int) do
+  Parse.alt(
+    Parse.map(
+      Parse.skip_first(Parse.lit("("),
+        Parse.skip_then(Parse.delay(fn -> nested()), Parse.lit(")"))),
+      fn n -> n + 1),
+    Parse.map(Parse.lit("x"), fn _ -> 0))
+end
+
 describe "Parse" do
 
   describe "lit" do
@@ -136,6 +148,50 @@ describe "Parse" do
     test "leaves a success untouched" do
       match Parse.run(Parse.commit(Parse.lit("ab")), "ab") do
         Ok(s)  -> assert (s == "ab")
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
+  describe "then_commit" do
+
+    -- WHERE a commit sits decides whether a later failure is reported at all.
+    -- Committing the delimiter makes only the DELIMITER's failure hard;
+    -- everything after it stays soft, so an enclosing `sep_by`/`alt` quietly
+    -- backtracks and the real error is replaced by a shallow one.
+    test "committing the tail reports the real failure, not a shallow one" do
+      let member =
+        Parse.ctx("member",
+          Parse.then_commit(Parse.take_while1("a key", fn b -> b >= 97 && b <= 122),
+            Parse.skip_first(Parse.lit(":"),
+              Parse.label("a value",
+                Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)))))
+      let obj =
+        Parse.skip_first(Parse.lit("{"),
+          Parse.skip_then(Parse.sep_by(member, Parse.lit(",")),
+                          Parse.commit(Parse.lit("}"))))
+      match Parse.run(obj, "{a:}") do
+        Ok(_) -> assert false
+        Err(e) ->
+          let msg = Parse.render("{a:}", e)
+          assert (msg == "1:4: I was expecting a value in the member that started at 1:2")
+      end
+    end
+
+    -- The commit must not fire before anything was consumed, or a genuinely
+    -- empty construct stops parsing.
+    test "an empty construct still parses" do
+      let member =
+        Parse.then_commit(Parse.take_while1("a key", fn b -> b >= 97 && b <= 122),
+          Parse.skip_first(Parse.lit(":"),
+            Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)))
+      let obj =
+        Parse.skip_first(Parse.lit("{"),
+          Parse.skip_then(Parse.sep_by(member, Parse.lit(",")),
+                          Parse.commit(Parse.lit("}"))))
+      match Parse.run(obj, "{}") do
+        Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
       end
     end
@@ -291,6 +347,124 @@ describe "Parse" do
 
     test "parses the empty list" do
       match Parse.run(Parse.sep_by(Parse.lit("a"), Parse.lit(",")), "") do
+        Ok(xs) -> assert (List.length(xs) == 0)
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
+  describe "delay" do
+
+    -- Combinators are VALUES, built eagerly. A grammar rule that mentions
+    -- itself (or a mutually recursive partner) would therefore recurse while
+    -- being CONSTRUCTED, before any input is read. `delay` defers the
+    -- construction into the parse itself.
+    test "allows a self-referential grammar to terminate" do
+      match Parse.run(nested(), "((x))") do
+        Ok(n)  -> assert (n == 2)
+        Err(_) -> assert false
+      end
+    end
+
+    test "still reports failures from inside the deferred parser" do
+      match Parse.run(nested(), "((x)") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 4)
+      end
+    end
+
+  end
+
+  describe "take_while1" do
+
+    test "returns the matched run as one string" do
+      match Parse.run(Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57), "123ab") do
+        Ok(s)  -> assert (s == "123")
+        Err(_) -> assert false
+      end
+    end
+
+    test "fails when the first byte does not match" do
+      match Parse.run(Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57), "ab") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 0)
+      end
+    end
+
+  end
+
+  describe "optional" do
+
+    test "yields Some when the parser matches" do
+      match Parse.run(Parse.optional(Parse.lit("-")), "-1") do
+        Ok(Some(s)) -> assert (s == "-")
+        _           -> assert false
+      end
+    end
+
+    test "yields None without consuming when it does not" do
+      match Parse.run(Parse.and_then(Parse.optional(Parse.lit("-")), Parse.lit("1")), "1") do
+        Ok((None, d)) -> assert (d == "1")
+        _             -> assert false
+      end
+    end
+
+  end
+
+  describe "flat_map" do
+
+    -- The combinator that `map`/`and_then`/`alt` cannot replace: what to parse
+    -- next DEPENDS on what was just parsed. Here a leading digit says how many
+    -- items follow — length-prefixed data, the shape most wire protocols have.
+    test "chooses the next parser from the previous result" do
+      let counted =
+        Parse.flat_map(Parse.byte_if("a digit", fn b -> b >= 48 && b <= 57),
+                       fn d -> Parse.repeat(Parse.lit("x"), d - 48))
+      match Parse.run(counted, "3xxx") do
+        Ok(xs) -> assert (List.length(xs) == 3)
+        Err(_) -> assert false
+      end
+    end
+
+    test "reports the dependent parser's own failure" do
+      let counted =
+        Parse.flat_map(Parse.byte_if("a digit", fn b -> b >= 48 && b <= 57),
+                       fn d -> Parse.repeat(Parse.lit("x"), d - 48))
+      match Parse.run(counted, "3xy") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 2)
+      end
+    end
+
+    test "propagates a failure in the first parser without running the second" do
+      let counted = Parse.flat_map(Parse.lit("n"), fn _ -> Parse.lit("y"))
+      match Parse.run(counted, "zz") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 0)
+      end
+    end
+
+  end
+
+  describe "repeat" do
+
+    test "parses exactly n occurrences" do
+      match Parse.run(Parse.repeat(Parse.lit("a"), 3), "aaaa") do
+        Ok(xs) -> assert (List.length(xs) == 3)
+        Err(_) -> assert false
+      end
+    end
+
+    test "fails when there are fewer than n" do
+      match Parse.run(Parse.repeat(Parse.lit("a"), 3), "aa") do
+        Ok(_)  -> assert false
+        Err(e) -> assert (e.pos == 2)
+      end
+    end
+
+    test "zero occurrences succeeds without consuming" do
+      match Parse.run(Parse.repeat(Parse.lit("a"), 0), "aaa") do
         Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
       end

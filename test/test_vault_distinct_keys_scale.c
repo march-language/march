@@ -63,7 +63,33 @@
  *     lock actually buys over a single counter. A single shared counter
  *     cannot reach this regardless of implementation quality: every reader
  *     RMWs the same cache line, which is exactly the bottleneck striping
- *     removes. */
+ *     removes.
+ *
+ * ROUND 5 — hard-coded 4 threads broke on hosted CI: this test moved onto
+ * the `conformance` job's CI legs (ubuntu-24.04, macos-15), which run on
+ * 2-4 core hosted runners. The original reasoning for putting a
+ * parallel-scaling assertion in CI at all ("runners are quiet") was simply
+ * wrong — quiet isn't the constraint, available cores is. With 4 reader
+ * threads competing for 2-4 cores, even the striped lock can't show
+ * anything close to 1-2x, because the OS is time-slicing threads onto a
+ * core count at or below the thread count; that's indistinguishable from
+ * lock contention in the wall-clock signal.
+ *
+ * Fix: read the actual core count at runtime (sysconf(_SC_NPROCESSORS_ONLN))
+ * and adapt both the thread count T = min(4, ncores) and the pass/fail bound
+ * to it, instead of assuming a fixed 4-thread shape. The bound is
+ * `four_median < solo_median * (T * 0.9)`: with T threads on at least T
+ * cores, the striped lock should stay near its measured 1-2x regardless of
+ * T, while an exclusive lock costs close to Tx (contention scales with
+ * thread count, not core count, once T <= ncores). Multiplying by 0.9
+ * keeps daylight between the two: at T=2 the bound is 1.8 (striped's
+ * ~1.0-1.5x passes comfortably, exclusive's ~2.0x fails); at T=4 it is 3.6
+ * (striped's ~2.0x passes, exclusive's ~9.5x fails by a wide margin). So
+ * the test keeps its discriminating power at every machine size — 2-core
+ * hosted CI runners included — instead of only on a big dev box. Below 2
+ * cores a scaling assertion is meaningless (there's no room for the
+ * "distinct" part of the test to show anything), so the test skips
+ * outright rather than asserting anything. */
 #include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -71,6 +97,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 extern void *march_vault_new(void *name);
 extern void *march_vault_set(void *t, void *k, void *v);
@@ -79,11 +106,13 @@ extern void *march_alloc(int64_t);
 extern void *march_string_lit(const char *utf8, int64_t len);
 
 #define READS 1000000
-#define NTHREADS 4
+#define MAX_THREADS 4
 #define NSAMPLES 5
 
+static int g_nthreads; /* T = min(MAX_THREADS, ncores), set in main() */
+
 static void *g_table;
-static void *g_keys[NTHREADS];
+static void *g_keys[MAX_THREADS];
 
 static int64_t now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -96,7 +125,7 @@ static void *reader(void *arg) {
     return NULL;
 }
 
-static int idxs[NTHREADS];
+static int idxs[MAX_THREADS];
 
 static int64_t run_solo(void) {
     int64_t t0 = now_ms();
@@ -104,11 +133,11 @@ static int64_t run_solo(void) {
     return now_ms() - t0;
 }
 
-static int64_t run_four_threads(void) {
-    pthread_t th[NTHREADS];
+static int64_t run_parallel_threads(void) {
+    pthread_t th[MAX_THREADS];
     int64_t t0 = now_ms();
-    for (int i = 0; i < NTHREADS; i++) pthread_create(&th[i], NULL, reader, &idxs[i]);
-    for (int i = 0; i < NTHREADS; i++) pthread_join(th[i], NULL);
+    for (int i = 0; i < g_nthreads; i++) pthread_create(&th[i], NULL, reader, &idxs[i]);
+    for (int i = 0; i < g_nthreads; i++) pthread_join(th[i], NULL);
     return now_ms() - t0;
 }
 
@@ -129,9 +158,19 @@ static void print_samples(const char *label, int64_t *samples, int n) {
 }
 
 int main(void) {
+    long ncores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (ncores < 2) {
+        printf("test_vault_distinct_keys_scale: skipped (ncores=%ld < 2 — a "
+                "parallel-scaling assertion is meaningless on one core)\n",
+                ncores);
+        return 0;
+    }
+    g_nthreads = (int)(ncores < MAX_THREADS ? ncores : MAX_THREADS);
+    double bound_factor = g_nthreads * 0.9;
+
     g_table = march_vault_new(march_string_lit("bench-distinct", 14));
     char buf[16];
-    for (int i = 0; i < NTHREADS; i++) {
+    for (int i = 0; i < g_nthreads; i++) {
         int len = snprintf(buf, sizeof buf, "k%d", i);
         g_keys[i] = march_string_lit(buf, (int64_t)len);
         march_vault_set(g_table, g_keys[i], march_string_lit("v", 1));
@@ -140,7 +179,7 @@ int main(void) {
 
     int64_t solo_samples[NSAMPLES], four_samples[NSAMPLES];
     for (int i = 0; i < NSAMPLES; i++) solo_samples[i] = run_solo();
-    for (int i = 0; i < NSAMPLES; i++) four_samples[i] = run_four_threads();
+    for (int i = 0; i < NSAMPLES; i++) four_samples[i] = run_parallel_threads();
 
     /* median_of() sorts in place; keep unsorted copies for the failure
      * diagnostic printout below. */
@@ -150,18 +189,22 @@ int main(void) {
     int64_t solo_med = median_of(solo_sorted, NSAMPLES);
     int64_t four_med = median_of(four_sorted, NSAMPLES);
 
-    fprintf(stderr, "solo_median=%lldms four_median=%lldms\n",
-            (long long)solo_med, (long long)four_med);
+    fprintf(stderr, "ncores=%ld T=%d bound_factor=%.2f solo_median=%lldms "
+            "four_median=%lldms ratio=%.2f\n",
+            ncores, g_nthreads, bound_factor, (long long)solo_med,
+            (long long)four_med,
+            solo_med > 0 ? (double)four_med / (double)solo_med : 0.0);
     /* Guard against a zero-length solo run on a very fast box. */
     if (solo_med < 5) { printf("test_vault_distinct_keys_scale: skipped (too fast to time)\n"); return 0; }
 
-    int ok = (four_med < solo_med * 3);
+    int ok = ((double)four_med < (double)solo_med * bound_factor);
     if (!ok) {
         fprintf(stderr, "test_vault_distinct_keys_scale: FAILED — four_median (%lldms) "
-                "not < solo_median (%lldms) * 3\n",
-                (long long)four_med, (long long)solo_med);
+                "not < solo_median (%lldms) * %.2f (T=%d, ncores=%ld)\n",
+                (long long)four_med, (long long)solo_med, bound_factor,
+                g_nthreads, ncores);
         print_samples("solo", solo_samples, NSAMPLES);
-        print_samples("four-threads", four_samples, NSAMPLES);
+        print_samples("parallel", four_samples, NSAMPLES);
     }
     assert(ok);
     printf("test_vault_distinct_keys_scale: all passed\n");
