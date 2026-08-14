@@ -5723,6 +5723,37 @@ let base_env : env =
         | [VUnit] -> VFloat (Unix.gettimeofday ())
         | _ -> eval_error "unix_time: takes no arguments"))
 
+    (* ---- peak_rss_bytes(): process self-inspection ----
+       OCaml has no getrusage binding, so the interpreter approximates with
+       Gc.quick_stat()'s top_heap_words converted to bytes. This measures the
+       OCaml *interpreter's* heap, not the compiled process's resident set —
+       the two are not comparable in magnitude or units. Only ORDERING
+       (a later call >= an earlier one, modulo GC compaction) is guaranteed
+       to agree with the compiled `march_peak_rss_bytes` path; do not expect
+       or assert equal raw numbers between interpreted and compiled runs. *)
+  ; ("peak_rss_bytes", VBuiltin ("peak_rss_bytes", function
+        | [] | [VUnit] ->
+          let stat = Gc.quick_stat () in
+          VInt (stat.Gc.top_heap_words * (Sys.word_size / 8))
+        | _ -> eval_error "peak_rss_bytes: takes no arguments"))
+
+    (* ---- live_allocs(): net count of live March heap objects ----
+       In a COMPILED program this reads march_live_allocs() — the runtime's
+       always-on alloc/free-on-rc-zero counter — and is exact.  The tree-walker
+       has no such objects at all: interpreted values are OCaml values managed
+       by the OCaml GC, and no march_alloc ever runs.  There is no meaningful
+       approximation, so this returns a constant 0 rather than inventing a
+       number that could be mistaken for a real measurement.
+       CONSEQUENCE, and it is deliberate: a leak guard built on live_allocs is
+       only falsifiable in the COMPILED path.  test/native's leak probes print
+       it to STDERR and let the dune threshold rule read it from the compiled
+       binary's captured stderr, keeping STDOUT (which IS diffed against an
+       interpreter-produced .expected) free of it.  Do not assert on this
+       value from an interpreted test. *)
+  ; ("live_allocs", VBuiltin ("live_allocs", function
+        | [] | [VUnit] -> VInt 0
+        | _ -> eval_error "live_allocs: takes no arguments"))
+
     (* ---- TCP socket builtins ---- *)
   ; ("tcp_connect", VBuiltin ("tcp_connect", function
         | [VString host; VInt port] ->
@@ -5989,6 +6020,22 @@ let base_env : env =
                 eval_error "random_bytes: cannot read /dev/urandom: %s" msg);
             march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "random_bytes(n: Int): Bytes"))
+    (* ---- Bytes <-> NativeU8Arr bridge: an O(n) copy each way (the two
+       layouts cannot be aliased — see runtime/march_extras.c). High bytes
+       (0x80-0xFF) must land as 128-255, i.e. zero-extended, never negative. *)
+  ; ("bytes_to_u8_arr", VBuiltin ("bytes_to_u8_arr", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VNativeU8Arr (Array.init (String.length s)
+                       (fun i -> Char.code s.[i]))
+           | Error e -> eval_error "bytes_to_u8_arr: %s" e)
+        | _ -> eval_error "bytes_to_u8_arr(b: Bytes): NativeU8Arr"))
+  ; ("u8_arr_to_bytes", VBuiltin ("u8_arr_to_bytes", function
+        | [VNativeU8Arr a] ->
+          let buf = Bytes.create (Array.length a) in
+          Array.iteri (fun i v -> Bytes.set buf i (Char.chr (v land 0xff))) a;
+          march_bytes_of_string (Bytes.to_string buf)
+        | _ -> eval_error "u8_arr_to_bytes(a: NativeU8Arr): Bytes"))
     (* ---- stdlib_* aliases: allow Crypto module to call builtins without shadowing ---- *)
   ; ("stdlib_sha256", VBuiltin ("stdlib_sha256", function
         | [v] ->
@@ -8238,6 +8285,14 @@ let base_env : env =
           done;
           VNativeF32Arr out
         | _ -> eval_error "native_f32_arr_map2: expected (NativeF32Arr, NativeF32Arr, fn)"))
+  ; ("native_f32_arr_fold", VBuiltin ("native_f32_arr_fold", function
+        | [acc0; VNativeF32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VFloat a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_f32_arr_fold: expected (init, NativeF32Arr, fn)"))
   ; ("native_f32_arr_from_list", VBuiltin ("native_f32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8307,6 +8362,14 @@ let base_env : env =
           done;
           VNativeI32Arr out
         | _ -> eval_error "native_i32_arr_map2: expected (NativeI32Arr, NativeI32Arr, fn)"))
+  ; ("native_i32_arr_fold", VBuiltin ("native_i32_arr_fold", function
+        | [acc0; VNativeI32Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_i32_arr_fold: expected (init, NativeI32Arr, fn)"))
   ; ("native_i32_arr_from_list", VBuiltin ("native_i32_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function
@@ -8376,6 +8439,14 @@ let base_env : env =
           done;
           VNativeU8Arr out
         | _ -> eval_error "native_u8_arr_map2: expected (NativeU8Arr, NativeU8Arr, fn)"))
+  ; ("native_u8_arr_fold", VBuiltin ("native_u8_arr_fold", function
+        | [acc0; VNativeU8Arr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_u8_arr_fold: expected (init, NativeU8Arr, fn)"))
   ; ("native_u8_arr_from_list", VBuiltin ("native_u8_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function

@@ -1,0 +1,53 @@
+-- Compiled/interpreted parity witness for NativeArray.fold_int/fold_float/
+-- fold_f32/fold_i32/fold_u8. Task 2 of the SIMD follow-ups plan: fold_int and
+-- fold_float previously had no compiled implementation (link error), and
+-- fold_f32/fold_i32/fold_u8 didn't exist at all.
+--
+-- Argument-order landmine: the March builtin is (init, arr, f), while the
+-- reference RC pattern (march_typed_array_fold) is (arr, acc, f), and the
+-- stdlib wrapper flips again to collection-first (arr, acc, f). A commutative
+-- fold (+) would pass even with the order silently wrong, so every case here
+-- uses a NON-COMMUTATIVE fold `fn (acc, x) -> acc * 2 + x`.
+--
+-- Odd initial accumulators are load-bearing, not cosmetic: the compiled
+-- call-site marshaling for a generic 'a accumulator only boxes/tags a raw
+-- scalar argument when the builtin is opted into
+-- Llvm_builtins.builtin_boxed_generic_params_tbl. Deleting an int-width
+-- entry from that table does NOT fail to compile or crash — the raw i64
+-- passes through `coerce ("ptr","i64")`'s CONDITIONAL untag, which only
+-- shifts ODD values and passes EVEN values through unshifted. An even init
+-- (e.g. 0) would silently pass that broken state; every int-width case below
+-- uses an odd init specifically so a regression there prints a wrong number
+-- instead of hiding behind the coincidence. (Float/f32 don't have this
+-- failure mode: `coerce ("ptr","double")` is an UNCONDITIONAL unbox, so an
+-- unboxed float argument SIGSEGVs immediately rather than silently
+-- corrupting — already maximally pinned by any float case at all.)
+--
+-- fold_i32's elements are deliberately negative ([-5, 7, -1]) to pin
+-- sign-extension: u8's zero-extension is already covered by 255 -> 263
+-- below, but nothing else in this fixture would catch the narrow-int-array
+-- macro regressing i32's load to unsigned.
+mod NativeArrFold do
+  needs IO.Console
+  fn main(_cap : Cap(IO.Console)) do
+    -- fold_int: init 3 (odd) -- 3*2+1=7, 7*2+2=16, 16*2+3=35
+    let i = NativeArray.from_list_int([1, 2, 3])
+    println(NativeArray.fold_int(i, 3, fn (acc, x) -> acc * 2 + x))       -- 35
+    -- fold_float: unconditional-unbox failure mode means any init pins it
+    let f = NativeArray.from_list_float([1.0, 2.0, 3.0])
+    println(NativeArray.fold_float(f, 0.0, fn (acc, x) -> acc *. 2.0 +. x)) -- 11.0
+    -- fold_f32: same as fold_float
+    let g = NativeArray.from_list_f32([1.0, 2.0, 3.0])
+    println(NativeArray.fold_f32(g, 0.0, fn (acc, x) -> acc *. 2.0 +. x))   -- 11.0
+    -- fold_i32: init 1 (odd, pins boxing) + negative elements (pins sign-extension)
+    -- 1*2+(-5)=-3, -3*2+7=1, 1*2+(-1)=1
+    let j = NativeArray.from_list_i32([-5, 7, -1])
+    println(NativeArray.fold_i32(j, 1, fn (acc, x) -> acc * 2 + x))         -- 1
+    -- fold_u8: init 1 (odd, pins boxing) + 255 element (pins zero-extension)
+    -- 1*2+1=3, 3*2+2=8, 8*2+255=271 (255 zero-extends, doesn't wrap negative)
+    let u = NativeArray.from_list_u8([1, 2, 255])
+    println(NativeArray.fold_u8(u, 1, fn (acc, x) -> acc * 2 + x))          -- 271
+    -- accumulator is generic: fold into a List to prove the erased path
+    println(List.length(NativeArray.fold_int(i, [], fn (acc, x) -> List.append([x], acc))))  -- 3
+  end
+end

@@ -87,11 +87,11 @@ pipeline.
 `map_f32`/`map2_f32`/`sum_f32` get the identical inline-loop vectorization
 treatment described above for `map_float`/`map2_float`/`sum_float` —
 confirmed via `-emit-llvm` to compile to real `<4 x float>` NEON vector
-instructions, not just scalar unrolling. `fold_i32`/`fold_u8`/`fold_f32` do
-not exist yet at all (interpreted or compiled) — deliberately scoped out,
-since giving them a compiled implementation would mean solving the same
-linkage problem that blocks `fold_int`/`fold_float` today (see Known
-limitations below); they'll be added once that gap closes.
+instructions, not just scalar unrolling. `fold_i32`/`fold_u8`/`fold_f32`
+(along with `fold_int`/`fold_float`) all have compiled implementations —
+the fold accumulator is a generic `'a` that crosses the closure boundary in
+the erased/boxed representation, so fold is a correctness-first scalar loop
+rather than a vectorized one; see Known limitations below.
 
 Same-box, same-build f32-vs-f64 comparison at N=5M (median of 6 samples,
 two opposite orderings to cancel first-position warmup bias — see
@@ -156,11 +156,23 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
 
 ## Known limitations
 
-- **`fold_int` / `fold_float` have no compiled implementation yet** — calling
-  either from a `--compile` build fails to link. Use `sum`/`map` or a manual
-  index loop until this lands. The narrow-width equivalents
-  (`fold_f32`/`fold_i32`/`fold_u8`) don't exist at all yet — interpreted or
-  compiled — and will be added once this linkage gap closes.
+- **`fold_int` / `fold_float` / `fold_f32` / `fold_i32` / `fold_u8`** all have
+  compiled implementations, but fold is not vectorized — the accumulator is a
+  generic `'a` that must stay boxed/erased across the closure boundary for
+  the whole loop, so it's a correctness-first scalar loop, not a SIMD one.
+  Use `sum`/`map` if you need the auto-vectorized path and your reduction
+  fits their shape.
+- **`fold_float` / `fold_f32` with a `Float` accumulator leak ~32 B per
+  element** (a known, still-open bug — the result is correct, only memory
+  residency is affected). Each iteration's accumulator box is never released,
+  so folding a 50M-element `NativeFloatArr` into a `Float` costs ~1.6 GB of
+  peak RSS. Measured at 5M elements: 193.6 MB with a `Float` accumulator vs
+  40.4 MB for the `fold_int` control. **Folds with an `Int` accumulator —
+  including `fold_int`, `fold_i32` and `fold_u8` — are unaffected**, because a
+  wire-tagged `Int` is never heap-allocated. Workaround for large arrays: use
+  `sum_float`/`sum_f32`, or fold with an `Int` accumulator, or chunk the array.
+  Tracked in
+  `specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md`.
 - **`DataFrame`**: `Sum`/`Mean` aggregation and `col_add_col` (column-column
   arithmetic, via `map2_int`/`map2_float`) use the vectorized `NativeArray`
   primitives above under the hood. `Min`/`Max`/`Std`/`Variance`/`Median`
