@@ -11,8 +11,8 @@ permalink: /docs/capability-audit/
 touching the filesystem? Opening sockets? Reading environment variables?
 
 In most ecosystems that question has no mechanical answer. `npm audit`,
-`cargo audit` and `pip-audit` answer a different one — *does this version appear
-in a vulnerability database?* — which is a lookup of what someone has already
+`cargo audit` and `pip-audit` answer a different one: *does this version appear
+in a vulnerability database?* That is a lookup of what someone has already
 reported. Nothing in a `package.json` or `Cargo.toml` states what a package is
 allowed to do, so "what authority does this code hold?" can only be approximated
 by sandboxing it, scanning it heuristically, or reading it.
@@ -24,13 +24,13 @@ those declarations against what the code does.
 How strongly it checks depends on how the capability is obtained, and the
 difference matters enough to state up front:
 
-- A capability passed as a value — a function taking `Cap(IO.FileWrite)` — **must**
+- A capability passed as a value (a function taking `Cap(IO.FileWrite)`) **must**
   be covered by a declared `needs`, or the module does not compile.
-- A capability builtin called directly — `file_write(path, data)` — produces a
+- A capability builtin called directly (`file_write(path, data)`) produces a
   **warning** when undeclared, not an error. The code still builds.
 
 So a package's declared capability set is a strong signal, checked by the
-compiler and impossible to drift silently for capability-passing code — but it
+compiler and impossible to drift silently for capability-passing code. It
 is not yet a hard lower bound for every code path. See
 [what this does not prove](#what-this-does-and-does-not-prove) for what follows
 from that.
@@ -48,7 +48,7 @@ the second.
 
 ---
 
-## `forge audit` — capability diffing on dependency update
+## `forge audit`: capability diffing on dependency update
 
 Record the capability set of your dependency tree once, and commit it:
 
@@ -96,7 +96,7 @@ The exit code is the gate. No plugin, no service:
 ```
 
 A pull request that bumps a dependency into new authority fails until someone
-records the new baseline — which puts the change in the diff, where a reviewer
+records the new baseline, which puts the change in the diff, where a reviewer
 sees it.
 
 ### What counts as a failure
@@ -105,11 +105,11 @@ Only **new** authority fails the audit:
 
 | Change | Reported | Exit code |
 |---|---|---|
-| A dependency gains a capability | `! name — now ALSO needs: …` | 1 |
-| A new dependency that declares capabilities | `+ name — new dependency, declares: …` | 1 |
-| A new dependency that declares none | `+ name — new dependency, declares no capabilities` | 0 |
-| A dependency drops a capability | `- name — no longer needs: …` | 0 |
-| A dependency is removed | `- name — dependency removed` | 0 |
+| A dependency gains a capability | `! name: now ALSO needs: …` | 1 |
+| A new dependency that declares capabilities | `+ name: new dependency, declares: …` | 1 |
+| A new dependency that declares none | `+ name: new dependency, declares no capabilities` | 0 |
+| A dependency drops a capability | `- name: no longer needs: …` | 0 |
+| A dependency is removed | `- name: dependency removed` | 0 |
 
 Narrowing does not fail. A gate that fires when a dependency becomes *safer* is
 a gate people learn to skip, and skipped gates are worse than absent ones.
@@ -137,8 +137,8 @@ into a settled one.
 ### It does not prove
 
 - **That a dependency declared everything it uses.** A module calling a
-  capability builtin directly — `file_write(…)` rather than receiving
-  `Cap(IO.FileWrite)` — gets a *warning* when it has not declared the
+  capability builtin directly (`file_write(…)` rather than receiving
+  `Cap(IO.FileWrite)`) gets a *warning* when it has not declared the
   capability, and still compiles. A dependency that ignores that warning will
   show a smaller capability set here than its behaviour justifies. The warning
   is visible when you build, so this is loud rather than silent, but `forge
@@ -153,7 +153,7 @@ into a settled one.
   longer complete"* rather than as one more row.
 - **That the shipped artifact matches this source.** `forge audit` reads the
   dependency sources resolved into your project. If you want a statement about a
-  binary — including one built elsewhere — that is
+  binary, including one built elsewhere, that is
   [`forge cap inspect`](#auditing-a-compiled-binary), which reads what the
   compiler actually emitted rather than what the source claims.
 - **Anything about non-March dependencies.** A package that vendors a shared
@@ -163,13 +163,13 @@ into a settled one.
 
 | Threat | Covered? |
 |---|---|
-| Dependency update silently widens **declared** authority | **Yes** — this is the case it exists for |
-| A new transitive dependency arrives with capabilities | **Yes** — reported as an addition |
-| A dependency uses a `Cap(X)` value it did not declare | **Yes** — compile error, at build time |
-| A dependency calls a capability builtin it did not declare | **Partly** — compiler warning at build time, but it compiles, and the declared set stays understated |
-| Baseline edited to hide a change | Partly — the edit is in your diff, reviewed like any other |
-| Effects through `extern` C, `dlopen`, or raw syscalls | **No** — reported as `IO.Foreign`, which bounds nothing |
-| A dependency that misuses a capability it legitimately holds | **No** — out of scope for any capability system |
+| Dependency update silently widens **declared** authority | **Yes**: this is the case it exists for |
+| A new transitive dependency arrives with capabilities | **Yes**: reported as an addition |
+| A dependency uses a `Cap(X)` value it did not declare | **Yes**: compile error, at build time |
+| A dependency calls a capability builtin it did not declare | **Partly**: compiler warning at build time, but it compiles, and the declared set stays understated |
+| Baseline edited to hide a change | Partly: the edit is in your diff, reviewed like any other |
+| Effects through `extern` C, `dlopen`, or raw syscalls | **No**: reported as `IO.Foreign`, which bounds nothing |
+| A dependency that misuses a capability it legitimately holds | **No**: out of scope for any capability system |
 
 For the row that is only partly covered, `forge cap inspect` on the built binary
 is the stronger check: it reads capability markers the compiler emitted and
@@ -180,9 +180,9 @@ builtin call shows up there whether or not it was declared.
 
 ## Auditing a compiled binary
 
-`forge audit` reads source declarations. To ask what a *built artifact* holds —
+`forge audit` reads source declarations. To ask what a *built artifact* holds,
 including the effect of dead-stripping, and evidence that does not depend on
-trusting the source tree — use `forge cap inspect`:
+trusting the source tree, use `forge cap inspect`:
 
 ```
 $ forge cap inspect ./build/myapp
@@ -209,7 +209,7 @@ Attributed to
 ```
 
 That is the difference between "this binary reads files" and "this binary reads
-files *because of this dependency*". Attribution is computed before inlining —
+files *because of this dependency*". Attribution is computed before inlining:
 by codegen time a small dependency function has been folded into its caller, and
 attributing there would credit the dependency's IO to your application. A
 capability reached only through an indirect call is reported as *unattributed*
@@ -233,19 +233,19 @@ to ship actually carries, and which module in it is responsible.
 
 ### Reading is not enforcing
 
-Both commands on this page *read* — they report authority, they do not restrain
+Both commands on this page *read*: they report authority, they do not restrain
 it. The one place a capability declaration is *enforced* at build time is the
 capability ceiling, which fails the build when any module's emitted code uses
-a capability it did not declare — including a dependency that never opted in.
+a capability it did not declare, including a dependency that never opted in.
 It is on by default; `--no-cap-strict` turns it off.
 See [capability ceilings]({{ site.baseurl }}/docs/capabilities/#cap-strict).
 
 The rows above marked "bounds nothing" (`IO.Foreign`, raw syscalls, an
 undeclared builtin call) are a limit of *reading a declaration or a symbol
 table*, not a limit of what March can enforce. To turn the declared set into an
-actual OS-level confinement — one that bounds even `extern` C and raw syscalls
-because it confines the whole process — see [OS-level
-enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement--sandboxing-the-compiled-binary):
+actual OS-level confinement, one that bounds even `extern` C and raw syscalls
+because it confines the whole process, see [OS-level
+enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement-sandboxing-the-compiled-binary):
 `forge cap run` (a sandbox forge installs around the binary) and `--cap-sandbox`
 (a deny-default profile the binary installs on itself at startup).
 
@@ -253,13 +253,13 @@ enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcemen
 
 ## See also
 
-- [Capabilities]({{ site.baseurl }}/docs/capabilities/) — the language feature
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/): the language feature
   these tools report on
-- [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) —
-  [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement--sandboxing-the-compiled-binary)
+- [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/):
+  [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement-sandboxing-the-compiled-binary)
   (`forge cap run`, `--cap-sandbox`) that turns a declared set into a real sandbox,
   and node-local hot-deploy admission control
-- [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/) —
+- [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/):
   how capabilities sit alongside the other safety axes
-- [FFI]({{ site.baseurl }}/docs/ffi/) — the `extern` boundary, and why analysis
+- [FFI]({{ site.baseurl }}/docs/ffi/): the `extern` boundary, and why analysis
   stops there
