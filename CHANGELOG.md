@@ -51,7 +51,10 @@ git log is authoritative for exact commits.
   `march dap`. Shadowing a Prelude/builtin name Prelude never calls
   internally — `head`, `map`, `unwrap`, `file_read`, and most of the rest —
   remains legal and unaffected; that's a documented, separately-tested
-  feature, not part of this bug.
+  feature, not part of this bug. **The editor (LSP) now reports this the
+  same way `march --compile`/`--check` do** — previously the language
+  server's own independent analysis pipeline didn't run this check, so a
+  colliding function showed no squiggle at all until you actually compiled.
 - **`simd_leak_probe`'s CI leak guard no longer false-positives on Linux.**
   The guard for the per-call SIMD vector temp-box leak
   (`test/native/simd_leak_probe.march`) asserted an absolute peak-RSS

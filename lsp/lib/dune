@@ -8,6 +8,7 @@
   march_lexer
   march_desugar
   march_typecheck
+  march_modules
   march_errors
   march_format
   march_resolver

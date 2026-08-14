@@ -3255,6 +3255,27 @@ let builtin_bindings : (string * scheme) list =
     [infer_app]'s [| [], t -> t] base case cannot tell these apart from its
     types alone (both look like "call site with 0 args, callee type is
     non-arrow"), so [Ast.EApp]'s handler special-cases names in this set. *)
+(* Shared source of truth for [Modules.Prelude_collision.check]'s two
+   builtin-name inputs, used by every caller (bin/main.ml, the LSP's
+   lsp/lib/analysis.ml) so they can never independently drift from what the
+   typechecker itself treats as a builtin — see
+   specs/plans/2026-08-13-prelude-entry-fn-name-collision.md §4.1/§4.2.
+   [prelude_collision_builtin_names] excludes qualified forms (containing
+   '.'): a user's bare top-level [fn] can never be named with a dot, so they
+   could never collide with one anyway. *)
+let prelude_collision_builtin_names : string list =
+  List.filter_map (fun (name, _) -> if String.contains name '.' then None else Some name)
+    builtin_bindings
+
+(* [show]/[eq]/[compare]/[hash] are NOT in the list above — they are
+   structural interface methods with their OWN type-directed dispatch
+   ([builtin_interface_bindings]), and a bare top-level [fn] of the right
+   ARITY legitimately participates in it (regression-tested by
+   test/native/iface_method_collision.march). Only a WRONG-arity same-name
+   function is a genuine collision — see Prelude_collision's doc comment. *)
+let prelude_collision_iface_arities : (string * int) list =
+  [ ("eq", 2); ("compare", 2); ("show", 1); ("hash", 1) ]
+
 let noncallable_builtin_values = StringSet.of_list [ "root_cap" ]
 
 let builtin_types : (string * int) list =

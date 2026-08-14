@@ -1,9 +1,10 @@
 # Fix: user top-level function names silently collide with Prelude
 
 Design spec for `specs/todos/2026-08-13-user-fn-name-collides-with-prelude-internal-call.md`.
-Status: root cause traced to a specific structural gap, with the exact
-overwrite site in each backend still to be confirmed by the implementer (see
-§4). Fix design and staging are settled; not yet implemented.
+Status: fully implemented and shipped — the compiler-side fix landed via
+PR #274 (merged 2026-08-14, `specs/progress/2026-08-14-prelude-entry-fn-name-collision.md`),
+including two post-merge CI-driven corrections (§2.5b, §2.5c); Stage 2 LSP
+parity landed the same day (`specs/progress/2026-08-14-lsp-prelude-collision-parity.md`).
 
 ---
 
@@ -415,7 +416,7 @@ a replacement for §4.1.
   entry module). Every other stdlib file keeps its `DMod` wrapper (§2.1), so
   this specific unprotected-flat-scope mechanism doesn't apply to them.
 
-## 5. Verification — done for Stage 1, Stage 2 (LSP) not yet started
+## 5. Verification — Stage 1 AND Stage 2 (LSP) done
 
 Followed this session's own methodology: golden repros, checked both
 interpreted and compiled, plus a check that the fix doesn't reject anything
@@ -454,12 +455,17 @@ it shouldn't.
    because a checker that never false-positives on the two repros could
    still false-positive on ordinary code; this rules that out directly
    rather than by inference from the corpus alone.
-7. **NOT DONE — LSP parity (Stage 2 of §4.2)**. `lsp/lib/analysis.ml`
-   independently reimplements the same prelude-unwrap-and-merge sequence
-   (§2.3) and has not been touched. Until it is, the LSP will show no
-   diagnostic for code `march --compile`/`march --check` now reject — a
-   known compiler/LSP disagreement class this codebase treats seriously.
-   Filed as follow-up work, not closed here.
+7. **DONE (2026-08-14) — LSP parity (Stage 2 of §4.2)**. `lsp/lib/analysis.ml`
+   now runs `Prelude_collision.check` after merging desugar diagnostics,
+   against a new shared `Typecheck.prelude_collision_builtin_names`/
+   `prelude_collision_iface_arities` (also adopted by `bin/main.ml`, which
+   previously held its own independent copy — removed to eliminate the
+   drift risk). Same shipped-stdlib-file exemption as `bin/main.ml`'s
+   `is_shipped_stdlib_file` (§2.5c), matched by basename. Two new TDD
+   cases in `lsp/test/test_lsp.ml`'s `"diagnostics"` group, both watched
+   RED before the fix and GREEN after; full LSP suite (353 tests) and full
+   compiler suite green. Detail: `specs/progress/
+   2026-08-14-lsp-prelude-collision-parity.md`.
 
 ## 6. Why this outranks the `Parse` throughput work
 
