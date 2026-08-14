@@ -3439,9 +3439,75 @@ let test_missing_needs_reported_once_per_module () =
     end
   end|} in
   Alcotest.(check int) "one aggregated missing-needs error, not one per builtin"
-    1 (count_errors_with ctx "does not declare");
+    1 (count_errors_with ctx "declares no matching `needs`");
   Alcotest.(check bool) "every missing capability is named"
     true (has_error_with ctx "IO.Console" && has_error_with ctx "IO.FileWrite")
+
+(* Fix-round regression: the aggregated error above carries a comma-joined
+   `cap_needs:<c1>,<c2>,...` code and reports only the FIRST offending span
+   (the `println` call). bin/main.ml's `dedupe_cap_hints` used to match a
+   Cap_infer hint against an error by EXACT (span, code) equality, which
+   worked when Check 1b emitted one error per call site — an exact mirror of
+   Cap_infer's own per-call hint. After aggregation, the hint for the SECOND
+   capability (`file_write`, a different span, and no longer an exact code
+   match) stopped matching and survived as an orphan diagnostic duplicating
+   content the aggregated error already states. `dedupe_cap_hints` lives
+   only in bin/main.ml (an executable, not a library `typecheck` above can
+   call into), so this has to go through the compiled binary rather than
+   `March_typecheck.Typecheck` directly — same pattern as
+   `test_cap_ceiling.ml`'s `compile_with`. Asserts hint ABSENCE by name, not
+   a total diagnostic count, per fix-round feedback that a count assertion
+   would not have caught this class of regression. *)
+let compiler_exe_for_cap_dedup =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
+let contains_substring haystack needle =
+  let hl = String.length haystack and nl = String.length needle in
+  let rec go i =
+    if i + nl > hl then false
+    else if String.sub haystack i nl = needle then true
+    else go (i + 1)
+  in
+  if nl = 0 then true else go 0
+
+let test_missing_needs_dedup_no_orphan_hint () =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup
+  else begin
+    let src = Filename.temp_file "cap_dedup" ".march" in
+    let oc = open_out src in
+    output_string oc
+      "mod ManyCaps do\n\
+      \  fn main(cap : Cap(IO)) : () do\n\
+      \    println(\"a\")\n\
+      \    match file_write(\"/tmp/many\", \"d\") do\n\
+      \      Ok(_) -> ()\n\
+      \      Err(_) -> ()\n\
+      \    end\n\
+      \  end\n\
+       end";
+    close_out oc;
+    let out = Filename.temp_file "cap_dedup" ".out" in
+    let (_ : int) =
+      Sys.command
+        (Printf.sprintf "%s --check %s > %s 2>&1"
+           (Filename.quote compiler_exe_for_cap_dedup) (Filename.quote src)
+           (Filename.quote out))
+    in
+    let ic = open_in out in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out ];
+    Alcotest.(check bool)
+      "no orphan cap_infer hint for a capability the aggregated error already covers"
+      false
+      (contains_substring s "call to `file_write` requires `needs IO.FileWrite`");
+    Alcotest.(check bool)
+      "the aggregated error itself still names both missing capabilities"
+      true
+      (contains_substring s "IO.Console" && contains_substring s "IO.FileWrite")
+  end
 
 let test_actor_handler_cap_missing_needs_error () =
   (* An actor handler with a Cap parameter, but no needs declaration, should error. *)
@@ -14305,6 +14371,7 @@ let compiler_suites =
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "missing needs reported once per module" `Quick test_missing_needs_reported_once_per_module;
+          Alcotest.test_case "missing needs dedup: no orphan cap_infer hint" `Quick test_missing_needs_dedup_no_orphan_hint;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;

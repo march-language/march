@@ -230,8 +230,9 @@ signature, is now the same severity:
 
 ```
 $ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
--- ERROR -- function bodies in `Reader` call builtins that require `Cap(IO.FileRead)`, but `Reader` does not declare `needs IO.FileRead`.
-hint: add `needs IO.FileRead` to the module body.
+-- ERROR -- function bodies in `Reader` call builtins that require `Cap(IO.FileRead)`, but `Reader` declares no matching `needs`.
+hint: add these to the module body —
+        needs IO.FileRead
 $ echo $?
 1
 ```
@@ -239,15 +240,20 @@ $ echo $?
 The error carries a machine-applicable fix, so `forge fix` will insert the
 `needs` line for you. Every offending capability in the module is collapsed
 into **one** diagnostic, not one per call site: a `main` that touches four
-undeclared capabilities gets a single error naming all four, with one fix
-that inserts all four `needs` lines at once —
+undeclared capabilities gets a single error naming all four once, with one
+fix that inserts all four `needs` lines at once —
 
 ```
--- ERROR -- function bodies in `Main` call builtins that require `Cap(IO.Console)`, `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`, but `Main` does not declare `needs IO.Console` and `needs IO.FileWrite` and `needs IO.Random` and `needs Time.Clock`.
-hint: add `needs IO.Console` and `needs IO.FileWrite` and `needs IO.Random` and `needs Time.Clock` to the module body.
+-- ERROR -- function bodies in `Main` call builtins that require `Cap(IO.Console)`, `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`, but `Main` declares no matching `needs`.
+hint: add these to the module body —
+        needs IO.Console
+        needs IO.FileWrite
+        needs IO.Random
+        needs Time.Clock
 ```
 
-— rather than four separate errors, each with its own single-line fix.
+— rather than four separate errors, each with its own single-line fix and
+its own restatement of the capability that was missing.
 
 #### What this does and does not guarantee
 
@@ -312,7 +318,7 @@ call graph and naming the whole path:
 
 ```
 function bodies in `Logger` call builtins that require `Cap(IO.FileWrite)`, but
-`Logger` does not declare `needs IO.FileWrite`.
+`Logger` declares no matching `needs`.
 ...
 reached from `main`: main → log_error → log
 ```

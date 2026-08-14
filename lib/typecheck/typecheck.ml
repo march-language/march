@@ -9590,25 +9590,44 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      let show =
        String.concat ", " (List.map (fun c -> Printf.sprintf "`Cap(%s)`" c) caps)
      in
-     let needs_list =
-       String.concat " and " (List.map (fun c -> "`needs " ^ c ^ "`") caps)
+     (* Two renderings of the same capability set, for two different
+        purposes: [fix_lines] is what `forge fix` literally splices into the
+        module body (two-space indent, matching the module's own `needs`
+        convention), and [display_lines] is what the diagnostic pane shows
+        (eight-space indent, matching the sibling grant error's `fn main(...)`
+        help block at line ~13249 above — same visual precedent, not a new
+        style). Naming the capability set only ONCE in the prose (in [show])
+        and then showing the literal fix text, rather than also restating the
+        set in a second "needs X and needs Y and ..." sentence, was fix-round
+        feedback on this task: the set was previously spelled three times
+        across two different join styles (", " for the Cap(...) list, " and "
+        for the needs list), which got worse rather than better as the
+        module's missing-capability count grew. *)
+     let fix_lines = String.concat "\n" (List.map (fun c -> "  needs " ^ c) caps) in
+     let display_lines =
+       String.concat "\n" (List.map (fun c -> "        needs " ^ c) caps)
      in
-     let lines = String.concat "\n" (List.map (fun c -> "  needs " ^ c) caps) in
      (* [~code] tags this diagnostic with the exact missing capability set so
         that a presentation-layer consumer (bin/main.ml) can recognise when
-        [Cap_infer]'s call-site hint at the SAME span is reporting the same
-        fact, without either pass having to know about the other — see
-        specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
+        [Cap_infer]'s call-site hint is reporting a fact already covered by
+        this error's capability set (same module, capability in this code's
+        set — no longer requiring the SAME span, since aggregation means
+        this error's span is only the first offending call site, not every
+        one Cap_infer might hint at), without either pass having to know
+        about the other — see
+        specs/progress/2026-08-10-capability-diagnostic-duplication.md and
+        specs/progress/2026-08-13-aggregate-missing-needs-diagnostics.md. *)
      Err.error_with_fix env.errors ~span:first_span
        ~code:("cap_needs:" ^ String.concat "," caps)
        ~fix:(Err.FInsert {
          after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
-         text = lines })
+         text = fix_lines })
        (Printf.sprintf
           "function bodies in `%s` call builtins that require %s, but `%s` \
-           does not declare %s.\n\
-           hint: add %s to the module body."
-          mod_name.txt show mod_name.txt needs_list needs_list))
+           declares no matching `needs`.\n\
+           hint: add these to the module body —\n\
+           %s"
+          mod_name.txt show mod_name.txt display_lines))
   ;
   (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
   List.iter (fun (cap_path, sp) ->

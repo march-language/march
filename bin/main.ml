@@ -29,22 +29,41 @@ let find_substring ~needle haystack =
 (* Presentation-only de-duplication of the capability diagnostics: the
    typechecker's Check 1b (lib/typecheck/typecheck.ml, an Error) and
    Cap_infer's call-site hint (lib/refinecheck/cap_infer.ml, a Hint) both
-   fire at the exact same span for the exact same missing capability once
-   Cap_infer's call-chain work landed — see
-   specs/progress/2026-08-10-capability-diagnostic-duplication.md. Their
-   "add `needs X`" clauses are now byte-for-byte redundant, but the hint's
-   trailing "reached from `main`: …" chain is genuinely new information the
-   error doesn't carry. So: when a Hint tagged `cap_needs:<cap>` shares its
-   span with an Error/Warning tagged with the same code, trim the hint down
-   to just the chain (dropping the now-redundant prefix); when there is no
-   chain to show, drop the hint entirely rather than print a sentence that
-   says nothing the error hasn't already said.
+   name the same missing capability once Cap_infer's call-chain work landed
+   — see specs/progress/2026-08-10-capability-diagnostic-duplication.md.
+   Their "add `needs X`" clauses are now byte-for-byte redundant, but the
+   hint's trailing "reached from `main`: …" chain is genuinely new
+   information the error doesn't carry. So: when a Hint tagged
+   `cap_needs:<cap>` names a capability already covered by an Error/Warning
+   in the SAME module, trim the hint down to just the chain (dropping the
+   now-redundant prefix); when there is no chain to show, drop the hint
+   entirely rather than print a sentence that says nothing the error hasn't
+   already said.
+
+   Matching used to be exact-span-plus-exact-code equality, which relied on
+   Check 1b emitting one error per (cap, call-site span) — an exact mirror
+   of Cap_infer's own per-call hint. Task 5
+   (specs/progress/2026-08-13-aggregate-missing-needs-diagnostics.md)
+   collapsed Check 1b to ONE error per module, carrying every missing
+   capability in a comma-joined `cap_needs:<c1>,<c2>,...` code and reporting
+   only the FIRST offending span — so a hint for the SECOND (or later)
+   offending capability no longer shares a span, or an exact code, with the
+   error that already covers it, and survived as an orphan duplicate. Fixed
+   by matching on capability-SET membership (parsed out of the comma-joined
+   code, not re-derived) plus the owning module (parsed out of each
+   message via a fixed marker, the same technique already used for the
+   chain suffix below) rather than requiring the span or the whole code
+   string to match exactly.
 
    Both passes are tagged via the `code` field (not by re-parsing each
-   other's prose) specifically so this stays robust to independent wording
-   changes on either side; the chain suffix is split off via
-   [Cap_infer.chain_marker], the one constant Cap_infer exports for this
-   purpose, rather than by guessing at hint phrasing here.
+   other's prose for the CAPABILITY) specifically so cap matching stays
+   robust to independent wording changes on either side; the chain suffix is
+   split off via [Cap_infer.chain_marker], the one constant Cap_infer
+   exports for this purpose. The MODULE name still has to come from the
+   message text (neither diagnostic carries a structured module field), via
+   fixed markers scoped to each emitter's own known phrasing — the same
+   "parse via anchor, not by guessing" discipline the chain marker already
+   established, just applied to a second anchor.
 
    This is deliberately scoped to THIS file: it changes only what the
    combined single-file compiler pipeline renders. [Cap_infer.check_module]
@@ -61,27 +80,65 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
     | Some c when String.length c > 10 && String.sub c 0 10 = "cap_needs:" -> Some c
     | _ -> None
   in
-  let strong_codes =
-    List.filter_map (fun (d : E.diagnostic) ->
+  let caps_of_code code =
+    let rest = String.sub code 10 (String.length code - 10) in
+    String.split_on_char ',' rest
+  in
+  (* The text right after [marker] up to the next backtick, e.g.
+     [name_after ~marker:"bodies in `" "function bodies in `M` call ..."]
+     is ["M"]. Returns [None] if [marker] isn't found or isn't followed by a
+     closing backtick — deliberately conservative: a missed match just means
+     the hint isn't suppressed, never a wrong suppression. *)
+  let name_after ~marker message =
+    match find_substring ~needle:marker message with
+    | None -> None
+    | Some i ->
+      let start = i + String.length marker in
+      let rest = String.sub message start (String.length message - start) in
+      (match find_substring ~needle:"`" rest with
+       | Some j -> Some (String.sub rest 0 j)
+       | None -> None)
+  in
+  (* Check 1b's aggregated error: "function bodies in `M` call builtins
+     that require ...". *)
+  let error_module (d : E.diagnostic) = name_after ~marker:"bodies in `" d.E.message in
+  (* Cap_infer's hint: "call to `f` requires `needs X` — add `needs X` to
+     module `M`...". *)
+  let hint_module (d : E.diagnostic) = name_after ~marker:"to module `" d.E.message in
+  (* Every (module, capability) pair already covered by some Error/Warning
+     in the diagnostic list. *)
+  let strong_caps : (string * string) list =
+    List.concat_map (fun (d : E.diagnostic) ->
         match d.E.severity, cap_needs_code d with
-        | (E.Error | E.Warning), Some code -> Some (d.E.span, code)
-        | _ -> None)
+        | (E.Error | E.Warning), Some code ->
+          (match error_module d with
+           | Some m -> List.map (fun c -> (m, c)) (caps_of_code code)
+           | None -> [])
+        | _ -> [])
       diags
   in
   List.filter_map
     (fun (d : E.diagnostic) ->
        match d.E.severity, cap_needs_code d with
-       | E.Hint, Some code when List.mem (d.E.span, code) strong_codes ->
-         let marker = March_refinecheck.Cap_infer.chain_marker in
-         (match find_substring ~needle:marker d.E.message with
-          | Some i ->
-            let chain_start = i + String.length marker in
-            let chain =
-              String.sub d.E.message chain_start
-                (String.length d.E.message - chain_start)
-            in
-            Some { d with E.message = "reached from `main`: " ^ chain }
-          | None -> None)
+       | E.Hint, Some code ->
+         let covered =
+           match caps_of_code code, hint_module d with
+           | [ cap ], Some m -> List.mem (m, cap) strong_caps
+           | _ -> false
+         in
+         if not covered then Some d
+         else begin
+           let marker = March_refinecheck.Cap_infer.chain_marker in
+           match find_substring ~needle:marker d.E.message with
+           | Some i ->
+             let chain_start = i + String.length marker in
+             let chain =
+               String.sub d.E.message chain_start
+                 (String.length d.E.message - chain_start)
+             in
+             Some { d with E.message = "reached from `main`: " ^ chain }
+           | None -> None
+         end
        | _ -> Some d)
     diags
 
