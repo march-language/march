@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A top-level function in your program can no longer silently replace a
+  name the March Prelude relies on internally.** `println` calls `print` and
+  `show` unqualified, and both — along with ~21 other Prelude functions like
+  `map`/`reverse`/`head` — sat in a flat, unprotected namespace shared with
+  your program's own entry-module declarations. A private helper named
+  `print` or `show` (or any of the others) silently took over that name for
+  the *whole program*, including inside Prelude's own code, with no error at
+  any compiler stage. Depending on how the two definitions' types happened to
+  line up this surfaced as a misattributed runtime arity error, a **compiled
+  SIGBUS with no diagnostic**, or a **fully silent no-op** — `println`
+  printing nothing at all, with no error and no crash. Now rejected as a
+  compile error naming the colliding function and why it matters, across
+  `march file.march`, `march --check`, `march --compile`, `march check`, and
+  `march dap`.
+
 - **`Regex` no longer has a denial-of-service on adversarial input.** The
   engine matched by backtracking, so repeated quantifiers over one character
   class followed by a byte that never matches cost O(n^k): the pattern

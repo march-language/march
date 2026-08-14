@@ -106,6 +106,198 @@ let test_ast_span () =
   let span = March_ast.Ast.dummy_span in
   Alcotest.(check string) "dummy span file" "<none>" span.file
 
+(* ── Prelude/entry-module name collision detection ────────────────────────
+   Design: specs/plans/2026-08-13-prelude-entry-fn-name-collision.md
+
+   Both prelude.march and the user's entry file are unwrapped into bare,
+   unqualified top-level declarations by bin/main.ml before being
+   concatenated (prelude first, entry appended). Nothing before this fix
+   ever checked whether that concatenation introduces a duplicate bare
+   name — and since Prelude's own functions (e.g. println) call other
+   Prelude names unqualified, a later-declared entry-module function
+   sharing one of those names silently replaces it program-wide.
+
+   [unwrap_decls] mirrors bin/main.ml's actual unwrap: parse a
+   `mod X do ... end` snippet, desugar it, and pull out the single
+   top-level DMod's inner declarations — exactly the shape both
+   prelude.march and an entry file are reduced to before concatenation. *)
+let unwrap_decls src =
+  let m = March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token)
+      (Lexing.from_string src) in
+  let desugared = March_desugar.Desugar.desugar_module m in
+  match desugared.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DMod (_, _, inner, _) ] -> inner
+  | decls -> decls
+
+let test_prelude_collision_detects_shared_fn_name () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn show(x) do "prelude's own show" end
+    fn println(x) do show(x) end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn show(label, t) do label end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool) "collision on `show` is reported" true
+    (March_errors.Errors.has_errors errors)
+
+let test_prelude_collision_names_the_colliding_identifier () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn print(x) do () end
+    fn println(x) do print(x) end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn print(x) do () end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      errors.March_errors.Errors.diagnostics in
+  let contains_sub s sub =
+    let n = String.length s and len = String.length sub in
+    let found = ref false in
+    for i = 0 to n - len do
+      if String.sub s i len = sub then found := true
+    done;
+    !found
+  in
+  Alcotest.(check bool) "message names `print`" true
+    (List.exists (fun m -> contains_sub m "print") msgs)
+
+let test_prelude_collision_silent_when_no_shared_name () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn show(x) do "prelude's own show" end
+    fn println(x) do show(x) end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn render_summary(x) do x end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool) "no collision, no error" false
+    (March_errors.Errors.has_errors errors)
+
+(* The interface-method dispatch path (`impl Show(...) for X do fn show(...)
+   end end`) must NOT trip this check: those `show` bodies belong to an
+   `impl` block, not the module's bare top-level scope, and get mangled to
+   type-qualified names downstream (Show$List.show etc. — confirmed by
+   inspecting how ambiguous-dispatch errors render elsewhere in this
+   codebase). A false positive here would break every module defining its
+   own Show/Eq/Ord/Hash impl. *)
+let test_prelude_collision_ignores_impl_show_bodies () =
+  (* Prelude DOES declare a bare `show` here (mirroring the real builtin) so
+     that if the checker wrongly descended into `impl` bodies, the entry's
+     `impl Show(Widget) do fn show(w) ... end end` would collide with it and
+     this test would catch that regression — the earlier version of this
+     test had an empty-of-`show` prelude and could not have caught it. *)
+  let prelude = unwrap_decls {|mod Prelude do
+    fn show(x) do "prelude's own show" end
+    fn println(x) do show(x) end
+  end|} in
+  let entry = unwrap_decls {|mod HasImpl do
+    type Widget = Widget(Int)
+    impl Show(Widget) do
+      fn show(w) do "widget" end
+    end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool) "impl Show's own `show` is not a bare top-level collision" false
+    (March_errors.Errors.has_errors errors)
+
+(* The other collision source: a name with NO March-source declaration
+   anywhere — `show` and `print` are exactly this (eval.ml VBuiltin, no
+   top-level `fn` in prelude.march at all, confirmed by grep). A DFn-vs-DFn
+   check alone cannot see this; it needs the builtin-name table passed in
+   separately. This is the path that actually explains both of the
+   original minimal repros in the filed todo. *)
+let test_prelude_collision_detects_native_builtin_name () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn println(x) do () end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn print(x) do () end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool) "collision on native builtin `print` is reported" true
+    (March_errors.Errors.has_errors errors)
+
+let test_prelude_collision_ordinary_name_not_a_builtin () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn println(x) do () end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn render_summary(x) do x end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool) "an ordinary name not in the builtin set is silent" false
+    (March_errors.Errors.has_errors errors)
+
+(* The case test/native/iface_method_collision.march is a standing regression
+   test for: a bare top-level `fn show(x) do ... end` at the RIGHT arity (1,
+   matching Show.show) is not a collision at all — the compiler already
+   dispatches it correctly by argument type, the same as an explicit
+   `impl Show(X)`. An earlier version of this checker did not know this and
+   broke that fixture. This test is the checker-level guard for the same
+   fact, independent of the fixture. *)
+let test_prelude_collision_right_arity_show_is_not_flagged () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn println(x) do () end
+  end|} in
+  let entry = unwrap_decls {|mod Test do
+    fn show(r) do "widget" end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool) "1-arg show matches Show.show's arity — not a collision" false
+    (March_errors.Errors.has_errors errors)
+
+(* The complementary case: a WRONG-arity `show` (2 args) can never be a
+   valid Show overload — there is no way to call a 2-argument function
+   through a 1-argument interface slot — so it is unambiguously the
+   original collision bug, not the supported dispatch feature, and must
+   still be flagged. This is exactly the shape of the original filed repro
+   (`pfn show(label, t)`). *)
+let test_prelude_collision_wrong_arity_show_is_flagged () =
+  let prelude = unwrap_decls {|mod Prelude do
+    fn println(x) do () end
+  end|} in
+  let entry = unwrap_decls {|mod Shadow do
+    fn show(label, t) do label end
+    fn main() do () end
+  end|} in
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:prelude
+    ~ordinary_builtin_names:["print"] ~iface_method_arities:[("show", 1); ("eq", 2)]
+    ~entry_decls:entry errors;
+  Alcotest.(check bool) "2-arg show cannot be a Show overload — still a collision" true
+    (March_errors.Errors.has_errors errors)
+
 (* String-literal spans must cover the literal's full extent — opening quote
    through closing quote — not a single quote character.  The read_string
    sub-lexer resets the lexeme start on every recursive match, so the span
@@ -14006,6 +14198,25 @@ let compiler_suites =
             test_parse_string_literal_span_offset;
           Alcotest.test_case "triple-quoted string literal span" `Quick
             test_parse_string_literal_span_triple;
+        ] );
+      ( "prelude-collision",
+        [
+          Alcotest.test_case "detects a shared bare fn name" `Quick
+            test_prelude_collision_detects_shared_fn_name;
+          Alcotest.test_case "names the colliding identifier" `Quick
+            test_prelude_collision_names_the_colliding_identifier;
+          Alcotest.test_case "silent when no name is shared" `Quick
+            test_prelude_collision_silent_when_no_shared_name;
+          Alcotest.test_case "ignores impl Show's own show" `Quick
+            test_prelude_collision_ignores_impl_show_bodies;
+          Alcotest.test_case "detects a native builtin name collision" `Quick
+            test_prelude_collision_detects_native_builtin_name;
+          Alcotest.test_case "ordinary name is not a builtin" `Quick
+            test_prelude_collision_ordinary_name_not_a_builtin;
+          Alcotest.test_case "right-arity show is a legitimate dispatch overload" `Quick
+            test_prelude_collision_right_arity_show_is_not_flagged;
+          Alcotest.test_case "wrong-arity show is still a collision" `Quick
+            test_prelude_collision_wrong_arity_show_is_flagged;
         ] );
       ( "parser",
         [

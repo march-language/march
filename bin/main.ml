@@ -13,6 +13,64 @@ let severity_word (sev : March_errors.Errors.severity) : string =
   | March_errors.Errors.Warning -> "warning"
   | March_errors.Errors.Hint -> "hint"
 
+(* Reject a bare top-level function name shared between prelude.march and the
+   entry module BEFORE the two decl lists are concatenated below (or, at the
+   two other call sites, wherever the equivalent concatenation happens for
+   that pipeline). Both are unwrapped into bare, unqualified declarations
+   (see [load_stdlib_file] and [desugar_module]'s [~is_entry] default), and
+   Prelude's own functions call each other unqualified, so an entry-module
+   function sharing one of those names silently replaces it program-wide —
+   confirmed to produce, depending on how the two definitions' types happen
+   to line up: a misattributed runtime arity error, a compiled SIGBUS with no
+   diagnostic, or a fully silent no-op. See
+   specs/plans/2026-08-13-prelude-entry-fn-name-collision.md.
+
+   [stdlib_decls] is the FULL concatenated stdlib list, not just prelude's —
+   passing the whole thing is correct and not just convenient: every stdlib
+   file other than prelude.march keeps its wrapping [DMod], so only
+   prelude's members ever appear as a bare top-level [DFn] in this list; the
+   checker is blind to everything else in it. *)
+(* The compiler's own builtin-name tables — [print] and friends have NO
+   corresponding March-source [DFn] anywhere (eval.ml injects them directly
+   as [VBuiltin] values), so [Prelude_collision]'s DFn-vs-DFn check cannot
+   see a collision with them on its own; it needs this list. Sourced from
+   the SAME table the typechecker itself resolves ordinary builtin calls
+   against, so this can never drift from what the compiler actually treats
+   as a builtin. Dotted names (there are none in [builtin_bindings] today,
+   but filtering is cheap insurance) are excluded — a user's top-level [fn]
+   can never be named with a `.`, so they could never collide with one. *)
+let ordinary_builtin_collision_names : string list =
+  List.filter_map (fun (name, _) -> if String.contains name '.' then None else Some name)
+    March_typecheck.Typecheck.builtin_bindings
+
+(* [show]/[eq]/[compare]/[hash] are NOT in the list above — they are
+   structural interface methods with their OWN type-directed dispatch
+   (Typecheck.builtin_interface_bindings), and a bare top-level [fn] of the
+   right ARITY legitimately participates in it (regression-tested by
+   test/native/iface_method_collision.march). Only a WRONG-arity same-name
+   function is a genuine collision — see Prelude_collision's doc comment. *)
+let iface_method_collision_arities : (string * int) list =
+  [ ("eq", 2); ("compare", 2); ("show", 1); ("hash", 1) ]
+
+let check_no_prelude_collision_decls ~(stdlib_decls : March_ast.Ast.decl list)
+    (entry_decls : March_ast.Ast.decl list) : unit =
+  let errors = March_errors.Errors.create () in
+  March_modules.Prelude_collision.check ~prelude_decls:stdlib_decls
+    ~ordinary_builtin_names:ordinary_builtin_collision_names
+    ~iface_method_arities:iface_method_collision_arities ~entry_decls errors;
+  if March_errors.Errors.has_errors errors then begin
+    List.iter (fun (d : March_errors.Errors.diagnostic) ->
+        Printf.eprintf "%s:%d:%d: %s: %s\n"
+          d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
+          d.span.March_ast.Ast.start_col (severity_word d.severity) d.message
+      ) (March_errors.Errors.sorted errors);
+    exit 1
+  end
+
+let check_no_prelude_collision ~(stdlib_decls : March_ast.Ast.decl list)
+    (entry : March_ast.Ast.module_) : unit =
+  check_no_prelude_collision_decls ~stdlib_decls entry.March_ast.Ast.mod_decls
+
 (* [find_substring ~needle haystack] returns the index of the first
    occurrence of [needle] in [haystack], or [None]. Small local helper so
    [dedupe_cap_hints] below doesn't reach for a regex library over one fixed
@@ -1572,6 +1630,7 @@ let run_test_cmd args =
         March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
     in
     let stdlib_decls = load_stdlib () in
+    check_no_prelude_collision ~stdlib_decls desugared;
     let desugared =
       { desugared with
         March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
@@ -2200,6 +2259,7 @@ let compile filename =
      stdlib internals (confirmed via the full test suite: 24 codegen + 6
      stdlib failures, all "type-incorrect TIR reached codegen" ICEs from
      stdlib functions the user's code called into never being lowered). *)
+  check_no_prelude_collision ~stdlib_decls desugared;
   let desugared =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
@@ -4303,6 +4363,7 @@ let run_check_cmd ?(emit_caps = false) files =
     | _ -> true
   ) stdlib_decls in
   let no_shadowing = List.length stdlib_decls = stdlib_decls_unshadowed_count in
+  check_no_prelude_collision_decls ~stdlib_decls all_decls;
   (* Build a synthetic module of just the user's own decls and type-check it,
      seeded from the cached stdlib typecheck env (see [get_stdlib_tc_env])
      instead of re-typechecking stdlib combined with user code from scratch —
@@ -4639,6 +4700,7 @@ let () =
           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
       let desugared = March_desugar.Desugar.desugar_module module_ast in
       let stdlib_decls = load_stdlib () in
+      check_no_prelude_collision ~stdlib_decls desugared;
       let combined =
         { desugared with
           March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls } in

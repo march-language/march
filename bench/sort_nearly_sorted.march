@@ -20,7 +20,7 @@ pfn build_pairs(n : Int, acc : List(Int)) : List(Int) do
   end
 end
 
-pfn head(xs : List(Int)) : Int do
+pfn first_or_zero(xs : List(Int)) : Int do
   match xs do
   Nil        -> 0
   Cons(h, _) -> h
@@ -34,8 +34,8 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let cmp = fn x -> fn y -> x <= y
   let ts  = Sort.timsort_by(build_pairs(4999, Nil), cmp)
   let ms  = Sort.mergesort_by(build_pairs(4999, Nil), cmp)
-  println(int_to_string(head(ts)))
-  println(int_to_string(head(ms)))
+  println(int_to_string(first_or_zero(ts)))
+  println(int_to_string(first_or_zero(ms)))
 end
 
 end

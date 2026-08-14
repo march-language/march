@@ -1,7 +1,9 @@
 -- Regression: unboxed newtype (single-field single-variant type).
 -- Counter(Int) must be stored as the tagged scalar, not heap-allocated.
 -- bump: Counter -> Counter (construct + match across function boundary)
--- unwrap: Counter -> Int   (extract the Int payload)
+-- unwrap_counter: Counter -> Int   (extract the Int payload; named to avoid
+-- colliding with Prelude's own unwrap — see
+-- specs/plans/2026-08-13-prelude-entry-fn-name-collision.md)
 -- Expected output: 42
 
 mod NewtypeCounter do
@@ -14,7 +16,7 @@ mod NewtypeCounter do
     end
   end
 
-  fn unwrap(c) do
+  fn unwrap_counter(c) do
     match c do
     Counter(n) -> n
     end
@@ -22,6 +24,6 @@ mod NewtypeCounter do
 
   fn main(_cap_console : Cap(IO.Console)) do
     let c = Counter(41)
-    println(int_to_string(unwrap(bump(c))))
+    println(int_to_string(unwrap_counter(bump(c))))
   end
 end

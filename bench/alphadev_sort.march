@@ -14,7 +14,7 @@ pfn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   end
 end
 
-pfn head(xs : List(Int)) : Int do
+pfn first_or_zero(xs : List(Int)) : Int do
   match xs do
   Nil        -> 0
   Cons(h, _) -> h
@@ -25,7 +25,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let xs     = gen_list(10000, 42, Nil)
   let cmp    = fn x -> fn y -> x <= y
   let sorted = Sort.sort_small_by(xs, cmp)
-  println(int_to_string(head(sorted)))
+  println(int_to_string(first_or_zero(sorted)))
 end
 
 end
