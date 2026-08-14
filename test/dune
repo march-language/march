@@ -2772,6 +2772,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/supervisor_spawn_children.expected native_supervisor_spawn_children.out)))
 
+; ── Regression: the crash trap must restore the actor record's refcount that
+; the dispatch loop clobbers to 1 for FBIP.  march_panic's longjmp used to
+; skip that restore, leaving a live, multiply-owned record claiming a single
+; owner — so the next drop by any other owner freed it and everything after
+; was a use-after-free (seen as EXC_BAD_ACCESS inside an unrelated malloc).
+; Asserts the RC directly (via the ffi_test_actor_rc probe in march_ffi.c),
+; because every March-level symptom of the bug is undefined behavior.
+(rule
+ (targets native_actor_crash_rc_restore native_actor_crash_rc_restore.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_crash_rc_restore.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_crash_rc_restore
+        native/actor_crash_rc_restore.march)
+   (with-stdout-to native_actor_crash_rc_restore.out
+        (system "./native_actor_crash_rc_restore")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_crash_rc_restore.expected native_actor_crash_rc_restore.out)))
+
 ; ── Regression: a panic inside a SUPERVISED actor's message handler must
 ; not exit(1) the whole process — it must crash-isolate to that actor's own
 ; green thread and trigger a one_for_one restart (before this fix, kill()
