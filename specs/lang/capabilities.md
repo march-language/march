@@ -449,7 +449,7 @@ actually holds the capability:
 
 ```
 `main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
-(reached from `main`: save). The grant is a ceiling on the WHOLE program —
+(reached from `main`: main → save). The grant is a ceiling on the WHOLE program —
 declaring `needs IO.FileWrite` does not raise it.
 help: widen the grant (e.g. `Cap(IO)`), or remove the use.
 ```

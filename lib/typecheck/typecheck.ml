@@ -13393,16 +13393,17 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  `needs %s` does not raise it.\n\
                  help: widen the grant (e.g. `Cap(IO)`), or remove the use."
                 show_grant c
+                (* Render exactly like the sibling missing-`needs` diagnostic's
+                   [Cap_infer.chain_note] (lib/refinecheck/cap_infer.ml): the
+                   FULL chain (no elision — neither diagnostic elides today;
+                   see specs/todos/2026-08-14-capability-chain-rendering-unify-elision.md
+                   for unifying the two under a shared, capped renderer),
+                   `main` included as the first frame, joined with `→`. Both
+                   read as a matched pair, so they must render the same way. *)
                 (match cap_reach_chain env ~from:"main" ~cap:c with
                  | Some (_ :: _ as chain) ->
-                   let shown =
-                     if List.length chain > 4 then
-                       "… -> "
-                       ^ String.concat " -> "
-                           (List.filteri (fun i _ -> i >= List.length chain - 3) chain)
-                     else String.concat " -> " chain
-                   in
-                   Printf.sprintf " (reached from `main`: %s)" shown
+                   Printf.sprintf " (reached from `main`: %s)"
+                     (String.concat " \xe2\x86\x92 " ("main" :: chain))
                  | _ -> "")
                 c))
       (List.sort_uniq String.compare closure)

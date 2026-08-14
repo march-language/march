@@ -10323,8 +10323,10 @@ let test_grant_violation_names_the_user_module () =
   (* A grant violation reached through the stdlib used to name only the
      stdlib leaf (the builtin holding the capability directly), leaving the
      user to hunt for which of their OWN functions called it. It should
-     instead print the chain from `main` through the user's own frames,
-     same as the body-scan error used to. *)
+     instead print the full chain from `main` through the user's own frames,
+     rendered the same way as the sibling missing-`needs` body-scan
+     diagnostic (`Cap_infer.chain_note`): `main` included as the first
+     frame, joined with `→`, no truncation. *)
   let ctx = typecheck {|mod Attributed do
     needs IO
     fn helper(p : String) : String do
@@ -10337,8 +10339,8 @@ let test_grant_violation_names_the_user_module () =
       println(helper("/etc/passwd"))
     end
   end|} in
-  Alcotest.(check bool) "the user's own function is named in the chain"
-    true (has_error_with ctx "helper")
+  Alcotest.(check bool) "the chain names `main` and the user's own function"
+    true (has_error_with ctx "reached from `main`: main \xe2\x86\x92 helper")
 
 let test_grant_full_io_accepts_everything () =
   (* `needs IO` is Check 1's requirement for the Cap(IO) SIGNATURE — the
