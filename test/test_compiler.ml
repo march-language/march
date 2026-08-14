@@ -9886,6 +9886,38 @@ let test_non_main_still_hinted_about_root_cap () =
   Alcotest.(check bool) "a non-main function is still hinted"
     true (has_hint_with ctx "root capability")
 
+(* ── Fix round 1: the unused-param exemption must be the DIRECT `Cap(X)`
+   form only, not "a capability appears anywhere in the type." A
+   `List(Cap(IO.Console))`, a tuple containing a `Cap(IO.Console))`, or a
+   `Cap(IO.Console) -> ()` closure parameter is an ordinary container/closure
+   value, not a grant token itself — a dead one should still warn. *)
+let test_unused_list_of_cap_param_still_warned () =
+  let ctx = typecheck {|mod ListOfCap do
+    fn f(caps : List(Cap(IO.Console))) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "a List(Cap(...)) parameter is not exempt"
+    true (has_warning_with ctx "Unused variable `caps`")
+
+let test_unused_tuple_of_cap_param_still_warned () =
+  let ctx = typecheck {|mod TupleOfCap do
+    fn f(pair : (Int, Cap(IO.Console))) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "a tuple containing a Cap(...) parameter is not exempt"
+    true (has_warning_with ctx "Unused variable `pair`")
+
+let test_unused_cap_arrow_param_still_warned () =
+  let ctx = typecheck {|mod CapArrow do
+    fn g(handler : Cap(IO.Console) -> ()) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "a Cap(...) -> () closure parameter is not exempt"
+    true (has_warning_with ctx "Unused variable `handler`")
+
 (* ── A module-level declaration SHADOWING a builtin name is not a call to
    that builtin ─────────────────────────────────────────────────────────────
    specs/2026-08-09-cap-loose-ends-plan.md, Tier 0.
@@ -14782,6 +14814,9 @@ let compiler_suites =
           Alcotest.test_case "ordinary unused param still warned"         `Quick test_ordinary_unused_param_still_warned;
           Alcotest.test_case "main not nagged about root cap"             `Quick test_main_is_not_nagged_about_root_cap;
           Alcotest.test_case "non-main still hinted about root cap"       `Quick test_non_main_still_hinted_about_root_cap;
+          Alcotest.test_case "List(Cap(...)) param still warned"          `Quick test_unused_list_of_cap_param_still_warned;
+          Alcotest.test_case "tuple-of-Cap(...) param still warned"       `Quick test_unused_tuple_of_cap_param_still_warned;
+          Alcotest.test_case "Cap(...) -> () closure param still warned"  `Quick test_unused_cap_arrow_param_still_warned;
         ] );
       ( "cap_unknown_name", [
           Alcotest.test_case "unknown capability rejected with suggestion" `Quick test_unknown_capability_is_rejected_with_suggestion;

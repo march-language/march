@@ -7656,10 +7656,23 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
   let used = free_vars_expr [] body in
   (* A capability value is a runtime-erased grant token: it is normal, and
      often correct, for it never to be mentioned in the body. Warning on it
-     made the right code noisy and pushed users to spell every grant `_cap`. *)
+     made the right code noisy and pushed users to spell every grant `_cap`.
+
+     Deliberately NOT [Cap_surface_ty.caps_in_ty], which recurses into ANY
+     type structure and returns non-empty as soon as a [Cap(...)] appears
+     ANYWHERE inside it — so `List(Cap(IO.Console))`, `(Int, Cap(IO.Console))`,
+     and `Cap(IO.Console) -> ()` all satisfied it, exempting a genuinely dead
+     list/tuple/closure parameter from the warning it should still get: the
+     "never referenced, and that's fine" rationale only holds for a value
+     that *is* a capability, not one that merely contains one. This checks
+     the DIRECT form only — the same recognition [caps_in_ty] itself uses at
+     its own top match arm (`cap_surface_ty.ml`'s `TyCon (con, [arg]) when
+     con.txt = "Cap"`) — so `fn main(cap : Cap(IO.Console))` and every plain
+     `Cap(X)` parameter stay exempt, while a capability merely nested inside
+     a container or arrow type does not. *)
   let is_cap_ty = function
-    | Some ty -> March_caps.Cap_surface_ty.caps_in_ty ty <> []
-    | None -> false
+    | Some (Ast.TyCon (con, [_])) -> con.txt = "Cap"
+    | Some _ | None -> false
   in
   let check_name name span =
     if name <> "_" && not (String.length name > 0 && name.[0] = '_')
