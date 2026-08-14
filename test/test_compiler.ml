@@ -3525,6 +3525,60 @@ let test_missing_needs_dedup_no_orphan_hint () =
       (contains_substring s "IO.Console" && contains_substring s "IO.FileWrite")
   end
 
+(* ── Regression: the `fn main(cap : Cap(IO))` shape, the one that actually
+   regressed ───────────────────────────────────────────────────────────
+
+   [test_missing_needs_dedup_no_orphan_hint] above deliberately uses a
+   `main`-less fixture, because a `main(cap : Cap(IO))` signature makes
+   Check 1 demand `needs IO`, which subsumes both IO.Console and
+   IO.FileWrite and so collapses Check 1b's aggregated error (and its
+   `cap_needs:` code) to nothing — leaving no error for the dedup pass to
+   key off of via the OLD exact-capability-set-membership match. That gap
+   is exactly why the orphan-hint bug escaped: `dedupe_cap_hints` matched a
+   hint's capability against an error's capability set by exact string
+   equality, which can never match `IO` (what Check 1's error covers)
+   against `IO.FileWrite` (what Cap_infer's hint names) — so on THIS shape
+   the hint survived even after Check 1's error was given a `cap_needs:IO`
+   code. Fixed by matching via `Cap_lattice.cap_subsumes` instead of exact
+   membership. Assert on the specific orphan hint's absence, not a
+   diagnostic count — a count assertion is exactly what let the prior
+   regression through undetected. *)
+let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup
+  else begin
+    let src = Filename.temp_file "cap_dedup_main" ".march" in
+    let oc = open_out src in
+    output_string oc
+      "mod ManyCaps do\n\
+      \  fn main(cap : Cap(IO)) : () do\n\
+      \    println(\"a\")\n\
+      \    let _ = file_write(\"/tmp/mc\", \"d\")\n\
+      \    ()\n\
+      \  end\n\
+       end";
+    close_out oc;
+    let out = Filename.temp_file "cap_dedup_main" ".out" in
+    let (_ : int) =
+      Sys.command
+        (Printf.sprintf "%s --check %s > %s 2>&1"
+           (Filename.quote compiler_exe_for_cap_dedup) (Filename.quote src)
+           (Filename.quote out))
+    in
+    let ic = open_in out in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out ];
+    Alcotest.(check bool)
+      "no orphan cap_infer hint for file_write's IO.FileWrite, subsumed by Check 1's `needs IO`"
+      false
+      (contains_substring s "call to `file_write` requires `needs IO.FileWrite`");
+    Alcotest.(check bool)
+      "Check 1's own error still names the Cap(IO) parameter"
+      true
+      (contains_substring s "used in module `ManyCaps`" && contains_substring s "needs IO")
+  end
+
 (* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
 
    `fn main(cap : Cap(IO))` makes Check 1 separately demand `needs IO`
@@ -14564,6 +14618,7 @@ let compiler_suites =
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "missing needs reported once per module" `Quick test_missing_needs_reported_once_per_module;
           Alcotest.test_case "missing needs dedup: no orphan cap_infer hint" `Quick test_missing_needs_dedup_no_orphan_hint;
+          Alcotest.test_case "missing needs dedup: no orphan hint with main(cap : Cap(IO))" `Quick test_missing_needs_dedup_no_orphan_hint_main_cap_param;
           Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
           Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;

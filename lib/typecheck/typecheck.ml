@@ -9586,7 +9586,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
             MPText " can mint "; cap cap_path; MPText " — callers must receive it as a parameter." ])
       | None ->
-        Err.error env.errors ~span:sp
+        Err.error_with_fix env.errors ~span:sp ~code:("cap_needs:" ^ cap_path)
+          ~fix:(Err.FInsert {
+            after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
+            text = "  needs " ^ cap_path })
           (render_parts [
             cap cap_path; MPText " used in module "; MPCode mod_name.txt;
             MPText " but "; MPCode cap_path; MPText " is not declared in ";

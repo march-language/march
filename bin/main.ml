@@ -100,8 +100,14 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
        | None -> None)
   in
   (* Check 1b's aggregated error: "function bodies in `M` call builtins
-     that require ...". *)
-  let error_module (d : E.diagnostic) = name_after ~marker:"bodies in `" d.E.message in
+     that require ...". Check 1's per-Cap(X)-parameter error: "`Cap(X)` used
+     in module `M` but ...". Both anchors are tried in turn — a diagnostic's
+     message matches at most one of them. *)
+  let error_module (d : E.diagnostic) =
+    match name_after ~marker:"bodies in `" d.E.message with
+    | Some m -> Some m
+    | None -> name_after ~marker:"used in module `" d.E.message
+  in
   (* Cap_infer's hint: "call to `f` requires `needs X` — add `needs X` to
      module `M`...". *)
   let hint_module (d : E.diagnostic) = name_after ~marker:"to module `" d.E.message in
@@ -122,8 +128,18 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
        match d.E.severity, cap_needs_code d with
        | E.Hint, Some code ->
          let covered =
+           (* [cap_subsumes parent child]: the ERROR's capability is the
+              parent (it's the broader `needs` a fix would add), the HINT's
+              capability is the child (the narrower one the call actually
+              triggers) — e.g. an error covering `IO` subsumes a hint for
+              `IO.FileWrite`. Getting this backwards would suppress hints
+              for capabilities the error does NOT actually cover. *)
            match caps_of_code code, hint_module d with
-           | [ cap ], Some m -> List.mem (m, cap) strong_caps
+           | [ hint_cap ], Some m ->
+             List.exists
+               (fun (em, error_cap) ->
+                  em = m && March_caps.Cap_lattice.cap_subsumes error_cap hint_cap)
+               strong_caps
            | _ -> false
          in
          if not covered then Some d
