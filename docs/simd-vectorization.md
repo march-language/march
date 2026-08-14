@@ -162,6 +162,17 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
   the whole loop, so it's a correctness-first scalar loop, not a SIMD one.
   Use `sum`/`map` if you need the auto-vectorized path and your reduction
   fits their shape.
+- **`fold_float` / `fold_f32` with a `Float` accumulator leak ~32 B per
+  element** (a known, still-open bug — the result is correct, only memory
+  residency is affected). Each iteration's accumulator box is never released,
+  so folding a 50M-element `NativeFloatArr` into a `Float` costs ~1.6 GB of
+  peak RSS. Measured at 5M elements: 193.6 MB with a `Float` accumulator vs
+  40.4 MB for the `fold_int` control. **Folds with an `Int` accumulator —
+  including `fold_int`, `fold_i32` and `fold_u8` — are unaffected**, because a
+  wire-tagged `Int` is never heap-allocated. Workaround for large arrays: use
+  `sum_float`/`sum_f32`, or fold with an `Int` accumulator, or chunk the array.
+  Tracked in
+  `specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md`.
 - **`DataFrame`**: `Sum`/`Mean` aggregation and `col_add_col` (column-column
   arithmetic, via `map2_int`/`map2_float`) use the vectorized `NativeArray`
   primitives above under the hood. `Min`/`Max`/`Std`/`Variance`/`Median`

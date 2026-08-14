@@ -6433,7 +6433,8 @@ void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
 /* fold: the accumulator is a GENERIC 'a, so it stays in the erased/boxed
  * representation for the whole loop and the caller's codegen owns boxing it
  * in and out.  RC discipline copied verbatim from march_typed_array_fold
- * (:6191 above) — incrc(f) per element, one decrc(f) after the loop.
+ * (above in this file; grep the name rather than trusting a line number)
+ * — incrc(f) per element, one decrc(f) after the loop.
  * ARG ORDER IS (acc, arr, f) — matching the March builtin, NOT
  * march_typed_array_fold's (arr, acc, f). */
 void *native_int_arr_fold(void *acc, void *arr, void *f) {
@@ -6640,10 +6641,18 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
  * unboxed double for storage rather than aliasing our box — so our box has
  * no surviving alias once the call returns and is always safe to drop.
  * Without this decrc, elem leaks: ~32B/element, unbounded in loop length
- * (confirmed via RSS measurement — see task-2-report.md). The accumulator
- * (result) has the identical borrowed-argument shape and also isn't freed
- * by the callee, but that half of the leak is inherited from the reference
- * march_typed_array_fold (:6191) and is out of scope here. */
+ * (confirmed via RSS measurement — see task-2-report.md). This decrc is
+ * pinned by test/native/native_arr_fold_leak_probe.march; deleting it takes
+ * that fixture's peak RSS from 48 MB to 171 MB.
+ *
+ * STILL OPEN — the accumulator (result) has the identical borrowed-argument
+ * shape and also isn't freed by the callee, so a fold whose accumulator is
+ * itself a Float leaks a SECOND ~32B/element as each iteration's
+ * march_alloc_float becomes the next accumulator. That half is inherited
+ * from the reference march_typed_array_fold (above in this file) and is out
+ * of scope here; it is measured and tracked in
+ * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md, and
+ * the fix most likely belongs in march_typed_array_fold rather than here. */
 void *native_float_arr_fold(void *acc, void *arr, void *f) {
     int64_t len = native_float_arr_length(arr);
     void *result = acc;
@@ -6896,7 +6905,11 @@ void *native_f32_arr_map2(void *arr1, void *arr2, void *f) {
  * argument order as native_int_arr_fold above. march_decrc(elem) after the
  * call releases our per-element box — see native_float_arr_fold's comment
  * above for why this is confirmed safe (borrowed-argument convention, no
- * alias survives the call) rather than a use-after-free. */
+ * alias survives the call) rather than a use-after-free. Pinned by
+ * test/native/native_arr_fold_leak_probe.march's f32 leg. The accumulator
+ * chain leaks the same way here as there when the accumulator is a Float —
+ * still open, see that comment and
+ * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md. */
 void *native_f32_arr_fold(void *acc, void *arr, void *f) {
     int64_t len = native_f32_arr_length(arr);
     void *result = acc;

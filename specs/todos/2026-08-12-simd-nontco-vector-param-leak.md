@@ -109,10 +109,9 @@ knowing by whoever generalizes this fix, because both weaken it:
   on macOS, kilobytes on Linux — to bytes at the C boundary) and prints it to
   stderr; the three `test/dune` rules no longer branch on `uname` or shell
   out to `/usr/bin/time` at all. The guard now runs unconditionally on both
-  CI legs — see `specs/todos/2026-08-13-simd-followups/task-3-report.md` for
-  the falsifiability re-demonstration (sabotage → RED with the leaked figure,
-  restore → GREEN) and which platforms were actually exercised, recorded in
-  `.superpowers/sdd/2026-08-13-simd-followups/task-3-report.md`.
+  CI legs — see `.superpowers/sdd/2026-08-13-simd-followups/task-3-report.md`
+  for the falsifiability re-demonstration (sabotage → RED with the leaked
+  figure, restore → GREEN) and which platforms were actually exercised.
 - **The threshold shipped as an absolute bound, not the specified delta.**
   The closeouts spec asked for "max RSS delta vs a scalar control < 5 MB";
   what landed is an absolute `< 32 MB` with no control run. That deviation is

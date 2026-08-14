@@ -314,6 +314,14 @@ void *march_string_lit(const char *utf8, int64_t len);
  * march_extras.c never re-#define a second copy — that's exactly how layout
  * drift starts. */
 #define NATIVE_ARR_HDR 32
+/* The value 32 is HARD-CODED on the codegen side too: lib/tir/llvm_emit.ml
+ * emits `arr + 32 + i*elem_size` GEPs directly rather than reading this
+ * header, so the two can silently diverge. This assert makes a change here
+ * a compile error, at which point the emitter's three NATIVE_ARR_HDR=32
+ * comments point at the sites that must be updated in lockstep. */
+_Static_assert(NATIVE_ARR_HDR == 32,
+               "NATIVE_ARR_HDR is hard-coded as 32 in lib/tir/llvm_emit.ml's "
+               "native-array GEPs; update both or the emitted IR is wrong");
 #define NATIVE_ELEM_I64 0
 #define NATIVE_ELEM_F64 1
 #define NATIVE_ELEM_F32 2

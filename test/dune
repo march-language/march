@@ -4047,6 +4047,68 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_fold.expected native_arr_fold.out)))
 
+; ── fold per-element float box: RSS guard ──────────────────────────────
+; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output
+; diff: native_float_arr_fold / native_f32_arr_fold return the right number
+; whether or not they release the per-element march_alloc_float box they
+; make for each closure call. So the two `march_decrc(elem)` lines in
+; runtime/march_runtime.c were unpinned -- deleting either left every gate
+; green. This is the guard; RSS is the only signal it can use.
+;
+; Falsifiability was ESTABLISHED BY SABOTAGE, both directions, both lines
+; (Darwin arm64, --opt 2, 4,000,000 elements per leg):
+;   both decrc present        50,397,184 B  ( 48.1 MB)   -> GREEN
+;   f64 decrc(elem) deleted  178,896,896 B  (170.6 MB)   -> RED
+;   f32 decrc(elem) deleted  178,864,128 B  (170.6 MB)   -> RED
+; Each sabotage adds exactly 32.1 B/element. Threshold 96 MB sits 2.0x above
+; the healthy figure and 1.8x below either leaked one.
+;
+; The probe's accumulator is an INT, deliberately. A Float accumulator would
+; also trip this rule, but for a DIFFERENT and still-open reason -- the
+; accumulator-chain leak of
+; specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md -- which
+; would make the rule fire for something it is not guarding. See the header
+; comment in the fixture.
+;
+; Three rules, all load-bearing, for the reasons spelled out at length on
+; simd_leak_probe below: (a) the run's exit status is dune's, (b) stdout is
+; diffed so a crash-after-partial-output cannot pass, (c) only then is RSS
+; read from a captured FILE rather than from a pipeline whose status belongs
+; to its last stage.
+(rule
+ (targets native_arr_fold_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_arr_fold_leak_probe
+       native/native_arr_fold_leak_probe.march)))
+
+(rule
+ (targets native_arr_fold_leak_probe.out native_arr_fold_leak_probe.rss)
+ (deps native_arr_fold_leak_probe)
+ (action
+  (with-stdout-to native_arr_fold_leak_probe.out
+   (with-stderr-to native_arr_fold_leak_probe.rss
+    (run ./native_arr_fold_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/native_arr_fold_leak_probe.expected
+        native_arr_fold_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_arr_fold_leak_probe.rss)
+ (action
+  (run bash -c
+   "rss=$(cat native_arr_fold_leak_probe.rss); \
+    test -n \"$rss\" || { echo 'could not read peak RSS from native_arr_fold_leak_probe.rss' >&2; exit 1; }; \
+    test \"$rss\" -lt 100663296 || { echo \"native_arr_fold_leak_probe leaked: peak RSS ${rss} B >= 96 MB. Folding 4,000,000 elements must not accumulate per-element march_alloc_float boxes -- healthy is ~48 MB, each missing march_decrc(elem) adds ~128 MB (32.1 B/element). Check that native_float_arr_fold and native_f32_arr_fold in runtime/march_runtime.c still call march_decrc(elem) after call_closure_2.\" >&2; exit 1; }; \
+    echo \"native_arr_fold_leak_probe peak RSS = ${rss} B\"")))
+
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
 ; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,
 ; pulled forward from the original Task 3 split; see llvm_emit.ml's SIMD

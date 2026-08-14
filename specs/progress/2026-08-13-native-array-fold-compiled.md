@@ -65,10 +65,22 @@ details are load-bearing, not just belt-and-suspenders).
    acc)`) always allocates a FRESH box from the unboxed double value for
    storage rather than aliasing the box passed in, so the original `elem`
    box has no surviving alias once the call returns and dropping it is
-   always safe. The accumulator has the identical borrowed-argument shape
-   and is *also* never freed by the callee, but that half of the leak is
-   inherited from the reference `march_typed_array_fold` and was
-   deliberately left out of scope for this task.
+   always safe. Now **pinned** by `test/native/native_arr_fold_leak_probe.march`
+   plus three `test/dune` rules (run / stdout diff / RSS threshold), added at
+   final review: an output diff cannot see a leak, so before that guard
+   existed deleting either `march_decrc(elem)` left every gate green.
+   Falsifiability established by sabotage in both directions and both lines —
+   48.1 MB healthy, 170.6 MB with either decrc removed, threshold 96 MB.
+
+   The accumulator has the identical borrowed-argument shape and is *also*
+   never freed by the callee, but that half of the leak is inherited from the
+   reference `march_typed_array_fold` and was deliberately left out of scope
+   for this task. It is now measured, disclosed to users
+   (`docs/simd-vectorization.md`, `CHANGELOG.md`) and tracked as an open item
+   in `specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md` —
+   5M elements with a `Float` accumulator cost 193.6 MB peak RSS against
+   40.4 MB for the `fold_int` control, i.e. 32.1 B/element, with int-width
+   folds unaffected.
 
 ## Verification
 

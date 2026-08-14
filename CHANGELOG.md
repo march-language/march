@@ -103,7 +103,18 @@ git log is authoritative for exact commits.
   float-family folds needed to release the per-element box they allocate
   each iteration (confirmed safe — not a use-after-free — by inspecting the
   compiled closure's `-emit-llvm` output, which always allocates a fresh box
-  when storing an element rather than aliasing the one passed in).
+  when storing an element rather than aliasing the one passed in); that
+  release is pinned by `test/native/native_arr_fold_leak_probe.march`, an RSS
+  guard, since an output diff cannot see a leak.
+  **A second, separate leak remains open:** `fold_float` / `fold_f32` with a
+  `Float` **accumulator** leak a further ~32 B per element, because each
+  iteration's accumulator box is never released — 5M elements cost 193.6 MB
+  of peak RSS against 40.4 MB for the `fold_int` control. Results are
+  correct; only memory residency is affected, and folds with an `Int`
+  accumulator (`fold_int`/`fold_i32`/`fold_u8`) are unaffected. The bug is
+  inherited from `TypedArray.fold`, not new to these helpers. See
+  `docs/simd-vectorization.md`'s "Known limitations" and
+  `specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md`.
 - **Runtime enforcement tests for `--cap-sandbox`** — compiled fixtures now
   verify that a withheld capability's syscall is actually denied at runtime
   (Linux seccomp-bpf, macOS Seatbelt), not just that the embedded policy
@@ -272,7 +283,12 @@ git log is authoritative for exact commits.
 - **`peak_rss_bytes` builtin** — process self-inspection returning peak
   resident set size in bytes on both macOS and Linux (`getrusage`'s
   `ru_maxrss` is bytes on macOS, kilobytes on Linux; normalized to bytes at
-  the C boundary). Ambient, no capability grant required — it performs no
+  the C boundary). **Compiled builds only** report a true RSS: the
+  interpreter has no `getrusage` binding and returns a `Gc.quick_stat`
+  `top_heap_words` approximation of the *interpreter's own* OCaml heap, which
+  is not comparable in magnitude to the compiled figure. Only the ordering
+  (a later call >= an earlier one) agrees across the two paths — never assert
+  equal raw numbers. Ambient, no capability grant required — it performs no
   IO and observes nothing outside the process. `System.mem_peak_bytes()` is
   the stdlib wrapper (named to avoid shadowing the builtin it calls). The
   SIMD-vector-temp-box leak guard (`test/native/simd_leak_probe.march`,
