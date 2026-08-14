@@ -614,8 +614,18 @@ let suggest_cap cap =
     let is_io_rooted =
       cap = "IO" || (String.length cap > 3 && String.sub cap 0 3 = "IO.")
     in
+    (* The leaf-collision rule catches `needs Network` — a real capability
+       written without its path.  It must apply ONLY to single-segment names:
+       a DOTTED non-IO path is an FFI/proof capability and is always legal, so
+       `MyLib.Clock` and `Vendor.Random` must not be dragged in by their last
+       segment.  (Corrected 2026-08-13 during execution: an earlier draft of
+       this code computed the leaf match before this gate, which falsely
+       rejected exactly those names and pointed the user at an unrelated IO
+       capability.  `Db.Migrated` and `Db.P` in the existing corpus are the
+       shape that must keep working.) *)
     let leaf_match =
-      List.find_opt (fun k -> lower (leaf k) = lower (leaf cap)) known_caps
+      if String.contains cap '.' then None
+      else List.find_opt (fun k -> lower (leaf k) = lower (leaf cap)) known_caps
     in
     match leaf_match with
     | Some k -> Some k
