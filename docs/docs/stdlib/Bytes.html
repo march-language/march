@@ -206,13 +206,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Bytes.html#fn-from_hex"><span class="sb-kind" style="color:var(--fn)">F</span>from_hex</a>
 <a class="sl" href="Bytes.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
 <a class="sl" href="Bytes.html#fn-from_string"><span class="sb-kind" style="color:var(--fn)">F</span>from_string</a>
+<a class="sl" href="Bytes.html#fn-from_u8_arr"><span class="sb-kind" style="color:var(--fn)">F</span>from_u8_arr</a>
 <a class="sl" href="Bytes.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Bytes.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="Bytes.html#fn-length"><span class="sb-kind" style="color:var(--fn)">F</span>length</a>
 <a class="sl" href="Bytes.html#fn-slice"><span class="sb-kind" style="color:var(--fn)">F</span>slice</a>
 <a class="sl" href="Bytes.html#fn-to_hex"><span class="sb-kind" style="color:var(--fn)">F</span>to_hex</a>
 <a class="sl" href="Bytes.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a>
-<a class="sl" href="Bytes.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
+<a class="sl" href="Bytes.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
+<a class="sl" href="Bytes.html#fn-to_u8_arr"><span class="sb-kind" style="color:var(--fn)">F</span>to_u8_arr</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="CRDT.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="CRDT.html">CRDT</a></div><div class="sb-sub"><a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
 <a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
 <a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
@@ -1417,8 +1419,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Msgpack.html#fn-str"><span class="sb-kind" style="color:var(--fn)">F</span>str</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div><div class="sb-sub"><a class="sl" href="NativeArray.html#fn-f32_to_float_arr"><span class="sb-kind" style="color:var(--fn)">F</span>f32_to_float_arr</a>
 <a class="sl" href="NativeArray.html#fn-float_to_f32_arr"><span class="sb-kind" style="color:var(--fn)">F</span>float_to_f32_arr</a>
+<a class="sl" href="NativeArray.html#fn-fold_f32"><span class="sb-kind" style="color:var(--fn)">F</span>fold_f32</a>
 <a class="sl" href="NativeArray.html#fn-fold_float"><span class="sb-kind" style="color:var(--fn)">F</span>fold_float</a>
+<a class="sl" href="NativeArray.html#fn-fold_i32"><span class="sb-kind" style="color:var(--fn)">F</span>fold_i32</a>
 <a class="sl" href="NativeArray.html#fn-fold_int"><span class="sb-kind" style="color:var(--fn)">F</span>fold_int</a>
+<a class="sl" href="NativeArray.html#fn-fold_u8"><span class="sb-kind" style="color:var(--fn)">F</span>fold_u8</a>
 <a class="sl" href="NativeArray.html#fn-from_list_f32"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_f32</a>
 <a class="sl" href="NativeArray.html#fn-from_list_float"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_float</a>
 <a class="sl" href="NativeArray.html#fn-from_list_i32"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_i32</a>
@@ -2141,6 +2146,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="System.html#fn-exit"><span class="sb-kind" style="color:var(--fn)">F</span>exit</a>
 <a class="sl" href="System.html#fn-exit_code"><span class="sb-kind" style="color:var(--fn)">F</span>exit_code</a>
 <a class="sl" href="System.html#fn-mem_available_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_available_bytes</a>
+<a class="sl" href="System.html#fn-mem_peak_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_peak_bytes</a>
 <a class="sl" href="System.html#fn-mem_total_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_total_bytes</a>
 <a class="sl" href="System.html#fn-monotonic_time"><span class="sb-kind" style="color:var(--fn)">F</span>monotonic_time</a>
 <a class="sl" href="System.html#fn-ok"><span class="sb-kind" style="color:var(--fn)">F</span>ok</a>
@@ -2337,13 +2343,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-from_hex"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_hex</span><span class="sig">from_hex(s)</span><a class="anchor-link" href="#fn-from_hex" title="Link">#</a></div><div class="ib"><p>Parse a hex string to Bytes. Returns Err if the input is not valid hex.</p></div></div>
 <div class="item" id="fn-from_list"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_list</span><span class="sig">from_list(xs)</span><a class="anchor-link" href="#fn-from_list" title="Link">#</a></div><div class="ib"><p>Wrap a List(Int) of byte values (0–255) as Bytes. O(n).</p></div></div>
 <div class="item" id="fn-from_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_string</span><span class="sig">from_string(s) do <a href="#type-Bytes">Bytes</a>(s) end</span><a class="anchor-link" href="#fn-from_string" title="Link">#</a></div><div class="ib"><p>Convert a String to Bytes (raw UTF-8 byte values, each 0–255). O(1).</p></div></div>
+<div class="item" id="fn-from_u8_arr"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_u8_arr</span><span class="sig">from_u8_arr(a) do u8_arr_to_bytes(a) end</span><a class="anchor-link" href="#fn-from_u8_arr" title="Link">#</a></div><div class="ib"><p>Copy [a]'s bytes into a fresh immutable Bytes. O(n) copy.</p></div></div>
 <div class="item" id="fn-get"><div class="ih"><span class="badge bfn">fn</span><span class="name">get</span><span class="sig">get(b, i)</span><a class="anchor-link" href="#fn-get" title="Link">#</a></div><div class="ib"><p>Byte at position i (0-based). Panics if out of bounds. O(1).</p></div></div>
 <div class="item" id="fn-is_empty"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_empty</span><span class="sig">is_empty(b)</span><a class="anchor-link" href="#fn-is_empty" title="Link">#</a></div><div class="ib"><p>True if the Bytes is empty. O(1).</p></div></div>
 <div class="item" id="fn-length"><div class="ih"><span class="badge bfn">fn</span><span class="name">length</span><span class="sig">length(b)</span><a class="anchor-link" href="#fn-length" title="Link">#</a></div><div class="ib"><p>Number of bytes. O(1).</p></div></div>
 <div class="item" id="fn-slice"><div class="ih"><span class="badge bfn">fn</span><span class="name">slice</span><span class="sig">slice(b, start, len)</span><a class="anchor-link" href="#fn-slice" title="Link">#</a></div><div class="ib"><p>Sub-slice: bytes from position start with given length. O(len).</p></div></div>
 <div class="item" id="fn-to_hex"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_hex</span><span class="sig">to_hex(b)</span><a class="anchor-link" href="#fn-to_hex" title="Link">#</a></div><div class="ib"><p>Encode Bytes as a lowercase hexadecimal string.</p></div></div>
 <div class="item" id="fn-to_list"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_list</span><span class="sig">to_list(b)</span><a class="anchor-link" href="#fn-to_list" title="Link">#</a></div><div class="ib"><p>Unwrap Bytes to a List(Int). O(n).</p></div></div>
-<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(b)</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Convert Bytes back to a String (bytes interpreted as UTF-8). O(1).</p></div></div></main></div><script>
+<div class="item" id="fn-to_string"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_string</span><span class="sig">to_string(b)</span><a class="anchor-link" href="#fn-to_string" title="Link">#</a></div><div class="ib"><p>Convert Bytes back to a String (bytes interpreted as UTF-8). O(1).</p></div></div>
+<div class="item" id="fn-to_u8_arr"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_u8_arr</span><span class="sig">to_u8_arr(b) do bytes_to_u8_arr(b) end</span><a class="anchor-link" href="#fn-to_u8_arr" title="Link">#</a></div><div class="ib"><p>Copy [b]'s bytes into a fresh NativeU8Arr for SIMD/numeric work. O(n) copy — the layouts cannot be shared.</p></div></div></main></div><script>
 /* Theme toggle */
 function getTheme(){var t=localStorage.getItem('march-doc-theme');
 if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}

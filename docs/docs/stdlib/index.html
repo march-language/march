@@ -206,13 +206,15 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Bytes.html#fn-from_hex"><span class="sb-kind" style="color:var(--fn)">F</span>from_hex</a>
 <a class="sl" href="Bytes.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
 <a class="sl" href="Bytes.html#fn-from_string"><span class="sb-kind" style="color:var(--fn)">F</span>from_string</a>
+<a class="sl" href="Bytes.html#fn-from_u8_arr"><span class="sb-kind" style="color:var(--fn)">F</span>from_u8_arr</a>
 <a class="sl" href="Bytes.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Bytes.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="Bytes.html#fn-length"><span class="sb-kind" style="color:var(--fn)">F</span>length</a>
 <a class="sl" href="Bytes.html#fn-slice"><span class="sb-kind" style="color:var(--fn)">F</span>slice</a>
 <a class="sl" href="Bytes.html#fn-to_hex"><span class="sb-kind" style="color:var(--fn)">F</span>to_hex</a>
 <a class="sl" href="Bytes.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a>
-<a class="sl" href="Bytes.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
+<a class="sl" href="Bytes.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
+<a class="sl" href="Bytes.html#fn-to_u8_arr"><span class="sb-kind" style="color:var(--fn)">F</span>to_u8_arr</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="CRDT.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="CRDT.html">CRDT</a></div><div class="sb-sub"><a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
 <a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
 <a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
@@ -1417,8 +1419,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Msgpack.html#fn-str"><span class="sb-kind" style="color:var(--fn)">F</span>str</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div><div class="sb-sub"><a class="sl" href="NativeArray.html#fn-f32_to_float_arr"><span class="sb-kind" style="color:var(--fn)">F</span>f32_to_float_arr</a>
 <a class="sl" href="NativeArray.html#fn-float_to_f32_arr"><span class="sb-kind" style="color:var(--fn)">F</span>float_to_f32_arr</a>
+<a class="sl" href="NativeArray.html#fn-fold_f32"><span class="sb-kind" style="color:var(--fn)">F</span>fold_f32</a>
 <a class="sl" href="NativeArray.html#fn-fold_float"><span class="sb-kind" style="color:var(--fn)">F</span>fold_float</a>
+<a class="sl" href="NativeArray.html#fn-fold_i32"><span class="sb-kind" style="color:var(--fn)">F</span>fold_i32</a>
 <a class="sl" href="NativeArray.html#fn-fold_int"><span class="sb-kind" style="color:var(--fn)">F</span>fold_int</a>
+<a class="sl" href="NativeArray.html#fn-fold_u8"><span class="sb-kind" style="color:var(--fn)">F</span>fold_u8</a>
 <a class="sl" href="NativeArray.html#fn-from_list_f32"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_f32</a>
 <a class="sl" href="NativeArray.html#fn-from_list_float"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_float</a>
 <a class="sl" href="NativeArray.html#fn-from_list_i32"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_i32</a>
@@ -2141,6 +2146,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="System.html#fn-exit"><span class="sb-kind" style="color:var(--fn)">F</span>exit</a>
 <a class="sl" href="System.html#fn-exit_code"><span class="sb-kind" style="color:var(--fn)">F</span>exit_code</a>
 <a class="sl" href="System.html#fn-mem_available_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_available_bytes</a>
+<a class="sl" href="System.html#fn-mem_peak_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_peak_bytes</a>
 <a class="sl" href="System.html#fn-mem_total_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>mem_total_bytes</a>
 <a class="sl" href="System.html#fn-monotonic_time"><span class="sb-kind" style="color:var(--fn)">F</span>monotonic_time</a>
 <a class="sl" href="System.html#fn-ok"><span class="sb-kind" style="color:var(--fn)">F</span>ok</a>
@@ -2332,7 +2338,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Array.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Array</h3><p>Array module: persistent vector backed by a 32-way trie.</p><div class="st"><span>11 functions</span><span>2 types</span></div></div></a>
 <a href="Base64.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Base64</h3><p>Base64 module: standard, URL-safe, and MIME Base64 encoding/decoding.</p><div class="st"><span>5 functions</span><span>0 types</span></div></div></a>
 <a href="BigInt.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>BigInt</h3><p>BigInt module: arbitrary-precision integers.</p><div class="st"><span>20 functions</span><span>1 types</span></div></div></a>
-<a href="Bytes.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Bytes</h3><p>Bytes module: raw byte manipulation.</p><div class="st"><span>16 functions</span><span>1 types</span></div></div></a>
+<a href="Bytes.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Bytes</h3><p>Bytes module: raw byte manipulation.</p><div class="st"><span>18 functions</span><span>1 types</span></div></div></a>
 <a href="CRDT.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>CRDT</h3><p>CRDT: state-based conflict-free replicated data types.</p><div class="st"><span>27 functions</span><span>4 types</span></div></div></a>
 <a href="Channel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Channel</h3><p>Channel module: Phoenix-style real-time channels for March.</p><div class="st"><span>28 functions</span><span>8 types</span></div></div></a>
 <a href="ChannelServer.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ChannelServer</h3><p>ChannelServer module: runtime helpers for Phoenix-style channel processes.</p><div class="st"><span>12 functions</span><span>2 types</span></div></div></a>
@@ -2391,7 +2397,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Membership.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Membership</h3><p>Membership: SWIM-style cluster membership with a CRDT member view (P1 L3).</p><div class="st"><span>10 functions</span><span>3 types</span></div></div></a>
 <a href="Merkle.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Merkle</h3><p>Merkle: content-addressed hash tree.</p><div class="st"><span>9 functions</span><span>1 types</span></div></div></a>
 <a href="Msgpack.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Msgpack</h3><p>Msgpack module: MessagePack binary serialization.</p><div class="st"><span>10 functions</span><span>1 types</span></div></div></a>
-<a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>56 functions</span><span>0 types</span></div></div></a>
+<a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>59 functions</span><span>0 types</span></div></div></a>
 <a href="NetFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetFrame</h3><p>NetFrame: length-prefixed framing for the distributed net-kernel transport.</p><div class="st"><span>2 functions</span><span>0 types</span></div></div></a>
 <a href="NetKernel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetKernel</h3><p>NetKernel: the socket-level transport for distributed OTP (P1).</p><div class="st"><span>16 functions</span><span>0 types</span></div></div></a>
 <a href="NodeCall.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeCall</h3><p>NodeCall: caller-side Node.call and server-side RPC dispatch loop (P3 L4).</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
@@ -2429,7 +2435,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="String.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>String</h3><p>String module: functions for working with UTF-8 encoded strings.</p><div class="st"><span>33 functions</span><span>0 types</span></div></div></a>
 <a href="Swim.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Swim</h3><p>Swim: the SWIM failure-detection probe loop over a Membership CRDT (P1 L3).</p><div class="st"><span>9 functions</span><span>4 types</span></div></div></a>
 <a href="SwimDriver.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SwimDriver</h3><p>SwimDriver: runtime I/O glue for the pure Swim state machine (P2 L3).</p><div class="st"><span>13 functions</span><span>3 types</span></div></div></a>
-<a href="System.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>System</h3><p>System module: OS and runtime information.</p><div class="st"><span>19 functions</span><span>0 types</span></div></div></a>
+<a href="System.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>System</h3><p>System module: OS and runtime information.</p><div class="st"><span>20 functions</span><span>0 types</span></div></div></a>
 <a href="Task.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Task</h3><p>Task module: Elixir-style lightweight async tasks for one-off concurrent work.</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
 <a href="Test.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Test</h3><p>Test module: lightweight assertion helpers for in-process testing.</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
 <a href="Tls.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Tls</h3><p>stdlib/tls.march — TLS (Transport Layer Security) support for March.</p><div class="st"><span>23 functions</span><span>5 types</span></div></div></a>
