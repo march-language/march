@@ -393,6 +393,48 @@
  (deps    (file test_vault_hammer_runner))
  (action  (run ./test_vault_hammer_runner)))
 
+; ── Named process registry C API (named-registry plan, task 3) ────────────
+; Exercises march_actor_register/unregister/whereis/registered directly at
+; the C level, with fake actor records (5-word heap objects with the $alive
+; flag set) so it's free of the scheduler. Same full-runtime link set as the
+; vault tests above, since the registry's forward table is Vault-backed.
+(rule
+ (targets test_actor_registry_runner)
+ (deps    test_actor_registry.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_actor_registry.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_actor_registry_runner))
+ (action  (run ./test_actor_registry_runner)))
+
+
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
 ; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the
@@ -482,7 +524,9 @@
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
           ../runtime/march_monitor_registry.c ../runtime/march_monitor_registry.h
-         
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_remote_registry.c
           ../lib/cas/blake3_cflags.sexp ../lib/cas/blake3_libs.sexp
           (glob_files ../runtime/*.h))
  (action
@@ -498,7 +542,10 @@
       ../runtime/march_scheduler.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c \
-      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread -lm")))
+      ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c \
+      ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c \
+      ../runtime/march_remote_registry.c \
+      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread -lm -lz")))
 
 (rule
  (alias runtest)
@@ -570,7 +617,9 @@
           ../runtime/march_gc.c
           ../runtime/march_monitor_registry.c
           ../runtime/march_monitor_registry.h
-         
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c
+          ../runtime/march_remote_registry.c
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -I../runtime -O2
@@ -584,8 +633,10 @@
                ../runtime/march_heap.c
                ../runtime/march_gc.c
                ../runtime/march_monitor_registry.c
-              
-               -lpthread -lm)))
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lm -lz)))
 
 (rule
  (alias   runtest)
@@ -5648,6 +5699,186 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/mailbox_bounded.expected native_mailbox_bounded.out)))
+
+; ── Named registry (Task 4): Actor.register/whereis/unregister ───────────
+; (compiled) ───────────────────────────────────────────────────────────
+; Actor.register/whereis under a name, duplicate registration of a live
+; actor fails, kill + run_until_idle then re-check whereis. The last line
+; is "gone after kill": march_actor_whereis re-checks the $alive flag at
+; lookup time (not just table membership), and do_actor_death already sets
+; that flag unconditionally on kill, independent of Task 5's
+; registry_retire_actor reverse-index cleanup — see the Task 4 commit
+; message for the verified trace. Uses Actor, hence source_tree ../stdlib.
+(rule
+ (targets native_actor_registry_basic native_actor_registry_basic.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_registry_basic.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_basic
+        native/actor_registry_basic.march)
+   (with-stdout-to native_actor_registry_basic.out
+        (system "./native_actor_registry_basic")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_basic.expected native_actor_registry_basic.out)))
+
+; ── Named registry (Task 5): registry_retire_actor on actor death ────────
+; (compiled + interpreted parity) ─────────────────────────────────────
+; What actor_registry_basic.march does NOT cover: a killed actor's name
+; must be fully RECLAIMED, not just resolve to None at lookup time (that
+; part is march_actor_whereis's own $alive re-check, present since Task 4,
+; independent of retire). Registers "worker" to actor a, kills a, confirms
+; the name drops out of Actor.registered(), then registers a DIFFERENT
+; actor b under the same name and confirms it succeeds and resolves.
+; Uses Actor, hence source_tree ../stdlib.
+;
+; CORRECTION (fix round 1, review finding): this fixture's assertions do
+; NOT actually discriminate whether do_actor_death's retire call ran, on
+; the COMPILED backend — march_actor_registered/whereis filter on the
+; $alive flag regardless of the forward-table entry, and name reuse
+; succeeds via Task 3's stale-overwrite branch regardless of retire too.
+; Verified by temporarily deleting the C call: this fixture's output was
+; unchanged. It DOES discriminate the interpreter's `crash_actor`, whose
+; `named_registry` Hashtbl has no such $alive-style filter of its own —
+; verified by temporarily reverting the `Hashtbl.remove` loop there and
+; re-running this file interpreted (not dune-wired; see
+; test/native/actor_registry_retire.march's usage note and the Task 5
+; report for the before/after). The genuine COMPILED-side discriminator
+; is the sibling fixture below, actor_registry_retire_vault.march, which
+; reads the raw (non-liveness-filtered) registry table directly.
+(rule
+ (targets native_actor_registry_retire native_actor_registry_retire.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_registry_retire.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_retire
+        native/actor_registry_retire.march)
+   (with-stdout-to native_actor_registry_retire.out
+        (system "./native_actor_registry_retire")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_retire.expected native_actor_registry_retire.out)))
+
+; ── Named registry (Task 5 fix round 1): retire, observed on the RAW table
+; (compiled-only — see the .march file's own header comment for why this
+; has no interpreted counterpart). Reads the runtime's forward registry
+; table ("$actor_registry") directly via Vault.whereis/Vault.keys, which
+; are NOT liveness-filtered — the one assertion that actually fails if
+; do_actor_death's registry_retire_actor(actor) call is removed (verified:
+; commenting it out flips "raw table has key after kill" from false to
+; true; see the Task 5 report for the full before/after). Needs IO.Mut
+; (Vault.whereis is a naming op), hence the 2-cap main signature.
+(rule
+ (targets native_actor_registry_retire_vault native_actor_registry_retire_vault.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_registry_retire_vault.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_retire_vault
+        native/actor_registry_retire_vault.march)
+   (with-stdout-to native_actor_registry_retire_vault.out
+        (system "./native_actor_registry_retire_vault")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_retire_vault.expected native_actor_registry_retire_vault.out)))
+
+; ── Named registry (Task 6): a name survives a supervisor restart ────────
+; (compiled) ───────────────────────────────────────────────────────────
+; The point of the entire named-registry plan. Registers a supervised
+; child under a name, crashes it (panic in a handler, not kill(), so the
+; supervisor's restart path is exercised), and resolves by NAME from a
+; holder that never saw the replacement's Pid -- twice, to prove the
+; carry-forward re-establishes itself on every restart, not just once.
+; Uses Actor + supervise, hence source_tree ../stdlib.
+(rule
+ (targets native_actor_registry_restart native_actor_registry_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_registry_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_restart
+        native/actor_registry_restart.march)
+   (with-stdout-to native_actor_registry_restart.out
+        (system "./native_actor_registry_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_restart.expected native_actor_registry_restart.out)))
+
+; ── Named registry (Task 6, round-1 review fix): a name survives a BATCH
+; restart even on a sibling that did NOT crash ────────────────────────────
+; (compiled) ───────────────────────────────────────────────────────────
+; march_one_for_all_restart/march_rest_for_one_restart null a live
+; sibling's meta->supervisor before killing+respawning it (to suppress a
+; recursive notify), which used to make the Task 6 capture -- gated on
+; meta->supervisor -- silently miss that sibling's names entirely. Two
+; named children under one_for_all; crash only one; both names must still
+; resolve and answer after the batch restart. Uses Actor + supervise,
+; hence source_tree ../stdlib.
+(rule
+ (targets native_actor_registry_restart_batch native_actor_registry_restart_batch.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_registry_restart_batch.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_registry_restart_batch
+        native/actor_registry_restart_batch.march)
+   (with-stdout-to native_actor_registry_restart_batch.out
+        (system "./native_actor_registry_restart_batch")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_restart_batch.expected native_actor_registry_restart_batch.out)))
 
 ; ── Previously-unwired test/stdlib/*.march describe/test corpus ──────────
 ; 37 of the 94 files in test/stdlib/ had real, substantial describe/test

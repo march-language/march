@@ -14,10 +14,12 @@ static int res_dtor_calls = 0;
 static void test_res_dtor(void *p) { res_dtor_calls++; free(p); }
 
 /* march_make_record interns a shape via march_record_shape_intern (defined in
- * march_extras.c, which drags in the whole crypto/compress chain). Stub it here
- * so the ABI unit test stays self-contained — the returned id is only stored in
- * the header pad word, not exercised by this test. */
-int32_t march_record_shape_intern(const char *desc) { (void)desc; return 0; }
+ * march_extras.c). This test now links march_extras.c for real (the named
+ * registry, Task 3, made march_runtime.c itself depend on march_extras.c's
+ * Vault C API, so every test rule linking march_runtime.c must link
+ * march_extras.c too) — no local stub needed any more; the real
+ * implementation runs, and its id is only stored in the header pad word,
+ * still not exercised by this test. */
 
 int main(void) {
     /* ── version handshake ─────────────────────────────────────────────── */

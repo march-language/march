@@ -1,8 +1,11 @@
-# Actor crash trap: `panic()` in a supervised handler left the actor record's RC clobbered
+# Actor crash trap: `panic()` in a supervised handler skipped the dispatch epilogue
 
 **Filed:** 2026-08-13 (found while adding a "two names on one actor" case to the
 named-registry restart golden — the failure is in the crash trap, not the registry).
-**Closed:** 2026-08-13, same commit as the fix.
+**Closed:** 2026-08-14. The RC half of this was fixed independently and better
+by PR #275, which deleted the clobber entirely instead of repairing it on the
+crash path (see "Superseded" below); what lands here is the code-version-pin
+leak #275 left, plus the regression test that pins the RC invariant.
 
 ## Symptom as reported
 
@@ -68,20 +71,43 @@ Everything the isolation had already established falls out of this:
   On plain `main`, a supervised child measures `rc=2`, so the same clobber is
   present today, latent, waiting for any owner to drop first.
 
+## Superseded, in part, by #275
+
+While this was being written up, PR #275 ("Named actor registry, and a
+use-after-free in actor message dispatch") landed on `main` with a strictly
+better fix for the RC half: it **deletes the clobber outright**. Two reasons,
+both of which this investigation missed by starting from the crash path:
+
+1. It is unnecessary. `llvm_emit.ml`'s `EReuse` arm already special-cases actor
+   structs and mutates them in place unconditionally — nothing in the emitted
+   handler reads `a[0]` at all.
+2. It is unsafe *without any panic*. `a[0]` is RMW'd atomically by
+   `march_incrc`/`march_decrc` on other threads; the plain stores are not
+   atomic with those and publish a false `rc == 1` for the whole dispatch, so a
+   concurrent drop frees a multiply-owned record on a purely happy path. #275
+   measured that directly (6 of 30 spawn-churn runs failing, 0 of 60 after).
+
+The `longjmp`-skips-the-restore path documented above is a real second way the
+same lie escaped the window — single-threaded and fully deterministic, which is
+why it reproduced 100% of the time rather than ~20%. With the clobber gone,
+there is no restore left to skip, and this file's root-cause analysis is kept
+because the *evidence* (which owner freed what, and when) is what pinned the
+mechanism.
+
 ## Fix
 
-Hoist the epilogue's state above the `setjmp` (as `volatile` — an automatic
-modified between `setjmp` and `longjmp` is indeterminate in the branch the
-`longjmp` lands in, C17 7.13.2.1p3) and complete the skipped epilogue in the
-crash branch, before `do_actor_death` and the restart it triggers:
+What remains after taking #275's version of the dispatch loop:
 
-- restore `a[0] = saved_rc` (verbatim, exactly as the normal path does — the
-  crash path deliberately does not invent a different RC contract);
 - `march_dispatch_leave` the code-version pin a hot-reload actor took in
-  `march_dispatch_enter`, which was leaking the same way and would otherwise
-  hold a ring slot's `refs` above zero forever, blocking its reclamation;
-- an `in_dispatch` flag so a `longjmp` that arrives from *outside* a dispatch
-  (e.g. out of a `migrate_fn`) repairs nothing.
+  `march_dispatch_enter`. The `longjmp` skips it, so every crash leaves that
+  version's `refs` permanently above zero and its ring slot unreclaimable — a
+  crash-looping hot-reload actor burns one slot per crash. Not an ordinary
+  leak: it is a live counter that blocks a runtime mechanism.
+- The pin's state (`pinned_version`, `dispatch_pinned`) is hoisted above the
+  `setjmp` as `volatile` — an automatic modified between `setjmp` and `longjmp`
+  is indeterminate in the branch the `longjmp` lands in (C17 7.13.2.1p3).
+  `dispatch_pinned` also covers a `longjmp` arriving from *outside* a dispatch
+  (e.g. out of a `migrate_fn`) and the non-hot-reload actor that never pins.
 
 **Not** repaired: the message. The dispatch function owns and consumes `msg`,
 and a `longjmp` out of its middle leaves no way to know whether it already did,
@@ -97,7 +123,15 @@ would make for a flaky test. Its first line — "victim is multiply owned" — i
 non-vacuity guard: the assertion only means something while the crashed child
 genuinely has more than one owner.
 
-Verified: `false` on the second line with the pre-fix runtime, `true` with it.
+Against the pre-#275 runtime the second line printed `false`; it prints `true`
+both with the crash-path restore this investigation first wrote and with #275's
+deletion of the clobber. That is the point of keeping it: the test now guards
+the invariant `main` relies on — reintroducing an RC lie around the dispatch
+fails a test instead of corrupting a heap — and it probes it from the crash
+path, which skips whatever epilogue a future clobber might add to protect
+itself.
+
 The originally-reported two-names crash was also re-run against the
-named-registry branch with only this runtime change applied — 5/5 clean where it
-had been 100% exit 138, and clean under Guard Malloc.
+named-registry branch with only the crash-path restore applied — 5/5 clean where
+it had been 100% exit 138, and clean under Guard Malloc — confirming the
+mechanism before #275 landed.

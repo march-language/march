@@ -1,14 +1,22 @@
 -- Regression: a panic inside a SUPERVISED actor's message handler must leave
 -- the actor record's refcount exactly as the dispatch loop found it.
 --
--- actor_green_thread clobbers the record's RC to 1 around every message (so
--- FBIP can reuse the state record in place) and restores the real count after
--- the handler returns.  march_panic's crash-trap longjmp jumped straight over
--- that restore, so a crashed child was left claiming a single owner while its
--- real owners still held references: the next drop by any of them freed a live,
--- still-reachable record, and everything after that was a use-after-free.  It
--- surfaced (once the named registry gave the crash path a second owner and some
--- post-crash allocation) as an EXC_BAD_ACCESS inside an unrelated malloc.
+-- actor_green_thread used to clobber the record's RC to 1 around every message
+-- (so codegen's generic reuse path would accept the handler's state write-back)
+-- and restore the real count afterwards.  Two ways that bit:  a concurrent drop
+-- on another scheduler thread saw the forced 1 and freed a record with live
+-- owners (fixed by deleting the clobber outright — see the "NO RC CLOBBER HERE"
+-- comment in actor_green_thread), and march_panic's crash-trap longjmp jumped
+-- straight over the restore, leaving a crashed child claiming a single owner
+-- single-threaded too.  Measured on the reported repro: rc 6 going into the
+-- handler, rc 1 coming out of the trap, then a free of the still-reachable
+-- record and an EXC_BAD_ACCESS inside an unrelated malloc.
+--
+-- With the clobber gone there is nothing for the crash path to restore, which
+-- is exactly the invariant worth pinning: this test fails if anyone
+-- reintroduces an RC lie around the dispatch, rather than letting it come back
+-- as heap corruption.  The crash path itself is what makes it a sharp probe —
+-- a longjmp out of a handler skips whatever epilogue a future clobber adds.
 --
 -- `ffi_test_actor_rc` is a test-only runtime probe (runtime/march_ffi.c): the
 -- RC is invisible from the March surface, and every March-level symptom of the
@@ -62,15 +70,16 @@ mod Main do
     println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
 
     -- Crash it from inside a handler (the setjmp/longjmp trap path), NOT via
-    -- kill() -- kill never enters the dispatch loop's RC-clobber window.
+    -- kill() -- kill runs the death sequence from outside the dispatch, so it
+    -- never exercises the window this test is about.
     send(pid_of_int(victim), Poison())
     run_until_idle()
 
     println("rc preserved across crash: "
             ++ bool_to_string(actor_rc(victim) == rc_before))
 
-    -- The supervisor still restarts it: the fix repairs the epilogue, it does
-    -- not change what a crash means.
+    -- The supervisor still restarts it: nothing here changes what a crash
+    -- means for supervision.
     let replacement = current_child(boss)
     println("restarted: " ++ bool_to_string(replacement != victim))
     println("replacement alive: " ++ bool_to_string(is_alive(pid_of_int(replacement))))

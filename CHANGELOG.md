@@ -11,6 +11,11 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`Actor.register(pid, name)` / `Actor.unregister(name)` / `Actor.whereis(name)` / `Actor.registered()`** — a named process registry over the runtime's `march_actor_*` C API. `register` fails (returns `false`) if the name is already held by a live actor, or if `pid` is dead; a stale entry left by a dead actor is silently reusable. `whereis` re-checks liveness at lookup time, so a name whose actor died resolves to `None` even before any restart-carry-forward cleanup runs. No capability is required — the registry table is owned by the runtime, so no March-level naming call happens. These four operations behave identically in the compiled and interpreted backends; carrying a name across a supervisor **restart**, below, is compiled-only for now — a supervised child that crashes under the interpreter comes back unregistered, so a restart-survival test must run compiled. For a hot lookup, resolve a name once and cache the `Pid`, re-resolving on `None`: repeated lookups of the *same* name contend on the reference count of the single stored value, and `send` itself takes no registry lock.
+- **A registered name now survives a supervisor restart.** `do_actor_death` snapshots a supervised actor's registered names onto its (never-freed) meta immediately before `registry_retire_actor` wipes them, and `march_respawn_child` re-registers each carried name on the replacement child — including across the up-to-~3.2s exponential-backoff delay a repeat crash can take. A holder outside the supervision tree that only ever knew the name, never any specific Pid, keeps resolving to whichever incarnation is currently alive. If a different live actor claims the same name during the restart window, the carried-forward registration is dropped for that name rather than stealing it back — the name legitimately belongs to its new, live owner. Unsupervised actors are unaffected: their names are simply dropped on death, as before.
+
 ### Changed
 
 - Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared, striped reader-count lock (`set`/`set_ttl`/`put_new`/`incr`/`push_capped`/`drop` still take it exclusively). Concurrent reads of *distinct* keys now scale close to linearly with thread count; concurrent reads of the *same* key are still bounded by reference-count contention on that key's one shared value, an orthogonal cost the lock change doesn't touch.
@@ -18,18 +23,35 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
-- **A `panic()` inside a supervised actor's message handler no longer corrupts
-  the heap.** The compiled dispatch loop forces the actor record's reference
-  count to 1 for the duration of each message (so in-place state reuse is
-  legal) and restores the real count afterwards; the crash trap's `longjmp`
-  jumped over that restore, leaving a live actor claiming a single owner while
-  its other owners still held references. The next drop by any of them then
-  freed a record that was still in use, and the damage surfaced later as a
-  crash inside an unrelated allocation. Any supervised actor that crashed via
-  `panic` was affected — it was merely silent unless something touched the
-  freed record afterwards. The same fix also releases the code-version pin a
-  hot-reload actor holds across a dispatch, which the `longjmp` was leaking.
+- **A `panic()` inside a hot-reload actor's message handler no longer pins its
+  code version forever.** A hot-reload dispatch is bracketed by
+  `march_dispatch_enter`/`march_dispatch_leave`, whose reference count stops a
+  concurrent publish from unloading code that is currently executing. The crash
+  trap's `longjmp` jumped over the `leave`, so every crash left that version's
+  count permanently above zero and its ring slot unreclaimable — a crash-looping
+  supervised actor burned one slot per crash. The crash path now releases the pin
+  before running the death/restart sequence.
 
+- **Fixed a use-after-free that could crash any multi-scheduler program whose actors are reachable from more than one owner** — a monitor, a `Pid` stored in a `Vault` table, a `Pid` passed to another actor, or (most visibly, and how this was found) an actor registered under a name, since `Actor.register` makes the registry a second owner. The defect long predates the registry; the registry is simply the easiest way to give an actor a second owner. If a concurrent program of yours has ever "flaked mysteriously" with a `SIGBUS` or an RC underflow, it is worth re-checking against this fix rather than assuming it was unrelated. While an actor's green thread ran a message handler, the runtime overwrote that actor's refcount word with `1` and restored it afterwards — a leftover from before codegen learned to update actor structs in place unconditionally. The forced `1` was visible to every other thread, so a concurrent drop of a `Pid` observed "last reference" and freed an actor record that still had live owners; the registry was then left pointing at freed memory, and the next lookup or death-cleanup read a garbage refcount (`march: RC underflow (rc was -6899412650951359789)`, `SIGBUS`, or `SIGTRAP`). Concurrent *increments* during the same window were silently lost. Single-scheduler runs were never affected. The spawn-and-kill churn scenario failed on 6 of 30 runs before the fix and 0 of 60 after.
+- **A killed actor's registered names are now reclaimed, not left occupying the registry forever.** `do_actor_death` (and the interpreter's matching `crash_actor` path) now retires all of the dying actor's names — dropping the forward-table entry and the per-actor reverse index — before any monitor `Down` notification is delivered, so a watcher woken by the death can never observe a name still mapped to the dead incarnation. Previously only the runtime's own `$alive`-flag re-check kept `whereis`/`registered` correct at lookup time; the table entry itself, and the interpreter's `named_registry` map, held on to the name indefinitely unless a later registration happened to overwrite it. `Actor.registered()` in the interpreter no longer lists a name after its actor is killed.
+- **A top-level function in your program can no longer silently replace a
+  name the March Prelude relies on internally.** `println` calls `print` and
+  `show` unqualified (also `panic`, `reverse`, and `to_string`, each called
+  from inside another Prelude function's own body), and all of them sat in a
+  flat, unprotected namespace shared with your program's own entry-module
+  declarations. A private helper named `print` or `show` (or any of the
+  others Prelude actually calls internally) silently took over that name for
+  the *whole program*, including inside Prelude's own code, with no error at
+  any compiler stage. Depending on how the two definitions' types happened to
+  line up this surfaced as a misattributed runtime arity error, a **compiled
+  SIGBUS with no diagnostic**, or a **fully silent no-op** — `println`
+  printing nothing at all, with no error and no crash. Now rejected as a
+  compile error naming the colliding function and why it matters, across
+  `march file.march`, `march --check`, `march --compile`, `march check`, and
+  `march dap`. Shadowing a Prelude/builtin name Prelude never calls
+  internally — `head`, `map`, `unwrap`, `file_read`, and most of the rest —
+  remains legal and unaffected; that's a documented, separately-tested
+  feature, not part of this bug.
 - **`simd_leak_probe`'s CI leak guard no longer false-positives on Linux.**
   The guard for the per-call SIMD vector temp-box leak
   (`test/native/simd_leak_probe.march`) asserted an absolute peak-RSS
