@@ -939,9 +939,16 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
   (* A capability value is a runtime-erased grant token: it is normal, and
      often correct, for it never to be mentioned in the body. Warning on it
      made the right code noisy and pushed users to spell every grant `_cap`. *)
+  (* The parameter's type must BE a capability, not merely CONTAIN one.
+     (Corrected 2026-08-13 during execution: an earlier draft tested
+     `Cap_surface_ty.caps_in_ty ty <> []`, which recurses into any structure,
+     so a genuinely dead `List(Cap(IO.Console))`, `(Int, Cap(IO.Console))` or
+     `Cap(IO.Console) -> ()` parameter silently escaped the unused-binding
+     warning.  A list/tuple/closure that happens to contain a capability is an
+     ordinary value and a dead one should still warn.) *)
   let is_cap_ty = function
-    | Some ty -> March_caps.Cap_surface_ty.caps_in_ty ty <> []
-    | None -> false
+    | Some (Ast.TyCon (con, [ _ ])) -> con.Ast.txt = "Cap"
+    | _ -> false
   in
   let check_name name span =
     if name <> "_" && not (String.length name > 0 && name.[0] = '_')
