@@ -4,7 +4,12 @@ Vault (`stdlib/vault.march`, `runtime/march_extras.c`) is March's ETS: a
 C-backed, process-global, in-memory key/value table, documented as *"shared
 across all actors without message passing"*. Four properties kept it from being
 the substrate a registry — or any read-heavy shared table — should be built on.
-**Two shipped 2026-08-14; two remain open and are what this file now tracks.**
+**Three have shipped; one remains open and is what this file now tracks.**
+
+This file is now item 2 only. Item 3 (typed table handles) shipped 2026-08-14
+— see `specs/progress/2026-08-14-vault-typed-handles.md`, which also records
+what typed handles deliberately do NOT close (`new`/`open`/`whereis` mint a
+handle at a caller-chosen element type; `ns_*` and `Config` stay erased).
 
 Filed out of the named-registry design
 (`specs/2026-08-12-named-registry-design.md`), which depended on items 1 and 4.
@@ -52,34 +57,23 @@ workload that measurably serialises on the write mutex first, or this is just
 added complexity in a lock that a review round already had to fix a memory-order
 bug in.
 
-## 3. Typed table handles — OPEN, and the live one
+## 3. Typed table handles — DONE (2026-08-14)
 
-`vault_get` returns `Option(TPtr TUnit)` (`lib/tir/llvm_builtins.ml:315`) — the
-value is *erased*. Storing an `Int` and reading it back as a `Pid` type-checks,
-and the resulting fake Pid is dereferenced as an actor record on the next
-`send`. Erlang does not have this problem because it is dynamically typed
-end-to-end; March does.
-
-Wanted: a phantom-typed handle, `Vault(k, v)`, so `new`/`open` fix the value
-type and `get` returns `Option(v)`. Keys are already stringified through
-`vault_key_cstr`, so the key parameter may be cosmetic — the value parameter is
-the one that closes the hole.
-
-Note the interaction with `Vault.update(table, key, fn)`: the function's type
-has to line up with `v` too.
-
-**Not stale.** The named registry sidesteps this hole rather than closing it:
-its values never pass through a March-level `vault_get` — the runtime reads the
-`"$actor_registry"` table in C and hands back a niche-encoded `Option(Pid)` — so
-the registry is safe while every ordinary Vault user still is not. The hazard is
-exactly as real as when it was filed, and now has a worked example of the
-dereference it enables sitting one type annotation away.
+Shipped as `Vault(v)` — phantom in the ELEMENT type only, no key parameter
+(keys are stringified, and `stdlib/config.march` keys one table with both
+2-tuples and 3-tuples) — plus a `Vault`-scoped value restriction, without
+which the phantom parameter would be decoration: March generalizes let-bound
+applications, so `let t = Vault.new("t")` would otherwise re-instantiate the
+element type at every use. Residual erasure (handle minting from a name,
+`ns_*`, `Config`) is enumerated in
+`specs/progress/2026-08-14-vault-typed-handles.md`.
 
 ## Acceptance
 
 - ~~A read-heavy Vault benchmark scales with cores instead of serialising.~~ DONE (item 1).
 - ~~A module that only reads a table it was handed needs no `needs` line, and the
   capability docs explain where the authority came from instead.~~ DONE (item 4).
-- Storing an `Int` and reading it as a `Pid` is a type error. **Open (item 3).**
+- ~~Storing an `Int` and reading it as a `Pid` is a type error.~~ DONE (item 3),
+  for a handle that was bound rather than minted inline.
 - Concurrent writers to unrelated keys in one table do not serialise.
   **Open (item 2) — see the staleness note; want a measured workload first.**
