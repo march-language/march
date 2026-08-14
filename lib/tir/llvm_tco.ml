@@ -414,7 +414,21 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
      <N x T> register slot. That is correct, just unaccelerated: the group
      boxes/unboxes the vector on every call, exactly as it did before the
      self-TCO residency optimization landed. Recorded in
-     docs/simd-vectorization.md's "Known limits"; no todo. *)
+     docs/simd-vectorization.md's "Known limits"; no todo — pinned wontfix-
+     until-demand, not gap-in-waiting. test/native/simd_mutual_tco.march
+     guards it through a PAIR of test/dune rules, because the numeric
+     result alone cannot see this decision: an output diff pins that the
+     boxed path still computes the right answer, and an IR-shape rule
+     (simd_mutual_tco_llvm_check) pins that a `@__mutco_*` dispatcher is
+     emitted at all with >=2 boxed `%<fn>__acc.addr = alloca ptr` slots —
+     i.e. that the fixture still reaches THIS code. Without that second
+     rule the fixture was vacuous: the TIR inliner folded the two steps
+     into one self-recursive function, which prints the same number while
+     exercising emit_fn's native-slot path instead. So a future change to
+     the mutual-TCO slot strategy has to come here and re-decide, and
+     can neither silently corrupt the result nor silently stop being
+     tested. See the closeouts spec at
+     specs/progress/2026-08-13-simd-closeouts-task3-mutual-tco-pin.md. *)
   let fn_param_slots : (string * (string * string * string) list) list =
     List.map (fun fn ->
       let slots = List.map (fun (v : Tir.var) ->

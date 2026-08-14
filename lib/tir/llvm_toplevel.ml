@@ -141,6 +141,41 @@ let rec expr_has_call (e : Tir.expr) : bool =
 
 (* ── Function emitter ────────────────────────────────────────────────── *)
 
+(** Parameter indices of [fn] that get a NATIVE `<N x T>` SIMD-vector TCO slot
+    (register-resident) instead of the default "boxed at rest" `ptr` slot.
+
+    SINGLE SOURCE OF TRUTH for that decision, called from exactly two places
+    that MUST agree:
+    - [emit_fn]'s per-parameter prologue, which builds the slot; and
+    - [emit_module]'s pre-pass, which publishes the answer to call sites via
+      [ctx.native_vec_params] so they can release the argument box they created
+      (llvm_emit's EApp arm — a native-slot callee provably does one
+      getelementptr + load and never retains the pointer).
+
+    They were two copies of the predicate until 2026-08-12. Drift between them
+    is a use-after-free in one direction (call site releases a box the callee
+    kept) and a leak in the other, and the RSS guard could not see the UAF
+    direction — hence the extraction. Note this is deliberately NOT "emit_fn
+    reads the table": [Llvm_repl]'s five emit_fn call sites run with an
+    unpopulated table, which would silently disable native vector slots in the
+    REPL/JIT and reintroduce per-iteration back-edge boxing.
+
+    Mutual-TCO group members are NOT excluded here — [emit_fn] is never called
+    for them ([Llvm_tco.emit_mutual_tco_group] emits those, with no native-slot
+    arm), so the exclusion belongs at the pre-pass call site, which has the
+    group membership in hand. *)
+let native_vec_param_idxs (fn : Tir.fn_def) : int list =
+  let is_tco =
+    Llvm_tco.has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body
+    && not (Llvm_builtins.is_builtin_fn fn.Tir.fn_name)
+  in
+  if not is_tco then []
+  else
+    List.filter_map (fun x -> x)
+      (List.mapi (fun i (v : Tir.var) ->
+           if Llvm_ctx.vec_ty_of_tir v.Tir.v_ty <> None then Some i else None)
+          fn.Tir.fn_params)
+
 let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.Llvm_ctx.local_names;
   Hashtbl.clear ctx.Llvm_ctx.var_slot;
@@ -229,7 +264,8 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     (Printf.sprintf "\ndefine %s%s @%s(%s) {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str);
 
   (* Alloca + store for each parameter; collect slot info for TCO. *)
-  let param_slots = List.map (fun (v : Tir.var) ->
+  let native_vec_idxs = native_vec_param_idxs fn in
+  let param_slots = List.mapi (fun param_idx (v : Tir.var) ->
     let ty = Llvm_ctx.llvm_ty v.Tir.v_ty in
     let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
     let vn = Llvm_ctx.llvm_name v.Tir.v_name in
@@ -264,34 +300,42 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
        guarded by `if ty = "ptr"`, and this slot's [var_llvm_ty] is now the
        vector type, so those ops go inert rather than dec'ing a register
        vector.  Same guard the existing native-vector ELet slots rely on. *)
-    let native_vec_slot = if is_tco then Llvm_ctx.vec_ty_of_tir v.Tir.v_ty else None in
+    let native_vec_slot =
+      if List.mem param_idx native_vec_idxs then Llvm_ctx.vec_ty_of_tir v.Tir.v_ty
+      else None
+    in
     match native_vec_slot with
     | Some vty ->
       Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s, align 16" slot vty);
       (* The incoming argument is BOXED (the signature says ptr and every call
          site coerces to it); unbox once, here, into the native slot.
 
-         KNOWN LEAK — 32 bytes per CALL, unbounded over a process's lifetime.
-         This unbox does NOT release the incoming box, so one march_simd_alloc
-         cell is leaked per invocation of this function. Measured at +32 bytes
-         per outer call (20M calls => +642MB over an equivalent scalar
-         control), so a long-lived server calling a SIMD kernel per request
-         grows without bound. It is strictly better than what it replaced (the
-         pre-fix code leaked one box per LOOP ITERATION, not per call) but it
-         is NOT fixed, and a reader should not conclude otherwise from the
-         "allocates nothing" framing in the comment above — that is about the
-         loop BODY.
+         The box is released by the CALL SITE, not here (fixed 2026-08-12;
+         this used to leak 32 bytes per invocation, unbounded — measured 64 MB
+         over 2M calls, now 2.7 MB). This function's presence in
+         [ctx.native_vec_params] — filled by the pre-pass in [emit_module],
+         which recomputes exactly the `native_vec_slot` decision below — tells
+         llvm_emit's EApp arm that a vector argument box it created for a call
+         to us is safe to `march_decrc` afterwards, BECAUSE the prologue here
+         uses the incoming pointer for exactly one getelementptr + load and
+         never stores it anywhere. Keep that property: if this arm ever
+         retains `%<param>.arg` (stashes it in a slot, a field, a closure),
+         the call-site release becomes a use-after-free.
 
-         A naive `march_decrc_local` here would be a use-after-free: a vector
-         argument is USUALLY a fresh temporary produced by the call site's
-         coerce, but it can also be a borrowed reference to a box owned by
-         someone else (e.g. a vector living in an ADT field passed straight
-         in), and freeing that frees out from under the owner. Distinguishing
-         the two needs ownership information (borrow inference / Perceus)
-         that is not available at this point in the backend.
+         A `march_decrc_local` HERE would still be wrong, for the reason it
+         always was: the emitter cannot tell an owned temporary from a
+         borrowed reference to a box someone else owns (a vector living in an
+         ADT field, passed straight in). The call site can — it knows whether
+         it created the box.
 
-         Tracked with the full measurement and fix direction in
-         specs/todos/2026-08-11-simd-tco-entry-box-leak.md. *)
+         Complementary invariant on the other side: a vector parameter that
+         does NOT get a native slot may escape into a heap aggregate, so its
+         box must NOT be released by the caller — pinned by
+         test/native/simd_vector_escape_arg.march. Those shapes still leak;
+         see specs/todos/2026-08-12-simd-nontco-vector-param-leak.md.
+
+         Full measurement and the ownership map:
+         specs/progress/2026-08-11-simd-tco-entry-box-leak.md. *)
       let nv = Llvm_ctx.coerce ctx "ptr" (Printf.sprintf "%%%s.arg" vn) vty in
       Llvm_ctx.emit ctx
         (Printf.sprintf "store %s %s, ptr %%%s.addr, align 16" vty nv slot);
@@ -843,6 +887,23 @@ let emit_module ~emit_expr
     List.concat_map (fun g -> List.map (fun fn -> fn.Tir.fn_name) g)
       mutual_groups
   in
+  (* Native-vector TCO slot PRE-PASS (must run before ANY function body is
+     emitted, including the mutual-TCO groups below, because a caller may be
+     emitted before its callee).  Publishes [native_vec_param_idxs] — the SAME
+     function [emit_fn] calls to build the slot, so the two cannot drift — to
+     call sites via [ctx.native_vec_params].  Members of a mutual-TCO group are
+     deliberately EXCLUDED: they are emitted by
+     [Llvm_tco.emit_mutual_tco_group], which has no native vector slot arm, so
+     their vector params stay `ptr` and may escape into a heap aggregate that
+     then owns the box — a call site must NOT release those. *)
+  List.iter (fun fn ->
+      if List.mem fn.Tir.fn_name mutual_fn_names then ()
+      else
+        match native_vec_param_idxs fn with
+        | [] -> ()
+        | idxs -> Hashtbl.replace ctx.Llvm_ctx.native_vec_params fn.Tir.fn_name idxs)
+    m.Tir.tm_fns;
+
   (* Emit the combined function + wrappers for each mutual-TCO group.
      emit_expr is passed as a labeled callback (de-cycling move, Wave 3
      Task 6, chunk 2 — same pattern as Llvm_case.emit_case in Task 5). *)

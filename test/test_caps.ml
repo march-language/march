@@ -1,4 +1,5 @@
 open March_caps
+open Test_helpers
 
 let subsumption_suite =
   [ Alcotest.test_case "root subsumes deep descendant" `Quick (fun () ->
@@ -62,7 +63,34 @@ let normalize_suite =
         Alcotest.(check (list string)) "empty" [] (Cap_lattice.normalize []));
   ]
 
+(* Reading an in-memory table is not an effect that escapes the process, and
+   requiring a MUTATION capability to look something up made every module that
+   so much as reads shared state declare `needs IO.Mut`. Writes still do. *)
+let test_vault_read_needs_no_capability () =
+  let ctx = typecheck {|mod T do
+    fn peek(t, k) do
+      vault_get(t, k)
+    end
+  end|} in
+  Alcotest.(check bool) "a bare vault_get needs no capability" false (has_errors ctx)
+
+let test_vault_write_still_needs_io_mut () =
+  let ctx = typecheck {|mod T do
+    fn poke(t, k, v) do
+      vault_set(t, k, v)
+    end
+  end|} in
+  Alcotest.(check bool) "a bare vault_set is still a capability error" true (has_errors ctx)
+
+let vault_suite =
+  [ Alcotest.test_case "vault_get needs no capability" `Quick
+      test_vault_read_needs_no_capability;
+    Alcotest.test_case "vault_set still needs IO.Mut" `Quick
+      test_vault_write_still_needs_io_mut;
+  ]
+
 let () =
   Alcotest.run "march_caps"
     [ "subsumption", subsumption_suite;
-      "normalize", normalize_suite ]
+      "normalize", normalize_suite;
+      "vault", vault_suite ]

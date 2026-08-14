@@ -143,7 +143,7 @@ across files — including resolving an `interface` declared in one file from an
 
 ## Typestate and capability intelligence
 
-When your code uses the [typestate system]({{ site.baseurl }}/docs/capabilities/#typestate-handles) — `always_linear type` handles with `transitions` blocks — the LSP provides extra guidance directly in the editor.
+When your code uses the [typestate system]({{ site.baseurl }}/docs/capabilities/#typestate-tracking-resource-lifecycle) (`always_linear type` handles with `transitions` blocks), the LSP provides extra guidance directly in the editor.
 
 ### Typestate hover
 

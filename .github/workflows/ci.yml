@@ -12,7 +12,7 @@
 #
 #   doc-lint                            (standalone, ~10s)
 #   test          (ubuntu, macos)       `dune runtest`
-#   conformance   (ubuntu, macos)       @types-check, @grammar-check, docs, fmt
+#   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
 #   sanitize-gate (ubuntu)              golden-corpus ASAN gate
 #   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
 #                  ubuntu leg only ─┼─ cross-linux-oracle
@@ -298,6 +298,25 @@ jobs:
         run: |
           eval $(opam env)
           dune build @grammar-check
+
+      # Vault's striped reader-count lock (runtime/march_extras.c,
+      # vault_rwlock_t): T = min(4, ncores) threads reading DISTINCT keys
+      # should scale close to 1x wall-clock (measured ~2.0x median at T=4 on
+      # a loaded 14-core dev box; see test/test_vault_distinct_keys_scale.c's
+      # header for the full history). The test reads sysconf's online core
+      # count at runtime and adapts both its thread count and its bound
+      # (solo_median * (T * 0.9)) to it — hosted runners here have only 2-4
+      # cores, and a hard-coded 4-thread shape can't show speedup on that
+      # regardless of lock quality, so this is NOT a claim that these
+      # runners are "quiet" (that reasoning was wrong; the constraint is
+      # core count, not load). Still NOT part of `runtest` — it is a
+      # parallel-scaling benchmark, not a unit test. Same "own alias, run
+      # explicitly" shape as @types-check / @grammar-check above.
+      - name: Vault distinct-key read-scaling benchmark (not part of runtest)
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build @vault-scale
 
       - name: Check doc notebooks (.scrollmd) compile
         timeout-minutes: 5
