@@ -25,6 +25,24 @@ git log is authoritative for exact commits.
 
 - **Fixed a use-after-free that could crash any multi-scheduler program whose actors are reachable from more than one owner** — a monitor, a `Pid` stored in a `Vault` table, a `Pid` passed to another actor, or (most visibly, and how this was found) an actor registered under a name, since `Actor.register` makes the registry a second owner. The defect long predates the registry; the registry is simply the easiest way to give an actor a second owner. If a concurrent program of yours has ever "flaked mysteriously" with a `SIGBUS` or an RC underflow, it is worth re-checking against this fix rather than assuming it was unrelated. While an actor's green thread ran a message handler, the runtime overwrote that actor's refcount word with `1` and restored it afterwards — a leftover from before codegen learned to update actor structs in place unconditionally. The forced `1` was visible to every other thread, so a concurrent drop of a `Pid` observed "last reference" and freed an actor record that still had live owners; the registry was then left pointing at freed memory, and the next lookup or death-cleanup read a garbage refcount (`march: RC underflow (rc was -6899412650951359789)`, `SIGBUS`, or `SIGTRAP`). Concurrent *increments* during the same window were silently lost. Single-scheduler runs were never affected. The spawn-and-kill churn scenario failed on 6 of 30 runs before the fix and 0 of 60 after.
 - **A killed actor's registered names are now reclaimed, not left occupying the registry forever.** `do_actor_death` (and the interpreter's matching `crash_actor` path) now retires all of the dying actor's names — dropping the forward-table entry and the per-actor reverse index — before any monitor `Down` notification is delivered, so a watcher woken by the death can never observe a name still mapped to the dead incarnation. Previously only the runtime's own `$alive`-flag re-check kept `whereis`/`registered` correct at lookup time; the table entry itself, and the interpreter's `named_registry` map, held on to the name indefinitely unless a later registration happened to overwrite it. `Actor.registered()` in the interpreter no longer lists a name after its actor is killed.
+- **A top-level function in your program can no longer silently replace a
+  name the March Prelude relies on internally.** `println` calls `print` and
+  `show` unqualified (also `panic`, `reverse`, and `to_string`, each called
+  from inside another Prelude function's own body), and all of them sat in a
+  flat, unprotected namespace shared with your program's own entry-module
+  declarations. A private helper named `print` or `show` (or any of the
+  others Prelude actually calls internally) silently took over that name for
+  the *whole program*, including inside Prelude's own code, with no error at
+  any compiler stage. Depending on how the two definitions' types happened to
+  line up this surfaced as a misattributed runtime arity error, a **compiled
+  SIGBUS with no diagnostic**, or a **fully silent no-op** — `println`
+  printing nothing at all, with no error and no crash. Now rejected as a
+  compile error naming the colliding function and why it matters, across
+  `march file.march`, `march --check`, `march --compile`, `march check`, and
+  `march dap`. Shadowing a Prelude/builtin name Prelude never calls
+  internally — `head`, `map`, `unwrap`, `file_read`, and most of the rest —
+  remains legal and unaffected; that's a documented, separately-tested
+  feature, not part of this bug.
 - **`simd_leak_probe`'s CI leak guard no longer false-positives on Linux.**
   The guard for the per-call SIMD vector temp-box leak
   (`test/native/simd_leak_probe.march`) asserted an absolute peak-RSS
