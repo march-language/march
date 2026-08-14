@@ -2960,6 +2960,24 @@ let analyse ~filename ~src : t =
     (* Merge desugar diagnostics into the typecheck context so they surface
        through the same diag_to_lsp path (user-file filter, span ordering). *)
     List.iter (Err.report errors) (Err.sorted desugar_errors);
+    (* Parity with the compiler's own prelude-collision check (bin/main.ml /
+       lib/modules/prelude_collision.ml) — otherwise the editor shows no
+       diagnostic at all for a top-level fn the compiler now hard-rejects.
+       Skip when this file IS a shipped stdlib module (matches
+       [is_shipped_stdlib_file] in bin/main.ml): a stdlib file's own
+       top-level names (e.g. List.reverse) are only ever loaded namespaced,
+       never flattened, in real use — the LSP treats the OPEN file as an
+       "entry" purely as an artifact of single-file analysis, exactly as
+       `--check` does on the CLI, so the exemption is needed for the same
+       reason there. *)
+    let is_shipped_stdlib_file =
+      List.mem (Filename.basename filename) March_modules.Stdlib_manifest.all_known
+    in
+    if not is_shipped_stdlib_file then
+      March_modules.Prelude_collision.check ~prelude_decls:stdlib_decls
+        ~ordinary_builtin_names:Tc.prelude_collision_builtin_names
+        ~iface_method_arities:Tc.prelude_collision_iface_arities
+        ~entry_decls:desugared.Ast.mod_decls errors;
     let def_map        = Hashtbl.create 64 in
     let use_map        = Hashtbl.create 64 in
     let doc_map        = Hashtbl.create 16 in

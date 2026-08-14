@@ -36,28 +36,17 @@ let severity_word (sev : March_errors.Errors.severity) : string =
    see a collision with them on its own; it needs this list. Sourced from
    the SAME table the typechecker itself resolves ordinary builtin calls
    against, so this can never drift from what the compiler actually treats
-   as a builtin. Dotted names (there are none in [builtin_bindings] today,
-   but filtering is cheap insurance) are excluded — a user's top-level [fn]
-   can never be named with a `.`, so they could never collide with one. *)
-let ordinary_builtin_collision_names : string list =
-  List.filter_map (fun (name, _) -> if String.contains name '.' then None else Some name)
-    March_typecheck.Typecheck.builtin_bindings
-
-(* [show]/[eq]/[compare]/[hash] are NOT in the list above — they are
-   structural interface methods with their OWN type-directed dispatch
-   (Typecheck.builtin_interface_bindings), and a bare top-level [fn] of the
-   right ARITY legitimately participates in it (regression-tested by
-   test/native/iface_method_collision.march). Only a WRONG-arity same-name
-   function is a genuine collision — see Prelude_collision's doc comment. *)
-let iface_method_collision_arities : (string * int) list =
-  [ ("eq", 2); ("compare", 2); ("show", 1); ("hash", 1) ]
-
+   as a builtin. Sourced from [Typecheck.prelude_collision_builtin_names]/
+   [Typecheck.prelude_collision_iface_arities] — the SAME shared values the
+   LSP's own [lsp/lib/analysis.ml] uses, so the two can never independently
+   drift from each other or from what the typechecker treats as a builtin. *)
 let check_no_prelude_collision_decls ~(stdlib_decls : March_ast.Ast.decl list)
     (entry_decls : March_ast.Ast.decl list) : unit =
   let errors = March_errors.Errors.create () in
   March_modules.Prelude_collision.check ~prelude_decls:stdlib_decls
-    ~ordinary_builtin_names:ordinary_builtin_collision_names
-    ~iface_method_arities:iface_method_collision_arities ~entry_decls errors;
+    ~ordinary_builtin_names:March_typecheck.Typecheck.prelude_collision_builtin_names
+    ~iface_method_arities:March_typecheck.Typecheck.prelude_collision_iface_arities
+    ~entry_decls errors;
   if March_errors.Errors.has_errors errors then begin
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
         Printf.eprintf "%s:%d:%d: %s: %s\n"
