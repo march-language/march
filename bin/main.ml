@@ -1983,6 +1983,41 @@ let patch_migrate_fn (fd : March_ast.Ast.fn_def)
    category to signal separately; anything that reaches here is a bug. *)
 let internal_compiler_error_exit_code = 3
 
+(** [cap_ceiling_module_spans ~entry_owner ~entry_span decls] maps each
+    module's --cap-strict ceiling owner name (the same keying
+    [March_typecheck.Typecheck.module_caps] uses: the entry module's own TIR
+    name, and both the bare and fully-qualified spelling of every nested
+    [DMod]) to the span [March_caps.Cap_ceiling.check] should attribute an
+    [Undeclared] violation to — that module's first [DNeeds] span if it
+    declares one, otherwise its own header span ([entry_span] for the entry
+    module, the [DMod]'s name span for a nested one).  Mirrors
+    [Typecheck.check_module_needs]'s [cap_qname_prefix] accumulation (empty
+    at the entry level) so a violation on a doubly-nested module resolves to
+    the SAME qualified key the ceiling matches attribution against. *)
+let cap_ceiling_module_spans ~entry_owner ~entry_span
+    (decls : March_ast.Ast.decl list) : (string * March_ast.Ast.span) list =
+  let first_needs_span decls =
+    List.find_map (function
+        | March_ast.Ast.DNeeds (_, sp) -> Some sp
+        | _ -> None)
+      decls
+  in
+  let acc = ref [ (entry_owner, Option.value ~default:entry_span (first_needs_span decls)) ] in
+  let rec walk ~prefix decls =
+    List.iter (function
+        | March_ast.Ast.DMod (n, _, inner, _) ->
+          let qname = if prefix = "" then n.March_ast.Ast.txt
+                      else prefix ^ "." ^ n.March_ast.Ast.txt in
+          let sp = Option.value ~default:n.March_ast.Ast.span (first_needs_span inner) in
+          acc := (qname, sp) :: !acc;
+          if qname <> n.March_ast.Ast.txt then acc := (n.March_ast.Ast.txt, sp) :: !acc;
+          walk ~prefix:qname inner
+        | _ -> ())
+      decls
+  in
+  walk ~prefix:"" decls;
+  !acc
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -3006,16 +3041,57 @@ let compile filename =
          typecheck_env.March_typecheck.Typecheck.mod_needs)
         :: typecheck_env.March_typecheck.Typecheck.module_caps
       in
+      let module_spans = cap_ceiling_module_spans
+          ~entry_owner:pre_opt_tir.March_tir.Tir.tm_name
+          ~entry_span:desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+          desugared.March_ast.Ast.mod_decls
+      in
       let violations =
-        March_caps.Cap_ceiling.check ~module_caps ~attribution:cap_attrib
-          ~caps:flat_caps
+        March_caps.Cap_ceiling.check ~module_caps ~module_spans
+          ~attribution:cap_attrib ~caps:flat_caps
       in
       if violations <> [] then begin
+        (* Undeclared violations carry a span and a name to their own owning
+           module (from [module_spans] above), so they render through the
+           SAME diagnostic pipeline as every other capability error — visible
+           to the LSP and machine-applicable by `forge fix` — rather than
+           the bespoke, file-less "-- CAPABILITY CEILING --" block this
+           replaces (see the same [vectorize_diags] pattern just below for
+           the render precedent: a fresh [Err.ctx], not the shared
+           typecheck [errors], since this runs after that context has
+           already been drained and printed).
+
+           [Unattributed] violations name no module and therefore have no
+           span to point at — the ceiling's own [.mli] documents why this
+           is a fail-closed case rather than a false-positive risk to guard
+           against here — so those stay on the original bespoke line. *)
+        let ctx = March_errors.Errors.create () in
         List.iter
           (fun v ->
-             Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
-               (March_caps.Cap_ceiling.describe v))
+             match v with
+             | March_caps.Cap_ceiling.Undeclared { cap; owner; span } ->
+               March_errors.Errors.error_with_fix ctx ~span
+                 ~code:("cap_ceiling:" ^ cap)
+                 ~fix:(March_errors.Errors.FInsert {
+                   after_line = span.March_ast.Ast.start_line;
+                   text = "  needs " ^ cap })
+                 (Printf.sprintf
+                    "module `%s` uses `%s` but does not declare `needs %s`.\n\
+                     help: add `needs %s` to the module body."
+                    owner cap cap cap)
+             | March_caps.Cap_ceiling.Unattributed _ ->
+               Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
+                 (March_caps.Cap_ceiling.describe v))
           violations;
+        List.iter (fun (d : March_errors.Errors.diagnostic) ->
+            let f = d.span.March_ast.Ast.file in
+            let (d_src, d_file) =
+              if f = filename || f = "" || f = "<unknown>" then (src, filename)
+              else (try read_file f with Sys_error _ -> src), f
+            in
+            Printf.eprintf "%s\n\n\n"
+              (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
+          ) (March_errors.Errors.sorted ctx);
         Printf.eprintf
           "%d capability ceiling violation(s). Every module's emitted code \
            must stay within its own `needs`.\n\

@@ -2,7 +2,7 @@
    See cap_ceiling.mli for why this is not another source-level AST walk. *)
 
 type violation =
-  | Undeclared of { cap : string; owner : string }
+  | Undeclared of { cap : string; owner : string; span : March_ast.Ast.span }
   | Unattributed of { cap : string }
 
 (* Emitted from the presence of extern blocks, not from an attributed call
@@ -19,13 +19,18 @@ let covered module_caps ~owner ~cap =
     (fun need -> Cap_lattice.cap_subsumes need cap)
     (declared_for module_caps owner)
 
-let check ~module_caps ~attribution ~caps =
+let span_for module_spans owner =
+  match List.assoc_opt owner module_spans with
+  | Some sp -> sp
+  | None -> March_ast.Ast.dummy_span
+
+let check ~module_caps ~module_spans ~attribution ~caps =
   let attribution = List.filter (fun (c, _) -> not (is_foreign c)) attribution in
   let undeclared =
     List.filter_map
       (fun (cap, owner) ->
          if covered module_caps ~owner ~cap then None
-         else Some (Undeclared { cap; owner }))
+         else Some (Undeclared { cap; owner; span = span_for module_spans owner }))
       attribution
   in
   (* A capability nobody can be held responsible for.  Fail-closed: see the
@@ -42,7 +47,7 @@ let check ~module_caps ~attribution ~caps =
   List.sort_uniq compare (undeclared @ unattributed)
 
 let describe = function
-  | Undeclared { cap; owner } ->
+  | Undeclared { cap; owner; span = _ } ->
     Printf.sprintf
       "module `%s` uses `%s` but does not declare `needs %s`" owner cap cap
   (* Do NOT name a single cause here.  This message used to end "— it is

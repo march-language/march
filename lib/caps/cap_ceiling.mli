@@ -32,9 +32,12 @@
     one required to declare [needs IO.FileWrite]. *)
 
 type violation =
-  | Undeclared of { cap : string; owner : string }
+  | Undeclared of { cap : string; owner : string; span : March_ast.Ast.span }
       (** [owner]'s emitted code uses [cap], which none of its [needs]
-          declarations subsumes. *)
+          declarations subsumes. [span] is [owner]'s first [DNeeds] span, or
+          its module-header span if it declares none — where a diagnostic
+          pointing at this violation, and a fix inserting the missing
+          [needs] line, should land. *)
   | Unattributed of { cap : string }
       (** The program uses [cap] but no module can be held responsible for it
           — it is reached only through indirect calls, whose callee is not
@@ -47,12 +50,16 @@ type violation =
 
 val check :
   module_caps:(string * string list) list ->
+  module_spans:(string * March_ast.Ast.span) list ->
   attribution:(string * string) list ->
   caps:string list ->
   violation list
 (** [module_caps] is each module's declared [needs]; a module absent from it
-    has declared none. [caps] is the program's flat capability set — the
-    marker channel — used to find capabilities with no owner row.
+    has declared none. [module_spans] maps a module name to the span an
+    [Undeclared] violation naming it should point at (see [violation]'s
+    [span] field); a module absent from it falls back to
+    [March_ast.Ast.dummy_span]. [caps] is the program's flat capability set —
+    the marker channel — used to find capabilities with no owner row.
 
     [IO.Foreign] and [IO.Foreign.Blocking] are excluded: they are emitted from
     the presence of [extern] blocks rather than from an attributed call site,

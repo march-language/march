@@ -549,7 +549,12 @@ let ceiling_violations (t : Cap_binary.t) =
          (owner, cap :: prev) :: List.remove_assoc owner acc)
       [] t.Cap_binary.declarations
   in
-  March_caps.Cap_ceiling.check ~module_caps
+  (* No AST is available for an artifact read back from disk — this runs on a
+     binary the caller did not build, not on source — so no span can be
+     attributed to a violation here.  [describe] (the only consumer of this
+     list's [Undeclared] case in this module) never reads [span], only
+     [cap]/[owner], so the fallback [March_ast.Ast.dummy_span] is inert. *)
+  March_caps.Cap_ceiling.check ~module_caps ~module_spans:[]
     ~attribution:t.Cap_binary.attribution ~caps:t.Cap_binary.caps
 
 let inspect ~bin ~json ~deny ~allow_only ~allow_foreign ~strict () =

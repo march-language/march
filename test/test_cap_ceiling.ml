@@ -13,7 +13,7 @@ let test_covered_by_exact_declaration () =
   Alcotest.check violations_pp "no violation" []
     (describe
        (C.check
-          ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
+          ~module_spans:[] ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
           ~attribution:[ ("IO.FileRead", "M") ]
           ~caps:[ "IO.FileRead" ]))
 
@@ -23,7 +23,7 @@ let test_covered_by_a_broader_declaration () =
   Alcotest.check violations_pp "parent covers child" []
     (describe
        (C.check
-          ~module_caps:[ ("M", [ "IO.FileSystem" ]) ]
+          ~module_spans:[] ~module_caps:[ ("M", [ "IO.FileSystem" ]) ]
           ~attribution:[ ("IO.FileRead", "M") ]
           ~caps:[ "IO.FileRead" ]))
 
@@ -34,14 +34,14 @@ let test_narrower_declaration_does_not_cover () =
   Alcotest.(check int) "one violation" 1
     (List.length
        (C.check
-          ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
+          ~module_spans:[] ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
           ~attribution:[ ("IO.FileWrite", "M") ]
           ~caps:[ "IO.FileWrite" ]))
 
 let test_undeclared_module_is_a_violation () =
   Alcotest.(check int) "module with no needs at all" 1
     (List.length
-       (C.check ~module_caps:[] ~attribution:[ ("IO.FileRead", "M") ]
+       (C.check ~module_spans:[] ~module_caps:[] ~attribution:[ ("IO.FileRead", "M") ]
           ~caps:[ "IO.FileRead" ]))
 
 let test_each_module_is_judged_on_its_own_needs () =
@@ -50,7 +50,7 @@ let test_each_module_is_judged_on_its_own_needs () =
      exactly the whole-program-union blindness this replaces. *)
   let vs =
     C.check
-      ~module_caps:[ ("A", [ "IO.FileRead" ]); ("B", [ "IO.Console" ]) ]
+      ~module_spans:[] ~module_caps:[ ("A", [ "IO.FileRead" ]); ("B", [ "IO.Console" ]) ]
       ~attribution:[ ("IO.FileRead", "A"); ("IO.FileRead", "B") ]
       ~caps:[ "IO.FileRead" ]
   in
@@ -66,7 +66,7 @@ let test_unattributed_capability_fails_closed () =
      precisely the one an attacker would route through. *)
   Alcotest.(check int) "unattributed is a violation" 1
     (List.length
-       (C.check ~module_caps:[] ~attribution:[] ~caps:[ "IO.FileRead" ]))
+       (C.check ~module_spans:[] ~module_caps:[] ~attribution:[] ~caps:[ "IO.FileRead" ]))
 
 let test_foreign_is_excluded () =
   (* IO.Foreign comes from the presence of extern blocks, not an attributed
@@ -75,7 +75,7 @@ let test_foreign_is_excluded () =
      unattributed would fire on every FFI-using program. *)
   Alcotest.check violations_pp "no violation for foreign" []
     (describe
-       (C.check ~module_caps:[] ~attribution:[]
+       (C.check ~module_spans:[] ~module_caps:[] ~attribution:[]
           ~caps:[ "IO.Foreign"; "IO.Foreign.Blocking" ]))
 
 let unit_tests =
@@ -133,9 +133,17 @@ let rejects name src =
   let rc, out = compile_strict src in
   if rc = 0 then
     Alcotest.failf "%s should have failed --cap-strict but compiled" name;
+  (* Task 7: a ceiling violation is now reported as an ordinary diagnostic
+     (file/line/source excerpt, an applicable fix) rather than the bespoke
+     "-- CAPABILITY CEILING --" block, so this can no longer match on that
+     literal header — it never appears for the common (attributable,
+     [Undeclared]) case this helper's callers exercise.  The one line every
+     ceiling failure still carries, [Undeclared] or [Unattributed], is the
+     trailing summary bin/main.ml prints after the per-violation diagnostics;
+     match that instead. *)
   if
     not
-      (let re = Str.regexp_string "CAPABILITY CEILING" in
+      (let re = Str.regexp_string "capability ceiling violation(s)" in
        match Str.search_forward re out 0 with
        | _ -> true
        | exception Not_found -> false)
@@ -225,6 +233,58 @@ mod CeilStdlib do
   end
 end
 |}
+
+(* ── Task 7, Steps 3-4: the violation carries a span and a fix ────────────
+   Before this task the ceiling was reported through a bespoke
+   "-- CAPABILITY CEILING --" block with no file, no line, no source excerpt
+   and no machine-applicable fix — invisible to the LSP and unusable by
+   `forge fix`, unlike every other capability diagnostic.  It is now an
+   ordinary [Err] diagnostic: rendered with the offending module's own
+   source (a numbered source line, matching every other diagnostic's
+   presentation) and an insertable fix line naming the missing capability. *)
+let test_ceiling_violation_carries_a_span_and_a_fix () =
+  let rc, out =
+    compile_strict
+      {|
+mod CeilSpanned do
+  needs IO.Console
+  needs IO.FileWrite
+  mod Inner do
+    needs IO.Console
+    fn go() : () do
+      match File.write("/tmp/x", "d") do
+        Ok(_)  -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+    Inner.go()
+  end
+end
+|}
+  in
+  if rc = 0 then Alcotest.failf "should have failed --cap-strict but compiled:\n%s" out;
+  (* No bespoke header for the common, attributable case. *)
+  (match Str.search_forward (Str.regexp_string "-- CAPABILITY CEILING --") out 0 with
+   | _ -> Alcotest.failf "still using the bespoke ceiling block:\n%s" out
+   | exception Not_found -> ());
+  (* Renders through the ordinary diagnostic pipeline: a numbered source
+     line, exactly like every other error. *)
+  (match Str.search_forward (Str.regexp "^ *[0-9]+ |") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "no numbered source line in ceiling diagnostic:\n%s" out);
+  (* An applicable fix, naming the exact missing capability. *)
+  (match Str.search_forward (Str.regexp_string "help: add `needs IO.FileWrite` to the module body.") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "no fix hint in ceiling diagnostic:\n%s" out);
+  (* Still names the offending module and the missing capability. *)
+  (match Str.search_forward (Str.regexp_string "module `Inner` uses `IO.FileWrite` but does not declare `needs IO.FileWrite`") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "diagnostic no longer names the offending module:\n%s" out)
 
 (* Route 3: a builtin handed out as a VALUE and invoked indirectly. *)
 let test_builtin_as_value_route () =
@@ -660,6 +720,8 @@ let tests =
         test_direct_builtin_route;
       Alcotest.test_case "route: stdlib wrapper (was silent)" `Slow
         test_stdlib_route_was_completely_silent;
+      Alcotest.test_case "violation carries a span and a fix" `Slow
+        test_ceiling_violation_carries_a_span_and_a_fix;
       Alcotest.test_case "route: builtin passed as a value" `Slow
         test_builtin_as_value_route;
       Alcotest.test_case "dependency exceeding its own ceiling" `Slow
