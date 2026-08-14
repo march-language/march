@@ -5880,6 +5880,47 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_registry_restart_batch.expected native_actor_registry_restart_batch.out)))
 
+; ── Named registry: restart carry-forward is backend PARITY, not a ───────
+; ── compiled-only feature (interpreted legs) ─────────────────────────────
+; The two rules above only ever ran these fixtures COMPILED, which is how
+; the interpreter shipped for weeks re-registering only the old atom-based
+; process_registry on restart and never touching named_registry -- the
+; table Actor.register/whereis actually use. Interpreted, the single
+; fixture printed "lost after restart"/"lost after second restart" and the
+; batch one lost BOTH children's names. Same source, same .expected, run
+; through the interpreter: the parity property is now pinned by CI instead
+; of by hand. No runtime .c deps -- no --compile here -- but stdlib is
+; still needed for Actor + supervise.
+(rule
+ (targets interp_actor_registry_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_registry_restart.march))
+ (action
+  (with-stdout-to interp_actor_registry_restart.out
+    (run %{exe:../bin/main.exe} native/actor_registry_restart.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_restart.expected interp_actor_registry_restart.out)))
+
+; The sibling case: one_for_all/rest_for_one clear a live sibling's
+; ai_supervisor before crashing it, so a capture gated on that field alone
+; drops the sibling's names. This fixture is what catches it -- on both
+; backends; the compiled side shipped exactly that bug once already.
+(rule
+ (targets interp_actor_registry_restart_batch.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_registry_restart_batch.march))
+ (action
+  (with-stdout-to interp_actor_registry_restart_batch.out
+    (run %{exe:../bin/main.exe} native/actor_registry_restart_batch.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_registry_restart_batch.expected interp_actor_registry_restart_batch.out)))
+
 ; ── Previously-unwired test/stdlib/*.march describe/test corpus ──────────
 ; 37 of the 94 files in test/stdlib/ had real, substantial describe/test
 ; coverage (237 describe blocks) but ran under NO automated runner -- only

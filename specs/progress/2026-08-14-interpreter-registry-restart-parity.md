@@ -1,8 +1,9 @@
-`[P2]` # Interpreter does not carry registered names across a supervisor restart
+# Interpreter now carries registered names across a supervisor restart (RESOLVED)
 
-**Backend parity gap.** `Actor.register` / `whereis` / `unregister` /
-`registered` behave identically compiled and interpreted. **Restart
-carry-forward does not** — it is compiled-only.
+**Backend parity gap — closed 2026-08-14.** `Actor.register` / `whereis` /
+`unregister` / `registered` behaved identically compiled and interpreted;
+**restart carry-forward did not** — it was compiled-only. It no longer is.
+What follows is the original filing, then the fix that landed.
 
 Found during the named-registry work
 (`specs/progress/2026-08-12-named-registry.md`); the 9-task plan scoped
@@ -72,3 +73,48 @@ of divergence that hid compiled `mailbox_size` returning the `Down` count.
 Until then: the actors docs and `CHANGELOG.md` both state the split explicitly.
 Do not let either drift back to an unqualified "identical semantics in both
 backends" while this is open.
+
+---
+
+## Resolution (2026-08-14)
+
+Mirrored the runtime's capture/consume pair in `lib/eval/eval.ml`, keeping the
+*semantics* rather than the C data layout:
+
+- **`reg_names_pending : (int, string list) Hashtbl.t`** — the stash, keyed by
+  the dying actor's pid. The interpreter has no per-actor meta outliving the
+  instance, but `next_pid` is monotonic and pids are never reused, so a pid key
+  is as stable as the C side's never-freed `march_actor_meta`.
+- **`capture_reg_names_pending pid`** — snapshots every `named_registry` entry
+  owned by `pid`. Guards an existing stash rather than overwriting, matching the
+  C guard.
+- **`crash_actor`** calls it immediately before the existing unconditional drop,
+  gated on `ai_supervisor <> None`. Unsupervised actors' names are still just
+  dropped.
+- **`one_for_all_restart` / `rest_for_one_restart`** call it *explicitly* for
+  each live sibling, **before** `ci.ai_supervisor <- None`. This is the half the
+  compiled side got wrong on its first attempt: those strategies clear the field
+  purely to suppress a recursive `notify_supervisor`, so a capture gated on it
+  alone silently loses every batch-restarted sibling's names even though the
+  sibling is unconditionally respawned a few lines later.
+- **`spawn_child_actor`** consumes the stash for `crashed_pid`, writing
+  `named_registry` (the table `Actor.register`/`whereis` use) — the pre-existing
+  block wrote only the old atom-based `process_registry`, which is left as-is.
+  Per name: if a *different* live actor holds it, the carried registration is
+  dropped rather than stolen back, matching `actor_register`'s first-live-claim
+  -wins rule and `march_respawn_child`'s comment.
+- Both `named_registry` reset sites (`reset_scheduler_state`, `eval_module_env`)
+  clear the stash too.
+
+## Verification
+
+`test/native/actor_registry_restart.march` and `..._batch.march` produce their
+`.expected` output interpreted, byte-identical to compiled. Before the fix the
+interpreter printed `lost after restart` / `second name lost after restart` /
+`lost after second restart` for the first and `child-a: lost after restart` /
+`child-b: lost after restart` for the batch one.
+
+Both fixtures gained an **interpreted CI leg** in `test/dune`
+(`interp_actor_registry_restart{,_batch}.out`, diffed against the same
+`.expected` the compiled rules use) — the fixtures had only ever run compiled,
+which is exactly how this divergence survived. The parity is now pinned by CI.

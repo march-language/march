@@ -241,12 +241,14 @@ supervised child is being respawned — in particular while it waits out its res
 signal that the service is mid-restart, not that the name was never registered; retry
 rather than treating it as a permanent error.
 
-Names survive supervisor restarts on the compiled backend: the crashing child's names are
+Names survive supervisor restarts, on **both** backends: the crashing child's names are
 carried forward and re-established on its replacement, so a holder outside the supervision
 tree keeps reaching whichever incarnation is current without ever learning the new Pid.
-**Hold names, not Pids, across a restart boundary.** The interpreter does not do this yet —
-a supervised child that crashes there comes back unregistered — so a restart-survival test
-must run compiled.
+**Hold names, not Pids, across a restart boundary.** This includes a live sibling killed by
+a `one_for_all` / `rest_for_one` batch restart, not only the child that actually crashed.
+If a *different* live actor claims the name during the restart window, the carried-forward
+registration is dropped for that name rather than stolen back. Unsupervised actors are
+unaffected — their names are simply dropped on death.
 
 On a hot path, resolve a name **once and cache the Pid** instead of calling `whereis` per
 message. Concurrent lookups of the *same* name all bump the refcount on the one stored
