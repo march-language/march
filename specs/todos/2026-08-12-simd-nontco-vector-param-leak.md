@@ -88,38 +88,37 @@ needing real thought.
 ## Measurement shape
 
 Same as the TCO variant: a driver loop calling the kernel N times,
-`--compile --opt 2`, `/usr/bin/time -l`, delta against a scalar control of the
-same driver shape. `test/native/simd_leak_probe.march` is the ready-made
-harness — swap its `go` for a non-tail-recursive callee and the RSS assertion
-(< 32 MB) fails again.
+`--compile --opt 2`, delta of `live_allocs()` around the loop.
+`test/native/simd_leak_probe.march` is the ready-made harness — swap its `go`
+for a non-tail-recursive callee and the leak assertion (`< 1000` objects, see
+below) fails again.
 
 ## Known weaknesses of the existing guard (read before trusting it)
 
-Two things about the `simd_leak_probe` RSS assertion in `test/dune` are worth
-knowing by whoever generalizes this fix, because both weaken it:
+Two things about the `simd_leak_probe` guard in `test/dune` are worth knowing
+by whoever generalizes this fix, because both weaken it:
 
-- **FIXED (2026-08-13): the RSS assertion was Darwin-only.** It used to read
-  max RSS from `/usr/bin/time -l` (a macOS spelling), gated on
-  `uname -s = Darwin` in `test/dune`, with the leak assertion silently
-  skipped elsewhere — the *only* automated place the leak was actually
-  measured was a developer macOS box (and macOS CI, where present). This is
-  now closed: the probe measures its own peak RSS from inside the process via
-  the new `peak_rss_bytes` builtin (`runtime/march_runtime.c`'s
-  `march_peak_rss_bytes`, which normalizes `getrusage`'s `ru_maxrss` — bytes
-  on macOS, kilobytes on Linux — to bytes at the C boundary) and prints it to
-  stderr; the three `test/dune` rules no longer branch on `uname` or shell
-  out to `/usr/bin/time` at all. The guard now runs unconditionally on both
-  CI legs — see `.superpowers/sdd/2026-08-13-simd-followups/task-3-report.md`
-  for the falsifiability re-demonstration (sabotage → RED with the leaked
-  figure, restore → GREEN) and which platforms were actually exercised.
-- **The threshold shipped as an absolute bound, not the specified delta.**
-  The closeouts spec asked for "max RSS delta vs a scalar control < 5 MB";
-  what landed is an absolute `< 32 MB` with no control run. That deviation is
-  accepted (the pre-fix measurement was ~67 MB and post-fix ~2.7 MB, so 32 MB
-  separates them by a wide margin and needs no second binary), but it does
-  mean the guard cannot distinguish a genuine regression from a general
-  baseline-RSS drift of the runtime. If runtime baseline RSS ever grows
-  materially, re-derive the bound or add the scalar control.
+- **FIXED (2026-08-13): the guard was Darwin-only.** It used to read max RSS
+  from `/usr/bin/time -l` (a macOS spelling), gated on `uname -s = Darwin` in
+  `test/dune`, with the leak assertion silently skipped elsewhere — the
+  *only* automated place the leak was actually measured was a developer
+  macOS box (and macOS CI, where present). This is now closed: the probe
+  measures its own peak RSS from inside the process via the `peak_rss_bytes`
+  builtin and prints it to stderr; the three `test/dune` rules no longer
+  branch on `uname` or shell out to `/usr/bin/time` at all. The guard now
+  runs unconditionally on both CI legs.
+- **FIXED (2026-08-14): the RSS threshold was an absolute bound, and
+  unreachable on Linux.** `peak_rss_bytes` made the guard portable in *unit*
+  but not in *baseline* — the absolute `< 32 MB` threshold was calibrated on
+  Darwin's ~2.7 MB healthy figure, and Linux's ~122 MB process baseline made
+  it unreachable: CI's first ubuntu run measured 128,761,856 B and went RED
+  on a healthy binary. The guard now asserts a `live_allocs()` delta instead
+  of RSS (same conversion as `native_arr_fold_leak_probe.march`): healthy is
+  a small constant (~1 object) independent of call count, the threshold is
+  `< 1000`, and a missing release adds exactly 2,000,000 — measured on both
+  sides of the sabotage cycle, see `test/native/simd_leak_probe.march`'s
+  header comment. A live-object count needs no platform calibration at all,
+  so this class of false positive cannot recur.
 
 ## Related
 

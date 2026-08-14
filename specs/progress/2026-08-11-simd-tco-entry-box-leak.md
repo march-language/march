@@ -25,6 +25,25 @@ so the box cannot escape into it and releasing after the call is sound.
 Committed as a dune `runtest` rule asserting max RSS < 32 MB (Darwin-gated:
 `/usr/bin/time -l` is macOS-specific, the rule skips with exit 0 elsewhere).
 
+**Guard mechanism updated 2026-08-14:** the RSS-band guard above went through
+two further revisions after landing, both false-positive fixes rather than
+changes to the underlying leak fix:
+1. The `peak_rss_bytes` builtin (`runtime/march_runtime.c`) replaced
+   `/usr/bin/time -l`, making the probe self-measuring and portable in unit
+   (bytes on both macOS and Linux) — the Darwin gate was dropped so the guard
+   started running on Linux CI too.
+2. That surfaced a second, more fundamental non-portability: the absolute
+   `< 32 MB` threshold was calibrated on Darwin's ~2.7 MB healthy baseline,
+   and Linux's ~122 MB process baseline made it unreachable — CI measured
+   128,761,856 B on a healthy tree and went RED. The guard now asserts a
+   `live_allocs()` delta instead of RSS (same conversion as
+   `native_arr_fold_leak_probe.march`, `specs/progress/2026-08-13-native-array-fold-compiled.md`):
+   healthy delta ~1 object, threshold `< 1000`, sabotage (deleting the
+   caller-side `release_temp_boxes` calls in `lib/tir/llvm_emit.ml`) produces
+   a delta of 2,000,001 — one leaked `march_simd_alloc` cell per call, both
+   measured on Darwin arm64. See `test/native/simd_leak_probe.march`'s header
+   comment and `test/dune` for the current guard.
+
 ### Ownership map — which call shapes transfer vs. retain
 
 The table the design turns on. "Boxed by the caller" means the argument's

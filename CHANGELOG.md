@@ -18,6 +18,20 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`simd_leak_probe`'s CI leak guard no longer false-positives on Linux.**
+  The guard for the per-call SIMD vector temp-box leak
+  (`test/native/simd_leak_probe.march`) asserted an absolute peak-RSS
+  threshold (< 32 MB) calibrated on macOS's ~2.7 MB healthy baseline; Linux's
+  ~122 MB process baseline made that threshold unreachable, so the guard
+  went RED on a healthy binary (measured 128,761,856 B) the first time CI's
+  ubuntu leg ran it. Converted to the same fix already applied to the
+  sibling `native_arr_fold_leak_probe` guard: assert a `live_allocs()`
+  delta instead of RSS, which counts leaked `march_simd_alloc` cells
+  directly and needs no platform calibration. Healthy delta is now ~1
+  object (threshold `< 1000`); a regression adds exactly 2,000,000 —
+  confirmed by reverting the caller-side release in
+  `lib/tir/llvm_emit.ml` and remeasuring.
+
 - **`Regex` no longer has a denial-of-service on adversarial input.** The
   engine matched by backtracking, so repeated quantifiers over one character
   class followed by a byte that never matches cost O(n^k): the pattern

@@ -4742,36 +4742,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;
 ; (1) simd_leak_probe -- the release must HAPPEN. `go` is self-tail-recursive
 ; with a vector param, so its entry prologue unboxes one caller-made box per
-; INVOCATION and (pre-fix) never released it: 2,000,000 calls leaked ~64 MB of
-; 32-byte march_simd_alloc cells. Post-fix max RSS is ~2.7 MB; the threshold is
-; 32 MB, comfortably above allocator noise and comfortably below the 64 MB
-; pre-fix figure, so it is falsifiable in both directions. An output check
-; cannot see a leak -- RSS is the only signal -- hence the unusual assertion.
+; INVOCATION and (pre-fix) never released it: 2,000,000 calls leaked one
+; march_simd_alloc cell each. An output check cannot see a leak, hence the
+; unusual assertion.
 ;
-; THREE checks, and all three are load-bearing. The first version of this rule
-; asserted ONLY the RSS, by piping `/usr/bin/time -l ./probe` into awk -- which
-; is an ANTI-canary: the pipeline's exit status is awk's, and macOS
-; /usr/bin/time -l still prints a max RSS for a child that died on SIGSEGV
-; (measured: RSS 1425408, pipeline rc 0). So the exact drift this rule exists
-; to catch -- the pre-pass says "native slot" while emit_fn stops giving one,
-; the caller releases a box the callee retained, and the probe segfaults early
-; -- would have produced a TINY RSS and a GREEN rule. Hence:
-;   (a) the run's EXIT STATUS is dune's (a `system` action fails on nonzero),
-;   (b) stdout is diffed against .expected, so a crash-after-partial-output or
-;       a wrong result cannot pass, and
-;   (c) only then is RSS read, from the captured stderr FILE rather than a
-;       pipeline whose status belongs to the last stage.
+; SIGNAL: live_allocs(), NOT RSS. The original version of this rule asserted
+; an absolute max-RSS threshold (< 32 MB), calibrated on Darwin (healthy
+; ~2.7 MB, leaked ~67 MB). It went RED the first time CI's ubuntu leg ran it
+; (PR #269 removed this probe's prior Darwin-only gate), at max RSS
+; 128,761,856 B -- not a leak, just Linux's ~122 MB process baseline that the
+; macOS-derived band never accounted for. live_allocs() reads the runtime's
+; always-on march_live_alloc_count -- incremented in march_alloc, decremented
+; on every free-on-rc-zero path -- so it counts the defect directly: no
+; allocator free-list behaviour, no page-granularity rounding, no OS/platform
+; baseline. Same conversion, same rationale, as
+; native_arr_fold_leak_probe.march.
 ;
-; .expected is NOT interpreter-produced (2,000,000 iterations do not finish
-; under the tree-walker in any reasonable time; same posture as
-; simd_bounds_panic, which is compiled-only by design). The value is
+; THREE checks, and all three are load-bearing (unchanged from the RSS-era
+; rule's reasoning). A single check that reads a captured number without
+; independently verifying the run went well can be fooled by a probe that
+; crashes early or corrupts its output -- e.g. macOS /usr/bin/time -l still
+; printing a max RSS for a child that died on SIGSEGV (measured: RSS
+; 1425408, pipeline rc 0), which is why this was never collapsed into one
+; piped command. Hence:
+;   (a) the run's EXIT STATUS is dune's (a `system`/`run` action fails on
+;       nonzero),
+;   (b) stdout is diffed against .expected, so a crash-after-partial-output
+;       or a wrong result cannot pass, and
+;   (c) only then is the live_allocs delta read, from the captured stderr
+;       FILE rather than a pipeline whose status belongs to the last stage.
+;
+; .expected's stdout is NOT interpreter-produced (2,000,000 iterations do not
+; finish under the tree-walker in any reasonable time; same posture as
+; simd_bounds_panic, which is compiled-only by design). The stdout value is
 ; arithmetic: 2,000,000 calls x sum of splat(1.0) over 4 lanes = 8000000.
+; live_allocs() itself returns a constant 0 in the INTERPRETER (see
+; eval.ml), which is why the delta goes to stderr rather than stdout: it
+; never has to agree between backends.
 ;
-; The probe measures its own peak RSS via the `peak_rss_bytes` builtin, which
-; normalises getrusage's platform-dependent unit (bytes on macOS, kilobytes on
-; Linux) to bytes at the C boundary -- see runtime/march_runtime.c. That makes
-; this guard genuinely portable: no `/usr/bin/time`, no `uname` gate, so it
-; now runs on the Linux CI leg as well as Darwin.
+; Numbers, measured on this fixture (Darwin arm64, --opt 2, 2,000,000
+; calls), both sabotage directions actually run:
+;   caller-side release present   live_allocs delta =         1
+;   release deleted (sabotage)    live_allocs delta = 2,000,001
+; The one leftover object is incidental runtime/stdlib state, not a per-call
+; leak; deleting the release adds exactly 2,000,000 -- one leaked
+; march_simd_alloc cell per invocation of `go`, the defect stated exactly
+; rather than estimated. The dune rule asserts < 1000: ~1000x above the
+; healthy figure (ample room for incidental runtime objects) and ~2000x
+; below the leaked figure, so it is falsifiable in both directions with an
+; enormous margin.
 (rule
  (targets simd_leak_probe)
  (deps (file %{exe:../bin/main.exe})
@@ -4784,14 +4803,14 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; Check (a): nonzero exit fails this rule (dune's own `system` semantics -- cf.
 ; simd_bounds_panic, which needs an explicit with-accepted-exit-codes to allow
-; its nonzero exit). Stdout (the diffable answer) and stderr (the RSS figure
-; the probe prints about itself) land in separate files.
+; its nonzero exit). Stdout (the diffable answer) and stderr (the
+; live_allocs delta the probe prints about itself) land in separate files.
 (rule
- (targets simd_leak_probe.out simd_leak_probe.rss)
+ (targets simd_leak_probe.out simd_leak_probe.live)
  (deps simd_leak_probe)
  (action
   (with-stdout-to simd_leak_probe.out
-   (with-stderr-to simd_leak_probe.rss
+   (with-stderr-to simd_leak_probe.live
     (run ./simd_leak_probe)))))
 
 ; Check (b): the probe must actually finish and print the right answer.
@@ -4802,13 +4821,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; Check (c): the leak assertion proper, read from the probe's own stderr line.
 (rule
  (alias runtest)
- (deps simd_leak_probe.rss)
+ (deps simd_leak_probe.live)
  (action
   (run bash -c
-   "rss=$(cat simd_leak_probe.rss); \
-    test -n \"$rss\" || { echo 'could not read peak RSS from simd_leak_probe.rss' >&2; exit 1; }; \
-    test \"$rss\" -lt 33554432 || { echo \"simd_leak_probe leaked: max RSS ${rss} B >= 32 MB. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- pre-fix this measured ~67 MB (32 B/call), post-fix ~2.7 MB. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that Llvm_toplevel.native_vec_param_idxs is still the single source of truth for that decision.\" >&2; exit 1; }; \
-    echo \"simd_leak_probe max RSS = ${rss} B\"")))
+   "live=$(cat simd_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from simd_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"simd_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- healthy is a small constant (~1 object, independent of call count), the missing release adds exactly 2,000,000. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that Llvm_toplevel.native_vec_param_idxs is still the single source of truth for that decision.\" >&2; exit 1; }; \
+    echo \"simd_leak_probe live_allocs delta = ${live} objects\"")))
 
 ; ── peak_rss_bytes builtin: unit test ──────────────────────────────────
 ; Bytes-on-both-platforms sanity check for the builtin the leak guard above

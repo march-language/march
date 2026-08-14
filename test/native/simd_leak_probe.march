@@ -1,12 +1,10 @@
--- RSS guard for the per-call SIMD vector temp-box leak.
+-- Leak guard for the per-call SIMD vector temp-box leak.
 --
 -- `go` is self-tail-recursive with a vector parameter, so llvm_toplevel gives
 -- that parameter a NATIVE <4 x float> TCO slot and the entry prologue unboxes
 -- the incoming argument once per call. Nothing released that box: one
 -- 32-byte march_simd_alloc cell leaked per INVOCATION (not per iteration),
--- unbounded over a long-lived process. `drive` calls `go` 2,000,000 times, so
--- pre-fix max RSS was ~64 MB against ~2.7 MB post-fix; the dune rule asserts
--- max RSS < 32 MB (headroom for allocator noise).
+-- unbounded over a long-lived process.
 --
 -- The fix is caller-side: the call site releases the box IT created, but only
 -- for callees listed in ctx.native_vec_params -- callees whose entry prologue
@@ -14,12 +12,41 @@
 -- canary for the shapes that must NOT be released is
 -- test/native/simd_vector_escape_arg.march.
 --
--- The probe measures its OWN peak RSS via the `peak_rss_bytes` builtin
--- (portable: bytes on both macOS and Linux -- see runtime/march_runtime.c)
--- and prints it to STDERR (via IO.warn) as the final line, so stdout stays
--- diffable against .expected while the dune rule parses the RSS figure
--- straight out of the probe's own output -- no `/usr/bin/time`, no Darwin
--- gate.
+-- SIGNAL: live_allocs(), NOT RSS -- same rationale, and same conversion, as
+-- native_arr_fold_leak_probe.march. march_simd_alloc cells are March heap
+-- objects, so live_allocs() (the runtime's always-on march_live_alloc_count,
+-- incremented in march_alloc/decremented on every free-on-rc-zero path)
+-- counts a leaked box directly, with no allocator free-list behaviour, no
+-- page-granularity rounding, and no OS/platform baseline to calibrate away.
+-- The ORIGINAL guard here asserted an absolute max-RSS threshold (< 32 MB),
+-- calibrated on Darwin (healthy ~2.7 MB, leaked ~67 MB). It went RED the
+-- first time CI's ubuntu leg ran it (PR #269 removed this probe's prior
+-- Darwin-only gate), at max RSS 128,761,856 B -- not a leak, just Linux's
+-- ~122 MB process baseline that the macOS-derived band never accounted for.
+-- An absolute-RSS threshold is not portable; a live-object count needs no
+-- calibration at all.
+--
+-- Numbers, measured on this fixture (Darwin arm64, --opt 2, 2,000,000 calls):
+--   caller-side release present   live_allocs delta =         1
+--   release deleted (sabotage)    live_allocs delta = 2,000,001
+-- The one leftover object is incidental runtime/stdlib state, not a
+-- per-call leak; deleting the release adds exactly 2,000,000 -- one leaked
+-- march_simd_alloc cell per invocation of `go`, the defect stated exactly
+-- rather than estimated.
+--
+-- The probe prints its live_allocs delta to STDERR via IO.warn as the final
+-- line, so stdout stays diffable against .expected while the dune rule reads
+-- the delta out of the captured stderr file -- same three-rule structure as
+-- native_arr_fold_leak_probe (run / stdout diff / threshold assertion).
+--
+-- .expected is NOT interpreter-produced for STDOUT either (2,000,000
+-- iterations do not finish under the tree-walker in any reasonable time;
+-- same posture as simd_bounds_panic, which is compiled-only by design). The
+-- stdout value is arithmetic: 2,000,000 calls x sum of splat(1.0) over 4
+-- lanes = 8000000. (live_allocs() itself returns a constant 0 in the
+-- INTERPRETER -- see eval.ml -- which is exactly why the delta goes to
+-- stderr: the stdout .expected must stay identical between the two
+-- backends, and it does, since it never depends on live_allocs().)
 --
 -- specs/progress/2026-08-11-simd-tco-entry-box-leak.md
 mod SimdLeakProbe do
@@ -36,7 +63,9 @@ mod SimdLeakProbe do
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
+    let before = live_allocs()
     println(drive(2000000, 0.0))
-    IO.warn(int_to_string(peak_rss_bytes()))
+    let after = live_allocs()
+    IO.warn(int_to_string(after - before))
   end
 end
