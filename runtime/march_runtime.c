@@ -2802,8 +2802,52 @@ static void actor_green_thread(void *arg) {
 
         uint32_t tbl_version = 0;
 
-        int64_t saved_rc = a[0];
-        a[0] = 1;  /* FBIP: force RC=1 for in-place reuse */
+        /* NO RC CLOBBER HERE — deliberately, and load-bearing.
+         *
+         * This loop used to bracket the dispatch call with
+         *     int64_t saved_rc = a[0];
+         *     a[0] = 1;              // "FBIP: force RC=1 for in-place reuse"
+         *     ...dispatch...
+         *     a[0] = saved_rc;
+         * to defeat the RC==1 uniqueness check that llvm_emit's generic
+         * EReuse path used to apply to the handler's state write-back.
+         *
+         * That is a use-after-free generator, and the codegen no longer needs
+         * it. Two independent reasons it must stay gone:
+         *
+         * 1. It is not needed. llvm_emit.ml's EReuse arm special-cases actor
+         *    structs ([Repr.is_actor_struct_type], gated structurally on field
+         *    0 being "$d_dispatch") and ALWAYS mutates the actor in place — no
+         *    RC load, no branch, no fresh alloc. Nothing in the emitted
+         *    handler reads a[0] at all.
+         *
+         * 2. It is unsafe. a[0] is the actor record's refcount, shared with
+         *    every other thread via the atomic march_incrc/march_decrc. The
+         *    plain stores above are not atomic with those, and worse, they
+         *    LIE: while the window is open every other thread sees rc == 1.
+         *    A concurrent march_incrc is then silently lost by the blind
+         *    `a[0] = saved_rc` restore, and — the fatal one — a concurrent
+         *    march_decrc observes prev == 1 and FREES an actor record that
+         *    still has other live owners.
+         *
+         *    Observed, not theorized (bench/actors/spawn_churn.march, which
+         *    registers each churned actor under a name before killing it):
+         *    an actor opened this window with a true rc of 4 on one scheduler
+         *    thread while another thread's decrc saw the forced 1 and freed
+         *    the record. The registry's forward table (march_vault_set incrc's
+         *    the stored actor, so a registered actor's rc is > 1 by
+         *    construction) was left pointing at freed memory, and the
+         *    subsequent registry_retire_actor read a garbage refcount out of
+         *    the reallocated block: "RC underflow (rc was
+         *    -6899412650951359789)", SIGBUS, or SIGTRAP, on ~20% of runs.
+         *    Single-scheduler runs never failed, because main and the actor's
+         *    green thread cannot then overlap.
+         *
+         * If a future actor lowering ever reintroduces an RC-conditional
+         * reuse of the actor record, fix it in llvm_emit by keeping the
+         * unconditional in-place store — do NOT reintroduce a refcount lie
+         * here. There is no way to make it safe: the window has to publish a
+         * false rc to a word other threads are concurrently RMW'ing. */
 
         if (meta->dispatch_name_id) {
             /* Hot-reload actor: the dispatch fn is a bare 2-arg function
@@ -2858,8 +2902,6 @@ static void actor_green_thread(void *arg) {
             march_incrc(closure);
             fn((void *)(uintptr_t)a[2], actor, msg);
         }
-
-        a[0] = saved_rc;
 
         if (meta->dispatch_name_id) {
             march_dispatch_leave(meta->dispatch_name_id, tbl_version);
