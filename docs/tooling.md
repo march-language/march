@@ -599,7 +599,7 @@ forge cap run ./build/myapp                               # run it under a sandb
 forge cap run --allow-only IO.Console ./untrusted          # run untrusted code with a policy YOU choose
 ```
 
-`forge cap inspect` cross-checks capability markers the compiler emitted, capability-bearing runtime symbols that survived dead-stripping, and an embedded manifest when present; `--deny`/`--allow-only` are **fail-closed** (they fail on a binary whose coverage is not full, and foreign code requires `--allow-foreign`). `forge cap run` is the enforcing counterpart — it launches the binary under an OS sandbox before the program gets control. Both are covered in depth on the [Capability Audit](capability-audit.md) page and under [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement--sandboxing-the-compiled-binary); a binary can also sandbox *itself* at startup when compiled with `march --compile --cap-sandbox`.
+`forge cap inspect` cross-checks capability markers the compiler emitted, capability-bearing runtime symbols that survived dead-stripping, and an embedded manifest when present; `--deny`/`--allow-only` are **fail-closed** (they fail on a binary whose coverage is not full, and foreign code requires `--allow-foreign`). `forge cap run` is the enforcing counterpart — it launches the binary under an OS sandbox before the program gets control. Both are covered in depth on the [Capability Audit](capability-audit.md) page and under [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement-sandboxing-the-compiled-binary); a binary can also sandbox *itself* at startup when compiled with `march --compile --cap-sandbox`.
 
 ---
 

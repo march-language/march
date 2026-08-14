@@ -7,9 +7,9 @@ permalink: /docs/safety-by-construction/
 
 # Safety by Construction
 
-March's safety features aren't a grab-bag — each one checks a *different,
+March's safety features aren't a grab-bag: each one checks a *different,
 orthogonal axis* of correctness, and they compose on the same function. This page
-walks one realistic function through all four layers at once, then maps each
+walks one realistic function through all three layers at once, then maps each
 layer to the exact bug class it eliminates and when.
 
 The example: a **bounded file-chunk reader**. It must (1) only run in code allowed
@@ -28,6 +28,8 @@ mod ChunkReader do
   -- (2) typestate: a linear handle that tracks Open vs Closed
   always_linear type File(s) = File(Int)
 
+  -- `tag` declares a zero-arg type used purely as a state label — Open and
+  -- Closed carry no data, they just fill the `s` slot in `File(s)` above.
   tag Open
   tag Closed
 
@@ -55,15 +57,15 @@ mod ChunkReader do
 end
 ```
 
-Every line of `read_first` is checked against all four layers simultaneously.
+Every line of `read_first` is checked against all three layers simultaneously.
 Now watch what each layer *rejects*.
 
 ### What the capability layer rejects
 
-A module that never declares `needs IO.FileRead` cannot call `open` at all — the
+A module that never declares `needs IO.FileRead` cannot call `open` at all. The
 build fails and names the missing cap. And because `open` *takes* a
 `Cap(IO.FileRead)`, you cannot conjure one: it has to be threaded down from
-`main`'s root capability. There is no ambient "just read a file" — the
+`main`'s root capability. There is no ambient "just read a file": the
 permission is a value you must be handed.
 
 ### What the typestate layer rejects
@@ -76,9 +78,13 @@ let again = read_chunk(f0, 0, 4096)   -- ERROR: `f0` was already consumed
 
 `File` is `always_linear`, so each handle is used **exactly once**. Reusing
 `f0` after `read_chunk` consumed it is a compile error; so is dropping a handle
-without closing it. And reordering — calling `close` before `read_chunk`, or
-`read_chunk` on a `File(Closed)` — fails because the *state* is in the type:
-`read_chunk` demands `File(Open)`.
+without closing it. And reordering (calling `close` before `read_chunk`, or
+`read_chunk` on a `File(Closed)`) fails because the *state* is in the type:
+`read_chunk` demands `File(Open)`. `Open` and `Closed` are declared with
+`tag`, March's shorthand for a zero-argument type that exists only to be a
+label; see [Capabilities: `tag`]({{ site.baseurl }}/docs/capabilities/#tag--zero-arg-phantom-label-types)
+for the full typestate picture, including how `transitions` blocks declare
+which functions move a handle between states.
 
 ### What the refinement layer rejects
 
@@ -90,7 +96,7 @@ read_chunk(f0, -1, 8192)
 
 A negative offset and an over-large chunk are both rejected **at compile time**,
 with the failing predicate quoted back. The SMT solver proves these arguments
-can *never* satisfy the contract — no test run required.
+can *never* satisfy the contract, no test run required.
 
 ---
 
@@ -100,26 +106,26 @@ Each layer kills a distinct category of bug, and all of them fire at compile tim
 
 | Layer | Syntax | Bug class it kills | Caught when |
 |-------|--------|--------------------|-------------|
-| **Capability** | `needs IO.FileRead`, `Cap(IO.FileRead)` | Ambient authority — code touching a resource it was never granted (surprise file/network access) | Compile time |
+| **Capability** | `needs IO.FileRead`, `Cap(IO.FileRead)` | Ambient authority: code touching a resource it was never granted (surprise file/network access) | Compile time |
 | **Linearity / typestate** | `always_linear type` + `File(Open)` / `File(Closed)` states | Use-after-close, double-close, leaked (never-closed) handle, operations in the wrong order | Compile time |
-| **Refinement** | `{Int \| _ >= 0}`, `{Int \| _ > 0 && _ <= 4096}` | Out-of-range values — negative offsets, oversized/zero chunk sizes, bad indices | Compile time |
+| **Refinement** | `{Int \| _ >= 0}`, `{Int \| _ > 0 && _ <= 4096}` | Out-of-range values: negative offsets, oversized/zero chunk sizes, bad indices | Compile time |
 
 Note these never overlap. The capability layer doesn't care *which* offset you
 pass; the refinement layer doesn't care whether you have permission; the
-typestate layer doesn't care about values at all — only the order and count of
+typestate layer doesn't care about values at all, only the order and count of
 handle uses.
 
 ---
 
-## The punchline: four orthogonal axes
+## Three orthogonal axes
 
 That's the whole idea. Each layer answers a different question about the same
 call, and a real bug usually lives on exactly one of these axes:
 
-- **Capability** — *what resources* may this code touch?
-- **Linearity / typestate** — *how many times*, and *in what order*, is this
+- **Capability**: *what resources* may this code touch?
+- **Linearity / typestate**: *how many times*, and *in what order*, is this
   resource used?
-- **Refinement** — *with what values* is it called?
+- **Refinement**: *with what values* is it called?
 
 Because the axes are independent, you can add them incrementally and they never
 fight: a function can be capability-gated today, gain a refined argument
@@ -131,18 +137,18 @@ are the ones that satisfy every axis at once.
 
 ## Next Steps
 
-- [Capabilities]({{ site.baseurl }}/docs/capabilities/) — the `needs` / `Cap(X)`
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/): the `needs` / `Cap(X)`
   system and typestate handles in full.
-- [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) —
+- [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/):
   turning a declared capability set into an OS-level sandbox and a hot-deploy
   admission gate.
-- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — `linear` / `affine`
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/): `linear` / `affine`
   ownership and why `always_linear` handles can't be dropped.
-- [Session Types]({{ site.baseurl }}/docs/session-types/) — the linearity
+- [Session Types]({{ site.baseurl }}/docs/session-types/): the linearity
   discipline applied to two-party communication protocols.
-- [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) — value
+- [Refinement Types]({{ site.baseurl }}/docs/refinement-types/): value
   predicates, the SMT checker, and its definite-failure semantics.
-- [Memory Model]({{ site.baseurl }}/docs/memory-model/) — how the same ownership
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/): how the same ownership
   facts drive in-place reuse (FBIP) with no garbage collector.
-- [Type System]({{ site.baseurl }}/docs/types/) — the "which safety tool for
+- [Type System]({{ site.baseurl }}/docs/types/): the "which safety tool for
   which job" table that indexes all of these.

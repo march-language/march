@@ -11,6 +11,11 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared, striped reader-count lock (`set`/`set_ttl`/`put_new`/`incr`/`push_capped`/`drop` still take it exclusively). Concurrent reads of *distinct* keys now scale close to linearly with thread count; concurrent reads of the *same* key are still bounded by reference-count contention on that key's one shared value, an orthogonal cost the lock change doesn't touch.
+- **`vault_get`/`vault_size`/`vault_keys` no longer require `needs IO.Mut`.** A Vault table is in-memory, so a lookup carries no ambient authority — only naming a table (`vault_new`/`vault_whereis`, mints a handle from a string) and mutating one (`vault_set`/`vault_set_ttl`/`vault_drop`/`vault_update`/`vault_put_new`/`vault_incr`/`vault_push_capped`) still do. Source-compatible: an existing module that declared `needs IO.Mut` only to read now over-declares (harmless; the checked stdlib carried no such module). Accepted trade-off: a reader of shared mutable state is now non-deterministic without saying so in its `needs` — authority remains auditable at the boundary, since some module still had to name/write the table under a declared capability.
+
 ### Fixed
 
 - **`Regex` no longer has a denial-of-service on adversarial input.** The
@@ -295,6 +300,19 @@ git log is authoritative for exact commits.
   `test/dune`) now uses it to measure its own RSS from inside the process,
   replacing a Darwin-only `/usr/bin/time -l` check — the guard runs on both
   CI legs for the first time.
+
+### Documentation
+
+- **Capability enforcement assurance-tier table, and an OS-primitive-by-capability
+  reference, added to the Capabilities and Capability Enforcement pages.** A
+  quick-reference table (type system → `forge cap inspect` → `--cap-sandbox` →
+  `forge cap run` → `forge cap run --allow-only`) makes the assurance/effort
+  tradeoff legible at a glance, backed by a full capability-to-OS-primitive
+  mapping for both `--cap-sandbox` (seccomp-bpf/Seatbelt) and `forge cap run`
+  (bubblewrap/sandbox-exec). Also documents two platform asymmetries verified
+  against real running binaries: macOS's `IO.Network` gates `bind`/`connect`
+  but not `socket()` creation, and macOS's `IO.Process` gates `fork` but not
+  `exec` — both differ from Linux, which is stricter on each.
 
 ### Changed
 

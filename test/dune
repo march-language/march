@@ -232,6 +232,167 @@
  (deps    (file test_float_box_runner))
  (action  (run ./test_float_box_runner)))
 
+; ── Vault concurrent-reads unit test (named-registry plan, task 1) ────────
+; march_vault_* lives in march_extras.c, which needs the same full runtime
+; link set as test_float_box_runner above (march_extras.c pulls in
+; march_compress.c -> -lz, plus the rest of the runtime object graph).
+;
+; This one STAYS in `runtest` (unlike its distinct-key sibling below, which
+; moved to its own `vault-scale` alias): it is 20/20 stable and is the
+; catastrophic-regression guard (never worse than the original exclusive
+; mutex), not a scaling benchmark — see its own header comment for why its
+; bound is loose and what it does/doesn't measure.
+(rule
+ (targets test_vault_concurrency_runner)
+ (deps    test_vault_concurrency.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_vault_concurrency.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_vault_concurrency_runner))
+ (action  (run ./test_vault_concurrency_runner)))
+
+; ── Vault distinct-key read-scaling test (named-registry plan, task 1,
+; fix round 4) ────────────────────────────────────────────────────────────
+; Companion to test_vault_concurrency_runner above: that one shares a single
+; key across all reader threads and is dominated by march_incrc contention
+; on the shared value, not the table lock (see its comment). This one gives
+; each thread a distinct key, isolating what the striped table lock actually
+; governs, with a correspondingly tight scaling assertion (median-of-5,
+; four-thread median < 3x the solo median). Same link set as
+; test_vault_concurrency_runner (march_extras.c's full dependency graph).
+;
+; A SCALING ASSERTION IS A BENCHMARK, NOT A UNIT TEST, so — same precedent as
+; `types-check`/`grammar-check` above and `stdlib-march-properties` below —
+; this is its OWN alias (`vault-scale`), NOT folded into `runtest`. It
+; measures parallel wall-clock scaling across up to 4 real OS threads, so it
+; is sensitive to core availability: on a box running other CPU-bound
+; sessions concurrently it can and does flake even with the median-of-5 built
+; in — a whole-run contention window (all 5 samples elevated together, not
+; just one) isn't something a within-run median can filter, and this repo's
+; dev boxes regularly run several other sessions' compiles/benchmarks at once
+; (see "bench load contamination" in project memory). `runtest` runs on every
+; PR and must stay green regardless of host load, so this can't live there.
+;
+; ROUND 5: the test's own thread count and bound now adapt to
+; sysconf(_SC_NPROCESSORS_ONLN) at runtime — T = min(4, ncores), bound =
+; solo_median * (T * 0.9) — instead of assuming a fixed 4-thread shape. That
+; assumption is what broke this on hosted CI (2-4 core runners can't show
+; 4-thread speedup regardless of lock quality); see the test's own header
+; comment for the full reasoning and measured figures. Below 2 cores the
+; test skips outright rather than asserting anything.
+; Run it deliberately, ideally on an otherwise-quiet box:
+;   dune build @vault-scale
+; A failure here on a loaded box is expected and, by itself, is not evidence
+; of a regression — re-run on a quiet one before concluding anything.
+(rule
+ (targets test_vault_distinct_keys_scale_runner)
+ (deps    test_vault_distinct_keys_scale.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_vault_distinct_keys_scale.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   vault-scale)
+ (deps    (file test_vault_distinct_keys_scale_runner))
+ (action  (run ./test_vault_distinct_keys_scale_runner)))
+
+; ── Vault reader/writer correctness hammer (named-registry plan, task 1,
+; fix round 5, I-3) ────────────────────────────────────────────────────────
+; 3 reader threads loop march_vault_get() against 1 writer thread looping
+; march_vault_set()/march_vault_drop(), all over the same small key set —
+; the lock's only novel path, and untested until now. NO TIMING ASSERTION
+; (unlike the vault-scale rule above), so — unlike that one — this belongs
+; in `runtest`: the oracles are the runtime's own safety checks (RC
+; underflow aborts, a UAF crashes), which don't depend on host load. Same
+; link set as the other two vault tests (march_extras.c's full dependency
+; graph).
+(rule
+ (targets test_vault_hammer_runner)
+ (deps    test_vault_hammer.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_vault_hammer.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_vault_hammer_runner))
+ (action  (run ./test_vault_hammer_runner)))
+
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
 ; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the
@@ -613,7 +774,7 @@
 (test
  (name test_caps)
  (modules test_caps)
- (libraries march_caps alcotest))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (test
  (name test_refinecheck)
