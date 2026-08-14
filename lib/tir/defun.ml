@@ -93,6 +93,8 @@ let builtin_names : StringSet.t =
       (* Monitor/supervision builtins *)
       "demonitor"; "monitor"; "mailbox_size"; "sched_stat"; "actor_set_mailbox_limit";
       "run_until_idle"; "register_resource"; "get_cap";
+      (* Named registry (Task 4) *)
+      "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "get_actor_field";
       (* Comparison builtins used by derived Ord instances *)

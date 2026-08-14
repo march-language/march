@@ -2711,6 +2711,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       "%s = call i64 @march_vault_put_new(ptr %s, ptr %s, ptr %s, i64 %s)" r vt vk vv vttl);
     ("i64", r)
 
+  (* ── actor_register: March-level arg order is (pid, name) — matching
+     monitor/kill — but the C entry point is march_actor_register(name,
+     actor): NAME FIRST.  The general EApp path below passes args in TIR
+     order unchanged, which would swap the two pointers at the C ABI
+     boundary (the runtime would read the Pid as the name string and vice
+     versa). Swap explicitly here, same shape as the vault_set arm above. *)
+  | Tir.EApp (f, [pid; name])
+    when f.Tir.v_name = "actor_register" ->
+    let vp = emit_atom_as ctx "ptr" pid in
+    let vn = emit_atom_as ctx "ptr" name in
+    let r  = fresh ctx "ar" in
+    emit ctx (Printf.sprintf
+      "%s = call i64 @march_actor_register(ptr %s, ptr %s)" r vn vp);
+    ("i64", r)
+
   | Tir.EApp (f, [tbl; key; value; maxn])
     when f.Tir.v_name = "vault_push_capped" ->
     let vt = emit_atom_as ctx "ptr" tbl in
