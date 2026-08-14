@@ -967,8 +967,37 @@ let emit_module ~emit_expr
 
   let out = Buffer.create 8192 in
   emit_preamble ~target out;
+  (* An extern may bind a C symbol the preamble ALREADY declared (e.g.
+     `fn live_allocs(): Int = "march_live_allocs"`, which test/native's FFI
+     fixtures use as a convenient real runtime symbol). Emitting our own
+     `declare` for it too is an "invalid redefinition of function" hard error
+     from the LLVM parser, so the whole module fails to compile. Skip those.
+     The set is derived from the text the preamble JUST emitted rather than
+     from Llvm_builtins' tables, so it is automatically correct for whatever
+     this target/repl configuration actually declared — a table-driven guess
+     would wrongly skip a native-only symbol when emitting WASM and drop a
+     declare that really was needed. Signature-wise the preamble's line wins,
+     which is what a C header would do; call sites are typed at the call in
+     opaque-pointer LLVM, so the extern's own signature is not load-bearing
+     here. *)
+  let preamble_declared : (string, unit) Hashtbl.t = Hashtbl.create 512 in
+  String.split_on_char '\n' (Buffer.contents out)
+  |> List.iter (fun line ->
+      let line = String.trim line in
+      if String.length line > 8 && String.sub line 0 8 = "declare " then
+        match String.index_opt line '@' with
+        | None -> ()
+        | Some at ->
+            let rest = String.sub line (at + 1) (String.length line - at - 1) in
+            let stop =
+              match String.index_opt rest '(' with
+              | Some i -> i
+              | None -> String.length rest in
+            let sym = String.trim (String.sub rest 0 stop) in
+            if sym <> "" then Hashtbl.replace preamble_declared sym ());
   (* Emit user-defined extern function declarations *)
   List.iter (fun (ed : Tir.extern_decl) ->
+      if not (Hashtbl.mem preamble_declared ed.ed_c_name) then begin
       (* A `raises` binding takes a hidden march_env* first param and returns the
          bare Ok payload (T of Result(T,E)); the call site wraps it into Ok/Err. *)
       let ret_llty =
@@ -980,6 +1009,7 @@ let emit_module ~emit_expr
           Printf.sprintf "%s %%%d" ty i) param_lltys) in
       Buffer.add_string out
         (Printf.sprintf "declare %s @%s(%s)\n" ret_llty ed.ed_c_name params_str)
+      end
     ) m.Tir.tm_externs;
   (* Blocking-dispatch helpers, if any extern is `blocking`. *)
   if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_blocking) m.Tir.tm_externs then
