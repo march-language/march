@@ -3422,6 +3422,27 @@ let test_actor_handler_cap_needs_ok () =
   end|} in
   Alcotest.(check bool) "actor handler cap with needs: ok" false (has_errors ctx)
 
+(* A `main` that calls several undeclared-capability builtins used to produce
+   one missing-`needs` error PER offending call site — on top of the grant
+   error, which already aggregates every reached capability into one
+   replacement signature. Pin that the body-scan check (Check 1b) now
+   aggregates too: one diagnostic, every missing capability named, one fix
+   that inserts all the `needs` lines at once. *)
+let test_missing_needs_reported_once_per_module () =
+  let ctx = typecheck {|mod ManyCaps do
+    fn main(cap : Cap(IO)) : () do
+      println("a")
+      match file_write("/tmp/many", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check int) "one aggregated missing-needs error, not one per builtin"
+    1 (count_errors_with ctx "does not declare");
+  Alcotest.(check bool) "every missing capability is named"
+    true (has_error_with ctx "IO.Console" && has_error_with ctx "IO.FileWrite")
+
 let test_actor_handler_cap_missing_needs_error () =
   (* An actor handler with a Cap parameter, but no needs declaration, should error. *)
   let ctx = typecheck {|mod Test do
@@ -14283,6 +14304,7 @@ let compiler_suites =
           Alcotest.test_case "srec multi-turn typechecks"      `Quick test_srec_multi_turn_typechecks;
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
+          Alcotest.test_case "missing needs reported once per module" `Quick test_missing_needs_reported_once_per_module;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;

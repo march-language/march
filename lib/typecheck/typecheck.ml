@@ -9553,30 +9553,63 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      builtin call in a module body.  A stdlib-MEDIATED call (`File.read`
      rather than `file_read`) is invisible here and is caught by
      --cap-strict's ceiling over emitted TIR instead.  Check 1c below
-     (extern -> IO.Foreign) is deliberately NOT flipped. *)
-  List.iter (fun (cap_path, sp) ->
-    let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
-    let self_declared = match List.assoc_opt cap_path env.proof_caps with
-      | Some dm -> dm = mod_name.txt
-      | None -> false
-    in
-    if not covered && not self_declared then
-      (* [~code] tags this diagnostic with the exact missing capability so
-         that a presentation-layer consumer (bin/main.ml) can recognise when
-         [Cap_infer]'s call-site hint at the SAME span is reporting the same
-         fact, without either pass having to know about the other — see
-         specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
-      Err.error_with_fix env.errors ~span:sp ~code:("cap_needs:" ^ cap_path)
-        ~fix:(Err.FInsert {
-          after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
-          text = "  needs " ^ cap_path })
-        (render_parts [
-          MPText "function body calls a builtin that requires "; cap cap_path;
-          MPText " but "; MPCode mod_name.txt; MPText " does not declare ";
-          MPCode ("needs " ^ cap_path); MPText ".";
-          MPBreak; MPText "hint: add "; MPCode ("needs " ^ cap_path);
-          MPText " to the module body." ])
-  ) body_cap_uses;
+     (extern -> IO.Foreign) is deliberately NOT flipped.
+
+     Reported ONCE per module, not once per offending call site: a `main`
+     that touches four undeclared capabilities used to produce four separate
+     "does not declare" errors on top of the grant error, which already
+     aggregates all four into one replacement signature. Accumulate every
+     (cap, span) that fails the check across the whole walk, then emit a
+     single diagnostic listing all of them with one multi-line insert fix —
+     `forge fix` still applies it in one pass since it is one [FInsert]. *)
+  let missing_needs =
+    List.filter_map (fun (cap_path, sp) ->
+      let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+      let self_declared = match List.assoc_opt cap_path env.proof_caps with
+        | Some dm -> dm = mod_name.txt
+        | None -> false
+      in
+      if not covered && not self_declared then Some (cap_path, sp) else None
+    ) body_cap_uses
+  in
+  (match missing_needs with
+   | [] -> ()
+   | first :: rest ->
+     (* [body_cap_uses] is not in source order (it is built by a fold that
+        prepends), so pick the earliest span explicitly rather than assuming
+        [first] is first in the file — the diagnostic must point at real
+        code, and "first accumulated" is not "first in the module". *)
+     let first_span =
+       List.fold_left (fun best (_, sp) ->
+         let open Ast in
+         if (sp.start_line, sp.start_col) < (best.start_line, best.start_col)
+         then sp else best
+       ) (snd first) rest
+     in
+     let caps = List.sort_uniq String.compare (List.map fst missing_needs) in
+     let show =
+       String.concat ", " (List.map (fun c -> Printf.sprintf "`Cap(%s)`" c) caps)
+     in
+     let needs_list =
+       String.concat " and " (List.map (fun c -> "`needs " ^ c ^ "`") caps)
+     in
+     let lines = String.concat "\n" (List.map (fun c -> "  needs " ^ c) caps) in
+     (* [~code] tags this diagnostic with the exact missing capability set so
+        that a presentation-layer consumer (bin/main.ml) can recognise when
+        [Cap_infer]'s call-site hint at the SAME span is reporting the same
+        fact, without either pass having to know about the other — see
+        specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
+     Err.error_with_fix env.errors ~span:first_span
+       ~code:("cap_needs:" ^ String.concat "," caps)
+       ~fix:(Err.FInsert {
+         after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
+         text = lines })
+       (Printf.sprintf
+          "function bodies in `%s` call builtins that require %s, but `%s` \
+           does not declare %s.\n\
+           hint: add %s to the module body."
+          mod_name.txt show mod_name.txt needs_list needs_list))
+  ;
   (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in

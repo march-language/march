@@ -230,14 +230,24 @@ signature, is now the same severity:
 
 ```
 $ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
--- ERROR -- function body calls a builtin that requires `Cap(IO.FileRead)` but `Reader` does not declare `needs IO.FileRead`.
-help: add `needs IO.FileRead` to the module body.
+-- ERROR -- function bodies in `Reader` call builtins that require `Cap(IO.FileRead)`, but `Reader` does not declare `needs IO.FileRead`.
+hint: add `needs IO.FileRead` to the module body.
 $ echo $?
 1
 ```
 
 The error carries a machine-applicable fix, so `forge fix` will insert the
-`needs` line for you.
+`needs` line for you. Every offending capability in the module is collapsed
+into **one** diagnostic, not one per call site: a `main` that touches four
+undeclared capabilities gets a single error naming all four, with one fix
+that inserts all four `needs` lines at once —
+
+```
+-- ERROR -- function bodies in `Main` call builtins that require `Cap(IO.Console)`, `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`, but `Main` does not declare `needs IO.Console` and `needs IO.FileWrite` and `needs IO.Random` and `needs Time.Clock`.
+hint: add `needs IO.Console` and `needs IO.FileWrite` and `needs IO.Random` and `needs Time.Clock` to the module body.
+```
+
+— rather than four separate errors, each with its own single-line fix.
 
 #### What this does and does not guarantee
 
@@ -301,8 +311,8 @@ This compiles as-is. Delete `needs IO.FileWrite` and it fails. Look at
 call graph and naming the whole path:
 
 ```
-function body calls a builtin that requires `Cap(IO.FileWrite)` but `Logger`
-does not declare `needs IO.FileWrite`.
+function bodies in `Logger` call builtins that require `Cap(IO.FileWrite)`, but
+`Logger` does not declare `needs IO.FileWrite`.
 ...
 reached from `main`: main → log_error → log
 ```
