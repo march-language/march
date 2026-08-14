@@ -68,6 +68,9 @@ void march_frame_reset(void);
 /* Time builtins. */
 double  march_unix_time(void);
 
+/* Process self-inspection: peak RSS in bytes, both platforms. */
+int64_t march_peak_rss_bytes(void);
+
 /* TypedArray builtins. */
 void   *march_typed_array_from_list(void *list);
 void   *march_typed_array_to_list(void *arr);

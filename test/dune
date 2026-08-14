@@ -4532,10 +4532,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; simd_bounds_panic, which is compiled-only by design). The value is
 ; arithmetic: 2,000,000 calls x sum of splat(1.0) over 4 lanes = 8000000.
 ;
-; /usr/bin/time -l is macOS-specific (Linux's coreutils `time` spells it `-v`
-; and reports kbytes). Off Darwin the binary still runs, and checks (a) and (b)
-; still apply -- only the RSS assertion (c) skips. The leak is
-; platform-independent; only the measurement instrument is not.
+; The probe measures its own peak RSS via the `peak_rss_bytes` builtin, which
+; normalises getrusage's platform-dependent unit (bytes on macOS, kilobytes on
+; Linux) to bytes at the C boundary -- see runtime/march_runtime.c. That makes
+; this guard genuinely portable: no `/usr/bin/time`, no `uname` gate, so it
+; now runs on the Linux CI leg as well as Darwin.
 (rule
  (targets simd_leak_probe)
  (deps (file %{exe:../bin/main.exe})
@@ -4548,32 +4549,57 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; Check (a): nonzero exit fails this rule (dune's own `system` semantics -- cf.
 ; simd_bounds_panic, which needs an explicit with-accepted-exit-codes to allow
-; its nonzero exit). Stdout and the time(1) report land in separate files.
+; its nonzero exit). Stdout (the diffable answer) and stderr (the RSS figure
+; the probe prints about itself) land in separate files.
 (rule
- (targets simd_leak_probe.out simd_leak_probe.time)
+ (targets simd_leak_probe.out simd_leak_probe.rss)
  (deps simd_leak_probe)
  (action
   (with-stdout-to simd_leak_probe.out
-   (with-stderr-to simd_leak_probe.time
-    (system
-     "if [ \"$(uname -s)\" = Darwin ]; then exec /usr/bin/time -l ./simd_leak_probe; else exec ./simd_leak_probe; fi")))))
+   (with-stderr-to simd_leak_probe.rss
+    (run ./simd_leak_probe)))))
 
 ; Check (b): the probe must actually finish and print the right answer.
 (rule
  (alias runtest)
  (action (diff native/simd_leak_probe.expected simd_leak_probe.out)))
 
-; Check (c): the leak assertion proper, read from the captured stderr file.
+; Check (c): the leak assertion proper, read from the probe's own stderr line.
 (rule
  (alias runtest)
- (deps simd_leak_probe.time)
+ (deps simd_leak_probe.rss)
  (action
   (run bash -c
-   "case \"$(uname -s)\" in Darwin) ;; *) echo 'simd_leak_probe: max-RSS assertion skipped (needs macOS /usr/bin/time -l); the exit-status and stdout checks still ran' >&2; exit 0 ;; esac; \
-    rss=$(awk '/maximum resident set size/ {print $1}' simd_leak_probe.time); \
-    test -n \"$rss\" || { echo 'could not read maximum resident set size from simd_leak_probe.time' >&2; cat simd_leak_probe.time >&2; exit 1; }; \
+   "rss=$(cat simd_leak_probe.rss); \
+    test -n \"$rss\" || { echo 'could not read peak RSS from simd_leak_probe.rss' >&2; exit 1; }; \
     test \"$rss\" -lt 33554432 || { echo \"simd_leak_probe leaked: max RSS ${rss} B >= 32 MB. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- pre-fix this measured ~67 MB (32 B/call), post-fix ~2.7 MB. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that Llvm_toplevel.native_vec_param_idxs is still the single source of truth for that decision.\" >&2; exit 1; }; \
     echo \"simd_leak_probe max RSS = ${rss} B\"")))
+
+; ── peak_rss_bytes builtin: unit test ──────────────────────────────────
+; Bytes-on-both-platforms sanity check for the builtin the leak guard above
+; relies on. Compile and diff against the interpreter's own output: only
+; ORDER-STABLE facts and a coarse magnitude band are asserted (never raw byte
+; counts, which vary per run/platform), so interpreter/compiled parity holds
+; even though the interpreter's figure (Gc.quick_stat-derived, see eval.ml)
+; and the compiled figure (real getrusage) measure different things.
+(rule
+ (targets peak_rss)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/peak_rss.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o peak_rss
+       native/peak_rss.march)))
+
+(rule
+ (targets peak_rss.out)
+ (deps peak_rss)
+ (action (with-stdout-to peak_rss.out (run ./peak_rss))))
+
+(rule
+ (alias runtest)
+ (action (diff native/peak_rss.expected peak_rss.out)))
 
 ; (2) simd_vector_escape_arg -- the release must NOT happen. `wrap` is
 ; structurally (not tail) recursive, so it gets NO native slot, its `v`

@@ -2346,6 +2346,13 @@ let builtin_bindings : (string * scheme) list =
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
+    (* peak_rss_bytes: process self-inspection (peak resident set size, in
+       bytes, on both platforms). Deliberately NOT in the capability table
+       below — it performs no IO and observes nothing outside this process,
+       so unlike unix_time (gated to IO.Clock right next to this entry) it
+       needs no capability grant. Don't "fix" that by copying unix_time's
+       cap-table entry. *)
+    ("peak_rss_bytes",  Mono (TArrow (t_unit,  t_int)));
     ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
     ("uuid_v7_at",      Mono (TArrow (t_int,   t_string)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));

@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -5859,6 +5860,20 @@ double march_unix_time(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Peak resident set size of this process, in BYTES on every platform.
+ * getrusage reports ru_maxrss in BYTES on macOS and KILOBYTES on Linux;
+ * normalising here means no caller can repeat the 1024x error that
+ * bench/run_string_bench.sh documents. */
+int64_t march_peak_rss_bytes(void) {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+#if defined(__APPLE__)
+    return (int64_t)ru.ru_maxrss;
+#else
+    return (int64_t)ru.ru_maxrss * 1024;
+#endif
 }
 
 /* ── TypedArray builtins ─────────────────────────────────────────────── */

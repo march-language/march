@@ -269,6 +269,16 @@ git log is authoritative for exact commits.
   reachable-from-`main` function that uses it. Enforced identically by
   `march --check`, the interpreter, and the compiler. (Sandbox ladder R1
   stages A+B; per-function grants are future work.)
+- **`peak_rss_bytes` builtin** — process self-inspection returning peak
+  resident set size in bytes on both macOS and Linux (`getrusage`'s
+  `ru_maxrss` is bytes on macOS, kilobytes on Linux; normalized to bytes at
+  the C boundary). Ambient, no capability grant required — it performs no
+  IO and observes nothing outside the process. `System.mem_peak_bytes()` is
+  the stdlib wrapper (named to avoid shadowing the builtin it calls). The
+  SIMD-vector-temp-box leak guard (`test/native/simd_leak_probe.march`,
+  `test/dune`) now uses it to measure its own RSS from inside the process,
+  replacing a Darwin-only `/usr/bin/time -l` check — the guard runs on both
+  CI legs for the first time.
 
 ### Changed
 

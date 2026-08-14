@@ -129,6 +129,8 @@ let builtin_names : StringSet.t =
       "string_chars"; "string_from_chars";
       (* Unix/time builtins *)
       "unix_time";
+      (* Process self-inspection builtins *)
+      "peak_rss_bytes";
       (* Comparison / hash builtins *)
       "compare"; "compare_int"; "compare_float"; "compare_string";
       (* Record builtins *)

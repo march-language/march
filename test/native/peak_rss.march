@@ -1,0 +1,26 @@
+-- Unit test for the `peak_rss_bytes` builtin: portable (bytes on both macOS
+-- and Linux -- see runtime/march_runtime.c's normalisation of getrusage's
+-- platform-dependent ru_maxrss unit), ambient (no capability grant needed --
+-- see typecheck.ml, where it is deliberately absent from the capability
+-- table next to the gated `unix_time`).
+--
+-- Only ORDER-STABLE facts are printed, never raw byte counts: RSS varies by
+-- run, allocator, and platform. The two bounds on the delta are the actual
+-- unit assertion -- a Linux kilobytes-vs-bytes mistake would make the delta
+-- ~1024x too small and fail the lower bound; mistakenly treating macOS bytes
+-- as kilobytes would fail the upper bound.
+mod PeakRss do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) do
+    let before = peak_rss_bytes()
+    let a = NativeArray.make_u8(64000000, 7)
+    let after = peak_rss_bytes()
+    println(before > 0)                          -- true
+    println(after >= before)                      -- true
+    -- 64MB allocated: the delta must be in the tens of MB, NOT ~62 (KB misread)
+    -- nor ~67e9
+    println(after - before > 32000000)            -- true
+    println(after - before < 640000000)           -- true
+    println(NativeArray.get_u8(a, 0))              -- 7 (keeps `a` live past the measurement)
+  end
+end

@@ -98,14 +98,21 @@ harness — swap its `go` for a non-tail-recursive callee and the RSS assertion
 Two things about the `simd_leak_probe` RSS assertion in `test/dune` are worth
 knowing by whoever generalizes this fix, because both weaken it:
 
-- **The RSS assertion is Darwin-only.** It reads max RSS from
-  `/usr/bin/time -l`, which is a macOS spelling, so `test/dune` gates it on
-  `uname -s = Darwin` and prints a skip notice elsewhere. On Linux CI the
-  compile, the exit status, and the stdout diff still run, but the leak
-  assertion itself does not — meaning the *only* automated place the leak is
-  actually measured is a developer macOS box (and macOS CI, where present).
-  A Linux-portable reading (`/usr/bin/time -v`'s "Maximum resident set size",
-  or `getrusage`/`/proc/self/status` from inside the probe) would close this.
+- **FIXED (2026-08-13): the RSS assertion was Darwin-only.** It used to read
+  max RSS from `/usr/bin/time -l` (a macOS spelling), gated on
+  `uname -s = Darwin` in `test/dune`, with the leak assertion silently
+  skipped elsewhere — the *only* automated place the leak was actually
+  measured was a developer macOS box (and macOS CI, where present). This is
+  now closed: the probe measures its own peak RSS from inside the process via
+  the new `peak_rss_bytes` builtin (`runtime/march_runtime.c`'s
+  `march_peak_rss_bytes`, which normalizes `getrusage`'s `ru_maxrss` — bytes
+  on macOS, kilobytes on Linux — to bytes at the C boundary) and prints it to
+  stderr; the three `test/dune` rules no longer branch on `uname` or shell
+  out to `/usr/bin/time` at all. The guard now runs unconditionally on both
+  CI legs — see `specs/todos/2026-08-13-simd-followups/task-3-report.md` for
+  the falsifiability re-demonstration (sabotage → RED with the leaked figure,
+  restore → GREEN) and which platforms were actually exercised, recorded in
+  `.superpowers/sdd/2026-08-13-simd-followups/task-3-report.md`.
 - **The threshold shipped as an absolute bound, not the specified delta.**
   The closeouts spec asked for "max RSS delta vs a scalar control < 5 MB";
   what landed is an absolute `< 32 MB` with no control run. That deviation is

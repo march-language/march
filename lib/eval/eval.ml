@@ -5723,6 +5723,20 @@ let base_env : env =
         | [VUnit] -> VFloat (Unix.gettimeofday ())
         | _ -> eval_error "unix_time: takes no arguments"))
 
+    (* ---- peak_rss_bytes(): process self-inspection ----
+       OCaml has no getrusage binding, so the interpreter approximates with
+       Gc.quick_stat()'s top_heap_words converted to bytes. This measures the
+       OCaml *interpreter's* heap, not the compiled process's resident set —
+       the two are not comparable in magnitude or units. Only ORDERING
+       (a later call >= an earlier one, modulo GC compaction) is guaranteed
+       to agree with the compiled `march_peak_rss_bytes` path; do not expect
+       or assert equal raw numbers between interpreted and compiled runs. *)
+  ; ("peak_rss_bytes", VBuiltin ("peak_rss_bytes", function
+        | [] | [VUnit] ->
+          let stat = Gc.quick_stat () in
+          VInt (stat.Gc.top_heap_words * (Sys.word_size / 8))
+        | _ -> eval_error "peak_rss_bytes: takes no arguments"))
+
     (* ---- TCP socket builtins ---- *)
   ; ("tcp_connect", VBuiltin ("tcp_connect", function
         | [VString host; VInt port] ->
