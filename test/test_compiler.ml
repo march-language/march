@@ -10319,6 +10319,27 @@ let test_grant_violation_through_helper () =
   Alcotest.(check bool) "helper-reached IO.FileWrite is still a grant error"
     true (has_error_with ctx "granted `Cap(IO.Console)`")
 
+let test_grant_violation_names_the_user_module () =
+  (* A grant violation reached through the stdlib used to name only the
+     stdlib leaf (the builtin holding the capability directly), leaving the
+     user to hunt for which of their OWN functions called it. It should
+     instead print the chain from `main` through the user's own frames,
+     same as the body-scan error used to. *)
+  let ctx = typecheck {|mod Attributed do
+    needs IO
+    fn helper(p : String) : String do
+      match file_read(p) do
+        Ok(s) -> s
+        Err(_) -> ""
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      println(helper("/etc/passwd"))
+    end
+  end|} in
+  Alcotest.(check bool) "the user's own function is named in the chain"
+    true (has_error_with ctx "helper")
+
 let test_grant_full_io_accepts_everything () =
   (* `needs IO` is Check 1's requirement for the Cap(IO) SIGNATURE — the
      established entry-point convention (test/native/main_cap_io.march). *)
@@ -14830,6 +14851,7 @@ let compiler_suites =
           Alcotest.test_case "narrow grant covers console"        `Quick test_grant_narrow_covers_console;
           Alcotest.test_case "narrow grant rejects filewrite"     `Quick test_grant_narrow_rejects_filewrite;
           Alcotest.test_case "violation through a helper"         `Quick test_grant_violation_through_helper;
+          Alcotest.test_case "grant violation names the user module" `Quick test_grant_violation_names_the_user_module;
           Alcotest.test_case "Cap(IO) grants everything"          `Quick test_grant_full_io_accepts_everything;
           Alcotest.test_case "parameterless main is granted nothing" `Quick test_grant_absent_is_ambient;
           Alcotest.test_case "narrow grant refuses IO.Foreign"    `Quick test_grant_narrow_refuses_foreign;

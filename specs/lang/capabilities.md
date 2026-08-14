@@ -443,11 +443,13 @@ end
 
 `Cap(IO.Console)` here is a machine-checked claim: this program (every helper,
 every stdlib call, every dependency `main` reaches) touches nothing beyond the
-console. Add one `file_write` anywhere in that closure and the build fails:
+console. Add a `save` helper that calls `file_write` anywhere in that closure
+and the build fails, naming the chain from `main` down to the frame that
+actually holds the capability:
 
 ```
 `main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
-(reached in `Report.save`). The grant is a ceiling on the WHOLE program —
+(reached from `main`: save). The grant is a ceiling on the WHOLE program —
 declaring `needs IO.FileWrite` does not raise it.
 help: widen the grant (e.g. `Cap(IO)`), or remove the use.
 ```

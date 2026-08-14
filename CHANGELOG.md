@@ -39,6 +39,8 @@ git log is authoritative for exact commits.
   `march --check` still does not run the ceiling (it does not lower to TIR, which the check
   currently requires); a module whose `needs` manifest is falsified only by a stdlib-mediated
   call (`File.read` rather than `file_read`) is still caught only by `march --compile`.
+- A grant violation now names the chain of the user's own functions that reaches the
+  capability, instead of only the stdlib function that holds it.
 
 ### Fixed
 

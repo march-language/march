@@ -13174,6 +13174,51 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
    - The check runs at the end of [check_module_core] only — never on the
      REPL's [check_module_with_env] path, which has no entry point to be
      granted from (the same exemption R2 gives it). *)
+(* The chain of references from [from] to a function that directly holds
+   [cap]. Same BFS and same two-way name resolution as [check_main_grant]'s
+   [reachable_from_main] below, but keeps the path rather than only the
+   reachable set — "who reaches what through whom" is exactly the evidence
+   the ceiling's attribution pass produces on the TIR side, and this is the
+   typecheck-side equivalent, available on BOTH the interpreter and compile
+   paths. Used by [check_main_grant] to attribute a grant violation to the
+   user's own call chain instead of only the stdlib function that directly
+   holds the capability. *)
+let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
+  : string list option =
+  let holds k =
+    match Hashtbl.find_opt env.own_cap_closures k with
+    | Some own -> List.mem cap own
+    | None -> false
+  in
+  let visited = Hashtbl.create 64 in
+  let queue = Queue.create () in
+  Queue.push (from, []) queue;
+  let result = ref None in
+  while !result = None && not (Queue.is_empty queue) do
+    let k, path = Queue.pop queue in
+    if not (Hashtbl.mem visited k) then begin
+      Hashtbl.replace visited k ();
+      let path = if k = from then path else path @ [ k ] in
+      if k <> from && holds k then result := Some path
+      else
+        let prefix =
+          match String.rindex_opt k '.' with
+          | Some i -> String.sub k 0 (i + 1)
+          | None -> ""
+        in
+        List.iter
+          (fun r ->
+             let known n =
+               Hashtbl.mem env.own_cap_closures n || Hashtbl.mem env.fn_refs n
+             in
+             if known r then Queue.push (r, path) queue;
+             let q = prefix ^ r in
+             if q <> r && known q then Queue.push (q, path) queue)
+          (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
+    end
+  done;
+  !result
+
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
@@ -13311,62 +13356,6 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
       | Some caps -> caps
       | None -> []
     in
-    (* One function that holds [c] directly AND is reachable from main, for
-       the diagnostic.  Restricting to the reachable set matters: the first
-       version picked any holder from [own_cap_closures] — the whole env,
-       linked stdlib included — and named `Logger.with_span` for an IO.Clock
-       reached through `Random.int`, sending the user to a function their
-       program never calls.
-
-       The BFS resolves a reference the same two ways the closure fixpoint's
-       resolver tries first (the name as-is, then qualified by the refering
-       key's module prefix); the remaining resolver shapes are rare enough
-       that a miss only shrinks the candidate set — the fallback below then
-       names an arbitrary holder rather than dropping the hint, which is
-       still where the capability lives even if reachability was not
-       re-proven here. *)
-    let reachable_from_main =
-      let visited = Hashtbl.create 64 in
-      let queue = Queue.create () in
-      Queue.push "main" queue;
-      while not (Queue.is_empty queue) do
-        let k = Queue.pop queue in
-        if not (Hashtbl.mem visited k) then begin
-          Hashtbl.replace visited k ();
-          let prefix =
-            match String.rindex_opt k '.' with
-            | Some i -> String.sub k 0 (i + 1)
-            | None -> ""
-          in
-          List.iter
-            (fun r ->
-               if Hashtbl.mem env.own_cap_closures r
-                  || Hashtbl.mem env.fn_refs r
-               then Queue.push r queue;
-               let q = prefix ^ r in
-               if q <> r
-                  && (Hashtbl.mem env.own_cap_closures q
-                      || Hashtbl.mem env.fn_refs q)
-               then Queue.push q queue)
-            (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
-        end
-      done;
-      visited
-    in
-    let reached_in c =
-      let holders =
-        Hashtbl.fold
-          (fun k own acc -> if List.mem c own then k :: acc else acc)
-          env.own_cap_closures []
-      in
-      let non_main = List.filter (fun k -> k <> "main") holders in
-      match List.filter (Hashtbl.mem reachable_from_main) non_main with
-      | k :: _ -> Some k
-      | [] ->
-        (match non_main with
-         | k :: _ -> Some k
-         | [] -> (match holders with k :: _ -> Some k | [] -> None))
-    in
     let covered c = List.exists (fun g -> cap_subsumes g c) grants in
     let show_grant =
       String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
@@ -13404,9 +13393,17 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  `needs %s` does not raise it.\n\
                  help: widen the grant (e.g. `Cap(IO)`), or remove the use."
                 show_grant c
-                (match reached_in c with
-                 | Some f -> Printf.sprintf " (reached in `%s`)" f
-                 | None -> "")
+                (match cap_reach_chain env ~from:"main" ~cap:c with
+                 | Some (_ :: _ as chain) ->
+                   let shown =
+                     if List.length chain > 4 then
+                       "… -> "
+                       ^ String.concat " -> "
+                           (List.filteri (fun i _ -> i >= List.length chain - 3) chain)
+                     else String.concat " -> " chain
+                   in
+                   Printf.sprintf " (reached from `main`: %s)" shown
+                 | _ -> "")
                 c))
       (List.sort_uniq String.compare closure)
 
@@ -13425,60 +13422,12 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
    per-module ceiling, and [check_main_grant] — none of them require passing
    a capability value to satisfy a check.
 
-   [cap_reach_chain] below outlived the check that was its only caller. It is
-   kept for Task 8, which will use it to attribute a whole-program grant
-   violation (from [check_main_grant]) to the user's call chain — the same
-   "who reaches what through whom" evidence this used to produce for a
-   per-function violation, now needed for the program-level one instead. See
-   its own `let _ = cap_reach_chain` a few lines below its definition. *)
-
-(* The chain of references from [from] to a function that directly holds
-   [cap]. Same BFS and same two-way name resolution as [check_main_grant]'s
-   [reachable_from_main], but keeps the path rather than only the reachable
-   set — "who reaches what through whom" is exactly the evidence the
-   ceiling's attribution pass produces on the TIR side, and this is the
-   typecheck-side equivalent, available on BOTH the interpreter and compile
-   paths. Currently unused (see the banner above); retained for Task 8. *)
-let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
-  : string list option =
-  let holds k =
-    match Hashtbl.find_opt env.own_cap_closures k with
-    | Some own -> List.mem cap own
-    | None -> false
-  in
-  let visited = Hashtbl.create 64 in
-  let queue = Queue.create () in
-  Queue.push (from, []) queue;
-  let result = ref None in
-  while !result = None && not (Queue.is_empty queue) do
-    let k, path = Queue.pop queue in
-    if not (Hashtbl.mem visited k) then begin
-      Hashtbl.replace visited k ();
-      let path = if k = from then path else path @ [ k ] in
-      if k <> from && holds k then result := Some path
-      else
-        let prefix =
-          match String.rindex_opt k '.' with
-          | Some i -> String.sub k 0 (i + 1)
-          | None -> ""
-        in
-        List.iter
-          (fun r ->
-             let known n =
-               Hashtbl.mem env.own_cap_closures n || Hashtbl.mem env.fn_refs n
-             in
-             if known r then Queue.push (r, path) queue;
-             let q = prefix ^ r in
-             if q <> r && known q then Queue.push (q, path) queue)
-          (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
-    end
-  done;
-  !result
-
-(* Kept unused after R1 stage C's removal (2026-08-13, the [check_fn_grants]
-   that used to call this was deleted) — Task 8 needs this to attribute a
-   grant violation to the user's call chain. Do not delete. *)
-let _ = cap_reach_chain
+   [cap_reach_chain], which outlived the check that was its only caller, is
+   now defined above [check_main_grant] (it moved from here in Task 8) and
+   used by it to attribute a whole-program grant violation to the user's call
+   chain — the same "who reaches what through whom" evidence this used to
+   produce for a per-function violation, now serving the program-level one
+   instead. *)
 
 (* [MARCH_DUMP_CAP_ROWS=1] prints the solved row table to stderr, one function
    per line, sorted.  This exists to make the `unknown` REFUSAL's blast radius
