@@ -7654,6 +7654,13 @@ and free_vars_pattern (p : Ast.pattern) : string list =
     The wildcard [_] and names starting with [_] are silently ignored. *)
 let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_span =
   let used = free_vars_expr [] body in
+  (* A capability value is a runtime-erased grant token: it is normal, and
+     often correct, for it never to be mentioned in the body. Warning on it
+     made the right code noisy and pushed users to spell every grant `_cap`. *)
+  let is_cap_ty = function
+    | Some ty -> March_caps.Cap_surface_ty.caps_in_ty ty <> []
+    | None -> false
+  in
   let check_name name span =
     if name <> "_" && not (String.length name > 0 && name.[0] = '_')
        && not (List.mem name used) then
@@ -7664,10 +7671,12 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
   in
   List.iter (fun fp ->
     match fp with
-    | Ast.FPNamed p -> check_name p.param_name.txt p.param_name.span
+    | Ast.FPNamed p ->
+      if not (is_cap_ty p.param_ty) then check_name p.param_name.txt p.param_name.span
     | Ast.FPPat (Ast.PatVar n) -> check_name n.txt n.span
     | Ast.FPPat _ -> ()
-    | Ast.FPDefault (p, _) -> check_name p.param_name.txt p.param_name.span
+    | Ast.FPDefault (p, _) ->
+      if not (is_cap_ty p.param_ty) then check_name p.param_name.txt p.param_name.span
   ) params
 
 (** Check a function definition.
@@ -9182,7 +9191,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           idef.Ast.impl_methods
       | _ -> ())
     decls;
-  let used_caps : (string * Ast.span) list = List.concat_map (function
+  (* The middle component is the enclosing function's bare name when the use
+     comes from a single named function ([DFn]/[DImpl] method/[DActor]
+     handler), and [""] otherwise (a type decl, extern block, or interface
+     signature names no single function). [""] can never equal ["main"], so
+     Check 3 below can compare against it safely to exempt `main`'s own
+     Cap(IO) parameter without affecting any non-function-scoped use. *)
+  let used_caps : (string * string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
       let param_tys = List.filter_map (fun p ->
         match p with
@@ -9225,7 +9240,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         List.concat_map (fun (c : Ast.fn_clause) -> cap_annots_in_expr [] c.Ast.fc_body)
           def.fn_clauses
       in
-      List.map (fun cap -> (cap, sp)) sig_caps @ body_annot_caps
+      List.map (fun cap -> (cap, def.fn_name.txt, sp)) sig_caps
+      @ List.map (fun (c, s) -> (c, def.fn_name.txt, s)) body_annot_caps
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
@@ -9255,14 +9271,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
-            List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
+            List.map (fun cap -> (cap, "", sp)) (cap_paths_in_surface_ty t)
           ) param_tys
         ) actor.actor_handlers
     (* An extern block declares `extern "lib" : Cap(X)` — that Cap(X) is a use
        of the capability, so a module with `needs X` + an extern block must not
        trigger the "declared but not used" warning. *)
     | Ast.DExtern (edef, sp) ->
-      List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty edef.ext_cap_ty)
+      List.map (fun cap -> (cap, "", sp)) (cap_paths_in_surface_ty edef.ext_cap_ty)
 
     (* A capability named in a TYPE DECLARATION — a record field, a variant
        constructor argument, or an alias right-hand side — is a use of that
@@ -9277,7 +9293,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
        reject/t148-t150. *)
     | Ast.DType (_, _, _, td, sp)
     | Ast.DAlwaysLinearType (_, _, _, td, sp) ->
-      List.map (fun cap -> (cap, sp)) (March_caps.Cap_surface_ty.caps_in_type_def td)
+      List.map (fun cap -> (cap, "", sp)) (March_caps.Cap_surface_ty.caps_in_type_def td)
 
     (* ── Everything below names no capability position ──────────────────
        Enumerated rather than wildcarded, deliberately.  Five separate bugs in
@@ -9319,7 +9335,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             | Some body -> cap_annots_in_expr [] body)
           idef.iface_methods
       in
-      List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+      List.map (fun cap -> (cap, "", sp)) sig_caps
+      @ List.map (fun (c, s) -> (c, "", s)) body_caps
 
     (* An IMPL method is a function: its signature and its body annotations are
        uses, exactly as a top-level [DFn]'s are.  Measured before this arm
@@ -9343,10 +9360,11 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           List.concat_map (fun (c : Ast.fn_clause) -> cap_annots_in_expr [] c.Ast.fc_body)
             fd.fn_clauses
         in
-        List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+        List.map (fun cap -> (cap, fd.fn_name.txt, sp)) sig_caps
+        @ List.map (fun (c, s) -> (c, fd.fn_name.txt, s)) body_caps
       in
       (* [impl_ty] itself can name a capability: `impl Grantor(Cap(IO))`. *)
-      List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty idef.impl_ty)
+      List.map (fun cap -> (cap, "", sp)) (cap_paths_in_surface_ty idef.impl_ty)
       @ List.concat_map (fun (_, fd) -> of_fn fd) idef.impl_methods
 
     | Ast.DProtocol _ | Ast.DSig _
@@ -9515,7 +9533,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
      `proof cap X` in mod M auto-covers `needs M.X` so the module needn't repeat itself. *)
-  List.iter (fun (cap_path, sp) ->
+  List.iter (fun (cap_path, _fn_name, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     let self_declared = match List.assoc_opt cap_path env.proof_caps with
       | Some dm -> dm = mod_name.txt
@@ -9686,7 +9704,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       in
       find_span decls
     in
-    let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps
+    let used = List.exists (fun (cap_path, _, _) -> cap_subsumes need cap_path) used_caps
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses
               || List.exists (fun (_, req_caps) ->
@@ -9705,9 +9723,11 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           cap need; MPText " or a sub-capability.";
           MPBreak; MPText "help: remove the unused capability declaration." ])
   ) declared_needs;
-  (* Check 3 (hint): Cap(IO) root — suggest narrowing *)
-  List.iter (fun (cap_path, sp) ->
-    if cap_path = "IO" then
+  (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
+     reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
+     hinting there tells users to stop following the documented advice. *)
+  List.iter (fun (cap_path, fn_name, sp) ->
+    if cap_path = "IO" && fn_name <> "main" then
       Err.hint env.errors ~span:sp
         (render_parts [
           MPText "this function takes "; cap "IO";

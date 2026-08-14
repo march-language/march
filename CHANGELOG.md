@@ -32,6 +32,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Capability parameters no longer trigger "Unused variable" warnings. A capability value is
+  a runtime-erased grant token and is normally never referenced in the body.
+- `fn main(cap : Cap(IO))` no longer emits the "narrow to least-privilege" hint. That is the
+  documented entry-point convention; the hint still fires on non-`main` functions.
+
 - `forge new` now scaffolds capability-correct projects. The generated `app`/`tool` entry
   point and test module declared no `needs` and took no grant, so a freshly created project
   failed `forge build` with two capability errors.

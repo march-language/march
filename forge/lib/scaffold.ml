@@ -20,19 +20,19 @@ let forge_toml name project_type =
 let lib_source name = function
   | Project.App ->
     Printf.sprintf
-      "mod %s do\n\n  needs IO.Console\n\n  fn main(_cap : Cap(IO.Console)) do\n    println(\"Hello from %s!\")\n  end\n\nend\n"
+      "mod %s do\n\n  needs IO.Console\n\n  fn main(cap : Cap(IO.Console)) do\n    println(\"Hello from %s!\")\n  end\n\nend\n"
       (snake_to_pascal name) name
   | Project.Lib ->
     Printf.sprintf "mod %s do\n\n  fn hello(name: String) : String do\n    \"Hello, \" ++ name ++ \"!\"\n  end\n\nend\n"
       (snake_to_pascal name)
   | Project.Tool ->
     Printf.sprintf
-      "mod %s do\n\n  needs IO.Console\n\n  fn main(_cap : Cap(IO.Console)) do\n    println(\"Hello from %s!\")\n  end\n\nend\n"
+      "mod %s do\n\n  needs IO.Console\n\n  fn main(cap : Cap(IO.Console)) do\n    println(\"Hello from %s!\")\n  end\n\nend\n"
       (snake_to_pascal name) name
 
 let test_source name =
   Printf.sprintf
-    "mod %sTest do\n\n  needs IO.Console\n\n  fn test_placeholder() : Bool do\n    true\n  end\n\n  fn main(_cap : Cap(IO.Console)) do\n    let result = test_placeholder()\n    if result do println(\"All tests passed.\") else println(\"Tests failed.\") end\n  end\n\nend\n"
+    "mod %sTest do\n\n  needs IO.Console\n\n  fn test_placeholder() : Bool do\n    true\n  end\n\n  fn main(cap : Cap(IO.Console)) do\n    let result = test_placeholder()\n    if result do println(\"All tests passed.\") else println(\"Tests failed.\") end\n  end\n\nend\n"
     (snake_to_pascal name)
 
 let editorconfig =

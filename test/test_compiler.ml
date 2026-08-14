@@ -9835,6 +9835,57 @@ let test_cap_propagation_still_warns_unrelated () =
   Alcotest.(check bool) "unrelated needs IO.Console still warns when unused" true
     (has_warning_with ctx "unused capability")
 
+(* ── Task 6: stop nagging correct capability code ─────────────────────────
+   A capability value is a runtime-erased grant token: never referencing one
+   in the body is its normal, correct state. Two diagnostics used to punish
+   that: the unused-variable warning on capability params, and the
+   narrow-to-least-privilege hint on `main`'s own root Cap(IO) — even though
+   `fn main(cap : Cap(IO))` is the documented entry-point convention. Both
+   are narrowly suppressed: only params whose declared type actually names a
+   capability are exempt from the unused warning, and only `main` is exempt
+   from the narrowing hint. *)
+let test_unused_cap_param_is_not_warned () =
+  let ctx = typecheck {|mod QuietCap do
+    needs IO.Console
+    fn main(cap : Cap(IO.Console)) : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "a capability parameter is not an unused variable"
+    false (has_warning_with ctx "Unused variable `cap`")
+
+let test_ordinary_unused_param_still_warned () =
+  let ctx = typecheck {|mod StillWarns do
+    fn f(x : Int) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "an ordinary unused parameter still warns"
+    true (has_warning_with ctx "Unused variable `x`")
+
+let test_main_is_not_nagged_about_root_cap () =
+  let ctx = typecheck {|mod EntryPoint do
+    needs IO
+    fn main(cap : Cap(IO)) : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "main is not told to narrow the root capability"
+    false (has_hint_with ctx "root capability")
+
+let test_non_main_still_hinted_about_root_cap () =
+  let ctx = typecheck {|mod NotEntry do
+    needs IO
+    fn helper(cap : Cap(IO)) : () do
+      println("hi")
+    end
+    fn main(c : Cap(IO)) : () do
+      helper(c)
+    end
+  end|} in
+  Alcotest.(check bool) "a non-main function is still hinted"
+    true (has_hint_with ctx "root capability")
+
 (* ── A module-level declaration SHADOWING a builtin name is not a call to
    that builtin ─────────────────────────────────────────────────────────────
    specs/2026-08-09-cap-loose-ends-plan.md, Tier 0.
@@ -14725,6 +14776,12 @@ let compiler_suites =
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
           Alcotest.test_case "stdlib-mediated needs is not unused"          `Quick test_stdlib_mediated_needs_is_not_unused;
           Alcotest.test_case "unrelated needs warns with stdlib loaded"     `Quick test_unrelated_needs_still_warns_with_stdlib_loaded;
+        ] );
+      ( "cap_ux_no_nag", [
+          Alcotest.test_case "capability param is not an unused variable" `Quick test_unused_cap_param_is_not_warned;
+          Alcotest.test_case "ordinary unused param still warned"         `Quick test_ordinary_unused_param_still_warned;
+          Alcotest.test_case "main not nagged about root cap"             `Quick test_main_is_not_nagged_about_root_cap;
+          Alcotest.test_case "non-main still hinted about root cap"       `Quick test_non_main_still_hinted_about_root_cap;
         ] );
       ( "cap_unknown_name", [
           Alcotest.test_case "unknown capability rejected with suggestion" `Quick test_unknown_capability_is_rejected_with_suggestion;
