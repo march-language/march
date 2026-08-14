@@ -12015,11 +12015,17 @@ let test_compiled_vault_scalar_roundtrip () =
     \  needs IO.Process\n\
     \  needs IO.Mut\n\
     \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-    \    let t = Vault.new(\"vs_test\")\n\
-    \    Vault.set(t, \"b\", true)\n\
-    \    Vault.set(t, \"n\", 4242)\n\
-    \    let b = Vault.get(t, \"b\") |> unwrap_or(false)\n\
-    \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
+    \    -- One table per element type: a Vault handle is Vault(v), phantom in\n\
+    \    -- the value type, so a single table cannot hold both a Bool and an\n\
+    \    -- Int. That is orthogonal to what this test guards (the runtime's\n\
+    \    -- scalar tagging on the store path), and both scalars still make the\n\
+    \    -- same round trip.\n\
+    \    let tb = Vault.new(\"vs_test_b\")\n\
+    \    let tn = Vault.new(\"vs_test_n\")\n\
+    \    Vault.set(tb, \"b\", true)\n\
+    \    Vault.set(tn, \"n\", 4242)\n\
+    \    let b = Vault.get(tb, \"b\") |> unwrap_or(false)\n\
+    \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
     \    if b && n == 4242 do () else process_exit(1) end\n\
     \  end\n\
      end\n";
@@ -12067,14 +12073,20 @@ let vault_update_src =
   \    n + 1\n\
   \  end\n\
   \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-  \    let t = Vault.new(\"vu_test\")\n\
-  \    Vault.set(t, \"n\", 1)\n\
-  \    Vault.update(t, \"n\", fn n -> n + 1)\n\
-  \    Vault.update(t, \"n\", inc)\n\
-  \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
-  \    Vault.set(t, \"s\", \"ab\")\n\
-  \    Vault.update(t, \"s\", fn s -> s ++ \"!\")\n\
-  \    let s = Vault.get(t, \"s\") |> unwrap_or(\"\")\n\
+  \    -- One table per element type (Vault(v) is phantom in the value type),\n\
+  \    -- which changes nothing about what this guards: the Int table still\n\
+  \    -- exercises the tagged-scalar untag before the closure call and the\n\
+  \    -- String table the heap-pointer pass-through, both against the same\n\
+  \    -- march_vault_update path.\n\
+  \    let tn = Vault.new(\"vu_test_n\")\n\
+  \    let ts = Vault.new(\"vu_test_s\")\n\
+  \    Vault.set(tn, \"n\", 1)\n\
+  \    Vault.update(tn, \"n\", fn n -> n + 1)\n\
+  \    Vault.update(tn, \"n\", inc)\n\
+  \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
+  \    Vault.set(ts, \"s\", \"ab\")\n\
+  \    Vault.update(ts, \"s\", fn s -> s ++ \"!\")\n\
+  \    let s = Vault.get(ts, \"s\") |> unwrap_or(\"\")\n\
   \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
   \  end\n\
    end\n"

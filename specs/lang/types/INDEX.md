@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 291/291 — 139 accept, 152
+Exit 0 iff every program behaves as declared (currently 293/293 — 140 accept, 153
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -567,7 +567,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t176_main_no_grant_does_io` | **R1 STAGE D — A PROGRAM MUST SAY WHAT IT RUNS UNDER (2026-08-10).** Stages A–C made a DECLARED grant enforceable and left the default ambient, which is what let them ship without breaking a program — and also what kept the claim down to "a program that STATES its grant cannot exceed it". Here every `needs` line is truthful and every earlier check passes; the program is rejected because it never declares the authority it runs under. This is the witness for the one semantic REVERSAL in the R1 sequence (the stage A/B test asserting the opposite was inverted, not deleted) | `performs IO but declares no grant` |
 | `t177_main_mixed_param_list` | **R1 STAGE D — the signature relaxation is bounded (2026-08-10).** "one capability parameter" became "any number of capability parameters", NOT "arbitrary parameters": a mixed list is rejected because a grant describing only SOME of what `main` receives would not be a grant, and the runtime has no value to supply for a non-capability parameter | ``only arguments of type `Cap(IO)` `` |
 
-**Result: 291 / 291 (139 accept, 152 reject).** `reject/t169`–`t170`
+**Result: 293 / 293 (140 accept, 153 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries — they mirror the existing `t164`/`t165` pattern

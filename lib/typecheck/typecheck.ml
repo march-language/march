@@ -1035,6 +1035,47 @@ let rec demote_to_monomorphic (t : ty) : unit =
   | TRefine (base, _, _) -> demote_to_monomorphic base
   | TNat _ | TError     -> ()
 
+(** Value restriction for Vault table handles — the phantom value parameter of
+    [Vault(v)] (see [builtin_types]) is only worth anything if it cannot be
+    re-instantiated at every use.
+
+    A Vault table is a process-global mutable cell reached through a handle, so
+    it is exactly ML's [ref []] case: [let t = Vault.new("t")] is an
+    APPLICATION, not a syntactic value, and generalizing its [v] to [∀v.
+    Vault(v)] would let [Vault.set(t, "k", 42)] instantiate [v := Int] and
+    [Vault.get(t, "k")] instantiate [v := Pid(_)] independently — reproducing
+    the erasure the phantom parameter exists to remove.  Demoting every var
+    that occurs UNDER a [Vault] constructor to level 0 pins the handle's
+    element type at its binding site, so the first write and every later read
+    unify against one [v].
+
+    Applied at the three generalization sites where a handle can be bound
+    without the user saying what it holds: block [let] and top-level [let] with
+    no annotation, and a [fn] with no return annotation.  Writing the
+    annotation ([fn open(name) : Vault(v)]) is the deliberate opt-out and is
+    what [Vault.new]/[Vault.open]/[Vault.whereis] and [Config]'s table getters
+    use — a name-keyed global table genuinely mints handles at any element
+    type, and that erasure is now explicit and greppable instead of ambient.
+
+    Scoped to [Vault] on purpose: no type that does not mention [Vault]
+    anywhere changes generalization behaviour by one variable. *)
+let rec demote_vault_handle_vars (t : ty) : unit =
+  match t with
+  | TCon ("Vault", args) -> List.iter demote_to_monomorphic args
+  | TVar r ->
+    (match !r with
+     | Link t'   -> demote_vault_handle_vars t'
+     | Unbound _ -> ())
+  | TCon   (_, args)    -> List.iter demote_vault_handle_vars args
+  | TArrow (a, b)       -> demote_vault_handle_vars a; demote_vault_handle_vars b
+  | TTuple ts           -> List.iter demote_vault_handle_vars ts
+  | TRecord flds        -> List.iter (fun (_, t) -> demote_vault_handle_vars t) flds
+  | TLin   (_, t)       -> demote_vault_handle_vars t
+  | TNatOp (_, a, b)    -> demote_vault_handle_vars a; demote_vault_handle_vars b
+  | TChan  _            -> ()
+  | TRefine (base, _, _) -> demote_vault_handle_vars base
+  | TNat _ | TError     -> ()
+
 (** Tag the inner cap-argument var of a [cap_narrow] result [Cap(a)] so [unify]
     can reject the instant [a] is bound to a nominal proof cap — closing the
     forge even when the value is laundered through a polymorphic function.  Two
@@ -1824,6 +1865,7 @@ let t_list   a     = TCon ("List",   [a])
 let t_option a     = TCon ("Option", [a])
 let t_result a e   = TCon ("Result", [a; e])
 let t_pid    a     = TCon ("Pid",    [a])
+let t_vault  v     = TCon ("Vault",  [v])
 
 let _t_list   = t_list
 let _t_option = t_option
@@ -2215,8 +2257,11 @@ let builtin_bindings : (string * scheme) list =
     let b = fresh_var 0 in
     Poly ([get_id a; get_id b], [], f a b)
   in
-  (* ∀a b c. f(a, b, c) — three unconstrained type variables *)
-  let poly3 f =
+  (* ∀a b c. f(a, b, c) — three unconstrained type variables.  Underscored:
+     no builtin needs three free vars since the vault_* group was retyped
+     against [Vault(v)] (2026-08-14).  Kept because it is the obvious partner
+     to poly1/poly2 for the next builtin that does. *)
+  let _poly3 f =
     let a = fresh_var 0 in
     let b = fresh_var 0 in
     let c = fresh_var 0 in
@@ -2308,10 +2353,16 @@ let builtin_bindings : (string * scheme) list =
     ("record_from_list", poly2 (fun a b -> TArrow (t_list (TTuple [t_string; a]), b)));
     (* Vault (in-memory key-value table) — raw C-runtime entry points backing
        the typed wrapper module [stdlib/vault.march] (`Vault.new`, `Vault.get`,
-       …). Deliberately near-fully-generic, like [record_get]/[record_put]
-       above: a table holds arbitrary March values under arbitrary keys, so
-       there is no meaningful static element type to enforce here — the typed
-       surface is [Vault.*], not these raw names.
+       …). The table handle is [Vault(v)], phantom in its ELEMENT type: the
+       same [v] appears in [vault_set]'s value, [vault_get]'s result and
+       [vault_update]'s function, so a table written at [Int] cannot be read
+       at [Pid(_)]. Keys stay per-operation generic ([k]) because
+       [vault_key_cstr] stringifies them — see the [Vault] entry in
+       [builtin_types] for why there is no key parameter.
+
+       [vault_ns_*] take a NAMESPACE STRING rather than a handle, so there is
+       no handle to carry [v] and they remain erased. That is the module's one
+       remaining untyped door and stdlib/vault.march says so at the call site.
 
        Needed so a BARE call to one of these resolves at all. Before this they
        were simply UNBOUND — every call site (including inside
@@ -2325,18 +2376,26 @@ let builtin_bindings : (string * scheme) list =
        masking the real capability check either way.
 
        Return shapes mirror the actual [VBuiltin] cases in lib/eval/eval.ml. *)
-    ("vault_new",          poly1 (fun a -> TArrow (t_string, a)));
-    ("vault_whereis",      poly1 (fun a -> TArrow (t_string, t_option a)));
-    ("vault_set",          poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, t_unit)))));
-    ("vault_set_ttl",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
-    ("vault_get",          poly3 (fun t k v -> TArrow (t, TArrow (k, t_option v))));
-    ("vault_drop",         poly2 (fun t k -> TArrow (t, TArrow (k, t_unit))));
-    ("vault_update",       poly3 (fun t k f -> TArrow (t, TArrow (k, TArrow (f, t_unit)))));
-    ("vault_put_new",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_bool))))));
-    ("vault_incr",         poly2 (fun t k -> TArrow (t, TArrow (k, TArrow (t_int, t_int)))));
-    ("vault_push_capped",  poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
-    ("vault_keys",         poly2 (fun t k -> TArrow (t, t_list k)));
-    ("vault_size",         poly1 (fun t -> TArrow (t, t_int)));
+    ("vault_new",          poly1 (fun v -> TArrow (t_string, t_vault v)));
+    ("vault_whereis",      poly1 (fun v -> TArrow (t_string, t_option (t_vault v))));
+    ("vault_set",          poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (v, t_unit)))));
+    ("vault_set_ttl",      poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
+    ("vault_get",          poly2 (fun k v -> TArrow (t_vault v, TArrow (k, t_option v))));
+    ("vault_drop",         poly2 (fun k v -> TArrow (t_vault v, TArrow (k, t_unit))));
+    ("vault_update",       poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (TArrow (v, v), t_unit)))));
+    ("vault_put_new",      poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (v, TArrow (t_int, t_bool))))));
+    (* [incr] and [push_capped] pin the element type the way the C runtime
+       actually treats it: [march_vault_incr] reads/writes an Int cell, and
+       [march_vault_push_capped] a List cell. Typing them against a table of
+       any [v] would keep exactly the erasure this parameter exists to remove. *)
+    ("vault_incr",         poly1 (fun k -> TArrow (t_vault t_int, TArrow (k, TArrow (t_int, t_int)))));
+    ("vault_push_capped",  poly2 (fun k e -> TArrow (t_vault (t_list e), TArrow (k, TArrow (e, TArrow (t_int, t_unit))))));
+    (* Keys come back STRINGIFIED — [vault_keys] returns what
+       [vault_key_cstr] wrote, never the original key value, so [List(String)]
+       is the honest type. The old [t -> List(k)] let `Vault.keys(t)` be read
+       back at the caller's key type, a second erasure in the same module. *)
+    ("vault_keys",         poly1 (fun v -> TArrow (t_vault v, t_list t_string)));
+    ("vault_size",         poly1 (fun v -> TArrow (t_vault v, t_int)));
     ("vault_ns_set",       poly2 (fun k v -> TArrow (t_string, TArrow (k, TArrow (v, t_unit)))));
     ("vault_ns_get",       poly2 (fun k v -> TArrow (t_string, TArrow (k, t_option v))));
     ("vault_ns_drop",      poly1 (fun k -> TArrow (t_string, TArrow (k, t_unit))));
@@ -3287,6 +3346,15 @@ let builtin_types : (string * int) list =
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
     ("ActorCap", 1);
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
+    (* Vault(v) — ETS-like table handle, phantom in its ELEMENT type.
+       ONE parameter, not the Vault(k, v) the design note sketched: keys are
+       stringified by [vault_key_cstr] before they ever reach the table, so a
+       key-type parameter buys no memory safety (a wrong-typed key is a silent
+       MISS, never a value read at the wrong type) and costs real
+       expressiveness — stdlib/config.march deliberately keys ONE table with
+       both 2-tuples and 3-tuples, which no single [k] can describe. The value
+       parameter is the one that closes the read-it-back-as-a-Pid hole. *)
+    ("Vault",  1);
     ("ChildSpec", 0); ("SupervisorSpec", 0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2);
     (* Tagged(X, T) — specialization tag constructor: phantom policy/width tags *)
@@ -7337,6 +7405,11 @@ and infer_block env exprs =
        them) and are correctly quantified; function-call result TVars that are
        linked to outer-scope TVars get lowered to env.level and are not
        quantified. *)
+    (* Vault handles are the ML [ref []] case: `let t = Vault.new("t")` is an
+       application, and generalizing its element type would let each use pick a
+       different one.  Skipped when the binding is annotated — writing the type
+       out is the explicit opt-out.  See [demote_vault_handle_vars]. *)
+    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
     let gen_binding bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
       | other          -> other
@@ -7503,7 +7576,11 @@ and infer_block env exprs =
        arrow unify but NOT here) is still surfaced. *)
     let errs_before_ret = List.length env.errors.March_errors.Errors.diagnostics in
     let ret_ty  = match ret_ann with
-      | None -> body_ty
+      | None ->
+        (* Same Vault return-position value restriction as the top-level `fn`
+           path — a local `fn t() do Vault.open("x") end` is a handle factory
+           too.  See [demote_vault_handle_vars]. *)
+        demote_vault_handle_vars body_ty; body_ty
       | Some ann ->
         let tvars = ref [] in
         let expected = surface_ty env ~tvars ann in
@@ -7988,7 +8065,16 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
             ~reason:(Some (RFnReturn (def.fn_name.txt, fn_span)));
           expected
         | None ->
-          infer_expr body_env clause.fc_body
+          let t = infer_expr body_env clause.fc_body in
+          (* A fn that RETURNS a Vault handle without saying what the table
+             holds must not hand every caller a freshly-instantiated element
+             type — that is the same erasure as an unannotated `let`, moved
+             one call frame out.  Annotating the return (`: Vault(v)`) is the
+             deliberate opt-out and is what the handle factories
+             (Vault.new/open/whereis, Config's table getters) use.  See
+             [demote_vault_handle_vars]. *)
+          demote_vault_handle_vars t;
+          t
       in
 
       (* Check linear params were all consumed *)
@@ -11290,6 +11376,8 @@ let rec check_decl env (d : Ast.decl) : env =
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     discharge_constraints env sp;
     ignore (leave_level env');
+    (* Same Vault value restriction as the block-[let] path above. *)
+    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
     (* Generalise simple variable bindings at module level *)
     let gen_bnd bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
