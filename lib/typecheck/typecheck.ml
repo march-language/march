@@ -13301,37 +13301,35 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                 c))
       (List.sort_uniq String.compare closure)
 
-(* ── R1 stage C: per-function grants ──────────────────────────────────────
-   specs/2026-08-10-r1-stage-c-effect-rows-design.md.
+(* ── R1 stage C: per-function grants — REMOVED 2026-08-13 ──────────────────
+   Formerly specs/2026-08-10-r1-stage-c-effect-rows-design.md; the removal is
+   specs/progress/2026-08-13-remove-per-function-grant-ceiling.md.
 
-   Stage B checks ONE row against ONE grant, at `main`.  Stage C makes every
-   function that takes a concrete `Cap(P)` parameter a discharge point, so the
-   guarantee composes per function and per dependency instead of per program.
+   Stage C used to make every function that took a concrete `Cap(P)`
+   parameter its own grant discharge point: its static reach had to fit under
+   its parameters' capabilities (checked here, by the now-deleted
+   [check_fn_grants]).  That made a capability PARAMETER a per-function
+   ceiling over everything the function transitively reached, so taking one
+   forced a function to enumerate every other capability it touched or add a
+   parameter for it — capability threading, which contradicts capabilities
+   being module-scoped.  It is gone.  What remains: `needs` (Check 1), the
+   per-module ceiling, and [check_main_grant] — none of them require passing
+   a capability value to satisfy a check.
 
-   The claim certified here is conditional, and deliberately so: "this
-   function's static reach fits under its granted capabilities, plus whatever
-   function values its callers hand it".  The conditional half needs no check
-   of its own — a caller that supplies a callback BY NAME is charged for that
-   callback's row by the free-variable edge that has always driven the closure
-   ([env.fn_refs]), and that caller is itself under a discharge point (or
-   under none at all, which is the unchanged ambient contract).  What cannot
-   be discharged by anyone is an invocation of a value with no traceable
-   creation site; [Cap_rows]'s [unknown] flag marks it, and a narrow grant
-   over such a function is REFUSED rather than certified — the same stance
-   stage B takes on `IO.Foreign`, for the same reason: a bound the analysis
-   cannot see must not be claimed.
-
-   Runs from [check_module_core] only, next to [check_main_grant], so the
-   interpreter, compile, test and LSP paths all enforce it identically and the
-   REPL keeps the exemption R2 gave it. *)
+   [cap_reach_chain] below outlived the check that was its only caller. It is
+   kept for Task 8, which will use it to attribute a whole-program grant
+   violation (from [check_main_grant]) to the user's call chain — the same
+   "who reaches what through whom" evidence this used to produce for a
+   per-function violation, now needed for the program-level one instead. See
+   its own `let _ = cap_reach_chain` a few lines below its definition. *)
 
 (* The chain of references from [from] to a function that directly holds
-   [cap], for the diagnostic.  Same BFS and same two-way name resolution as
-   [check_main_grant]'s [reachable_from_main], but keeping the path rather
-   than only the reachable set — "who reaches what through whom" is exactly
-   the evidence the ceiling's attribution pass produces on the TIR side, and
-   this is the typecheck-side equivalent, available on BOTH the interpreter
-   and compile paths. *)
+   [cap]. Same BFS and same two-way name resolution as [check_main_grant]'s
+   [reachable_from_main], but keeps the path rather than only the reachable
+   set — "who reaches what through whom" is exactly the evidence the
+   ceiling's attribution pass produces on the TIR side, and this is the
+   typecheck-side equivalent, available on BOTH the interpreter and compile
+   paths. Currently unused (see the banner above); retained for Task 8. *)
 let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
   : string list option =
   let holds k =
