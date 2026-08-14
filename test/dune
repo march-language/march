@@ -4182,6 +4182,106 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
+; Compiled/interpreted parity witness for NativeArray.fold_int/fold_float/
+; fold_f32/fold_i32/fold_u8 (SIMD follow-ups Task 2). fold_int/fold_float
+; previously had no compiled implementation (link error); fold_f32/fold_i32/
+; fold_u8 didn't exist at all. Every case uses a NON-COMMUTATIVE fold so the
+; (init, arr, f) vs. march_typed_array_fold's (arr, acc, f) vs. the stdlib
+; wrapper's (arr, acc, f) argument-order landmine can't hide behind a
+; commutative operator. Also proves the accumulator crosses the closure
+; boundary correctly in its erased/boxed representation via the trailing
+; fold-into-a-List case.
+(rule
+ (targets native_arr_fold native_arr_fold.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_fold
+        native/native_arr_fold.march)
+   (with-stdout-to native_arr_fold.out
+        (system "./native_arr_fold")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_fold.expected native_arr_fold.out)))
+
+; ── fold per-element float box: live-object guard ──────────────────────
+; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output
+; diff: native_float_arr_fold / native_f32_arr_fold return the right number
+; whether or not they release the per-element march_alloc_float box they
+; make for each closure call. So the two `march_decrc(elem)` lines in
+; runtime/march_runtime.c were unpinned -- deleting either left every gate
+; green. This is the guard.
+;
+; The signal is live_allocs() -- the runtime's always-on net count of live
+; march objects -- NOT peak RSS. This rule originally asserted an absolute
+; RSS band calibrated on Darwin (healthy 48 MB / leaked 170 MB / threshold
+; 96 MB); the first ubuntu CI run reported 128,143,360 B and went RED on a
+; healthy tree, because Linux's process baseline is ~122 MB on its own. An
+; absolute-RSS threshold is not portable across platforms. A live-object
+; count is: a leak IS "allocated and never freed", so the counter measures
+; the defect exactly, with no allocator, page-rounding, or OS baseline in
+; the path, and the threshold becomes a small exact number.
+;
+; Falsifiability was ESTABLISHED BY SABOTAGE, both directions, both lines
+; (Darwin arm64, --opt 2, 4,000,000 elements per leg):
+;   both decrc present        live_allocs delta         3   -> GREEN
+;   f64 decrc(elem) deleted   live_allocs delta 4,000,003   -> RED
+;   f32 decrc(elem) deleted   live_allocs delta 4,000,003   -> RED
+; Each sabotage adds exactly one leaked object per element. Threshold 1000
+; sits ~333x above the healthy figure and 4000x below either leaked one.
+; The healthy delta is a constant, not a per-element quantity: if it starts
+; tracking the element count, that is a new leak, not drift in this bound.
+;
+; The probe's accumulator is an INT, deliberately. A Float accumulator would
+; also trip this rule, but for a DIFFERENT and still-open reason -- the
+; accumulator-chain leak of
+; specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md -- which
+; would make the rule fire for something it is not guarding. See the header
+; comment in the fixture.
+;
+; Three rules, all load-bearing, for the reasons spelled out at length on
+; simd_leak_probe below: (a) the run's exit status is dune's, (b) stdout is
+; diffed so a crash-after-partial-output cannot pass, (c) only then is the
+; delta read from a captured FILE rather than from a pipeline whose status
+; belongs to its last stage.
+(rule
+ (targets native_arr_fold_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_arr_fold_leak_probe
+       native/native_arr_fold_leak_probe.march)))
+
+(rule
+ (targets native_arr_fold_leak_probe.out native_arr_fold_leak_probe.live)
+ (deps native_arr_fold_leak_probe)
+ (action
+  (with-stdout-to native_arr_fold_leak_probe.out
+   (with-stderr-to native_arr_fold_leak_probe.live
+    (run ./native_arr_fold_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/native_arr_fold_leak_probe.expected
+        native_arr_fold_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_arr_fold_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat native_arr_fold_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from native_arr_fold_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"native_arr_fold_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. Folding 4,000,000 elements must not accumulate per-element march_alloc_float boxes -- healthy is a small constant (~3 objects, independent of element count), each missing march_decrc(elem) adds exactly 4,000,000. Check that native_float_arr_fold and native_f32_arr_fold in runtime/march_runtime.c still call march_decrc(elem) after call_closure_2.\" >&2; exit 1; }; \
+    echo \"native_arr_fold_leak_probe live_allocs delta = ${live} objects\"")))
+
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
 ; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,
 ; pulled forward from the original Task 3 split; see llvm_emit.ml's SIMD
@@ -4206,6 +4306,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/simd_vector_core.expected simd_vector_core.out)))
+
+; Compiled/interpreted parity witness for the Bytes <-> NativeU8Arr bridge
+; (Bytes.to_u8_arr / Bytes.from_u8_arr): round-trip identity, the empty
+; case, high bytes (0x80-0xFF must zero-extend to 128-255), and the
+; motivating end-to-end case of feeding real byte data to the Simd byte
+; scanner. .expected is interpreter-produced; the compiled binary must
+; match byte-for-byte.
+(rule
+ (targets bytes_u8_bridge bytes_u8_bridge.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/bytes_u8_bridge.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o bytes_u8_bridge
+        native/bytes_u8_bridge.march)
+   (with-stdout-to bytes_u8_bridge.out
+        (system "./bytes_u8_bridge")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_u8_bridge.expected bytes_u8_bridge.out)))
 
 ; Rounding-parity fuzz for Simd.fma_f32x4: 100k deterministic LCG iterations x
 ; 4 lanes, folded into an integer checksum, half of them drawn from a family
@@ -4619,35 +4742,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;
 ; (1) simd_leak_probe -- the release must HAPPEN. `go` is self-tail-recursive
 ; with a vector param, so its entry prologue unboxes one caller-made box per
-; INVOCATION and (pre-fix) never released it: 2,000,000 calls leaked ~64 MB of
-; 32-byte march_simd_alloc cells. Post-fix max RSS is ~2.7 MB; the threshold is
-; 32 MB, comfortably above allocator noise and comfortably below the 64 MB
-; pre-fix figure, so it is falsifiable in both directions. An output check
-; cannot see a leak -- RSS is the only signal -- hence the unusual assertion.
+; INVOCATION and (pre-fix) never released it: 2,000,000 calls leaked one
+; march_simd_alloc cell each. An output check cannot see a leak, hence the
+; unusual assertion.
 ;
-; THREE checks, and all three are load-bearing. The first version of this rule
-; asserted ONLY the RSS, by piping `/usr/bin/time -l ./probe` into awk -- which
-; is an ANTI-canary: the pipeline's exit status is awk's, and macOS
-; /usr/bin/time -l still prints a max RSS for a child that died on SIGSEGV
-; (measured: RSS 1425408, pipeline rc 0). So the exact drift this rule exists
-; to catch -- the pre-pass says "native slot" while emit_fn stops giving one,
-; the caller releases a box the callee retained, and the probe segfaults early
-; -- would have produced a TINY RSS and a GREEN rule. Hence:
-;   (a) the run's EXIT STATUS is dune's (a `system` action fails on nonzero),
-;   (b) stdout is diffed against .expected, so a crash-after-partial-output or
-;       a wrong result cannot pass, and
-;   (c) only then is RSS read, from the captured stderr FILE rather than a
-;       pipeline whose status belongs to the last stage.
+; SIGNAL: live_allocs(), NOT RSS. The original version of this rule asserted
+; an absolute max-RSS threshold (< 32 MB), calibrated on Darwin (healthy
+; ~2.7 MB, leaked ~67 MB). It went RED the first time CI's ubuntu leg ran it
+; (PR #269 removed this probe's prior Darwin-only gate), at max RSS
+; 128,761,856 B -- not a leak, just Linux's ~122 MB process baseline that the
+; macOS-derived band never accounted for. live_allocs() reads the runtime's
+; always-on march_live_alloc_count -- incremented in march_alloc, decremented
+; on every free-on-rc-zero path -- so it counts the defect directly: no
+; allocator free-list behaviour, no page-granularity rounding, no OS/platform
+; baseline. Same conversion, same rationale, as
+; native_arr_fold_leak_probe.march.
 ;
-; .expected is NOT interpreter-produced (2,000,000 iterations do not finish
-; under the tree-walker in any reasonable time; same posture as
-; simd_bounds_panic, which is compiled-only by design). The value is
+; THREE checks, and all three are load-bearing (unchanged from the RSS-era
+; rule's reasoning). A single check that reads a captured number without
+; independently verifying the run went well can be fooled by a probe that
+; crashes early or corrupts its output -- e.g. macOS /usr/bin/time -l still
+; printing a max RSS for a child that died on SIGSEGV (measured: RSS
+; 1425408, pipeline rc 0), which is why this was never collapsed into one
+; piped command. Hence:
+;   (a) the run's EXIT STATUS is dune's (a `system`/`run` action fails on
+;       nonzero),
+;   (b) stdout is diffed against .expected, so a crash-after-partial-output
+;       or a wrong result cannot pass, and
+;   (c) only then is the live_allocs delta read, from the captured stderr
+;       FILE rather than a pipeline whose status belongs to the last stage.
+;
+; .expected's stdout is NOT interpreter-produced (2,000,000 iterations do not
+; finish under the tree-walker in any reasonable time; same posture as
+; simd_bounds_panic, which is compiled-only by design). The stdout value is
 ; arithmetic: 2,000,000 calls x sum of splat(1.0) over 4 lanes = 8000000.
+; live_allocs() itself returns a constant 0 in the INTERPRETER (see
+; eval.ml), which is why the delta goes to stderr rather than stdout: it
+; never has to agree between backends.
 ;
-; /usr/bin/time -l is macOS-specific (Linux's coreutils `time` spells it `-v`
-; and reports kbytes). Off Darwin the binary still runs, and checks (a) and (b)
-; still apply -- only the RSS assertion (c) skips. The leak is
-; platform-independent; only the measurement instrument is not.
+; Numbers, measured on this fixture (Darwin arm64, --opt 2, 2,000,000
+; calls), both sabotage directions actually run:
+;   caller-side release present   live_allocs delta =         1
+;   release deleted (sabotage)    live_allocs delta = 2,000,001
+; The one leftover object is incidental runtime/stdlib state, not a per-call
+; leak; deleting the release adds exactly 2,000,000 -- one leaked
+; march_simd_alloc cell per invocation of `go`, the defect stated exactly
+; rather than estimated. The dune rule asserts < 1000: ~1000x above the
+; healthy figure (ample room for incidental runtime objects) and ~2000x
+; below the leaked figure, so it is falsifiable in both directions with an
+; enormous margin.
 (rule
  (targets simd_leak_probe)
  (deps (file %{exe:../bin/main.exe})
@@ -4660,32 +4803,57 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; Check (a): nonzero exit fails this rule (dune's own `system` semantics -- cf.
 ; simd_bounds_panic, which needs an explicit with-accepted-exit-codes to allow
-; its nonzero exit). Stdout and the time(1) report land in separate files.
+; its nonzero exit). Stdout (the diffable answer) and stderr (the
+; live_allocs delta the probe prints about itself) land in separate files.
 (rule
- (targets simd_leak_probe.out simd_leak_probe.time)
+ (targets simd_leak_probe.out simd_leak_probe.live)
  (deps simd_leak_probe)
  (action
   (with-stdout-to simd_leak_probe.out
-   (with-stderr-to simd_leak_probe.time
-    (system
-     "if [ \"$(uname -s)\" = Darwin ]; then exec /usr/bin/time -l ./simd_leak_probe; else exec ./simd_leak_probe; fi")))))
+   (with-stderr-to simd_leak_probe.live
+    (run ./simd_leak_probe)))))
 
 ; Check (b): the probe must actually finish and print the right answer.
 (rule
  (alias runtest)
  (action (diff native/simd_leak_probe.expected simd_leak_probe.out)))
 
-; Check (c): the leak assertion proper, read from the captured stderr file.
+; Check (c): the leak assertion proper, read from the probe's own stderr line.
 (rule
  (alias runtest)
- (deps simd_leak_probe.time)
+ (deps simd_leak_probe.live)
  (action
   (run bash -c
-   "case \"$(uname -s)\" in Darwin) ;; *) echo 'simd_leak_probe: max-RSS assertion skipped (needs macOS /usr/bin/time -l); the exit-status and stdout checks still ran' >&2; exit 0 ;; esac; \
-    rss=$(awk '/maximum resident set size/ {print $1}' simd_leak_probe.time); \
-    test -n \"$rss\" || { echo 'could not read maximum resident set size from simd_leak_probe.time' >&2; cat simd_leak_probe.time >&2; exit 1; }; \
-    test \"$rss\" -lt 33554432 || { echo \"simd_leak_probe leaked: max RSS ${rss} B >= 32 MB. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- pre-fix this measured ~67 MB (32 B/call), post-fix ~2.7 MB. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that Llvm_toplevel.native_vec_param_idxs is still the single source of truth for that decision.\" >&2; exit 1; }; \
-    echo \"simd_leak_probe max RSS = ${rss} B\"")))
+   "live=$(cat simd_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from simd_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"simd_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. 2,000,000 calls to a self-TCO'd fn with a vector param must not accumulate march_simd_alloc cells -- healthy is a small constant (~1 object, independent of call count), the missing release adds exactly 2,000,000. Check that llvm_emit's EApp arm still releases call-scoped vector temp boxes for callees in ctx.native_vec_params, and that Llvm_toplevel.native_vec_param_idxs is still the single source of truth for that decision.\" >&2; exit 1; }; \
+    echo \"simd_leak_probe live_allocs delta = ${live} objects\"")))
+
+; ── peak_rss_bytes builtin: unit test ──────────────────────────────────
+; Bytes-on-both-platforms sanity check for the builtin the leak guard above
+; relies on. Compile and diff against the interpreter's own output: only
+; ORDER-STABLE facts and a coarse magnitude band are asserted (never raw byte
+; counts, which vary per run/platform), so interpreter/compiled parity holds
+; even though the interpreter's figure (Gc.quick_stat-derived, see eval.ml)
+; and the compiled figure (real getrusage) measure different things.
+(rule
+ (targets peak_rss)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/peak_rss.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o peak_rss
+       native/peak_rss.march)))
+
+(rule
+ (targets peak_rss.out)
+ (deps peak_rss)
+ (action (with-stdout-to peak_rss.out (run ./peak_rss))))
+
+(rule
+ (alias runtest)
+ (action (diff native/peak_rss.expected peak_rss.out)))
 
 ; (2) simd_vector_escape_arg -- the release must NOT happen. `wrap` is
 ; structurally (not tail) recursive, so it gets NO native slot, its `v`
