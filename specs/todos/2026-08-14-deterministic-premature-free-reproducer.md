@@ -6,6 +6,44 @@ regression test**. If someone reintroduces an RC-conditional reuse of the actor
 record — the exact thing the deleted `a[0] = 1` clobber existed to enable — the
 suite will stay green.
 
+## Update 2026-08-14 (second pass) — the window itself is now pinned
+
+`test/native/actor_dispatch_rc_window.march` closes the gap the section below
+describes. It is option (1)'s invariant, reached without option (1)'s machinery:
+**no second thread is required to observe the window.**
+
+The clobber installed the forged `1` *before* the dispatch call, so the lie is
+already published by the time the handler body runs. A `ffi_test_actor_rc` probe
+called from **inside** the handler therefore reads exactly what a concurrent
+thread would read — on one scheduler thread, with no race. The bug needs a
+second thread to be *harmed* by the lie; it does not need one to *observe* it.
+That is what turns "statistical repro" into a unit test.
+
+The victim is a supervised child, so its true refcount exceeds 1 by
+construction; the test's first line is the non-vacuity guard on that, and its
+third line guards against a probe that silently never fired.
+
+Verified adversarially by reinstating the `a[0] = 1` / `a[0] = saved_rc` pair
+into `actor_green_thread` on top of current `main` (i.e. reverting only
+`a9032530`'s hunks, keeping `acfa832c`):
+
+| runtime | runs | result |
+|---|---|---|
+| clobber reinstated | 20 | 20/20 **RED** (`rc inside handler matches rc outside: false`) |
+| clobber absent (`main`) | 20 | 20/20 **GREEN** |
+
+Crucially this fails for a clobber that restores correctly on *every* exit path,
+including the crash trap — the case `actor_crash_rc_restore.march` cannot see.
+The two tests are complements: that one pins the failure to close the window,
+this one pins the window being open at all.
+
+**Still open: option (2)**, the source-level guard against a plain store to an
+actor record's `a[0]`. Not done here deliberately — it is new machinery (nothing
+in the suite currently greps runtime C source), it is trivially evadable by a
+reintroduction that spells the store differently, and its value is only for
+clobbers on dispatch paths this test has no window on. Worth doing, but it is a
+different change than "pin the bug", which is now done.
+
 ## Partially covered as of 2026-08-14 — the deterministic red now exists
 
 `test/native/actor_crash_rc_restore.march` asserts, through the test-only
@@ -73,12 +111,15 @@ instance was found (`native_int_arr_set` and friends *read* `->rc` rather than
 forging it), but the pattern is attractive enough to recur, and a guard of shape
 (2) would catch the next one for free.
 
-## Acceptance (revised 2026-08-14)
+## Acceptance (revised 2026-08-14, second pass)
 
 Original criterion — "reverting `a9032530` turns something red deterministically"
 — is **met** by `test/native/actor_crash_rc_restore.march`.
 
-Remaining: a test that fails when the refcount word is written non-atomically
-even if every exit path restores it correctly — i.e. one that observes the
-window from another thread (option 1), and/or a guard that rejects the pattern
-in source (option 2).
+The sharper criterion — "fails when the refcount word is written non-atomically
+even if every exit path restores it correctly" — is **met** by
+`test/native/actor_dispatch_rc_window.march` (20/20 red with the clobber, 20/20
+green without; see the second-pass section at the top).
+
+Remaining: only option (2), the source-level guard. This file stays open for
+that alone; the testing question it was filed for is answered.
