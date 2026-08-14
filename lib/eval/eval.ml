@@ -171,6 +171,51 @@ let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
     than requiring proactive cleanup on death. *)
 let named_registry  : (string, int) Hashtbl.t = Hashtbl.create 16
 
+(** Registry carry-forward stash: pid of a dying actor -> the names it held
+    in [named_registry] at the moment of death. Mirrors the runtime's
+    [march_actor_meta.reg_names_pending] (see
+    runtime/march_runtime.c:capture_reg_names_pending), keyed by pid rather
+    than hung off a meta record because the interpreter has no per-actor
+    meta that outlives the instance — pids are handed out monotonically from
+    [next_pid] and never reused, so a pid key is as stable as the C side's
+    never-freed meta.
+
+    Populated by [capture_reg_names_pending] and consumed exactly once by
+    [spawn_child_actor] when it replaces that pid. An entry left behind
+    (actor died supervised but the supervisor gave up rather than
+    respawning, e.g. max_restarts exceeded) is inert: nothing reads it, and
+    it dies with the table on the next module eval. *)
+let reg_names_pending : (int, string list) Hashtbl.t = Hashtbl.create 8
+
+(** Snapshot [pid]'s registered names into [reg_names_pending] so a restart
+    can re-establish them on the replacement, before [crash_actor] drops
+    them from [named_registry].
+
+    Two call sites, matching the runtime's two:
+      - [crash_actor], for an actor dying with [ai_supervisor] still set;
+      - [one_for_all_restart] / [rest_for_one_restart], explicitly, for each
+        LIVE SIBLING they are about to kill and respawn. Those two set
+        [ci.ai_supervisor <- None] before crashing the sibling — solely to
+        stop [crash_actor] re-entering [notify_supervisor] for it — so by
+        the time [crash_actor] runs, its own supervisor gate is already
+        false. Gating capture on the supervisor field ALONE therefore drops
+        every batch-restarted sibling's names, even though the sibling is
+        unconditionally respawned a few lines later. That exact bug shipped
+        on the compiled side and was caught in review; test/native/
+        actor_registry_restart_batch.march is its regression test.
+
+    Guards an existing stash rather than overwriting it, mirroring the C
+    side: no current caller can run twice for one pid, but a future one
+    doing so should not lose the first snapshot. *)
+let capture_reg_names_pending (pid : int) : unit =
+  if not (Hashtbl.mem reg_names_pending pid) then begin
+    let names =
+      Hashtbl.fold (fun name owner acc -> if owner = pid then name :: acc else acc)
+        named_registry []
+    in
+    if names <> [] then Hashtbl.replace reg_names_pending pid names
+  end
+
 (* ------------------------------------------------------------------ *)
 (* Dynamic Supervisor state                                            *)
 (* ------------------------------------------------------------------ *)
@@ -2194,6 +2239,31 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
           Hashtbl.remove pid_to_registry_name old_pid;
           Hashtbl.replace process_registry name child_pid;
           Hashtbl.replace pid_to_registry_name child_pid name));
+    (* Carry the crashed incarnation's [named_registry] names forward onto
+       the replacement (mirrors march_respawn_child's reg_names_pending
+       consume). Each name is decided individually by the same "first live
+       claim wins" rule [actor_register] enforces: if some OTHER live actor
+       claimed that exact name during the restart window, the carried
+       registration is DROPPED rather than stealing it back — that is the
+       registry's normal contract, not an error, so it isn't reported. *)
+    (match crashed_pid with
+     | None -> ()
+     | Some old_pid ->
+       (match Hashtbl.find_opt reg_names_pending old_pid with
+        | None -> ()
+        | Some names ->
+          Hashtbl.remove reg_names_pending old_pid;
+          List.iter (fun name ->
+            let held_by_live_other =
+              match Hashtbl.find_opt named_registry name with
+              | Some owner when owner <> child_pid ->
+                (match Hashtbl.find_opt actor_registry owner with
+                 | Some inst -> inst.ai_alive
+                 | None      -> false)
+              | _ -> false
+            in
+            if not held_by_live_other then
+              Hashtbl.replace named_registry name child_pid) names));
     child_pid
 
 (** Restart a supervisor's crashed child under one_for_one strategy.
@@ -2276,6 +2346,10 @@ and one_for_all_restart (sup_pid : int) (_crashed_pid : int) : unit =
          List.iter (fun cpid ->
            match Hashtbl.find_opt actor_registry cpid with
            | Some ci when ci.ai_alive ->
+             (* Capture BEFORE the detach below: clearing [ai_supervisor]
+                makes crash_actor's own capture gate false, and this sibling
+                is unconditionally respawned a few lines down. *)
+             capture_reg_names_pending cpid;
              ci.ai_supervisor <- None;  (* detach before crashing to prevent re-entry *)
              crash_actor cpid "one_for_all restart"
            | _ -> ()
@@ -2345,6 +2419,10 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
              if cpid >= 0 then
                (match Hashtbl.find_opt actor_registry cpid with
                 | Some ci when ci.ai_alive ->
+                  (* Same reason as one_for_all_restart's identical call:
+                     capture before the detach, or this sibling's names are
+                     lost even though it is respawned below. *)
+                  capture_reg_names_pending cpid;
                   ci.ai_supervisor <- None;
                   crash_actor cpid "rest_for_one restart"
                 | _ -> ())
@@ -2456,7 +2534,15 @@ and crash_actor (pid : int) (reason : string) : unit =
        Actor.whereis/Actor.registered must not see the name still mapped to
        this dead pid). Compare-and-drop by pid, not by name alone, so a name
        already reassigned to a different live pid (stale-overwrite) is left
-       untouched. *)
+       untouched.
+
+       Task 6 parity: snapshot the names FIRST if this actor is supervised,
+       so a restart can re-establish them on the replacement. Unsupervised
+       actors' names are simply dropped, as before. Siblings killed by
+       one_for_all / rest_for_one have already had their [ai_supervisor]
+       cleared by the time they get here, which is why those two strategies
+       call [capture_reg_names_pending] themselves before clearing it. *)
+    if supervisor <> None then capture_reg_names_pending pid;
     let dead_names =
       Hashtbl.fold
         (fun name owner acc -> if owner = pid then name :: acc else acc)
@@ -9993,6 +10079,7 @@ let reset_scheduler_state () : unit =
   next_task_id := 0;
   Hashtbl.clear actor_registry;
   Hashtbl.clear named_registry;
+  Hashtbl.clear reg_names_pending;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
@@ -11184,6 +11271,7 @@ let eval_module_env (m : module_) : env =
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
   Hashtbl.clear named_registry;
+  Hashtbl.clear reg_names_pending;
   next_pid := 0;
   dropped_messages_count := 0;
   Hashtbl.clear task_registry;
