@@ -66,6 +66,23 @@ let dropped = Scheduler.dropped_messages()    -- shed by drop policies, cumulati
 let queued  = mailbox_size(pid)               -- one actor's current queue depth
 ```
 
+`mailbox_size` needs a `Pid`, which a monitoring loop rarely has on hand. For an actor
+registered under a name, `Actor.whereis(name)` supplies one — and keeps supplying one
+across supervisor restarts, where a cached `Pid` would have gone stale:
+
+```march
+match Actor.whereis("ingest") do
+  Some(pid) -> check_depth(mailbox_size(pid))
+  None      -> ()                 -- not registered, or mid-restart
+end
+```
+
+Resolve once and cache the `Pid` on a hot path, re-resolving on `None`; repeated lookups
+of the same name contend on the stored value's reference count. There is still no way to
+*enumerate* live actors, so this works for actors you can name in advance, not for
+discovering an unknown hot one — see
+[`specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-08-12-per-actor-introspection-and-alarms.md).
+
 A practical shedding pattern is checking a worker's depth at the *dispatch point* —
 whatever hands work to the worker refuses in microseconds when the worker is behind,
 instead of enqueueing onto a backlog that has already lost:
