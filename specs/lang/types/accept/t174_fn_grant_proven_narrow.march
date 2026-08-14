@@ -12,10 +12,15 @@ mod Main do
   -- that callback by the same reference edge that has always driven the
   -- capability closure.
   --
-  -- Neither `log` nor `run` is called from `main`: a capability parameter is
-  -- a discharge point wherever it is declared, so a LIBRARY function's bound
-  -- is checked without any entry point opting in. That is the whole point of
-  -- stage C over stage B.
+  -- Neither `log` nor `run` is called from `main`. That used to matter under
+  -- R1 stage C (a `Cap(P)` parameter was a discharge point wherever it was
+  -- declared, so a LIBRARY function's bound was checked without any entry
+  -- point opting in) — stage C was removed 2026-08-13
+  -- (`specs/progress/2026-08-13-remove-per-function-grant-ceiling.md`):
+  -- capabilities are module-scoped, so a `Cap(P)` parameter is now just an
+  -- authority marker, and what is actually checked here is `needs`, the
+  -- module ceiling, and `main`'s own `Cap(IO.FileWrite)` grant (satisfied,
+  -- since `main` only calls `save`).
   needs IO.Console
   needs IO.FileWrite
 

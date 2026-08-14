@@ -85,3 +85,69 @@ let normalize caps =
   List.filter (fun c ->
     not (List.exists (fun other -> other <> c && cap_subsumes other c) uniq)
   ) uniq
+
+(* Levenshtein distance, iterative two-row form. *)
+let edit_distance a b =
+  let la = String.length a and lb = String.length b in
+  if la = 0 then lb else if lb = 0 then la
+  else begin
+    let prev = Array.init (lb + 1) (fun j -> j) in
+    let cur  = Array.make (lb + 1) 0 in
+    for i = 1 to la do
+      cur.(0) <- i;
+      for j = 1 to lb do
+        let cost = if a.[i - 1] = b.[j - 1] then 0 else 1 in
+        cur.(j) <- min (min (cur.(j - 1) + 1) (prev.(j) + 1)) (prev.(j - 1) + cost)
+      done;
+      Array.blit cur 0 prev 0 (lb + 1)
+    done;
+    prev.(lb)
+  end
+
+let known_caps = List.map fst hierarchy
+
+let leaf c =
+  match String.rindex_opt c '.' with
+  | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+  | None -> c
+
+(** [suggest_cap cap] is [None] when [cap] is a legal capability path, and
+    [Some known] naming the closest known capability when it is not.
+
+    A path rooted at [IO] must appear in [hierarchy] — that lattice is closed.
+    Any other root is an FFI/proof capability (see the header comment) and is
+    legal, INCLUDING a dotted one like [Db.Migrated] or [MyLib.Clock] — a
+    dotted non-[IO] path is never mistaken for a mistyped [IO] capability,
+    because it is unambiguously its own namespaced root.
+
+    The leaf-collision rule (a leaf matching a known capability's leaf
+    case-insensitively is rejected in favor of the known capability) applies
+    ONLY to a bare, single-segment name: that's the `needs Network` case, a
+    real capability written without its `IO.` path. Gating it on "no dot"
+    keeps it from misfiring on a legitimate dotted FFI root whose last
+    segment happens to coincide with an IO leaf (e.g. [MyLib.Clock],
+    [Vendor.Random] — these must stay legal, exactly like [Db.Migrated]). *)
+let suggest_cap cap =
+  if List.mem cap known_caps then None
+  else begin
+    let lower s = String.lowercase_ascii s in
+    let is_io_rooted =
+      cap = "IO" || (String.length cap > 3 && String.sub cap 0 3 = "IO.")
+    in
+    let is_dotted = String.contains cap '.' in
+    let leaf_match =
+      if is_dotted && not is_io_rooted then None
+      else List.find_opt (fun k -> lower (leaf k) = lower (leaf cap)) known_caps
+    in
+    match leaf_match with
+    | Some k -> Some k
+    | None ->
+      if not is_io_rooted then None   (* an FFI/proof root; legal *)
+      else
+        let scored =
+          List.map (fun k -> (edit_distance (lower cap) (lower k), k)) known_caps
+        in
+        match List.sort compare scored with
+        | (d, k) :: _ when d <= 3 -> Some k
+        | _ -> Some "IO"
+  end

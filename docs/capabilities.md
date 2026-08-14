@@ -16,9 +16,11 @@ March is a **capability-based language**: side effects are **visible in your typ
 > custom effects with row-polymorphic inference. What exists is a fixed,
 > closed lattice of IO/behavioral capabilities (`IO.Network`, `IO.FileWrite`,
 > `cap pure`, …), checked structurally by tracing which of them a function's
-> reachable call graph touches. A true per-function effect-row system is a
-> documented future direction, not something that exists today. See "effect
-> rows... stage C and not built" under [The grant](#grant), below.
+> reachable call graph touches. A true per-function effect-row system is
+> deliberately **not** built: it would make a `Cap(X)` parameter a ceiling
+> over everything a function reaches, forcing every caller to thread
+> capabilities it does not otherwise need — the opposite of March's
+> module-scoped design. See [The grant](#grant), below.
 
 ---
 
@@ -159,6 +161,8 @@ boundary, a compiled binary actually refusing the syscalls a withheld
 capability gates, see [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement-sandboxing-the-compiled-binary),
 including the [full capability-to-OS-primitive map]({{ site.baseurl }}/docs/capability-enforcement/#os-primitives-capability-by-capability).
 
+This `IO` lattice is closed: every `IO`-rooted path in a `needs` declaration must appear in it. An unrecognized `IO`-rooted path (wrong case, a typo) or a bare leaf standing in for a real capability (`needs Network` instead of `needs IO.Network`) is a compile-time error with a did-you-mean suggestion, rather than being silently accepted and only surfacing later as a confusing "no function requires it" warning or an unrelated missing-`needs` error. Capability roots outside the `IO` lattice (e.g. `needs Ffi`, a dotted namespace like `needs Db.Migrated`, or an FFI extern's `Cap(LibC)`) are intentionally not in this table and stay free-form. The one exception is a *bare, single-segment* name whose spelling collides with a real capability's leaf case-insensitively — `needs Network` is rejected in favor of `needs IO.Network`, since that's almost always a real capability written without its `IO.` path rather than a genuine FFI root. A dotted non-`IO` path is never subject to that check, even if its last segment happens to coincide with an `IO` capability's leaf (`needs MyLib.Clock`, `needs Vendor.Random`): the dot makes it unambiguously its own namespace.
+
 A module that declares `needs IO` can pass `Cap(IO)` to any function that requires a narrower cap. Use `cap_narrow` to produce a sub-capability. It's free, compile-time only:
 
 ```march
@@ -226,14 +230,30 @@ signature, is now the same severity:
 
 ```
 $ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
--- ERROR -- function body calls a builtin that requires `Cap(IO.FileRead)` but `Reader` does not declare `needs IO.FileRead`.
-help: add `needs IO.FileRead` to the module body.
+-- ERROR -- function bodies in `Reader` call builtins that require `Cap(IO.FileRead)`, but `Reader` declares no matching `needs`.
+hint: add these to the module body —
+        needs IO.FileRead
 $ echo $?
 1
 ```
 
 The error carries a machine-applicable fix, so `forge fix` will insert the
-`needs` line for you.
+`needs` line for you. Every offending capability in the module is collapsed
+into **one** diagnostic, not one per call site: a `main` that touches four
+undeclared capabilities gets a single error naming all four once, with one
+fix that inserts all four `needs` lines at once —
+
+```
+-- ERROR -- function bodies in `Main` call builtins that require `Cap(IO.Console)`, `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`, but `Main` declares no matching `needs`.
+hint: add these to the module body —
+        needs IO.Console
+        needs IO.FileWrite
+        needs IO.Random
+        needs Time.Clock
+```
+
+— rather than four separate errors, each with its own single-line fix and
+its own restatement of the capability that was missing.
 
 #### What this does and does not guarantee
 
@@ -297,8 +317,8 @@ This compiles as-is. Delete `needs IO.FileWrite` and it fails. Look at
 call graph and naming the whole path:
 
 ```
-function body calls a builtin that requires `Cap(IO.FileWrite)` but `Logger`
-does not declare `needs IO.FileWrite`.
+function bodies in `Logger` call builtins that require `Cap(IO.FileWrite)`, but
+`Logger` declares no matching `needs`.
 ...
 reached from `main`: main → log_error → log
 ```
@@ -404,11 +424,13 @@ end
 
 `Cap(IO.Console)` here is a machine-checked claim: this program, every helper,
 every stdlib call, every dependency `main` reaches, touches nothing beyond the
-console. Add one `file_write` anywhere in that closure and the build fails:
+console. Add a `save` helper that calls `file_write` anywhere in that closure
+and the build fails, naming the chain from `main` down to the frame that
+actually holds the capability:
 
 ```
 `main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
-(reached in `Report.save`). The grant is a ceiling on the WHOLE program:
+(reached from `main`: main → save). The grant is a ceiling on the WHOLE program:
 declaring `needs IO.FileWrite` does not raise it.
 help: widen the grant (e.g. `Cap(IO)`), or remove the use.
 ```
@@ -441,8 +463,13 @@ Two deliberate edges:
 
 The grant is `needs`' missing other half: `needs` says what a *module*
 touches, and the grant bounds what the *program* may. Sandbox ladder stages A/B/D
-are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`); per-function
-grants (effect rows) are stage C and not built.
+are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`). Per-function
+grants (effect rows) are stage C and deliberately **not** built: making a
+`Cap(X)` parameter a ceiling over everything a function reaches would force
+every caller to thread capabilities it does not otherwise need, which is the
+opposite of March's module-scoped design. A `Cap(X)` parameter is an authority
+marker at a module boundary; the *checks* are `needs`, the module ceiling, and
+`main`'s grant.
 
 ### When *not* to use IO capabilities
 

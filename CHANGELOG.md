@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- An unrecognized capability in `needs` is now an error with a did-you-mean suggestion
+  (`needs IO.FileWrit` → `needs IO.FileWrite`). Typos previously produced only a misleading
+  "declared but no function requires it — remove the unused declaration" warning.
+
+### Changed
+
+- A `Cap(X)` parameter on a non-`main` function is no longer a ceiling on everything that
+  function transitively reaches. Taking one capability parameter used to oblige a function
+  to take parameters for every other capability it reached, forcing callers to thread
+  capabilities through the call graph. Capabilities are module-scoped: `needs`, the module
+  ceiling, and `main`'s grant are the checks. `main`'s grant is unchanged.
 - **`Actor.register(pid, name)` / `Actor.unregister(name)` / `Actor.whereis(name)` / `Actor.registered()`** — a named process registry over the runtime's `march_actor_*` C API. `register` fails (returns `false`) if the name is already held by a live actor, or if `pid` is dead; a stale entry left by a dead actor is silently reusable. `whereis` re-checks liveness at lookup time, so a name whose actor died resolves to `None` even before any restart-carry-forward cleanup runs. No capability is required — the registry table is owned by the runtime, so no March-level naming call happens. These four operations behave identically in the compiled and interpreted backends, and so does carrying a name across a supervisor **restart** (below). For a hot lookup, resolve a name once and cache the `Pid`, re-resolving on `None`: repeated lookups of the *same* name contend on the reference count of the single stored value, and `send` itself takes no registry lock.
 - **A registered name now survives a supervisor restart.** `do_actor_death` snapshots a supervised actor's registered names onto its (never-freed) meta immediately before `registry_retire_actor` wipes them, and `march_respawn_child` re-registers each carried name on the replacement child — including across the up-to-~3.2s exponential-backoff delay a repeat crash can take. A holder outside the supervision tree that only ever knew the name, never any specific Pid, keeps resolving to whichever incarnation is currently alive. If a different live actor claims the same name during the restart window, the carried-forward registration is dropped for that name rather than stealing it back — the name legitimately belongs to its new, live owner. Unsupervised actors are unaffected: their names are simply dropped on death, as before. The interpreter now does the same thing, so this is backend parity rather than a compiled-only feature: `crash_actor` stashes a supervised actor's `named_registry` names before retiring them and `spawn_child_actor` re-establishes them on the replacement, under the same first-live-claim-wins rule. That includes a live sibling killed by a `one_for_all` / `rest_for_one` batch restart — those strategies clear the sibling's supervisor field before crashing it, so they capture its names explicitly rather than relying on that field as a gate. `test/native/actor_registry_restart.march` and `actor_registry_restart_batch.march` now run interpreted as well as compiled and diff against the same expected output.
 
@@ -25,9 +36,57 @@ git log is authoritative for exact commits.
   Compatibility: code that keeps one element type per table needs no change. Code that stored several unrelated types in one table under a single bound handle now needs either separate tables or the explicit `: Vault(v)` annotation. Nothing changes at runtime — no representation, layout, or codegen change — and the runtime-owned `$actor_registry` table, which C reads and writes directly without passing through the typechecker, is untouched.
 - Vault reads no longer serialise against each other — `get`/`size`/`keys` take a shared, striped reader-count lock (`set`/`set_ttl`/`put_new`/`incr`/`push_capped`/`drop` still take it exclusively). Concurrent reads of *distinct* keys now scale close to linearly with thread count; concurrent reads of the *same* key are still bounded by reference-count contention on that key's one shared value, an orthogonal cost the lock change doesn't touch.
 - **`vault_get`/`vault_size`/`vault_keys` no longer require `needs IO.Mut`.** A Vault table is in-memory, so a lookup carries no ambient authority — only naming a table (`vault_new`/`vault_whereis`, mints a handle from a string) and mutating one (`vault_set`/`vault_set_ttl`/`vault_drop`/`vault_update`/`vault_put_new`/`vault_incr`/`vault_push_capped`) still do. Source-compatible: an existing module that declared `needs IO.Mut` only to read now over-declares (harmless; the checked stdlib carried no such module). Accepted trade-off: a reader of shared mutable state is now non-deterministic without saying so in its `needs` — authority remains auditable at the boundary, since some module still had to name/write the table under a declared capability.
+- Missing `needs` declarations are now reported as one aggregated error per module listing
+  every missing capability, with a single fix that inserts them all, instead of one error
+  per offending call site.
+- A `--cap-strict` capability ceiling violation is now reported as an ordinary diagnostic —
+  file, line, source excerpt, and a machine-applicable `FInsert` fix that inserts the missing
+  `needs` line — instead of a bespoke `-- CAPABILITY CEILING --` block with none of those. It
+  will become visible to the LSP and applicable by `forge fix` once the ceiling also runs under
+  `--check` (`forge fix`'s only input is `march --check-json`, which today exits before this
+  diagnostic is ever built, so the fix has no consumer yet — see
+  `specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md`).
+  `march --check` still does not run the ceiling (it does not lower to TIR, which the check
+  currently requires); a module whose `needs` manifest is falsified only by a stdlib-mediated
+  call (`File.read` rather than `file_read`) is still caught only by `march --compile`.
+- A grant violation now names the chain of the user's own functions that reaches the
+  capability, instead of only the stdlib function that holds it.
 
 ### Fixed
 
+- Fixed an internal compiler error (`Invalid_argument("List.nth")`) on the most common
+  project shape: a `MARCH_LIB_PATH` dependency (any file loaded via `use`/import from a
+  separate `.march` file) that violates the `--cap-strict` ceiling but declares no `needs`
+  of its own. Such a module is synthesized with a placeholder span, and the fix-indent
+  helper indexed a negative line number into the wrong file's source. It now falls back to
+  the dependency's own first real declaration for the diagnostic span, and — if no real
+  span can be found at all — to the pre-existing bespoke `-- CAPABILITY CEILING --`
+  rendering rather than ever crashing or pointing at unrelated code.
+- An unknown capability in `needs` (`needs Network`) no longer also produces a contradictory
+  "declares `needs Network` but no function requires it — remove the unused capability
+  declaration" warning on the same line. The two diagnostics gave opposite advice (fix the
+  name vs. delete the line); the unused-capability check now skips any capability path the
+  unknown-capability check already rejected.
+- The aggregated missing-`needs` error no longer proposes a fix that overlaps a capability
+  `Cap(X)` signature parameter is separately demanding. `fn main(cap : Cap(IO))` calling
+  `println`/`unix_time`/`random_bytes` used to get both "add `needs IO`" (from the `Cap(IO)`
+  parameter) and "add `needs IO.Clock`, `needs IO.Console`, `needs IO.Random`" (from the
+  body scan) — `forge fix` applying both wrote four `needs` lines where one suffices. The
+  aggregation now drops any capability already subsumed by a capability Check 1 demands.
+
+- Capability parameters no longer trigger "Unused variable" warnings. A capability value is
+  a runtime-erased grant token and is normally never referenced in the body.
+- `fn main(cap : Cap(IO))` no longer emits the "narrow to least-privilege" hint. That is the
+  documented entry-point convention; the hint still fires on non-`main` functions.
+
+- `forge new` now scaffolds capability-correct projects. The generated `app`/`tool` entry
+  point and test module declared no `needs` and took no grant, so a freshly created project
+  failed `forge build` with two capability errors.
+
+- `forge fix` now applies capability fixes. It previously refused to run whenever any
+  error-severity diagnostic carried a machine-applicable fix — which is exactly what the
+  missing-`needs` and missing-grant errors emit, so the fix those errors advertised could
+  never be applied.
 - **A `panic()` inside a hot-reload actor's message handler no longer pins its
   code version forever.** A hot-reload dispatch is bracketed by
   `march_dispatch_enter`/`march_dispatch_leave`, whose reference count stops a

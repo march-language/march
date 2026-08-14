@@ -3663,6 +3663,213 @@ let test_actor_handler_cap_needs_ok () =
   end|} in
   Alcotest.(check bool) "actor handler cap with needs: ok" false (has_errors ctx)
 
+(* A module that calls several undeclared-capability builtins used to
+   produce one missing-`needs` error PER offending call site. Pin that the
+   body-scan check (Check 1b) now aggregates too: one diagnostic, every
+   missing capability named, one fix that inserts all the `needs` lines at
+   once.
+
+   Deliberately a `main`-LESS library module (a plain helper function, no
+   `Cap(...)` signature parameter anywhere): once Check 1 and Check 1b's
+   aggregation stopped proposing overlapping redundant fixes (a Check-1-
+   demanded `Cap(X)` now makes the aggregation drop every capability it
+   subsumes — see [test_check1b_omits_caps_subsumed_by_check1] below), a
+   `main(cap : Cap(IO))` shape here would have every capability in this
+   very aggregation subsumed by Check 1's OWN "add `needs IO`" demand,
+   collapsing Check 1b's error to nothing and testing the wrong thing. A
+   `main`-less module keeps Check 1's [used_caps] empty (no function has a
+   `Cap` parameter) so this test still isolates Check 1b's own
+   aggregation. *)
+let test_missing_needs_reported_once_per_module () =
+  let ctx = typecheck {|mod ManyCaps do
+    fn helper() : () do
+      println("a")
+      match file_write("/tmp/many", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check int) "one aggregated missing-needs error, not one per builtin"
+    1 (count_errors_with ctx "declares no matching `needs`");
+  Alcotest.(check bool) "every missing capability is named"
+    true (has_error_with ctx "IO.Console" && has_error_with ctx "IO.FileWrite")
+
+(* Fix-round regression: the aggregated error above carries a comma-joined
+   `cap_needs:<c1>,<c2>,...` code and reports only the FIRST offending span
+   (the `println` call). bin/main.ml's `dedupe_cap_hints` used to match a
+   Cap_infer hint against an error by EXACT (span, code) equality, which
+   worked when Check 1b emitted one error per call site — an exact mirror of
+   Cap_infer's own per-call hint. After aggregation, the hint for the SECOND
+   capability (`file_write`, a different span, and no longer an exact code
+   match) stopped matching and survived as an orphan diagnostic duplicating
+   content the aggregated error already states. `dedupe_cap_hints` lives
+   only in bin/main.ml (an executable, not a library `typecheck` above can
+   call into), so this has to go through the compiled binary rather than
+   `March_typecheck.Typecheck` directly — same pattern as
+   `test_cap_ceiling.ml`'s `compile_with`. Asserts hint ABSENCE by name, not
+   a total diagnostic count, per fix-round feedback that a count assertion
+   would not have caught this class of regression. *)
+let compiler_exe_for_cap_dedup =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
+let contains_substring haystack needle =
+  let hl = String.length haystack and nl = String.length needle in
+  let rec go i =
+    if i + nl > hl then false
+    else if String.sub haystack i nl = needle then true
+    else go (i + 1)
+  in
+  if nl = 0 then true else go 0
+
+let test_missing_needs_dedup_no_orphan_hint () =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup
+  else begin
+    let src = Filename.temp_file "cap_dedup" ".march" in
+    let oc = open_out src in
+    (* Same `main`-less shape as [test_missing_needs_reported_once_per_module]
+       above and for the same reason: a `main(cap : Cap(IO))` signature would
+       make Check 1 demand `needs IO`, which subsumes both IO.Console and
+       IO.FileWrite, collapsing Check 1b's aggregated error (and its
+       `cap_needs:` code, which this dedup relies on) to nothing. *)
+    output_string oc
+      "mod ManyCaps do\n\
+      \  fn helper() : () do\n\
+      \    println(\"a\")\n\
+      \    match file_write(\"/tmp/many\", \"d\") do\n\
+      \      Ok(_) -> ()\n\
+      \      Err(_) -> ()\n\
+      \    end\n\
+      \  end\n\
+       end";
+    close_out oc;
+    let out = Filename.temp_file "cap_dedup" ".out" in
+    let (_ : int) =
+      Sys.command
+        (Printf.sprintf "%s --check %s > %s 2>&1"
+           (Filename.quote compiler_exe_for_cap_dedup) (Filename.quote src)
+           (Filename.quote out))
+    in
+    let ic = open_in out in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out ];
+    Alcotest.(check bool)
+      "no orphan cap_infer hint for a capability the aggregated error already covers"
+      false
+      (contains_substring s "call to `file_write` requires `needs IO.FileWrite`");
+    Alcotest.(check bool)
+      "the aggregated error itself still names both missing capabilities"
+      true
+      (contains_substring s "IO.Console" && contains_substring s "IO.FileWrite")
+  end
+
+(* ── Regression: the `fn main(cap : Cap(IO))` shape, the one that actually
+   regressed ───────────────────────────────────────────────────────────
+
+   [test_missing_needs_dedup_no_orphan_hint] above deliberately uses a
+   `main`-less fixture, because a `main(cap : Cap(IO))` signature makes
+   Check 1 demand `needs IO`, which subsumes both IO.Console and
+   IO.FileWrite and so collapses Check 1b's aggregated error (and its
+   `cap_needs:` code) to nothing — leaving no error for the dedup pass to
+   key off of via the OLD exact-capability-set-membership match. That gap
+   is exactly why the orphan-hint bug escaped: `dedupe_cap_hints` matched a
+   hint's capability against an error's capability set by exact string
+   equality, which can never match `IO` (what Check 1's error covers)
+   against `IO.FileWrite` (what Cap_infer's hint names) — so on THIS shape
+   the hint survived even after Check 1's error was given a `cap_needs:IO`
+   code. Fixed by matching via `Cap_lattice.cap_subsumes` instead of exact
+   membership. Assert on the specific orphan hint's absence, not a
+   diagnostic count — a count assertion is exactly what let the prior
+   regression through undetected. *)
+let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup
+  else begin
+    let src = Filename.temp_file "cap_dedup_main" ".march" in
+    let oc = open_out src in
+    output_string oc
+      "mod ManyCaps do\n\
+      \  fn main(cap : Cap(IO)) : () do\n\
+      \    println(\"a\")\n\
+      \    let _ = file_write(\"/tmp/mc\", \"d\")\n\
+      \    ()\n\
+      \  end\n\
+       end";
+    close_out oc;
+    let out = Filename.temp_file "cap_dedup_main" ".out" in
+    let (_ : int) =
+      Sys.command
+        (Printf.sprintf "%s --check %s > %s 2>&1"
+           (Filename.quote compiler_exe_for_cap_dedup) (Filename.quote src)
+           (Filename.quote out))
+    in
+    let ic = open_in out in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out ];
+    Alcotest.(check bool)
+      "no orphan cap_infer hint for file_write's IO.FileWrite, subsumed by Check 1's `needs IO`"
+      false
+      (contains_substring s "call to `file_write` requires `needs IO.FileWrite`");
+    Alcotest.(check bool)
+      "Check 1's own error still names the Cap(IO) parameter"
+      true
+      (contains_substring s "used in module `ManyCaps`" && contains_substring s "needs IO")
+  end
+
+(* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
+
+   `fn main(cap : Cap(IO))` makes Check 1 separately demand `needs IO`
+   (the signature's own capability). Before this fix, Check 1b's aggregated
+   error ALSO listed every individual capability the body reaches
+   (IO.Console for `println`, IO.FileWrite for `file_write`) even though
+   `needs IO` already covers both — so `forge fix` applying both
+   diagnostics wrote four `needs` lines (`IO`, then `IO.Console`,
+   `IO.FileWrite`, ...) where the one `needs IO` line already suffices.
+   Pin that the aggregation now DROPS any capability already subsumed by a
+   Cap(X) Check 1 is separately demanding: Check 1's own "add `needs IO`"
+   error still fires, but Check 1b's redundant, narrower echo of the same
+   fix does not. *)
+let test_check1b_omits_caps_subsumed_by_check1 () =
+  let ctx = typecheck {|mod Agg do
+    fn main(cap : Cap(IO)) : () do
+      println("a")
+      match file_write("/tmp/agg", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "Check 1's own `needs IO` demand still fires"
+    true (has_error_with ctx "not declared in `needs`");
+  Alcotest.(check int)
+    "Check 1b's aggregated error is fully subsumed and does not also fire"
+    0 (count_errors_with ctx "declares no matching `needs`")
+
+(* The narrower half: when Check 1 demands a capability that covers only
+   SOME of what Check 1b would otherwise report, the still-uncovered
+   capability must survive in the aggregation — dropping subsumed caps must
+   not turn into dropping everything indiscriminately. `Cap(IO.Console)`
+   subsumes `println`'s IO.Console but not `file_write`'s IO.FileWrite. *)
+let test_check1b_keeps_caps_not_subsumed_by_check1 () =
+  let ctx = typecheck {|mod AggPartial do
+    fn main(cap : Cap(IO.Console)) : () do
+      println("a")
+      match file_write("/tmp/agg_partial", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check int)
+    "Check 1b still aggregates the capability Check 1 does not cover"
+    1 (count_errors_with ctx "declares no matching `needs`");
+  Alcotest.(check bool) "the surviving capability is IO.FileWrite, not IO.Console"
+    true (has_error_with ctx "IO.FileWrite")
+
 let test_actor_handler_cap_missing_needs_error () =
   (* An actor handler with a Cap parameter, but no needs declaration, should error. *)
   let ctx = typecheck {|mod Test do
@@ -9989,6 +10196,89 @@ let test_cap_propagation_still_warns_unrelated () =
   Alcotest.(check bool) "unrelated needs IO.Console still warns when unused" true
     (has_warning_with ctx "unused capability")
 
+(* ── Task 6: stop nagging correct capability code ─────────────────────────
+   A capability value is a runtime-erased grant token: never referencing one
+   in the body is its normal, correct state. Two diagnostics used to punish
+   that: the unused-variable warning on capability params, and the
+   narrow-to-least-privilege hint on `main`'s own root Cap(IO) — even though
+   `fn main(cap : Cap(IO))` is the documented entry-point convention. Both
+   are narrowly suppressed: only params whose declared type actually names a
+   capability are exempt from the unused warning, and only `main` is exempt
+   from the narrowing hint. *)
+let test_unused_cap_param_is_not_warned () =
+  let ctx = typecheck {|mod QuietCap do
+    needs IO.Console
+    fn main(cap : Cap(IO.Console)) : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "a capability parameter is not an unused variable"
+    false (has_warning_with ctx "Unused variable `cap`")
+
+let test_ordinary_unused_param_still_warned () =
+  let ctx = typecheck {|mod StillWarns do
+    fn f(x : Int) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "an ordinary unused parameter still warns"
+    true (has_warning_with ctx "Unused variable `x`")
+
+let test_main_is_not_nagged_about_root_cap () =
+  let ctx = typecheck {|mod EntryPoint do
+    needs IO
+    fn main(cap : Cap(IO)) : () do
+      println("hi")
+    end
+  end|} in
+  Alcotest.(check bool) "main is not told to narrow the root capability"
+    false (has_hint_with ctx "root capability")
+
+let test_non_main_still_hinted_about_root_cap () =
+  let ctx = typecheck {|mod NotEntry do
+    needs IO
+    fn helper(cap : Cap(IO)) : () do
+      println("hi")
+    end
+    fn main(c : Cap(IO)) : () do
+      helper(c)
+    end
+  end|} in
+  Alcotest.(check bool) "a non-main function is still hinted"
+    true (has_hint_with ctx "root capability")
+
+(* ── Fix round 1: the unused-param exemption must be the DIRECT `Cap(X)`
+   form only, not "a capability appears anywhere in the type." A
+   `List(Cap(IO.Console))`, a tuple containing a `Cap(IO.Console))`, or a
+   `Cap(IO.Console) -> ()` closure parameter is an ordinary container/closure
+   value, not a grant token itself — a dead one should still warn. *)
+let test_unused_list_of_cap_param_still_warned () =
+  let ctx = typecheck {|mod ListOfCap do
+    fn f(caps : List(Cap(IO.Console))) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "a List(Cap(...)) parameter is not exempt"
+    true (has_warning_with ctx "Unused variable `caps`")
+
+let test_unused_tuple_of_cap_param_still_warned () =
+  let ctx = typecheck {|mod TupleOfCap do
+    fn f(pair : (Int, Cap(IO.Console))) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "a tuple containing a Cap(...) parameter is not exempt"
+    true (has_warning_with ctx "Unused variable `pair`")
+
+let test_unused_cap_arrow_param_still_warned () =
+  let ctx = typecheck {|mod CapArrow do
+    fn g(handler : Cap(IO.Console) -> ()) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "a Cap(...) -> () closure parameter is not exempt"
+    true (has_warning_with ctx "Unused variable `handler`")
+
 (* ── A module-level declaration SHADOWING a builtin name is not a call to
    that builtin ─────────────────────────────────────────────────────────────
    specs/2026-08-09-cap-loose-ends-plan.md, Tier 0.
@@ -10234,6 +10524,111 @@ let test_unrelated_needs_still_warns_with_stdlib_loaded () =
       "needs IO.NetListen with no use of any kind still warns" true
       (has_warning_with errors "unused capability"))
 
+(* ── Unrecognized capability names in `needs` are rejected ────────────────
+   Task 4 of the 2026-08-13 capability UX plan: `needs IO.Filesystem` (wrong
+   case), `needs IO.FileWrit` (typo), and `needs Network` (bare leaf, missing
+   its `IO.` root) were all silently accepted before, producing only a
+   misleading "declared but no function requires it" unused-capability
+   warning. The lattice (`Cap_lattice.hierarchy`) is closed, so any `IO`-rooted
+   path not in it is definitely wrong and can be validated eagerly, with a
+   did-you-mean suggestion. FFI capability roots outside the `IO` lattice
+   (e.g. `Cap(LibC)`) are intentionally not in `hierarchy` and must stay
+   legal — the last test below pins that. *)
+let test_unknown_capability_is_rejected_with_suggestion () =
+  let ctx = typecheck {|mod BadCap do
+    needs IO.FileWrit
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "an unknown capability is an error"
+    true (has_error_with ctx "IO.FileWrit");
+  Alcotest.(check bool) "the closest known capability is suggested"
+    true (has_error_with ctx "IO.FileWrite")
+
+let test_wrong_case_capability_is_rejected () =
+  let ctx = typecheck {|mod BadCase do
+    needs IO.Filesystem
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "wrong case is suggested against"
+    true (has_error_with ctx "IO.FileSystem")
+
+let test_bare_leaf_capability_is_rejected () =
+  let ctx = typecheck {|mod BareLeaf do
+    needs Network
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a bare leaf name suggests the full path"
+    true (has_error_with ctx "IO.Network")
+
+(* Final whole-branch review, Important 2: Check 0 (unknown capability,
+   above) and Check 2 (unused `needs`, lib/typecheck/typecheck.ml's
+   `declared_needs` loop) used to fire on the SAME `needs Network` line and
+   give directly opposing advice — "did you mean `IO.Network`?" (fix the
+   name) vs. "no function requires it — remove the unused capability
+   declaration" (delete the line). A user following the warning would
+   delete the declaration they actually needed. Check 2 must skip any
+   capability path Check 0 already rejected as unknown. *)
+let test_unknown_capability_does_not_also_warn_unused () =
+  let ctx = typecheck {|mod Unk do
+    needs Network
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "the unknown-capability error still fires"
+    true (has_error_with ctx "is not a known capability");
+  Alcotest.(check bool) "no contradictory 'remove the unused declaration' warning"
+    false (has_warning_with ctx "remove the unused capability declaration")
+
+let test_ffi_capability_root_still_accepted () =
+  (* FFI roots are deliberately outside the IO lattice and must stay legal. *)
+  let ctx = typecheck {|mod FfiRoot do
+    needs IO.Foreign
+    extern "libc": Cap(LibC) do
+      fn getpid() : Int
+    end
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "an FFI capability root is not reported unknown"
+    false (has_error_with ctx "is not a known capability")
+
+(* Fix round 1: the leaf-collision rule (a bare `needs Network` suggesting
+   `IO.Network`) was firing on any non-IO-rooted path, not just a bare
+   single-segment one — so a legitimate DOTTED FFI/proof capability whose
+   last segment happens to coincide with a known IO capability's leaf
+   (`MyLib.Clock`, `Vendor.Random`) was wrongly rejected and pointed at an
+   unrelated IO capability. A dotted non-IO root is unambiguously its own
+   namespace (exactly like `Db.Migrated`/`Db.P`, which the sweep found
+   already in the corpus) and must stay legal regardless of what its leaf
+   happens to spell. *)
+let test_dotted_ffi_capability_with_io_leaf_collision_still_accepted () =
+  let ctx = typecheck {|mod DottedFfiClock do
+    needs MyLib.Clock
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a dotted FFI capability is not reported unknown"
+    false (has_error_with ctx "is not a known capability")
+
+let test_dotted_ffi_capability_with_io_leaf_collision_still_accepted_2 () =
+  let ctx = typecheck {|mod DottedFfiRandom do
+    needs Vendor.Random
+    fn main() : () do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "a dotted FFI capability is not reported unknown"
+    false (has_error_with ctx "is not a known capability")
+
 (* ── R1 stages A+B: main's capability parameter IS the grant ──────────────
    specs/2026-08-08-r1-no-ambient-io-design.md.
 
@@ -10304,6 +10699,29 @@ let test_grant_violation_through_helper () =
   end|} in
   Alcotest.(check bool) "helper-reached IO.FileWrite is still a grant error"
     true (has_error_with ctx "granted `Cap(IO.Console)`")
+
+let test_grant_violation_names_the_user_module () =
+  (* A grant violation reached through the stdlib used to name only the
+     stdlib leaf (the builtin holding the capability directly), leaving the
+     user to hunt for which of their OWN functions called it. It should
+     instead print the full chain from `main` through the user's own frames,
+     rendered the same way as the sibling missing-`needs` body-scan
+     diagnostic (`Cap_infer.chain_note`): `main` included as the first
+     frame, joined with `→`, no truncation. *)
+  let ctx = typecheck {|mod Attributed do
+    needs IO
+    fn helper(p : String) : String do
+      match file_read(p) do
+        Ok(s) -> s
+        Err(_) -> ""
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      println(helper("/etc/passwd"))
+    end
+  end|} in
+  Alcotest.(check bool) "the chain names `main` and the user's own function"
+    true (has_error_with ctx "reached from `main`: main \xe2\x86\x92 helper")
 
 let test_grant_full_io_accepts_everything () =
   (* `needs IO` is Check 1's requirement for the Cap(IO) SIGNATURE — the
@@ -10406,26 +10824,13 @@ let test_main_signature_still_rejects_non_cap () =
       end
     end|})
 
-(* ── R1 stage C: per-function grants (effect rows) ────────────────────────
-   specs/2026-08-10-r1-stage-c-effect-rows-design.md.
-
-   Stages A/B check ONE row against ONE grant, at `main`.  Stage C makes any
-   function that takes a concrete `Cap(P)` parameter a DISCHARGE POINT: its
-   own transitive capability row must sit under the capabilities its
-   parameters were handed.  The guarantee stops being "this BINARY cannot
-   touch the filesystem" and becomes "this FUNCTION cannot", which is what
-   composes across dependencies.
-
-   The claim being certified is deliberately CONDITIONAL — "this function's
-   static reach fits under P, plus whatever function values you hand it" —
-   and the tests below pin both halves of that:
-   - a function that invokes a PARAMETER still certifies (its callers are
-     charged for what they supply, by the free-variable edge that has always
-     driven the closure), and
-   - a function that invokes a value with no traceable creation site is
-     REFUSED under a narrow grant, the same way stage B refuses to certify a
-     narrow grant over `IO.Foreign`, rather than certifying a bound it cannot
-     see. *)
+(* ── R1 stage C: REMOVED (2026-08-13) ─────────────────────────────────────
+   Per-function grants made any `Cap(X)` parameter a ceiling over everything
+   the function transitively reached, so taking one capability parameter
+   obliged a function to take parameters for all the others — capability
+   threading, which March's module-scoped design rejects. `main`'s grant and
+   the per-module ceiling remain. The tests below are the ones that assert
+   NO error, kept to pin that a Cap parameter is not itself a gate. *)
 
 let test_fn_grant_narrow_covers_console () =
   let ctx = typecheck {|mod FnGrantOk do
@@ -10440,56 +10845,12 @@ let test_fn_grant_narrow_covers_console () =
   Alcotest.(check bool) "a console-only helper under Cap(IO.Console) is fine"
     false (has_errors ctx)
 
-let test_fn_grant_narrow_rejects_filewrite () =
-  (* The manifest is truthful — `needs IO.FileWrite` is declared and the
-     module-level checks are all satisfied.  Declaring still does not grant,
-     now at function granularity. *)
-  let ctx = typecheck {|mod FnGrantViolate do
-    needs IO.Console
-    needs IO.FileWrite
-    fn log(cap : Cap(IO.Console), msg : String) : () do
-      match file_write("/tmp/fn_grant_x", msg) do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
-      end
-    end
-    fn main() : () do
-      ()
-    end
-  end|} in
-  Alcotest.(check bool) "IO.FileWrite outside a Cap(IO.Console) parameter errors"
-    true (has_error_with ctx "granted `Cap(IO.Console)`");
-  Alcotest.(check bool) "the violating capability is named"
-    true (has_error_with ctx "IO.FileWrite")
-
-let test_fn_grant_violation_through_helper () =
-  (* Transitive, and the diagnostic names the chain that reaches it — the
-     evidence stage B could only give as a single hop. *)
-  let ctx = typecheck {|mod FnGrantHelper do
-    needs IO.Console
-    needs IO.FileWrite
-    fn save(msg : String) : () do
-      match file_write("/tmp/fn_grant_h", msg) do
-        Ok(_) -> ()
-        Err(_) -> ()
-      end
-    end
-    fn log(cap : Cap(IO.Console), msg : String) : () do
-      save(msg)
-      println(msg)
-    end
-    fn main() : () do
-      ()
-    end
-  end|} in
-  Alcotest.(check bool) "a helper-reached capability is still a grant error"
-    true (has_error_with ctx "granted `Cap(IO.Console)`");
-  Alcotest.(check bool) "the chain to the capability is named"
-    true (has_error_with ctx "save")
-
 let test_fn_grant_multi_cap_params_union () =
-  (* A helper may hold several narrow caps; the grant is their union, unlike
-     `main`, which the signature check restricts to exactly one parameter. *)
+  (* Not deleted with the rest of stage C: this asserts NO error, not a
+     violation, so nothing about it pins removed behavior — it stays as a
+     source-shape regression pin that several concrete `Cap(P)` parameters on
+     one signature still typecheck together now that no per-function ceiling
+     reads them. *)
   let ctx = typecheck {|mod FnGrantMulti do
     needs IO.Console
     needs IO.FileWrite
@@ -10548,50 +10909,6 @@ let test_fn_grant_invoking_a_parameter_still_certifies () =
   Alcotest.(check bool) "invoking a parameter is a conditional row, not a violation"
     false (has_errors ctx)
 
-let test_fn_grant_supplier_is_charged_for_the_callback () =
-  (* The other half of the same property: the caller that NAMES the effectful
-     callback is the one that must hold the capability for it. *)
-  let ctx = typecheck {|mod FnGrantSupplier do
-    needs IO.Console
-    needs IO.FileWrite
-    fn run(job : (() -> ())) : () do
-      job()
-    end
-    fn writer() : () do
-      match file_write("/tmp/fn_grant_s", "d") do
-        Ok(_) -> ()
-        Err(_) -> ()
-      end
-    end
-    fn caller(cap : Cap(IO.Console)) : () do
-      run(writer)
-    end
-    fn main() : () do
-      ()
-    end
-  end|} in
-  Alcotest.(check bool) "supplying an effectful callback is charged to the supplier"
-    true (has_error_with ctx "granted `Cap(IO.Console)`")
-
-let test_fn_grant_refuses_untraceable_invocation () =
-  (* The refusal at the precision frontier.  `dispatch` invokes a function it
-     pulled out of a record — no creation site this analysis can trace, so no
-     caller can be charged for it and no narrow bound can be certified.  Like
-     the `IO.Foreign` clause, this is refused rather than silently allowed. *)
-  let ctx = typecheck {|mod FnGrantOpaque do
-    needs IO.Console
-    type Handler = { run : (() -> ()) }
-    fn dispatch(cap : Cap(IO.Console), h : Handler) : () do
-      let f = h.run
-      f()
-    end
-    fn main() : () do
-      ()
-    end
-  end|} in
-  Alcotest.(check bool) "an untraceable invocation refuses a narrow grant"
-    true (has_error_with ctx "cannot trace")
-
 let test_fn_grant_full_io_accepts_untraceable_invocation () =
   (* The refusal is specific to a NARROW grant, exactly like stage B's
      `IO.Foreign` rule: `Cap(IO)` bounds nothing within the IO lattice, so
@@ -10609,23 +10926,6 @@ let test_fn_grant_full_io_accepts_untraceable_invocation () =
   end|} in
   Alcotest.(check bool) "Cap(IO) certifies nothing narrow, so nothing is refused"
     false (has_errors ctx)
-
-let test_fn_grant_narrow_refuses_foreign () =
-  let ctx = typecheck {|mod FnGrantForeign do
-    needs IO.Console
-    needs Ffi
-    extern "rt" : Cap(Ffi) do
-      fn ffi_id2(x : Int) : Int = "march_test_ffi_id"
-    end
-    fn wrapped(cap : Cap(IO.Console)) : () do
-      println(int_to_string(ffi_id2(1)))
-    end
-    fn main() : () do
-      ()
-    end
-  end|} in
-  Alcotest.(check bool) "IO.Foreign under a narrow per-function grant is refused"
-    true (has_error_with ctx "linked C code")
 
 let test_fn_grant_dead_code_is_not_charged () =
   let ctx = typecheck {|mod FnGrantDead do
@@ -10690,8 +10990,17 @@ let test_fn_grant_main_is_not_double_reported () =
    ordinary stdlib module keeps its `DMod` wrapper (so its members are keyed
    "DateTime.now"), while prelude.march alone is UNWRAPPED into the entry
    module's own flat declaration list (so `println` is keyed bare and sits in
-   the very list a module-level scan walks). *)
-let test_fn_grant_with_stdlib_prepended () =
+   the very list a module-level scan walks).
+
+   These two were rewritten on 2026-08-13 when stage C (per-function grants)
+   was removed: their setup — the stdlib-prepended / prelude-flattened
+   construction — is the load-bearing part per the regression above, so it is
+   kept VERBATIM. Only the assertions changed: each now pins that a non-`main`
+   `Cap(P)` parameter is no longer itself a discharge point under these real
+   pipeline shapes, while `main`'s grant still fires under the same shape —
+   so a silent no-op capability pass (the original incident) would still be
+   caught here. *)
+let test_module_scoped_caps_with_stdlib_prepended () =
   with_stdlib_registered "datetime.march" (fun () ->
     let dt = load_stdlib_file_for_test "datetime.march" in
     let m = March_ast.Ast.{
@@ -10702,23 +11011,22 @@ let test_fn_grant_with_stdlib_prepended () =
         fn stamped(cap : Cap(IO.Console)) : () do
           println(int_to_string(DateTime.now()))
         end
-        fn main() : () do
-          ()
+        fn main(cap : Cap(IO.Console)) : () do
+          stamped(cap)
         end
       end|}).March_ast.Ast.mod_decls;
     } in
     let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
     Alcotest.(check bool)
-      "a stdlib-mediated IO.Clock violates a Cap(IO.Console) function grant"
+      "a Cap(IO.Console) parameter on `stamped` is no longer its own discharge point"
+      false (has_error_with errors "`stamped` is granted");
+    Alcotest.(check bool)
+      "main's grant still bounds the IO.Clock reached through stamped"
       true (has_error_with errors "granted `Cap(IO.Console)`"))
 
-let test_fn_grant_with_prelude_flattened () =
+let test_module_scoped_caps_with_prelude_flattened () =
   (* Prelude's declarations ride in the entry module's own flat list, exactly
-     as bin/main.ml unwraps them.  Both directions are asserted: the console
-     grant still certifies over prelude's own `println`, and a capability
-     reached THROUGH a flattened prelude function is still caught — the
-     asymmetry that the shadowing regression got wrong in the silencing
-     direction. *)
+     as bin/main.ml unwraps them. *)
   let prelude = load_stdlib_file_for_test "prelude.march" in
   let flattened =
     match prelude with
@@ -10739,18 +11047,68 @@ let test_fn_grant_with_prelude_flattened () =
           Err(_) -> println("e")
         end
       end
-      fn main() : () do
-        ()
+      fn main(cap : Cap(IO.Console)) : () do
+        talk(cap, "hi")
+        scribble(cap, "x")
       end
     end|}).March_ast.Ast.mod_decls;
   } in
   let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
   Alcotest.(check bool)
-    "a prelude-mediated console use still certifies under Cap(IO.Console)"
-    true (has_error_with errors "IO.FileWrite");
+    "neither talk's nor scribble's Cap(IO.Console) parameter is itself reported"
+    false (has_error_with errors "`talk` is granted");
   Alcotest.(check bool)
-    "the console-only function is not itself reported"
-    false (has_error_with errors "`talk` is granted")
+    "scribble's Cap(IO.Console) parameter is not itself reported either"
+    false (has_error_with errors "`scribble` is granted");
+  Alcotest.(check bool)
+    "main's grant still bounds the IO.FileWrite reached through scribble"
+    true (has_error_with errors "granted `Cap(IO.Console)`")
+
+let test_cap_param_does_not_force_threading () =
+  (* A capability parameter marks authority at a module boundary. It does NOT
+     oblige the function to enumerate every capability it reaches: that is what
+     the module's `needs` and the program's grant are for. Requiring a second
+     parameter here is exactly the threading the module-scoped design rejects. *)
+  (* Check 1 requires `needs` for every `Cap(X)` in a signature, `main`'s
+     `Cap(IO)` included — hence `needs IO` alongside the narrower needs
+     `handle` uses; that requirement is unrelated to and unweakened by this
+     task, see the module ceiling assertion in the next test. *)
+  let ctx = typecheck {|mod NoThread do
+    needs IO.Console
+    needs IO.FileWrite
+    needs IO
+    fn handle(c : Cap(IO.FileWrite), msg : String) : () do
+      println("handling")
+      match file_write("/tmp/no_thread", msg) do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn main(cap : Cap(IO)) : () do
+      handle(cap_narrow(cap), "x")
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a Cap parameter does not impose a per-function ceiling"
+    false (has_errors ctx)
+
+let test_main_grant_still_bounds_the_program () =
+  (* Removing the per-function ceiling must not weaken the program grant. *)
+  let ctx = typecheck {|mod StillBounded do
+    needs IO.Console
+    needs IO.FileWrite
+    fn handle(c : Cap(IO.FileWrite), msg : String) : () do
+      match file_write("/tmp/still_bounded", msg) do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      handle(cap_narrow(cap), "x")
+    end
+  end|} in
+  Alcotest.(check bool) "the program grant still rejects IO.FileWrite"
+    true (has_error_with ctx "granted `Cap(IO.Console)`")
 
 (* ── R1 stage D: a grant is REQUIRED, and `main` may hold a SET ───────────
    specs/2026-08-10-r1-stage-d-grant-required-design.md.
@@ -10840,8 +11198,8 @@ let test_main_explicit_foreign_grant_accepted () =
   (* Stage B refuses IO.Foreign under any grant but Cap(IO), which is right
      when `main` holds exactly ONE capability. Once it can hold a set, a
      `Cap(IO.Foreign)` parameter is an explicit grant of the unbounded thing
-     and the person who wrote the signature knows what they authorized —
-     stage C's rule, applied here for the same reason. *)
+     and the person who wrote the signature knows what they authorized — the
+     module ceiling applies the same reasoning here. *)
   let ctx = typecheck {|mod StageDForeignOk do
     needs IO.Console
     needs IO.Foreign
@@ -10897,8 +11255,9 @@ let test_parameterless_main_that_is_pure_still_compiles () =
     false (has_errors ctx)
 
 let test_module_without_main_is_not_gated () =
-  (* A library has no entry point to be granted from. Stage C is what covers
-     its capability-parameter functions; stage D is about programs. *)
+  (* A library has no entry point to be granted from. Its module `needs`
+     ceiling is what covers its capability-parameter functions; stage D is
+     about programs. *)
   let ctx = typecheck {|mod StageDLib do
     needs IO.Console
     fn shout(msg : String) : () do
@@ -14521,6 +14880,11 @@ let compiler_suites =
           Alcotest.test_case "srec multi-turn typechecks"      `Quick test_srec_multi_turn_typechecks;
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
+          Alcotest.test_case "missing needs reported once per module" `Quick test_missing_needs_reported_once_per_module;
+          Alcotest.test_case "missing needs dedup: no orphan cap_infer hint" `Quick test_missing_needs_dedup_no_orphan_hint;
+          Alcotest.test_case "missing needs dedup: no orphan hint with main(cap : Cap(IO))" `Quick test_missing_needs_dedup_no_orphan_hint_main_cap_param;
+          Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
+          Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
@@ -14875,10 +15239,29 @@ let compiler_suites =
           Alcotest.test_case "stdlib-mediated needs is not unused"          `Quick test_stdlib_mediated_needs_is_not_unused;
           Alcotest.test_case "unrelated needs warns with stdlib loaded"     `Quick test_unrelated_needs_still_warns_with_stdlib_loaded;
         ] );
+      ( "cap_ux_no_nag", [
+          Alcotest.test_case "capability param is not an unused variable" `Quick test_unused_cap_param_is_not_warned;
+          Alcotest.test_case "ordinary unused param still warned"         `Quick test_ordinary_unused_param_still_warned;
+          Alcotest.test_case "main not nagged about root cap"             `Quick test_main_is_not_nagged_about_root_cap;
+          Alcotest.test_case "non-main still hinted about root cap"       `Quick test_non_main_still_hinted_about_root_cap;
+          Alcotest.test_case "List(Cap(...)) param still warned"          `Quick test_unused_list_of_cap_param_still_warned;
+          Alcotest.test_case "tuple-of-Cap(...) param still warned"       `Quick test_unused_tuple_of_cap_param_still_warned;
+          Alcotest.test_case "Cap(...) -> () closure param still warned"  `Quick test_unused_cap_arrow_param_still_warned;
+        ] );
+      ( "cap_unknown_name", [
+          Alcotest.test_case "unknown capability rejected with suggestion" `Quick test_unknown_capability_is_rejected_with_suggestion;
+          Alcotest.test_case "wrong-case capability rejected"              `Quick test_wrong_case_capability_is_rejected;
+          Alcotest.test_case "bare leaf capability rejected"               `Quick test_bare_leaf_capability_is_rejected;
+          Alcotest.test_case "unknown capability does not also warn unused" `Quick test_unknown_capability_does_not_also_warn_unused;
+          Alcotest.test_case "FFI capability root still accepted"          `Quick test_ffi_capability_root_still_accepted;
+          Alcotest.test_case "dotted FFI cap with IO-leaf collision (Clock) accepted"  `Quick test_dotted_ffi_capability_with_io_leaf_collision_still_accepted;
+          Alcotest.test_case "dotted FFI cap with IO-leaf collision (Random) accepted" `Quick test_dotted_ffi_capability_with_io_leaf_collision_still_accepted_2;
+        ] );
       ( "cap_grant", [
           Alcotest.test_case "narrow grant covers console"        `Quick test_grant_narrow_covers_console;
           Alcotest.test_case "narrow grant rejects filewrite"     `Quick test_grant_narrow_rejects_filewrite;
           Alcotest.test_case "violation through a helper"         `Quick test_grant_violation_through_helper;
+          Alcotest.test_case "grant violation names the user module" `Quick test_grant_violation_names_the_user_module;
           Alcotest.test_case "Cap(IO) grants everything"          `Quick test_grant_full_io_accepts_everything;
           Alcotest.test_case "parameterless main is granted nothing" `Quick test_grant_absent_is_ambient;
           Alcotest.test_case "narrow grant refuses IO.Foreign"    `Quick test_grant_narrow_refuses_foreign;
@@ -14888,19 +15271,16 @@ let compiler_suites =
         ] );
       ( "cap_fn_grant", [
           Alcotest.test_case "narrow fn grant covers console"      `Quick test_fn_grant_narrow_covers_console;
-          Alcotest.test_case "narrow fn grant rejects filewrite"   `Quick test_fn_grant_narrow_rejects_filewrite;
-          Alcotest.test_case "violation through a helper, chained" `Quick test_fn_grant_violation_through_helper;
           Alcotest.test_case "multi cap params union to the grant" `Quick test_fn_grant_multi_cap_params_union;
           Alcotest.test_case "Cap(a) param creates no gate"        `Quick test_fn_grant_polymorphic_cap_param_is_no_gate;
           Alcotest.test_case "invoking a param still certifies"    `Quick test_fn_grant_invoking_a_parameter_still_certifies;
-          Alcotest.test_case "the supplier is charged for callback" `Quick test_fn_grant_supplier_is_charged_for_the_callback;
-          Alcotest.test_case "untraceable invocation is refused"   `Quick test_fn_grant_refuses_untraceable_invocation;
           Alcotest.test_case "Cap(IO) refuses nothing narrow"      `Quick test_fn_grant_full_io_accepts_untraceable_invocation;
-          Alcotest.test_case "narrow fn grant refuses IO.Foreign"  `Quick test_fn_grant_narrow_refuses_foreign;
           Alcotest.test_case "dead code is not charged"            `Quick test_fn_grant_dead_code_is_not_charged;
           Alcotest.test_case "main is not double-reported"         `Quick test_fn_grant_main_is_not_double_reported;
-          Alcotest.test_case "real stdlib-prepended shape"         `Quick test_fn_grant_with_stdlib_prepended;
-          Alcotest.test_case "real prelude-flattened shape"        `Quick test_fn_grant_with_prelude_flattened;
+          Alcotest.test_case "real stdlib-prepended shape"         `Quick test_module_scoped_caps_with_stdlib_prepended;
+          Alcotest.test_case "real prelude-flattened shape"        `Quick test_module_scoped_caps_with_prelude_flattened;
+          Alcotest.test_case "cap param does not force threading"  `Quick test_cap_param_does_not_force_threading;
+          Alcotest.test_case "main grant still bounds the program" `Quick test_main_grant_still_bounds_the_program;
         ] );
       ( "cap_grant_required", [
           Alcotest.test_case "multi-cap main signature accepted"   `Quick test_main_multi_cap_signature_accepted;

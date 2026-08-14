@@ -24,3 +24,9 @@ val cap_subsumes : string -> string -> bool
     another cap in the list (e.g. ["IO"; "IO.FileRead"] -> ["IO"]).  Preserves
     the relative order of the caps that remain. *)
 val normalize : string list -> string list
+
+(** [suggest_cap cap] is [None] when [cap] is a legal capability path, and
+    [Some known] naming the closest known capability when it is not.  Paths
+    rooted at [IO] must be in the closed lattice; other roots are FFI
+    capabilities and are legal unless their leaf names a real capability. *)
+val suggest_cap : string -> string option

@@ -46,9 +46,8 @@ let parse_fix_line line : fix_item option =
     end
   with _ -> None
 
-let collect_all_fixes ~lib_path_env files : fix_item list * bool =
+let collect_all_fixes ~lib_path_env files : fix_item list =
   let all_items = ref [] in
-  let has_errors = ref false in
   List.iter (fun file ->
     let cmd = Printf.sprintf "%smarch --check-json %s 2>/dev/null"
       lib_path_env (Filename.quote file) in
@@ -57,15 +56,13 @@ let collect_all_fixes ~lib_path_env files : fix_item list * bool =
       while true do
         let line = input_line ic in
         (match parse_fix_line line with
-         | Some fi ->
-           if fi.fi_severity = "error" then has_errors := true;
-           all_items := fi :: !all_items
+         | Some fi -> all_items := fi :: !all_items
          | None -> ())
       done
     with End_of_file -> ());
     ignore (Unix.close_process_in ic)
   ) files;
-  (!all_items, !has_errors)
+  !all_items
 
 let read_lines path =
   let ic = open_in path in
@@ -193,11 +190,8 @@ let run ?(dry_run = false) () =
     if all_files = [] then Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
       let lib_path_env = Cmd_build.lib_path_env proj in
-      let (items, has_errors) = collect_all_fixes ~lib_path_env all_files in
-      if has_errors then
-        Error "project has errors — fix them before running `forge fix`"
-      else begin
-        let root = proj.Project.root in
+      let items = collect_all_fixes ~lib_path_env all_files in
+      let root = proj.Project.root in
         let owned = List.filter (fun fi ->
           let abs      = try Unix.realpath fi.fi_file with _ -> fi.fi_file in
           let abs_root = try Unix.realpath root       with _ -> root in
@@ -228,5 +222,4 @@ let run ?(dry_run = false) () =
             !total_files (if !total_files = 1 then "" else "s")
             !total_fixes (if !total_fixes = 1 then "" else "es")
             (if dry_run then " (dry run — no files written)" else ""))
-      end
     end
