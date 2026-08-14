@@ -2409,6 +2409,21 @@ static void actor_green_thread(void *arg) {
     pthread_mutex_lock(&g_tbl_mu);
     int has_supervisor = meta->supervisor != NULL;
     pthread_mutex_unlock(&g_tbl_mu);
+
+    /* Dispatch-epilogue state, hoisted above the setjmp so the crash branch
+     * can finish the epilogue that march_panic's longjmp jumped over — see
+     * that branch for what each one repairs.  `volatile` is load-bearing,
+     * not decoration: an automatic object modified between setjmp and
+     * longjmp has an INDETERMINATE value in the branch the longjmp lands
+     * in unless it is volatile (C17 7.13.2.1p3), and these are written on
+     * every message.  in_dispatch is the "the epilogue never ran" flag:
+     * a panic can also longjmp here from outside the dispatch call (e.g.
+     * out of a migrate_fn), and then there is nothing to repair. */
+    volatile int64_t   saved_rc        = 0;
+    volatile int       in_dispatch     = 0;
+    volatile uint32_t  pinned_version  = 0;
+    volatile int       dispatch_pinned = 0;
+
     if (has_supervisor && self) {
         /* Only a supervised child gets crash-isolated — an unsupervised
          * actor's panic keeps today's exit(1) behavior (see march_panic). */
@@ -2420,6 +2435,45 @@ static void actor_green_thread(void *arg) {
          * (since this actor has a supervisor) triggers a restart — kill/
          * crash-notify parity with the interpreter's kill = crash_actor. */
         self->crash_jmp = saved_jmp;
+
+        /* Finish the dispatch epilogue the longjmp skipped, BEFORE anything
+         * else runs — do_actor_death and the restart it triggers both touch
+         * the state repaired here.
+         *
+         * a[0] is the actor record's refcount, which the loop below
+         * deliberately clobbers to 1 for the duration of one message (so
+         * FBIP can reuse the state record in place) and restores from
+         * saved_rc afterwards.  Without this restore the crashed actor's
+         * record is left claiming a single owner while its real owners
+         * (measured: 2 for a plain supervised child, more once anything
+         * else holds it — e.g. the named registry's forward table) all
+         * still hold references: the next drop by ANY of them takes the
+         * count to zero and frees a record that is still live and still
+         * reachable, and every later access is a use-after-free.  That is
+         * heap corruption, not a leak — it surfaced as an EXC_BAD_ACCESS
+         * inside an unrelated malloc several calls later.  Restoring the
+         * saved value verbatim (rather than folding in whatever the
+         * handler did to a[0] before it panicked) is exactly what the
+         * normal path does; this branch deliberately does not invent a
+         * different RC contract for the crash path.
+         *
+         * The dispatch-table pin is the other half: a hot-reload actor
+         * pins its code version across the call, and skipping the matching
+         * march_dispatch_leave would keep that version's refs count above
+         * zero forever, permanently blocking reclamation of the ring slot.
+         *
+         * Not repaired here: the message itself.  The dispatch function
+         * owns and consumes msg, and a longjmp out of its middle leaves no
+         * way to know whether it already did — so msg is leaked on this
+         * path rather than risking a double free. */
+        if (in_dispatch) {
+            a[0] = saved_rc;
+            if (dispatch_pinned)
+                march_dispatch_leave(meta->dispatch_name_id, pinned_version);
+            in_dispatch = 0;
+            dispatch_pinned = 0;
+        }
+
         do_actor_death(actor);
         /* green_thread is now _Atomic — this critical section protected
          * nothing else, so the mutex is dropped in favor of a release
@@ -2471,7 +2525,11 @@ static void actor_green_thread(void *arg) {
 
         uint32_t tbl_version = 0;
 
-        int64_t saved_rc = a[0];
+        /* saved_rc / in_dispatch / pinned_version / dispatch_pinned are
+         * declared above the setjmp and kept current here so the crash
+         * branch can undo this iteration if the handler panics. */
+        saved_rc = a[0];
+        in_dispatch = 1;
         a[0] = 1;  /* FBIP: force RC=1 for in-place reuse */
 
         if (meta->dispatch_name_id) {
@@ -2479,7 +2537,12 @@ static void actor_green_thread(void *arg) {
              * Counter_dispatch(actor, msg) — NOT a closure wrapper.
              * Call it directly without a closure env arg. */
             typedef void (*dispatch_fn_t)(void *, void *);
+            /* march_dispatch_enter takes a plain uint32_t* out-param, so the
+             * pin's version lands in a non-volatile local first and is then
+             * published to the volatile copy the crash branch reads. */
             void *fn_raw = march_dispatch_enter(meta->dispatch_name_id, &tbl_version);
+            pinned_version = tbl_version;
+            dispatch_pinned = 1;
             dispatch_fn_t dispatch_fn;
             memcpy(&dispatch_fn, &fn_raw, sizeof(dispatch_fn));
             dispatch_fn(actor, msg);
@@ -2532,7 +2595,9 @@ static void actor_green_thread(void *arg) {
 
         if (meta->dispatch_name_id) {
             march_dispatch_leave(meta->dispatch_name_id, tbl_version);
+            dispatch_pinned = 0;
         }
+        in_dispatch = 0;   /* epilogue done: nothing for the crash branch to undo */
 
         march_sched_tick();
     }

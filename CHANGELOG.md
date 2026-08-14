@@ -18,6 +18,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A `panic()` inside a supervised actor's message handler no longer corrupts
+  the heap.** The compiled dispatch loop forces the actor record's reference
+  count to 1 for the duration of each message (so in-place state reuse is
+  legal) and restores the real count afterwards; the crash trap's `longjmp`
+  jumped over that restore, leaving a live actor claiming a single owner while
+  its other owners still held references. The next drop by any of them then
+  freed a record that was still in use, and the damage surfaced later as a
+  crash inside an unrelated allocation. Any supervised actor that crashed via
+  `panic` was affected — it was merely silent unless something touched the
+  freed record afterwards. The same fix also releases the code-version pin a
+  hot-reload actor holds across a dispatch, which the `longjmp` was leaking.
+
 - **`Regex` no longer has a denial-of-service on adversarial input.** The
   engine matched by backtracking, so repeated quantifiers over one character
   class followed by a byte that never matches cost O(n^k): the pattern
