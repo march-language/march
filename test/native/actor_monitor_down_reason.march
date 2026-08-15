@@ -7,10 +7,29 @@
 mod ActorMonitorDownReason do
   needs IO.Console
 
+  -- Deliberately reuse the runtime-reserved short type/constructor name under
+  -- a module qualifier.  This must use UserValues.Down.Down's ordinary tag,
+  -- never the canonical monitor Down tag.
+  mod UserValues do
+    type Down = Down(Int)
+  end
+
+  fn wait_for_queued_message(pid) do
+    if mailbox_size(pid) > 0 do
+      ()
+    else
+      wait_for_queued_message(pid)
+    end
+  end
+
   actor Worker do
     state { alive : Bool }
     init { alive: true }
-    on Poison() do
+    on Poison(me) do
+      -- Main queues UserValues.Down behind Poison.  Waiting until it is
+      -- visible forces the supervised panic's dead-proc reap to drain that
+      -- nested user value through the runtime mailbox disposer.
+      wait_for_queued_message(me)
       panic("bang")
     end
     on PoisonNul() do
@@ -99,7 +118,8 @@ mod ActorMonitorDownReason do
     let boss = spawn(Boss)
     let crashed = pid_of_int(child_int(boss, "crashed"))
     monitor(watcher, crashed)
-    send(crashed, Poison())
+    send(crashed, Poison(crashed))
+    send(crashed, UserValues.Down(7))
     send(watcher, ReadDown(crashed, "crashed"))
     run_until_idle()
 

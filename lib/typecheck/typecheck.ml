@@ -1188,9 +1188,25 @@ let lookup_ctor name env =
   | None -> None
   | Some [] -> None
   | Some (first :: _ as cis) ->
-    (match List.find_opt (fun ci -> ci.ci_module = env.current_module) cis with
-     | Some _ as preferred -> preferred
-     | None -> Some first)
+    let is_canonical_monitor_key =
+      match name with
+      | "Down.Down"
+      | "DownReason.Normal" | "DownReason.Killed" | "DownReason.Crash" -> true
+      | _ -> false
+    in
+    if is_canonical_monitor_key then
+      (* These exact type-qualified keys are the declaration-free runtime ABI.
+         A nested user declaration contributes another candidate with the same
+         short [ci_type], but its real public key is module-qualified
+         ([Inner.Down], [DistLink.Crash], ...).  Never let registration order
+         make the canonical spelling resolve to that user candidate. *)
+      (match List.find_opt (fun ci -> ci.ci_module = "") cis with
+       | Some _ as builtin -> builtin
+       | None -> Some first)
+    else
+      (match List.find_opt (fun ci -> ci.ci_module = env.current_module) cis with
+       | Some _ as preferred -> preferred
+       | None -> Some first)
 
 (** Same-module precedence for an UNQUALIFIED constructor reference.
 

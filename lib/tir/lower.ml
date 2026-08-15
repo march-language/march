@@ -707,10 +707,15 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          byte-identical. The [env.mod_prefix <> ""] half of the gate stays. *)
       let ctor_key = match ty_of_span env span with
         | Tir.TCon (type_name, _) ->
-          if env.mod_prefix <> ""
-             && Lower_state.shared_ctor_collision_type env.mod_prefix short_tag <> None
-          then env.mod_prefix ^ type_name ^ "." ^ short_tag
-          else type_name ^ "." ^ short_tag
+          (match Lower_state.reserved_monitor_ctor_key
+                   ~module_prefix:env.mod_prefix ~source_tag:tag
+                   ~type_name:(Some type_name) ~ctor_name:short_tag with
+           | Some key -> key
+           | None ->
+             if env.mod_prefix <> ""
+                && Lower_state.shared_ctor_collision_type env.mod_prefix short_tag <> None
+             then env.mod_prefix ^ type_name ^ "." ^ short_tag
+             else type_name ^ "." ^ short_tag)
         | _ -> short_tag
       in
       (* For a NULLARY constructor (e.g. [None]) thread the enclosing type's

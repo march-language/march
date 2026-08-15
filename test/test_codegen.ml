@@ -6455,6 +6455,72 @@ end
      Alcotest.(check string) "bare (unqualified) ctor key" "Thing.Shared" k
    | _ -> Alcotest.fail "expected EAlloc body in DcA.mk")
 
+(** Reserved local-monitor constructor names are the one intentional exception
+    to the ordinary non-colliding short-key rule.  The compiler always seeds
+    canonical [Down.Down] metadata with [MARCH_DOWN_TAG], so a nested user type
+    named [Down] must retain its declaring-module qualifier at construction and
+    pattern sites even when it has no second source declaration and no impl.
+    Otherwise [Inner.Down(7)] lowers to canonical [Down.Down], and mailbox reap
+    mis-disposes its one-field object as the runtime's three-field monitor Down. *)
+let test_nested_down_constructor_does_not_alias_monitor_abi () =
+  let src = {|
+mod Top do
+  mod Inner do
+    type Down = Down(Int)
+    type DownReason = Crash(Int)
+    fn make() : Down do Down(7) end
+    fn make_reason() : DownReason do Crash(8) end
+    fn unwrap(value : Down) : Int do
+      match value do
+        Down(n) -> n
+      end
+    end
+    fn unwrap_reason(value : DownReason) : Int do
+      match value do
+        Crash(n) -> n
+      end
+    end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (errors, type_map) = March_typecheck.Typecheck.check_module m in
+  Alcotest.(check bool) "nested Down source typechecks" false
+    (March_errors.Errors.has_errors errors);
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find
+      (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let alloc_key =
+    match (find_fn "Inner.make").March_tir.Tir.fn_body with
+    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (key, _), _) -> key
+    | _ -> Alcotest.fail "expected EAlloc body in Inner.make"
+  in
+  let branch_tag =
+    match (find_fn "Inner.unwrap").March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase (_, branch :: _, _) -> branch.March_tir.Tir.br_tag
+    | _ -> Alcotest.fail "expected ECase body in Inner.unwrap"
+  in
+  let reason_alloc_key =
+    match (find_fn "Inner.make_reason").March_tir.Tir.fn_body with
+    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (key, _), _) -> key
+    | _ -> Alcotest.fail "expected EAlloc body in Inner.make_reason"
+  in
+  let reason_branch_tag =
+    match (find_fn "Inner.unwrap_reason").March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase (_, branch :: _, _) -> branch.March_tir.Tir.br_tag
+    | _ -> Alcotest.fail "expected ECase body in Inner.unwrap_reason"
+  in
+  Alcotest.(check string) "nested Down allocation keeps module identity"
+    "Inner.Down.Down" alloc_key;
+  Alcotest.(check string) "nested Down pattern keeps module identity"
+    "Inner.Down.Down" branch_tag;
+  Alcotest.(check string) "nested DownReason allocation keeps module identity"
+    "Inner.DownReason.Crash" reason_alloc_key;
+  Alcotest.(check string) "nested DownReason pattern keeps module identity"
+    "Inner.DownReason.Crash" reason_branch_tag
+
 (* ── Final-review finding: ctor construction INSIDE an impl method body
    (not just a module-level `fn mk()`) must ALSO get the qualified key.
    [collect_iface_impls] (Pass 1) lowers impl method bodies via
@@ -14104,6 +14170,8 @@ let codegen_suites =
           test_colliding_ctor_construction_gets_qualified_key;
         Alcotest.test_case "non-colliding ctor construction stays bare" `Quick
           test_noncolliding_ctor_construction_stays_bare;
+        Alcotest.test_case "nested Down does not alias monitor ABI" `Quick
+          test_nested_down_constructor_does_not_alias_monitor_abi;
         Alcotest.test_case "colliding ctor construction inside impl method body gets qualified key" `Quick
           test_colliding_ctor_construction_inside_impl_method_gets_qualified_key;
       ]);
