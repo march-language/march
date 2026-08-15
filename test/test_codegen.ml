@@ -6521,6 +6521,101 @@ end
   Alcotest.(check string) "nested DownReason pattern keeps module identity"
     "Inner.DownReason.Crash" reason_branch_tag
 
+(** Exact canonical monitor spellings remain canonical even in the lexical
+    scope of user types that shadow both reserved short names.  Bare local
+    constructors still name the local user variants.  This pins source-level
+    precedence at the lowering boundary for both allocation and matching. *)
+let test_canonical_monitor_spelling_wins_inside_shadowing_module () =
+  let src = {|
+mod Top do
+  mod Inner do
+    type Down = Down(Int)
+    type DownReason = Crash(Int)
+
+    fn make_local() : Down do Down(7) end
+    fn match_local(value : Down) : Int do
+      match value do
+        Down(n) -> n
+      end
+    end
+
+    fn make_canonical(pid) do
+      Down.Down(1, pid, DownReason.Normal)
+    end
+    fn make_canonical_killed() do DownReason.Killed end
+    fn make_canonical_crash() do DownReason.Crash("boom") end
+    fn match_canonical(value) : Int do
+      match value do
+        Down.Down(_, _, DownReason.Crash(_)) -> 1
+        _ -> 0
+      end
+    end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (errors, type_map) = March_typecheck.Typecheck.check_module m in
+  Alcotest.(check bool) "canonical and local constructors typecheck together"
+    false (March_errors.Errors.has_errors errors);
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find
+      (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let rec alloc_keys (expr : March_tir.Tir.expr) acc =
+    let open March_tir.Tir in
+    match expr with
+    | EAlloc (TCon (key, _), _) -> key :: acc
+    | EAlloc _ -> acc
+    | ELet (_, before, after) -> alloc_keys after (alloc_keys before acc)
+    | ELetRec (fns, body) ->
+      alloc_keys body
+        (List.fold_left
+           (fun keys (fn : fn_def) -> alloc_keys fn.fn_body keys) acc fns)
+    | ECase (_, branches, fallback) ->
+      let acc = List.fold_left
+          (fun keys (branch : branch) -> alloc_keys branch.br_body keys)
+          acc branches in
+      (match fallback with Some body -> alloc_keys body acc | None -> acc)
+    | ESeq (left, right) -> alloc_keys right (alloc_keys left acc)
+    | _ -> acc
+  in
+  let rec case_tags (expr : March_tir.Tir.expr) acc =
+    let open March_tir.Tir in
+    match expr with
+    | ECase (_, branches, fallback) ->
+      let acc = List.fold_left
+          (fun tags (branch : branch) ->
+             case_tags branch.br_body (branch.br_tag :: tags))
+          acc branches in
+      (match fallback with Some body -> case_tags body acc | None -> acc)
+    | ELet (_, before, after) -> case_tags after (case_tags before acc)
+    | ELetRec (fns, body) ->
+      case_tags body
+        (List.fold_left
+           (fun tags (fn : fn_def) -> case_tags fn.fn_body tags) acc fns)
+    | ESeq (left, right) -> case_tags right (case_tags left acc)
+    | _ -> acc
+  in
+  let keys name = alloc_keys (find_fn name).March_tir.Tir.fn_body [] in
+  let tags name = case_tags (find_fn name).March_tir.Tir.fn_body [] in
+  Alcotest.(check bool) "bare local Down allocation stays local" true
+    (List.mem "Inner.Down.Down" (keys "Inner.make_local"));
+  Alcotest.(check bool) "bare local Down pattern stays local" true
+    (List.mem "Inner.Down.Down" (tags "Inner.match_local"));
+  Alcotest.(check bool) "explicit canonical Down allocation stays canonical" true
+    (List.mem "Down.Down" (keys "Inner.make_canonical"));
+  Alcotest.(check bool) "explicit canonical Normal allocation stays canonical" true
+    (List.mem "DownReason.Normal" (keys "Inner.make_canonical"));
+  Alcotest.(check bool) "explicit canonical Killed allocation stays canonical" true
+    (List.mem "DownReason.Killed" (keys "Inner.make_canonical_killed"));
+  Alcotest.(check bool) "explicit canonical Crash allocation stays canonical" true
+    (List.mem "DownReason.Crash" (keys "Inner.make_canonical_crash"));
+  Alcotest.(check bool) "explicit canonical Down pattern stays canonical" true
+    (List.mem "Down.Down" (tags "Inner.match_canonical"));
+  Alcotest.(check bool) "explicit canonical Crash pattern stays canonical" true
+    (List.mem "DownReason.Crash" (tags "Inner.match_canonical"))
+
 (* ── Final-review finding: ctor construction INSIDE an impl method body
    (not just a module-level `fn mk()`) must ALSO get the qualified key.
    [collect_iface_impls] (Pass 1) lowers impl method bodies via
@@ -14172,6 +14267,8 @@ let codegen_suites =
           test_noncolliding_ctor_construction_stays_bare;
         Alcotest.test_case "nested Down does not alias monitor ABI" `Quick
           test_nested_down_constructor_does_not_alias_monitor_abi;
+        Alcotest.test_case "canonical monitor spelling wins inside shadowing module" `Quick
+          test_canonical_monitor_spelling_wins_inside_shadowing_module;
         Alcotest.test_case "colliding ctor construction inside impl method body gets qualified key" `Quick
           test_colliding_ctor_construction_inside_impl_method_gets_qualified_key;
       ]);

@@ -280,6 +280,12 @@ let reserved_monitor_ctor_key ~(module_prefix : string)
     | "Down" | "DownReason" -> true
     | _ -> false
   in
+  let is_exact_canonical_source_tag =
+    match source_tag with
+    | "Down.Down"
+    | "DownReason.Normal" | "DownReason.Killed" | "DownReason.Crash" -> true
+    | _ -> false
+  in
   let local_key short =
     if module_prefix = "" then None
     else
@@ -288,7 +294,8 @@ let reserved_monitor_ctor_key ~(module_prefix : string)
         Some (module_prefix ^ declared ^ "." ^ ctor_name)
       | _ -> None
   in
-  match String.rindex_opt source_tag '.' with
+  if is_exact_canonical_source_tag then Some source_tag
+  else match String.rindex_opt source_tag '.' with
   | Some i ->
     let qual = String.sub source_tag 0 (i + 1) in
     let qual_without_dot = String.sub source_tag 0 i in
