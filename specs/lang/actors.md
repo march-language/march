@@ -197,13 +197,24 @@ treating a monitor as a count of dead actors:
 
 ```march
 actor Watcher do
+  state { seen : Int }
+  init  { seen: 0 }
+
   on CheckDown() do
     match receive() do
-      Down(ref, target, Normal)       -> println("stopped " ++ to_string(target))
-      Down(ref, target, Killed)       -> println("killed " ++ to_string(target))
-      Down(ref, target, Crash(error)) -> println("crashed " ++ error)
+      Down(_, target, Normal) ->
+        println("stopped " ++ to_string(target))
+        state
+      Down(_, target, Killed) ->
+        println("killed " ++ to_string(target))
+        state
+      Down(_, _, Crash(error)) ->
+        println("crashed " ++ error)
+        state
+      _ ->
+        println("unexpected monitor message")
+        state
     end
-    state
   end
 end
 ```
