@@ -957,14 +957,16 @@ let test_eval_monitor_builtin () =
     fn main() do
       let pa = spawn(A)
       let pb = spawn(B)
+      actor_set_mailbox_limit(pb, 1, 1)
+      send(pb, Noop())
       monitor(pb, pa)
       kill(pa)
       mailbox_size(pb)
     end
   end|} in
   let v = call_fn env "main" [] in
-  Alcotest.(check bool) "mailbox_size >= 1 after kill" true
-    (match v with March_eval.Eval.VInt n -> n >= 1 | _ -> false)
+  Alcotest.(check int) "mailbox_size counts queued user + Down exactly once" 2
+    (match v with March_eval.Eval.VInt n -> n | _ -> -1)
 
 let test_eval_link_builtin () =
   (* End-to-end: link/kill propagates death via March source *)

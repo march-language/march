@@ -104,6 +104,33 @@ mod ActorMonitorDownReason do
       end
       { seen: state.seen + 1 }
     end
+    on PrimeBounded(expected, watcher) do
+      let queued = mailbox_size(watcher)
+      match receive() do
+        Down.Down(ref, target, DownReason.Killed) ->
+          if to_string(target) == to_string(expected) && queued == 1 do
+            println("bounded mailbox=" ++ to_string(queued) ++
+                    " down=Killed ref=" ++ to_string(ref))
+          else
+            panic("bounded Down or mailbox count mismatch")
+          end
+        _ -> panic("bounded mailbox delivered wrong message")
+      end
+      { seen: state.seen + 1 }
+    end
+    on ReadLateDown(expected) do
+      match receive() do
+        Down.Down(ref, target, DownReason.Killed) ->
+          if to_string(target) == to_string(expected) do
+            println("late down ref=" ++ to_string(ref) ++
+                    " target=killed reason=Killed")
+          else
+            panic("late Down target mismatch")
+          end
+        _ -> panic("late Down wrong shape")
+      end
+      { seen: state.seen + 1 }
+    end
   end
 
   fn child_int(boss, field) do
@@ -124,9 +151,14 @@ mod ActorMonitorDownReason do
     run_until_idle()
 
     let killed = pid_of_int(child_int(boss, "killed"))
+    Actor.set_queue_limit(watcher, 1, 1)
     monitor(watcher, killed)
+    send(watcher, PrimeBounded(killed, watcher))
     kill(killed)
-    send(watcher, ReadDown(killed, "killed"))
+    run_until_idle()
+
+    monitor(watcher, killed)
+    send(watcher, ReadLateDown(killed))
     run_until_idle()
 
     let nulled = pid_of_int(child_int(boss, "nulled"))

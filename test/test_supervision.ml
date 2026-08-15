@@ -122,12 +122,21 @@ let test_monitor_multiple_distinct_refs () =
   March_eval.Eval.crash_actor 0 "killed";
   let b_msg = Queue.pop ib.March_eval.Eval.ai_mailbox in
   let c_msg = Queue.pop ic.March_eval.Eval.ai_mailbox in
-  let ref_of = function
-    | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt r; March_eval.Eval.VInt _; _]) -> r
-    | _ -> -1
+  let down_of = function
+    | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt r;
+                                       March_eval.Eval.VInt target;
+                                       March_eval.Eval.VCon ("Crash", [March_eval.Eval.VString reason])]) ->
+      (r, target, reason)
+    | _ -> (-1, -1, "")
   in
-  Alcotest.(check int) "B's Down has m1 ref" m1 (ref_of b_msg);
-  Alcotest.(check int) "C's Down has m2 ref" m2 (ref_of c_msg)
+  let b_ref, b_target, b_reason = down_of b_msg in
+  let c_ref, c_target, c_reason = down_of c_msg in
+  Alcotest.(check int) "B's Down has m1 ref" m1 b_ref;
+  Alcotest.(check int) "C's Down has m2 ref" m2 c_ref;
+  Alcotest.(check int) "B's Down target" 0 b_target;
+  Alcotest.(check int) "C's Down target" 0 c_target;
+  Alcotest.(check string) "B's Down reason" "killed" b_reason;
+  Alcotest.(check string) "C's Down reason" "killed" c_reason
 
 (** The local monitor payload carries the monitor ref, target pid, and a
     structured exit reason.  Keep explicit kill and crash distinct. *)
