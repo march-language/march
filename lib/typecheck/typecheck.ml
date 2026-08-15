@@ -3383,7 +3383,12 @@ let builtin_types : (string * int) list =
     ("NativeF32Arr",   0); ("NativeI32Arr",   0); ("NativeU8Arr", 0);
     (* Simd — explicit 128-bit SIMD vector types (F32x4/F64x2/I32x4/I64x2/U8x16).
        All arity 0, sendable (NOT added to non_sendable_types below). *)
-    ("F32x4", 0); ("F64x2", 0); ("I32x4", 0); ("I64x2", 0); ("U8x16", 0); ]
+    ("F32x4", 0); ("F64x2", 0); ("I32x4", 0); ("I64x2", 0); ("U8x16", 0);
+    (* Runtime-originated local-monitor signal. These names are reserved by
+       the compiled ABI; source declarations with the same exact shape (the
+       native conformance fixture and, later, the actor stdlib surface) refine
+       the same nominal entries rather than inventing per-module wire tags. *)
+    ("DownReason", 0); ("Down", 1); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
@@ -3391,6 +3396,7 @@ let builtin_types : (string * int) list =
     type-qualified name ("Option.Some") so that users can write either form. *)
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
+  let mk_ty name args = Ast.TyCon ({ txt = name; span = Ast.dummy_span }, args) in
   let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
   let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
@@ -3399,12 +3405,25 @@ let builtin_ctors : (string * ctor_info) list =
   let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   let cons_ci  = { ci_type = "List";   ci_params = ["a"];
                    ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let normal_ci = { ci_type = "DownReason"; ci_params = []; ci_arg_tys = [];
+                    ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let killed_ci = { normal_ci with ci_type = "DownReason" } in
+  let crash_ci = { normal_ci with ci_arg_tys = [mk_ty "String" []] } in
+  let down_ci = { ci_type = "Down"; ci_params = ["a"];
+                  ci_arg_tys = [mk_ty "Int" [];
+                                mk_ty "Pid" [mk_var "a"];
+                                mk_ty "DownReason" []];
+                  ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   [ ("Some",        some_ci);  ("Option.Some", some_ci);
     ("None",        none_ci);  ("Option.None", none_ci);
     ("Ok",          ok_ci);    ("Result.Ok",   ok_ci);
     ("Err",         err_ci);   ("Result.Err",  err_ci);
     ("Nil",         nil_ci);   ("List.Nil",    nil_ci);
     ("Cons",        cons_ci);  ("List.Cons",   cons_ci);
+    ("Normal",      normal_ci); ("DownReason.Normal", normal_ci);
+    ("Killed",      killed_ci); ("DownReason.Killed", killed_ci);
+    ("Crash",       crash_ci);  ("DownReason.Crash",  crash_ci);
+    ("Down",        down_ci);   ("Down.Down",         down_ci);
   ]
 
 let base_env errors type_map =

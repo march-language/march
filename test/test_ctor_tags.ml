@@ -52,11 +52,42 @@ let test_noncolliding_program_byte_identical_tags () =
   Alcotest.(check int) "List.Cons keeps tag 1" 1 (tag_of "List.Cons");
   Alcotest.(check int) "Other.Foo.F keeps tag 0" 0 (tag_of "Other.Foo.F")
 
+let test_monitor_down_uses_reserved_abi_tags () =
+  let defs = [
+    mk_variant "DownReason"
+      [("Normal", []); ("Killed", []); ("Crash", [Tir.TString])];
+    mk_variant "Down"
+      [("Down", [Tir.TInt; Tir.TCon ("Pid", [Tir.TVar "a"]);
+                  Tir.TCon ("DownReason", [])])];
+    mk_variant "Probe_Msg" [("Probe", [])];
+    mk_variant "Ordinary" [("Ordinary", [])];
+  ] in
+  let m : Tir.tir_module =
+    { tm_name = "test"; tm_types = defs; tm_fns = []; tm_externs = [];
+      tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let ctx = Llvm_ctx.make_ctx ~type_defs:defs () in
+  Llvm_toplevel.build_ctor_info ctx m;
+  let tag_of key = (Hashtbl.find ctx.Llvm_ctx.ctor_info key).Llvm_ctx.ce_tag in
+  Alcotest.(check int) "Down tag" 0x7f00_0000 (tag_of "Down.Down");
+  Alcotest.(check int) "Normal tag" 0x7f00_0001
+    (tag_of "DownReason.Normal");
+  Alcotest.(check int) "Killed tag" 0x7f00_0002
+    (tag_of "DownReason.Killed");
+  Alcotest.(check int) "Crash tag" 0x7f00_0003
+    (tag_of "DownReason.Crash");
+  Alcotest.(check int) "actor-message range stays disjoint" 0x0100_0000
+    (tag_of "Probe_Msg.Probe");
+  Alcotest.(check int) "ordinary range stays disjoint" 0
+    (tag_of "Ordinary.Ordinary")
+
 let suites = [
   ( "ctor_tags", [
       Alcotest.test_case "colliding types get distinct global tags" `Quick
         test_colliding_types_get_global_tags;
       Alcotest.test_case "non-colliding program keeps per-type tags" `Quick
         test_noncolliding_program_byte_identical_tags;
+      Alcotest.test_case "monitor Down uses reserved ABI tags" `Quick
+        test_monitor_down_uses_reserved_abi_tags;
     ] );
 ]

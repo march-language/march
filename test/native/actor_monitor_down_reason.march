@@ -1,20 +1,32 @@
--- Failing witness for local monitor Down payloads.
+-- Native witness for local monitor Down payloads.
 -- The watcher consumes the monitor notification with receive() and requires
 -- the three-field Down(ref, target, reason) shape for both exit paths.
+-- Worker crashes are trapped only for supervised children in the compiled
+-- runtime, so both monitored workers belong to Boss.  Unsupervised panics keep
+-- their existing process-fatal semantics.
 mod ActorMonitorDownReason do
   needs IO.Console
 
   type DownReason = Normal | Killed | Crash(String)
   type Down(a) = Down(Int, a, DownReason)
 
-  type Poison = Poison
-  type ReadDown(a) = ReadDown(a, String)
-
   actor Worker do
     state { alive : Bool }
     init { alive: true }
     on Poison() do
       panic("bang")
+    end
+  end
+
+  actor Boss do
+    state { crashed : Int, killed : Int }
+    init { crashed: 0, killed: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Worker crashed
+      Worker killed
     end
   end
 
@@ -43,14 +55,23 @@ mod ActorMonitorDownReason do
     end
   end
 
+  fn child_int(boss, field) do
+    match get_actor_field(boss, field) do
+      None -> -1
+      Some(n) -> n
+    end
+  end
+
   fn main(_console : Cap(IO.Console)) do
     let watcher = spawn(Watcher)
-    let crashed = spawn(Worker)
+    let boss = spawn(Boss)
+    let crashed = pid_of_int(child_int(boss, "crashed"))
     monitor(watcher, crashed)
     send(crashed, Poison())
     send(watcher, ReadDown(crashed, "crashed"))
+    run_until_idle()
 
-    let killed = spawn(Worker)
+    let killed = pid_of_int(child_int(boss, "killed"))
     monitor(watcher, killed)
     kill(killed)
     send(watcher, ReadDown(killed, "killed"))

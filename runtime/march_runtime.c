@@ -1158,7 +1158,8 @@ void march_panic(void *s);
  * restart strategies) is called from actor_green_thread's crash-recovery
  * branch (below) and from march_kill / the restart helpers, both of which
  * are also defined earlier in the file than do_actor_death itself. */
-static void do_actor_death(void *actor);
+static void do_actor_death(void *actor, march_death_reason reason,
+                           const char *message);
 
 /* panic_ / todo_ / unreachable_: internal runtime primitives called by the
  * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
@@ -1195,6 +1196,16 @@ void march_panic(void *s) {
      * multiple OS threads, so the currently-running proc can migrate). */
     march_proc *cur_proc = march_sched_current();
     if (cur_proc && cur_proc->crash_jmp) {
+        size_t len = (size_t)ms->len;
+        char *copy = (char *)malloc(len + 1);
+        if (!copy) {
+            fputs("march: out of memory copying actor crash reason\n", stderr);
+            exit(1);
+        }
+        memcpy(copy, ms->data, len);
+        copy[len] = '\0';
+        free(cur_proc->crash_message);
+        cur_proc->crash_message = copy;
         longjmp(*cur_proc->crash_jmp, 1);
     }
     fprintf(stderr, "panic: ");
@@ -1713,9 +1724,10 @@ void *march_try_finally(void *action, void *cleanup) {
  * ───────────────
  * Each actor runs as a green thread (march_proc) on the cooperative scheduler
  * in march_scheduler.c.  The green thread loop (actor_green_thread) calls
- * march_sched_recv() to block until a message arrives, dispatches it via the
- * actor's $dispatch closure, then calls march_sched_tick() for cooperative
- * preemption.
+ * march_sched_recv_user() to block until a user message arrives, dispatches it
+ * via the actor's $dispatch closure, then calls march_sched_tick() for
+ * cooperative preemption. Runtime control values remain queued for explicit
+ * language-level receive().
  *
  * Actor struct layout (as int64_t[]):
  *   [0] rc         (reference count)
@@ -1834,7 +1846,9 @@ typedef struct march_actor_meta {
     int                          pididx_linked;
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
-    _Atomic int64_t             down_count;   /* Down messages received (watcher side) */
+    int                          terminal_set; /* Claimed once under g_tbl_mu. */
+    march_death_reason           terminal_reason;
+    char                        *terminal_message; /* strdup'd Crash text, else NULL. */
     /* Supervision metadata (set by march_register_supervisor): */
     int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
     int64_t                     supervisor_max_restarts;
@@ -2307,7 +2321,6 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     m = (march_actor_meta *)calloc(1, sizeof(march_actor_meta));
     if (!m) { fputs("march: out of memory (actor meta)\n", stderr); exit(1); }
     m->actor = actor;
-    atomic_init(&m->down_count, 0);
     atomic_init(&m->green_thread, NULL);
     /* tbl_next is written BEFORE the release store below publishes `m` as
      * the new bucket head, so any lock-free find_meta reader that observes
@@ -2374,7 +2387,6 @@ static march_actor_meta *replace_stale_meta_locked(void *actor,
     march_actor_meta *m = (march_actor_meta *)calloc(1, sizeof(march_actor_meta));
     if (!m) { fputs("march: out of memory (actor meta)\n", stderr); exit(1); }
     m->actor = actor;
-    atomic_init(&m->down_count, 0);
     atomic_init(&m->green_thread, NULL);
     atomic_init(&m->pid_index, 0);
     m->dispatch_name_id = stale->dispatch_name_id;
@@ -2801,7 +2813,11 @@ static void actor_green_thread(void *arg) {
             dispatch_pinned = 0;
         }
 
-        do_actor_death(actor);
+        char *crash_message = self->crash_message;
+        self->crash_message = NULL;
+        do_actor_death(actor, MARCH_DEATH_CRASH,
+                       crash_message ? crash_message : "panic");
+        free(crash_message);
         /* green_thread is now _Atomic — this critical section protected
          * nothing else, so the mutex is dropped in favor of a release
          * store (paired with the acquire loads in march_send /
@@ -2812,7 +2828,7 @@ static void actor_green_thread(void *arg) {
     }
 
     while (a[3]) {  /* while alive */
-        void *msg = march_sched_recv();
+        void *msg = march_sched_recv_user();
         if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
 
         /* ── Phase 5: detect system migrate message ──────────────────────────
@@ -2971,6 +2987,7 @@ static void actor_green_thread(void *arg) {
      * sched_loop.  Clear the meta handle so march_kill / march_send observe
      * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
     if (self) self->crash_jmp = saved_jmp;
+    do_actor_death(actor, MARCH_DEATH_NORMAL, NULL);
     /* Same rationale as the crash-trap exit above: the mutex protected only
      * this field, now converted to a release store. */
     atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
@@ -3141,7 +3158,8 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
 static void march_one_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
     if (!march_restart_budget_ok(sup_meta)) {
-        do_actor_death(supervisor);
+        do_actor_death(supervisor, MARCH_DEATH_CRASH,
+                       "restart intensity exceeded");
         return;
     }
     march_respawn_child(supervisor, sup_meta, child_idx);
@@ -3153,7 +3171,8 @@ static void march_one_for_one_restart(void *supervisor, march_actor_meta *sup_me
 static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     (void)child_idx;
     if (!march_restart_budget_ok(sup_meta)) {
-        do_actor_death(supervisor);
+        do_actor_death(supervisor, MARCH_DEATH_CRASH,
+                       "restart intensity exceeded");
         return;
     }
     int n = sup_meta->sup_num_children;
@@ -3183,7 +3202,8 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
         }
     }
     for (int i = 0; i < n; i++) {
-        if (live_children[i]) do_actor_death(live_children[i]);
+        if (live_children[i])
+            do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL);
     }
     for (int i = 0; i < n; i++) {
         march_respawn_child(supervisor, sup_meta, i);
@@ -3197,7 +3217,8 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
 static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
     if (!march_restart_budget_ok(sup_meta)) {
-        do_actor_death(supervisor);
+        do_actor_death(supervisor, MARCH_DEATH_CRASH,
+                       "restart intensity exceeded");
         return;
     }
     int n = sup_meta->sup_num_children;
@@ -3217,7 +3238,8 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
         }
     }
     for (int i = child_idx + 1; i < n; i++) {
-        if (live_children[i]) do_actor_death(live_children[i]);
+        if (live_children[i])
+            do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL);
     }
     for (int i = child_idx; i < n; i++) {
         march_respawn_child(supervisor, sup_meta, i);
@@ -3521,19 +3543,95 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
     march_sched_spawn(delayed_restart_thread, dr);
 }
 
+static void dispose_monitor_down(void *down) {
+    if (!IS_HEAP_PTR(down)) return;
+    int64_t *fields = (int64_t *)((char *)down + 16);
+    void *target = (void *)(uintptr_t)fields[1];
+    void *reason = (void *)(uintptr_t)fields[2];
+    if (IS_HEAP_PTR(reason)
+            && ((march_hdr *)reason)->tag == MARCH_DOWN_CRASH_TAG) {
+        int64_t *reason_fields = (int64_t *)((char *)reason + 16);
+        march_decrc((void *)(uintptr_t)reason_fields[0]);
+    }
+    march_decrc(reason);
+    march_decrc(target);
+    march_decrc(down);
+}
+
+static void deliver_monitor_down(void *watcher, int64_t mon_ref, void *target,
+                                 march_death_reason reason,
+                                 const char *message) {
+    march_actor_meta *watcher_meta = find_meta(watcher);
+    march_proc *gt = watcher_meta
+        ? atomic_load_explicit(&watcher_meta->green_thread,
+                               memory_order_acquire)
+        : NULL;
+    if (!gt) return;
+
+    void *reason_value = march_alloc(reason == MARCH_DEATH_CRASH ? 24 : 16);
+    ((march_hdr *)reason_value)->tag =
+        reason == MARCH_DEATH_KILLED ? MARCH_DOWN_KILLED_TAG
+      : reason == MARCH_DEATH_CRASH  ? MARCH_DOWN_CRASH_TAG
+                                     : MARCH_DOWN_NORMAL_TAG;
+    if (reason == MARCH_DEATH_CRASH) {
+        const char *text = message ? message : "panic";
+        int64_t *reason_fields = (int64_t *)((char *)reason_value + 16);
+        reason_fields[0] = (int64_t)(uintptr_t)
+            march_string_lit(text, (int64_t)strlen(text));
+    }
+
+    /* Down owns the target Pid and reason. Scalar fields use the uniform
+     * tagged-slot encoding expected by generated boxed-pattern code. */
+    void *down = march_alloc(40);
+    ((march_hdr *)down)->tag = MARCH_DOWN_TAG;
+    int64_t *down_fields = (int64_t *)((char *)down + 16);
+    down_fields[0] = (mon_ref << 1) | 1;
+    march_incrc(target);
+    down_fields[1] = (int64_t)(uintptr_t)target;
+    down_fields[2] = (int64_t)(uintptr_t)reason_value;
+
+    if (march_sched_send_control(gt, down) == MARCH_SEND_DEAD)
+        dispose_monitor_down(down);
+}
+
 /* Mark `actor` dead, run its cleanup callbacks and monitor Down-notifications,
- * wake its green thread — and, notify its supervisor (if it has one) for a
- * possible restart. The ONE place that does this, called both by an
+ * and wake its green thread. Non-normal deaths also notify a supervisor (if
+ * present) for a possible restart. The ONE place that does this, called by an
  * explicit kill() and by a panic inside a supervised actor's handler
  * (the crash trap in actor_green_thread below) — mirrors the interpreter's
  * kill = crash_actor unification (eval.ml:3004-3006). */
-static void do_actor_death(void *actor) {
+static void do_actor_death(void *actor, march_death_reason reason,
+                           const char *message) {
     int64_t *fields = (int64_t *)actor;
-    if (!fields[3]) return;   /* Already dead */
+    march_monitor_node *monitors = NULL;
+
+    /* Claim terminal state and detach the monitor list atomically with
+     * demonitor/monitor registration. Cleanup may invoke arbitrary March code,
+     * so the table lock is released before any callback runs. */
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *meta = find_meta(actor);
+    if (!fields[3] || (meta && meta->terminal_set)) {
+        pthread_mutex_unlock(&g_tbl_mu);
+        return;
+    }
+    if (meta) {
+        meta->terminal_set = 1;
+        meta->terminal_reason = reason;
+        if (reason == MARCH_DEATH_CRASH) {
+            meta->terminal_message = strdup(message ? message : "panic");
+            if (!meta->terminal_message) {
+                pthread_mutex_unlock(&g_tbl_mu);
+                fputs("march: out of memory storing actor crash reason\n", stderr);
+                exit(1);
+            }
+        }
+        monitors = meta->monitor_head;
+        meta->monitor_head = NULL;
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
 
     /* Run cleanup callbacks in reverse acquisition order (cleanup_head is
      * most recently registered → already LIFO order). */
-    march_actor_meta *meta = find_meta(actor);
     if (meta && meta->cleanup_head) {
         /* The cleanup function is a March closure: fn(_ : Unit) : Unit.
          * Call it via the closure dispatch convention:
@@ -3595,31 +3693,29 @@ static void do_actor_death(void *actor) {
      * be restarted. See that function's own comment for why (round-1
      * review finding: without it, every non-crashed sibling in a batch
      * restart lost its name forever). */
-    if (meta && meta->supervisor)
+    if (meta && meta->supervisor && reason != MARCH_DEATH_NORMAL)
         capture_reg_names_pending(actor);
     registry_retire_actor(actor);
 
-    /* Deliver Down notifications to all local watchers. */
-    if (meta && meta->monitor_head) {
-        march_monitor_node *mn = meta->monitor_head;
-        while (mn) {
-            march_monitor_node *next_mn = mn->next;
-            march_actor_meta *watcher_meta = find_meta(mn->watcher);
-            if (watcher_meta) {
-                atomic_fetch_add_explicit(&watcher_meta->down_count, 1,
-                                          memory_order_relaxed);
-            }
-            free(mn);
-            mn = next_mn;
-        }
-        meta->monitor_head = NULL;
+    /* Deliver one owned control value per node after the list is detached. */
+    while (monitors) {
+        march_monitor_node *next_mn = monitors->next;
+        deliver_monitor_down(monitors->watcher, monitors->mon_ref, actor,
+                             reason, meta ? meta->terminal_message : message);
+        free(monitors);
+        monitors = next_mn;
     }
 
     /* Fire MONITOR_FIRE to any remote (cross-node) watchers of this pid. */
     if (meta) {
+        int dist_reason = reason == MARCH_DEATH_KILLED
+            ? MARCH_DIST_REASON_KILLED
+            : reason == MARCH_DEATH_CRASH
+                ? MARCH_DIST_REASON_CRASH : MARCH_DIST_REASON_NORMAL;
         march_dist_monitor_fire_pid(
             atomic_load_explicit(&meta->pid_index, memory_order_relaxed),
-                                     MARCH_DIST_REASON_NORMAL, NULL);
+            dist_reason, reason == MARCH_DEATH_CRASH
+                ? meta->terminal_message : NULL);
     }
 
     fields[3] = 0;   /* $alive flag at byte offset 24 */
@@ -3635,13 +3731,13 @@ static void do_actor_death(void *actor) {
         if (gt) march_sched_wake(gt);
     }
 
-    if (meta && meta->supervisor) {
+    if (meta && meta->supervisor && reason != MARCH_DEATH_NORMAL) {
         march_supervisor_notify(meta->supervisor, meta);
     }
 }
 
 void march_kill(void *actor) {
-    do_actor_death(actor);
+    do_actor_death(actor, MARCH_DEATH_KILLED, NULL);
 }
 
 int64_t march_is_alive(void *actor) {
@@ -3681,6 +3777,10 @@ int64_t march_is_alive(void *actor) {
 static void march_actor_msg_dispose(void *msg) {
     if (IS_HEAP_PTR(msg) && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
         free(msg);
+        return;
+    }
+    if (IS_HEAP_PTR(msg) && ((march_hdr *)msg)->tag == MARCH_DOWN_TAG) {
+        dispose_monitor_down(msg);
         return;
     }
     march_decrc(msg);
@@ -4306,7 +4406,7 @@ static int march_actor_call_unwrap(void *msg, int64_t corr, void **out_payload) 
  *      `on GetCount(reply_to)`) and hands it back verbatim to Actor.reply.
  *   3. Send the augmented message to the actor's green thread.
  *   4. Wait for the reply: timeout_ms <= 0 blocks forever via
- *      march_sched_recv(); a positive timeout_ms does a deadline-bounded
+ *      march_sched_recv_user(); a positive timeout_ms does a deadline-bounded
  *      park-with-timeout and returns Err("no reply (timeout or unhandled
  *      Call)") past the deadline. Any reply whose correlation id doesn't
  *      match this call's is discarded (see march_actor_call_unwrap above)
@@ -4398,7 +4498,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
          * receive a stale envelope left over from an EARLIER timed-out call
          * on the same green thread. */
         for (;;) {
-            void *result = march_sched_recv();
+            void *result = march_sched_recv_user();
             if (result == MARCH_RECV_NO_MSG)
                 return mk_err_cstr("no reply (timeout or unhandled Call)");
             void *payload;
@@ -4439,7 +4539,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * server. Two branches, one shared unwrap helper, is the right split.) */
     int64_t deadline_ms = march_now_ms() + timeout_ms;
     for (;;) {
-        void *msg = march_sched_recv_until(deadline_ms);
+        void *msg = march_sched_recv_user_until(deadline_ms);
         if (msg != MARCH_RECV_NO_MSG) {
             void *payload;
             int rc = march_actor_call_unwrap(msg, corr, &payload);
@@ -4466,7 +4566,8 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
  * ref_ptr is the reply-ref built by march_actor_call: a heap struct with
  * field0 = caller proc, field1 = correlation id (tag MARCH_CALL_REPLY_TAG).
  * We wrap result in an envelope carrying that corr and send it to the
- * caller's mailbox, waking it from march_sched_recv()/march_sched_recv_until().
+ * caller's mailbox, waking it from march_sched_recv_user() /
+ * march_sched_recv_user_until().
  * The caller's unwrap (march_actor_call_unwrap) compares corr against the
  * one it is waiting on and discards the envelope if they don't match.
  *
@@ -5974,43 +6075,51 @@ int64_t march_pid_index_of(void *actor) {
                                  memory_order_relaxed);
 }
 
-/* monitor: establish a monitor link from watcher to target.
-   Returns a unique monitor ref.  If target is already dead,
-   delivers Down immediately by incrementing watcher's down_count. */
+/* monitor: establish a monitor link from watcher to target. If death already
+ * claimed the target, enqueue the stored terminal reason immediately. */
 int64_t march_monitor(void *watcher, void *target) {
     int64_t ref = atomic_fetch_add_explicit(&g_next_monitor_ref, 1,
                                              memory_order_relaxed);
     if (!IS_HEAP_PTR(target)) {
-        /* Target is an integer/non-heap ptr — treat as dead. */
-        march_actor_meta *wm = find_or_create_meta(watcher);
-        atomic_fetch_add_explicit(&wm->down_count, 1, memory_order_relaxed);
+        /* Invalid/never-spawned target: interpreter-compatible Normal fallback. */
+        deliver_monitor_down(watcher, ref, target, MARCH_DEATH_NORMAL, NULL);
         return ref;
     }
-    int64_t *tfields = (int64_t *)target;
-    int target_alive = (int)tfields[3];
-    if (!target_alive) {
-        /* Target already dead — deliver Down immediately. */
-        march_actor_meta *wm = find_or_create_meta(watcher);
-        atomic_fetch_add_explicit(&wm->down_count, 1, memory_order_relaxed);
-        return ref;
-    }
-    /* Register on target's monitor list. */
+
     march_monitor_node *node = (march_monitor_node *)malloc(sizeof(march_monitor_node));
-    if (!node) return ref;
+    if (!node) {
+        fputs("march: out of memory registering actor monitor\n", stderr);
+        exit(1);
+    }
     node->watcher = watcher;
     node->mon_ref = ref;
     march_actor_meta *tm = find_or_create_meta(target);
+
+    march_death_reason terminal_reason = MARCH_DEATH_NORMAL;
+    const char *terminal_message = NULL;
+    int deliver_now = 0;
     pthread_mutex_lock(&g_tbl_mu);
-    node->next = tm->monitor_head;
-    tm->monitor_head = node;
+    if (tm->terminal_set || !((int64_t *)target)[3]) {
+        terminal_reason = tm->terminal_set
+            ? tm->terminal_reason : MARCH_DEATH_NORMAL;
+        terminal_message = tm->terminal_message;
+        deliver_now = 1;
+    } else {
+        node->next = tm->monitor_head;
+        tm->monitor_head = node;
+    }
     pthread_mutex_unlock(&g_tbl_mu);
+
+    if (deliver_now) {
+        free(node);
+        deliver_monitor_down(watcher, ref, target, terminal_reason,
+                             terminal_message);
+    }
     return ref;
 }
 
-/* mailbox_size: live queue depth (pending, undelivered actor messages) plus
-   "down_count" (pending Down notifications). The interpreter materializes
-   Down notifications as real mailbox messages, so this sum is the
-   parity-correct meaning across both backends. */
+/* mailbox_size: scheduler depth includes both user and reserved control FIFO
+ * nodes, so each Down is counted exactly once with no side-band accounting. */
 int64_t march_mailbox_size(void *pid) {
     if (!IS_HEAP_PTR(pid)) return 0;
     march_actor_meta *meta = find_meta(pid);
@@ -6020,8 +6129,7 @@ int64_t march_mailbox_size(void *pid) {
     march_proc *gt = atomic_load_explicit(&meta->green_thread,
                                           memory_order_acquire);
     if (gt) depth = march_sched_mbox_count(gt);
-    return depth + atomic_load_explicit(&meta->down_count,
-                                        memory_order_relaxed);
+    return depth;
 }
 
 /* actor_set_mailbox_limit: bind a mailbox capacity + overflow policy to the

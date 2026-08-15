@@ -80,6 +80,26 @@ type builtin = {
   declare_sig   : string option;
 }
 
+(* Reserved constructor-tag ABI shared with runtime/march_runtime.h.
+
+   Ordinary variants use per-type tags below [ordinary_ctor_tag_limit]. Actor
+   messages and same-short-name collision variants have dedicated, bounded
+   global ranges. Runtime-originated monitor values live in a final reserved
+   range that none of those allocators may enter; [Llvm_toplevel.build_ctor_info]
+   enforces every boundary when it assigns tags. Keep these values in sync with
+   MARCH_*_TAG in march_runtime.h. *)
+let ordinary_ctor_tag_limit = 0x0100_0000
+let actor_message_tag_base = 0x0100_0000
+let actor_message_tag_limit = 0x0200_0000
+let collision_tag_base = 0x0200_0000
+let collision_tag_limit = 0x0300_0000
+
+let monitor_down_tag = 0x7f00_0000
+let monitor_reason_normal_tag = 0x7f00_0001
+let monitor_reason_killed_tag = 0x7f00_0002
+let monitor_reason_crash_tag = 0x7f00_0003
+let reserved_ctor_tag_limit = 0x7f00_0004
+
 let builtins : builtin list = [
   { march_name = "print"; c_name = Some "march_print"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_print(ptr %s)" };

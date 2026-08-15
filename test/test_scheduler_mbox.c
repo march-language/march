@@ -139,6 +139,37 @@ static void test_block_spurious_wake_while_linked(void) {
      * this regression guards against. */
 }
 
+/* ── Reserved control FIFO: policy isolation + dispatch isolation ──────
+ *
+ * A control value must survive DROP_OLD user traffic and actor dispatch's
+ * user-only receive must leave it queued for an explicit general receive.
+ * Queue all three values before the scheduler starts so ordering is exact:
+ * the second user send evicts only the first user value, then recv_user gets
+ * the survivor while recv gets the untouched control value. */
+static void *g_control_first = NULL, *g_user_first = NULL;
+
+static void control_rx(void *arg) {
+    (void)arg;
+    g_user_first = march_sched_recv_user();
+    g_control_first = march_sched_recv();
+}
+
+static void test_control_fifo_bypasses_user_policy(void) {
+    march_sched_init();
+    march_proc *rx = march_sched_spawn(control_rx, NULL);
+    march_sched_set_mbox_limit(rx, 1, MARCH_MBOX_DROP_OLD);
+
+    assert(march_sched_send_control(rx, (void *)0x11) == MARCH_SEND_OK);
+    assert(march_sched_send(rx, (void *)0x21) == MARCH_SEND_OK);
+    assert(march_sched_send(rx, (void *)0x31) == MARCH_SEND_OK);
+    assert(march_sched_mbox_count(rx) == 2);
+
+    march_sched_request_shutdown();
+    march_sched_run();
+    assert(g_user_first == (void *)0x31);
+    assert(g_control_first == (void *)0x11);
+}
+
 /* ── Task 14: dead-actor mailbox drain ────────────────────────────────
  *
  * Runs march_sched_run() to actual completion (its own init/run pair, like
@@ -249,6 +280,7 @@ int main(void) {
 
     test_block_live_scheduler();
     test_block_spurious_wake_while_linked();
+    test_control_fifo_bypasses_user_policy();
     test_dead_reap_drain();
 
     march_sched_init();
