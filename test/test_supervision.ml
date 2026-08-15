@@ -123,11 +123,57 @@ let test_monitor_multiple_distinct_refs () =
   let b_msg = Queue.pop ib.March_eval.Eval.ai_mailbox in
   let c_msg = Queue.pop ic.March_eval.Eval.ai_mailbox in
   let ref_of = function
-    | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt r; _]) -> r
+    | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt r; March_eval.Eval.VInt _; _]) -> r
     | _ -> -1
   in
   Alcotest.(check int) "B's Down has m1 ref" m1 (ref_of b_msg);
   Alcotest.(check int) "C's Down has m2 ref" m2 (ref_of c_msg)
+
+(** The local monitor payload carries the monitor ref, target pid, and a
+    structured exit reason.  Keep explicit kill and crash distinct. *)
+let test_monitor_down_payload_killed () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ = add_fresh_actor 0 "A" in
+  let watcher = add_fresh_actor 1 "B" in
+  let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  let kill = List.assoc "kill" March_eval.Eval.base_env in
+  ignore (March_eval.Eval.apply kill [March_eval.Eval.VPid 0]);
+  match Queue.pop watcher.March_eval.Eval.ai_mailbox with
+  | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
+                                     March_eval.Eval.VInt target;
+                                     March_eval.Eval.VCon ("Killed", [])]) ->
+    Alcotest.(check int) "monitor ref" mon m;
+    Alcotest.(check int) "target pid" 0 target
+  | _ -> Alcotest.fail "expected Down(ref, target, Killed)"
+
+let test_monitor_down_payload_crash () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ = add_fresh_actor 0 "A" in
+  let watcher = add_fresh_actor 1 "B" in
+  let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  March_eval.Eval.crash_actor 0 "bang";
+  match Queue.pop watcher.March_eval.Eval.ai_mailbox with
+  | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
+                                     March_eval.Eval.VInt target;
+                                     March_eval.Eval.VCon ("Crash", [March_eval.Eval.VString msg])]) ->
+    Alcotest.(check int) "monitor ref" mon m;
+    Alcotest.(check int) "target pid" 0 target;
+    Alcotest.(check string) "crash message" "bang" msg
+  | _ -> Alcotest.fail "expected Down(ref, target, Crash(msg))"
+
+let test_monitor_down_payload_already_dead () =
+  March_eval.Eval.reset_scheduler_state ();
+  let dead = mk_actor_inst "A" false March_eval.Eval.VUnit in
+  Hashtbl.replace March_eval.Eval.actor_registry 0 dead;
+  let watcher = add_fresh_actor 1 "B" in
+  let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  match Queue.pop watcher.March_eval.Eval.ai_mailbox with
+  | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
+                                     March_eval.Eval.VInt target;
+                                     March_eval.Eval.VCon ("Normal", [])]) ->
+    Alcotest.(check int) "monitor ref" mon m;
+    Alcotest.(check int) "target pid" 0 target
+  | _ -> Alcotest.fail "expected Down(ref, target, Normal) for dead target"
 
 (* ------------------------------------------------------------------ *)
 (* Phase 2 — Supervisor Restart Strategies                             *)
@@ -536,6 +582,9 @@ let () =
       Alcotest.test_case "link chain propagation"        `Quick (with_reset test_link_chain_propagation);
       Alcotest.test_case "monitor does not kill watcher" `Quick (with_reset test_monitor_does_not_kill_watcher);
       Alcotest.test_case "multiple monitors distinct refs" `Quick (with_reset test_monitor_multiple_distinct_refs);
+      Alcotest.test_case "Down payload killed"           `Quick (with_reset test_monitor_down_payload_killed);
+      Alcotest.test_case "Down payload crash"            `Quick (with_reset test_monitor_down_payload_crash);
+      Alcotest.test_case "Down payload dead target"      `Quick (with_reset test_monitor_down_payload_already_dead);
     ]);
     ("phase2 supervisor strategies", [
       Alcotest.test_case "one_for_one basic"             `Quick (with_reset test_one_for_one_basic);

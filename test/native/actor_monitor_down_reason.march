@@ -1,0 +1,51 @@
+-- Failing witness for local monitor Down payloads.
+-- The watcher consumes the monitor notification with receive() and requires
+-- the three-field Down(ref, target, reason) shape for both exit paths.
+mod ActorMonitorDownReason do
+  needs IO.Console
+
+  type DownReason = Normal | Killed | Crash(String)
+  type Down = Down(Int, Int, DownReason)
+
+  type Poison = Poison
+  type ReadDown = ReadDown
+
+  actor Worker do
+    state { alive : Bool }
+    init { alive: true }
+    on Poison() do
+      panic("bang")
+    end
+  end
+
+  actor Watcher do
+    state { seen : Int }
+    init { seen: 0 }
+    on ReadDown() do
+      match receive() do
+        Down(ref, target, Crash(msg)) ->
+          println("down ref=" ++ to_string(ref) ++ " target=" ++ to_string(target) ++
+                  " reason=Crash(" ++ msg ++ ")")
+        Down(ref, target, Killed) ->
+          println("down ref=" ++ to_string(ref) ++ " target=" ++ to_string(target) ++
+                  " reason=Killed")
+        _ -> println("down wrong-shape")
+      end
+      { seen: state.seen + 1 }
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let watcher = spawn(Watcher)
+    let crashed = spawn(Worker)
+    monitor(watcher, crashed)
+    send(crashed, Poison())
+    send(watcher, ReadDown())
+
+    let killed = spawn(Worker)
+    monitor(watcher, killed)
+    kill(killed)
+    send(watcher, ReadDown())
+    run_until_idle()
+  end
+end
