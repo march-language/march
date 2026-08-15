@@ -5,10 +5,10 @@ mod ActorMonitorDownReason do
   needs IO.Console
 
   type DownReason = Normal | Killed | Crash(String)
-  type Down = Down(Int, Int, DownReason)
+  type Down(a) = Down(Int, a, DownReason)
 
   type Poison = Poison
-  type ReadDown = ReadDown
+  type ReadDown(a) = ReadDown(a, String)
 
   actor Worker do
     state { alive : Bool }
@@ -21,15 +21,23 @@ mod ActorMonitorDownReason do
   actor Watcher do
     state { seen : Int }
     init { seen: 0 }
-    on ReadDown() do
+    on ReadDown(expected, label) do
       match receive() do
         Down(ref, target, Crash(msg)) ->
-          println("down ref=" ++ to_string(ref) ++ " target=" ++ to_string(target) ++
-                  " reason=Crash(" ++ msg ++ ")")
+          if target == expected do
+            println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
+                    " reason=Crash(" ++ msg ++ ")")
+          else
+            panic("crash Down target mismatch")
+          end
         Down(ref, target, Killed) ->
-          println("down ref=" ++ to_string(ref) ++ " target=" ++ to_string(target) ++
-                  " reason=Killed")
-        _ -> println("down wrong-shape")
+          if target == expected do
+            println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
+                    " reason=Killed")
+          else
+            panic("kill Down target mismatch")
+          end
+        _ -> panic("Down wrong shape")
       end
       { seen: state.seen + 1 }
     end
@@ -40,12 +48,12 @@ mod ActorMonitorDownReason do
     let crashed = spawn(Worker)
     monitor(watcher, crashed)
     send(crashed, Poison())
-    send(watcher, ReadDown())
+    send(watcher, ReadDown(crashed, "crashed"))
 
     let killed = spawn(Worker)
     monitor(watcher, killed)
     kill(killed)
-    send(watcher, ReadDown())
+    send(watcher, ReadDown(killed, "killed"))
     run_until_idle()
   end
 end
