@@ -59,8 +59,9 @@ Files documented: `docs/actors.md`, `specs/lang/actors.md`, and `CHANGELOG.md`.
 The native monitor witness is `test/native/actor_monitor_down_reason.march`.
 
 Verification: `scripts/check-docs.sh` passed. The required combined
-`scripts/run-tests.sh compiler eval codegen stdlib` run was started, but was
-intentionally interrupted after sustained host load during the compiler/stdlib
-run; no failure was reported before interruption, so full-suite completion is
-not claimed. The focused native monitor fixture and final documentation checks
-are recorded in the task report.
+`scripts/run-tests.sh compiler eval codegen stdlib` run was started, and
+compiler/eval/codegen completed. `run_stdlib` recorded four undiagnosed
+failures (HCR dispatch, HCR manifest caps, `MARCH_SANITIZE` clean exit, and
+string-statistics bytes-copied) before the run was terminated; `test_stdlib_march`
+never started. Full-suite completion is not claimed. The focused native monitor
+fixture and final documentation checks are recorded in the task report.
