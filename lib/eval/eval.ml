@@ -1765,6 +1765,16 @@ let list_actors () =
 (* Phase 1: Monitors, Links, and crash_actor (must precede base_env)  *)
 (* ------------------------------------------------------------------ *)
 
+type monitor_down_reason = Normal | Killed | Crash of string
+
+let monitor_down_value = function
+  | Normal -> VCon ("Normal", [])
+  | Killed -> VCon ("Killed", [])
+  | Crash msg -> VCon ("Crash", [VString msg])
+
+let monitor_down_message mon_ref target_pid reason =
+  VCon ("Down", [VInt mon_ref; VInt target_pid; monitor_down_value reason])
+
 let fresh_monitor_id () =
   let id = !next_monitor_id in
   next_monitor_id := id + 1;
@@ -2498,7 +2508,8 @@ and notify_supervisor (sup_pid : int) (crashed_pid : int) : unit =
 
 (** Crash an actor: mark dead, deliver Down to monitors, propagate to links,
     and notify any supervising actor for restart. *)
-and crash_actor (pid : int) (reason : string) : unit =
+and crash_actor_with_reason (pid : int) (reason : string)
+    (down_reason : monitor_down_reason) : unit =
   match Hashtbl.find_opt actor_registry pid with
   | None -> ()
   | Some inst when not inst.ai_alive -> ()
@@ -2553,7 +2564,7 @@ and crash_actor (pid : int) (reason : string) : unit =
     List.iter (fun (mon_ref, watcher_pid) ->
       match Hashtbl.find_opt actor_registry watcher_pid with
       | Some watcher when watcher.ai_alive ->
-        Queue.push (VCon ("Down", [VInt mon_ref; VString reason])) watcher.ai_mailbox
+        Queue.push (monitor_down_message mon_ref pid down_reason) watcher.ai_mailbox
       | _ -> ()
     ) inst.ai_monitors;
     (* Propagate crash to all linked actors *)
@@ -2572,6 +2583,9 @@ and crash_actor (pid : int) (reason : string) : unit =
     (match supervisor with
      | Some sup_pid -> notify_supervisor sup_pid pid
      | None -> ())
+
+and crash_actor (pid : int) (reason : string) : unit =
+  crash_actor_with_reason pid reason (Crash reason)
 
 (** Task 9: interpreter-side counter for messages dropped by bounded-mailbox
     overflow policies. Mirrors the compiled runtime's
@@ -2618,7 +2632,7 @@ let monitor_actor ~watcher_pid ~target_pid : int =
      (* Target already dead — immediately deliver Down to watcher *)
      (match Hashtbl.find_opt actor_registry watcher_pid with
       | Some watcher when watcher.ai_alive ->
-        Queue.push (VCon ("Down", [VInt mon_ref; VString "noproc"])) watcher.ai_mailbox
+        Queue.push (monitor_down_message mon_ref target_pid Normal) watcher.ai_mailbox
       | _ -> ()));
   mon_ref
 
@@ -4379,7 +4393,7 @@ let base_env : env =
         | _ -> eval_error "negate: expected number"))
     (* Actor builtins — operate on the global actor_registry *)
   ; ("kill", VBuiltin ("kill", function
-        | [VPid pid] -> crash_actor pid "killed"; VUnit
+        | [VPid pid] -> crash_actor_with_reason pid "killed" Killed; VUnit
         | _ -> eval_error "kill: expected Pid"))
   ; ("is_alive", VBuiltin ("is_alive", function
         | [VPid pid] ->
