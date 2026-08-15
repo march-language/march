@@ -541,6 +541,35 @@ let emit_atom_show_table ctx =
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
 let build_ctor_info ctx (m : Tir.tir_module) =
+  (* Runtime-originated monitor values exist even when source never declares
+     their nominal types. Seed their canonical lowering metadata before
+     walking user TIR, then treat any same-named source TIR as a declaration
+     to validate rather than as authority to replace the ABI shape. *)
+  let down_reason_ctors =
+    [("Normal", []); ("Killed", []); ("Crash", [Tir.TString])]
+  in
+  let down_ctors =
+    [("Down", [Tir.TInt; Tir.TCon ("Pid", [Tir.TVar "a"]);
+                Tir.TCon ("DownReason", [])])]
+  in
+  let seed_reserved_type type_name params ctors =
+    Hashtbl.replace ctx.Llvm_ctx.type_params type_name params;
+    List.iter (fun (ctor_name, field_tys) ->
+      let tag =
+        match type_name, ctor_name with
+        | "Down", "Down" -> Llvm_builtins.monitor_down_tag
+        | "DownReason", "Normal" -> Llvm_builtins.monitor_reason_normal_tag
+        | "DownReason", "Killed" -> Llvm_builtins.monitor_reason_killed_tag
+        | "DownReason", "Crash" -> Llvm_builtins.monitor_reason_crash_tag
+        | _ -> failwith "invalid canonical monitor constructor"
+      in
+      Hashtbl.replace ctx.Llvm_ctx.ctor_info (type_name ^ "." ^ ctor_name)
+        { Llvm_ctx.ce_tag = tag; ce_fields = field_tys };
+      Hashtbl.replace ctx.Llvm_ctx.poly_ctors (type_name, ctor_name) field_tys
+    ) ctors
+  in
+  seed_reserved_type "DownReason" [] down_reason_ctors;
+  seed_reserved_type "Down" ["a"] down_ctors;
   (* Finding-19 memory-safety fix: actor message variant constructors
      (<Actor>_Msg) get GLOBALLY-unique heap tags across all actors, not the
      per-variant 0-based tag ordinary ADTs use.  Rationale: a message meant for
@@ -570,46 +599,15 @@ let build_ctor_info ctx (m : Tir.tir_module) =
     incr next;
     tag
   in
-  let reserved_monitor_tag type_name ctor_name =
-    match type_name, ctor_name with
-    | "Down", "Down" -> Some Llvm_builtins.monitor_down_tag
-    | "DownReason", "Normal" -> Some Llvm_builtins.monitor_reason_normal_tag
-    | "DownReason", "Killed" -> Some Llvm_builtins.monitor_reason_killed_tag
-    | "DownReason", "Crash" -> Some Llvm_builtins.monitor_reason_crash_tag
-    | "Down", other | "DownReason", other ->
-      failwith (Printf.sprintf
-        "reserved monitor ABI type %s cannot declare constructor %s" type_name other)
-    | _ -> None
-  in
   List.iter (fun td ->
     match td with
     | Tir.TDVariant (_name, ctors)
       when _name = "Down" || _name = "DownReason" ->
-      let seen = Hashtbl.create 4 in
-      let params = ref [] in
-      let rec collect_tvars = function
-        | Tir.TVar n ->
-          if not (Hashtbl.mem seen n) then begin
-            Hashtbl.add seen n (); params := n :: !params
-          end
-        | Tir.TCon (_, args) -> List.iter collect_tvars args
-        | Tir.TFn (ps, r) -> List.iter collect_tvars ps; collect_tvars r
-        | Tir.TTuple ts -> List.iter collect_tvars ts
-        | Tir.TPtr t -> collect_tvars t
-        | _ -> ()
-      in
-      List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
-      Hashtbl.replace ctx.Llvm_ctx.type_params _name (List.rev !params);
-      List.iter (fun (ctor_name, field_tys) ->
-        let tag = Option.get (reserved_monitor_tag _name ctor_name) in
-        if tag < Llvm_builtins.monitor_down_tag
-           || tag >= Llvm_builtins.reserved_ctor_tag_limit then
-          failwith "reserved monitor constructor tag escaped its ABI range";
-        let key = _name ^ "." ^ ctor_name in
-        Hashtbl.replace ctx.Llvm_ctx.ctor_info key
-          { Llvm_ctx.ce_tag = tag; ce_fields = field_tys };
-        Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
-      ) ctors
+      let expected = if _name = "Down" then down_ctors else down_reason_ctors in
+      if ctors <> expected then
+        failwith (Printf.sprintf
+          "reserved monitor ABI type %s has an incompatible declaration"
+          _name)
     | Tir.TDVariant (_name, ctors) when Tir_names.is_actor_msg_name _name ->
       (* Actor message type: assign global tags, but otherwise identical to the
          generic TDVariant arm (type_params + qualified ctor_info key +

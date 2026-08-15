@@ -11557,6 +11557,14 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_vars bindings' env
 
   | Ast.DType (_vis, name, params, typedef, _sp) ->
+    if env.current_module = env.enclosing_package
+       && (name.txt = "Down" || name.txt = "DownReason") then begin
+      Err.error env.errors ~span:name.span
+        (Printf.sprintf
+           "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"
+           name.txt);
+      env
+    end else
     let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
     (match typedef with
      | Ast.TDVariant variants ->

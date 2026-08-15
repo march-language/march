@@ -7,26 +7,27 @@
 mod ActorMonitorDownReason do
   needs IO.Console
 
-  type DownReason = Normal | Killed | Crash(String)
-  type Down(a) = Down(Int, a, DownReason)
-
   actor Worker do
     state { alive : Bool }
     init { alive: true }
     on Poison() do
       panic("bang")
     end
+    on PoisonNul() do
+      panic("bang\x00tail")
+    end
   end
 
   actor Boss do
-    state { crashed : Int, killed : Int }
-    init { crashed: 0, killed: 0 }
+    state { crashed : Int, killed : Int, nulled : Int }
+    init { crashed: 0, killed: 0, nulled: 0 }
 
     supervise do
       strategy one_for_one
       max_restarts 5 within 60
       Worker crashed
       Worker killed
+      Worker nulled
     end
   end
 
@@ -35,21 +36,52 @@ mod ActorMonitorDownReason do
     init { seen: 0 }
     on ReadDown(expected, label) do
       match receive() do
-        Down(ref, target, Crash(msg)) ->
-          if target == expected do
-            println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
-                    " reason=Crash(" ++ msg ++ ")")
+        Down.Down(ref, target, DownReason.Crash(msg)) ->
+          if to_string(target) == to_string(expected) do
+            if is_alive(target) do
+              panic("crash Down observed target alive")
+            else
+              println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
+                      " reason=Crash(" ++ msg ++ ")")
+            end
           else
             panic("crash Down target mismatch")
           end
-        Down(ref, target, Killed) ->
-          if target == expected do
-            println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
-                    " reason=Killed")
+        Down.Down(ref, target, DownReason.Killed) ->
+          if to_string(target) == to_string(expected) do
+            if is_alive(target) do
+              panic("kill Down observed target alive")
+            else
+              println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
+                      " reason=Killed")
+            end
           else
             panic("kill Down target mismatch")
           end
         _ -> panic("Down wrong shape")
+      end
+      { seen: state.seen + 1 }
+    end
+    on ReadNulDown(expected) do
+      match receive() do
+        Down.Down(_, target, DownReason.Crash(msg)) ->
+          if to_string(target) == to_string(expected) do
+            if is_alive(target) do
+              panic("NUL Down observed target alive")
+            else
+              if string_byte_length(msg) == 9 &&
+                 string_byte_at(msg, 4) == 0 &&
+                 string_byte_at(msg, 5) == 116 &&
+                 string_byte_at(msg, 8) == 108 do
+                println("down target=nulled reason=Crash(embedded-nul-ok)")
+              else
+                panic("embedded NUL crash reason truncated")
+              end
+            end
+          else
+            panic("NUL Down target mismatch")
+          end
+        _ -> panic("NUL Down wrong shape")
       end
       { seen: state.seen + 1 }
     end
@@ -75,6 +107,12 @@ mod ActorMonitorDownReason do
     monitor(watcher, killed)
     kill(killed)
     send(watcher, ReadDown(killed, "killed"))
+    run_until_idle()
+
+    let nulled = pid_of_int(child_int(boss, "nulled"))
+    monitor(watcher, nulled)
+    send(nulled, PoisonNul())
+    send(watcher, ReadNulDown(nulled))
     run_until_idle()
   end
 end

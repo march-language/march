@@ -125,6 +125,8 @@ typedef enum {
 /* ── Mailbox node ────────────────────────────────────────────────────── */
 typedef struct march_mbox_node {
     void                   *msg;
+    uint64_t                enqueue_seq; /* Per-mailbox global order across
+                                            user and control planes. */
     struct march_mbox_node *next;
 } march_mbox_node;
 
@@ -158,6 +160,7 @@ typedef struct march_proc {
     march_mbox_node           *control_mailbox; /* Reserved control-plane queue. Never
                                                    subject to user overflow policy. */
     march_mbox_node           *control_mbox_tail;
+    uint64_t                   mbox_next_seq; /* Written only under mbox_lock. */
     _Atomic int64_t             mbox_count;  /* Total user + control messages. Atomic:
                                                  writers (mbox_push/mbox_pop) always run
                                                  under mbox_lock, but wake_idle_daemons /
@@ -251,6 +254,7 @@ typedef struct march_proc {
     jmp_buf                   *crash_jmp;
     char                      *crash_message; /* Panic text copied before crash_jmp fires;
                                                 consumed by actor_green_thread. */
+    size_t                     crash_message_len; /* Byte length; embedded NUL-safe. */
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber

@@ -771,6 +771,7 @@ static void mbox_push_node(march_proc *p, march_mbox_node *node,
                            int is_control) {
     march_mbox_node **head = is_control ? &p->control_mailbox : &p->mailbox;
     march_mbox_node **tail = is_control ? &p->control_mbox_tail : &p->mbox_tail;
+    node->enqueue_seq = p->mbox_next_seq++;
     if (*tail) {
         (*tail)->next = node;
     } else {
@@ -803,7 +804,10 @@ static void *mbox_pop_user(march_proc *p) {
 }
 
 static void *mbox_pop_any(march_proc *p) {
-    if (p->control_mailbox)
+    if (p->control_mailbox
+            && (!p->mailbox
+                || p->control_mailbox->enqueue_seq
+                     < p->mailbox->enqueue_seq))
         return mbox_pop_queue(p, &p->control_mailbox,
                               &p->control_mbox_tail, 1);
     return mbox_pop_user(p);

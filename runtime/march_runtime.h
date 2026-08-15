@@ -466,6 +466,10 @@ void    march_kill(void *actor);
 int64_t march_is_alive(void *actor);
 /* Register an actor with the scheduler; returns actor unchanged. */
 void   *march_spawn(void *actor);
+/* Internal compiler/runtime handshake for supervise-block children: assign a
+ * Pid/meta now, but do not schedule the actor loop until register_child has
+ * published its supervisor and restart slot. */
+void   *march_spawn_supervised(void *actor);
 /* Read word at int64_t index from actor struct (0=rc,1=tag,2=dispatch,...). */
 int64_t march_actor_get_int(void *actor, int64_t index);
 /* Send a message (takes ownership of msg's RC).

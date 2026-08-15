@@ -460,6 +460,8 @@ let builtins : builtin list = [
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_send_linear(ptr %actor, ptr %msg)" };
   { march_name = "spawn"; c_name = Some "march_spawn"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_spawn(ptr %actor)" };
+  { march_name = "spawn_supervised"; c_name = Some "march_spawn_supervised"; ret_ty = Some (Tir.TPtr Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_spawn_supervised(ptr %actor)" };
   { march_name = "actor_get_int"; c_name = Some "march_actor_get_int"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_get_int(ptr %actor, i64 %index)" };
   { march_name = "actor_call"; c_name = Some "march_actor_call"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TVar "e"]));
@@ -1319,6 +1321,7 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_msg_move";
   PDeclare "march_process_alloc";
   PDeclare "march_spawn";
+  PDeclare "march_spawn_supervised";
   PDeclare "march_actor_get_int";
   PDeclare "march_actor_call";
   PDeclare "march_actor_reply";

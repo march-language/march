@@ -52,13 +52,8 @@ let test_noncolliding_program_byte_identical_tags () =
   Alcotest.(check int) "List.Cons keeps tag 1" 1 (tag_of "List.Cons");
   Alcotest.(check int) "Other.Foo.F keeps tag 0" 0 (tag_of "Other.Foo.F")
 
-let test_monitor_down_uses_reserved_abi_tags () =
+let test_monitor_down_metadata_is_seeded_without_source_declarations () =
   let defs = [
-    mk_variant "DownReason"
-      [("Normal", []); ("Killed", []); ("Crash", [Tir.TString])];
-    mk_variant "Down"
-      [("Down", [Tir.TInt; Tir.TCon ("Pid", [Tir.TVar "a"]);
-                  Tir.TCon ("DownReason", [])])];
     mk_variant "Probe_Msg" [("Probe", [])];
     mk_variant "Ordinary" [("Ordinary", [])];
   ] in
@@ -79,7 +74,36 @@ let test_monitor_down_uses_reserved_abi_tags () =
   Alcotest.(check int) "actor-message range stays disjoint" 0x0100_0000
     (tag_of "Probe_Msg.Probe");
   Alcotest.(check int) "ordinary range stays disjoint" 0
-    (tag_of "Ordinary.Ordinary")
+    (tag_of "Ordinary.Ordinary");
+  Alcotest.(check int) "Down metadata has three fields" 3
+    (List.length
+       (Hashtbl.find ctx.Llvm_ctx.ctor_info "Down.Down").Llvm_ctx.ce_fields);
+  Alcotest.(check int) "Crash metadata has one field" 1
+    (List.length
+       (Hashtbl.find ctx.Llvm_ctx.ctor_info "DownReason.Crash").Llvm_ctx.ce_fields)
+
+let test_monitor_reserved_malformed_tir_is_rejected () =
+  let defs = [mk_variant "Down" [("Down", [Tir.TInt])]] in
+  let m : Tir.tir_module =
+    { tm_name = "test"; tm_types = defs; tm_fns = []; tm_externs = [];
+      tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let ctx = Llvm_ctx.make_ctx ~type_defs:defs () in
+  let rejected =
+    try Llvm_toplevel.build_ctor_info ctx m; false
+    with Failure _ -> true
+  in
+  Alcotest.(check bool) "malformed reserved TIR rejected" true rejected
+
+let test_monitor_reserved_source_redeclaration_is_rejected () =
+  let errors = Test_helpers.typecheck {|
+    mod Test do
+      type Down(a) = Down(Int)
+      type DownReason = Normal | Crash(Int)
+    end
+  |} in
+  Alcotest.(check bool) "reserved source redeclarations rejected" true
+    (March_errors.Errors.has_errors errors)
 
 let suites = [
   ( "ctor_tags", [
@@ -87,7 +111,11 @@ let suites = [
         test_colliding_types_get_global_tags;
       Alcotest.test_case "non-colliding program keeps per-type tags" `Quick
         test_noncolliding_program_byte_identical_tags;
-      Alcotest.test_case "monitor Down uses reserved ABI tags" `Quick
-        test_monitor_down_uses_reserved_abi_tags;
+      Alcotest.test_case "monitor metadata is declaration-free" `Quick
+        test_monitor_down_metadata_is_seeded_without_source_declarations;
+      Alcotest.test_case "malformed reserved TIR is rejected" `Quick
+        test_monitor_reserved_malformed_tir_is_rejected;
+      Alcotest.test_case "reserved source redeclaration is rejected" `Quick
+        test_monitor_reserved_source_redeclaration_is_rejected;
     ] );
 ]
