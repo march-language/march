@@ -3585,11 +3585,10 @@ static void deliver_monitor_down(void *watcher, int64_t mon_ref, void *target,
                                  march_death_reason reason,
                                  const char *message, size_t message_len) {
     march_actor_meta *watcher_meta = find_meta(watcher);
-    march_proc *gt = watcher_meta
-        ? atomic_load_explicit(&watcher_meta->green_thread,
-                               memory_order_acquire)
-        : NULL;
-    if (!gt) return;
+    if (!watcher_meta) return;
+    march_proc *candidate = atomic_load_explicit(&watcher_meta->green_thread,
+                                                  memory_order_acquire);
+    if (!candidate) return;
 
     void *reason_value = march_alloc(reason == MARCH_DEATH_CRASH ? 24 : 16);
     ((march_hdr *)reason_value)->tag =
@@ -3614,7 +3613,23 @@ static void deliver_monitor_down(void *watcher, int64_t mon_ref, void *target,
     down_fields[1] = (int64_t)(uintptr_t)target;
     down_fields[2] = (int64_t)(uintptr_t)reason_value;
 
-    if (march_sched_send_control(gt, down) == MARCH_SEND_DEAD)
+    /* Actor terminal ownership is claimed under g_tbl_mu before the backing
+     * green thread reaches PROC_DEAD. Scheduler-level liveness alone can
+     * therefore accept a Down after the watcher is already logically dead.
+     * Keep the terminal check and control enqueue in the same g_tbl_mu
+     * critical section as do_actor_death's claim: if delivery wins, the
+     * watcher was live at enqueue ownership; if death wins, dispose locally.
+     * march_sched_send_control releases the mailbox lock before waking and
+     * does not call a message disposer, so this lock order has no inverse. */
+    int send_result = MARCH_SEND_DEAD;
+    pthread_mutex_lock(&g_tbl_mu);
+    march_proc *gt = atomic_load_explicit(&watcher_meta->green_thread,
+                                          memory_order_acquire);
+    if (!watcher_meta->terminal_set && actor_alive_load(watcher) && gt)
+        send_result = march_sched_send_control(gt, down);
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    if (send_result != MARCH_SEND_OK)
         dispose_monitor_down(down);
 }
 

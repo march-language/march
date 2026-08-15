@@ -103,7 +103,14 @@ let test_monitor_reserved_source_redeclaration_is_rejected () =
     end
   |} in
   Alcotest.(check bool) "reserved source redeclarations rejected" true
-    (March_errors.Errors.has_errors errors)
+    (March_errors.Errors.has_errors errors);
+  let dist_errors = Test_helpers.typecheck {|
+    mod DistLink do
+      type DownReason = Normal | Killed | Crash(Int) | NodeDown
+    end
+  |} in
+  Alcotest.(check bool) "malformed DistLink exception rejected" true
+    (March_errors.Errors.has_errors dist_errors)
 
 let suites = [
   ( "ctor_tags", [

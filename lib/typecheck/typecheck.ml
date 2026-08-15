@@ -11573,8 +11573,31 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_vars bindings' env
 
   | Ast.DType (_vis, name, params, typedef, _sp) ->
+    let is_canonical_dist_link_down_reason =
+      let nullary name (v : Ast.variant) =
+        v.var_name.txt = name && v.var_args = []
+      in
+      let crash_with_string (v : Ast.variant) =
+        v.var_name.txt = "Crash"
+        && match v.var_args with
+           | [Ast.TyCon (arg, [])] -> arg.txt = "String"
+           | _ -> false
+      in
+      env.current_module = "DistLink"
+      && env.enclosing_package = "DistLink"
+      && name.txt = "DownReason"
+      && params = []
+      && match typedef with
+         | Ast.TDVariant [normal; killed; crash; node_down] ->
+           nullary "Normal" normal
+           && nullary "Killed" killed
+           && crash_with_string crash
+           && nullary "NodeDown" node_down
+         | _ -> false
+    in
     if env.current_module = env.enclosing_package
-       && (name.txt = "Down" || name.txt = "DownReason") then begin
+       && (name.txt = "Down" || name.txt = "DownReason")
+       && not is_canonical_dist_link_down_reason then begin
       Err.error env.errors ~span:name.span
         (Printf.sprintf
            "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"

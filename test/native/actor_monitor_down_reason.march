@@ -166,5 +166,19 @@ mod ActorMonitorDownReason do
     send(nulled, PoisonNul())
     send(watcher, ReadNulDown(nulled))
     run_until_idle()
+
+    -- Once a watcher's terminal state is claimed, another actor's death must
+    -- not enqueue a Down into the watcher's still-owned green-thread mailbox.
+    let terminal_watcher = spawn(Watcher)
+    let terminal_target = spawn(Worker)
+    monitor(terminal_watcher, terminal_target)
+    kill(terminal_watcher)
+    kill(terminal_target)
+    let terminal_depth = mailbox_size(terminal_watcher)
+    if terminal_depth == 0 do
+      println("terminal watcher mailbox=0")
+    else
+      panic("terminal watcher accepted Down after death claim")
+    end
   end
 end

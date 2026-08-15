@@ -124,12 +124,15 @@ and env = (string * value) list
 (* Actor runtime                                                       *)
 (* ------------------------------------------------------------------ *)
 
+type monitor_down_reason = Normal | Killed | Crash of string
+
 type actor_inst = {
   ai_name    : string;           (** Actor type name, e.g. "Counter" *)
   ai_def     : actor_def;
   ai_env_ref : env ref;         (** Module environment at spawn time *)
   mutable ai_state    : value;
   mutable ai_alive    : bool;
+  mutable ai_terminal_reason : monitor_down_reason;
   (* Phase 1: supervision infrastructure *)
   mutable ai_monitors : (int * int) list;   (** (monitor_ref, watcher_pid) pairs *)
   mutable ai_links    : int list;            (** bidirectionally linked pids *)
@@ -956,6 +959,7 @@ type actor_inst_snapshot = {
   ais_name  : string;
   ais_state : value;
   ais_alive : bool;
+  ais_terminal_reason : monitor_down_reason;
 }
 
 type actor_state_snapshot = {
@@ -1021,7 +1025,8 @@ let snapshot_actors () : actor_state_snapshot =
   let instances = Hashtbl.fold (fun pid (inst : actor_inst) acc ->
       let snap = { ais_name  = inst.ai_name;
                    ais_state = inst.ai_state;
-                   ais_alive = inst.ai_alive } in
+                   ais_alive = inst.ai_alive;
+                   ais_terminal_reason = inst.ai_terminal_reason } in
       (pid, snap) :: acc
     ) actor_registry [] in
   { ass_defs = defs; ass_instances = instances; ass_next_pid = !next_pid }
@@ -1042,6 +1047,7 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_env_ref  = env_r;
                      ai_state    = s.ais_state;
                      ai_alive    = s.ais_alive;
+                     ai_terminal_reason = s.ais_terminal_reason;
                      ai_monitors = [];
                      ai_links    = [];
                      ai_mailbox  = Queue.create ();
@@ -1765,15 +1771,13 @@ let list_actors () =
 (* Phase 1: Monitors, Links, and crash_actor (must precede base_env)  *)
 (* ------------------------------------------------------------------ *)
 
-type monitor_down_reason = Normal | Killed | Crash of string
-
 let monitor_down_value = function
   | Normal -> VCon ("Normal", [])
   | Killed -> VCon ("Killed", [])
   | Crash msg -> VCon ("Crash", [VString msg])
 
 let monitor_down_message mon_ref target_pid reason =
-  VCon ("Down", [VInt mon_ref; VInt target_pid; monitor_down_value reason])
+  VCon ("Down", [VInt mon_ref; VPid target_pid; monitor_down_value reason])
 
 let fresh_monitor_id () =
   let id = !next_monitor_id in
@@ -2232,6 +2236,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_name = child_actor_name; ai_def = child_def;
       ai_env_ref = child_env_ref;
       ai_state = child_init_state; ai_alive = true;
+      ai_terminal_reason = Normal;
       ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
@@ -2515,6 +2520,7 @@ and crash_actor_with_reason (pid : int) (reason : string)
   | Some inst when not inst.ai_alive -> ()
   | Some inst ->
     let supervisor = inst.ai_supervisor in
+    inst.ai_terminal_reason <- down_reason;
     inst.ai_alive <- false;
     (* Phase 6a: run resource cleanup in reverse acquisition order.
        This runs for the actor being crashed directly.
@@ -2628,11 +2634,15 @@ let monitor_actor ~watcher_pid ~target_pid : int =
   (match Hashtbl.find_opt actor_registry target_pid with
    | Some inst when inst.ai_alive ->
      inst.ai_monitors <- (mon_ref, watcher_pid) :: inst.ai_monitors
-   | _ ->
+   | target ->
      (* Target already dead — immediately deliver Down to watcher *)
+     let reason = match target with
+       | Some inst -> inst.ai_terminal_reason
+       | None -> Normal
+     in
      (match Hashtbl.find_opt actor_registry watcher_pid with
       | Some watcher when watcher.ai_alive ->
-        Queue.push (monitor_down_message mon_ref target_pid Normal) watcher.ai_mailbox
+        Queue.push (monitor_down_message mon_ref target_pid reason) watcher.ai_mailbox
       | _ -> ()));
   mon_ref
 
@@ -9835,6 +9845,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_name = child_actor_name; ai_def = child_def;
                  ai_env_ref = child_env_ref;
                  ai_state = child_init_state; ai_alive = true;
+                 ai_terminal_reason = Normal;
                  ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
@@ -9867,6 +9878,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
        in
        let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
                     ai_state    = init_state; ai_alive = true;
+                    ai_terminal_reason = Normal;
                     ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
@@ -10713,7 +10725,9 @@ let shutdown_actor_pid (pid : int) : unit =
        watcher left to observe a stale name and no further named_registry
        lookups expected afterward — not an oversight. *)
     (match Hashtbl.find_opt actor_registry pid with
-     | Some inst2 -> inst2.ai_alive <- false
+     | Some inst2 ->
+       inst2.ai_terminal_reason <- Normal;
+       inst2.ai_alive <- false
      | None -> ())
 
 (** Graceful shutdown: stop all app-level children in reverse spawn order. *)
@@ -10756,6 +10770,7 @@ let spawn_from_spec (spec : value) : unit =
               let inst = {
                 ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
                 ai_state = init_state; ai_alive = true;
+                ai_terminal_reason = Normal;
                 ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = []; ai_linear_values = [];

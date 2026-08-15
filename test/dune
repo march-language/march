@@ -5771,7 +5771,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; a mailbox-depth counter or a dropped control value. The bounded case also
 ; proves that a drop_new user mailbox does not drop the control-plane Down,
 ; and that mailbox_size counts the queued Down exactly once. The late case
-; proves a monitor registered after death receives the stored reason.
+; proves a monitor registered after death receives the stored reason. The
+; single-scheduler run makes the terminal-watcher ownership check deterministic:
+; its green thread cannot reach PROC_DEAD between main's two kill calls.
 (rule
  (targets native_actor_monitor_down_reason native_actor_monitor_down_reason.out)
  (deps (file %{exe:../bin/main.exe})
@@ -5790,14 +5792,14 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run %{exe:../bin/main.exe} --compile -o native_actor_monitor_down_reason
         native/actor_monitor_down_reason.march)
    (with-stdout-to native_actor_monitor_down_reason.out
-        (system "./native_actor_monitor_down_reason")))))
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_actor_monitor_down_reason")))))
 
 (rule
  (alias runtest)
  (deps (file native_actor_monitor_down_reason.out))
  (action
  (run bash -c
-   "grep -Eq '^down ref=[0-9]+ target=crashed reason=Crash\\(bang\\)$' native_actor_monitor_down_reason.out && grep -Eq '^down target=nulled reason=Crash\\(embedded-nul-ok\\)$' native_actor_monitor_down_reason.out && grep -Eq '^bounded mailbox=1 down=Killed ref=[0-9]+$' native_actor_monitor_down_reason.out && grep -Eq '^late down ref=[0-9]+ target=killed reason=Killed$' native_actor_monitor_down_reason.out")))
+   "grep -Eq '^down ref=[0-9]+ target=crashed reason=Crash\\(bang\\)$' native_actor_monitor_down_reason.out && grep -Eq '^down target=nulled reason=Crash\\(embedded-nul-ok\\)$' native_actor_monitor_down_reason.out && grep -Eq '^bounded mailbox=1 down=Killed ref=[0-9]+$' native_actor_monitor_down_reason.out && grep -Eq '^late down ref=[0-9]+ target=killed reason=Killed$' native_actor_monitor_down_reason.out && grep -Eq '^terminal watcher mailbox=0$' native_actor_monitor_down_reason.out")))
 
 ; Registration/alive publication stress: the compiled runtime uses four
 ; scheduler OS threads by default. Re-running the supervised crash witness

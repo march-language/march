@@ -903,7 +903,7 @@ let test_down_message_format () =
   let msg = Queue.pop ib.March_eval.Eval.ai_mailbox in
   (match msg with
    | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
-                                     March_eval.Eval.VInt target;
+                                     March_eval.Eval.VPid target;
                                      March_eval.Eval.VCon ("Crash", [March_eval.Eval.VString r])]) ->
      Alcotest.(check int) "mon_ref matches" mon m;
      Alcotest.(check int) "target pid" 0 target;
@@ -919,7 +919,7 @@ let test_down_message_killed_reason () =
   ignore (March_eval.Eval.apply kill [March_eval.Eval.VPid 0]);
   match Queue.pop ib.March_eval.Eval.ai_mailbox with
   | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
-                                     March_eval.Eval.VInt target;
+                                     March_eval.Eval.VPid target;
                                      March_eval.Eval.VCon ("Killed", [])]) ->
     Alcotest.(check int) "mon_ref matches" mon m;
     Alcotest.(check int) "target pid" 0 target
@@ -927,13 +927,11 @@ let test_down_message_killed_reason () =
 
 let test_down_message_dead_target_fallback () =
   March_eval.Eval.reset_scheduler_state ();
-  let dead = mk_actor_inst "A" false March_eval.Eval.VUnit in
-  Hashtbl.replace March_eval.Eval.actor_registry 0 dead;
   let ib = add_fresh_actor 1 "B" in
   let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
   match Queue.pop ib.March_eval.Eval.ai_mailbox with
   | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
-                                     March_eval.Eval.VInt target;
+                                     March_eval.Eval.VPid target;
                                      March_eval.Eval.VCon ("Normal", [])]) ->
     Alcotest.(check int) "mon_ref matches" mon m;
     Alcotest.(check int) "target pid" 0 target
@@ -967,6 +965,42 @@ let test_eval_monitor_builtin () =
   let v = call_fn env "main" [] in
   Alcotest.(check int) "mailbox_size counts queued user + Down exactly once" 2
     (match v with March_eval.Eval.VInt n -> n | _ -> -1)
+
+let test_eval_monitor_down_target_is_pid () =
+  let env = eval_module {|mod Test do
+    actor Target do
+      state { x : Int }
+      init { x: 0 }
+    end
+
+    actor Watcher do
+      state { target_dead : Bool }
+      init { target_dead: false }
+      on Check() do
+        match receive() do
+          Down.Down(_, target, DownReason.Killed) ->
+            { target_dead: !is_alive(target) }
+          _ -> { target_dead: false }
+        end
+      end
+    end
+
+    fn main() do
+      let target = spawn(Target)
+      let watcher = spawn(Watcher)
+      monitor(watcher, target)
+      send(watcher, Check())
+      kill(target)
+      run_until_idle()
+      match get_actor_field(watcher, "target_dead") do
+        Some(dead) -> dead
+        None -> false
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "Down target is accepted by is_alive as a Pid" true
+    (match v with March_eval.Eval.VBool b -> b | _ -> false)
 
 let test_eval_link_builtin () =
   (* End-to-end: link/kill propagates death via March source *)
@@ -13213,6 +13247,7 @@ let stdlib_suites =
         Alcotest.test_case "Down killed reason"                    `Quick (with_reset test_down_message_killed_reason);
         Alcotest.test_case "Down dead-target fallback"             `Quick (with_reset test_down_message_dead_target_fallback);
         Alcotest.test_case "monitor builtin end-to-end"           `Quick (with_reset test_eval_monitor_builtin);
+        Alcotest.test_case "Down target is a Pid in source"       `Quick (with_reset test_eval_monitor_down_target_is_pid);
         Alcotest.test_case "link builtin end-to-end"              `Quick (with_reset test_eval_link_builtin);
       ]);
       ("supervision phase2", [
