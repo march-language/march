@@ -90,6 +90,27 @@ elsewhere could still inherit `X` falsely. Worth an explicit test case
 before this ships, not just the `main`-shape
 regression test the 2026-08-08 fix already has.
 
+**A latent trap to fix WHILE implementing this**: the `FInsert` fix that
+Task 7 Steps 3-4 built is currently mis-placed for cross-file modules, and it
+is invisible today only because nothing consumes it. `span_and_is_header`
+(`bin/main.ml:2138`) falls back, when a module's `decl_span` is `dummy_span`
+(which is how every module loaded from a separate file is synthesized —
+`bin/main.ml:361-364`), to `first_real_decl_span` — the module's first inner
+declaration, typically a `fn` — while still returning `is_header = true`.
+`cap_ceiling_fix_indent` (`bin/main.ml:2194`) then computes `base + 2` off
+that `fn` line's indentation, and the insert is anchored after it. So applying
+the fix would write `needs X` INSIDE the function body rather than at the top
+of the module — syntactically wrong, and on the exact cross-file shape this
+todo is about.
+
+The moment the ceiling runs under `--check`, that payload reaches
+`--check-json` and `forge fix` and the mis-placement becomes a real,
+user-visible bug. Either give the fallback its own `is_header = false` plus a
+module-body-relative anchor, or suppress the fix payload entirely when the
+span came from the fallback. Cover it with a test that APPLIES the fix and
+re-parses the result, not merely one that asserts the diagnostic text — a
+text-only assertion passes with the insert in the wrong place.
+
 Not urgent — under-reporting (this gap) is the tolerable failure mode per
 the capability-UX plan's own priorities; `--compile` still catches the real
 case before it reaches a binary. Priority is "close before `--check` is
