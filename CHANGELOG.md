@@ -11,6 +11,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- The whole-program capability grant now bounds actor message handlers. A handler's body
+  was invisible to `main`'s grant reachability walk, so a program granted only
+  `Cap(IO.Console)` could `file_write` inside an actor handler — and it compiled, ran, and
+  wrote the file. The grant now follows `spawn(Actor)` edges into the actor's handlers, so a
+  handler's IO counts against the grant the moment the actor is spawned. A defined-but-never-
+  spawned actor stays free, like any other dead code. The manifest (`needs`) side already
+  tracked handlers; only the grant did not.
+
 ### Added
 
 - An unrecognized capability in `needs` is now an error with a did-you-mean suggestion
@@ -18,6 +28,12 @@ git log is authoritative for exact commits.
   "declared but no function requires it — remove the unused declaration" warning.
 
 ### Changed
+
+- A partial-grant error (e.g. `main` granted `Cap(IO.Console)` but the program reaches
+  `IO.Spawn`) now suggests the precise least-privilege fix — add a `Cap(IO.Spawn)` parameter
+  to `main` — before the broad `Cap(IO)` escape hatch, matching the no-grant diagnostic's
+  suggested-signature help. It previously offered only "widen the grant (e.g. `Cap(IO)`)",
+  steering users to the widest grant against the system's own least-privilege ethos.
 
 - **Local actor monitors now deliver reason-carrying `Down(ref, target_pid, reason)` messages** — `Normal`, `Killed`, or `Crash(String)` — through the control plane, so the notification bypasses mailbox limits and is not lost behind a full bounded queue. Interpreter and compiled backends now have the same local monitor payload and reason semantics.
 - A `Cap(X)` parameter on a non-`main` function is no longer a ceiling on everything that
