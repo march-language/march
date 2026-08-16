@@ -134,7 +134,7 @@ let rec find_sigils tbl file (e : March_ast.Ast.expr) =
   | EApp (f, args, _) -> go f; List.iter go args
   | ECon (_, args, _) -> List.iter go args
   | ELet (b, _) -> go b.bind_expr
-  | ELetQ (_, a, b, _) -> go a; go b
+  | ELetQ (_, a, b, _) | ELetStar (_, a, b, _) -> go a; go b
   | ELetFn (_, _, _, b, _) -> go b
   | EIf (a, b, c, _) -> go a; go b; go c
   | ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms

@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: `let*` cannot be the last expression in a block.
+-- Mirrors let?'s r05/t67: a trailing `let*` has an empty continuation,
+-- which can never unify against the flat_map return type.
+mod Main do
+  fn f(a : Option(Int)) : Option(Int) do
+    let* x = a
+  end
+end

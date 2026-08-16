@@ -65,6 +65,7 @@ let rec calls_in_expr (acc : (string * Ast.span * Ast.span) list) (e : Ast.expr)
   | Ast.EDbg (Some inner, _) -> calls_in_expr acc inner
   | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
   | Ast.ELetQ (_, rhs, body, _) -> calls_in_expr (calls_in_expr acc rhs) body
+  | Ast.ELetStar (_, rhs, body, _) -> calls_in_expr (calls_in_expr acc rhs) body
   | Ast.EAssert (e, _) -> calls_in_expr acc e
   | Ast.ESigil (_, content, _) -> calls_in_expr acc content
   | Ast.ELit _ | Ast.EVar _ -> acc

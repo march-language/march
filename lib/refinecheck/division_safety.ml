@@ -262,7 +262,8 @@ let rec iter_div_sites
   (* A local `fn go(...)` binds its own name (it may recurse) and its
      parameters throughout its body. *)
   | A.ELetFn (n, ps, _, body, _) -> under (n.A.txt :: lam_param_names ps) body
-  | A.ELetQ (p, rhs, body, _) -> go rhs; under (Refine_check.pat_binders p) body
+  | A.ELetQ (p, rhs, body, _) | A.ELetStar (p, rhs, body, _) ->
+    go rhs; under (Refine_check.pat_binders p) body
   | A.EAssert (inner, _) -> go inner
   | A.ESend (cap, msg, _) -> go cap; go msg
   | A.ESpawn (inner, _) -> go inner

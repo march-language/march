@@ -158,10 +158,13 @@
     in
     EApp (mk_var "List.map", [source; map_lam], sp)
 
-  (** Right-fold a flat block list into nested [ELetQ] continuations.
-      [let? p = e; rest...] becomes [ELetQ(p, e, fold_letq rest sp, sp)].
-      Non-let? expressions are collected into [EBlock] as before.
-      An [ELetQ] as the very last expression produces [ELetQ(p, e, EBlock([], sp), sp)];
+  (** Right-fold a flat block list into nested [ELetQ]/[ELetStar] continuations.
+      [let? p = e; rest...] becomes [ELetQ(p, e, fold_letq rest sp, sp)], and
+      likewise [let* p = e; rest...] becomes [ELetStar(p, e, fold_letq rest sp, sp)]
+      -- both binder forms share this fold since they have the same
+      (pattern, rhs, continuation, span) shape and a block may freely mix them.
+      Non-binder expressions are collected into [EBlock] as before.
+      A binder as the very last expression produces e.g. [ELetQ(p, e, EBlock([], sp), sp)];
       the typechecker flags the empty continuation with a clear error. *)
   let rec fold_letq es sp =
     match es with
@@ -169,6 +172,8 @@
     | [ e ] -> e
     | ELetQ (p, result, _, lsp) :: rest ->
         ELetQ (p, result, fold_letq rest sp, lsp)
+    | ELetStar (p, result, _, lsp) :: rest ->
+        ELetStar (p, result, fold_letq rest sp, lsp)
     | e :: rest ->
         (match fold_letq rest sp with
          | EBlock (inner, bsp) -> EBlock (e :: inner, bsp)
@@ -1099,6 +1104,20 @@ block_expr:
         "I was expecting `=` in the let? binding here:"
         (Some "let? name = result_expr")
         $startpos($4) }
+  | LET; STAR; p = simple_pattern; EQUALS; e = expr
+    { ELetStar (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
+  | LET; STAR; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
+    { let _ = ty in
+      error_raise
+        "A `let*` binding can't have a type annotation — its type is \
+         inferred from the right-hand side."
+        (Some "let* name = expr")
+        $startpos(ty) }
+  | LET; STAR; _p = simple_pattern; error
+    { error_raise
+        "I was expecting `=` in the let* binding here:"
+        (Some "let* name = expr")
+        $startpos($4) }
   | LET; _p = simple_pattern; _ty = option(type_annot); error
     { error_raise
         "I was expecting `=` in the let binding here:"
@@ -1224,6 +1243,8 @@ lambda_stmts:
             mk_span ($loc)) :: rest }
   | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
     { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
+  | LET; STAR; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
+    { ELetStar (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
 
 expr_pipe:
   | l = expr_pipe; PIPE_ARROW; r = expr_or
@@ -1378,6 +1399,8 @@ call_arg_lambda_stmt:
             mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr
     { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
+  | LET; STAR; p = simple_pattern; EQUALS; ev = expr
+    { ELetStar (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
   | e = expr { e }
 
 (** Field access: x.name — left-recursive for chained access: x.y.z

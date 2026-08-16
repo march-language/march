@@ -465,6 +465,8 @@ let rec expr_inline = function
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
   | ELetQ (p, r, _, _)          ->
     Printf.sprintf "let? %s = %s; ..." (fmt_pat p) (expr_inline r)
+  | ELetStar (p, r, _, _)       ->
+    Printf.sprintf "let* %s = %s; ..." (fmt_pat p) (expr_inline r)
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
   | ESigil (name, content, _)     ->
     let inner = expr_inline content in
@@ -490,7 +492,7 @@ let sigil_is_multiline content =
     needs multi-line rendering — the "trailing block" call shape, e.g.
     [List.map(xs, fn x -> <multi-statement body> )]. *)
 let rec is_multiline = function
-  | EMatch _ | ELetFn _ | ELetQ _ -> true
+  | EMatch _ | ELetFn _ | ELetQ _ | ELetStar _ -> true
   | EBlock (_ :: _ :: _, _) -> true
   | ESigil (_, content, _) -> sigil_is_multiline content
   | ELam (_, body, _) -> is_multiline body
@@ -553,6 +555,14 @@ let rec emit_stmt ctx e =
       indented ctx (fun () -> emit_stmt ctx r)
     end else
       line ctx (Printf.sprintf "let? %s = %s" (fmt_pat p) (expr_inline r));
+    emit_stmt ctx cont
+
+  | ELetStar (p, r, cont, _) ->
+    if should_break (ctx.indent + 1) r then begin
+      line ctx (Printf.sprintf "let* %s =" (fmt_pat p));
+      indented ctx (fun () -> emit_stmt ctx r)
+    end else
+      line ctx (Printf.sprintf "let* %s = %s" (fmt_pat p) (expr_inline r));
     emit_stmt ctx cont
 
   | ESigil (name, content, _) when sigil_is_multiline content ->

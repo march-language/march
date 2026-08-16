@@ -168,7 +168,7 @@ let seed_of_body (params : string list) (body : A.expr) : seed =
         @ scope
       in
       go inner body
-    | A.ELetQ (p, result, cont, _) ->
+    | A.ELetQ (p, result, cont, _) | A.ELetStar (p, result, cont, _) ->
       go scope result;
       let scope = List.map (fun n -> (n, COpaque)) (pat_binders p) @ scope in
       go scope cont
