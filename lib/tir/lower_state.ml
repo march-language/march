@@ -256,6 +256,71 @@ let module_ctor_type (module_prefix : string) (ctor_name : string)
 let type_declares_ctor (type_name : string) (ctor_name : string) : bool =
   Hashtbl.mem type_ctor_tbl (type_name, ctor_name)
 
+(** Resolve constructor identity for the runtime-reserved local-monitor type
+    short names without letting a module-qualified user declaration collapse
+    onto canonical [Down.*]/[DownReason.*] metadata.
+
+    The typechecker intentionally permits names such as [DistLink.DownReason]
+    and [Inner.Down].  Their TIR type definitions are module-qualified, but the
+    inferred [TCon] stays short and ordinary constructor lowering normally
+    builds [ShortType.Ctor].  For these two names that ordinary key is the
+    runtime ABI key, so preserve a declaring module whenever the AST-derived
+    module/constructor table can identify one.  Canonical declaration-free
+    monitor constructors have no declaring source module and keep their bare
+    reserved keys. *)
+let reserved_monitor_ctor_key ~(module_prefix : string)
+    ~(source_tag : string) ~(type_name : string option)
+    ~(ctor_name : string) : string option =
+  let last_segment s =
+    match String.rindex_opt s '.' with
+    | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+    | None -> s
+  in
+  let is_reserved_short = function
+    | "Down" | "DownReason" -> true
+    | _ -> false
+  in
+  let is_exact_canonical_source_tag =
+    match source_tag with
+    | "Down.Down"
+    | "DownReason.Normal" | "DownReason.Killed" | "DownReason.Crash" -> true
+    | _ -> false
+  in
+  let local_key short =
+    if module_prefix = "" then None
+    else
+      match module_ctor_type module_prefix ctor_name with
+      | Some declared when String.equal (last_segment declared) short ->
+        Some (module_prefix ^ declared ^ "." ^ ctor_name)
+      | _ -> None
+  in
+  if is_exact_canonical_source_tag then Some source_tag
+  else match String.rindex_opt source_tag '.' with
+  | Some i ->
+    let qual = String.sub source_tag 0 (i + 1) in
+    let qual_without_dot = String.sub source_tag 0 i in
+    (match module_ctor_type qual ctor_name with
+     | Some declared when is_reserved_short (last_segment declared) ->
+       Some (qual ^ declared ^ "." ^ ctor_name)
+     | _ ->
+       (match type_name with
+        | Some inferred when is_reserved_short (last_segment inferred) ->
+          let short = last_segment inferred in
+          if String.equal qual_without_dot short then
+            (match local_key short with Some key -> Some key | None -> Some source_tag)
+          else if String.equal (last_segment qual_without_dot) short then
+            Some source_tag
+          else None
+        | _ -> None))
+  | None ->
+    (match type_name with
+     | Some inferred when is_reserved_short (last_segment inferred) ->
+       let short = last_segment inferred in
+       (match local_key short with
+        | Some key -> Some key
+        | None -> Some (short ^ "." ^ ctor_name))
+     | _ -> None)
+
 (** Populate [shared_ctor_collision_tbl] from [decls], mirroring
     [lib/eval/eval.ml]'s [compute_type_collision_set] exactly (descend into
     [DMod], accumulating a "Sub.Sub2." prefix; collect each

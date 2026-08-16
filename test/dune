@@ -5766,6 +5766,52 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_registry_basic.expected native_actor_registry_basic.out)))
 
+; ── Local monitor Down payload (failing witness) ────────────────────────
+; The watcher must receive Down(ref, target, Crash(msg)|Killed), rather than
+; a mailbox-depth counter or a dropped control value. The bounded case also
+; proves that a drop_new user mailbox does not drop the control-plane Down,
+; and that mailbox_size counts the queued Down exactly once. The late case
+; proves a monitor registered after death receives the stored reason. The
+; single-scheduler run makes the terminal-watcher ownership check deterministic:
+; its green thread cannot reach PROC_DEAD between main's two kill calls.
+(rule
+ (targets native_actor_monitor_down_reason native_actor_monitor_down_reason.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_monitor_down_reason.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_monitor_down_reason
+        native/actor_monitor_down_reason.march)
+   (with-stdout-to native_actor_monitor_down_reason.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_actor_monitor_down_reason")))))
+
+(rule
+ (alias runtest)
+ (deps (file native_actor_monitor_down_reason.out))
+ (action
+ (run bash -c
+   "grep -Eq '^down ref=[0-9]+ target=crashed reason=Crash\\(bang\\)$' native_actor_monitor_down_reason.out && grep -Eq '^down target=nulled reason=Crash\\(embedded-nul-ok\\)$' native_actor_monitor_down_reason.out && grep -Eq '^bounded mailbox=1 down=Killed ref=[0-9]+$' native_actor_monitor_down_reason.out && grep -Eq '^late down ref=[0-9]+ target=killed reason=Killed$' native_actor_monitor_down_reason.out && grep -Eq '^terminal watcher mailbox=0$' native_actor_monitor_down_reason.out")))
+
+; Registration/alive publication stress: the compiled runtime uses four
+; scheduler OS threads by default. Re-running the supervised crash witness
+; exercises child preparation/registration, terminal publication, and Down
+; delivery under cross-scheduler scheduling pressure.
+(rule
+ (alias runtest)
+ (deps (file native_actor_monitor_down_reason))
+ (action
+  (run bash -c
+   "i=0; while [ $i -lt 100 ]; do MARCH_NUM_SCHEDULERS=4 ./native_actor_monitor_down_reason >/dev/null || exit $?; i=$((i + 1)); done")))
+
 ; ── Named registry (Task 5): registry_retire_actor on actor death ────────
 ; (compiled + interpreted parity) ─────────────────────────────────────
 ; What actor_registry_basic.march does NOT cover: a killed actor's name

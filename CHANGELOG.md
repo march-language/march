@@ -19,6 +19,7 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Local actor monitors now deliver reason-carrying `Down(ref, target_pid, reason)` messages** — `Normal`, `Killed`, or `Crash(String)` — through the control plane, so the notification bypasses mailbox limits and is not lost behind a full bounded queue. Interpreter and compiled backends now have the same local monitor payload and reason semantics.
 - A `Cap(X)` parameter on a non-`main` function is no longer a ceiling on everything that
   function transitively reaches. Taking one capability parameter used to oblige a function
   to take parameters for every other capability it reached, forcing callers to thread

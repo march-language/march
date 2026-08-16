@@ -13309,6 +13309,17 @@ let test_stdlib_sorted_set_cmp_curried () =
 let test_stdlib_range_reduce_curried () =
   assert_stdlib_file_typechecks_cleanly "range.march"
 
+let test_stdlib_dist_link_cli_check () =
+  let project_root = march_project_root () in
+  let main_exe = find_main_exe () in
+  let cmd = Printf.sprintf "cd %s && %s --check stdlib/dist_link.march"
+      (Filename.quote project_root) (Filename.quote main_exe) in
+  let rc, output = run_capture cmd in
+  Alcotest.(check int)
+    (Printf.sprintf
+       "exact `--check stdlib/dist_link.march` succeeds; output:\n%s" output)
+    0 rc
+
 (* ── Green guards: the fix must not over-reject legitimate entry-qualified use ── *)
 
 let test_entry_qual_same_type_ok () =
@@ -15445,6 +15456,7 @@ let compiler_suites =
           Alcotest.test_case "ordered_map.march cmp/fold: curried, no internal error" `Quick test_stdlib_ordered_map_cmp_curried;
           Alcotest.test_case "sorted_set.march cmp/fold: curried, no internal error"  `Quick test_stdlib_sorted_set_cmp_curried;
           Alcotest.test_case "range.march reduce: curried, no internal error"         `Quick test_stdlib_range_reduce_curried;
+          Alcotest.test_case "dist_link.march exact CLI check"                         `Quick test_stdlib_dist_link_cli_check;
           Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
           Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
           Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;
@@ -15476,4 +15488,3 @@ let compiler_suites =
           Alcotest.test_case "dependency mod, structural recursion: no error"       `Quick test_tce_non_entry_structural_recursion_no_error;
         ] );
   ]
-

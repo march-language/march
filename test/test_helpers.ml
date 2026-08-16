@@ -1243,6 +1243,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_env_ref       = ref [];
   ai_state         = st;
   ai_alive         = alive;
+  ai_terminal_reason = March_eval.Eval.Normal;
   ai_monitors      = [];
   ai_links         = [];
   ai_mailbox       = Queue.create ();

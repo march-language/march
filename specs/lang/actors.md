@@ -188,6 +188,43 @@ is the one lifecycle observation that is **byte-identical interpreted vs compile
 golden witness `g37_actor_lifecycle` pins `spawn → is_alive true → kill → is_alive false`).
 The operational rules for `kill`/`is_alive` are in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
 
+## Monitoring Actor Death
+
+`monitor(watcher, target)` delivers a control-plane `Down(ref, target_pid, reason)`
+message to `watcher` when `target` terminates. The local reasons are `Normal`,
+`Killed`, and `Crash(message)`. Match the three fields in a handler rather than
+treating a monitor as a count of dead actors:
+
+```march
+actor Watcher do
+  state { seen : Int }
+  init  { seen: 0 }
+
+  on CheckDown() do
+    match receive() do
+      Down(_, target, Normal) ->
+        println("stopped " ++ to_string(target))
+        state
+      Down(_, target, Killed) ->
+        println("killed " ++ to_string(target))
+        state
+      Down(_, _, Crash(error)) ->
+        println("crashed " ++ error)
+        state
+      _ ->
+        println("unexpected monitor message")
+        state
+    end
+  end
+end
+```
+
+Monitor `Down` messages are control-plane delivery: they bypass the target
+watcher's mailbox limit, so a full bounded mailbox cannot lose the death
+notification. Local monitoring has the same payload and reason vocabulary on
+the interpreted and compiled backends; the distributed monitor protocol uses
+the same `Down(ref, target_pid, reason)` shape (and additionally has `NodeDown`).
+
 ---
 
 ## Named Actors
@@ -680,6 +717,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `receive()` | `→ Msg` | both | Pop the next mailbox message (only the first `receive()` per handler may block) |
 | `kill(pid)` | `→ ()` | both | Stop an actor |
 | `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup) |
+| `monitor(watcher, target)` | `→ Int` | both | Deliver `Down(ref, target_pid, reason)` on target exit; local reasons are `Normal`, `Killed`, and `Crash(String)` |
 | `self()` | `→ Pid` | both | Current actor's Pid |
 | `run_until_idle()` | `→ ()` | both | Drain the scheduler to a fixed point (interpreter / tests) |
 | `get_cap(pid)` | `→ Option(Cap(Msg))` | both | Obtain an epoch-tagged capability; `None` for a dead/unknown pid |

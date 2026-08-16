@@ -136,6 +136,27 @@ void    march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len);
 void    march_simd_lane_panic(int64_t i, int64_t lanes);
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
 
+/* Reserved constructor-tag ABI for runtime-originated local-monitor values.
+ * Keep in sync with lib/tir/llvm_builtins.ml. Ordinary constructors and the
+ * two compiler global-tag allocators are bounded below this range. */
+#define MARCH_ORDINARY_CTOR_TAG_LIMIT 0x01000000
+#define MARCH_ACTOR_MSG_TAG_BASE      0x01000000
+#define MARCH_ACTOR_MSG_TAG_LIMIT     0x02000000
+#define MARCH_COLLISION_TAG_BASE      0x02000000
+#define MARCH_COLLISION_TAG_LIMIT     0x03000000
+#define MARCH_DOWN_TAG                0x7F000000
+#define MARCH_DOWN_NORMAL_TAG         0x7F000001
+#define MARCH_DOWN_KILLED_TAG         0x7F000002
+#define MARCH_DOWN_CRASH_TAG          0x7F000003
+#define MARCH_RESERVED_CTOR_TAG_LIMIT 0x7F000004
+
+#if MARCH_ORDINARY_CTOR_TAG_LIMIT > MARCH_ACTOR_MSG_TAG_BASE || \
+    MARCH_ACTOR_MSG_TAG_LIMIT > MARCH_COLLISION_TAG_BASE || \
+    MARCH_COLLISION_TAG_LIMIT > MARCH_DOWN_TAG || \
+    MARCH_DOWN_CRASH_TAG >= MARCH_RESERVED_CTOR_TAG_LIMIT
+#error "March constructor tag ranges overlap the reserved monitor ABI"
+#endif
+
 /* Polymorphic containers store scalars via tagged integers: the low bit of the
  * pointer is set to 1 for immediate scalar values (integers, booleans, chars).
  * Heap pointers from march_alloc (backed by calloc) are always 8-byte aligned,
@@ -377,6 +398,14 @@ void   *march_string_to_int(void *s);
 void   *march_string_join(void *list, void *sep);
 void   *march_codepoint_to_utf8(int64_t cp);  /* Encode codepoint as UTF-8, returns Some(string) or None */
 
+/* Terminal actor reason shared by every compiled death path and the local
+ * monitor Down ABI. Crash carries its text separately. */
+typedef enum {
+    MARCH_DEATH_NORMAL = 0,
+    MARCH_DEATH_KILLED = 1,
+    MARCH_DEATH_CRASH  = 2,
+} march_death_reason;
+
 /* Actor link builtins. */
 /* link: establish a bidirectional crash-propagation link between two actors.
    If either dies, the other receives a Down notification (and may crash too). */
@@ -437,6 +466,10 @@ void    march_kill(void *actor);
 int64_t march_is_alive(void *actor);
 /* Register an actor with the scheduler; returns actor unchanged. */
 void   *march_spawn(void *actor);
+/* Internal compiler/runtime handshake for supervise-block children: assign a
+ * Pid/meta now, but do not schedule the actor loop until register_child has
+ * published its supervisor and restart slot. */
+void   *march_spawn_supervised(void *actor);
 /* Read word at int64_t index from actor struct (0=rc,1=tag,2=dispatch,...). */
 int64_t march_actor_get_int(void *actor, int64_t index);
 /* Send a message (takes ownership of msg's RC).

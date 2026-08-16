@@ -331,7 +331,15 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
               v_ty   = Tir.TFn ([], Tir.TPtr Tir.TUnit);
               v_lin  = Tir.Unr;
             } in
-            let march_spawn_var : Tir.var = { v_name = "spawn"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+            (* A supervise-block child must not enter its actor loop before
+               register_supervisor_child publishes the supervisor pointer.
+               The deferred runtime spawn assigns its Pid now (needed in the
+               supervisor state), and registration activates it later. *)
+            let march_spawn_var : Tir.var = {
+              v_name = "spawn_supervised";
+              v_ty = Tir.TPtr Tir.TUnit;
+              v_lin = Tir.Unr;
+            } in
             let pid_index_of_var : Tir.var = { v_name = "pid_index_of"; v_ty = Tir.TInt; v_lin = Tir.Unr } in
             let raw_var = actor_var ("$sup_child_raw_" ^ fname) (Tir.TPtr Tir.TUnit) in
             let child_ptr_var = actor_var ("$sup_child_ptr_" ^ fname) (Tir.TPtr Tir.TUnit) in

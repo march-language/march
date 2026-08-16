@@ -45,3 +45,23 @@ in `march_sched_send`) or ordinary traffic that can be dropped.
 
 A watcher receives a `Down` carrying the monitor ref, the dead Pid, and a
 reason that distinguishes normal / killed / crashed, on both backends.
+
+## Completed 2026-08-15
+
+Implemented by the local-monitor runtime/compiler work and documented here.
+The delivered shape is `Down(ref, target_pid, reason)`, with local reasons
+`Normal`, `Killed`, and `Crash(String)`. Delivery is control-plane traffic and
+bypasses the watcher's mailbox limit. The interpreter and compiled backends
+have matching local payload and reason behavior; the distributed protocol
+retains the same shape and adds `NodeDown`.
+
+Files documented: `docs/actors.md`, `specs/lang/actors.md`, and `CHANGELOG.md`.
+The native monitor witness is `test/native/actor_monitor_down_reason.march`.
+
+Verification: `scripts/check-docs.sh` passed. The required combined
+`scripts/run-tests.sh compiler eval codegen stdlib` run was started, and
+compiler/eval/codegen completed. `run_stdlib` recorded four undiagnosed
+failures (HCR dispatch, HCR manifest caps, `MARCH_SANITIZE` clean exit, and
+string-statistics bytes-copied) before the run was terminated; `test_stdlib_march`
+never started. Full-suite completion is not claimed. The focused native monitor
+fixture and final documentation checks are recorded in the task report.
