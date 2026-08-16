@@ -495,6 +495,15 @@ let rec expr_to_json (e : expr) : string =
       ("span", span_to_json span);
       rty;
     ]
+  | ELetStar (pat, value, cont, span) ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "ELetStar");
+      ("pattern", pattern_to_json pat);
+      ("value", expr_to_json value);
+      ("cont", expr_to_json cont);
+      ("span", span_to_json span);
+      rty;
+    ]
   | EAssert (e, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EAssert");

@@ -121,6 +121,23 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`let* p = e1; e2` — generalized monadic-bind sugar.** Generalizes `let?`
+  (propagation for `Result` only) to any type `M` with a same-named module
+  exporting `flat_map(x : M(a), f : a -> M(b)) : M(b)` — works today with
+  `Option`, `Result`, and `List`, and with any user-defined type following
+  the same convention:
+  ```march
+  fn compute(a : Int, b : Int, c : Int) : Option(Int) do
+    let* x = safe_div(a, b)
+    let* y = safe_div(x, c)
+    Some(y + 1)
+  end
+  ```
+  A type with no matching `flat_map` is a clear compile error naming
+  exactly what's missing, not a crash. Known gap: `stdlib/parse.march`'s
+  `Parser` type lives in a module named `Parse`, not `Parser`, so `let*`
+  doesn't (yet) work with it — filed as a follow-up. See
+  `specs/lang/let-star-generalized-bind.md`.
 - **`Bytes.to_u8_arr` / `Bytes.from_u8_arr`** — an O(n)-copy bridge between
   `Bytes` and `NativeU8Arr`, so byte data from files, sockets, or
   `Bytes.from_hex` can reach the SIMD byte scanner (`Simd.load_u8x16` /

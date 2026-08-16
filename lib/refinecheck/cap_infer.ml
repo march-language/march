@@ -206,7 +206,7 @@ let rec iter_cap_calls ?(shadowed = fun (_ : string) -> false)
   | A.EAnnot (inner, _, _) -> go inner
   | A.ELam (_, body, _) -> go body
   | A.ELetFn (_, _, _, body, _) -> go body
-  | A.ELetQ (_, rhs, body, _) -> go rhs; go body
+  | A.ELetQ (_, rhs, body, _) | A.ELetStar (_, rhs, body, _) -> go rhs; go body
   | A.EAssert (inner, _) -> go inner
   | A.ESend (cap, msg, _) -> go cap; go msg
   | A.ESpawn (inner, _) -> go inner
@@ -246,7 +246,7 @@ let direct_callees (e : A.expr) : string list =
     | A.ERecordUpdate (r, fields, _) -> go r; List.iter (fun (_, e) -> go e) fields
     | A.EBlock (es, _) -> List.iter go es
     | A.ELet (b, _) -> go b.A.bind_expr
-    | A.ELetQ (_, e1, e2, _) -> go e1; go e2
+    | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> go e1; go e2
     | A.ELetFn (_, _, _, body, _) -> go body
     | A.EMatch (scrut, arms, _) ->
       go scrut; List.iter (fun (br : A.branch) -> go br.A.branch_body) arms

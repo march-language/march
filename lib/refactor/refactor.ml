@@ -196,7 +196,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.ELetFn (n, ps, rt, body, _) ->
       f SFn n; List.iter param ps;
       (match rt with Some t -> ty t | None -> ()); expr body
-    | Ast.ELetQ (_, r, c, _) -> expr r; expr c
+    | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> expr r; expr c
   in
   let fn_def (fn : Ast.fn_def) =
     f SFn fn.Ast.fn_name;
@@ -599,7 +599,7 @@ and iter_app_exprs (f : Ast.expr -> Ast.expr list -> Ast.span -> unit)
     | Ast.ERecordUpdate (e, fs, _) -> ex e; List.iter (fun (_, e) -> ex e) fs
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
     | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.EDbg (Some e, _) -> ex e
-    | Ast.ELetQ (_, r, c, _) -> ex r; ex c
+    | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> ex r; ex c
     | _ -> ()
   in
   let rec decl (d : Ast.decl) =
@@ -625,7 +625,7 @@ and span_of_expr (e : Ast.expr) : Ast.span =
   | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
-  | Ast.ELetQ (_, _, _, sp)
+  | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
   | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) -> sp
   | Ast.EVar n -> n.Ast.span
   | Ast.EResultRef _ -> Ast.dummy_span
@@ -726,7 +726,7 @@ let unshadowed_uses (targets : string list) (e : Ast.expr) : (string * Ast.span)
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> walk bound a; walk bound b
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk bound e) fs
     | Ast.ERecordUpdate (e, fs, _) -> walk bound e; List.iter (fun (_, e) -> walk bound e) fs
-    | Ast.ELetQ (_, r, c, _) ->
+    | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) ->
       walk bound r;
       walk bound c
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)

@@ -1266,7 +1266,7 @@ let children : A.expr -> A.expr list = function
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
   | A.EDbg (Some e, _) -> [ e ]
   | A.ESend (a, b, _) -> [ a; b ]
-  | A.ELetQ (_, e1, e2, _) -> [ e1; e2 ]
+  | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> [ e1; e2 ]
 
 let rec iter_all (f : A.expr -> unit) (e : A.expr) : unit =
   f e;
@@ -1816,7 +1816,7 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.ELet (b, _) -> bound (pat_binders b.A.bind_pat) || expr_mentions names b.A.bind_expr
   | A.ELetFn (n, ps, _, body, _) ->
     List.mem n.A.txt names || params ps || expr_mentions names body
-  | A.ELetQ (p, e1, e2, _) ->
+  | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
     bound (pat_binders p) || expr_mentions names e1 || expr_mentions names e2
   | A.EMatch (subj, brs, _) ->
     expr_mentions names subj
@@ -1872,14 +1872,15 @@ let rec expr_mentions_free (m : string) (e : A.expr) : bool =
         (match e with
          | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
          | A.ELetFn (n, _, _, _, _) when n.A.txt = m -> false
-         | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+         | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) when binds (pat_binders p) -> false
          | _ -> go rest)
     in
     go es
   | A.ELet (b, _) -> free b.A.bind_expr
   | A.ELetFn (n, ps, _, body, _) ->
     if n.A.txt = m || pbinds ps then false else free body
-  | A.ELetQ (p, e1, e2, _) -> free e1 || (if binds (pat_binders p) then false else free e2)
+  | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
+    free e1 || (if binds (pat_binders p) then false else free e2)
   | A.EMatch (subj, brs, _) ->
     free subj
     || List.exists
@@ -3007,14 +3008,15 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
         (match e with
          | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
          | A.ELetFn (n, _, _, _, _) when n.A.txt = subject -> false
-         | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+         | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) when binds (pat_binders p) -> false
          | _ -> go rest)
     in
     go es
   | A.ELet (b, _) -> free b.A.bind_expr
   | A.ELetFn (n, ps, _, body, _) ->
     if n.A.txt = subject || pbinds ps then false else free body
-  | A.ELetQ (p, e1, e2, _) -> free e1 || (if binds (pat_binders p) then false else free e2)
+  | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
+    free e1 || (if binds (pat_binders p) then false else free e2)
   | A.EMatch (subj, brs, _) ->
     free subj
     || List.exists
@@ -3276,10 +3278,10 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
             (match e with
              | A.ELet (b, _) when binds (pat_binders b.A.bind_pat) -> false
              | A.ELetFn (n, _, _, _, _) when n.A.txt = sn.A.txt -> false
-             | A.ELetQ (p, _, _, _) when binds (pat_binders p) -> false
+             | (A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _)) when binds (pat_binders p) -> false
              | A.ELet (b, _) -> go (pat_binders b.A.bind_pat @ shadowed) rest
              | A.ELetFn (n, _, _, _, _) -> go (n.A.txt :: shadowed) rest
-             | A.ELetQ (p, _, _, _) -> go (pat_binders p @ shadowed) rest
+             | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> go (pat_binders p @ shadowed) rest
              | _ -> go shadowed rest)
         in
         go shadowed es
@@ -3287,7 +3289,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.ELetFn (n, ps, _, body, _) ->
         if n.A.txt = sn.A.txt || pbinds ps then false
         else recur ~bind:(n.A.txt :: param_names ps) body
-      | A.ELetQ (p, e1, e2, _) ->
+      | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
         recur e1 || (if binds (pat_binders p) then false else recur ~bind:(pat_binders p) e2)
       | A.EMatch (subj, brs, _) ->
         recur subj
@@ -6015,11 +6017,12 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) -> go e
   | A.ESend (a, b, _) -> go a; go b
-  | A.ELetQ (p, e1, e2, _) ->
+  | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
     go e1;
-    (* `let? p = e1` binds p's names in the Ok payload before continuing into
-       e2 — a binding construct exactly like ELet/ELam/EMatch, so it must
-       shadow any same-named outer refined local before e2 is visited. *)
+    (* `let? p = e1` (and `let* p = e1`, same shape) binds p's names in the
+       Ok payload / flat_map callback before continuing into e2 — a binding
+       construct exactly like ELet/ELam/EMatch, so it must shadow any
+       same-named outer refined local before e2 is visited. *)
     let binders = pat_binders p in
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
@@ -6305,7 +6308,7 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
     List.iter (fun (p : A.param) -> Option.iter (warn_predicate_ty errctx) p.A.param_ty) ps;
     Option.iter (warn_predicate_ty errctx) ret_ty;
     ge body
-  | A.ELetQ (_, e1, e2, _) -> ge e1; ge e2
+  | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> ge e1; ge e2
   | A.EAssert (e, _) -> ge e
   | A.ESigil (_, e, _) -> ge e
 
@@ -7104,7 +7107,7 @@ let expr_binder_span (name : string) (e : A.expr) : A.span option =
             if is n.A.txt || List.exists param ps then Some sp else None
           | A.ELet (b, sp) ->
             if List.exists is (pat_binders b.A.bind_pat) then Some sp else None
-          | A.ELetQ (p, _, _, sp) ->
+          | A.ELetQ (p, _, _, sp) | A.ELetStar (p, _, _, sp) ->
             if List.exists is (pat_binders p) then Some sp else None
           | A.EMatch (_, brs, sp) ->
             if

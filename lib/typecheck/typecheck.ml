@@ -4708,6 +4708,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EDbg (_, sp)            -> sp
   | Ast.ELetFn (_, _, _, _, sp) -> sp
   | Ast.ELetQ  (_, _, _, sp)   -> sp
+  | Ast.ELetStar (_, _, _, sp) -> sp
   | Ast.EAssert (_, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
 
@@ -6871,6 +6872,84 @@ let rec infer_expr env (e : Ast.expr) : ty =
              "The code after `let?` must produce a Result with the same error type."))
            body_ty (t_result t_r t_err);
          body_ty)
+
+    | Ast.ELetStar (p, result_expr, body, sp) ->
+      (* let* p = result_expr; body
+         Generalizes let?: `M` is whatever type constructor result_expr's
+         type turns out to be (Option, Result, List, a user type, ...),
+         resolved by convention -- M's `flat_map` lives in the module of
+         the SAME name as M (Option.flat_map, Result.flat_map, ...). March
+         has no Bind/Monad interface (interfaces take exactly one type
+         parameter; Self is never applied to an argument), so this cannot
+         be ordinary constrained polymorphism -- the dispatch happens HERE,
+         by inferred type, at typecheck time. See
+         specs/lang/let-star-generalized-bind.md and
+         specs/plans/2026-08-09-parsing-and-string-search.md §4.3.
+         TIR lowering (lib/tir/lower.ml) expands this into an ordinary call
+         `M.flat_map(result_expr, fn p -> body end)` once types are fixed;
+         this case only needs to CHECK that shape is consistent. *)
+      (match body with
+       | Ast.EBlock ([], _) ->
+         Err.error env.errors ~span:sp
+           "`let*` cannot be the last expression in a block.\n\
+            Add an expression of the same type as the right-hand side \
+            after it — for example, if the right-hand side is an \
+            `Option`:\n\
+            \n\
+            \    let* x = might_be_none()\n\
+            \    Some(x + 1)";
+         TError
+       | _ ->
+         let result_ty = infer_expr env result_expr in
+         (match repr result_ty with
+          | TCon (head_name, _) ->
+            let flat_map_name = head_name ^ ".flat_map" in
+            let env', scheme_opt = resolve_qualified_var flat_map_name env in
+            (match scheme_opt with
+             | None ->
+               Err.error env'.errors ~span:sp
+                 (Printf.sprintf
+                    "`let*` needs `%s`, but it doesn't exist.\n\
+                     Define `flat_map(x : %s(a), f : a -> %s(b)) : %s(b)` \
+                     in a module named `%s` to make `let*` work with `%s`."
+                    flat_map_name head_name head_name head_name
+                    head_name head_name);
+               TError
+             | Some scheme ->
+               let flat_map_ty = instantiate env'.level env' scheme in
+               (match repr flat_map_ty with
+                | TArrow (m_arg, TArrow (TArrow (a_ty, m_b1), m_b2)) ->
+                  unify env' ~span:sp
+                    ~reason:(Some (RBuiltin
+                      (Printf.sprintf
+                         "The right-hand side of `let*` must match `%s`'s \
+                          own type." flat_map_name)))
+                    result_ty m_arg;
+                  unify env' ~span:sp ~reason:(Some (RLetBind sp)) m_b1 m_b2;
+                  let bindings, pat_ty = infer_pattern ~expected:a_ty env' p in
+                  unify env' ~span:sp ~reason:(Some (RLetBind sp)) a_ty pat_ty;
+                  let env'' = bind_pattern_bindings result_expr bindings env' in
+                  let body_ty = infer_expr env'' body in
+                  unify env'' ~span:sp
+                    ~reason:(Some (RBuiltin
+                      (Printf.sprintf
+                         "The code after `let*` must also produce `%s`."
+                         head_name)))
+                    body_ty m_b2;
+                  body_ty
+                | _ ->
+                  Err.error env'.errors ~span:sp
+                    (Printf.sprintf
+                       "`%s` doesn't have the shape `let*` needs: \
+                        `%s(a) -> (a -> %s(b)) -> %s(b)`."
+                       flat_map_name head_name head_name head_name);
+                  TError))
+          | _ ->
+            Err.error env.errors ~span:sp
+              "`let*`'s right-hand side must have a concrete type (e.g. \
+               `Option(a)`, `Result(a, e)`) so `let*` can find its \
+               `flat_map` — its type could not be determined here.";
+            TError))
   in
   Hashtbl.replace env.type_map (span_of_expr e) (repr result);
   result
@@ -7643,7 +7722,7 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   | Ast.ELetFn (name, params, _, body, _) ->
     let inner_bound = name.txt :: List.map (fun p -> p.Ast.param_name.txt) params @ bound in
     free_vars_expr inner_bound body
-  | Ast.ELetQ (p, result, cont, _) ->
+  | Ast.ELetQ (p, result, cont, _) | Ast.ELetStar (p, result, cont, _) ->
     let pat_bound = free_vars_pattern p in
     free_vars_expr bound result @
     free_vars_expr (pat_bound @ bound) cont
@@ -8600,7 +8679,7 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.ELetFn (_, ps, ret, body, sp) ->
     let acc = of_ty_opt (of_params acc sp ps) sp ret in
     cap_annots_in_expr acc body
-  | Ast.ELetQ (_, rhs, body, _) ->
+  | Ast.ELetQ (_, rhs, body, _) | Ast.ELetStar (_, rhs, body, _) ->
     cap_annots_in_expr (cap_annots_in_expr acc rhs) body
   | Ast.EApp (f, args, _) ->
     List.fold_left cap_annots_in_expr (cap_annots_in_expr acc f) args
@@ -10422,7 +10501,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.ESend (a, b, _) -> ex a; ex b
     | Ast.ESpawn (e, _) -> ex e
     | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
-    | Ast.ELetQ (_, r, c, _) -> ex r; ex c
+    | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> ex r; ex c
     | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
@@ -10533,7 +10612,7 @@ let unqualified_module_deps
     | Ast.ESend (a, b, _) -> ex a; ex b
     | Ast.ESpawn (e, _) -> ex e
     | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
-    | Ast.ELetQ (_, r, c, _) -> ex r; ex c
+    | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> ex r; ex c
     | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
@@ -12511,7 +12590,7 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
                     (collect_direct_fn_calls fn_names b)
   | Ast.ESpawn (ex, _)       -> collect_direct_fn_calls fn_names ex
   | Ast.EDbg (Some ex, _)    -> collect_direct_fn_calls fn_names ex
-  | Ast.ELetQ (pat, r, c, _) ->
+  | Ast.ELetQ (pat, r, c, _) | Ast.ELetStar (pat, r, c, _) ->
     StringSet.union (collect_direct_fn_calls fn_names r)
       (collect_direct_fn_calls
          (StringSet.diff fn_names (collect_pattern_vars pat)) c)
@@ -12791,6 +12870,16 @@ let rec check_tail_position
       chk false names smaller "right-hand side of `let?`" r;
       chk in_tail (StringSet.diff names (collect_pattern_vars pat))
         smaller ctx cont
+    (* `let*` desugars to `M.flat_map(r, fn pat -> cont end)` (TIR lowering) --
+       unlike `let?` (a direct `match`, no call-frame boundary), `cont` ends
+       up INSIDE a callback lambda handed to `flat_map`, so it is never in
+       tail position relative to the enclosing function no matter what
+       `in_tail` says here. Treat it exactly like `ELam` above: a fresh
+       scope, not walked further by THIS check -- a self-recursive call
+       inside `cont` is an ordinary non-tail call through a closure, not a
+       tail-position violation. *)
+    | Ast.ELetStar (_, r, _, _) ->
+      chk false names smaller "right-hand side of `let*`" r
     | Ast.EAssert (ex, _)     -> chk false names smaller "assert expression" ex
     | Ast.ESigil (_, content, _) -> chk false names smaller "sigil content" content
     (* ── leaves ── *)
