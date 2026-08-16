@@ -894,7 +894,7 @@ let test_multiple_monitors_all_fire () =
     (not (Queue.is_empty ic.March_eval.Eval.ai_mailbox))
 
 let test_down_message_format () =
-  (* Down message has the right constructor shape: Down(mon_ref, reason) *)
+  (* Down message has the right constructor shape: Down(mon_ref, target, reason) *)
   March_eval.Eval.reset_scheduler_state ();
   let _ia = add_fresh_actor 0 "A" in
   let ib  = add_fresh_actor 1 "B" in
@@ -902,10 +902,40 @@ let test_down_message_format () =
   March_eval.Eval.crash_actor 0 "bang";
   let msg = Queue.pop ib.March_eval.Eval.ai_mailbox in
   (match msg with
-   | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m; March_eval.Eval.VString r]) ->
+   | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
+                                     March_eval.Eval.VPid target;
+                                     March_eval.Eval.VCon ("Crash", [March_eval.Eval.VString r])]) ->
      Alcotest.(check int) "mon_ref matches" mon m;
+     Alcotest.(check int) "target pid" 0 target;
      Alcotest.(check string) "reason in Down" "bang" r
-   | _ -> Alcotest.fail "expected Down(mon_ref, reason)")
+   | _ -> Alcotest.fail "expected Down(mon_ref, target, Crash(reason))")
+
+let test_down_message_killed_reason () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ = add_fresh_actor 0 "A" in
+  let ib = add_fresh_actor 1 "B" in
+  let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  let kill = List.assoc "kill" March_eval.Eval.base_env in
+  ignore (March_eval.Eval.apply kill [March_eval.Eval.VPid 0]);
+  match Queue.pop ib.March_eval.Eval.ai_mailbox with
+  | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
+                                     March_eval.Eval.VPid target;
+                                     March_eval.Eval.VCon ("Killed", [])]) ->
+    Alcotest.(check int) "mon_ref matches" mon m;
+    Alcotest.(check int) "target pid" 0 target
+  | _ -> Alcotest.fail "expected Down(mon_ref, target, Killed)"
+
+let test_down_message_dead_target_fallback () =
+  March_eval.Eval.reset_scheduler_state ();
+  let ib = add_fresh_actor 1 "B" in
+  let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  match Queue.pop ib.March_eval.Eval.ai_mailbox with
+  | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m;
+                                     March_eval.Eval.VPid target;
+                                     March_eval.Eval.VCon ("Normal", [])]) ->
+    Alcotest.(check int) "mon_ref matches" mon m;
+    Alcotest.(check int) "target pid" 0 target
+  | _ -> Alcotest.fail "expected Down(mon_ref, target, Normal)"
 
 let test_eval_monitor_builtin () =
   (* End-to-end: monitor/kill/mailbox_size via March source *)
@@ -925,14 +955,52 @@ let test_eval_monitor_builtin () =
     fn main() do
       let pa = spawn(A)
       let pb = spawn(B)
+      actor_set_mailbox_limit(pb, 1, 1)
+      send(pb, Noop())
       monitor(pb, pa)
       kill(pa)
       mailbox_size(pb)
     end
   end|} in
   let v = call_fn env "main" [] in
-  Alcotest.(check bool) "mailbox_size >= 1 after kill" true
-    (match v with March_eval.Eval.VInt n -> n >= 1 | _ -> false)
+  Alcotest.(check int) "mailbox_size counts queued user + Down exactly once" 2
+    (match v with March_eval.Eval.VInt n -> n | _ -> -1)
+
+let test_eval_monitor_down_target_is_pid () =
+  let env = eval_module {|mod Test do
+    actor Target do
+      state { x : Int }
+      init { x: 0 }
+    end
+
+    actor Watcher do
+      state { target_dead : Bool }
+      init { target_dead: false }
+      on Check() do
+        match receive() do
+          Down.Down(_, target, DownReason.Killed) ->
+            { target_dead: !is_alive(target) }
+          _ -> { target_dead: false }
+        end
+      end
+    end
+
+    fn main() do
+      let target = spawn(Target)
+      let watcher = spawn(Watcher)
+      monitor(watcher, target)
+      send(watcher, Check())
+      kill(target)
+      run_until_idle()
+      match get_actor_field(watcher, "target_dead") do
+        Some(dead) -> dead
+        None -> false
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "Down target is accepted by is_alive as a Pid" true
+    (match v with March_eval.Eval.VBool b -> b | _ -> false)
 
 let test_eval_link_builtin () =
   (* End-to-end: link/kill propagates death via March source *)
@@ -12015,11 +12083,17 @@ let test_compiled_vault_scalar_roundtrip () =
     \  needs IO.Process\n\
     \  needs IO.Mut\n\
     \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-    \    let t = Vault.new(\"vs_test\")\n\
-    \    Vault.set(t, \"b\", true)\n\
-    \    Vault.set(t, \"n\", 4242)\n\
-    \    let b = Vault.get(t, \"b\") |> unwrap_or(false)\n\
-    \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
+    \    -- One table per element type: a Vault handle is Vault(v), phantom in\n\
+    \    -- the value type, so a single table cannot hold both a Bool and an\n\
+    \    -- Int. That is orthogonal to what this test guards (the runtime's\n\
+    \    -- scalar tagging on the store path), and both scalars still make the\n\
+    \    -- same round trip.\n\
+    \    let tb = Vault.new(\"vs_test_b\")\n\
+    \    let tn = Vault.new(\"vs_test_n\")\n\
+    \    Vault.set(tb, \"b\", true)\n\
+    \    Vault.set(tn, \"n\", 4242)\n\
+    \    let b = Vault.get(tb, \"b\") |> unwrap_or(false)\n\
+    \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
     \    if b && n == 4242 do () else process_exit(1) end\n\
     \  end\n\
      end\n";
@@ -12067,14 +12141,20 @@ let vault_update_src =
   \    n + 1\n\
   \  end\n\
   \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-  \    let t = Vault.new(\"vu_test\")\n\
-  \    Vault.set(t, \"n\", 1)\n\
-  \    Vault.update(t, \"n\", fn n -> n + 1)\n\
-  \    Vault.update(t, \"n\", inc)\n\
-  \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
-  \    Vault.set(t, \"s\", \"ab\")\n\
-  \    Vault.update(t, \"s\", fn s -> s ++ \"!\")\n\
-  \    let s = Vault.get(t, \"s\") |> unwrap_or(\"\")\n\
+  \    -- One table per element type (Vault(v) is phantom in the value type),\n\
+  \    -- which changes nothing about what this guards: the Int table still\n\
+  \    -- exercises the tagged-scalar untag before the closure call and the\n\
+  \    -- String table the heap-pointer pass-through, both against the same\n\
+  \    -- march_vault_update path.\n\
+  \    let tn = Vault.new(\"vu_test_n\")\n\
+  \    let ts = Vault.new(\"vu_test_s\")\n\
+  \    Vault.set(tn, \"n\", 1)\n\
+  \    Vault.update(tn, \"n\", fn n -> n + 1)\n\
+  \    Vault.update(tn, \"n\", inc)\n\
+  \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
+  \    Vault.set(ts, \"s\", \"ab\")\n\
+  \    Vault.update(ts, \"s\", fn s -> s ++ \"!\")\n\
+  \    let s = Vault.get(ts, \"s\") |> unwrap_or(\"\")\n\
   \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
   \  end\n\
    end\n"
@@ -13164,7 +13244,10 @@ let stdlib_suites =
         Alcotest.test_case "monitor on dead actor immediate Down" `Quick (with_reset test_monitor_already_dead_immediate_down);
         Alcotest.test_case "multiple monitors all fire"           `Quick (with_reset test_multiple_monitors_all_fire);
         Alcotest.test_case "Down message format"                  `Quick (with_reset test_down_message_format);
+        Alcotest.test_case "Down killed reason"                    `Quick (with_reset test_down_message_killed_reason);
+        Alcotest.test_case "Down dead-target fallback"             `Quick (with_reset test_down_message_dead_target_fallback);
         Alcotest.test_case "monitor builtin end-to-end"           `Quick (with_reset test_eval_monitor_builtin);
+        Alcotest.test_case "Down target is a Pid in source"       `Quick (with_reset test_eval_monitor_down_target_is_pid);
         Alcotest.test_case "link builtin end-to-end"              `Quick (with_reset test_eval_link_builtin);
       ]);
       ("supervision phase2", [

@@ -853,16 +853,21 @@ type env = {
       rather than a second implementation.  See
       [specs/2026-08-10-r1-stage-c-effect-rows-design.md]. *)
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
-  (** R1 stage C: functions whose signature makes them a DISCHARGE POINT —
+  (** Functions whose signature carries a concrete [Cap(P)] parameter —
       qualified name → (the concrete capability paths their PARAMETERS grant,
       the span to report against).  Recorded by [check_module_needs] (which
       already owns the [cap_qname] convention and already runs for nested
-      modules), consumed once by [check_fn_grants] at the end of
-      [check_module_core], after every module's recording has happened.
+      modules).
 
-      Parameter caps only: a returned [Cap(X)] is not a capability the
-      function was HANDED.  [main] is excluded — [check_main_grant] owns it,
-      and reporting both would double every whole-program violation. *)
+      R1 stage C (2026-08-10) once consumed this at the end of
+      [check_module_core] to make every [Cap(P)]-parameter function its own
+      grant-discharge point.  That check ([check_fn_grants]) was REMOVED
+      2026-08-13: it made any capability parameter a ceiling over everything
+      the function transitively reached, forcing every caller to thread
+      capabilities the module-scoped design does not require.  This table is
+      still populated — Task 8 reads it to attribute a whole-program grant
+      violation to the user's call chain — but nothing currently checks it.
+      [main] is excluded regardless — [check_main_grant] owns it. *)
   local_mods : string list StrMap.t;
   (** In-file nested modules → their PRIVATE value/function member names.
       Populated by the [Ast.DMod] export step.  A same-file qualified reference
@@ -1035,6 +1040,47 @@ let rec demote_to_monomorphic (t : ty) : unit =
   | TRefine (base, _, _) -> demote_to_monomorphic base
   | TNat _ | TError     -> ()
 
+(** Value restriction for Vault table handles — the phantom value parameter of
+    [Vault(v)] (see [builtin_types]) is only worth anything if it cannot be
+    re-instantiated at every use.
+
+    A Vault table is a process-global mutable cell reached through a handle, so
+    it is exactly ML's [ref []] case: [let t = Vault.new("t")] is an
+    APPLICATION, not a syntactic value, and generalizing its [v] to [∀v.
+    Vault(v)] would let [Vault.set(t, "k", 42)] instantiate [v := Int] and
+    [Vault.get(t, "k")] instantiate [v := Pid(_)] independently — reproducing
+    the erasure the phantom parameter exists to remove.  Demoting every var
+    that occurs UNDER a [Vault] constructor to level 0 pins the handle's
+    element type at its binding site, so the first write and every later read
+    unify against one [v].
+
+    Applied at the three generalization sites where a handle can be bound
+    without the user saying what it holds: block [let] and top-level [let] with
+    no annotation, and a [fn] with no return annotation.  Writing the
+    annotation ([fn open(name) : Vault(v)]) is the deliberate opt-out and is
+    what [Vault.new]/[Vault.open]/[Vault.whereis] and [Config]'s table getters
+    use — a name-keyed global table genuinely mints handles at any element
+    type, and that erasure is now explicit and greppable instead of ambient.
+
+    Scoped to [Vault] on purpose: no type that does not mention [Vault]
+    anywhere changes generalization behaviour by one variable. *)
+let rec demote_vault_handle_vars (t : ty) : unit =
+  match t with
+  | TCon ("Vault", args) -> List.iter demote_to_monomorphic args
+  | TVar r ->
+    (match !r with
+     | Link t'   -> demote_vault_handle_vars t'
+     | Unbound _ -> ())
+  | TCon   (_, args)    -> List.iter demote_vault_handle_vars args
+  | TArrow (a, b)       -> demote_vault_handle_vars a; demote_vault_handle_vars b
+  | TTuple ts           -> List.iter demote_vault_handle_vars ts
+  | TRecord flds        -> List.iter (fun (_, t) -> demote_vault_handle_vars t) flds
+  | TLin   (_, t)       -> demote_vault_handle_vars t
+  | TNatOp (_, a, b)    -> demote_vault_handle_vars a; demote_vault_handle_vars b
+  | TChan  _            -> ()
+  | TRefine (base, _, _) -> demote_vault_handle_vars base
+  | TNat _ | TError     -> ()
+
 (** Tag the inner cap-argument var of a [cap_narrow] result [Cap(a)] so [unify]
     can reject the instant [a] is bound to a nominal proof cap — closing the
     forge even when the value is laundered through a polymorphic function.  Two
@@ -1142,9 +1188,25 @@ let lookup_ctor name env =
   | None -> None
   | Some [] -> None
   | Some (first :: _ as cis) ->
-    (match List.find_opt (fun ci -> ci.ci_module = env.current_module) cis with
-     | Some _ as preferred -> preferred
-     | None -> Some first)
+    let is_canonical_monitor_key =
+      match name with
+      | "Down.Down"
+      | "DownReason.Normal" | "DownReason.Killed" | "DownReason.Crash" -> true
+      | _ -> false
+    in
+    if is_canonical_monitor_key then
+      (* These exact type-qualified keys are the declaration-free runtime ABI.
+         A nested user declaration contributes another candidate with the same
+         short [ci_type], but its real public key is module-qualified
+         ([Inner.Down], [DistLink.Crash], ...).  Never let registration order
+         make the canonical spelling resolve to that user candidate. *)
+      (match List.find_opt (fun ci -> ci.ci_module = "") cis with
+       | Some _ as builtin -> builtin
+       | None -> Some first)
+    else
+      (match List.find_opt (fun ci -> ci.ci_module = env.current_module) cis with
+       | Some _ as preferred -> preferred
+       | None -> Some first)
 
 (** Same-module precedence for an UNQUALIFIED constructor reference.
 
@@ -1824,6 +1886,7 @@ let t_list   a     = TCon ("List",   [a])
 let t_option a     = TCon ("Option", [a])
 let t_result a e   = TCon ("Result", [a; e])
 let t_pid    a     = TCon ("Pid",    [a])
+let t_vault  v     = TCon ("Vault",  [v])
 
 let _t_list   = t_list
 let _t_option = t_option
@@ -2215,8 +2278,11 @@ let builtin_bindings : (string * scheme) list =
     let b = fresh_var 0 in
     Poly ([get_id a; get_id b], [], f a b)
   in
-  (* ∀a b c. f(a, b, c) — three unconstrained type variables *)
-  let poly3 f =
+  (* ∀a b c. f(a, b, c) — three unconstrained type variables.  Underscored:
+     no builtin needs three free vars since the vault_* group was retyped
+     against [Vault(v)] (2026-08-14).  Kept because it is the obvious partner
+     to poly1/poly2 for the next builtin that does. *)
+  let _poly3 f =
     let a = fresh_var 0 in
     let b = fresh_var 0 in
     let c = fresh_var 0 in
@@ -2308,10 +2374,16 @@ let builtin_bindings : (string * scheme) list =
     ("record_from_list", poly2 (fun a b -> TArrow (t_list (TTuple [t_string; a]), b)));
     (* Vault (in-memory key-value table) — raw C-runtime entry points backing
        the typed wrapper module [stdlib/vault.march] (`Vault.new`, `Vault.get`,
-       …). Deliberately near-fully-generic, like [record_get]/[record_put]
-       above: a table holds arbitrary March values under arbitrary keys, so
-       there is no meaningful static element type to enforce here — the typed
-       surface is [Vault.*], not these raw names.
+       …). The table handle is [Vault(v)], phantom in its ELEMENT type: the
+       same [v] appears in [vault_set]'s value, [vault_get]'s result and
+       [vault_update]'s function, so a table written at [Int] cannot be read
+       at [Pid(_)]. Keys stay per-operation generic ([k]) because
+       [vault_key_cstr] stringifies them — see the [Vault] entry in
+       [builtin_types] for why there is no key parameter.
+
+       [vault_ns_*] take a NAMESPACE STRING rather than a handle, so there is
+       no handle to carry [v] and they remain erased. That is the module's one
+       remaining untyped door and stdlib/vault.march says so at the call site.
 
        Needed so a BARE call to one of these resolves at all. Before this they
        were simply UNBOUND — every call site (including inside
@@ -2325,18 +2397,26 @@ let builtin_bindings : (string * scheme) list =
        masking the real capability check either way.
 
        Return shapes mirror the actual [VBuiltin] cases in lib/eval/eval.ml. *)
-    ("vault_new",          poly1 (fun a -> TArrow (t_string, a)));
-    ("vault_whereis",      poly1 (fun a -> TArrow (t_string, t_option a)));
-    ("vault_set",          poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, t_unit)))));
-    ("vault_set_ttl",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
-    ("vault_get",          poly3 (fun t k v -> TArrow (t, TArrow (k, t_option v))));
-    ("vault_drop",         poly2 (fun t k -> TArrow (t, TArrow (k, t_unit))));
-    ("vault_update",       poly3 (fun t k f -> TArrow (t, TArrow (k, TArrow (f, t_unit)))));
-    ("vault_put_new",      poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_bool))))));
-    ("vault_incr",         poly2 (fun t k -> TArrow (t, TArrow (k, TArrow (t_int, t_int)))));
-    ("vault_push_capped",  poly3 (fun t k v -> TArrow (t, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
-    ("vault_keys",         poly2 (fun t k -> TArrow (t, t_list k)));
-    ("vault_size",         poly1 (fun t -> TArrow (t, t_int)));
+    ("vault_new",          poly1 (fun v -> TArrow (t_string, t_vault v)));
+    ("vault_whereis",      poly1 (fun v -> TArrow (t_string, t_option (t_vault v))));
+    ("vault_set",          poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (v, t_unit)))));
+    ("vault_set_ttl",      poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (v, TArrow (t_int, t_unit))))));
+    ("vault_get",          poly2 (fun k v -> TArrow (t_vault v, TArrow (k, t_option v))));
+    ("vault_drop",         poly2 (fun k v -> TArrow (t_vault v, TArrow (k, t_unit))));
+    ("vault_update",       poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (TArrow (v, v), t_unit)))));
+    ("vault_put_new",      poly2 (fun k v -> TArrow (t_vault v, TArrow (k, TArrow (v, TArrow (t_int, t_bool))))));
+    (* [incr] and [push_capped] pin the element type the way the C runtime
+       actually treats it: [march_vault_incr] reads/writes an Int cell, and
+       [march_vault_push_capped] a List cell. Typing them against a table of
+       any [v] would keep exactly the erasure this parameter exists to remove. *)
+    ("vault_incr",         poly1 (fun k -> TArrow (t_vault t_int, TArrow (k, TArrow (t_int, t_int)))));
+    ("vault_push_capped",  poly2 (fun k e -> TArrow (t_vault (t_list e), TArrow (k, TArrow (e, TArrow (t_int, t_unit))))));
+    (* Keys come back STRINGIFIED — [vault_keys] returns what
+       [vault_key_cstr] wrote, never the original key value, so [List(String)]
+       is the honest type. The old [t -> List(k)] let `Vault.keys(t)` be read
+       back at the caller's key type, a second erasure in the same module. *)
+    ("vault_keys",         poly1 (fun v -> TArrow (t_vault v, t_list t_string)));
+    ("vault_size",         poly1 (fun v -> TArrow (t_vault v, t_int)));
     ("vault_ns_set",       poly2 (fun k v -> TArrow (t_string, TArrow (k, TArrow (v, t_unit)))));
     ("vault_ns_get",       poly2 (fun k v -> TArrow (t_string, TArrow (k, t_option v))));
     ("vault_ns_drop",      poly1 (fun k -> TArrow (t_string, TArrow (k, t_unit))));
@@ -2525,6 +2605,14 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_string, TArrow (TArrow (t_unit, t_unit), t_unit)))));
     (* Phase 6b: Register a linear value with an actor; Drop impl resolved at runtime *)
     ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
+    (* Named registry (Task 4): register/unregister/whereis/registered over the
+       runtime-owned name table. No capability — the runtime owns the table,
+       so no March-level naming call happens. Arg order matches monitor/kill
+       (pid first). *)
+    ("actor_register",   poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_bool))));
+    ("actor_unregister", Mono (TArrow (t_string, t_bool)));
+    ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
+    ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));
     (* Phase 3: Epoch-based capability builtins *)
     (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
        a revocable, epoch-checked reference to a live actor, represented at run
@@ -3247,6 +3335,27 @@ let builtin_bindings : (string * scheme) list =
     [infer_app]'s [| [], t -> t] base case cannot tell these apart from its
     types alone (both look like "call site with 0 args, callee type is
     non-arrow"), so [Ast.EApp]'s handler special-cases names in this set. *)
+(* Shared source of truth for [Modules.Prelude_collision.check]'s two
+   builtin-name inputs, used by every caller (bin/main.ml, the LSP's
+   lsp/lib/analysis.ml) so they can never independently drift from what the
+   typechecker itself treats as a builtin — see
+   specs/plans/2026-08-13-prelude-entry-fn-name-collision.md §4.1/§4.2.
+   [prelude_collision_builtin_names] excludes qualified forms (containing
+   '.'): a user's bare top-level [fn] can never be named with a dot, so they
+   could never collide with one anyway. *)
+let prelude_collision_builtin_names : string list =
+  List.filter_map (fun (name, _) -> if String.contains name '.' then None else Some name)
+    builtin_bindings
+
+(* [show]/[eq]/[compare]/[hash] are NOT in the list above — they are
+   structural interface methods with their OWN type-directed dispatch
+   ([builtin_interface_bindings]), and a bare top-level [fn] of the right
+   ARITY legitimately participates in it (regression-tested by
+   test/native/iface_method_collision.march). Only a WRONG-arity same-name
+   function is a genuine collision — see Prelude_collision's doc comment. *)
+let prelude_collision_iface_arities : (string * int) list =
+  [ ("eq", 2); ("compare", 2); ("show", 1); ("hash", 1) ]
+
 let noncallable_builtin_values = StringSet.of_list [ "root_cap" ]
 
 let builtin_types : (string * int) list =
@@ -3258,6 +3367,15 @@ let builtin_types : (string * int) list =
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
     ("ActorCap", 1);
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
+    (* Vault(v) — ETS-like table handle, phantom in its ELEMENT type.
+       ONE parameter, not the Vault(k, v) the design note sketched: keys are
+       stringified by [vault_key_cstr] before they ever reach the table, so a
+       key-type parameter buys no memory safety (a wrong-typed key is a silent
+       MISS, never a value read at the wrong type) and costs real
+       expressiveness — stdlib/config.march deliberately keys ONE table with
+       both 2-tuples and 3-tuples, which no single [k] can describe. The value
+       parameter is the one that closes the read-it-back-as-a-Pid hole. *)
+    ("Vault",  1);
     ("ChildSpec", 0); ("SupervisorSpec", 0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2);
     (* Tagged(X, T) — specialization tag constructor: phantom policy/width tags *)
@@ -3281,7 +3399,12 @@ let builtin_types : (string * int) list =
     ("NativeF32Arr",   0); ("NativeI32Arr",   0); ("NativeU8Arr", 0);
     (* Simd — explicit 128-bit SIMD vector types (F32x4/F64x2/I32x4/I64x2/U8x16).
        All arity 0, sendable (NOT added to non_sendable_types below). *)
-    ("F32x4", 0); ("F64x2", 0); ("I32x4", 0); ("I64x2", 0); ("U8x16", 0); ]
+    ("F32x4", 0); ("F64x2", 0); ("I32x4", 0); ("I64x2", 0); ("U8x16", 0);
+    (* Runtime-originated local-monitor signal. These names are reserved by
+       the compiled ABI; source declarations with the same exact shape (the
+       native conformance fixture and, later, the actor stdlib surface) refine
+       the same nominal entries rather than inventing per-module wire tags. *)
+    ("DownReason", 0); ("Down", 1); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
@@ -3289,6 +3412,7 @@ let builtin_types : (string * int) list =
     type-qualified name ("Option.Some") so that users can write either form. *)
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
+  let mk_ty name args = Ast.TyCon ({ txt = name; span = Ast.dummy_span }, args) in
   let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
   let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
@@ -3297,12 +3421,25 @@ let builtin_ctors : (string * ctor_info) list =
   let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   let cons_ci  = { ci_type = "List";   ci_params = ["a"];
                    ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let normal_ci = { ci_type = "DownReason"; ci_params = []; ci_arg_tys = [];
+                    ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
+  let killed_ci = { normal_ci with ci_type = "DownReason" } in
+  let crash_ci = { normal_ci with ci_arg_tys = [mk_ty "String" []] } in
+  let down_ci = { ci_type = "Down"; ci_params = ["a"];
+                  ci_arg_tys = [mk_ty "Int" [];
+                                mk_ty "Pid" [mk_var "a"];
+                                mk_ty "DownReason" []];
+                  ci_module = ""; ci_vis = Ast.Public; ci_is_actor_msg = false } in
   [ ("Some",        some_ci);  ("Option.Some", some_ci);
     ("None",        none_ci);  ("Option.None", none_ci);
     ("Ok",          ok_ci);    ("Result.Ok",   ok_ci);
     ("Err",         err_ci);   ("Result.Err",  err_ci);
     ("Nil",         nil_ci);   ("List.Nil",    nil_ci);
     ("Cons",        cons_ci);  ("List.Cons",   cons_ci);
+    ("Normal",      normal_ci); ("DownReason.Normal", normal_ci);
+    ("Killed",      killed_ci); ("DownReason.Killed", killed_ci);
+    ("Crash",       crash_ci);  ("DownReason.Crash",  crash_ci);
+    ("Down",        down_ci);   ("Down.Down",         down_ci);
   ]
 
 let base_env errors type_map =
@@ -7387,6 +7524,11 @@ and infer_block env exprs =
        them) and are correctly quantified; function-call result TVars that are
        linked to outer-scope TVars get lowered to env.level and are not
        quantified. *)
+    (* Vault handles are the ML [ref []] case: `let t = Vault.new("t")` is an
+       application, and generalizing its element type would let each use pick a
+       different one.  Skipped when the binding is annotated — writing the type
+       out is the explicit opt-out.  See [demote_vault_handle_vars]. *)
+    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
     let gen_binding bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
       | other          -> other
@@ -7553,7 +7695,11 @@ and infer_block env exprs =
        arrow unify but NOT here) is still surfaced. *)
     let errs_before_ret = List.length env.errors.March_errors.Errors.diagnostics in
     let ret_ty  = match ret_ann with
-      | None -> body_ty
+      | None ->
+        (* Same Vault return-position value restriction as the top-level `fn`
+           path — a local `fn t() do Vault.open("x") end` is a handle factory
+           too.  See [demote_vault_handle_vars]. *)
+        demote_vault_handle_vars body_ty; body_ty
       | Some ann ->
         let tvars = ref [] in
         let expected = surface_ty env ~tvars ann in
@@ -7757,6 +7903,26 @@ and free_vars_pattern (p : Ast.pattern) : string list =
     The wildcard [_] and names starting with [_] are silently ignored. *)
 let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_span =
   let used = free_vars_expr [] body in
+  (* A capability value is a runtime-erased grant token: it is normal, and
+     often correct, for it never to be mentioned in the body. Warning on it
+     made the right code noisy and pushed users to spell every grant `_cap`.
+
+     Deliberately NOT [Cap_surface_ty.caps_in_ty], which recurses into ANY
+     type structure and returns non-empty as soon as a [Cap(...)] appears
+     ANYWHERE inside it — so `List(Cap(IO.Console))`, `(Int, Cap(IO.Console))`,
+     and `Cap(IO.Console) -> ()` all satisfied it, exempting a genuinely dead
+     list/tuple/closure parameter from the warning it should still get: the
+     "never referenced, and that's fine" rationale only holds for a value
+     that *is* a capability, not one that merely contains one. This checks
+     the DIRECT form only — the same recognition [caps_in_ty] itself uses at
+     its own top match arm (`cap_surface_ty.ml`'s `TyCon (con, [arg]) when
+     con.txt = "Cap"`) — so `fn main(cap : Cap(IO.Console))` and every plain
+     `Cap(X)` parameter stay exempt, while a capability merely nested inside
+     a container or arrow type does not. *)
+  let is_cap_ty = function
+    | Some (Ast.TyCon (con, [_])) -> con.txt = "Cap"
+    | Some _ | None -> false
+  in
   let check_name name span =
     if name <> "_" && not (String.length name > 0 && name.[0] = '_')
        && not (List.mem name used) then
@@ -7767,10 +7933,12 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
   in
   List.iter (fun fp ->
     match fp with
-    | Ast.FPNamed p -> check_name p.param_name.txt p.param_name.span
+    | Ast.FPNamed p ->
+      if not (is_cap_ty p.param_ty) then check_name p.param_name.txt p.param_name.span
     | Ast.FPPat (Ast.PatVar n) -> check_name n.txt n.span
     | Ast.FPPat _ -> ()
-    | Ast.FPDefault (p, _) -> check_name p.param_name.txt p.param_name.span
+    | Ast.FPDefault (p, _) ->
+      if not (is_cap_ty p.param_ty) then check_name p.param_name.txt p.param_name.span
   ) params
 
 (** Check a function definition.
@@ -8038,7 +8206,16 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
             ~reason:(Some (RFnReturn (def.fn_name.txt, fn_span)));
           expected
         | None ->
-          infer_expr body_env clause.fc_body
+          let t = infer_expr body_env clause.fc_body in
+          (* A fn that RETURNS a Vault handle without saying what the table
+             holds must not hand every caller a freshly-instantiated element
+             type — that is the same erasure as an unannotated `let`, moved
+             one call frame out.  Annotating the return (`: Vault(v)`) is the
+             deliberate opt-out and is what the handle factories
+             (Vault.new/open/whereis, Config's table getters) use.  See
+             [demote_vault_handle_vars]. *)
+          demote_vault_handle_vars t;
+          t
       in
 
       (* Check linear params were all consumed *)
@@ -8893,6 +9070,43 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
     | _ -> []
   ) decls in
+  (* Check 0: every `needs X` must name a real capability.  The lattice is
+     closed, so an `IO`-rooted path not in it (wrong case, a typo) or a bare
+     leaf standing in for a real capability (`needs Network`) is definitely
+     wrong and is rejected eagerly with a did-you-mean, rather than silently
+     accepted and surfacing later as an unrelated "no function requires it"
+     unused-capability warning or a missing-`needs` error somewhere else.
+     FFI capability roots (e.g. `LibC`) are deliberately outside the lattice
+     and stay legal — see [March_caps.Cap_lattice.suggest_cap]. *)
+  (* Capability paths Check 0 rejects as unknown.  Check 2 (unused `needs`,
+     below) must skip these: a module with a typo'd `needs Network` used to
+     get BOTH "not a known capability, did you mean `IO.Network`?" AND
+     "declares `needs Network` but no function requires it — help: remove
+     the unused capability declaration" for the very same line — directly
+     opposing advice (fix the name vs. delete the line) on a check that
+     already fixed this exact class of contradiction once between the
+     ceiling and Check 2 (see the comment at Check 2's [own_transitive_caps]
+     above). A capability Check 0 has already rejected is never "unused" in
+     any meaningful sense — it was never a real capability to use. *)
+  let unknown_needs = ref [] in
+  List.iter (function
+    | Ast.DNeeds (caps, sp) ->
+      List.iter (fun (path, _scope) ->
+        let cap_path = cap_path_of_names path in
+        match March_caps.Cap_lattice.suggest_cap cap_path with
+        | None -> ()
+        | Some known ->
+          unknown_needs := cap_path :: !unknown_needs;
+          Err.error_with_fix env.errors ~span:sp
+            ~fix:(Err.FReplace { span = sp; text = "needs " ^ known })
+            (Printf.sprintf
+               "`%s` is not a known capability.\n\
+                help: did you mean `%s`?"
+               cap_path known)
+      ) caps
+    | _ -> ()
+  ) decls;
+  let unknown_needs = !unknown_needs in
   (* See [locally_declared_names_of] for why a raw call-name match against
      [builtin_cap_table] must first check for module-local shadowing. *)
   let locally_declared_names = locally_declared_names_of decls in
@@ -9073,15 +9287,15 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let refs = List.concat_map (fun (bound, e) -> free_vars_expr bound e) bodies in
     let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
     Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior));
-    (* R1 stage C: retain the same (params, body) pairs the reference walk
-       used, so a row SEED can be derived from them later. Deliberately not
-       walked here: the seed walk is a second full pass over every function
-       body, and its output ([deps]/[unknown]) is read only by
-       [check_fn_grants], which does nothing unless the program declares a
-       capability parameter. Doing it eagerly cost ~18% of `--check`
-       wall-clock across the conformance corpus for a result almost every
-       program discards. Storing the pairs is O(1) — they are already-built
-       AST nodes. *)
+    (* R1 stage C (now removed, 2026-08-13 — see [check_fn_grants]'s deletion
+       note near [fn_grant_points]): retain the same (params, body) pairs the
+       reference walk used, so a row SEED can be derived from them later.
+       Deliberately not walked here: the seed walk is a second full pass over
+       every function body, and its output ([deps]/[unknown]) is read only by
+       [dump_cap_rows]'s debug dump — nothing enforces on it anymore. Doing it
+       eagerly cost ~18% of `--check` wall-clock across the conformance corpus
+       for a result almost every program discards. Storing the pairs is
+       O(1) — they are already-built AST nodes. *)
     let prior_bodies =
       Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies fn_qname)
     in
@@ -9261,7 +9475,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           idef.Ast.impl_methods
       | _ -> ())
     decls;
-  let used_caps : (string * Ast.span) list = List.concat_map (function
+  (* The middle component is the enclosing function's bare name when the use
+     comes from a single named function ([DFn]/[DImpl] method/[DActor]
+     handler), and [""] otherwise (a type decl, extern block, or interface
+     signature names no single function). [""] can never equal ["main"], so
+     Check 3 below can compare against it safely to exempt `main`'s own
+     Cap(IO) parameter without affecting any non-function-scoped use. *)
+  let used_caps : (string * string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
       let param_tys = List.filter_map (fun p ->
         match p with
@@ -9272,18 +9492,18 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
       let qname = cap_qname def.fn_name.txt in
       record_fn_caps qname sig_caps;
-      (* R1 stage C: a concrete [Cap(P)] PARAMETER makes this function a
-         discharge point.  Recorded here, checked once at the end of
-         [check_module_core] (see [check_fn_grants]) — recording and checking
-         must not be the same pass, because a module checked early would judge
-         itself against a closure the later modules have not contributed to
-         yet.
+      (* Record which functions carry a concrete [Cap(P)] PARAMETER.  R1 stage
+         C once made this a discharge point, checked once at the end of
+         [check_module_core] by [check_fn_grants]; that check was REMOVED
+         2026-08-13 (see [fn_grant_points]'s doc comment) because it made a
+         capability parameter a per-function ceiling, forcing threading.  This
+         recording step stays — Task 8 reads [fn_grant_points] — but nothing
+         currently checks it.
 
          Parameters only, not [ret_tys]: returning a [Cap(X)] is minting or
          forwarding one, not being handed one to spend.
 
-         [main] is skipped — [check_main_grant] is its discharge point, and
-         claiming it here would report every whole-program violation twice.
+         [main] is skipped — [check_main_grant] is its discharge point.
          [Cap(a)] contributes nothing: [caps_in_ty] yields no path for a type
          VARIABLE, so capability-polymorphic plumbing like [cap_narrow]'s
          signature creates no gate. *)
@@ -9304,7 +9524,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         List.concat_map (fun (c : Ast.fn_clause) -> cap_annots_in_expr [] c.Ast.fc_body)
           def.fn_clauses
       in
-      List.map (fun cap -> (cap, sp)) sig_caps @ body_annot_caps
+      List.map (fun cap -> (cap, def.fn_name.txt, sp)) sig_caps
+      @ List.map (fun (c, s) -> (c, def.fn_name.txt, s)) body_annot_caps
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
@@ -9334,14 +9555,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
-            List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
+            List.map (fun cap -> (cap, "", sp)) (cap_paths_in_surface_ty t)
           ) param_tys
         ) actor.actor_handlers
     (* An extern block declares `extern "lib" : Cap(X)` — that Cap(X) is a use
        of the capability, so a module with `needs X` + an extern block must not
        trigger the "declared but not used" warning. *)
     | Ast.DExtern (edef, sp) ->
-      List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty edef.ext_cap_ty)
+      List.map (fun cap -> (cap, "", sp)) (cap_paths_in_surface_ty edef.ext_cap_ty)
 
     (* A capability named in a TYPE DECLARATION — a record field, a variant
        constructor argument, or an alias right-hand side — is a use of that
@@ -9356,7 +9577,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
        reject/t148-t150. *)
     | Ast.DType (_, _, _, td, sp)
     | Ast.DAlwaysLinearType (_, _, _, td, sp) ->
-      List.map (fun cap -> (cap, sp)) (March_caps.Cap_surface_ty.caps_in_type_def td)
+      List.map (fun cap -> (cap, "", sp)) (March_caps.Cap_surface_ty.caps_in_type_def td)
 
     (* ── Everything below names no capability position ──────────────────
        Enumerated rather than wildcarded, deliberately.  Five separate bugs in
@@ -9398,7 +9619,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             | Some body -> cap_annots_in_expr [] body)
           idef.iface_methods
       in
-      List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+      List.map (fun cap -> (cap, "", sp)) sig_caps
+      @ List.map (fun (c, s) -> (c, "", s)) body_caps
 
     (* An IMPL method is a function: its signature and its body annotations are
        uses, exactly as a top-level [DFn]'s are.  Measured before this arm
@@ -9422,10 +9644,11 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           List.concat_map (fun (c : Ast.fn_clause) -> cap_annots_in_expr [] c.Ast.fc_body)
             fd.fn_clauses
         in
-        List.map (fun cap -> (cap, sp)) sig_caps @ body_caps
+        List.map (fun cap -> (cap, fd.fn_name.txt, sp)) sig_caps
+        @ List.map (fun (c, s) -> (c, fd.fn_name.txt, s)) body_caps
       in
       (* [impl_ty] itself can name a capability: `impl Grantor(Cap(IO))`. *)
-      List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty idef.impl_ty)
+      List.map (fun cap -> (cap, "", sp)) (cap_paths_in_surface_ty idef.impl_ty)
       @ List.concat_map (fun (_, fd) -> of_fn fd) idef.impl_methods
 
     | Ast.DProtocol _ | Ast.DSig _
@@ -9594,13 +9817,22 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
      `proof cap X` in mod M auto-covers `needs M.X` so the module needn't repeat itself. *)
-  List.iter (fun (cap_path, sp) ->
+  (* Every [Cap(X)] Check 1 is itself separately demanding (below).  Check
+     1b's aggregation (further down) must drop any capability already
+     SUBSUMED by one of these — else `fn main(cap : Cap(IO))` demands
+     `needs IO` here while Check 1b separately demands `needs IO.Clock`,
+     `needs IO.Console`, `needs IO.Random`, ... for the same body: `needs
+     IO` alone already covers all of them, so `forge fix` applying both
+     diagnostics writes four lines where one suffices. *)
+  let check1_demanded_caps = ref [] in
+  List.iter (fun (cap_path, _fn_name, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     let self_declared = match List.assoc_opt cap_path env.proof_caps with
       | Some dm -> dm = mod_name.txt
       | None -> false
     in
     if not covered && not self_declared then begin
+      check1_demanded_caps := cap_path :: !check1_demanded_caps;
       match List.assoc_opt cap_path env.proof_caps with
       | Some declaring_mod ->
         Err.error env.errors ~span:sp
@@ -9612,7 +9844,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
             MPText " can mint "; cap cap_path; MPText " — callers must receive it as a parameter." ])
       | None ->
-        Err.error env.errors ~span:sp
+        Err.error_with_fix env.errors ~span:sp ~code:("cap_needs:" ^ cap_path)
+          ~fix:(Err.FInsert {
+            after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
+            text = "  needs " ^ cap_path })
           (render_parts [
             cap cap_path; MPText " used in module "; MPCode mod_name.txt;
             MPText " but "; MPCode cap_path; MPText " is not declared in ";
@@ -9632,30 +9867,91 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      builtin call in a module body.  A stdlib-MEDIATED call (`File.read`
      rather than `file_read`) is invisible here and is caught by
      --cap-strict's ceiling over emitted TIR instead.  Check 1c below
-     (extern -> IO.Foreign) is deliberately NOT flipped. *)
-  List.iter (fun (cap_path, sp) ->
-    let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
-    let self_declared = match List.assoc_opt cap_path env.proof_caps with
-      | Some dm -> dm = mod_name.txt
-      | None -> false
-    in
-    if not covered && not self_declared then
-      (* [~code] tags this diagnostic with the exact missing capability so
-         that a presentation-layer consumer (bin/main.ml) can recognise when
-         [Cap_infer]'s call-site hint at the SAME span is reporting the same
-         fact, without either pass having to know about the other — see
-         specs/progress/2026-08-10-capability-diagnostic-duplication.md. *)
-      Err.error_with_fix env.errors ~span:sp ~code:("cap_needs:" ^ cap_path)
-        ~fix:(Err.FInsert {
-          after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
-          text = "  needs " ^ cap_path })
-        (render_parts [
-          MPText "function body calls a builtin that requires "; cap cap_path;
-          MPText " but "; MPCode mod_name.txt; MPText " does not declare ";
-          MPCode ("needs " ^ cap_path); MPText ".";
-          MPBreak; MPText "hint: add "; MPCode ("needs " ^ cap_path);
-          MPText " to the module body." ])
-  ) body_cap_uses;
+     (extern -> IO.Foreign) is deliberately NOT flipped.
+
+     Reported ONCE per module, not once per offending call site: a `main`
+     that touches four undeclared capabilities used to produce four separate
+     "does not declare" errors on top of the grant error, which already
+     aggregates all four into one replacement signature. Accumulate every
+     (cap, span) that fails the check across the whole walk, then emit a
+     single diagnostic listing all of them with one multi-line insert fix —
+     `forge fix` still applies it in one pass since it is one [FInsert]. *)
+  let missing_needs =
+    List.filter_map (fun (cap_path, sp) ->
+      let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+      let self_declared = match List.assoc_opt cap_path env.proof_caps with
+        | Some dm -> dm = mod_name.txt
+        | None -> false
+      in
+      (* Already subsumed by a capability Check 1 is separately demanding
+         (e.g. `Cap(IO)` subsumes `IO.Clock`/`IO.Console`/`IO.Random`) — skip
+         it here so the two checks' fixes do not overlap; Check 1's own
+         diagnostic above already covers this capability. *)
+      let subsumed_by_check1 =
+        List.exists (fun demanded -> cap_subsumes demanded cap_path)
+          !check1_demanded_caps
+      in
+      if not covered && not self_declared && not subsumed_by_check1
+      then Some (cap_path, sp) else None
+    ) body_cap_uses
+  in
+  (match missing_needs with
+   | [] -> ()
+   | first :: rest ->
+     (* [body_cap_uses] is not in source order (it is built by a fold that
+        prepends), so pick the earliest span explicitly rather than assuming
+        [first] is first in the file — the diagnostic must point at real
+        code, and "first accumulated" is not "first in the module". *)
+     let first_span =
+       List.fold_left (fun best (_, sp) ->
+         let open Ast in
+         if (sp.start_line, sp.start_col) < (best.start_line, best.start_col)
+         then sp else best
+       ) (snd first) rest
+     in
+     let caps = List.sort_uniq String.compare (List.map fst missing_needs) in
+     let show =
+       String.concat ", " (List.map (fun c -> Printf.sprintf "`Cap(%s)`" c) caps)
+     in
+     (* Two renderings of the same capability set, for two different
+        purposes: [fix_lines] is what `forge fix` literally splices into the
+        module body (two-space indent, matching the module's own `needs`
+        convention), and [display_lines] is what the diagnostic pane shows
+        (eight-space indent, matching the sibling grant error's `fn main(...)`
+        help block at line ~13249 above — same visual precedent, not a new
+        style). Naming the capability set only ONCE in the prose (in [show])
+        and then showing the literal fix text, rather than also restating the
+        set in a second "needs X and needs Y and ..." sentence, was fix-round
+        feedback on this task: the set was previously spelled three times
+        across two different join styles (", " for the Cap(...) list, " and "
+        for the needs list), which got worse rather than better as the
+        module's missing-capability count grew. *)
+     let fix_lines = String.concat "\n" (List.map (fun c -> "  needs " ^ c) caps) in
+     let display_lines =
+       String.concat "\n" (List.map (fun c -> "        needs " ^ c) caps)
+     in
+     (* [~code] tags this diagnostic with the exact missing capability set so
+        that a presentation-layer consumer (bin/main.ml) can recognise when
+        [Cap_infer]'s call-site hint is reporting a fact already covered by
+        this error's capability set (same module, capability in this code's
+        set — no longer requiring the SAME span, since aggregation means
+        this error's span is only the first offending call site, not every
+        one Cap_infer might hint at), without either pass having to know
+        about the other — see
+        specs/progress/2026-08-10-capability-diagnostic-duplication.md and
+        specs/progress/2026-08-13-aggregate-missing-needs-diagnostics.md. *)
+     Err.error_with_fix env.errors ~span:first_span
+       ~code:("cap_needs:" ^ String.concat "," caps)
+       ~fix:(Err.FInsert {
+         after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
+         text = fix_lines })
+       (Printf.sprintf
+          "function bodies in `%s` call builtins that require %s, but `%s` \
+           declares no matching `needs`.\n\
+           hint: add these to the module body —\n\
+           %s"
+          mod_name.txt show mod_name.txt display_lines))
+  ;
   (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
@@ -9713,7 +10009,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       in
       find_span decls
     in
-    let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps
+    let used = List.exists (fun (cap_path, _, _) -> cap_subsumes need cap_path) used_caps
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses
               || List.exists (fun (_, req_caps) ->
@@ -9731,10 +10027,12 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           MPCode ("needs " ^ need); MPText " but no function requires ";
           cap need; MPText " or a sub-capability.";
           MPBreak; MPText "help: remove the unused capability declaration." ])
-  ) declared_needs;
-  (* Check 3 (hint): Cap(IO) root — suggest narrowing *)
-  List.iter (fun (cap_path, sp) ->
-    if cap_path = "IO" then
+  ) (List.filter (fun need -> not (List.mem need unknown_needs)) declared_needs);
+  (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
+     reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
+     hinting there tells users to stop following the documented advice. *)
+  List.iter (fun (cap_path, fn_name, sp) ->
+    if cap_path = "IO" && fn_name <> "main" then
       Err.hint env.errors ~span:sp
         (render_parts [
           MPText "this function takes "; cap "IO";
@@ -11340,6 +11638,8 @@ let rec check_decl env (d : Ast.decl) : env =
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     discharge_constraints env sp;
     ignore (leave_level env');
+    (* Same Vault value restriction as the block-[let] path above. *)
+    if b.bind_ty = None then demote_vault_handle_vars rhs_ty;
     (* Generalise simple variable bindings at module level *)
     let gen_bnd bnd = match bnd with
       | (name, Mono t) -> (name, generalize env.level t)
@@ -11352,6 +11652,37 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_vars bindings' env
 
   | Ast.DType (_vis, name, params, typedef, _sp) ->
+    let is_canonical_dist_link_down_reason =
+      let nullary name (v : Ast.variant) =
+        v.var_name.txt = name && v.var_args = []
+      in
+      let crash_with_string (v : Ast.variant) =
+        v.var_name.txt = "Crash"
+        && match v.var_args with
+           | [Ast.TyCon (arg, [])] -> arg.txt = "String"
+           | _ -> false
+      in
+      env.current_module = "DistLink"
+      && env.enclosing_package = "DistLink"
+      && name.txt = "DownReason"
+      && params = []
+      && match typedef with
+         | Ast.TDVariant [normal; killed; crash; node_down] ->
+           nullary "Normal" normal
+           && nullary "Killed" killed
+           && crash_with_string crash
+           && nullary "NodeDown" node_down
+         | _ -> false
+    in
+    if env.current_module = env.enclosing_package
+       && (name.txt = "Down" || name.txt = "DownReason")
+       && not is_canonical_dist_link_down_reason then begin
+      Err.error env.errors ~span:name.span
+        (Printf.sprintf
+           "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"
+           name.txt);
+      env
+    end else
     let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
     (match typedef with
      | Ast.TDVariant variants ->
@@ -13178,13 +13509,64 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
    - The check runs at the end of [check_module_core] only — never on the
      REPL's [check_module_with_env] path, which has no entry point to be
      granted from (the same exemption R2 gives it). *)
+(* The chain of references from [from] to a function that directly holds
+   [cap]. Same BFS and same two-way name resolution as [check_main_grant]'s
+   [reachable_from_main] below, but keeps the path rather than only the
+   reachable set — "who reaches what through whom" is exactly the evidence
+   the ceiling's attribution pass produces on the TIR side, and this is the
+   typecheck-side equivalent, available on BOTH the interpreter and compile
+   paths. Used by [check_main_grant] to attribute a grant violation to the
+   user's own call chain instead of only the stdlib function that directly
+   holds the capability. *)
+let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
+  : string list option =
+  let holds k =
+    match Hashtbl.find_opt env.own_cap_closures k with
+    | Some own -> List.mem cap own
+    | None -> false
+  in
+  let visited = Hashtbl.create 64 in
+  let queue = Queue.create () in
+  Queue.push (from, []) queue;
+  let result = ref None in
+  while !result = None && not (Queue.is_empty queue) do
+    let k, path = Queue.pop queue in
+    if not (Hashtbl.mem visited k) then begin
+      Hashtbl.replace visited k ();
+      let path = if k = from then path else path @ [ k ] in
+      if k <> from && holds k then result := Some path
+      else
+        let prefix =
+          match String.rindex_opt k '.' with
+          | Some i -> String.sub k 0 (i + 1)
+          | None -> ""
+        in
+        List.iter
+          (fun r ->
+             let known n =
+               Hashtbl.mem env.own_cap_closures n || Hashtbl.mem env.fn_refs n
+             in
+             if known r then Queue.push (r, path) queue;
+             let q = prefix ^ r in
+             if q <> r && known q then Queue.push (q, path) queue)
+          (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
+    end
+  done;
+  !result
+
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
      end-of-module consumer ([check_fn_grants]) — so without sharing, every
      `--check` ran the fixpoint twice over the whole stdlib-prepended program.
      That cost ~10% of wall-clock per file and pushed CI's @types-check step
-     (288 files, a 10-minute budget it was already using 9 of) over the limit. *)
+     (288 files, a 10-minute budget it was already using 9 of) over the limit.
+     [check_fn_grants] was REMOVED 2026-08-13 (see [fn_grant_points]'s doc
+     comment), so [check_module_core] is [rows]'s only caller now — but the
+     parameter stays, both as the cheapest way to keep this signature stable
+     for any future second consumer, and because [rows] is still how the
+     caller controls [~with_rows] (see its own call site: this function never
+     reads [deps]/[unknown], so it is solved caps-only there). *)
   (* R1 stage D: `main`'s grant is the UNION over ALL of its capability
      parameters, not the head of the first one's caps.  Same rule as
      [check_fn_grants]; [Desugar.check_main_signature] guarantees every
@@ -13289,7 +13671,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             The span has to be [fc_params_span] specifically — `main`'s NAME
             span would yield `fn main(…)() : ()`, and the clause span covers
             the body. That is why `fn_clause` grew the field. *)
-         Err.error_with_fix env.errors ~span
+         Err.error_with_fix env.errors ~span ~code:"cap_grant"
            ~fix:(Err.FReplace
                    { span = params_span; text = Printf.sprintf "(%s)" suggested })
            (Printf.sprintf
@@ -13308,62 +13690,6 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
       match Hashtbl.find_opt (closures_tbl ()) "main" with
       | Some caps -> caps
       | None -> []
-    in
-    (* One function that holds [c] directly AND is reachable from main, for
-       the diagnostic.  Restricting to the reachable set matters: the first
-       version picked any holder from [own_cap_closures] — the whole env,
-       linked stdlib included — and named `Logger.with_span` for an IO.Clock
-       reached through `Random.int`, sending the user to a function their
-       program never calls.
-
-       The BFS resolves a reference the same two ways the closure fixpoint's
-       resolver tries first (the name as-is, then qualified by the refering
-       key's module prefix); the remaining resolver shapes are rare enough
-       that a miss only shrinks the candidate set — the fallback below then
-       names an arbitrary holder rather than dropping the hint, which is
-       still where the capability lives even if reachability was not
-       re-proven here. *)
-    let reachable_from_main =
-      let visited = Hashtbl.create 64 in
-      let queue = Queue.create () in
-      Queue.push "main" queue;
-      while not (Queue.is_empty queue) do
-        let k = Queue.pop queue in
-        if not (Hashtbl.mem visited k) then begin
-          Hashtbl.replace visited k ();
-          let prefix =
-            match String.rindex_opt k '.' with
-            | Some i -> String.sub k 0 (i + 1)
-            | None -> ""
-          in
-          List.iter
-            (fun r ->
-               if Hashtbl.mem env.own_cap_closures r
-                  || Hashtbl.mem env.fn_refs r
-               then Queue.push r queue;
-               let q = prefix ^ r in
-               if q <> r
-                  && (Hashtbl.mem env.own_cap_closures q
-                      || Hashtbl.mem env.fn_refs q)
-               then Queue.push q queue)
-            (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
-        end
-      done;
-      visited
-    in
-    let reached_in c =
-      let holders =
-        Hashtbl.fold
-          (fun k own acc -> if List.mem c own then k :: acc else acc)
-          env.own_cap_closures []
-      in
-      let non_main = List.filter (fun k -> k <> "main") holders in
-      match List.filter (Hashtbl.mem reachable_from_main) non_main with
-      | k :: _ -> Some k
-      | [] ->
-        (match non_main with
-         | k :: _ -> Some k
-         | [] -> (match holders with k :: _ -> Some k | [] -> None))
     in
     let covered c = List.exists (fun g -> cap_subsumes g c) grants in
     let show_grant =
@@ -13402,78 +13728,42 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  `needs %s` does not raise it.\n\
                  help: widen the grant (e.g. `Cap(IO)`), or remove the use."
                 show_grant c
-                (match reached_in c with
-                 | Some f -> Printf.sprintf " (reached in `%s`)" f
-                 | None -> "")
+                (* Render exactly like the sibling missing-`needs` diagnostic's
+                   [Cap_infer.chain_note] (lib/refinecheck/cap_infer.ml): the
+                   FULL chain (no elision — neither diagnostic elides today;
+                   see specs/todos/2026-08-14-capability-chain-rendering-unify-elision.md
+                   for unifying the two under a shared, capped renderer),
+                   `main` included as the first frame, joined with `→`. Both
+                   read as a matched pair, so they must render the same way. *)
+                (match cap_reach_chain env ~from:"main" ~cap:c with
+                 | Some (_ :: _ as chain) ->
+                   Printf.sprintf " (reached from `main`: %s)"
+                     (String.concat " \xe2\x86\x92 " ("main" :: chain))
+                 | _ -> "")
                 c))
       (List.sort_uniq String.compare closure)
 
-(* ── R1 stage C: per-function grants ──────────────────────────────────────
-   specs/2026-08-10-r1-stage-c-effect-rows-design.md.
+(* ── R1 stage C: per-function grants — REMOVED 2026-08-13 ──────────────────
+   Formerly specs/2026-08-10-r1-stage-c-effect-rows-design.md; the removal is
+   specs/progress/2026-08-13-remove-per-function-grant-ceiling.md.
 
-   Stage B checks ONE row against ONE grant, at `main`.  Stage C makes every
-   function that takes a concrete `Cap(P)` parameter a discharge point, so the
-   guarantee composes per function and per dependency instead of per program.
+   Stage C used to make every function that took a concrete `Cap(P)`
+   parameter its own grant discharge point: its static reach had to fit under
+   its parameters' capabilities (checked here, by the now-deleted
+   [check_fn_grants]).  That made a capability PARAMETER a per-function
+   ceiling over everything the function transitively reached, so taking one
+   forced a function to enumerate every other capability it touched or add a
+   parameter for it — capability threading, which contradicts capabilities
+   being module-scoped.  It is gone.  What remains: `needs` (Check 1), the
+   per-module ceiling, and [check_main_grant] — none of them require passing
+   a capability value to satisfy a check.
 
-   The claim certified here is conditional, and deliberately so: "this
-   function's static reach fits under its granted capabilities, plus whatever
-   function values its callers hand it".  The conditional half needs no check
-   of its own — a caller that supplies a callback BY NAME is charged for that
-   callback's row by the free-variable edge that has always driven the closure
-   ([env.fn_refs]), and that caller is itself under a discharge point (or
-   under none at all, which is the unchanged ambient contract).  What cannot
-   be discharged by anyone is an invocation of a value with no traceable
-   creation site; [Cap_rows]'s [unknown] flag marks it, and a narrow grant
-   over such a function is REFUSED rather than certified — the same stance
-   stage B takes on `IO.Foreign`, for the same reason: a bound the analysis
-   cannot see must not be claimed.
-
-   Runs from [check_module_core] only, next to [check_main_grant], so the
-   interpreter, compile, test and LSP paths all enforce it identically and the
-   REPL keeps the exemption R2 gave it. *)
-
-(* The chain of references from [from] to a function that directly holds
-   [cap], for the diagnostic.  Same BFS and same two-way name resolution as
-   [check_main_grant]'s [reachable_from_main], but keeping the path rather
-   than only the reachable set — "who reaches what through whom" is exactly
-   the evidence the ceiling's attribution pass produces on the TIR side, and
-   this is the typecheck-side equivalent, available on BOTH the interpreter
-   and compile paths. *)
-let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
-  : string list option =
-  let holds k =
-    match Hashtbl.find_opt env.own_cap_closures k with
-    | Some own -> List.mem cap own
-    | None -> false
-  in
-  let visited = Hashtbl.create 64 in
-  let queue = Queue.create () in
-  Queue.push (from, []) queue;
-  let result = ref None in
-  while !result = None && not (Queue.is_empty queue) do
-    let k, path = Queue.pop queue in
-    if not (Hashtbl.mem visited k) then begin
-      Hashtbl.replace visited k ();
-      let path = if k = from then path else path @ [ k ] in
-      if k <> from && holds k then result := Some path
-      else
-        let prefix =
-          match String.rindex_opt k '.' with
-          | Some i -> String.sub k 0 (i + 1)
-          | None -> ""
-        in
-        List.iter
-          (fun r ->
-             let known n =
-               Hashtbl.mem env.own_cap_closures n || Hashtbl.mem env.fn_refs n
-             in
-             if known r then Queue.push (r, path) queue;
-             let q = prefix ^ r in
-             if q <> r && known q then Queue.push (q, path) queue)
-          (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
-    end
-  done;
-  !result
+   [cap_reach_chain], which outlived the check that was its only caller, is
+   now defined above [check_main_grant] (it moved from here in Task 8) and
+   used by it to attribute a whole-program grant violation to the user's call
+   chain — the same "who reaches what through whom" evidence this used to
+   produce for a per-function violation, now serving the program-level one
+   instead. *)
 
 (* [MARCH_DUMP_CAP_ROWS=1] prints the solved row table to stderr, one function
    per line, sorted.  This exists to make the `unknown` REFUSAL's blast radius
@@ -13501,94 +13791,6 @@ let dump_cap_rows (env : env) : unit =
       rows;
     Printf.eprintf "cap-row-summary total=%d unknown=%d\n" (List.length rows)
       unknown_count
-
-let check_fn_grants ?rows (env : env) : unit =
-  dump_cap_rows env;
-  if Hashtbl.length env.fn_grant_points > 0 then begin
-    let rows =
-      match rows with Some r -> r | None -> fn_capability_rows_tbl env
-    in
-    Hashtbl.iter
-      (fun qname (grants, span) ->
-         let row =
-           Option.value ~default:March_caps.Cap_rows.empty_row
-             (Hashtbl.find_opt rows qname)
-         in
-         let covered c = List.exists (fun g -> cap_subsumes g c) grants in
-         let grants_io = List.exists (fun g -> cap_subsumes "IO" g) grants in
-         let full_io = List.mem "IO" grants in
-         let show_grants =
-           String.concat " + "
-             (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
-         in
-         (* An untraceable invocation cannot be bounded, so a narrow grant
-            over it is refused outright.  Only when the function holds a
-            NARROW IO grant is there anything to refuse: `Cap(IO)` claims no
-            bound within the IO lattice, and a purely non-IO grant (an FFI
-            root) is governed by the extern checks, not this lattice. *)
-         if row.March_caps.Cap_rows.unknown && grants_io && not full_io then
-           Err.error env.errors ~span
-             (Printf.sprintf
-                "`%s` is granted %s, but its body invokes a function value \
-                 whose origin the capability analysis cannot trace, so no \
-                 caller can be held responsible for what it does. A narrow \
-                 grant cannot be certified over it.\n\
-                 help: grant `Cap(IO)` instead, or restructure so the invoked \
-                 function arrives as a parameter or a named function."
-                qname show_grants);
-         List.iter
-           (fun c ->
-              if not (cap_subsumes "IO" c) then ()  (* FFI root; not this lattice *)
-              else if covered c then ()
-              (* Stage B refuses `IO.Foreign` under ANY grant but `Cap(IO)`,
-                 because `main` holds exactly one capability and certifying a
-                 console bound over an extern block would be a lie.  At
-                 function granularity the same reasoning gives a different
-                 rule: a parameter of type `Cap(IO.Foreign)` IS an explicit
-                 grant of the unbounded thing, and the caller supplying it
-                 knows exactly what it is authorizing.  So the refusal applies
-                 only where the grant does NOT cover it — where it would
-                 otherwise be an ordinary violation, and this message is the
-                 more informative one to give.  (Pinned by
-                 [test_cap_hierarchy_args_ok], which takes four narrow caps
-                 including `Cap(IO.Foreign)` and must stay clean.) *)
-              else if cap_subsumes "IO.Foreign" c then
-                Err.error env.errors ~span
-                  (Printf.sprintf
-                     "`%s` is granted %s, but reaches `%s` — linked C code, \
-                      whose behavior the capability lattice cannot bound. A \
-                      narrow grant cannot be certified over an `extern` \
-                      block.\n\
-                      help: grant `Cap(IO)` or `Cap(IO.Foreign)` explicitly, \
-                      or remove the extern dependency from everything `%s` \
-                      reaches."
-                     qname show_grants c qname)
-              else
-                Err.error env.errors ~span
-                  (Printf.sprintf
-                     "`%s` is granted %s, but reaches `%s`%s. The grant is a \
-                      ceiling on everything `%s` can reach — declaring \
-                      `needs %s` does not raise it.\n\
-                      help: widen the parameter's capability, or remove the \
-                      use."
-                     qname show_grants c
-                     (match cap_reach_chain env ~from:qname ~cap:c with
-                      | Some (_ :: _ as chain) ->
-                        let shown =
-                          if List.length chain > 4 then
-                            "… -> "
-                            ^ String.concat " -> "
-                                (List.filteri
-                                   (fun i _ -> i >= List.length chain - 3)
-                                   chain)
-                          else String.concat " -> " chain
-                        in
-                        Printf.sprintf " (via %s)" shown
-                      | _ -> "")
-                     qname c))
-           (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
-      env.fn_grant_points
-  end
 
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
@@ -13890,18 +14092,17 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
     ~cap_qname_prefix:"";
   (* R1: hold the program's capability closure under main's grant. *)
-  (* Rows (deps/unknown) are only READ by [check_fn_grants], which does
-     nothing unless the program declares a capability parameter. Solving
-     caps-only otherwise keeps `--check` at its pre-stage-C cost. *)
-  let cap_rows =
-    fn_capability_rows_tbl
-      ~with_rows:(Hashtbl.length final_env.fn_grant_points > 0) final_env
-  in
+  (* [check_main_grant] deliberately does not consult [deps]/[unknown] (see
+     its own comment on the [unknown]-ignoring arm), and after stage C's
+     removal nothing else reads them from THIS table either — [dump_cap_rows]
+     solves its own copy independently, gated behind [MARCH_DUMP_CAP_ROWS], so
+     it does not benefit from (or need) this one being solved with rows.
+     [~with_rows:false] keeps this call at the caps-only fixpoint, which is
+     what [check_main_grant] actually reads — this was the pre-stage-C cost
+     and stays that with stage C gone. *)
+  let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
+  dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
-  (* R1 stage C: and each Cap-parameter function's row under its own grant.
-     After [check_module_needs] for every module, so the closure every
-     discharge point is judged against is complete. *)
-  check_fn_grants ~rows:cap_rows final_env;
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;

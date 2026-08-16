@@ -1,0 +1,4 @@
+registered a: true
+registered b: true
+child-a: reached by name after restart
+child-b: reached by name after restart

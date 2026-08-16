@@ -80,6 +80,26 @@ type builtin = {
   declare_sig   : string option;
 }
 
+(* Reserved constructor-tag ABI shared with runtime/march_runtime.h.
+
+   Ordinary variants use per-type tags below [ordinary_ctor_tag_limit]. Actor
+   messages and same-short-name collision variants have dedicated, bounded
+   global ranges. Runtime-originated monitor values live in a final reserved
+   range that none of those allocators may enter; [Llvm_toplevel.build_ctor_info]
+   enforces every boundary when it assigns tags. Keep these values in sync with
+   MARCH_*_TAG in march_runtime.h. *)
+let ordinary_ctor_tag_limit = 0x0100_0000
+let actor_message_tag_base = 0x0100_0000
+let actor_message_tag_limit = 0x0200_0000
+let collision_tag_base = 0x0200_0000
+let collision_tag_limit = 0x0300_0000
+
+let monitor_down_tag = 0x7f00_0000
+let monitor_reason_normal_tag = 0x7f00_0001
+let monitor_reason_killed_tag = 0x7f00_0002
+let monitor_reason_crash_tag = 0x7f00_0003
+let reserved_ctor_tag_limit = 0x7f00_0004
+
 let builtins : builtin list = [
   { march_name = "print"; c_name = Some "march_print"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_print(ptr %s)" };
@@ -440,6 +460,8 @@ let builtins : builtin list = [
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_send_linear(ptr %actor, ptr %msg)" };
   { march_name = "spawn"; c_name = Some "march_spawn"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_spawn(ptr %actor)" };
+  { march_name = "spawn_supervised"; c_name = Some "march_spawn_supervised"; ret_ty = Some (Tir.TPtr Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_spawn_supervised(ptr %actor)" };
   { march_name = "actor_get_int"; c_name = Some "march_actor_get_int"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_get_int(ptr %actor, i64 %index)" };
   { march_name = "actor_call"; c_name = Some "march_actor_call"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TVar "e"]));
@@ -810,6 +832,24 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_run_until_idle()" };
   { march_name = "register_resource"; c_name = Some "march_register_resource"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)" };
+  (* Named registry (Task 4). C signature is march_actor_register(name, actor)
+     — name FIRST — but the March-level builtin is Pid -> String -> Bool (pid
+     first, matching monitor/kill's argument order). The call site in
+     llvm_emit.ml has a dedicated EApp arm that swaps the two atoms into the
+     C order; this declare_sig documents the real callee signature. *)
+  { march_name = "actor_register"; c_name = Some "march_actor_register"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_register(ptr %name, ptr %actor)" };
+  { march_name = "actor_unregister"; c_name = Some "march_actor_unregister"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_unregister(ptr %name)" };
+  (* Niche-encoded Option, matching vault_get's precedent: NULL is None, the
+     actor pointer itself is Some — no boxed cell. *)
+  { march_name = "actor_whereis"; c_name = Some "march_actor_whereis";
+    ret_ty = Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]));
+    in_is_builtin = true;
+    declare_sig = Some "declare ptr  @march_actor_whereis(ptr %name)" };
+  { march_name = "actor_registered"; c_name = Some "march_actor_registered";
+    ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_registered()" };
   { march_name = "get_cap"; c_name = Some "march_get_cap"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("ActorCap", [Tir.TVar "a"])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_cap(ptr %pid)" };
   { march_name = "send_checked"; c_name = Some "march_send_checked"; ret_ty = Some (Tir.TCon ("Atom", []));
@@ -1281,6 +1321,7 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_msg_move";
   PDeclare "march_process_alloc";
   PDeclare "march_spawn";
+  PDeclare "march_spawn_supervised";
   PDeclare "march_actor_get_int";
   PDeclare "march_actor_call";
   PDeclare "march_actor_reply";
@@ -1496,6 +1537,11 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_actor_set_mbox_limit";
   PDeclare "march_run_until_idle";
   PDeclare "march_register_resource";
+  PComment "; Named registry builtins";
+  PDeclare "march_actor_register";
+  PDeclare "march_actor_unregister";
+  PDeclare "march_actor_whereis";
+  PDeclare "march_actor_registered";
   PDeclare "march_get_cap";
   PDeclare "march_send_checked";
   PDeclare "march_revoke_cap";

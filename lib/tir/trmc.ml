@@ -393,13 +393,31 @@ let rec seed_entry ~(self : string) ~(dps : Tir.var) (e : Tir.expr) : Tir.expr =
 
 (** True when [ty] names a type that can cross an actor boundary, and so must
     never be rewritten: the hole-fill is a plain non-atomic store, safe only
-    while the cell is thread-local.  Both checks are STRUCTURAL — a name-suffix
-    guess here was previously found to false-positive on a user type called
-    [Tree_Actor] (see [Repr.is_actor_struct_type]). *)
-let crosses_actor_boundary (ty : Tir.ty) : bool =
+    while the cell is thread-local.
+
+    The two halves are checked DIFFERENTLY, deliberately:
+
+    - The actor-STRUCT half is structural — [Repr.is_actor_struct_type] confirms
+      field 0 is literally ["$d_dispatch"], a name [lower_actor.ml] alone can
+      construct (no surface March identifier may start with [$]).  A name-suffix
+      guess here previously false-positived on a user type called [Tree_Actor];
+      in [llvm_emit.ml]'s [EReuse] arm that was outright unsound (it skipped the
+      refcount check shared-value FBIP safety depends on), which is why
+      [Repr.is_actor_struct_type] exists at all.  Here the same false positive
+      is merely conservative — an over-approximation only DECLINES a rewrite —
+      but a user type named [Tree_Actor] silently lost TRMC for no reason, so it
+      is worth checking properly now that the structural predicate is available.
+
+    - The actor-MESSAGE half is still the ["_Msg"] name suffix
+      ([Tir_names.is_actor_msg_name]).  There is no structural predicate for a
+      message variant, and the failure direction is safe: a user type named
+      [Foo_Msg] over-approximates to "crosses a boundary" and loses TRMC, which
+      costs an optimization and never correctness.  Do not copy this suffix test
+      to a site where a false positive would SKIP a safety check. *)
+let crosses_actor_boundary (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
   match ty with
   | Tir.TCon (name, _) ->
-    Tir_names.is_actor_msg_name name || Tir_names.is_actor_struct_name name
+    Tir_names.is_actor_msg_name name || Repr.is_actor_struct_type type_defs name
   | _ -> false
 
 (** [Some (f', f_dps)] when [fn] is transformable.
@@ -410,10 +428,11 @@ let crosses_actor_boundary (ty : Tir.ty) : bool =
     ladder — two copies of it would drift, and a skip line that says only
     "eligible" tells you a gap exists but not which one. *)
 let transform_fn ?(on_decline = fun (_ : string) -> ())
+      (type_defs : Tir.type_def list)
       (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
   let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
   let decline reason = on_decline reason; None in
-  if crosses_actor_boundary fn.Tir.fn_ret_ty then
+  if crosses_actor_boundary type_defs fn.Tir.fn_ret_ty then
     decline "actor-boundary-return"
   else
   match verdict_of r, r.r_modcons with
@@ -465,7 +484,7 @@ let transform_module (m : Tir.tir_module) : Tir.tir_module =
             (List.length r.r_modcons) r.r_other
         end
       in
-      match transform_fn ~on_decline fn with
+      match transform_fn ~on_decline m.Tir.tm_types fn with
       | Some (entry, helper) ->
         if report then
           Printf.eprintf "TRMCXFORM\t%s -> %s\n%!" fn.Tir.fn_name helper.Tir.fn_name;

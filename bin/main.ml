@@ -36,28 +36,17 @@ let severity_word (sev : March_errors.Errors.severity) : string =
    see a collision with them on its own; it needs this list. Sourced from
    the SAME table the typechecker itself resolves ordinary builtin calls
    against, so this can never drift from what the compiler actually treats
-   as a builtin. Dotted names (there are none in [builtin_bindings] today,
-   but filtering is cheap insurance) are excluded — a user's top-level [fn]
-   can never be named with a `.`, so they could never collide with one. *)
-let ordinary_builtin_collision_names : string list =
-  List.filter_map (fun (name, _) -> if String.contains name '.' then None else Some name)
-    March_typecheck.Typecheck.builtin_bindings
-
-(* [show]/[eq]/[compare]/[hash] are NOT in the list above — they are
-   structural interface methods with their OWN type-directed dispatch
-   (Typecheck.builtin_interface_bindings), and a bare top-level [fn] of the
-   right ARITY legitimately participates in it (regression-tested by
-   test/native/iface_method_collision.march). Only a WRONG-arity same-name
-   function is a genuine collision — see Prelude_collision's doc comment. *)
-let iface_method_collision_arities : (string * int) list =
-  [ ("eq", 2); ("compare", 2); ("show", 1); ("hash", 1) ]
-
+   as a builtin. Sourced from [Typecheck.prelude_collision_builtin_names]/
+   [Typecheck.prelude_collision_iface_arities] — the SAME shared values the
+   LSP's own [lsp/lib/analysis.ml] uses, so the two can never independently
+   drift from each other or from what the typechecker treats as a builtin. *)
 let check_no_prelude_collision_decls ~(stdlib_decls : March_ast.Ast.decl list)
     (entry_decls : March_ast.Ast.decl list) : unit =
   let errors = March_errors.Errors.create () in
   March_modules.Prelude_collision.check ~prelude_decls:stdlib_decls
-    ~ordinary_builtin_names:ordinary_builtin_collision_names
-    ~iface_method_arities:iface_method_collision_arities ~entry_decls errors;
+    ~ordinary_builtin_names:March_typecheck.Typecheck.prelude_collision_builtin_names
+    ~iface_method_arities:March_typecheck.Typecheck.prelude_collision_iface_arities
+    ~entry_decls errors;
   if March_errors.Errors.has_errors errors then begin
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
         Printf.eprintf "%s:%d:%d: %s: %s\n"
@@ -87,22 +76,41 @@ let find_substring ~needle haystack =
 (* Presentation-only de-duplication of the capability diagnostics: the
    typechecker's Check 1b (lib/typecheck/typecheck.ml, an Error) and
    Cap_infer's call-site hint (lib/refinecheck/cap_infer.ml, a Hint) both
-   fire at the exact same span for the exact same missing capability once
-   Cap_infer's call-chain work landed — see
-   specs/progress/2026-08-10-capability-diagnostic-duplication.md. Their
-   "add `needs X`" clauses are now byte-for-byte redundant, but the hint's
-   trailing "reached from `main`: …" chain is genuinely new information the
-   error doesn't carry. So: when a Hint tagged `cap_needs:<cap>` shares its
-   span with an Error/Warning tagged with the same code, trim the hint down
-   to just the chain (dropping the now-redundant prefix); when there is no
-   chain to show, drop the hint entirely rather than print a sentence that
-   says nothing the error hasn't already said.
+   name the same missing capability once Cap_infer's call-chain work landed
+   — see specs/progress/2026-08-10-capability-diagnostic-duplication.md.
+   Their "add `needs X`" clauses are now byte-for-byte redundant, but the
+   hint's trailing "reached from `main`: …" chain is genuinely new
+   information the error doesn't carry. So: when a Hint tagged
+   `cap_needs:<cap>` names a capability already covered by an Error/Warning
+   in the SAME module, trim the hint down to just the chain (dropping the
+   now-redundant prefix); when there is no chain to show, drop the hint
+   entirely rather than print a sentence that says nothing the error hasn't
+   already said.
+
+   Matching used to be exact-span-plus-exact-code equality, which relied on
+   Check 1b emitting one error per (cap, call-site span) — an exact mirror
+   of Cap_infer's own per-call hint. Task 5
+   (specs/progress/2026-08-13-aggregate-missing-needs-diagnostics.md)
+   collapsed Check 1b to ONE error per module, carrying every missing
+   capability in a comma-joined `cap_needs:<c1>,<c2>,...` code and reporting
+   only the FIRST offending span — so a hint for the SECOND (or later)
+   offending capability no longer shares a span, or an exact code, with the
+   error that already covers it, and survived as an orphan duplicate. Fixed
+   by matching on capability-SET membership (parsed out of the comma-joined
+   code, not re-derived) plus the owning module (parsed out of each
+   message via a fixed marker, the same technique already used for the
+   chain suffix below) rather than requiring the span or the whole code
+   string to match exactly.
 
    Both passes are tagged via the `code` field (not by re-parsing each
-   other's prose) specifically so this stays robust to independent wording
-   changes on either side; the chain suffix is split off via
-   [Cap_infer.chain_marker], the one constant Cap_infer exports for this
-   purpose, rather than by guessing at hint phrasing here.
+   other's prose for the CAPABILITY) specifically so cap matching stays
+   robust to independent wording changes on either side; the chain suffix is
+   split off via [Cap_infer.chain_marker], the one constant Cap_infer
+   exports for this purpose. The MODULE name still has to come from the
+   message text (neither diagnostic carries a structured module field), via
+   fixed markers scoped to each emitter's own known phrasing — the same
+   "parse via anchor, not by guessing" discipline the chain marker already
+   established, just applied to a second anchor.
 
    This is deliberately scoped to THIS file: it changes only what the
    combined single-file compiler pipeline renders. [Cap_infer.check_module]
@@ -119,27 +127,81 @@ let dedupe_cap_hints (diags : March_errors.Errors.diagnostic list)
     | Some c when String.length c > 10 && String.sub c 0 10 = "cap_needs:" -> Some c
     | _ -> None
   in
-  let strong_codes =
-    List.filter_map (fun (d : E.diagnostic) ->
+  let caps_of_code code =
+    let rest = String.sub code 10 (String.length code - 10) in
+    String.split_on_char ',' rest
+  in
+  (* The text right after [marker] up to the next backtick, e.g.
+     [name_after ~marker:"bodies in `" "function bodies in `M` call ..."]
+     is ["M"]. Returns [None] if [marker] isn't found or isn't followed by a
+     closing backtick — deliberately conservative: a missed match just means
+     the hint isn't suppressed, never a wrong suppression. *)
+  let name_after ~marker message =
+    match find_substring ~needle:marker message with
+    | None -> None
+    | Some i ->
+      let start = i + String.length marker in
+      let rest = String.sub message start (String.length message - start) in
+      (match find_substring ~needle:"`" rest with
+       | Some j -> Some (String.sub rest 0 j)
+       | None -> None)
+  in
+  (* Check 1b's aggregated error: "function bodies in `M` call builtins
+     that require ...". Check 1's per-Cap(X)-parameter error: "`Cap(X)` used
+     in module `M` but ...". Both anchors are tried in turn — a diagnostic's
+     message matches at most one of them. *)
+  let error_module (d : E.diagnostic) =
+    match name_after ~marker:"bodies in `" d.E.message with
+    | Some m -> Some m
+    | None -> name_after ~marker:"used in module `" d.E.message
+  in
+  (* Cap_infer's hint: "call to `f` requires `needs X` — add `needs X` to
+     module `M`...". *)
+  let hint_module (d : E.diagnostic) = name_after ~marker:"to module `" d.E.message in
+  (* Every (module, capability) pair already covered by some Error/Warning
+     in the diagnostic list. *)
+  let strong_caps : (string * string) list =
+    List.concat_map (fun (d : E.diagnostic) ->
         match d.E.severity, cap_needs_code d with
-        | (E.Error | E.Warning), Some code -> Some (d.E.span, code)
-        | _ -> None)
+        | (E.Error | E.Warning), Some code ->
+          (match error_module d with
+           | Some m -> List.map (fun c -> (m, c)) (caps_of_code code)
+           | None -> [])
+        | _ -> [])
       diags
   in
   List.filter_map
     (fun (d : E.diagnostic) ->
        match d.E.severity, cap_needs_code d with
-       | E.Hint, Some code when List.mem (d.E.span, code) strong_codes ->
-         let marker = March_refinecheck.Cap_infer.chain_marker in
-         (match find_substring ~needle:marker d.E.message with
-          | Some i ->
-            let chain_start = i + String.length marker in
-            let chain =
-              String.sub d.E.message chain_start
-                (String.length d.E.message - chain_start)
-            in
-            Some { d with E.message = "reached from `main`: " ^ chain }
-          | None -> None)
+       | E.Hint, Some code ->
+         let covered =
+           (* [cap_subsumes parent child]: the ERROR's capability is the
+              parent (it's the broader `needs` a fix would add), the HINT's
+              capability is the child (the narrower one the call actually
+              triggers) — e.g. an error covering `IO` subsumes a hint for
+              `IO.FileWrite`. Getting this backwards would suppress hints
+              for capabilities the error does NOT actually cover. *)
+           match caps_of_code code, hint_module d with
+           | [ hint_cap ], Some m ->
+             List.exists
+               (fun (em, error_cap) ->
+                  em = m && March_caps.Cap_lattice.cap_subsumes error_cap hint_cap)
+               strong_caps
+           | _ -> false
+         in
+         if not covered then Some d
+         else begin
+           let marker = March_refinecheck.Cap_infer.chain_marker in
+           match find_substring ~needle:marker d.E.message with
+           | Some i ->
+             let chain_start = i + String.length marker in
+             let chain =
+               String.sub d.E.message chain_start
+                 (String.length d.E.message - chain_start)
+             in
+             Some { d with E.message = "reached from `main`: " ^ chain }
+           | None -> None
+         end
        | _ -> Some d)
     diags
 
@@ -2015,6 +2077,142 @@ let patch_migrate_fn (fd : March_ast.Ast.fn_def)
    category to signal separately; anything that reaches here is a bug. *)
 let internal_compiler_error_exit_code = 3
 
+(** [cap_ceiling_module_spans ~entry_owner ~entry_span decls] maps each
+    module's --cap-strict ceiling owner name (the same keying
+    [March_typecheck.Typecheck.module_caps] uses: the entry module's own TIR
+    name, and both the bare and fully-qualified spelling of every nested
+    [DMod]) to (a) the span [March_caps.Cap_ceiling.check] should attribute
+    an [Undeclared] violation to — that module's first [DNeeds] span if it
+    declares one, otherwise its own header span ([entry_span] for the entry
+    module, the [DMod]'s own declaration span for a nested one) — and (b)
+    whether that span is a HEADER (no existing [DNeeds]) as opposed to an
+    existing [DNeeds] line, which [cap_ceiling_fix_indent] below needs to
+    pick the right indent for an inserted `needs` line.
+
+    Mirrors [Typecheck.check_module_needs]'s [cap_qname_prefix] accumulation
+    (empty at the entry level) so a violation on a doubly-nested module
+    resolves to the SAME qualified key the ceiling matches attribution
+    against. *)
+let cap_ceiling_module_spans ~entry_owner ~entry_span
+    (decls : March_ast.Ast.decl list)
+    : (string * March_ast.Ast.span) list * (string * bool) list =
+  let first_needs_span decls =
+    List.find_map (function
+        | March_ast.Ast.DNeeds (_, sp) -> Some sp
+        | _ -> None)
+      decls
+  in
+  (* A module loaded from a separate file via MARCH_LIB_PATH is synthesized
+     as [DMod (..., dummy_span)] (bin/main.ml's lib-path loader never had a
+     real `mod ... end` span to give it) — its OWN header span is useless.
+     Fall back to the first inner declaration that carries a real span, so
+     the ceiling still has somewhere concrete to point at instead of
+     [dummy_span]'s (file="<none>", line=0), which downstream indexes
+     straight into a negative line number. *)
+  let rec first_real_decl_span decls =
+    match decls with
+    | [] -> None
+    | d :: rest ->
+      let sp =
+        match (d : March_ast.Ast.decl) with
+        | March_ast.Ast.DFn (_, sp) | March_ast.Ast.DLet (_, _, sp)
+        | March_ast.Ast.DType (_, _, _, _, sp)
+        | March_ast.Ast.DAlwaysLinearType (_, _, _, _, sp)
+        | March_ast.Ast.DActor (_, _, _, sp) | March_ast.Ast.DProtocol (_, _, sp)
+        | March_ast.Ast.DMod (_, _, _, sp)
+        | March_ast.Ast.DSig (_, _, sp) | March_ast.Ast.DInterface (_, sp)
+        | March_ast.Ast.DImpl (_, sp)
+        | March_ast.Ast.DExtern (_, sp) | March_ast.Ast.DUse (_, sp)
+        | March_ast.Ast.DAlias (_, sp)
+        | March_ast.Ast.DNeeds (_, sp) | March_ast.Ast.DProofCap (_, sp)
+        | March_ast.Ast.DTransitions (_, _, sp)
+        | March_ast.Ast.DApp (_, sp) | March_ast.Ast.DDeriving (_, _, sp)
+        | March_ast.Ast.DSatisfy (_, _, sp)
+        | March_ast.Ast.DTest (_, sp) | March_ast.Ast.DDescribe (_, _, sp)
+        | March_ast.Ast.DSetup (_, sp)
+        | March_ast.Ast.DSetupAll (_, sp) | March_ast.Ast.DOpts (_, sp) -> sp
+      in
+      if sp <> March_ast.Ast.dummy_span then Some sp
+      else first_real_decl_span rest
+  in
+  let span_and_is_header ~header decls =
+    match first_needs_span decls with
+    | Some sp -> (sp, false)
+    | None ->
+      let header =
+        if header = March_ast.Ast.dummy_span then
+          match first_real_decl_span decls with
+          | Some sp -> sp
+          | None -> header
+        else header
+      in
+      (header, true)
+  in
+  let spans = ref [] and is_header = ref [] in
+  let add name sp hdr =
+    spans := (name, sp) :: !spans;
+    is_header := (name, hdr) :: !is_header
+  in
+  let (entry_sp, entry_hdr) = span_and_is_header ~header:entry_span decls in
+  add entry_owner entry_sp entry_hdr;
+  let rec walk ~prefix decls =
+    List.iter (function
+        | March_ast.Ast.DMod (n, _, inner, decl_span) ->
+          let qname = if prefix = "" then n.March_ast.Ast.txt
+                      else prefix ^ "." ^ n.March_ast.Ast.txt in
+          (* [decl_span], not [n.span] — [n] is only the module NAME token
+             ("Dep" in "mod Dep do"), whose column is well past the line's
+             actual leading indentation.  [decl_span] (parser.mly:
+             [mk_span ($loc)] over the whole [mod ... end] production)
+             starts at the `mod` keyword itself, which IS the line's
+             indentation. *)
+          let (sp, hdr) = span_and_is_header ~header:decl_span inner in
+          add qname sp hdr;
+          if qname <> n.March_ast.Ast.txt then add n.March_ast.Ast.txt sp hdr;
+          walk ~prefix:qname inner
+        | _ -> ())
+      decls
+  in
+  walk ~prefix:"" decls;
+  (!spans, !is_header)
+
+(** [cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header span] is the
+    column an inserted `needs` line for [span]'s module should start at:
+    the ACTUAL leading whitespace of [span]'s own source line (read from
+    [src], or from [read_file span.file] when the span points into a
+    different file than the one being compiled — a sibling module pulled in
+    via [MARCH_LIB_PATH]) when [span] is an existing [DNeeds] line (a new
+    line is a peer of it, same column); that plus 2 when [span] is a module
+    HEADER instead — the module's body, where the fix lands, is indented one
+    step deeper than its own header line. (This codebase's own convention;
+    March is not indentation-sensitive, so a wrong answer here is cosmetic,
+    never a build break — confirmed by [test_ceiling_violation_carries_a_span_and_a_fix],
+    which does not assert on indent width.) Reading the source line directly,
+    rather than trusting a token's [start_col], is deliberate: the natural
+    candidate span for a header ([DMod]'s NAME token) sits well past the
+    line's real indentation, which is exactly the bug this function fixes. *)
+let cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header
+    (span : March_ast.Ast.span) : int =
+  let file_src =
+    if span.March_ast.Ast.file = filename || span.March_ast.Ast.file = "" then src
+    else (try read_file span.March_ast.Ast.file with Sys_error _ -> src)
+  in
+  let lines = String.split_on_char '\n' file_src in
+  let idx = span.March_ast.Ast.start_line - 1 in
+  let base =
+    (* [List.nth_opt] RAISES [Invalid_argument] on a negative index rather
+       than returning [None] — a [dummy_span] (start_line = 0) gives
+       idx = -1, which would otherwise crash the compiler here instead of
+       degrading gracefully. *)
+    match if idx < 0 then None else List.nth_opt lines idx with
+    | None -> 0
+    | Some line ->
+      let n = String.length line in
+      let rec count i = if i < n && line.[i] = ' ' then count (i + 1) else i in
+      count 0
+  in
+  if is_header then base + 2 else base
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -3040,16 +3238,84 @@ let compile filename =
          typecheck_env.March_typecheck.Typecheck.mod_needs)
         :: typecheck_env.March_typecheck.Typecheck.module_caps
       in
+      let (module_spans, module_is_header) = cap_ceiling_module_spans
+          ~entry_owner:pre_opt_tir.March_tir.Tir.tm_name
+          ~entry_span:desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+          desugared.March_ast.Ast.mod_decls
+      in
       let violations =
-        March_caps.Cap_ceiling.check ~module_caps ~attribution:cap_attrib
-          ~caps:flat_caps
+        March_caps.Cap_ceiling.check ~module_caps ~module_spans
+          ~attribution:cap_attrib ~caps:flat_caps
       in
       if violations <> [] then begin
+        (* Undeclared violations carry a span and a name to their own owning
+           module (from [module_spans] above), so they render through the
+           SAME diagnostic pipeline as every other capability error — with
+           a real span, a source excerpt, and a machine-applicable [FInsert]
+           fix — rather than the bespoke, file-less
+           "-- CAPABILITY CEILING --" block this replaces (see the same
+           [vectorize_diags] pattern just below for the render precedent: a
+           fresh [Err.ctx], not the shared typecheck [errors], since this
+           runs after that context has already been drained and printed).
+
+           This does NOT yet make the violation visible to the LSP or
+           applicable by `forge fix` — this only runs on the [--compile]
+           path, which `--check`/`--check-json` (forge fix's only input,
+           see [run_check_cmd]) never reaches. The fix payload is real and
+           ready; it has no consumer until the ceiling also runs under
+           [--check] (tracked in
+           specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md).
+
+           [Unattributed] violations name no module and therefore have no
+           span to point at — the ceiling's own [.mli] documents why this
+           is a fail-closed case rather than a false-positive risk to guard
+           against here — so those stay on the original bespoke line. *)
+        let ctx = March_errors.Errors.create () in
         List.iter
           (fun v ->
-             Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
-               (March_caps.Cap_ceiling.describe v))
+             match v with
+             | March_caps.Cap_ceiling.Undeclared { cap = _; owner = _; span }
+               when span = March_ast.Ast.dummy_span ->
+               (* No real span was found ANYWHERE for this violation's
+                  owning module — every inner declaration was itself
+                  span-less. Rendering through the normal diagnostic
+                  pipeline with [dummy_span]'s file ("<none>") would raise
+                  [Sys_error] on read, silently fall back to the ENTRY
+                  file's source, and print line 0 of the WRONG file. Fail
+                  back to the bespoke, file-less rendering instead — never
+                  a crash, never a diagnostic pointing at unrelated code. *)
+               Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
+                 (March_caps.Cap_ceiling.describe v)
+             | March_caps.Cap_ceiling.Undeclared { cap; owner; span } ->
+               let is_header =
+                 match List.assoc_opt owner module_is_header with
+                 | Some h -> h | None -> true
+               in
+               let indent =
+                 cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header span
+               in
+               March_errors.Errors.error_with_fix ctx ~span
+                 ~code:("cap_ceiling:" ^ cap)
+                 ~fix:(March_errors.Errors.FInsert {
+                   after_line = span.March_ast.Ast.start_line;
+                   text = String.make indent ' ' ^ "needs " ^ cap })
+                 (Printf.sprintf
+                    "module `%s` uses `%s` but does not declare `needs %s`.\n\
+                     help: add `needs %s` to the module body."
+                    owner cap cap cap)
+             | March_caps.Cap_ceiling.Unattributed _ ->
+               Printf.eprintf "-- CAPABILITY CEILING --\n%s\n\n"
+                 (March_caps.Cap_ceiling.describe v))
           violations;
+        List.iter (fun (d : March_errors.Errors.diagnostic) ->
+            let f = d.span.March_ast.Ast.file in
+            let (d_src, d_file) =
+              if f = filename || f = "" || f = "<unknown>" then (src, filename)
+              else (try read_file f with Sys_error _ -> src), f
+            in
+            Printf.eprintf "%s\n\n\n"
+              (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
+          ) (March_errors.Errors.sorted ctx);
         Printf.eprintf
           "%d capability ceiling violation(s). Every module's emitted code \
            must stay within its own `needs`.\n\

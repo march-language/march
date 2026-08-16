@@ -1,0 +1,33 @@
+-- Vault typed handles, accept side. A `Vault(v)` handle is used at exactly
+-- the element type it was written at, across every operation in the module
+-- that takes a handle: set/get/update/put_new/set_ttl/drop/has/size/keys/all.
+-- `keys` is `List(String)` whatever the key expression was, because keys are
+-- stringified on insert. Reject companion: reject/t178 (store Int, read Pid).
+mod M do
+  needs IO.Mut
+
+  fn main(_m : Cap(IO.Mut)) : Int do
+    let names = Vault.new("names")
+    Vault.set(names, "a", "alice")
+    Vault.set_ttl(names, "b", "bob", 60)
+    Vault.update(names, "a", fn s -> s ++ "!")
+    let claimed = Vault.put_new(names, "c", "carol")
+    let first = match Vault.get(names, "a") do
+      Some(s) -> String.byte_size(s)
+      None    -> 0
+    end
+    let ks : List(String) = Vault.keys(names)
+    Vault.drop(names, "b")
+
+    -- A separate table at a different element type, in the same scope.
+    let hits = Vault.new("hits")
+    let n = Vault.incr(hits, "page", 1)
+
+    let recent = Vault.new("recent")
+    Vault.push_capped(recent, "log", 7, 10)
+
+    first + n + List.length(ks) + Vault.size(names)
+      + (if claimed do 1 else 0 end)
+      + List.length(Vault.all(recent))
+  end
+end

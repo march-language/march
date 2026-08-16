@@ -144,6 +144,111 @@ kill(counter)
 
 After `kill`, `is_alive(counter)` returns `false` and further `send`s return `None` (interpreted — see the dead-`send` note above).
 
+## Monitoring Actor Death
+
+`monitor(watcher, target)` delivers a control-plane `Down(ref, target_pid, reason)`
+message to `watcher` when `target` terminates. The local reasons are `Normal`,
+`Killed`, and `Crash(message)`. Match the three fields in a handler rather than
+treating a monitor as a count of dead actors:
+
+```march
+actor Watcher do
+  state { seen : Int }
+  init  { seen: 0 }
+
+  on CheckDown() do
+    match receive() do
+      Down(_, target, Normal) ->
+        println("stopped " ++ to_string(target))
+        state
+      Down(_, target, Killed) ->
+        println("killed " ++ to_string(target))
+        state
+      Down(_, _, Crash(error)) ->
+        println("crashed " ++ error)
+        state
+      _ ->
+        println("unexpected monitor message")
+        state
+    end
+  end
+end
+```
+
+Monitor `Down` messages are control-plane delivery: they bypass the target
+watcher's mailbox limit, so a full bounded mailbox cannot lose the death
+notification. Local monitoring has the same payload and reason vocabulary on
+the interpreted and compiled backends; the distributed monitor protocol uses
+the same `Down(ref, target_pid, reason)` shape (and additionally has `NodeDown`).
+
+---
+
+## Named Actors
+
+A Pid is not stable. When a supervisor restarts a crashed child, the replacement gets a
+*new* Pid, and everyone still holding the old one is talking to a corpse. The named
+registry hands out a stable string name instead:
+
+```march
+mod Main do
+  needs IO.Console
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let pid = spawn(Counter)
+    println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
+    println("names: " ++ int_to_string(List.length(Actor.registered())))
+
+    -- Resolve the name once, then reuse the Pid for the whole burst.
+    match Actor.whereis("counter") do
+      None -> println("counter is unavailable right now — retry")
+      Some(here) ->
+        let _ = send(here, Bump())
+        let _ = send(here, Bump())
+        println("sent")
+    end
+
+    println("unregistered: " ++ bool_to_string(Actor.unregister("counter")))
+  end
+end
+```
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `Actor.register(pid, name)` | `Bool` | Bind `name` to `pid`. `false` if `pid` is already dead, or if `name` is currently held by a *live* actor. |
+| `Actor.unregister(name)` | `Bool` | Release the name. `false` if it was not registered. |
+| `Actor.whereis(name)` | `Option(Pid)` | The actor currently holding `name`. |
+| `Actor.registered()` | `List(String)` | Every name currently bound; order unspecified. |
+
+A name is released automatically when its actor dies, so a name never resolves to a dead
+Pid and you do not have to unregister from a crash path.
+
+`whereis` returns an `Option` because a name can be *momentarily* unresolvable. While a
+supervised child is being respawned — in particular while it waits out its restart backoff
+— the old actor is gone and its replacement does not exist yet. `None` there is the honest
+signal that the service is mid-restart, not that the name was never registered; retry
+rather than treating it as a permanent error.
+
+Names survive supervisor restarts, on **both** backends: the crashing child's names are
+carried forward and re-established on its replacement, so a holder outside the supervision
+tree keeps reaching whichever incarnation is current without ever learning the new Pid.
+**Hold names, not Pids, across a restart boundary.** This includes a live sibling killed by
+a `one_for_all` / `rest_for_one` batch restart, not only the child that actually crashed.
+If a *different* live actor claims the name during the restart window, the carried-forward
+registration is dropped for that name rather than stolen back. Unsupervised actors are
+unaffected — their names are simply dropped on death.
+
+On a hot path, resolve a name **once and cache the Pid** instead of calling `whereis` per
+message. Concurrent lookups of the *same* name all bump the refcount on the one stored
+value, and that contention — not the registry's table lock — is what bounds same-name
+resolution; `send` itself takes no registry lock. Re-resolve when a send fails or a monitor
+fires, not on every message.
+
 ---
 
 ## Capability-Based Messaging
@@ -574,6 +679,7 @@ under the interpreter, but broken or unreliable compiled today.
 | `receive()` | `→ Msg` | both | Pop the next mailbox message (only the first `receive()` per handler may block) |
 | `kill(pid)` | `→ ()` | both | Stop an actor |
 | `is_alive(pid)` | `→ Bool` | both | Check if actor is running |
+| `monitor(watcher, target)` | `→ Int` | both | Deliver `Down(ref, target_pid, reason)` on target exit; local reasons are `Normal`, `Killed`, and `Crash(String)` |
 | `self()` | `→ Pid` | both | Current actor's Pid |
 | `run_until_idle()` | `→ ()` | both | Drain the scheduler to a fixed point (interpreter / tests) |
 | `get_cap(pid)` | `→ Option(Cap(Msg))` | interpreter-only | Obtain an epoch-tagged capability |
@@ -593,6 +699,7 @@ The concurrency and distribution docs form a journey — actors are the foundati
 - [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — fault-tolerant hierarchies with automatic restart, ending in a capstone crash-tolerant job processor.
 - [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — `pmap` / `pmap_n` for data-parallel work on the same scheduler.
 - [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming pipelines when a fast producer outruns a slow consumer.
+- [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/) — the practical guide to mailbox limits, load shedding, deadlines, and restart backoff working together.
 - [Session Types]({{ site.baseurl }}/docs/session-types/) — typed two-party protocols whose message order the compiler enforces.
 - [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised actor app from one node to a cluster with cross-node calls.
 - [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) — deploy new code to a running server without restarting; actors migrate their state on the fly.

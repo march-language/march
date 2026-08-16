@@ -1243,6 +1243,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_env_ref       = ref [];
   ai_state         = st;
   ai_alive         = alive;
+  ai_terminal_reason = March_eval.Eval.Normal;
   ai_monitors      = [];
   ai_links         = [];
   ai_mailbox       = Queue.create ();
@@ -1814,6 +1815,21 @@ let has_error_with ctx sub =
     done;
     !found
   ) ctx.March_errors.Errors.diagnostics
+
+(** Counts error diagnostics whose message contains [sub] (case-insensitive). *)
+let count_errors_with ctx sub =
+  let sub_lo = String.lowercase_ascii sub in
+  List.length (List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error &&
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let sub_len = String.length sub_lo in
+    let m_len   = String.length m in
+    let found   = ref false in
+    for i = 0 to m_len - sub_len do
+      if String.sub m i sub_len = sub_lo then found := true
+    done;
+    !found
+  ) ctx.March_errors.Errors.diagnostics)
 
 (** Returns true if ANY hint diagnostic is present. *)
 let has_hints ctx =

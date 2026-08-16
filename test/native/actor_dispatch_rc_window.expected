@@ -1,0 +1,3 @@
+victim is multiply owned: true
+rc inside handler matches rc outside: true
+handler observed something: true

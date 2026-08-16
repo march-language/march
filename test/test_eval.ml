@@ -3469,7 +3469,10 @@ let test_actor_compile_supervisor_registers () =
   end|} in
   (* Supervisor spawning should emit march_register_supervisor *)
   Alcotest.(check bool) "march_register_supervisor in IR" true
-    (ir_contains ir "march_register_supervisor")
+    (ir_contains ir "march_register_supervisor");
+  Alcotest.(check bool)
+    "supervised child is prepared without scheduling before registration" true
+    (ir_contains ir "call ptr @march_spawn_supervised")
 
 (** Compiled monitor: monitor call emitted. *)
 let test_actor_compile_monitor_emitted () =

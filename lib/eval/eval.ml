@@ -124,12 +124,15 @@ and env = (string * value) list
 (* Actor runtime                                                       *)
 (* ------------------------------------------------------------------ *)
 
+type monitor_down_reason = Normal | Killed | Crash of string
+
 type actor_inst = {
   ai_name    : string;           (** Actor type name, e.g. "Counter" *)
   ai_def     : actor_def;
   ai_env_ref : env ref;         (** Module environment at spawn time *)
   mutable ai_state    : value;
   mutable ai_alive    : bool;
+  mutable ai_terminal_reason : monitor_down_reason;
   (* Phase 1: supervision infrastructure *)
   mutable ai_monitors : (int * int) list;   (** (monitor_ref, watcher_pid) pairs *)
   mutable ai_links    : int list;            (** bidirectionally linked pids *)
@@ -161,6 +164,60 @@ let actor_defs_tbl : (string, actor_def * env ref) Hashtbl.t = Hashtbl.create 8
 
 (** Live actor instances — reset per module eval. *)
 let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
+
+(** Named registry (Task 4): name -> pid, mirroring the runtime's
+    march_actor_register/unregister/whereis/registered C API. Reset per
+    module eval, same lifecycle as [actor_registry]. Semantics matched to
+    the C side: register fails if the name is held by a LIVE actor or if
+    the registering actor is itself dead; whereis re-checks [ai_alive] at
+    lookup time (a stale entry for a dead actor resolves to None) rather
+    than requiring proactive cleanup on death. *)
+let named_registry  : (string, int) Hashtbl.t = Hashtbl.create 16
+
+(** Registry carry-forward stash: pid of a dying actor -> the names it held
+    in [named_registry] at the moment of death. Mirrors the runtime's
+    [march_actor_meta.reg_names_pending] (see
+    runtime/march_runtime.c:capture_reg_names_pending), keyed by pid rather
+    than hung off a meta record because the interpreter has no per-actor
+    meta that outlives the instance — pids are handed out monotonically from
+    [next_pid] and never reused, so a pid key is as stable as the C side's
+    never-freed meta.
+
+    Populated by [capture_reg_names_pending] and consumed exactly once by
+    [spawn_child_actor] when it replaces that pid. An entry left behind
+    (actor died supervised but the supervisor gave up rather than
+    respawning, e.g. max_restarts exceeded) is inert: nothing reads it, and
+    it dies with the table on the next module eval. *)
+let reg_names_pending : (int, string list) Hashtbl.t = Hashtbl.create 8
+
+(** Snapshot [pid]'s registered names into [reg_names_pending] so a restart
+    can re-establish them on the replacement, before [crash_actor] drops
+    them from [named_registry].
+
+    Two call sites, matching the runtime's two:
+      - [crash_actor], for an actor dying with [ai_supervisor] still set;
+      - [one_for_all_restart] / [rest_for_one_restart], explicitly, for each
+        LIVE SIBLING they are about to kill and respawn. Those two set
+        [ci.ai_supervisor <- None] before crashing the sibling — solely to
+        stop [crash_actor] re-entering [notify_supervisor] for it — so by
+        the time [crash_actor] runs, its own supervisor gate is already
+        false. Gating capture on the supervisor field ALONE therefore drops
+        every batch-restarted sibling's names, even though the sibling is
+        unconditionally respawned a few lines later. That exact bug shipped
+        on the compiled side and was caught in review; test/native/
+        actor_registry_restart_batch.march is its regression test.
+
+    Guards an existing stash rather than overwriting it, mirroring the C
+    side: no current caller can run twice for one pid, but a future one
+    doing so should not lose the first snapshot. *)
+let capture_reg_names_pending (pid : int) : unit =
+  if not (Hashtbl.mem reg_names_pending pid) then begin
+    let names =
+      Hashtbl.fold (fun name owner acc -> if owner = pid then name :: acc else acc)
+        named_registry []
+    in
+    if names <> [] then Hashtbl.replace reg_names_pending pid names
+  end
 
 (* ------------------------------------------------------------------ *)
 (* Dynamic Supervisor state                                            *)
@@ -902,6 +959,7 @@ type actor_inst_snapshot = {
   ais_name  : string;
   ais_state : value;
   ais_alive : bool;
+  ais_terminal_reason : monitor_down_reason;
 }
 
 type actor_state_snapshot = {
@@ -967,7 +1025,8 @@ let snapshot_actors () : actor_state_snapshot =
   let instances = Hashtbl.fold (fun pid (inst : actor_inst) acc ->
       let snap = { ais_name  = inst.ai_name;
                    ais_state = inst.ai_state;
-                   ais_alive = inst.ai_alive } in
+                   ais_alive = inst.ai_alive;
+                   ais_terminal_reason = inst.ai_terminal_reason } in
       (pid, snap) :: acc
     ) actor_registry [] in
   { ass_defs = defs; ass_instances = instances; ass_next_pid = !next_pid }
@@ -988,6 +1047,7 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_env_ref  = env_r;
                      ai_state    = s.ais_state;
                      ai_alive    = s.ais_alive;
+                     ai_terminal_reason = s.ais_terminal_reason;
                      ai_monitors = [];
                      ai_links    = [];
                      ai_mailbox  = Queue.create ();
@@ -1711,6 +1771,14 @@ let list_actors () =
 (* Phase 1: Monitors, Links, and crash_actor (must precede base_env)  *)
 (* ------------------------------------------------------------------ *)
 
+let monitor_down_value = function
+  | Normal -> VCon ("Normal", [])
+  | Killed -> VCon ("Killed", [])
+  | Crash msg -> VCon ("Crash", [VString msg])
+
+let monitor_down_message mon_ref target_pid reason =
+  VCon ("Down", [VInt mon_ref; VPid target_pid; monitor_down_value reason])
+
 let fresh_monitor_id () =
   let id = !next_monitor_id in
   next_monitor_id := id + 1;
@@ -2168,6 +2236,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_name = child_actor_name; ai_def = child_def;
       ai_env_ref = child_env_ref;
       ai_state = child_init_state; ai_alive = true;
+      ai_terminal_reason = Normal;
       ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
@@ -2185,6 +2254,31 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
           Hashtbl.remove pid_to_registry_name old_pid;
           Hashtbl.replace process_registry name child_pid;
           Hashtbl.replace pid_to_registry_name child_pid name));
+    (* Carry the crashed incarnation's [named_registry] names forward onto
+       the replacement (mirrors march_respawn_child's reg_names_pending
+       consume). Each name is decided individually by the same "first live
+       claim wins" rule [actor_register] enforces: if some OTHER live actor
+       claimed that exact name during the restart window, the carried
+       registration is DROPPED rather than stealing it back — that is the
+       registry's normal contract, not an error, so it isn't reported. *)
+    (match crashed_pid with
+     | None -> ()
+     | Some old_pid ->
+       (match Hashtbl.find_opt reg_names_pending old_pid with
+        | None -> ()
+        | Some names ->
+          Hashtbl.remove reg_names_pending old_pid;
+          List.iter (fun name ->
+            let held_by_live_other =
+              match Hashtbl.find_opt named_registry name with
+              | Some owner when owner <> child_pid ->
+                (match Hashtbl.find_opt actor_registry owner with
+                 | Some inst -> inst.ai_alive
+                 | None      -> false)
+              | _ -> false
+            in
+            if not held_by_live_other then
+              Hashtbl.replace named_registry name child_pid) names));
     child_pid
 
 (** Restart a supervisor's crashed child under one_for_one strategy.
@@ -2267,6 +2361,10 @@ and one_for_all_restart (sup_pid : int) (_crashed_pid : int) : unit =
          List.iter (fun cpid ->
            match Hashtbl.find_opt actor_registry cpid with
            | Some ci when ci.ai_alive ->
+             (* Capture BEFORE the detach below: clearing [ai_supervisor]
+                makes crash_actor's own capture gate false, and this sibling
+                is unconditionally respawned a few lines down. *)
+             capture_reg_names_pending cpid;
              ci.ai_supervisor <- None;  (* detach before crashing to prevent re-entry *)
              crash_actor cpid "one_for_all restart"
            | _ -> ()
@@ -2336,6 +2434,10 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
              if cpid >= 0 then
                (match Hashtbl.find_opt actor_registry cpid with
                 | Some ci when ci.ai_alive ->
+                  (* Same reason as one_for_all_restart's identical call:
+                     capture before the detach, or this sibling's names are
+                     lost even though it is respawned below. *)
+                  capture_reg_names_pending cpid;
                   ci.ai_supervisor <- None;
                   crash_actor cpid "rest_for_one restart"
                 | _ -> ())
@@ -2411,12 +2513,14 @@ and notify_supervisor (sup_pid : int) (crashed_pid : int) : unit =
 
 (** Crash an actor: mark dead, deliver Down to monitors, propagate to links,
     and notify any supervising actor for restart. *)
-and crash_actor (pid : int) (reason : string) : unit =
+and crash_actor_with_reason (pid : int) (reason : string)
+    (down_reason : monitor_down_reason) : unit =
   match Hashtbl.find_opt actor_registry pid with
   | None -> ()
   | Some inst when not inst.ai_alive -> ()
   | Some inst ->
     let supervisor = inst.ai_supervisor in
+    inst.ai_terminal_reason <- down_reason;
     inst.ai_alive <- false;
     (* Phase 6a: run resource cleanup in reverse acquisition order.
        This runs for the actor being crashed directly.
@@ -2440,11 +2544,33 @@ and crash_actor (pid : int) (reason : string) : unit =
           pid (Printexc.to_string exn)
     ) (List.rev inst.ai_linear_values);
     inst.ai_linear_values <- [];  (* clear to prevent re-run on double-crash *)
+    (* Task 5: retire this actor's registered names from [named_registry]
+       BEFORE any Down notification is delivered below (mirrors the
+       runtime's do_actor_death -> registry_retire_actor placement, and the
+       same reasoning: a watcher woken by a Down that immediately calls
+       Actor.whereis/Actor.registered must not see the name still mapped to
+       this dead pid). Compare-and-drop by pid, not by name alone, so a name
+       already reassigned to a different live pid (stale-overwrite) is left
+       untouched.
+
+       Task 6 parity: snapshot the names FIRST if this actor is supervised,
+       so a restart can re-establish them on the replacement. Unsupervised
+       actors' names are simply dropped, as before. Siblings killed by
+       one_for_all / rest_for_one have already had their [ai_supervisor]
+       cleared by the time they get here, which is why those two strategies
+       call [capture_reg_names_pending] themselves before clearing it. *)
+    if supervisor <> None then capture_reg_names_pending pid;
+    let dead_names =
+      Hashtbl.fold
+        (fun name owner acc -> if owner = pid then name :: acc else acc)
+        named_registry []
+    in
+    List.iter (Hashtbl.remove named_registry) dead_names;
     (* Deliver Down(mon_ref, reason) to each watcher's mailbox *)
     List.iter (fun (mon_ref, watcher_pid) ->
       match Hashtbl.find_opt actor_registry watcher_pid with
       | Some watcher when watcher.ai_alive ->
-        Queue.push (VCon ("Down", [VInt mon_ref; VString reason])) watcher.ai_mailbox
+        Queue.push (monitor_down_message mon_ref pid down_reason) watcher.ai_mailbox
       | _ -> ()
     ) inst.ai_monitors;
     (* Propagate crash to all linked actors *)
@@ -2463,6 +2589,9 @@ and crash_actor (pid : int) (reason : string) : unit =
     (match supervisor with
      | Some sup_pid -> notify_supervisor sup_pid pid
      | None -> ())
+
+and crash_actor (pid : int) (reason : string) : unit =
+  crash_actor_with_reason pid reason (Crash reason)
 
 (** Task 9: interpreter-side counter for messages dropped by bounded-mailbox
     overflow policies. Mirrors the compiled runtime's
@@ -2505,11 +2634,15 @@ let monitor_actor ~watcher_pid ~target_pid : int =
   (match Hashtbl.find_opt actor_registry target_pid with
    | Some inst when inst.ai_alive ->
      inst.ai_monitors <- (mon_ref, watcher_pid) :: inst.ai_monitors
-   | _ ->
+   | target ->
      (* Target already dead — immediately deliver Down to watcher *)
+     let reason = match target with
+       | Some inst -> inst.ai_terminal_reason
+       | None -> Normal
+     in
      (match Hashtbl.find_opt actor_registry watcher_pid with
       | Some watcher when watcher.ai_alive ->
-        Queue.push (VCon ("Down", [VInt mon_ref; VString "noproc"])) watcher.ai_mailbox
+        Queue.push (monitor_down_message mon_ref target_pid reason) watcher.ai_mailbox
       | _ -> ()));
   mon_ref
 
@@ -4270,7 +4403,7 @@ let base_env : env =
         | _ -> eval_error "negate: expected number"))
     (* Actor builtins — operate on the global actor_registry *)
   ; ("kill", VBuiltin ("kill", function
-        | [VPid pid] -> crash_actor pid "killed"; VUnit
+        | [VPid pid] -> crash_actor_with_reason pid "killed" Killed; VUnit
         | _ -> eval_error "kill: expected Pid"))
   ; ("is_alive", VBuiltin ("is_alive", function
         | [VPid pid] ->
@@ -4291,6 +4424,41 @@ let base_env : env =
   ; ("link", VBuiltin ("link", function
         | [VPid a; VPid b] -> link_actors a b; VUnit
         | _ -> eval_error "link: expected two pids"))
+    (* Named registry (Task 4) — interpreter parity with
+       march_actor_register/unregister/whereis/registered. [named_registry]
+       maps name -> pid, mirroring the runtime's forward Vault table. *)
+  ; ("actor_register", VBuiltin ("actor_register", function
+        | [VPid pid; VString name] ->
+          let live pid' = match Hashtbl.find_opt actor_registry pid' with
+            | Some inst -> inst.ai_alive
+            | None      -> false
+          in
+          if not (live pid) then VBool false
+          else
+            (match Hashtbl.find_opt named_registry name with
+             | Some existing when live existing -> VBool false  (* held by a live actor *)
+             | _ -> Hashtbl.replace named_registry name pid; VBool true)
+        | _ -> eval_error "actor_register: expected (Pid, String)"))
+  ; ("actor_unregister", VBuiltin ("actor_unregister", function
+        | [VString name] ->
+          if Hashtbl.mem named_registry name then begin
+            Hashtbl.remove named_registry name; VBool true
+          end else VBool false
+        | _ -> eval_error "actor_unregister: expected String"))
+  ; ("actor_whereis", VBuiltin ("actor_whereis", function
+        | [VString name] ->
+          (match Hashtbl.find_opt named_registry name with
+           | Some pid ->
+             (match Hashtbl.find_opt actor_registry pid with
+              | Some inst when inst.ai_alive -> VCon ("Some", [VPid pid])
+              | _ -> VCon ("None", []))
+           | None -> VCon ("None", []))
+        | _ -> eval_error "actor_whereis: expected String"))
+  ; ("actor_registered", VBuiltin ("actor_registered", function
+        | [] ->
+          Hashtbl.fold (fun name _pid acc -> VString name :: acc) named_registry []
+          |> List.fold_left (fun acc v -> VCon ("Cons", [v; acc])) (VCon ("Nil", []))
+        | _ -> eval_error "actor_registered: expected unit"))
   ; ("mailbox_size", VBuiltin ("mailbox_size", function
         | [VPid pid] ->
           (match Hashtbl.find_opt actor_registry pid with
@@ -9677,6 +9845,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_name = child_actor_name; ai_def = child_def;
                  ai_env_ref = child_env_ref;
                  ai_state = child_init_state; ai_alive = true;
+                 ai_terminal_reason = Normal;
                  ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
@@ -9709,6 +9878,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
        in
        let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
                     ai_state    = init_state; ai_alive = true;
+                    ai_terminal_reason = Normal;
                     ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
@@ -9960,6 +10130,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear task_registry;
   next_task_id := 0;
   Hashtbl.clear actor_registry;
+  Hashtbl.clear named_registry;
+  Hashtbl.clear reg_names_pending;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
@@ -10573,9 +10745,15 @@ let shutdown_actor_pid (pid : int) : unit =
           end
       end
     end;
-    (* Force-kill the actor *)
+    (* Force-kill the actor. Deliberately bypasses crash_actor (and so its
+       Task 5 named_registry retire mirror too): this is process-teardown-
+       only, called from graceful_shutdown as the app exits, with no
+       watcher left to observe a stale name and no further named_registry
+       lookups expected afterward — not an oversight. *)
     (match Hashtbl.find_opt actor_registry pid with
-     | Some inst2 -> inst2.ai_alive <- false
+     | Some inst2 ->
+       inst2.ai_terminal_reason <- Normal;
+       inst2.ai_alive <- false
      | None -> ())
 
 (** Graceful shutdown: stop all app-level children in reverse spawn order. *)
@@ -10618,6 +10796,7 @@ let spawn_from_spec (spec : value) : unit =
               let inst = {
                 ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
                 ai_state = init_state; ai_alive = true;
+                ai_terminal_reason = Normal;
                 ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = []; ai_linear_values = [];
@@ -11146,6 +11325,8 @@ let eval_module_env (m : module_) : env =
   Hashtbl.clear module_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
+  Hashtbl.clear named_registry;
+  Hashtbl.clear reg_names_pending;
   next_pid := 0;
   dropped_messages_count := 0;
   Hashtbl.clear task_registry;

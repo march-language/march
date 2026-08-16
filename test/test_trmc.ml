@@ -365,7 +365,50 @@ let test_actor_msg_type_is_refused () =
       fn_body = body; fn_kind = Tir.FnNormal }
   in
   Alcotest.(check bool) "actor message type is not transformed"
-    true (Trmc.transform_fn fd = None)
+    true (Trmc.transform_fn [] fd = None)
+
+(* The actor-STRUCT half of [crosses_actor_boundary] is structural: it asks
+   [Repr.is_actor_struct_type] whether field 0 is literally "$d_dispatch", a
+   name only lower_actor.ml can construct.  It used to be a "_Actor" name-suffix
+   guess, which false-positived on a user type coincidentally named [Tree_Actor]
+   and silently cost it TRMC.  (In llvm_emit's EReuse arm the same false
+   positive was outright unsound, which is why the structural predicate exists.)
+
+   These two pin both directions, because a gate is only correct if it also
+   still says NO to the thing it is guarding. *)
+let actor_struct_fixture ~type_defs ~ty_name =
+  let ty = Tir.TCon (ty_name, []) in
+  let self = v "f" (Tir.TFn ([ty], ty)) in
+  let t = v "t" ty and h = v "h" Tir.TInt in
+  let body =
+    Tir.ELet (t, Tir.EApp (self, [Tir.AVar (v "xs" ty)]),
+              Tir.EAlloc (Tir.TCon (ty_name ^ ".Node", []),
+                          [Tir.AVar h; Tir.AVar t]))
+  in
+  let fd =
+    { Tir.fn_name = "f"; fn_params = [v "xs" ty]; fn_ret_ty = ty;
+      fn_body = body; fn_kind = Tir.FnNormal }
+  in
+  (type_defs, fd)
+
+(* A user type merely NAMED [Tree_Actor] is not an actor: no "$d_dispatch". *)
+let test_user_type_named_actor_is_transformed () =
+  let type_defs, fd =
+    actor_struct_fixture ~ty_name:"Tree_Actor"
+      ~type_defs:[Tir.TDRecord ("Tree_Actor", [("left", Tir.TInt)])]
+  in
+  Alcotest.(check bool) "a user type named Tree_Actor still gets TRMC"
+    true (Trmc.transform_fn type_defs fd <> None)
+
+(* A real actor struct — field 0 is "$d_dispatch" — must still be refused. *)
+let test_real_actor_struct_is_not_transformed () =
+  let type_defs, fd =
+    actor_struct_fixture ~ty_name:"Counter_Actor"
+      ~type_defs:[Tir.TDRecord ("Counter_Actor",
+                                [("$d_dispatch", Tir.TInt); ("n", Tir.TInt)])]
+  in
+  Alcotest.(check bool) "a genuine actor struct is not transformed"
+    true (Trmc.transform_fn type_defs fd = None)
 
 (* REPL/JIT must apply the same transform as the compiled path, or a function
    behaves one way in the REPL and another when compiled.  repl_jit may re-lower
@@ -490,6 +533,8 @@ let suites = [
     Alcotest.test_case "normal nested fn is not a jp"   `Quick test_normal_nested_fn_is_not_a_join_point;
     Alcotest.test_case "intervening use blocks hole"    `Quick test_intervening_let_blocks_when_used;
     Alcotest.test_case "actor msg type refused"          `Quick test_actor_msg_type_is_refused;
+    Alcotest.test_case "user type named _Actor gets TRMC" `Quick test_user_type_named_actor_is_transformed;
+    Alcotest.test_case "real actor struct refused"        `Quick test_real_actor_struct_is_not_transformed;
     Alcotest.test_case "transform is idempotent"         `Quick test_transform_is_idempotent_on_a_transformed_module;
   ];
   "trmc-ir", [

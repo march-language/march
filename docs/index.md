@@ -245,6 +245,7 @@ Prefer to poke at it live? [Try It Out](playground.md) runs March in your browse
 | [Parallelism](parallelism.md) | Tasks, `pmap`, the M:N work-stealing scheduler |
 | [Session Types](session-types.md) | Typed two-party protocols; deadlocks caught at compile time |
 | [Flow](flow.md) | Backpressure pipelines for streaming work |
+| [Overload & Resilience](overload-resilience.md) | Bounded mailboxes, load shedding, and backoff — surviving thundering herds |
 | [Clustering](clustering.md) | Distributed actors: SWIM, CRDTs, RPC across nodes |
 | [Interfaces](interfaces.md) | `interface`, `impl`, `derive` |
 | [FFI](ffi.md) | Bind C/Rust libraries: `extern`, ownership, codecs, the `march` crate |

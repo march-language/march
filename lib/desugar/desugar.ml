@@ -2586,8 +2586,12 @@ let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
            (* R1 stage D
               (specs/2026-08-10-r1-stage-d-grant-required-design.md): `main`
               may take ANY NUMBER of capability parameters, and the grant is
-              their union — the same rule [Typecheck.check_fn_grants] already
-              applies to ordinary functions.
+              their union.  (Stage C once applied the same union rule to
+              ordinary functions via [Typecheck.check_fn_grants]; that check
+              was removed 2026-08-13 — see
+              specs/progress/2026-08-13-remove-per-function-grant-ceiling.md —
+              so `main` is now the only place a capability-parameter union is
+              checked at all.)
 
               This is a prerequisite for requiring a grant at all, not a
               convenience. Before it, `main` could hold exactly ONE capability,

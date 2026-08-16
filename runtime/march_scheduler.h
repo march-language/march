@@ -125,6 +125,8 @@ typedef enum {
 /* ── Mailbox node ────────────────────────────────────────────────────── */
 typedef struct march_mbox_node {
     void                   *msg;
+    uint64_t                enqueue_seq; /* Per-mailbox global order across
+                                            user and control planes. */
     struct march_mbox_node *next;
 } march_mbox_node;
 
@@ -155,12 +157,18 @@ typedef struct march_proc {
     size_t                     stack_alloc;     /* Total mmap size: MARCH_STACK_MAX + one guard page */
     march_mbox_node           *mailbox;      /* Head of message queue (FIFO)             */
     march_mbox_node           *mbox_tail;    /* Tail of message queue (for O(1) enqueue) */
-    _Atomic int64_t             mbox_count;  /* Number of messages in mailbox. Atomic:
+    march_mbox_node           *control_mailbox; /* Reserved control-plane queue. Never
+                                                   subject to user overflow policy. */
+    march_mbox_node           *control_mbox_tail;
+    uint64_t                   mbox_next_seq; /* Written only under mbox_lock. */
+    _Atomic int64_t             mbox_count;  /* Total user + control messages. Atomic:
                                                  writers (mbox_push/mbox_pop) always run
                                                  under mbox_lock, but wake_idle_daemons /
                                                  march_sched_wait_idle / march_sched_mbox_count
                                                  read it from other OS threads without
                                                  the lock. */
+    _Atomic int64_t             user_mbox_count; /* User messages only; mailbox limits and
+                                                    BLOCK low-water checks use this count. */
     int64_t                    mbox_limit;   /* 0 = unbounded (default). Plain field: only
                                                  read/written under mbox_lock (set by
                                                  march_sched_set_mbox_limit, read by
@@ -170,6 +178,8 @@ typedef struct march_proc {
                                                  mbox_limit above; calloc zero-inits to
                                                  MARCH_MBOX_UNBOUNDED (=0). */
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
+    _Atomic int                mbox_wait_mode; /* 0=not mailbox-waiting, 1=receive any,
+                                                  2=actor dispatch waiting for user only. */
     struct march_proc         *mbox_send_waiters; /* Task 8 (MARCH_MBOX_BLOCK): intrusive
                                                  singly-linked list of sender procs parked
                                                  on THIS proc's full mailbox, threaded
@@ -242,6 +252,9 @@ typedef struct march_proc {
      * thread-local would read the wrong (or another proc's) value after
      * such a migration. This field migrates with the proc itself. */
     jmp_buf                   *crash_jmp;
+    char                      *crash_message; /* Panic text copied before crash_jmp fires;
+                                                consumed by actor_green_thread. */
+    size_t                     crash_message_len; /* Byte length; embedded NUL-safe. */
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
@@ -363,6 +376,11 @@ int64_t      march_sched_total_spawned(void);
  * opted in via march_sched_set_mbox_limit. */
 int          march_sched_send(march_proc *target, void *msg);
 
+/* Enqueue a reserved runtime control value. The message bypasses every user
+ * mailbox capacity/overflow policy and is stored outside the user FIFO, so a
+ * later DROP_OLD send cannot evict it. Ownership matches march_sched_send. */
+int          march_sched_send_control(march_proc *target, void *msg);
+
 /* Set a mailbox capacity + overflow policy on a process. limit <= 0 means
  * unbounded (MARCH_MBOX_UNBOUNDED is the default set at spawn). Safe to call
  * while senders are concurrently active — both fields are written under
@@ -426,6 +444,10 @@ extern int march_recv_no_msg_sentinel;
  * constructors!), or MARCH_RECV_NO_MSG if woken without a message. */
 void        *march_sched_recv(void);
 
+/* Receive user traffic only. Actor dispatch loops use this so reserved
+ * control values remain available to an explicit language-level receive(). */
+void        *march_sched_recv_user(void);
+
 /* Try to receive without blocking. Returns the message if available,
  * NULL if mailbox is empty. Does not yield. */
 void        *march_sched_try_recv(void);
@@ -476,6 +498,7 @@ int march_sched_park_self_until(int64_t deadline_ms);
  * against their own deadline to tell the two apart and loop if time
  * remains (same contract as march_sched_park_self_until). */
 void *march_sched_recv_until(int64_t deadline_ms);
+void *march_sched_recv_user_until(int64_t deadline_ms);
 
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */

@@ -91,4 +91,34 @@ mod Actor do
     actor_set_mailbox_limit(pid, limit, policy)
   end
 
+  doc """
+  Register `pid` under `name`, so holders can re-resolve it after a restart.
+  Returns false if the name is already held by a LIVE actor, or if `pid` is
+  dead. A registered actor's name is carried forward across supervisor
+  restarts, so callers should hold the name, not the Pid.
+  """
+  fn register(pid, name) do
+    actor_register(pid, name)
+  end
+
+  doc "Remove a name. Returns false if it was not registered."
+  fn unregister(name) do
+    actor_unregister(name)
+  end
+
+  doc """
+  Resolve a name to the actor currently holding it. Returns None if the name
+  is unregistered, or if its actor has died — including the window while a
+  supervised actor is waiting out its restart backoff, which is the honest
+  signal that the service is mid-restart.
+  """
+  fn whereis(name) do
+    actor_whereis(name)
+  end
+
+  doc "Every currently-registered name."
+  fn registered() do
+    actor_registered()
+  end
+
 end

@@ -1,0 +1,184 @@
+-- Native witness for local monitor Down payloads.
+-- The watcher consumes the monitor notification with receive() and requires
+-- the three-field Down(ref, target, reason) shape for both exit paths.
+-- Worker crashes are trapped only for supervised children in the compiled
+-- runtime, so both monitored workers belong to Boss.  Unsupervised panics keep
+-- their existing process-fatal semantics.
+mod ActorMonitorDownReason do
+  needs IO.Console
+
+  -- Deliberately reuse the runtime-reserved short type/constructor name under
+  -- a module qualifier.  This must use UserValues.Down.Down's ordinary tag,
+  -- never the canonical monitor Down tag.
+  mod UserValues do
+    type Down = Down(Int)
+  end
+
+  fn wait_for_queued_message(pid) do
+    if mailbox_size(pid) > 0 do
+      ()
+    else
+      wait_for_queued_message(pid)
+    end
+  end
+
+  actor Worker do
+    state { alive : Bool }
+    init { alive: true }
+    on Poison(me) do
+      -- Main queues UserValues.Down behind Poison.  Waiting until it is
+      -- visible forces the supervised panic's dead-proc reap to drain that
+      -- nested user value through the runtime mailbox disposer.
+      wait_for_queued_message(me)
+      panic("bang")
+    end
+    on PoisonNul() do
+      panic("bang\x00tail")
+    end
+  end
+
+  actor Boss do
+    state { crashed : Int, killed : Int, nulled : Int }
+    init { crashed: 0, killed: 0, nulled: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Worker crashed
+      Worker killed
+      Worker nulled
+    end
+  end
+
+  actor Watcher do
+    state { seen : Int }
+    init { seen: 0 }
+    on ReadDown(expected, label) do
+      match receive() do
+        Down.Down(ref, target, DownReason.Crash(msg)) ->
+          if to_string(target) == to_string(expected) do
+            if is_alive(target) do
+              panic("crash Down observed target alive")
+            else
+              println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
+                      " reason=Crash(" ++ msg ++ ")")
+            end
+          else
+            panic("crash Down target mismatch")
+          end
+        Down.Down(ref, target, DownReason.Killed) ->
+          if to_string(target) == to_string(expected) do
+            if is_alive(target) do
+              panic("kill Down observed target alive")
+            else
+              println("down ref=" ++ to_string(ref) ++ " target=" ++ label ++
+                      " reason=Killed")
+            end
+          else
+            panic("kill Down target mismatch")
+          end
+        _ -> panic("Down wrong shape")
+      end
+      { seen: state.seen + 1 }
+    end
+    on ReadNulDown(expected) do
+      match receive() do
+        Down.Down(_, target, DownReason.Crash(msg)) ->
+          if to_string(target) == to_string(expected) do
+            if is_alive(target) do
+              panic("NUL Down observed target alive")
+            else
+              if string_byte_length(msg) == 9 &&
+                 string_byte_at(msg, 4) == 0 &&
+                 string_byte_at(msg, 5) == 116 &&
+                 string_byte_at(msg, 8) == 108 do
+                println("down target=nulled reason=Crash(embedded-nul-ok)")
+              else
+                panic("embedded NUL crash reason truncated")
+              end
+            end
+          else
+            panic("NUL Down target mismatch")
+          end
+        _ -> panic("NUL Down wrong shape")
+      end
+      { seen: state.seen + 1 }
+    end
+    on PrimeBounded(expected, watcher) do
+      let queued = mailbox_size(watcher)
+      match receive() do
+        Down.Down(ref, target, DownReason.Killed) ->
+          if to_string(target) == to_string(expected) && queued == 1 do
+            println("bounded mailbox=" ++ to_string(queued) ++
+                    " down=Killed ref=" ++ to_string(ref))
+          else
+            panic("bounded Down or mailbox count mismatch")
+          end
+        _ -> panic("bounded mailbox delivered wrong message")
+      end
+      { seen: state.seen + 1 }
+    end
+    on ReadLateDown(expected) do
+      match receive() do
+        Down.Down(ref, target, DownReason.Killed) ->
+          if to_string(target) == to_string(expected) do
+            println("late down ref=" ++ to_string(ref) ++
+                    " target=killed reason=Killed")
+          else
+            panic("late Down target mismatch")
+          end
+        _ -> panic("late Down wrong shape")
+      end
+      { seen: state.seen + 1 }
+    end
+  end
+
+  fn child_int(boss, field) do
+    match get_actor_field(boss, field) do
+      None -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    let watcher = spawn(Watcher)
+    let boss = spawn(Boss)
+    let crashed = pid_of_int(child_int(boss, "crashed"))
+    monitor(watcher, crashed)
+    send(crashed, Poison(crashed))
+    send(crashed, UserValues.Down(7))
+    send(watcher, ReadDown(crashed, "crashed"))
+    run_until_idle()
+
+    let killed = pid_of_int(child_int(boss, "killed"))
+    Actor.set_queue_limit(watcher, 1, 1)
+    monitor(watcher, killed)
+    send(watcher, PrimeBounded(killed, watcher))
+    kill(killed)
+    run_until_idle()
+
+    monitor(watcher, killed)
+    send(watcher, ReadLateDown(killed))
+    run_until_idle()
+
+    let nulled = pid_of_int(child_int(boss, "nulled"))
+    monitor(watcher, nulled)
+    send(nulled, PoisonNul())
+    send(watcher, ReadNulDown(nulled))
+    run_until_idle()
+
+    -- Once a watcher's terminal state is claimed, another actor's death must
+    -- not enqueue a Down into the watcher's still-owned green-thread mailbox.
+    let terminal_watcher = spawn(Watcher)
+    let terminal_target = spawn(Worker)
+    monitor(terminal_watcher, terminal_target)
+    kill(terminal_watcher)
+    kill(terminal_target)
+    let terminal_depth = mailbox_size(terminal_watcher)
+    if terminal_depth == 0 do
+      println("terminal watcher mailbox=0")
+    else
+      panic("terminal watcher accepted Down after death claim")
+    end
+  end
+end

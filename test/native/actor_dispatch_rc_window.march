@@ -1,0 +1,106 @@
+-- Regression: an actor record's refcount must tell the truth WHILE its
+-- handler is running, not just before and after.
+--
+-- actor_green_thread used to bracket every message dispatch with
+--     int64_t saved_rc = a[0];
+--     a[0] = 1;              // "FBIP: force RC=1 for in-place reuse"
+--     ...dispatch...
+--     a[0] = saved_rc;
+-- a[0] is the actor record's refcount, which every other thread mutates
+-- atomically through march_incrc/march_decrc.  Those plain stores published a
+-- LIE: for the whole duration of a handler, every other thread saw the
+-- refcount as 1.  A concurrent march_decrc then observed prev == 1, concluded
+-- "last reference", and freed a record that still had live owners
+-- (specs/progress/2026-08-14-actor-dispatch-rc-clobber-uaf.md).
+--
+-- test/native/actor_crash_rc_restore.march already pins the neighbouring case:
+-- a panic()'s longjmp skipping the `a[0] = saved_rc` epilogue.  But a future
+-- clobber that restored correctly on EVERY exit path — crash trap included —
+-- would pass that test and still be exactly as unsafe, because the danger is
+-- the OPEN WINDOW, not the failure to close it.  This test pins the window
+-- itself.
+--
+-- The window is observable without any race, which is what makes this a unit
+-- test rather than a stress harness.  The clobber is installed BEFORE the
+-- dispatch call, so the forged 1 is already published by the time the handler
+-- body runs: a probe called from INSIDE the handler reads the same lie a
+-- concurrent thread would, on a single scheduler thread, on every run.  The
+-- real bug needs a second thread to be HARMED by the lie; it does not need one
+-- to OBSERVE it.
+--
+-- `ffi_test_actor_rc` is the test-only runtime probe (runtime/march_ffi.c)
+-- also used by actor_crash_rc_restore.march.  The refcount is invisible from
+-- the March surface, and every March-level symptom of this bug is a
+-- use-after-free — i.e. undefined behavior, and therefore a flaky test.  The
+-- refcount IS the invariant, so assert on it directly.
+--
+-- The victim is a SUPERVISED child so that its refcount exceeds 1 by
+-- construction (the supervisor holds a reference alongside main's).  The first
+-- line is the non-vacuity guard: if the observed-from-outside count is not > 1
+-- then a forged 1 would be indistinguishable from the truth, the second line
+-- has stopped proving anything, and this test needs a new shape rather than a
+-- new .expected.
+mod Main do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+
+  extern "rt" : Cap(Ffi) do
+    fn actor_rc(pid : Int) : Int = "ffi_test_actor_rc"
+  end
+
+  actor Victim do
+    state { seen : Int }
+    init  { seen: 0 }
+
+    -- The pid index arrives in the message rather than via `self`, which is
+    -- bound as an opaque Pid inside a handler; the probe wants the raw index.
+    on Look(idx : Int) do
+      { seen: actor_rc(idx) }
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Victim child
+    end
+  end
+
+  fn current_child(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn seen_by(child) do
+    match get_actor_field(pid_of_int(child), "seen") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
+    let boss = spawn(Boss)
+    let victim = current_child(boss)
+    let rc_outside = actor_rc(victim)
+    println("victim is multiply owned: " ++ bool_to_string(rc_outside > 1))
+
+    send(pid_of_int(victim), Look(victim))
+    run_until_idle()
+
+    -- The load-bearing line.  With the clobber present this reads 1 while
+    -- rc_outside reads the true owner count, on every single run.
+    println("rc inside handler matches rc outside: "
+            ++ bool_to_string(seen_by(victim) == rc_outside))
+
+    -- And the handler really did run, so a probe that silently never fired
+    -- cannot masquerade as a pass.
+    println("handler observed something: " ++ bool_to_string(seen_by(victim) > 0))
+  end
+end

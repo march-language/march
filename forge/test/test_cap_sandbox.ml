@@ -13,6 +13,85 @@
 
 open March_forge
 
+(* [test_forge_fix_applies_capability_errors] and
+   [test_scaffolded_app_builds_clean] below shell out to bare `march`/`forge`
+   via [Sys.command]/[Sys.getenv "PATH"], resolved through ambient PATH. Left
+   as-is that is CI-vacuous or CI-broken for exactly the reason
+   [test_build_check.ml]'s [setup_hermetic_march] documents at length: a
+   fresh CI checkout has no `.march-version` pin, no `~/.march/current`
+   global, and no `march`/`forge` on PATH, so the bare commands either fail
+   to resolve (rc=127, failing the `= 0` assertions for the wrong reason) or
+   — locally, where a stale installed release happens to be on PATH — pass
+   vacuously without ever exercising the build under test.
+
+   Fix: symlink the JUST-BUILT `march` and `forge` (passed in by the dune
+   rule below as MARCH_TEST_BIN / FORGE_TEST_BIN) onto a private bin/
+   directory prepended to PATH, and point MARCH_HOME at an empty directory so
+   no global toolchain resolves and the bare `march`/`forge` invoked by the
+   subprocess commands in this file hit our symlinks. Mirrors
+   [test_build_check.ml]'s [setup_hermetic_march] structurally, but that
+   suite never exercises a real native compile (its `forge build` cases only
+   cover a `Lib` project and error-before-compile paths), so it never hit the
+   next problem: [resolve_exe_path]/[find_stdlib_dir]/[runtime_dir] in
+   `bin/main.ml` resolve stdlib/runtime relative to [Sys.executable_name],
+   and when `march` is invoked as a bare name resolved through PATH to a
+   symlink, that resolves relative to the SYMLINK's directory (our private
+   bin/), not the real build tree three levels up -- so a `forge build` under
+   this symlink setup failed with "cannot find runtime/march_runtime.c" even
+   though `forge check` (which never needs runtime/) passed. Fix: also pass
+   the just-staged runtime/ and stdlib/ directories (MARCH_TEST_RUNTIME_DIR /
+   MARCH_TEST_STDLIB_DIR, backed by `(source_tree ../../runtime)` /
+   `(source_tree ../../stdlib)` deps in the dune rule) and export them as
+   MARCH_RUNTIME_DIR / MARCH_STDLIB, which both take priority over
+   exe-relative resolution (see the two doc comments in `bin/main.ml`). *)
+let setup_hermetic_toolchain () =
+  let resolve env_var =
+    match Sys.getenv_opt env_var with
+    | None | Some "" ->
+      Printf.eprintf
+        "test_cap_sandbox: %s is not set. The dune rule must pass the built \
+         binary/directory (see forge/test/dune) -- refusing to fall back to \
+         an ambient PATH binary, which would not exercise this build.\n"
+        env_var;
+      exit 2
+    | Some rel ->
+      if Filename.is_relative rel then Filename.concat (Sys.getcwd ()) rel else rel
+  in
+  let march_abs = resolve "MARCH_TEST_BIN" in
+  let forge_abs = resolve "FORGE_TEST_BIN" in
+  let runtime_dir_abs = resolve "MARCH_TEST_RUNTIME_DIR" in
+  let stdlib_dir_abs = resolve "MARCH_TEST_STDLIB_DIR" in
+  List.iter
+    (fun abs ->
+       if not (Sys.file_exists abs) then begin
+         Printf.eprintf "test_cap_sandbox: %s does not exist\n" abs;
+         exit 2
+       end)
+    [ march_abs; forge_abs; runtime_dir_abs; stdlib_dir_abs ];
+  let bindir = Filename.temp_dir "march_hermetic_bin_" "" in
+  let link_as name abs =
+    let link = Filename.concat bindir name in
+    try Unix.symlink abs link
+    with Unix.Unix_error _ ->
+      (* Symlinks unavailable -- fall back to a copy. *)
+      ignore (Sys.command (Printf.sprintf "cp %s %s && chmod +x %s"
+                              (Filename.quote abs) (Filename.quote link)
+                              (Filename.quote link)))
+  in
+  link_as "march" march_abs;
+  link_as "forge" forge_abs;
+  let old_path = match Sys.getenv_opt "PATH" with Some p -> p | None -> "" in
+  Unix.putenv "PATH" (bindir ^ ":" ^ old_path);
+  (* Empty MARCH_HOME => no global toolchain resolves => the bare
+     `march`/`forge` invoked by the shelled-out commands hit our PATH
+     symlinks, not an installed release. *)
+  Unix.putenv "MARCH_HOME" (Filename.temp_dir "march_hermetic_home_" "");
+  (* Override resolution explicitly -- see the doc comment above for why
+     exe-relative resolution can't be trusted once `march` is invoked through
+     a PATH-resolved symlink. *)
+  Unix.putenv "MARCH_RUNTIME_DIR" runtime_dir_abs;
+  Unix.putenv "MARCH_STDLIB" stdlib_dir_abs
+
 let has_deny profile needle =
   let re = Str.regexp_string needle in
   try ignore (Str.search_forward re profile 0); true with Not_found -> false
@@ -174,6 +253,51 @@ let test_filereads_enforceability_matches_backend () =
     Alcotest.(check bool) "Advisory only on a non-bwrap backend" true
       (not (Sys.file_exists "/usr/bin/bwrap" || Sys.file_exists "/bin/bwrap"))
 
+let test_forge_fix_applies_capability_errors () =
+  (* A capability-incorrect module must be repaired by `forge fix`, not
+     refused. Both fixes are error-severity: the missing grant on `main`
+     and the missing `needs` line. `collect_all_fixes` used to set
+     `has_errors` on exactly the diagnostics that carry a fix (the ones
+     `parse_fix_line` doesn't discard), so `forge fix` refused precisely
+     when it had safe work to do. *)
+  let dir = Filename.concat (Filename.get_temp_dir_name ()) "forge_fix_caps" in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)));
+  ignore (Sys.command (Printf.sprintf "mkdir -p %s/lib" (Filename.quote dir)));
+  let src = Filename.concat dir "lib/ffc.march" in
+  let oc = open_out src in
+  output_string oc "mod Ffc do\n  fn main() do\n    println(\"hi\")\n  end\nend\n";
+  close_out oc;
+  let toml = open_out (Filename.concat dir "forge.toml") in
+  output_string toml "[package]\nname = \"ffc\"\nversion = \"0.1.0\"\ntype = \"app\"\n\n[deps]\n";
+  close_out toml;
+  let rc = Sys.command (Printf.sprintf "cd %s && forge fix > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "forge fix succeeds on capability errors" 0 rc;
+  let ic = open_in src in
+  let n = in_channel_length ic in
+  let content = really_input_string ic n in
+  close_in ic;
+  Alcotest.(check bool) "needs line inserted" true
+    (has_deny content "needs IO.Console");
+  Alcotest.(check bool) "grant parameter inserted" true
+    (has_deny content "Cap(IO.Console)")
+
+let test_scaffolded_app_builds_clean () =
+  let dir = Filename.concat (Filename.get_temp_dir_name ()) "forge_new_clean" in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)));
+  let rc_new = Sys.command
+    (Printf.sprintf "cd %s && forge new %s > /dev/null 2>&1"
+       (Filename.quote (Filename.get_temp_dir_name ())) "forge_new_clean") in
+  Alcotest.(check int) "forge new succeeds" 0 rc_new;
+  let rc_check = Sys.command
+    (Printf.sprintf "cd %s && forge check > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "a freshly scaffolded app checks clean" 0 rc_check;
+  let rc_build = Sys.command
+    (Printf.sprintf "cd %s && forge build > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "a freshly scaffolded app builds" 0 rc_build;
+  let rc_test = Sys.command
+    (Printf.sprintf "cd %s && forge test > /dev/null 2>&1" (Filename.quote dir)) in
+  Alcotest.(check int) "a freshly scaffolded app's tests run" 0 rc_test
+
 let tests =
   [
     Alcotest.test_case "bwrap read scoping" `Quick test_bwrap_read_scoping;
@@ -194,6 +318,12 @@ let tests =
       test_target_binary_always_launchable;
     Alcotest.test_case "unenforceable caps declared advisory" `Quick
       test_unenforceable_caps_are_declared_advisory;
+    Alcotest.test_case "forge fix applies capability errors" `Quick
+      test_forge_fix_applies_capability_errors;
+    Alcotest.test_case "scaffolded app builds clean" `Quick
+      test_scaffolded_app_builds_clean;
   ]
 
-let () = Alcotest.run "cap_sandbox" [ ("cap_sandbox", tests) ]
+let () =
+  setup_hermetic_toolchain ();
+  Alcotest.run "cap_sandbox" [ ("cap_sandbox", tests) ]

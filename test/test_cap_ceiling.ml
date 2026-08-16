@@ -13,7 +13,7 @@ let test_covered_by_exact_declaration () =
   Alcotest.check violations_pp "no violation" []
     (describe
        (C.check
-          ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
+          ~module_spans:[] ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
           ~attribution:[ ("IO.FileRead", "M") ]
           ~caps:[ "IO.FileRead" ]))
 
@@ -23,7 +23,7 @@ let test_covered_by_a_broader_declaration () =
   Alcotest.check violations_pp "parent covers child" []
     (describe
        (C.check
-          ~module_caps:[ ("M", [ "IO.FileSystem" ]) ]
+          ~module_spans:[] ~module_caps:[ ("M", [ "IO.FileSystem" ]) ]
           ~attribution:[ ("IO.FileRead", "M") ]
           ~caps:[ "IO.FileRead" ]))
 
@@ -34,14 +34,14 @@ let test_narrower_declaration_does_not_cover () =
   Alcotest.(check int) "one violation" 1
     (List.length
        (C.check
-          ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
+          ~module_spans:[] ~module_caps:[ ("M", [ "IO.FileRead" ]) ]
           ~attribution:[ ("IO.FileWrite", "M") ]
           ~caps:[ "IO.FileWrite" ]))
 
 let test_undeclared_module_is_a_violation () =
   Alcotest.(check int) "module with no needs at all" 1
     (List.length
-       (C.check ~module_caps:[] ~attribution:[ ("IO.FileRead", "M") ]
+       (C.check ~module_spans:[] ~module_caps:[] ~attribution:[ ("IO.FileRead", "M") ]
           ~caps:[ "IO.FileRead" ]))
 
 let test_each_module_is_judged_on_its_own_needs () =
@@ -50,7 +50,7 @@ let test_each_module_is_judged_on_its_own_needs () =
      exactly the whole-program-union blindness this replaces. *)
   let vs =
     C.check
-      ~module_caps:[ ("A", [ "IO.FileRead" ]); ("B", [ "IO.Console" ]) ]
+      ~module_spans:[] ~module_caps:[ ("A", [ "IO.FileRead" ]); ("B", [ "IO.Console" ]) ]
       ~attribution:[ ("IO.FileRead", "A"); ("IO.FileRead", "B") ]
       ~caps:[ "IO.FileRead" ]
   in
@@ -66,7 +66,7 @@ let test_unattributed_capability_fails_closed () =
      precisely the one an attacker would route through. *)
   Alcotest.(check int) "unattributed is a violation" 1
     (List.length
-       (C.check ~module_caps:[] ~attribution:[] ~caps:[ "IO.FileRead" ]))
+       (C.check ~module_spans:[] ~module_caps:[] ~attribution:[] ~caps:[ "IO.FileRead" ]))
 
 let test_foreign_is_excluded () =
   (* IO.Foreign comes from the presence of extern blocks, not an attributed
@@ -75,7 +75,7 @@ let test_foreign_is_excluded () =
      unattributed would fire on every FFI-using program. *)
   Alcotest.check violations_pp "no violation for foreign" []
     (describe
-       (C.check ~module_caps:[] ~attribution:[]
+       (C.check ~module_spans:[] ~module_caps:[] ~attribution:[]
           ~caps:[ "IO.Foreign"; "IO.Foreign.Blocking" ]))
 
 let unit_tests =
@@ -133,9 +133,17 @@ let rejects name src =
   let rc, out = compile_strict src in
   if rc = 0 then
     Alcotest.failf "%s should have failed --cap-strict but compiled" name;
+  (* Task 7: a ceiling violation is now reported as an ordinary diagnostic
+     (file/line/source excerpt, an applicable fix) rather than the bespoke
+     "-- CAPABILITY CEILING --" block, so this can no longer match on that
+     literal header — it never appears for the common (attributable,
+     [Undeclared]) case this helper's callers exercise.  The one line every
+     ceiling failure still carries, [Undeclared] or [Unattributed], is the
+     trailing summary bin/main.ml prints after the per-violation diagnostics;
+     match that instead. *)
   if
     not
-      (let re = Str.regexp_string "CAPABILITY CEILING" in
+      (let re = Str.regexp_string "capability ceiling violation(s)" in
        match Str.search_forward re out 0 with
        | _ -> true
        | exception Not_found -> false)
@@ -188,7 +196,7 @@ let rejects_naming name ~expect src =
 (* Route 1: a direct builtin call.  Warning-only without --cap-strict. *)
 let test_direct_builtin_route () =
   rejects_at_typecheck "direct builtin call"
-    ~expect:"does not declare `needs IO.FileWrite`"
+    ~expect:"declares no matching `needs`"
     {|
 mod CeilDirect do
   needs IO.Console
@@ -226,6 +234,58 @@ mod CeilStdlib do
 end
 |}
 
+(* ── Task 7, Steps 3-4: the violation carries a span and a fix ────────────
+   Before this task the ceiling was reported through a bespoke
+   "-- CAPABILITY CEILING --" block with no file, no line, no source excerpt
+   and no machine-applicable fix — invisible to the LSP and unusable by
+   `forge fix`, unlike every other capability diagnostic.  It is now an
+   ordinary [Err] diagnostic: rendered with the offending module's own
+   source (a numbered source line, matching every other diagnostic's
+   presentation) and an insertable fix line naming the missing capability. *)
+let test_ceiling_violation_carries_a_span_and_a_fix () =
+  let rc, out =
+    compile_strict
+      {|
+mod CeilSpanned do
+  needs IO.Console
+  needs IO.FileWrite
+  mod Inner do
+    needs IO.Console
+    fn go() : () do
+      match File.write("/tmp/x", "d") do
+        Ok(_)  -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+    Inner.go()
+  end
+end
+|}
+  in
+  if rc = 0 then Alcotest.failf "should have failed --cap-strict but compiled:\n%s" out;
+  (* No bespoke header for the common, attributable case. *)
+  (match Str.search_forward (Str.regexp_string "-- CAPABILITY CEILING --") out 0 with
+   | _ -> Alcotest.failf "still using the bespoke ceiling block:\n%s" out
+   | exception Not_found -> ());
+  (* Renders through the ordinary diagnostic pipeline: a numbered source
+     line, exactly like every other error. *)
+  (match Str.search_forward (Str.regexp "^ *[0-9]+ |") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "no numbered source line in ceiling diagnostic:\n%s" out);
+  (* An applicable fix, naming the exact missing capability. *)
+  (match Str.search_forward (Str.regexp_string "help: add `needs IO.FileWrite` to the module body.") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "no fix hint in ceiling diagnostic:\n%s" out);
+  (* Still names the offending module and the missing capability. *)
+  (match Str.search_forward (Str.regexp_string "module `Inner` uses `IO.FileWrite` but does not declare `needs IO.FileWrite`") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "diagnostic no longer names the offending module:\n%s" out)
+
 (* Route 3: a builtin handed out as a VALUE and invoked indirectly. *)
 let test_builtin_as_value_route () =
   rejects "builtin passed as a value"
@@ -257,7 +317,7 @@ end
    opted in to anything. *)
 let test_dependency_exceeding_its_own_ceiling () =
   rejects_at_typecheck "dependency exceeds its declared needs"
-    ~expect:"does not declare `needs IO.FileRead`"
+    ~expect:"declares no matching `needs`"
     {|
 mod CeilApp do
   needs IO.Console
@@ -345,7 +405,7 @@ end
    dropping deep modules from the ceiling. *)
 let test_doubly_nested_module_without_needs_is_still_caught () =
   rejects_at_typecheck "doubly-nested module missing needs"
-    ~expect:"does not declare `needs IO.FileWrite`"
+    ~expect:"declares no matching `needs`"
     {|
 mod CeilDeepBad do
   needs IO.Console
@@ -389,7 +449,7 @@ end
    reported against its (absent) `needs`. *)
 let test_console_use_without_needs_is_still_caught () =
   rejects_at_typecheck "undeclared console use"
-    ~expect:"does not declare `needs IO.Console`"
+    ~expect:"declares no matching `needs`"
     {|
 mod CeilConsoleUndeclared do
   fn main() : () do
@@ -574,7 +634,7 @@ end
    attribution or the build fails on `CeilActorOuter`. *)
 let test_nested_actor_handler_violation_names_inner () =
   rejects_at_typecheck "nested actor handler without needs blames Inner"
-    ~expect:"`Inner` does not declare `needs IO.Console`"
+    ~expect:"`Inner` declares no matching `needs`"
     {|
 mod CeilActorOuter2 do
   mod Inner do
@@ -637,9 +697,119 @@ mod CeilImpl do
 end
 |}
 
+(* ── A MARCH_LIB_PATH dependency with NO `needs` line at all ──────────────
+
+   Every module above nests the violator INSIDE the entry file's own `mod
+   ... end`, so it always has a real, parser-assigned [decl_span]. A module
+   loaded from a SEPARATE file via MARCH_LIB_PATH is instead synthesized as
+   [DMod (..., dummy_span)] (bin/main.ml's lib-path loader has no `mod ...
+   end` span of its own to give it), and when that module declares no
+   `needs` at all [cap_ceiling_module_spans] used to fall through to that
+   dummy header span — [dummy_span.start_line = 0] — which
+   [cap_ceiling_fix_indent] indexed into the source lines at [-1],
+   `List.nth_opt`'s documented-but-surprising RAISE (not [None]) on a
+   negative index, an internal compiler error on exactly this shape: a
+   fresh dependency nobody has annotated with `needs` yet. This is
+   deliberately NOT expressible with [compile_with] (single temp file) —
+   the bug is specific to a module arriving from a second file, so the test
+   needs its own two-file harness. *)
+let compile_with_lib_dep ~lib_name ~lib_src entry_src =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  let lib_dir = Filename.temp_file "cap_ceiling_lib" "" in
+  Sys.remove lib_dir;
+  Unix.mkdir lib_dir 0o755;
+  let lib_path = Filename.concat lib_dir lib_name in
+  let oc = open_out lib_path in
+  output_string oc lib_src;
+  close_out oc;
+  let src = Filename.temp_file "cap_ceiling_entry" ".march" in
+  let oc = open_out src in
+  output_string oc entry_src;
+  close_out oc;
+  let out = Filename.temp_file "cap_ceiling" ".out" in
+  let bin = Filename.temp_file "cap_ceiling" ".bin" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "MARCH_LIB_PATH=%s %s --compile -o %s %s > %s 2>&1"
+         (Filename.quote lib_dir) (Filename.quote compiler_exe)
+         (Filename.quote bin) (Filename.quote src) (Filename.quote out))
+  in
+  let ic = open_in out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out; bin ];
+  (try Sys.remove lib_path with Sys_error _ -> ());
+  (try Unix.rmdir lib_dir with Unix.Unix_error _ -> ());
+  (rc, s)
+
+let test_lib_path_dependency_with_no_needs_does_not_crash () =
+  let rc, out =
+    compile_with_lib_dep ~lib_name:"leaky.march"
+      ~lib_src:
+        (* A STDLIB-MEDIATED call (`File.write`, not `file_write`) — same
+           reason as [test_stdlib_route_was_completely_silent] above: a
+           direct builtin call is caught earlier, at typecheck's Check 1b,
+           before compilation ever reaches the ceiling. Only the
+           stdlib-wrapper route is invisible to Check 1b and actually
+           exercises [cap_ceiling_module_spans] on a cross-file module. *)
+        {|
+mod Leaky do
+  fn slurp(p : String) : () do
+    match File.write(p, "d") do
+      Ok(_)  -> ()
+      Err(_) -> ()
+    end
+  end
+end
+|}
+      (* [needs IO] / [Cap(IO)]: broad enough that the entry module's own
+         GRANT check (main's signature vs. what the program reaches) never
+         fires first and masks the ceiling violation this test is after —
+         same shape as the reviewer's own repro. *)
+      {|
+mod CeilLibDepCrash do
+  use Leaky
+
+  needs IO
+
+  fn main(_cap : Cap(IO)) do
+    Leaky.slurp("/tmp/cap_ceiling_lib_dep_crash")
+    println("ok")
+  end
+end
+|}
+  in
+  (* The internal-compiler-error exit code, distinct from both a clean
+     compile (0) and an ordinary rejected-program exit (1) — this is the
+     crash this test exists to rule out. *)
+  if rc = 3 || rc = 2 then
+    Alcotest.failf
+      "MARCH_LIB_PATH dependency with no `needs` crashed the compiler \
+       (rc=%d) instead of reporting a ceiling violation:\n%s"
+      rc out;
+  if rc = 0 then
+    Alcotest.failf
+      "MARCH_LIB_PATH dependency using IO.FileWrite with no `needs` should \
+       have failed --cap-strict but compiled:\n%s"
+      out;
+  (match Str.search_forward (Str.regexp_string "Leaky") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf
+       "ceiling violation did not name the offending dependency `Leaky`:\n%s"
+       out);
+  (match Str.search_forward (Str.regexp_string "capability ceiling violation(s)") out 0 with
+   | _ -> ()
+   | exception Not_found ->
+     Alcotest.failf "not reported as a ceiling violation:\n%s" out)
+
 let tests =
   unit_tests
   @ [
+      Alcotest.test_case
+        "MARCH_LIB_PATH dependency with no needs does not crash" `Slow
+        test_lib_path_dependency_with_no_needs_does_not_crash;
       Alcotest.test_case "impl method covered by declaring module" `Slow
         test_impl_method_covered_by_declaring_module;
       Alcotest.test_case "nested actor handler covered by declaring module" `Slow
@@ -660,6 +830,8 @@ let tests =
         test_direct_builtin_route;
       Alcotest.test_case "route: stdlib wrapper (was silent)" `Slow
         test_stdlib_route_was_completely_silent;
+      Alcotest.test_case "violation carries a span and a fix" `Slow
+        test_ceiling_violation_carries_a_span_and_a_fix;
       Alcotest.test_case "route: builtin passed as a value" `Slow
         test_builtin_as_value_route;
       Alcotest.test_case "dependency exceeding its own ceiling" `Slow

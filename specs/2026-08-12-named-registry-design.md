@@ -1,9 +1,12 @@
 # Named process registry — design
 
-**Date:** 2026-08-12 (revised same day, see §4)
-**Status:** design, not yet implemented
-**Todo:** `specs/todos/2026-08-12-actor-named-registry.md`
+**Date:** 2026-08-12 (revised same day, see §4; reconciled against the shipped
+implementation 2026-08-14, see §3 and §5)
+**Status:** **implemented** — landed 2026-08-14. Completed record, including
+every deviation and its reason:
+[`specs/progress/2026-08-12-named-registry.md`](progress/2026-08-12-named-registry.md).
 **Depends on:** `specs/todos/2026-08-12-vault-toward-ets-semantics.md`
+(items 1 and 4 delivered; 2 and 3 still open)
 
 ## 1. The problem, precisely
 
@@ -64,16 +67,32 @@ routing decision rather than a second API.
 
 Three layers, mirroring Elixir's:
 
-1. **Storage: Vault.** Two tables — `name → pid` and `pid → names` (the reverse
-   index, per §2). Vault is already a C-backed, process-global, ETS-like table
-   with per-table locking and RC'd values (`runtime/march_extras.c`).
-2. **Policy: stdlib.** `Actor.register` / `whereis` / `unregister` live in
-   March, over those tables. Testable, and extensible to duplicate keys later
-   without touching the runtime.
+1. **Storage.** The forward table `name → pid` is a Vault table the runtime
+   owns, created lazily under the well-known name `"$actor_registry"`
+   (`MARCH_REGISTRY_TABLE_NAME`, `runtime/march_runtime.c`). Vault is a
+   C-backed, process-global, ETS-like table with per-table locking and RC'd
+   values (`runtime/march_extras.c`).
+2. **Policy: stdlib.** `Actor.register` / `whereis` / `unregister` /
+   `registered` live in `stdlib/actor.march` over builtins. Testable, and
+   extensible to duplicate keys later without touching the runtime.
 3. **Cleanup trigger: the runtime.** `do_actor_death` drops the dying actor's
    entries through Vault's C API.
 
 Layer 3 is the deliberate divergence from Elixir — see §6.
+
+**As built: the reverse index is not a second Vault table.** This draft
+specified `pid → names` as a second Vault table, mirroring Elixir's second ETS
+table. It shipped instead as two fields on `march_actor_meta` — `char **reg_names`
+and `int reg_name_count`, mutated only under `g_registry_mu`. The meta already
+exists per actor, is address-stable, and is **never freed or unlinked**
+(`g_actor_tbl`'s documented invariant), so cleanup in `do_actor_death` is a
+direct field read: no table lookup, no key construction, no second lock to order
+against the first. Elixir needs a second ETS table because a BEAM library has
+nowhere to hang per-process state; we own the runtime and do. The cost is that
+the reverse index is not introspectable from March the way the forward table is
+(`test/native/actor_registry_retire_vault.march` reads `"$actor_registry"`
+directly to get a non-liveness-filtered view). That is an acceptable trade — the
+forward table is the one a user would want to inspect.
 
 ## 4. Why not a bespoke C table (revised)
 
@@ -98,17 +117,43 @@ fixable properties would leave Vault's own users with all three.
 
 ## 5. What Vault needs first
 
-| Property | Vault today | Needed | Whose problem |
-|---|---|---|---|
-| Concurrent reads | per-table mutex on every `get` | ETS `read_concurrency` equivalent | **Registry's**: the guidance is "resolve at use", so lookups land on the send path — which Task 10 deliberately took *off* a mutex |
-| Write concurrency | one mutex per table | partitioned/sharded buckets | Registration storms during a restart wave |
-| Value typing | `Option(ptr)`, erased | typed handles | **Registry's**: a mistyped read followed by `send` dereferences garbage as an actor record |
-| Capability | every op needs `IO.Mut` | see §7 | **Registry's**: name resolution would drag a mutation capability into every module |
+| Property | Vault before | Needed | Whose problem | Outcome |
+|---|---|---|---|---|
+| Concurrent reads | per-table mutex on every `get` | ETS `read_concurrency` equivalent | **Registry's**: the guidance is "resolve at use", so lookups land on the send path — which Task 10 deliberately took *off* a mutex | **DONE** — striped reader-count lock, `acf9a35b` |
+| Write concurrency | one mutex per table | partitioned/sharded buckets | Registration storms during a restart wave | **OPEN** — vault todo item 2 |
+| Value typing | `Option(ptr)`, erased | typed handles | **Registry's**: a mistyped read followed by `send` dereferences garbage as an actor record | **OPEN** — vault todo item 3; the registry does not depend on it, since its values never pass through March-level `vault_get` |
+| Capability | every op needs `IO.Mut` | see §7 | **Registry's**: name resolution would drag a mutation capability into every module | **DONE** — reads capability-free, `3c4e566a`; all four `Actor.*` ops carry none |
 
 The first two are independently justified: Vault is documented as *"shared
 across all actors without message passing"*, and `docs/overload-resilience.md`
 points readers at Vault-style tables for rate limiting — a read-heavy workload
 where a mutex per read is already a wart.
+
+### What concurrent reads actually shipped as
+
+Neither the lock-free/epoch scheme the Vault todo sketched **nor**
+`pthread_rwlock_t`. It is a hand-rolled striped reader-count lock
+(`vault_rwlock_t` in `runtime/march_extras.c`: 16 cache-line-aligned `_Atomic
+int64_t` reader counters, a writer-preference flag, writers serialised by a
+plain mutex, all four operations of the Dekker exclusion pair `seq_cst`).
+
+`pthread_rwlock_t` was built first, exactly as the obvious reading of this
+section suggests, and **rejected on measurement**: same box, same test, it
+measured ~18x four-thread/solo where the exclusive mutex it replaced measured
+~9.5x — i.e. worse than doing nothing. The pathology reproduces in a synthetic
+benchmark with no Vault code at all and is a documented Darwin trait; CI runs
+`macos-15`, so shipping it would have regressed Vault reads on every macOS leg.
+The striped lock measures 5.7–6.5x same-key and a median ~2.0x distinct-key.
+
+That split matters for this design: **same-key reads are bounded by refcount
+contention on the single shared value, not by the table lock**
+(`march_vault_get` does `march_incrc(n->value)` inside the read section). ETS
+sidesteps this by not refcounting reads at all; March cannot. Hence the
+documented guidance to **resolve a name once and cache the Pid, re-resolving on
+`None`** rather than resolving per send — §10's decision not to make `send`
+accept a name is reinforced by measurement, not only by taste.
+
+Full measurement trail: `specs/progress/2026-08-12-named-registry.md`.
 
 ## 6. Death cleanup, and why we diverge from Elixir here
 
@@ -242,7 +287,7 @@ Builtins (each needs all four sites — typecheck / defun / llvm_builtins / eval
 
 | Builtin | Type | Capability |
 |---|---|---|
-| `actor_register` | `String -> Pid(a) -> Bool` | see §7 |
+| `actor_register` | `String -> Pid(a) -> Bool` — **shipped pid-first**, `Pid(a) -> String -> Bool`, matching `monitor`/`kill`; `llvm_emit.ml` swaps the atoms back for the C ABI | see §7 |
 | `actor_unregister` | `String -> Bool` | see §7 |
 | `actor_whereis` | `String -> Option(Pid(a))` | none |
 | `actor_registered` | `Unit -> List(String)` | none |
@@ -278,18 +323,28 @@ explicit form proves noisy.
 
 ## 12. Open questions
 
-1. **Does `whereis` check liveness, or is the retire-on-death race tight
-   enough?** Proposed: check — one load of `fields[3]` on a path that is not
-   per-message hot.
+*(Reconciled 2026-08-14. 1 and 3 are answered by what shipped; 2, 4 and 5 remain
+open.)*
+
+1. **ANSWERED — yes, `whereis` checks liveness.** One load of `fields[3]` on a
+   path that is not per-message hot. Cleanup and lookup race by nature, so the
+   check is not optional.
 2. **Is a read of shared mutable state an effect?** §7 proposes data ops need
    no capability. If `needs` is also a purity signal, that loses information.
    Decide before the split ships, since it governs all of Vault.
-3. **Should the supervisor re-register names for a child it did not itself
-   register?** §9 says yes. The alternative needs a child-spec field, worth
-   revisiting if specs grow anyway for restart types
+3. **ANSWERED — yes.** The supervisor re-registers every name the crashed
+   incarnation held, regardless of who registered it, and this extends to live
+   siblings killed by `one_for_all` / `rest_for_one`. No child-spec field was
+   added. Still worth revisiting if specs grow anyway for restart types
    (`specs/todos/2026-08-12-supervisor-restart-types-and-child-specs.md`).
-4. **Partitioning:** does the registry want its own partitioned tables from the
-   start, or is one table with concurrent reads enough until measured?
+   Caveat as built: this is **compiled-only** — the interpreter does not carry
+   names across a restart
+   (`specs/todos/2026-08-14-interpreter-registry-restart-parity.md`).
+4. **Partitioning — still open.** One table with concurrent reads was enough:
+   40 000 register+retire pairs cost ~1.6 µs each and add ~60–70 ms to a ~900 ms
+   churn scenario, with no measurable effect on the `fanin` send path. Revisit
+   under a genuine registration storm; tracked as
+   `specs/todos/2026-08-12-vault-toward-ets-semantics.md` item 2.
 5. **Distributed seam:** should a local registration announce into
    `global_registry` automatically? Proposed: no, not implicitly — design the
    bridge when the distributed plane

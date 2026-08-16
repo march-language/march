@@ -168,7 +168,22 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
        `Type.Ctor` reference (e.g. `List.Cons`, "List" a type, not a
        module) likewise has no [shared_ctor_collision_type] entry and is
        unchanged. *)
-    let tag =
+    let reserved_monitor_tag =
+      let type_name = match scrut with
+        | Tir.AVar { Tir.v_ty = Tir.TCon (name, _); _ } -> Some name
+        | _ -> None
+      in
+      let short_tag = match String.rindex_opt tag '.' with
+        | Some i -> String.sub tag (i + 1) (String.length tag - i - 1)
+        | None -> tag
+      in
+      Lower_state.reserved_monitor_ctor_key
+        ~module_prefix:env.Lower_state.mod_prefix ~source_tag:tag
+        ~type_name ~ctor_name:short_tag
+    in
+    let tag = match reserved_monitor_tag with
+      | Some key -> key
+      | None ->
       match String.rindex_opt tag '.' with
       | None ->
         (match scrut with

@@ -628,16 +628,27 @@ Logger.with_context(fn () ->
 
 `vault.march` — Process-local key-value store backed by a mutable hash table. Used extensively in the stdlib for global mutable state.
 
-```march
-let t = Vault.new("counter_table")    -- or Vault.open(name), idempotent
+A handle is `Vault(v)`, phantom in the type of the values the table holds, so
+a table written at one type cannot be read back at another.
 
-Vault.put(t, "counter", 0)
-Vault.get(t, "counter")          -- Option(a)
-Vault.update(t, "counter", fn n -> n + 1)
+```march
+let t = Vault.new("counter_table")    -- Vault(v); or Vault.open(name), idempotent
+
+Vault.put(t, "counter", 0)       -- pins v := Int
+Vault.get(t, "counter")          -- Option(Int)
+Vault.update(t, "counter", fn n -> n + 1)   -- fn is (v) -> v
 Vault.delete(t, "counter")
 Vault.keys(t)                    -- List(String) — all live keys (no prefix filter)
-Vault.all(t)                     -- List((String, a))
+Vault.all(t)                     -- List((String, Int))
 ```
+
+The element type is fixed where the handle is bound: a `let`-bound handle does
+not let-generalize, because a Vault is a process-global mutable cell. Two
+doors stay element-erased on purpose — `new`/`open`/`whereis`, which mint a
+handle from a *name* and so choose `v` rather than check it, and the
+`ns_set`/`ns_get`/`ns_drop` namespace-string API, which has no handle to carry
+`v`. `Config` (a heterogeneous store by design) opts out explicitly with a
+`: Vault(v)` annotation on its table getters.
 
 ---
 
