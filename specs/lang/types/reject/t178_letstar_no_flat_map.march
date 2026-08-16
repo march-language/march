@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: `let*` needs `Widget.flat_map`, but it doesn't exist.
+-- `let*` resolves `<Type>.flat_map` from the RHS's inferred type. A type
+-- with no `flat_map` in a same-named module is a clear, actionable error,
+-- not a crash or a generic "unbound" message.
+mod Main do
+  type Widget = Widget(Int)
+  fn f(w : Widget) : Int do
+    let* x = w
+    x
+  end
+end

@@ -931,6 +931,45 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     } in
     lower_expr env (Ast.EMatch (result_expr, [ok_branch; err_branch], dsp))
 
+  (* --- let* p = e; cont  →  M.flat_map(e, fn $tmp -> match $tmp do p -> cont end end)
+     where M is e's head type constructor (Option, Result, a user type, ...).
+     Unlike ELetQ (hardwired to Result's two ctors, so it can build the
+     exhaustive match directly), ELetStar has no fixed shape to match on --
+     it must go through the SAME `M.flat_map` call an ordinary qualified
+     call would make, so this constructs that call and re-enters
+     [lower_expr] on it, exactly as ELetQ re-enters on its synthesized
+     EMatch above. `M` is resolved from [result_expr]'s type, already
+     pinned by typecheck (which validated `M.flat_map` exists and has the
+     right shape) and available here via [ty_of_expr]/[env.type_map]. *)
+  | Ast.ELetStar (p, result_expr, cont, sp) ->
+    let dsp = Ast.dummy_span in
+    let head_name = match ty_of_expr env result_expr with
+      | Tir.TCon (name, _) -> name
+      | _ ->
+        failwith (Printf.sprintf
+          "lower_expr: let* at %s:%d could not determine its right-hand \
+           side's type constructor (should have been caught by typecheck)"
+          sp.Ast.file sp.Ast.start_line)
+    in
+    let tmp : Ast.name = { txt = "$letstar_tmp"; span = dsp } in
+    let match_branch : Ast.branch = {
+      branch_pat   = p;
+      branch_guard = None;
+      branch_body  = cont;
+    } in
+    let callback = Ast.ELam (
+        [ { Ast.param_name = tmp; param_ty = None; param_lin = Ast.Unrestricted } ],
+        Ast.EMatch (Ast.EVar tmp, [match_branch], dsp),
+        dsp)
+    in
+    let flat_map_call =
+      Ast.EApp (
+        Ast.EVar { txt = head_name ^ ".flat_map"; span = dsp },
+        [ result_expr; callback ],
+        dsp)
+    in
+    lower_expr env flat_map_call
+
   (* --- Assert: lower to a runtime panic call on failure (for compiled path) --- *)
   | Ast.EAssert (inner, _) ->
     (* Lower assert to: if inner then () else panic("assertion failed")

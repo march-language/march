@@ -1,0 +1,20 @@
+-- `let*` over Result behaves exactly like `let?` (which is the special case
+-- `M = Result`). Confirms let* doesn't regress the let?-shaped use case.
+-- Value-witnessed by golden g47.
+mod Main do
+  needs IO.Console
+  fn step(x : Int) : Result(Int, String) do
+    if x > 0 do Ok(x + 1) else Err("neg") end
+  end
+  fn chain(x : Int) : Result(Int, String) do
+    let* a = step(x)
+    let* b = step(a)
+    Ok(b * 10)
+  end
+  fn main(_cap_console : Cap(IO.Console)) do
+    match chain(5) do
+      Ok(v)  -> println(int_to_string(v))
+      Err(e) -> println(e)
+    end
+  end
+end

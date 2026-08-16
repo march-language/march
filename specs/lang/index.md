@@ -72,6 +72,7 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Grammar (resolved, normative) | [`grammar.md`](grammar.md) | canonical |
 | Modules, visibility, imports | [`modules.md`](modules.md) | canonical |
 | `let?` / Result propagation | [`let-propagation.md`](let-propagation.md) | canonical |
+| `let*` / generalized monadic bind | [`let-star-generalized-bind.md`](let-star-generalized-bind.md) | canonical |
 | Pattern matching | [`pattern-matching.md`](pattern-matching.md) | canonical |
 | Interfaces (typeclasses) | [`interfaces.md`](interfaces.md) | canonical |
 | Type system (tutorial companion to core-march-types.md) | [`type-system.md`](type-system.md) | canonical |
