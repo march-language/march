@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **New `AhoCorasick` stdlib module** for multi-pattern string search: build an automaton
+  once from a list of literal patterns (`AhoCorasick.build`), then find every match of any
+  of them in a haystack in a single linear pass (`find_all` / `find_first` / `matches`),
+  in `O(haystack + total pattern length)` time regardless of how many patterns there are —
+  independent of the pattern count, unlike calling `String.index_of` once per pattern.
+  Overlapping matches and patterns that are prefixes of one another are both reported
+  correctly (e.g. patterns `"he"` and `"she"` both match inside `"ushers"`). Useful for
+  March-written lexers/tokenizers doing keyword dispatch, and any "find any of these N
+  literal strings" search.
 - An unrecognized capability in `needs` is now an error with a did-you-mean suggestion
   (`needs IO.FileWrit` → `needs IO.FileWrite`). Typos previously produced only a misleading
   "declared but no function requires it — remove the unused declaration" warning.

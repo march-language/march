@@ -1,0 +1,158 @@
+-- Tests for the AhoCorasick stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_aho_corasick.march
+
+mod TestAhoCorasick do
+
+  -- Match records compared as plain tuples so equality doesn't depend on
+  -- record structural-equality behaving a particular way.
+  pfn tup(m) do
+    (m.start, m.stop, m.pattern_index, m.pattern)
+  end
+
+  pfn tuples(ms) do
+    match ms do
+    Nil -> Nil
+    Cons(m, rest) -> Cons(tup(m), tuples(rest))
+    end
+  end
+
+  describe "AhoCorasick" do
+
+    describe "build / pattern_count / pattern_at" do
+
+      test "empty pattern list has zero patterns and matches nothing" do
+        let ac = AhoCorasick.build(Nil)
+        assert (AhoCorasick.pattern_count(ac) == 0)
+        assert (AhoCorasick.find_all(ac, "anything at all") == Nil)
+        assert not(AhoCorasick.matches(ac, "anything at all"))
+        assert (AhoCorasick.find_first(ac, "anything at all") == None)
+      end
+
+      test "empty pattern list against empty haystack" do
+        let ac = AhoCorasick.build(Nil)
+        assert (AhoCorasick.find_all(ac, "") == Nil)
+      end
+
+      test "pattern_count reflects the input list length" do
+        let ac = AhoCorasick.build(["a", "b", "c"])
+        assert (AhoCorasick.pattern_count(ac) == 3)
+      end
+
+      test "pattern_at returns the pattern text by index, None out of range" do
+        let ac = AhoCorasick.build(["he", "she"])
+        assert (AhoCorasick.pattern_at(ac, 0) == Some("he"))
+        assert (AhoCorasick.pattern_at(ac, 1) == Some("she"))
+        assert (AhoCorasick.pattern_at(ac, 2) == None)
+        assert (AhoCorasick.pattern_at(ac, -1) == None)
+      end
+
+      test "an empty pattern string is skipped: never matches, still counted" do
+        let ac = AhoCorasick.build(["", "x"])
+        assert (AhoCorasick.pattern_count(ac) == 2)
+        assert (tuples(AhoCorasick.find_all(ac, "xyz")) == Cons((0, 1, 1, "x"), Nil))
+      end
+
+    end
+
+    describe "single pattern" do
+
+      test "find_all finds a single occurrence" do
+        let ac = AhoCorasick.build(["needle"])
+        let ms = tuples(AhoCorasick.find_all(ac, "a needle in a haystack"))
+        assert (ms == Cons((2, 8, 0, "needle"), Nil))
+      end
+
+      test "find_all finds multiple non-overlapping occurrences of one pattern" do
+        let ac = AhoCorasick.build(["ab"])
+        let ms = tuples(AhoCorasick.find_all(ac, "ababab"))
+        assert (ms == Cons((0, 2, 0, "ab"), Cons((2, 4, 0, "ab"), Cons((4, 6, 0, "ab"), Nil))))
+      end
+
+      test "matches / find_first agree with find_all on presence" do
+        let ac = AhoCorasick.build(["needle"])
+        assert (AhoCorasick.matches(ac, "a needle here"))
+        assert not(AhoCorasick.matches(ac, "nothing to see"))
+        assert (AhoCorasick.find_first(ac, "nothing to see") == None)
+      end
+
+    end
+
+    describe "no matches" do
+
+      test "find_all is empty when nothing matches" do
+        let ac = AhoCorasick.build(["xyz", "qqq"])
+        assert (AhoCorasick.find_all(ac, "hello world") == Nil)
+        assert not(AhoCorasick.matches(ac, "hello world"))
+      end
+
+    end
+
+    describe "empty haystack" do
+
+      test "find_all against an empty haystack is always empty" do
+        let ac = AhoCorasick.build(["a", "bb", "ccc"])
+        assert (AhoCorasick.find_all(ac, "") == Nil)
+        assert not(AhoCorasick.matches(ac, ""))
+      end
+
+    end
+
+    describe "pattern longer than haystack" do
+
+      test "a pattern longer than the haystack never matches" do
+        let ac = AhoCorasick.build(["muchlongerthanthehaystack"])
+        assert (AhoCorasick.find_all(ac, "short") == Nil)
+      end
+
+    end
+
+    describe "patterns that are prefixes of each other" do
+
+      test "every prefix pattern along a shared trie path is reported" do
+        let ac = AhoCorasick.build(["a", "ab", "abc"])
+        let ms = tuples(AhoCorasick.find_all(ac, "abc"))
+        assert (ms == Cons((0, 1, 0, "a"), Cons((0, 2, 1, "ab"), Cons((0, 3, 2, "abc"), Nil))))
+      end
+
+      test "the shorter of two prefix patterns still matches inside a longer haystack" do
+        let ac = AhoCorasick.build(["he", "hers"])
+        let ms = tuples(AhoCorasick.find_all(ac, "hers"))
+        assert (ms == Cons((0, 2, 0, "he"), Cons((0, 4, 1, "hers"), Nil)))
+      end
+
+    end
+
+    describe "overlapping matches" do
+
+      -- The classic Aho-Corasick example: "he" and "she" both occur inside
+      -- "ushers", even though "she" (not "he") is the trie path actually
+      -- walked to reach that position — "he" is recovered via the failure
+      -- link. Longest match at a given end position is reported first.
+      test "he and she both match inside ushers" do
+        let ac = AhoCorasick.build(["he", "she", "his", "hers"])
+        let ms = tuples(AhoCorasick.find_all(ac, "ushers"))
+        assert (ms == Cons((1, 4, 1, "she"), Cons((2, 4, 0, "he"), Cons((2, 6, 3, "hers"), Nil))))
+      end
+
+      test "overlapping matches of different lengths at the same start" do
+        let ac = AhoCorasick.build(["a", "ab", "abc"])
+        let ms = tuples(AhoCorasick.find_all(ac, "abcabc"))
+        assert (ms == Cons((0, 1, 0, "a"), Cons((0, 2, 1, "ab"), Cons((0, 3, 2, "abc"),
+                 Cons((3, 4, 0, "a"), Cons((3, 5, 1, "ab"), Cons((3, 6, 2, "abc"), Nil)))))))
+      end
+
+    end
+
+    describe "case sensitivity and byte-oriented matching" do
+
+      test "matching is case-sensitive" do
+        let ac = AhoCorasick.build(["He"])
+        assert (AhoCorasick.find_all(ac, "he") == Nil)
+        assert not(AhoCorasick.find_all(ac, "He") == Nil)
+      end
+
+    end
+
+  end
+
+end
