@@ -4725,21 +4725,145 @@ static void *make_tuple2(void *a, void *b) {
     return tup;
 }
 
+/* ── SIMD first-byte scan for march_memmem ──────────────────────────────
+ *
+ * march_simd_memchr is a hand-written vector byte-scanner: broadcast the
+ * target byte across a 16-byte register, compare it against the buffer in
+ * 64-byte chunks (four 16-byte lanes) to get a per-lane equality mask, use a
+ * single cheap "did ANY of the 64 bytes match" reduction to skip the whole
+ * chunk on a miss, and only when that reduction says yes, find the exact
+ * lane and byte position — falling through to a 16-byte loop and then a
+ * scalar tail for whatever is left under 64/16 bytes. This is the same
+ * "compiled at build time for the target ISA" split as
+ * runtime/march_http_parse_simd.c: SSE2 is the x86-64 ABI baseline (always
+ * available, no -msse4.2/-mavx flag needed — unlike that file's SSE4.2
+ * PCMPESTRI path) and NEON is the AArch64 ABI baseline (always available on
+ * both CI platforms, macos-15 arm64 and any aarch64 Linux target; see
+ * bin/main.ml's arch_cflags, which passes -msse4.2 only for X86_64/Native
+ * and leaves arm64 flag-less with the comment "NEON by default"). Anything
+ * else (32-bit ARM without NEON, WASM) falls back to plain libc memchr,
+ * which is always correct.
+ *
+ * Each of the three implementations has IDENTICAL contract to libc memchr:
+ * given a starting pointer and byte count, return a pointer to the first
+ * occurrence of the target byte in that exact range, or NULL. Because every
+ * loop stage's trip count is gated on its own chunk size fitting in what's
+ * left (i + 64 <= n, then i + 16 <= n, then plain i < n for the scalar
+ * tail), no load ever starts past `n` minus its own width — no
+ * out-of-bounds read for any n, including n < 16 (neither vector loop body
+ * ever runs then).
+ */
+
+#if defined(__SSE2__)
+#include <emmintrin.h>
+/* Four 16-byte lanes (64 bytes/iteration) so the common "no match in this
+ * chunk" case pays one OR + one movemask-and-test across the whole 64 bytes
+ * instead of a movemask-and-branch every 16 — libc memchr on both platforms
+ * this runtime targets does the equivalent wide-chunk trick, and a plain
+ * 16-bytes-at-a-time loop measured meaningfully slower than it in practice. */
+static const char *march_simd_memchr(const char *p, char c, size_t n) {
+    const __m128i target = _mm_set1_epi8(c);
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        __m128i c0 = _mm_loadu_si128((const __m128i *)(p + i));
+        __m128i c1 = _mm_loadu_si128((const __m128i *)(p + i + 16));
+        __m128i c2 = _mm_loadu_si128((const __m128i *)(p + i + 32));
+        __m128i c3 = _mm_loadu_si128((const __m128i *)(p + i + 48));
+        __m128i e0 = _mm_cmpeq_epi8(c0, target);
+        __m128i e1 = _mm_cmpeq_epi8(c1, target);
+        __m128i e2 = _mm_cmpeq_epi8(c2, target);
+        __m128i e3 = _mm_cmpeq_epi8(c3, target);
+        __m128i any = _mm_or_si128(_mm_or_si128(e0, e1), _mm_or_si128(e2, e3));
+        if (_mm_movemask_epi8(any)) {
+            int m0 = _mm_movemask_epi8(e0);
+            if (m0) return p + i + __builtin_ctz((unsigned)m0);
+            int m1 = _mm_movemask_epi8(e1);
+            if (m1) return p + i + 16 + __builtin_ctz((unsigned)m1);
+            int m2 = _mm_movemask_epi8(e2);
+            if (m2) return p + i + 32 + __builtin_ctz((unsigned)m2);
+            int m3 = _mm_movemask_epi8(e3);
+            return p + i + 48 + __builtin_ctz((unsigned)m3);
+        }
+    }
+    for (; i + 16 <= n; i += 16) {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(p + i));
+        __m128i eq = _mm_cmpeq_epi8(chunk, target);
+        int mask = _mm_movemask_epi8(eq);
+        if (mask) return p + i + __builtin_ctz((unsigned)mask);
+    }
+    for (; i < n; i++) if (p[i] == c) return p + i;
+    return NULL;
+}
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
+#include <arm_neon.h>
+/* Same 64-byte-chunk shape as the SSE2 path above, using vmaxvq_u8 (a single
+ * horizontal-max-across-lanes instruction) as the cheap "any lane matched"
+ * test in place of movemask: a plain 16-bytes-at-a-time loop that always
+ * paid two vgetq_lane_u64 + ctzll extractions per chunk (even on a miss)
+ * measured ~45% SLOWER than libc memchr on Apple Silicon; this reduction
+ * shape only pays the precise per-lane extraction once a chunk is known to
+ * contain a hit. */
+static const char *march_simd_memchr(const char *p, char c, size_t n) {
+    const uint8x16_t target = vdupq_n_u8((uint8_t)c);
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        uint8x16_t c0 = vld1q_u8((const uint8_t *)(p + i));
+        uint8x16_t c1 = vld1q_u8((const uint8_t *)(p + i + 16));
+        uint8x16_t c2 = vld1q_u8((const uint8_t *)(p + i + 32));
+        uint8x16_t c3 = vld1q_u8((const uint8_t *)(p + i + 48));
+        uint8x16_t e0 = vceqq_u8(c0, target);
+        uint8x16_t e1 = vceqq_u8(c1, target);
+        uint8x16_t e2 = vceqq_u8(c2, target);
+        uint8x16_t e3 = vceqq_u8(c3, target);
+        uint8x16_t any = vorrq_u8(vorrq_u8(e0, e1), vorrq_u8(e2, e3));
+        if (vmaxvq_u8(any)) {
+            uint8x16_t hit_eq; size_t base;
+            if (vmaxvq_u8(e0))      { hit_eq = e0; base = i; }
+            else if (vmaxvq_u8(e1)) { hit_eq = e1; base = i + 16; }
+            else if (vmaxvq_u8(e2)) { hit_eq = e2; base = i + 32; }
+            else                    { hit_eq = e3; base = i + 48; }
+            uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(hit_eq), 0);
+            if (lo) return p + base + (__builtin_ctzll(lo) >> 3);
+            uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(hit_eq), 1);
+            return p + base + 8 + (__builtin_ctzll(hi) >> 3);
+        }
+    }
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + i));
+        uint8x16_t eq = vceqq_u8(chunk, target);
+        uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(eq), 0);
+        if (lo) return p + i + (__builtin_ctzll(lo) >> 3);
+        uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(eq), 1);
+        if (hi) return p + i + 8 + (__builtin_ctzll(hi) >> 3);
+    }
+    for (; i < n; i++) if (p[i] == c) return p + i;
+    return NULL;
+}
+#else
+static const char *march_simd_memchr(const char *p, char c, size_t n) {
+    return (const char *)memchr(p, c, n);
+}
+#endif
+
 /* Substring search shared by every string search site in this file.
  *
- * Two stages: memchr finds candidate first bytes, memcmp confirms.  libc's
- * memchr is SIMD-optimised on every platform we target, so this gets vector
- * scanning with no intrinsics and no per-architecture code — the same reasoning
- * that keeps runtime/march_http_parse_simd.c's scalar fallback rather than
- * requiring SSE4.2 everywhere.  The previous implementation called memcmp at
- * every byte offset, which measured at roughly 0.5 GB/s.
+ * Two stages: march_simd_memchr finds candidate first bytes with a
+ * hand-written SIMD scan (see above), memcmp confirms.  The previous
+ * implementation called memcmp at every byte offset, which measured at
+ * roughly 0.5 GB/s; delegating the first-byte scan to libc memchr (itself
+ * usually SIMD internally, but not something this codebase writes or
+ * controls) was the intermediate step before this hand-written kernel.
  *
  * march_string is LENGTH-COUNTED and may contain NUL bytes, so nothing here may
  * use strstr/strchr or treat NUL as a terminator.
  *
  * On a failed candidate the scan resumes at hit + 1, NOT hit + nlen: needles
  * can overlap, and skipping the whole needle would miss the match in
- * ("aaaa", "aa") starting at index 1.
+ * ("aaaa", "aa") starting at index 1.  A match that straddles a 16-byte SIMD
+ * window boundary is still found correctly: march_simd_memchr only locates
+ * the needle's FIRST byte (a single-byte compare, so window boundaries never
+ * split what it is looking for), and the subsequent memcmp of the full
+ * needle is an ordinary linear scan with no window structure of its own.
  *
  * Returns a pointer into [hay], or NULL when there is no match. */
 static const char *march_memmem(const char *hay, int64_t haylen,
@@ -4753,7 +4877,7 @@ static const char *march_memmem(const char *hay, int64_t haylen,
         /* Only the first (remaining - nlen + 1) bytes can start a match; a hit
          * beyond that could not be followed by a full needle. */
         const char *hit =
-            (const char *)memchr(p, first, (size_t)(remaining - nlen + 1));
+            march_simd_memchr(p, first, (size_t)(remaining - nlen + 1));
         if (!hit) return NULL;
         if (memcmp(hit, needle, (size_t)nlen) == 0) return hit;
         remaining -= (hit - p) + 1;

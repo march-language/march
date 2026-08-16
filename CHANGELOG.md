@@ -19,6 +19,18 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`String.index_of`/`index_of_from`/`contains` (and everything else that shares
+  `march_memmem` in `runtime/march_runtime.c`) now scan for the needle's first byte with a
+  hand-written SIMD kernel** instead of delegating to libc `memchr`: SSE2 on x86-64 (the ABI
+  baseline, no `-msse4.2`/`-mavx` flag needed) and NEON on AArch64 (the ABI baseline on both
+  CI platforms, macOS arm64 and Linux arm64), each unrolled to 64 bytes per iteration with a
+  cheap "any lane matched" reduction before paying for exact-position extraction, falling back
+  to plain `memchr` on any other target. Measured ~30% faster than the previous `memchr`-based
+  implementation on a 32MB-haystack/absent-needle benchmark on Apple Silicon. Purely a
+  performance change — matching contract (empty-needle, negative/out-of-range `start`
+  clamping, overlapping-match resume-at-hit+1, embedded-NUL handling) is unchanged and pinned
+  by `test/native/string_search_edge_cases.march`.
+
 - **Local actor monitors now deliver reason-carrying `Down(ref, target_pid, reason)` messages** — `Normal`, `Killed`, or `Crash(String)` — through the control plane, so the notification bypasses mailbox limits and is not lost behind a full bounded queue. Interpreter and compiled backends now have the same local monitor payload and reason semantics.
 - A `Cap(X)` parameter on a non-`main` function is no longer a ceiling on everything that
   function transitively reaches. Taking one capability parameter used to oblige a function

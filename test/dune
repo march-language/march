@@ -1285,6 +1285,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ring_buf_ops.expected native_ring_buf_ops.out)))
 
+; String search edge cases (SIMD march_memmem kernel, runtime/march_runtime.c).
+; String.index_of/index_of_from/contains go through the compiled runtime's
+; march_memmem, a different code path from the interpreter's own OCaml
+; implementation (lib/eval/eval.ml) that test/stdlib/test_string.march
+; exercises — this fixture is compiled-only so it actually reaches the C
+; kernel. Cases target the specific failure modes of a hand-rolled SIMD
+; scan: a needle match straddling a 16-byte window boundary, embedded NUL
+; bytes (March strings are length-prefixed, not NUL-terminated), the
+; overlapping-match resume-at-hit+1 rule, and index_of_from's start-clamping
+; contract. See specs/progress/2026-08-16-simd-string-search.md.
+(rule
+ (targets native_string_search_edge_cases native_string_search_edge_cases.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/string_search_edge_cases.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_string_search_edge_cases
+        native/string_search_edge_cases.march)
+   (with-stdout-to native_string_search_edge_cases.out
+        (system "./native_string_search_edge_cases")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_search_edge_cases.expected native_string_search_edge_cases.out)))
+
 ; ── Regression: nested `derive Json` must dispatch `to_json` natively ──
 ; mono.ml's record_to_typename map keyed each record type only on its DECLARED
 ; field shape, where a nested record field is a nominal TCon ("Mid").  A record
