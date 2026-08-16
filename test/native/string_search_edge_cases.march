@@ -1,0 +1,81 @@
+-- Edge-case regression for the SIMD-accelerated march_memmem kernel backing
+-- String.index_of / index_of_from / contains (runtime/march_runtime.c).
+--
+-- Compiled-only: exercises the C runtime kernel directly, unlike
+-- test/stdlib/test_string.march which runs through the interpreter's
+-- separate OCaml implementation (lib/eval/eval.ml) and never touches
+-- march_memmem at all.
+--
+-- Cases specifically chosen to catch a naive per-16-byte-window SIMD scan:
+--   - a needle match straddling a 16-byte window boundary (must not be
+--     missed by scanning windows independently without carrying state
+--     across the boundary)
+--   - embedded NUL bytes (March strings are length-prefixed, not
+--     NUL-terminated; any NUL-terminated-string function would truncate)
+--   - empty needle, needle longer than haystack, negative/out-of-range
+--     start (clamping contract documented above march_string_index_of_from)
+--   - haystacks/needles both under and over the ~16-byte SIMD threshold
+mod Main do
+  needs IO.Console
+
+  pfn show_opt(o : Option(Int)) : String do
+    match o do
+    None -> "None"
+    Some(i) -> "Some(" ++ String.from_int(i) ++ ")"
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    -- Short (< 16 byte) haystack/needle: scalar-ish path.
+    println(show_opt(String.index_of("hello", "ll")))          -- Some(2)
+    println(show_opt(String.index_of("hello", "xyz")))         -- None
+    println(show_opt(String.index_of("hello", "")))            -- Some(0)
+    println(String.contains("hello world", "world"))           -- true
+    println(String.contains("hello", ""))                      -- true
+    println(String.contains("hi", "hello"))                    -- false (needle > haystack)
+
+    -- Long haystack (> 16 bytes) forcing the vectorized loop.
+    let long_hay = "0123456789abcdef0123456789abcdefXYZ0123456789abcdef"
+    println(show_opt(String.index_of(long_hay, "XYZ")))        -- Some(32)
+    println(show_opt(String.index_of(long_hay, "not_here_at_all"))) -- None
+
+    -- Needle match straddling a 16-byte window boundary: place the needle
+    -- so it starts at offset 14 and runs through offset 19, crossing the
+    -- byte-15/16 boundary of the first SIMD window.
+    let straddle = "aaaaaaaaaaaaaaNEEDLEbbbbbbbbbbbbbbbbbbbb"
+    println(show_opt(String.index_of(straddle, "NEEDLE")))     -- Some(14)
+
+    -- Needle whose first byte recurs many times before the real match, to
+    -- exercise the "candidate rejected by memcmp, resume scan at hit+1"
+    -- path across a SIMD window (repeated 'a's before the real "ab" match).
+    let many_candidates = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+    println(show_opt(String.index_of(many_candidates, "ab")))  -- Some(45)
+
+    -- Overlapping needle/haystack repeats (must resume at hit+1, not hit+nlen).
+    println(show_opt(String.index_of("aaaa", "aa")))           -- Some(0)
+    println(show_opt(String.index_of_from("aaaa", "aa", 1)))   -- Some(1)
+
+    -- Embedded NUL bytes: must not stop at the NUL as a terminator.
+    let with_nul = "abc\0defXYZghi"
+    println(show_opt(String.index_of(with_nul, "XYZ")))        -- Some(7)
+    println(show_opt(String.index_of(with_nul, "\0def")))      -- Some(3)
+    println(String.contains(with_nul, "\0def"))                 -- true
+
+    -- Long haystack with embedded NUL past the 16-byte SIMD boundary.
+    let long_nul = "0123456789abcdef\0" ++ "0123456789abcdefTARGET_AFTER_NUL"
+    println(show_opt(String.index_of(long_nul, "TARGET_AFTER_NUL"))) -- Some(33)
+
+    -- index_of_from clamping contract.
+    println(show_opt(String.index_of_from("a,b,c", ",", 0)))   -- Some(1)
+    println(show_opt(String.index_of_from("a,b,c", ",", 2)))   -- Some(3)
+    println(show_opt(String.index_of_from("a,b,c", ",", 4)))   -- None
+    println(show_opt(String.index_of_from("a,b,c", ",", -5)))  -- Some(1) (negative clamps to 0)
+    println(show_opt(String.index_of_from("a,b,c", ",", 100))) -- None (past end)
+    println(show_opt(String.index_of_from("a,b,c", "", 3)))    -- Some(3) (empty needle at clamped start)
+    println(show_opt(String.index_of_from("a,b,c", "", -1)))   -- Some(0) (empty needle, clamped negative start)
+
+    -- Needle longer than haystack at every entry point.
+    println(show_opt(String.index_of("short", "much longer needle"))) -- None
+    println(String.contains("short", "much longer needle"))    -- false
+  end
+end
