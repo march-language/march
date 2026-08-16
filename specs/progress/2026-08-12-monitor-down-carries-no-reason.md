@@ -58,10 +58,37 @@ retains the same shape and adds `NodeDown`.
 Files documented: `docs/actors.md`, `specs/lang/actors.md`, and `CHANGELOG.md`.
 The native monitor witness is `test/native/actor_monitor_down_reason.march`.
 
-Verification: `scripts/check-docs.sh` passed. The required combined
-`scripts/run-tests.sh compiler eval codegen stdlib` run was started, and
-compiler/eval/codegen completed. `run_stdlib` recorded four undiagnosed
-failures (HCR dispatch, HCR manifest caps, `MARCH_SANITIZE` clean exit, and
-string-statistics bytes-copied) before the run was terminated; `test_stdlib_march`
-never started. Full-suite completion is not claimed. The focused native monitor
-fixture and final documentation checks are recorded in the task report.
+Verification (completed 2026-08-15 on a quiet box, load avg ~9.5, after the
+initial run was terminated mid-flight under a load-250 episode):
+
+| suite / gate | result |
+|---|---|
+| `run_compiler` | 915 tests, 0 failures |
+| `run_eval` | 256 tests, 0 failures |
+| `run_codegen` | 583 tests, 0 failures |
+| `run_stdlib` | 863 tests, 0 failures |
+| `test_stdlib_march` | 59 tests, 0 failures |
+| TIR snapshots | 33 tests, 0 failures; `git diff test/snapshots/` empty |
+| `@types-check` (CI-only, `--force`) | 293 passed, 0 failed |
+| `@grammar-check` (CI-only, `--force`) | 46 passed, 0 failed |
+| `scripts/check-docs.sh` | passed |
+
+The four `run_stdlib` failures recorded in the first attempt (HCR versioned
+dispatch, HCR manifest capabilities, `MARCH_SANITIZE` clean exit, and
+string-statistics bytes-copied) were **environmental, not caused by this
+change**: the same suite that recorded them now passes in full, and
+`test_stdlib_march`, which never started, passes too. They were not assumed to
+be flakes — this change reallocates constructor tags (reserved range
+`0x7f00_0000+`) and HCR dispatch is tag-sensitive, so a genuine regression was
+plausible and had to be ruled out by re-running rather than by inspection.
+
+The TIR snapshots were run deliberately rather than skipped: this change edits
+`lower.ml`, `lower_match.ml`, `lower_state.ml` and `lower_actor.ml` while
+updating no `.expected` file, which is the profile of a stale-snapshot failure.
+They pass, and the snapshot diff is genuinely empty — the monitor lowering does
+not perturb the pinned corpus.
+
+Both CI-only gates were run with `--force`; without it `@types-check` exits 0
+with a zero-byte log and proves nothing.
+
+The native monitor witness is `test/native/actor_monitor_down_reason.march`.
