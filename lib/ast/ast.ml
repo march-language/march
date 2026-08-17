@@ -288,9 +288,25 @@ and restart_strategy =
   | OneForAll    (** Kill and restart all children *)
   | RestForOne   (** Kill and restart children after the crashed one in order *)
 
+(** Per-child restart policy on a supervise block.
+
+    NOTE [Permanent] and [Transient] are behaviourally IDENTICAL in the local
+    plane today: both restart on Killed and Crash, neither on Normal. In OTP the
+    only difference between them is restart-on-normal-exit, and March's
+    [Permanent] deliberately does not restart on a normal exit (do_actor_death
+    already guards the supervisor notify with [reason != MARCH_DEATH_NORMAL],
+    and changing that would alter every supervise block already written).
+
+    [Transient] exists so a child spec reads the same locally and under
+    [stdlib/dist_supervisor.march]'s RestartStrategy, and it will diverge if
+    March ever adopts OTP's restart-on-normal Permanent. See
+    specs/2026-08-17-supervisor-restart-types-design.md. *)
+and restart_type = Permanent | Transient | Temporary
+
 and supervise_field = {
-  sf_name : name;
-  sf_ty   : ty;
+  sf_name    : name;
+  sf_ty      : ty;
+  sf_restart : restart_type;   (** [Permanent] when the modifier is omitted *)
 }
 
 and supervise_config = {
