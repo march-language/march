@@ -11180,6 +11180,7 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
    compile fails. *)
 let hcr_manifest_actor_handler_caps_fixture_src =
   "mod Outer do\n\
+  \  needs IO.Console\n\
   \  mod Inner do\n\
   \    needs IO.Console\n\
   \    actor Weeble do\n\
@@ -11195,7 +11196,7 @@ let hcr_manifest_actor_handler_caps_fixture_src =
   \      send(pid, Zorp(\"hi\"))\n\
   \    end\n\
   \  end\n\
-  \  fn main() do\n\
+  \  fn main(_cap : Cap(IO.Console)) do\n\
   \    Inner.run_it()\n\
   \  end\n\
    end\n"

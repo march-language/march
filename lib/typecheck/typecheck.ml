@@ -9285,8 +9285,21 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      accumulate-across-call-sites behavior. *)
   let record_fn_refs (fn_qname : string) (bodies : (string list * Ast.expr) list) =
     let refs = List.concat_map (fun (bound, e) -> free_vars_expr bound e) bodies in
+    (* A `spawn(Actor)` reaches the actor's message handlers at runtime, but
+       neither the call walk nor [free_vars_expr] sees that edge — the actor
+       name is a nullary [ECon] tag both walks discard.  Emit each spawned
+       actor's bare name as an extra reference; the [DActor] arm registers the
+       matching [Actor -> handler_qname] edges, so a handler's capabilities
+       flow into the closure of every function that spawns its actor, and thus
+       into [main]'s grant.  Charged on SPAWN (reachability), so a defined-but-
+       never-spawned actor stays free like any other dead code. *)
+    let spawn_refs =
+      List.concat_map
+        (fun (_, e) -> March_ast.Calls.spawned_actor_names [] e) bodies
+    in
     let prior = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs fn_qname) in
-    Hashtbl.replace env.fn_refs fn_qname (List.sort_uniq compare (refs @ prior));
+    Hashtbl.replace env.fn_refs fn_qname
+      (List.sort_uniq compare (refs @ spawn_refs @ prior));
     (* R1 stage C (now removed, 2026-08-13 — see [check_fn_grants]'s deletion
        note near [fn_grant_points]): retain the same (params, body) pairs the
        reference walk used, so a row SEED can be derived from them later.
@@ -9552,6 +9565,36 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
                h.Ast.ah_body) ]
         ) actor.actor_handlers;
+      (* Bridge the actor-NAME node to its handler functions, so a `spawn(A)`
+         site — which [record_fn_refs] records as a reference to the bare name
+         [A] (see its [spawn_refs]) — reaches [A]'s handlers in the closure
+         walk.  Keyed by the actor's OWN bare [name.txt], matching both the
+         handler qnames above and the name a spawn site writes. *)
+      let handler_qnames =
+        List.map (fun (h : Ast.actor_handler) -> name.txt ^ "_" ^ h.Ast.ah_msg.txt)
+          actor.actor_handlers
+      in
+      (* The `init { ... }` initializer runs at spawn time, so its transitive
+         IO is reachable exactly when a handler's is.  Fold its own builtin
+         caps and its reference/spawn edges into the actor-NAME node too, so
+         `main -> A` charges init alongside the handlers.  Without this an
+         `init` that calls a file-writing helper escaped the grant entirely
+         (the handler bridge alone did not cover it). *)
+      let init_caps =
+        List.filter_map (fun (call_name, _) -> cap_of_builtin_call call_name)
+          (March_ast.Calls.names_and_name_spans actor.Ast.actor_init)
+      in
+      record_fn_caps name.txt init_caps;
+      let prior_actor_refs =
+        Option.value ~default:[] (Hashtbl.find_opt env.fn_refs name.txt)
+      in
+      let init_refs = free_vars_expr [] actor.Ast.actor_init in
+      let init_spawn_refs =
+        March_ast.Calls.spawned_actor_names [] actor.Ast.actor_init
+      in
+      Hashtbl.replace env.fn_refs name.txt
+        (List.sort_uniq compare
+           (handler_qnames @ init_refs @ init_spawn_refs @ prior_actor_refs));
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
@@ -13721,12 +13764,29 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  dependency from everything `main` reaches."
                 show_grant c)
          else
+           (* Suggest the PRECISE least-privilege fix — add a parameter for
+              exactly the reached capability — before the broad `Cap(IO)`
+              escape hatch.  The whole system promotes least privilege, so the
+              help must not steer the user to the widest grant.  Parameter name
+              mirrors the no-grant path's `_cap_<leaf>` spelling (a fixed
+              prefix, never a bare leaf like `spawn`, which is a reserved
+              keyword and would not parse). *)
+           let leaf =
+             match String.rindex_opt c '.' with
+             | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+             | None -> c
+           in
+           let param_hint =
+             Printf.sprintf "_cap_%s : Cap(%s)" (String.lowercase_ascii leaf) c
+           in
            Err.error env.errors ~span
              (Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s`%s. \
                  The grant is a ceiling on the WHOLE program — declaring \
                  `needs %s` does not raise it.\n\
-                 help: widen the grant (e.g. `Cap(IO)`), or remove the use."
+                 help: add a `Cap(%s)` parameter to `main` (e.g. \
+                 `fn main(…, %s)`), or widen the whole grant to `Cap(IO)`, \
+                 or remove the use."
                 show_grant c
                 (* Render exactly like the sibling missing-`needs` diagnostic's
                    [Cap_infer.chain_note] (lib/refinecheck/cap_infer.ml): the
@@ -13740,7 +13800,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                    Printf.sprintf " (reached from `main`: %s)"
                      (String.concat " \xe2\x86\x92 " ("main" :: chain))
                  | _ -> "")
-                c))
+                c c param_hint))
       (List.sort_uniq String.compare closure)
 
 (* ── R1 stage C: per-function grants — REMOVED 2026-08-13 ──────────────────

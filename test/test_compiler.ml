@@ -3960,6 +3960,109 @@ let test_actor_handler_body_io_with_needs_no_warning () =
     "actor handler body IO with needs declared: no missing-needs warning"
     false has_warning
 
+(* ── Actor grant bypass (2026-08-16) ────────────────────────────────────────
+   `check_main_grant` bounds the WHOLE program under `main`'s capability
+   parameter.  Before spawn->handler reference edges existed, an actor message
+   handler's IO was invisible to that walk: a handler could `file_write` under
+   a `main` granted only `Cap(IO.Console)`, and the program compiled and ran,
+   writing the file — a runtime-exploitable hole in the flagship guarantee.
+   The manifest side (Check 1b / ceiling) already saw the handler; only the
+   grant's reachability walk did not.  These pin the grant closing it. *)
+let test_actor_handler_escapes_grant_is_caught () =
+  let ctx = typecheck {|mod Sneak do
+    needs IO.Console
+    needs IO.FileWrite
+    actor Exfil do
+      state { n : Int }
+      init  { n: 0 }
+      on Go(msg : String) do
+        let _ = file_write("/tmp/cap_grant_actor_test", msg)
+        { n: state.n + 1 }
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      let p = spawn(Exfil)
+      send(p, Go("secrets"))
+      println("done")
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a handler's IO.FileWrite under a Console-only grant is a grant error"
+    true (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "the escaping capability is named"
+    true (has_error_with ctx "IO.FileWrite")
+
+(* Charged on SPAWN, not send: once an actor is spawned its handlers can run
+   (self-send, or a message from any holder of the pid), so spawning an actor
+   whose handler writes files IS authorizing that capability. *)
+let test_actor_spawned_not_sent_still_charged () =
+  let ctx = typecheck {|mod SpawnOnly do
+    needs IO.Console
+    needs IO.FileWrite
+    actor Z do
+      state { n : Int }
+      init  { n: 0 }
+      on Go() do
+        let _ = file_write("/tmp/cap_grant_actor_test2", "x")
+        { n: state.n + 1 }
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      let _p = spawn(Z)
+      println("never sent")
+    end
+  end|} in
+  Alcotest.(check bool) "spawning the actor charges its handler to the grant"
+    true (has_error_with ctx "granted `Cap(IO.Console)`")
+
+(* Dead-code-is-free is preserved: an actor DEFINED but never spawned can never
+   run, so its handler's caps must NOT be charged to the grant. *)
+let test_actor_defined_never_spawned_is_free () =
+  let ctx = typecheck {|mod DefOnly do
+    needs IO.Console
+    needs IO.FileWrite
+    actor Z do
+      state { n : Int }
+      init  { n: 0 }
+      on Go() do
+        let _ = file_write("/tmp/cap_grant_actor_test3", "x")
+        { n: state.n + 1 }
+      end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      println("Z is never spawned")
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a never-spawned actor's handler caps are not charged to the grant"
+    false (has_error_with ctx "granted `Cap(IO.Console)`")
+
+(* The `init { ... }` initializer runs at spawn time, so its transitive IO is
+   reachable exactly when a handler's is.  A helper-reached file_write from
+   init escaped an early version of the grant fix (handlers were bridged, init
+   was not); pinned here. *)
+let test_actor_init_io_is_charged_to_grant () =
+  let ctx = typecheck {|mod InitLeak do
+    needs IO.Console
+    needs IO.FileWrite
+    fn leak() : Int do
+      let _ = file_write("/tmp/cap_init_grant_test", "secret")
+      0
+    end
+    actor Exfil do
+      state { n : Int }
+      init { n: leak() }
+      on Go() do { n: state.n + 1 } end
+    end
+    fn main(cap : Cap(IO.Console)) : () do
+      let p = spawn(Exfil)
+      send(p, Go())
+      println("done")
+    end
+  end|} in
+  Alcotest.(check bool) "init-reached IO.FileWrite is charged to main's grant"
+    true (has_error_with ctx "granted `Cap(IO.Console)`")
+
 (* TRMC (Task 9): constructor-wrapped structural recursion — `Succ(bump(k))` —
    is compiled into a loop by TRMC, so the warning must NOT prescribe an
    accumulator parameter, and must say the compiler handles this shape.
@@ -14900,6 +15003,11 @@ let compiler_suites =
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
           Alcotest.test_case "actor handler body IO, needs declared: no warning" `Quick test_actor_handler_body_io_with_needs_no_warning;
+          (* Actor grant bypass (2026-08-16): handler IO must count against main's grant *)
+          Alcotest.test_case "actor handler escapes grant: caught" `Quick test_actor_handler_escapes_grant_is_caught;
+          Alcotest.test_case "actor spawned not sent: charged" `Quick test_actor_spawned_not_sent_still_charged;
+          Alcotest.test_case "actor defined never spawned: free" `Quick test_actor_defined_never_spawned_is_free;
+          Alcotest.test_case "actor init IO charged to grant" `Quick test_actor_init_io_is_charged_to_grant;
           (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
           Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
           Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;
