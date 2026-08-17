@@ -225,6 +225,19 @@ notification. Local monitoring has the same payload and reason vocabulary on
 the interpreted and compiled backends; the distributed monitor protocol uses
 the same `Down(ref, target_pid, reason)` shape (and additionally has `NodeDown`).
 
+### Why there are no links
+
+March's fault model is **monitors plus supervisors**, not BEAM's links and exit
+signals. A monitor is one-directional and observational: the watcher receives
+`Down(ref, pid, reason)` carrying `Normal`, `Killed`, or `Crash(msg)`, and
+decides for itself what to do. Failure propagates *downward* through supervision
+trees, never sideways between peers.
+
+This is the same choice Akka made in dropping links for DeathWatch plus
+supervision strategies. A reason-carrying `Down` gives a watcher everything a
+link's exit signal would have told it, without the bidirectional coupling — and
+without needing a `trap_exit` escape hatch to make that coupling survivable.
+
 ---
 
 ## Named Actors

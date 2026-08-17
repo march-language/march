@@ -1245,7 +1245,6 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_alive         = alive;
   ai_terminal_reason = March_eval.Eval.Normal;
   ai_monitors      = [];
-  ai_links         = [];
   ai_mailbox       = Queue.create ();
   ai_supervisor    = None;
   ai_restart_count = [];

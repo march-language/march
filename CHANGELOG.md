@@ -74,6 +74,17 @@ git log is authoritative for exact commits.
 - A grant violation now names the chain of the user's own functions that reaches the
   capability, instead of only the stdlib function that holds it.
 
+### Removed
+
+- **The unreachable `link` builtin is gone.** The interpreter carried a `link`
+  builtin and `ai_links` crash-propagation machinery that the typechecker never
+  exposed, so no March program could call it — `link(a, b)` failed with "I cannot
+  find `link`". Rather than finish it, March commits to monitors plus supervisors
+  as its fault model (see the actors chapter): a monitor's `Down(ref, pid, reason)`
+  now carries `Normal`/`Killed`/`Crash(msg)`, which is what a link's exit signal
+  would have told a peer, without bidirectional coupling or a `trap_exit` escape
+  hatch. No program can regress, because none could reach it.
+
 ### Fixed
 
 - **A delayed supervisor restart (a repeat crash backed off by exponential backoff, up to
