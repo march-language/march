@@ -86,3 +86,45 @@ critical path (crash isolation). Filed here instead of attempted inline.
   so the fix's test needs to be a structural assertion — e.g. an
   explicit synchronization checkpoint proving registration happens before
   the green thread's first dispatch — rather than a race-and-hope loop).
+
+## Resolved
+
+Verified fixed by reading `runtime/march_runtime.c` (not by re-running the
+timing-sensitive `rfo_widen.march` repro — that reproducer is inherently
+race-and-hope, and a structural read of the code is stronger evidence here:
+the green thread that would read `meta->supervisor` too early simply does
+not exist until after the write that this todo worried about).
+
+The fix landed as deferred activation, exactly the shape this todo's
+"Suggested shape" section proposed ("`march_spawn` accepts ... the
+supervisor pointer directly, so `meta->supervisor` is set BEFORE the green
+thread is started"), implemented as a `defer_activation` flag on the shared
+spawn path rather than a variant taking the supervisor pointer directly:
+
+- `march_spawn_common(actor, defer_activation)` is the single spawn
+  implementation; `march_spawn(actor)` calls it with `defer_activation=0`
+  (green thread starts immediately, the ordinary case), while
+  `march_spawn_supervised(actor)` calls it with `defer_activation=1` —
+  `activate_actor_green_thread(meta)` is skipped at spawn time, so no
+  green thread exists yet to race the registration write.
+- `march_respawn_child` (`runtime/march_runtime.c`) calls
+  `march_spawn_supervised(raw)` to get the deferred child, then writes
+  `new_meta->supervisor = supervisor;` (plus `sup_child_index`, `epoch`)
+  **inside** a `pthread_mutex_lock(&g_tbl_mu)` / `pthread_mutex_unlock`
+  pair — closing the other half of the original bug report, the unlocked
+  write `march_respawn_child` used to do.
+- Only after that locked publication does `march_respawn_child` call
+  `activate_actor_green_thread(new_meta);`, per the comment directly above
+  the call: "Publication above is complete before this proc can run and
+  install its supervised panic trap."
+
+So both halves of the original bug are closed: the ordering gap (green
+thread now starts strictly after the supervisor write, not concurrently
+with it) and the unlocked-write half (`march_respawn_child`'s write is now
+under `g_tbl_mu`, matching `march_actor_register_child`'s existing
+discipline).
+
+Codegen confirmation that supervised children actually go through the
+deferred path: `test/test_eval.ml:3475` and `test/test_codegen.ml:12564`
+both assert the emitted IR calls `march_spawn_supervised` for supervise-
+block children, not the immediate-activation `march_spawn`.

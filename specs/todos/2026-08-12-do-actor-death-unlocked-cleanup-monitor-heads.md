@@ -1,5 +1,22 @@
 # do_actor_death mutates cleanup_head/monitor_head without g_tbl_mu — UAF window vs monitor/demonitor/unlink
 
+## Partially fixed 2026-08-15 (#284)
+
+The `monitor_head` half is CLOSED. `do_actor_death` now detaches the list
+under `g_tbl_mu`:
+
+    monitors = meta->monitor_head;
+    meta->monitor_head = NULL;
+
+and walks the detached list after unlocking, so `march_monitor`'s locked
+prepend can no longer write into a list being freed.
+
+The `cleanup_head` half is STILL OPEN and is what remains of this todo. It
+cannot simply take the lock: cleanup closures run arbitrary March code via
+`fn_ptr(clo, unit_arg)`, which can re-enter the runtime and re-acquire
+`g_tbl_mu`. The fix is the same detach-then-run shape the monitor half now
+uses.
+
 Discovered during Task 10's review (`.superpowers/sdd/2026-08-11-actor-system-hardening/`)
 while auditing `g_tbl_mu` coverage of per-meta mutable fields; flagged forward
 to Tasks 14/16 (which also touch `do_actor_death`) and finally filed here at
