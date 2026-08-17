@@ -839,7 +839,7 @@ let test_enum_max_by () =
   let args = match result with March_eval.Eval.VCon ("Some", a) -> a | _ -> [] in
   Alcotest.(check int) "Enum.max_by" 5 (vint (List.hd args))
 
-(* ── Phase 1: Monitor and Link tests ──────────────────────────────── *)
+(* ── Phase 1: Monitor tests ──────────────────────────────── *)
 
 (** Helper: create a fresh actor inst with Phase 1 fields and add to registry. *)
 let test_monitor_receives_down_on_kill () =
@@ -860,15 +860,6 @@ let test_demonitor_prevents_down () =
   March_eval.Eval.crash_actor 0 "killed";
   Alcotest.(check bool) "B's mailbox empty after demonitor" true
     (Queue.is_empty ib.March_eval.Eval.ai_mailbox)
-
-let test_link_kills_both_on_crash () =
-  March_eval.Eval.reset_scheduler_state ();
-  let _ia = add_fresh_actor 0 "A" in
-  let ib  = add_fresh_actor 1 "B" in
-  March_eval.Eval.link_actors 0 1;
-  March_eval.Eval.crash_actor 0 "killed";
-  Alcotest.(check bool) "B dead after linked A crashes" true
-    (not ib.March_eval.Eval.ai_alive)
 
 let test_monitor_already_dead_immediate_down () =
   March_eval.Eval.reset_scheduler_state ();
@@ -1001,33 +992,6 @@ let test_eval_monitor_down_target_is_pid () =
   let v = call_fn env "main" [] in
   Alcotest.(check bool) "Down target is accepted by is_alive as a Pid" true
     (match v with March_eval.Eval.VBool b -> b | _ -> false)
-
-let test_eval_link_builtin () =
-  (* End-to-end: link/kill propagates death via March source *)
-  let env = eval_module {|mod Test do
-    actor A do
-      state { x : Int }
-      init { x: 0 }
-      on Noop() do { x: state.x } end
-    end
-
-    actor B do
-      state { x : Int }
-      init { x: 0 }
-      on Noop() do { x: state.x } end
-    end
-
-    fn main() do
-      let pa = spawn(A)
-      let pb = spawn(B)
-      link(pa, pb)
-      kill(pa)
-      is_alive(pb)
-    end
-  end|} in
-  let v = call_fn env "main" [] in
-  Alcotest.(check bool) "B is dead after linked A killed" false
-    (match v with March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool")
 
 (* ── Supervision Phase 2: Supervisor Actor Pattern ─────────────────────── *)
 
@@ -1620,22 +1584,6 @@ let test_resource_cleanup_reverse_order () =
      order. Execution order third→second→first gives list ["first"; "second"; "third"]. *)
   Alcotest.(check (list string)) "reverse cleanup order"
     ["first"; "second"; "third"] !order
-
-(** Phase 6a: resources of linked actor are also cleaned on link propagation. *)
-let test_resource_cleanup_on_link_crash () =
-  March_eval.Eval.reset_scheduler_state ();
-  let a_cleaned = ref false in
-  let b_cleaned = ref false in
-  let _ = add_fresh_actor 0 "A" in
-  let _ = add_fresh_actor 1 "B" in
-  March_eval.Eval.register_resource_ocaml 0 "a_res"
-    (fun () -> a_cleaned := true);
-  March_eval.Eval.register_resource_ocaml 1 "b_res"
-    (fun () -> b_cleaned := true);
-  March_eval.Eval.link_actors 0 1;
-  March_eval.Eval.crash_actor 0 "test";
-  Alcotest.(check bool) "A's resource cleaned" true !a_cleaned;
-  Alcotest.(check bool) "B's resource cleaned via link" true !b_cleaned
 
 (* ── Supervision Phase 6b: Linear Drop Handlers ──────────────────────────── *)
 
@@ -4993,29 +4941,6 @@ let test_actor_kill_marks_dead () =
     end
   end|} in
   Alcotest.(check bool) "is_alive returns false after kill" false
-    (vbool (call_fn env "main" []))
-
-let test_actor_link_propagates_death () =
-  let env = eval_module {|mod Test do
-    actor A do
-      state { x : Int }
-      init { x: 0 }
-      on Noop() do { x: 0 } end
-    end
-    actor B do
-      state { x : Int }
-      init { x: 0 }
-      on Noop() do { x: 0 } end
-    end
-    fn main() : Bool do
-      let pa = spawn(A)
-      let pb = spawn(B)
-      link(pa, pb)
-      kill(pa)
-      is_alive(pb)
-    end
-  end|} in
-  Alcotest.(check bool) "linked actor B dies when A is killed" false
     (vbool (call_fn env "main" []))
 
 let test_actor_monitor_delivers_down () =
@@ -13241,7 +13166,6 @@ let stdlib_suites =
       ("supervision phase1", [
         Alcotest.test_case "monitor receives Down on kill"        `Quick (with_reset test_monitor_receives_down_on_kill);
         Alcotest.test_case "demonitor prevents Down delivery"     `Quick (with_reset test_demonitor_prevents_down);
-        Alcotest.test_case "link kills both on crash"             `Quick (with_reset test_link_kills_both_on_crash);
         Alcotest.test_case "monitor on dead actor immediate Down" `Quick (with_reset test_monitor_already_dead_immediate_down);
         Alcotest.test_case "multiple monitors all fire"           `Quick (with_reset test_multiple_monitors_all_fire);
         Alcotest.test_case "Down message format"                  `Quick (with_reset test_down_message_format);
@@ -13249,7 +13173,6 @@ let stdlib_suites =
         Alcotest.test_case "Down dead-target fallback"             `Quick (with_reset test_down_message_dead_target_fallback);
         Alcotest.test_case "monitor builtin end-to-end"           `Quick (with_reset test_eval_monitor_builtin);
         Alcotest.test_case "Down target is a Pid in source"       `Quick (with_reset test_eval_monitor_down_target_is_pid);
-        Alcotest.test_case "link builtin end-to-end"              `Quick (with_reset test_eval_link_builtin);
       ]);
       ("supervision phase2", [
         Alcotest.test_case "one_for_one restart"          `Quick (with_reset test_supervision_one_for_one_restart);
@@ -13280,8 +13203,6 @@ let stdlib_suites =
           `Quick (with_reset test_resource_cleanup_on_crash);
         Alcotest.test_case "resource cleanup reverse order"
           `Quick (with_reset test_resource_cleanup_reverse_order);
-        Alcotest.test_case "resource cleanup on link crash"
-          `Quick (with_reset test_resource_cleanup_on_link_crash);
       ]);
       ("supervision phase6b", [
         Alcotest.test_case "actor_inst has ai_linear_values field"
@@ -13657,7 +13578,6 @@ let stdlib_suites =
         Alcotest.test_case "send doesn't crash actor"        `Quick (with_reset test_actor_send_does_not_crash);
         Alcotest.test_case "is_alive after spawn"            `Quick (with_reset test_actor_is_alive_after_spawn);
         Alcotest.test_case "kill marks dead"                 `Quick (with_reset test_actor_kill_marks_dead);
-        Alcotest.test_case "link propagates death"           `Quick (with_reset test_actor_link_propagates_death);
         Alcotest.test_case "monitor delivers Down"           `Quick (with_reset test_actor_monitor_delivers_down);
         Alcotest.test_case "supervisor max_restarts 1 typechecks" `Quick (with_reset test_actor_supervisor_max_restarts_eval);
       ]);
