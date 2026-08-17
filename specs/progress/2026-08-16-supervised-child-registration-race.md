@@ -125,6 +125,14 @@ under `g_tbl_mu`, matching `march_actor_register_child`'s existing
 discipline).
 
 Codegen confirmation that supervised children actually go through the
-deferred path: `test/test_eval.ml:3475` and `test/test_codegen.ml:12564`
-both assert the emitted IR calls `march_spawn_supervised` for supervise-
-block children, not the immediate-activation `march_spawn`.
+deferred path: `test/test_eval.ml:3475` asserts
+`ir_contains ir "call ptr @march_spawn_supervised"` for a supervise-block
+child, i.e. that the emitted IR actually calls `march_spawn_supervised`
+rather than the immediate-activation `march_spawn`. `test/test_codegen.ml:12564`
+is a different kind of evidence, not a duplicate of this assertion: it is a
+`declare ptr @march_spawn_supervised(ptr %actor)` line inside the static
+`golden_preamble_native_actor` string, boilerplate present in every
+actor-codegen golden test regardless of whether that particular golden
+exercises a supervise block. It shows the symbol is declared in the emitted
+module's preamble, not that any specific supervise-block case calls it — so
+`test_eval.ml` alone is what establishes the call-site claim.

@@ -23,10 +23,44 @@ to Tasks 14/16 (which also touch `do_actor_death`) and finally filed here at
 Task 17 close-out. Pre-existing — not introduced by, and not fixed as part
 of, any task in this plan.
 
-## The bug
+## The bug (as it stands now — the `monitor_head` half below is HISTORICAL, see the "Partially fixed" banner above; only `cleanup_head` is still open)
 
-`do_actor_death` (`runtime/march_runtime.c:3054`) walks and nulls out
-`meta->cleanup_head` and `meta->monitor_head` with **no lock held**:
+`do_actor_death` (`runtime/march_runtime.c:3642`) walks and nulls out
+`meta->cleanup_head` with **no lock held**:
+
+```c
+static void do_actor_death(void *actor, march_death_reason reason,
+                           const char *message, size_t message_len) {
+    ...
+    pthread_mutex_unlock(&g_tbl_mu);   /* :3673 — monitor_head already detached above, under the lock */
+
+    if (meta && meta->cleanup_head) {                    /* :3681, UNLOCKED */
+        march_cleanup_node *node = meta->cleanup_head;
+        while (node) {
+            ...
+            fn_ptr(clo, unit_arg);                         /* :3696 — arbitrary March code */
+            ...
+            node = next;
+        }
+        meta->cleanup_head = NULL;                        /* :3703 */
+    }
+    ...
+}
+```
+
+Meanwhile `march_demonitor` (`runtime/march_runtime.c:6122`) and
+`march_unlink` (`:6159`) still run under `g_tbl_mu` as before. Neither of
+them touches `cleanup_head`, so the free-then-use hazard this todo now
+tracks is narrower than the original report: it only arises if a cleanup
+closure itself re-enters the runtime in a way that mutates
+`meta->cleanup_head` while `do_actor_death`'s unlocked walk is still
+in-flight (cleanup closures run arbitrary March code via the
+`fn_ptr(clo, unit_arg)` dispatch at `:3696`, so this is not merely
+hypothetical — it depends on what that closure calls).
+
+Historical snippet (fixed by #284, kept for context on what the bug used to
+look like before `monitor_head` was split out — do not use these line
+numbers, they no longer exist in this shape):
 
 ```c
 static void do_actor_death(void *actor) {
@@ -35,36 +69,28 @@ static void do_actor_death(void *actor) {
     if (meta && meta->cleanup_head) {
         march_cleanup_node *node = meta->cleanup_head;
         while (node) { ... free(node); node = next; }
-        meta->cleanup_head = NULL;               /* runtime/march_runtime.c:3083 */
+        meta->cleanup_head = NULL;               /* old :3083 */
     }
     if (meta && meta->monitor_head) {
         march_monitor_node *mn = meta->monitor_head;
         while (mn) { ... free(mn); mn = next_mn; }
-        meta->monitor_head = NULL;               /* runtime/march_runtime.c:3099 */
+        meta->monitor_head = NULL;               /* old :3099 — now detached under g_tbl_mu instead, see banner above */
     }
     ...
 }
 ```
 
-Meanwhile `march_monitor` (`runtime/march_runtime.c:5464`), `march_demonitor`
-(`:5332`), and `march_unlink` (`:5369`) all mutate the *same* `monitor_head`
-list (prepending or unlinking `march_monitor_node`s) **under `g_tbl_mu`**.
-
-If a watcher calls `march_monitor(watcher, target)` concurrently with
-`target`'s death, the two sides can race on `meta->monitor_head`:
-`march_monitor`'s locked prepend can write a node into a list that
-`do_actor_death`'s unlocked walk is simultaneously freeing — a classic
-free-then-use or lost-update, not merely a stale read. The same shape applies
-to `march_demonitor`/`march_unlink` racing the cleanup-list walk if a cleanup
-callback itself calls one of those APIs (cleanup closures run arbitrary
-March code via the `fn_ptr(clo, unit_arg)` dispatch at `:3076`).
-
 ## Suggested fix
 
-Take `g_tbl_mu` around the `cleanup_head`/`monitor_head` read-and-null
-sections in `do_actor_death`, matching `march_monitor`/`march_demonitor`/
-`march_unlink`'s existing discipline — being careful of the lock-ordering
-comment already documented near `g_supervise_mu`/`g_tbl_mu` (`:2562`-`:2600`):
+Take `g_tbl_mu` around the `cleanup_head` read-and-null section in
+`do_actor_death`, matching the detach-then-run shape #284 already applied to
+`monitor_head` — being careful of the lock-ordering comment already
+documented near `g_supervise_mu`/`g_tbl_mu` (`:2562`-`:2600`):
 `do_actor_death` must not end up calling back into anything that re-acquires
-`g_tbl_mu` while already holding it (the cleanup-closure call at `:3076` runs
-arbitrary March code and needs auditing for this before the lock is added).
+`g_tbl_mu` while already holding it. The cleanup-closure call at `:3696` runs
+arbitrary March code and needs auditing for this before the lock is added —
+this is exactly why the monitor half could be closed with a simple
+detach-under-lock while this half cannot: detach `cleanup_head` under
+`g_tbl_mu` (mirroring `monitors = meta->monitor_head; meta->monitor_head = NULL;`
+at `:3674`-`:3675`), unlock, and only then walk the detached list and invoke
+each closure.
