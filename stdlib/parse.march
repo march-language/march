@@ -28,12 +28,14 @@
 -- Choice:          alt
 -- Repetition:      many, many1, repeat, sep_by, sep_by1
 -- Error control:   commit, then_commit, ctx, label, fence, recover
--- Running:         run
+-- Running:         run_all (whole input), run (prefix)
 -- Rendering:       render, line_col
 --
--- Still to come: the golden error-message corpus (plan §3.7), and an
--- OCaml-side renderer into lib/errors so library and compiler diagnostics
--- are indistinguishable.
+-- Start with `run_all`: `run` succeeds on a valid PREFIX and drops the rest,
+-- which is the usual way a combinator grammar silently gives a wrong answer.
+--
+-- Still to come: an OCaml-side renderer into lib/errors so library and
+-- compiler diagnostics are indistinguishable.
 
 mod Parse do
 
@@ -89,10 +91,20 @@ mod Parse do
   end
 
   doc """
-  Run a parser over an input string.
+  Run a parser over an input string, consuming as much as it matches.
 
   Both a soft and a hard failure surface as `Err` — the distinction between
   them matters to `alt` while parsing, not to the caller of `run`.
+
+  **`run` succeeds on a valid PREFIX and ignores the rest.** That is the
+  single most common way to get a wrong answer out of a combinator library:
+
+      run(digits(), "123xyz")   ->  Ok("123")
+                                    -- the trailing `xyz` is never looked at
+
+  That behaviour is correct for a parser you are composing INTO a larger one,
+  and wrong for a top-level "parse this whole input" call. For the latter
+  reach for `run_all`, which is this plus `eof`.
   """
   fn run(p : Parser(a), input : String) : Result(a, ParseErr) do
     match p do
@@ -103,6 +115,25 @@ mod Parse do
           RCut(e)      -> Err(e)
         end
     end
+  end
+
+  doc """
+  Run a parser over an input string and require it to consume ALL of it.
+
+  This is `run` with `eof` appended, and it is what you almost always want at
+  the TOP level of a grammar: it turns "parsed a prefix, silently dropped the
+  rest" into a real error that points at the first byte the grammar could not
+  account for.
+
+      run_all(digits(), "123xyz")  ->  Err(..)
+                                       -- 1:4: I was expecting end of input
+      run_all(digits(), "123")     ->  Ok("123")
+
+  Use `run` instead only when a leftover tail is meaningful — streaming, or
+  hand-managing the offset yourself.
+  """
+  fn run_all(p : Parser(a), input : String) : Result(a, ParseErr) do
+    run(skip_then(p, eof()), input)
   end
 
   doc """
@@ -302,6 +333,11 @@ mod Parse do
 
   Without this a grammar silently accepts a valid prefix of invalid input —
   `1 + 2 )))` parses as `1 + 2` and the trailing garbage is never reported.
+
+  At the top level you rarely need to write this yourself: `run_all` is
+  `run` with `eof` already appended. Reach for `eof` directly when the
+  end-of-input requirement sits INSIDE a grammar — one branch of an `alt`,
+  say — rather than at the outermost call.
   """
   fn eof() : Parser(Unit) do
     Parser(fn (input, i) ->
@@ -595,7 +631,25 @@ mod Parse do
 
   A hard failure is never relabelled either: past a commit point the specific
   error is the whole point.
+
+      run(label("a number", lit("0")), "x")  ->  Err(..)
+                                                 -- 1:1: I was expecting a number
   """
+  fn label(name : String, p : Parser(a)) : Parser(a) do
+    match p do
+      Parser(f) ->
+        Parser(fn (input, i) ->
+          match f(input, i) do
+            ROk(x, j, fp) -> ROk(x, j, fp)
+            RCut(e)       -> RCut(e)
+            RFail(e) ->
+              if e.pos == i do
+                RFail({ pos: i, expected: Cons(ExpLabel(name), Nil), context: e.context })
+              else RFail(e) end
+          end)
+    end
+  end
+
   -- ── Recovery (plan §3.6) ─────────────────────────────────────────────────
   --
   -- Markdown never "fails" — every byte sequence is valid — but its structure
@@ -738,21 +792,6 @@ mod Parse do
     int_to_string(l) ++ ":" ++ int_to_string(c)
       ++ ": I was expecting " ++ join_expected(e.expected)
       ++ render_context(input, e.context)
-  end
-
-  fn label(name : String, p : Parser(a)) : Parser(a) do
-    match p do
-      Parser(f) ->
-        Parser(fn (input, i) ->
-          match f(input, i) do
-            ROk(x, j, fp) -> ROk(x, j, fp)
-            RCut(e)       -> RCut(e)
-            RFail(e) ->
-              if e.pos == i do
-                RFail({ pos: i, expected: Cons(ExpLabel(name), Nil), context: e.context })
-              else RFail(e) end
-          end)
-    end
   end
 
 end

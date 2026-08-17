@@ -76,3 +76,71 @@ let rec calls_in_expr (acc : (string * Ast.span * Ast.span) list) (e : Ast.expr)
     substitute without a behavior change. *)
 let names_and_name_spans (e : Ast.expr) : (string * Ast.span) list =
   List.map (fun (n, name_span, _) -> (n, name_span)) (calls_in_expr [] e)
+
+(** [spawned_actor_names e] is every actor name appearing in a [spawn(Actor)]
+    position inside [e], as a bare string.  The actor name in an [ESpawn] is
+    always a plain nullary constructor or variable — [Typecheck]'s spawn arm
+    rejects any computed actor expression — so it is matched here exactly the
+    way that arm extracts it ([ECon(n,[],_)] / [EVar n]).
+
+    Why this exists: the whole-program capability GRANT ([check_main_grant])
+    walks the static reference graph from [main].  An actor's message handlers
+    are synthesized functions ([<Actor>_<Msg>]) that carry their own capability
+    closure, but nothing in ordinary reference-following reaches them — a
+    [spawn(Actor)] site names the actor, not its handlers, and [free_vars_expr]
+    sees the actor only as a nullary [ECon] tag it discards.  Feeding these
+    names in as reference edges (paired with the [DActor] arm registering
+    [Actor -> handler] edges) is what makes a handler's IO count against the
+    grant, closing a runtime-exploitable bypass where a handler could reach a
+    capability the grant never authorized.  A handler is charged when its actor
+    is SPAWNED (reachable), not merely defined, so a never-spawned actor stays
+    free exactly like any other dead code. *)
+let rec spawned_actor_names (acc : string list) (e : Ast.expr) : string list =
+  match e with
+  | Ast.ESpawn (inner, _) ->
+    let acc =
+      match inner with
+      | Ast.ECon (n, [], _) | Ast.EVar n -> n.Ast.txt :: acc
+      | _ -> acc
+    in
+    spawned_actor_names acc inner
+  | Ast.EApp (f, args, _) ->
+    List.fold_left spawned_actor_names (spawned_actor_names acc f) args
+  | Ast.ECon (_, args, _) -> List.fold_left spawned_actor_names acc args
+  | Ast.ELam (_, body, _) -> spawned_actor_names acc body
+  | Ast.EBlock (es, _) -> List.fold_left spawned_actor_names acc es
+  | Ast.ELet (b, _) -> spawned_actor_names acc b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    let acc = spawned_actor_names acc scrut in
+    List.fold_left (fun a arm ->
+      let a =
+        Option.fold ~none:a ~some:(spawned_actor_names a) arm.Ast.branch_guard
+      in
+      spawned_actor_names a arm.Ast.branch_body) acc arms
+  | Ast.ETuple (es, _) -> List.fold_left spawned_actor_names acc es
+  | Ast.ERecord (fields, _) ->
+    List.fold_left (fun a (_, ex) -> spawned_actor_names a ex) acc fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    let acc = spawned_actor_names acc base in
+    List.fold_left (fun a (_, ex) -> spawned_actor_names a ex) acc fields
+  | Ast.EField (inner, _, _) -> spawned_actor_names acc inner
+  | Ast.EIf (cond, then_, else_, _) ->
+    spawned_actor_names
+      (spawned_actor_names (spawned_actor_names acc cond) then_) else_
+  | Ast.ECond (arms, _) ->
+    List.fold_left (fun a (ce, be) ->
+      spawned_actor_names (spawned_actor_names a ce) be) acc arms
+  | Ast.EPipe (a, b, _) -> spawned_actor_names (spawned_actor_names acc a) b
+  | Ast.EAnnot (ex, _, _) -> spawned_actor_names acc ex
+  | Ast.EAtom (_, args, _) -> List.fold_left spawned_actor_names acc args
+  | Ast.ESend (a, b, _) -> spawned_actor_names (spawned_actor_names acc a) b
+  | Ast.EDbg (Some inner, _) -> spawned_actor_names acc inner
+  | Ast.ELetFn (_, _, _, body, _) -> spawned_actor_names acc body
+  | Ast.ELetQ (_, rhs, body, _) ->
+    spawned_actor_names (spawned_actor_names acc rhs) body
+  | Ast.ELetStar (_, rhs, body, _) ->
+    spawned_actor_names (spawned_actor_names acc rhs) body
+  | Ast.EAssert (e, _) -> spawned_actor_names acc e
+  | Ast.ESigil (_, content, _) -> spawned_actor_names acc content
+  | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
+  | Ast.ELit _ | Ast.EVar _ -> acc

@@ -451,8 +451,21 @@ actually holds the capability:
 `main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite`
 (reached from `main`: main → save). The grant is a ceiling on the WHOLE program —
 declaring `needs IO.FileWrite` does not raise it.
-help: widen the grant (e.g. `Cap(IO)`), or remove the use.
+help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g.
+`fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to
+`Cap(IO)`, or remove the use.
 ```
+
+The help names the **precise** capability to add as a parameter before the
+broad `Cap(IO)` escape hatch — least privilege is the default the diagnostic
+steers you toward, not the widest grant.
+
+**Actors are inside the grant.** A message handler's body counts against
+`main`'s grant exactly like any other reachable code: an actor whose handler
+calls `file_write` is charged the moment the program `spawn`s it, so a program
+granted only `Cap(IO.Console)` cannot smuggle a file write into a handler. An
+actor that is *defined but never spawned* costs nothing, the same
+dead-code-is-free rule the rest of the grant follows.
 
 Three signatures, three meanings:
 

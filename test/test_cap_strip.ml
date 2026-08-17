@@ -159,7 +159,7 @@ mod ActorStripApp do
     end
   end
 
-  fn main() : () do
+  fn main(_cap : Cap(IO.Console)) : () do
     let c = spawn(Counter)
     send(c, Inc(1))
     send(c, Inc(1))

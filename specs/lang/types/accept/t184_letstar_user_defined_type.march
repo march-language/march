@@ -1,0 +1,42 @@
+-- `let*` must work with a USER-DEFINED type, not only the stdlib ones.
+--
+-- `let*` resolves `M`'s `flat_map` by convention: the module named `M` owns
+-- it (specs/lang/let-star-generalized-bind.md §2). This file follows that
+-- convention exactly -- module `Box`, type `Box(a)`, and a `flat_map` of
+-- precisely the documented shape.
+--
+-- REGRESSION WITNESS (found by the 2026-08-16 Parse usability pass): the
+-- original implementation resolved `flat_map` ONLY through
+-- `resolve_qualified_var`, which requires `Module_registry.ensure_loaded` to
+-- find a stdlib FILE whose snake_case name matches the module. A user module
+-- -- in this file, or imported -- is already bound in the typing environment
+-- but has no such file, so resolution returned None and `let*` reported
+-- "`Box.flat_map` doesn't exist" while instructing the reader to define
+-- exactly the function they had already defined. `let*` therefore worked for
+-- Option/Result/List and NOTHING else: its documented extension point was
+-- non-functional. Accept-only is enough here because the pre-fix behavior was
+-- a hard ERROR, not a wrong-but-silent acceptance.
+mod Main do
+  needs IO.Console
+
+  mod Box do
+    type Box(a) = Box(a)
+    fn flat_map(m : Box(a), f : a -> Box(b)) : Box(b) do
+      match m do
+        Box(x) -> f(x)
+      end
+    end
+  end
+
+  fn chain() : Box.Box(Int) do
+    let* x = Box.Box(1)
+    let* y = Box.Box(x + 1)
+    Box.Box(y * 10)
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    match chain() do
+      Box.Box(v) -> println(int_to_string(v))
+    end
+  end
+end

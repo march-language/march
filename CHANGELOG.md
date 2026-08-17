@@ -11,7 +11,31 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- The whole-program capability grant now bounds actor message handlers. A handler's body
+  was invisible to `main`'s grant reachability walk, so a program granted only
+  `Cap(IO.Console)` could `file_write` inside an actor handler — and it compiled, ran, and
+  wrote the file. The grant now follows `spawn(Actor)` edges into the actor's handlers, so a
+  handler's IO counts against the grant the moment the actor is spawned. A defined-but-never-
+  spawned actor stays free, like any other dead code. The manifest (`needs`) side already
+  tracked handlers; only the grant did not.
+
 ### Added
+
+- **`Parse.run_all`** — run a parser and require it to consume the *whole*
+  input. `Parse.run` succeeds on a valid PREFIX and silently discards the rest
+  (`run(number(), "123xyz")` is `Ok("123")`), which is the usual way a
+  combinator grammar quietly returns a wrong answer. `run_all` is `run` plus
+  `eof`, so the same call reports `1:4: I was expecting end of input`. `run` is
+  still the right choice when a leftover tail is meaningful.
+- **A parsing guide**, [docs/parsing.md](https://march-lang.org/docs/parsing/) —
+  the `Parse` library had a complete API reference but no narrative
+  introduction. Covers the building blocks, why recursive grammars need
+  `delay`, how `label`/`ctx`/`commit` combine to produce good diagnostics
+  (including the commit-placement trap, where both spellings accept all valid
+  input and only differ on the malformed input where the message mattered), and
+  collecting every error in one pass with `recover`.
 
 - **New `AhoCorasick` stdlib module** for multi-pattern string search: build an automaton
   once from a list of literal patterns (`AhoCorasick.build`), then find every match of any
@@ -26,8 +50,31 @@ git log is authoritative for exact commits.
   (`needs IO.FileWrit` → `needs IO.FileWrite`). Typos previously produced only a misleading
   "declared but no function requires it — remove the unused declaration" warning.
 
+### Fixed
+
+- **`let*` now works with user-defined types, not just `Option`/`Result`/`List`.**
+  Its documented extension point — "define `flat_map` in a module named after
+  the type" — was non-functional for any type you defined yourself, whether in
+  the same file or imported: resolution went exclusively through the stdlib
+  module loader, which finds a module only if a *file* of the matching
+  snake_case name exists. A user module is already bound in scope but has no
+  such file, so `let*` reported that `Box.flat_map` did not exist while telling
+  the reader to define precisely the function they had already defined.
+  Resolution now consults the current scope first, matching how an ordinary
+  `Box.flat_map(...)` call already resolved.
+- **`Parse.label` is documented again.** Its doc comment had been written but
+  sat above a *private* helper rather than above `label` itself, so it was
+  dropped from the generated reference entirely and `label` — the combinator
+  whose whole job is making error messages readable — was the module's only
+  undocumented public function.
+
 ### Changed
 
+- A partial-grant error (e.g. `main` granted `Cap(IO.Console)` but the program reaches
+  `IO.Spawn`) now suggests the precise least-privilege fix — add a `Cap(IO.Spawn)` parameter
+  to `main` — before the broad `Cap(IO)` escape hatch, matching the no-grant diagnostic's
+  suggested-signature help. It previously offered only "widen the grant (e.g. `Cap(IO)`)",
+  steering users to the widest grant against the system's own least-privilege ethos.
 - **`String.index_of`/`index_of_from`/`contains` (and everything else that shares
   `march_memmem` in `runtime/march_runtime.c`) now scan for the needle's first byte with a
   hand-written SIMD kernel** instead of delegating to libc `memchr`: SSE2 on x86-64 (the ABI
