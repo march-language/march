@@ -97,6 +97,15 @@ git log is authoritative for exact commits.
   original incarnation. Timing (when a restart fires) is unchanged; only which supervisor a
   delayed restart validates against is affected.
 
+- **An actor's cleanup callbacks (registered via `register_resource`) were linked onto
+  and walked off the actor's cleanup list with no lock held**, unlike the equivalent
+  monitor list. A cleanup callback registered concurrently with that actor's death could
+  race the death path's walk-and-free: a node the registering thread just linked could be
+  freed out from under it, or dropped entirely, either leaking whatever OS resource the
+  callback was meant to release or crashing on the freed node. Both sides now detach/link
+  under the same lock the monitor list already uses; the cleanup closures themselves still
+  run lock-free, since they are arbitrary March code that can re-enter the runtime.
+
 - **Two children of a compiled `one_for_all`/`rest_for_one` supervisor crashing for the
   first time at the same moment on different scheduler threads could run two restart
   strategies concurrently** against the same supervisor's child array. A first crash

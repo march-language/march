@@ -187,12 +187,18 @@ March's fault model is **monitors plus supervisors**, not BEAM's links and exit
 signals. A monitor is one-directional and observational: the watcher receives
 `Down(ref, pid, reason)` carrying `Normal`, `Killed`, or `Crash(msg)`, and
 decides for itself what to do. Failure propagates *downward* through supervision
-trees, never sideways between peers.
+trees, never sideways between actor peers.
 
 This is the same choice Akka made in dropping links for DeathWatch plus
 supervision strategies. A reason-carrying `Down` gives a watcher everything a
 link's exit signal would have told it, without the bidirectional coupling — and
 without needing a `trap_exit` escape hatch to make that coupling survivable.
+
+One asymmetric edge remains: `task_spawn_link` links a plain task to an actor,
+and if the task's thunk raises, the linked actor is crashed — a task-to-actor
+propagation path, not an actor-to-actor one. It is a narrower primitive than a
+BEAM link (a task cannot itself be linked to or crashed by anything), so it
+doesn't reopen the sideways-coupling problem this section argues against.
 
 ---
 

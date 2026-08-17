@@ -3306,14 +3306,20 @@ typedef struct {
  *
  * find_meta_by_pid_index is keyed off the pid-index table instead, which is
  * per-spawn and never reused (g_next_pid_index only ever increments, and
- * g_pididx_tbl is insert-only — see its comment), so a lookup that still
- * resolves to the SAME meta this restart was scheduled against is proof
- * the original incarnation is the one being addressed, not a coincidental
- * reuse. Combined with march_is_alive, this closes the identity-confusion
- * half of the bug (running a restart's bookkeeping against an unrelated
- * supervisor's meta); the residual narrow window where march_is_alive
- * itself dereferences a reused address is the same "empirically rare, not
- * addressed by existing sync" class of risk documented in
+ * g_pididx_tbl is insert-only — see its comment). The fix is the resolution
+ * at delayed_restart_thread's start (`sup_meta = find_meta_by_pid_index(
+ * sup_pid_index)`, done once, before the first liveness check): that pid-
+ * index lookup is what pins sup_meta to the original incarnation instead of
+ * whatever a reused supervisor address happens to point at now. The
+ * `find_meta_by_pid_index(sup_pid_index) == sup_meta` conjunct below is only
+ * a cheap invariant assertion on that pinning (g_pididx_tbl entries are
+ * never reassigned, so it can never observe a mismatch) — it is not itself
+ * what re-derives the correct meta. Combined with march_is_alive, this
+ * closes the identity-confusion half of the bug (running a restart's
+ * bookkeeping against an unrelated supervisor's meta); the residual narrow
+ * window where march_is_alive itself dereferences a reused address is the
+ * same "empirically rare, not addressed by existing sync" class of risk
+ * documented in
  * specs/progress/2026-08-16-delayed-restart-incarnation-precise.md. */
 static int sup_still_live(int64_t sup_pid_index, march_actor_meta *sup_meta,
                           void *supervisor) {
@@ -3621,6 +3627,30 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
                  * as there: clearing it on an orphaned meta would let some
                  * later crash of a child still pointing at this dead
                  * supervisor run a strategy against it. */
+                /* Known gap, left as address-keyed on purpose: unlike
+                 * sup_still_live's pid-index-pinned check on the delayed
+                 * path, this probe is a bare march_is_alive(supervisor) —
+                 * the same address-reuse exposure Task 4 closed there. It
+                 * was left alone here because the interval between passes
+                 * (a full march_one_for_all_restart/march_rest_for_one_
+                 * restart call, which runs arbitrary March spawn/cleanup
+                 * code and can yield) is not actually narrower than the
+                 * delayed path's backoff window, so "no backoff window"
+                 * undersells the exposure — it should be read as "smaller
+                 * blast radius", not "no window". If `supervisor`'s address
+                 * were reused during that interval, this reads the new
+                 * occupant's status word (memory-safe: it's live memory
+                 * belonging to that occupant) and continues the loop against
+                 * `sup_meta`, which is never freed (see
+                 * replace_stale_meta_locked), so at worst this runs one more
+                 * strategy pass against the ORIGINAL supervisor's meta after
+                 * that supervisor is actually gone — safe, just wasted work,
+                 * not corruption of an unrelated actor's state. A full fix
+                 * would also have to convert `sup_meta`'s function-entry
+                 * resolution above (`find_meta(supervisor)`, address-keyed)
+                 * to pid-index; upgrading only this recheck without that
+                 * would still leave sup_meta itself pinned to whatever
+                 * find_meta(supervisor) happened to resolve to at entry. */
                 int alive = march_is_alive(supervisor);
                 pthread_mutex_unlock(&g_supervise_mu);
                 if (!alive) return;
@@ -6498,12 +6528,20 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
     march_cleanup_node *node = (march_cleanup_node *)malloc(sizeof(march_cleanup_node));
     if (!node) return;
     node->cleanup_fn = cleanup;
+    /* Retain before publishing: take the reference BEFORE the node becomes
+     * visible to do_actor_death's detach-and-walk (i.e. before the lock
+     * below), not after. Today's caller convention (the compiled call site
+     * holds its own live reference across this builtin call, and the
+     * cleanup walk never decrc's the closure) means the old publish-then-
+     * retain order never actually raced a concurrent drop — but publishing
+     * a node whose payload isn't yet retained is fragile against any future
+     * caller that doesn't hold its own reference, so retain first. */
+    march_incrc(cleanup);  /* Keep closure alive */
     /* Prepend: most recently registered is at head → LIFO on kill */
     pthread_mutex_lock(&g_tbl_mu);
     node->next = meta->cleanup_head;
     meta->cleanup_head = node;
     pthread_mutex_unlock(&g_tbl_mu);
-    march_incrc(cleanup);  /* Keep closure alive */
 }
 
 /* Intern an atom name to its i64 value: FNV-1a 64-bit of the (colon-less)

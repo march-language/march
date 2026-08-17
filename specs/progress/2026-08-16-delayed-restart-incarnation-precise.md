@@ -115,11 +115,18 @@ per-pass TOCTOU recheck inside the batch loop) now go through a new
 suggested local `#define`/`#undef` macro, to match this file's house
 style (macros here are file-scope constants/table generators, not
 function-scoped logic). It checks `find_meta_by_pid_index(sup_pid_index)
-== sup_meta && march_is_alive(supervisor)`: the pid-index re-lookup
-proves the meta being used for restart bookkeeping is still the ORIGINAL
-incarnation's (closing the identity-confusion half of the bug — a batch
-restart can no longer run against an unrelated supervisor's children or
-budget), and `march_is_alive` still gates whether to actually restart.
+== sup_meta && march_is_alive(supervisor)`. The identity-confusion half of
+the bug is actually closed by the pid-index-keyed *resolution* that produces
+`sup_meta` in the first place — `delayed_restart_thread` now calls
+`find_meta_by_pid_index(sup_pid_index)` once, up front, instead of the old
+address-keyed `find_meta(supervisor)` — so restart bookkeeping is pinned to
+the original incarnation's meta before any liveness check ever runs. The
+`find_meta_by_pid_index(sup_pid_index) == sup_meta` conjunct inside
+`sup_still_live` is a cheap invariant assertion on top of that pinning
+(`g_pididx_tbl` is insert-only with never-reused keys, so this lookup always
+returns the same pointer `sup_meta` already holds — it can never observe a
+mismatch), not the mechanism that re-derives correctness on each call.
+`march_is_alive` still gates whether to actually restart.
 The dead-supervisor path's existing "leave `delayed_batch_pending` set,
 don't clear it" behaviour (established by Task 3, see
 `specs/progress/2026-08-16-sync-batch-restart-in-flight-marker.md`) is
