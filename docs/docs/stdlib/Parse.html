@@ -2442,8 +2442,8 @@ offset against the offset the parser started at.
 A hard failure is never relabelled either: past a commit point the specific
 error is the whole point.
 
-    march&gt; Parse.run(Parse.label(&quot;a number&quot;, Parse.lit(&quot;0&quot;)), &quot;x&quot;)
-    Err(...)   -- renders as: 1:1: I was expecting a number</code></pre></div></div>
+    run(label(&quot;a number&quot;, lit(&quot;0&quot;)), &quot;x&quot;)  -&gt;  Err(..)
+                                               -- 1:1: I was expecting a number</code></pre></div></div>
 <div class="item" id="fn-line_col"><div class="ih"><span class="badge bfn">fn</span><span class="name">line_col</span><span class="sig">line_col(input : String, pos : Int) : (Int, Int)</span><a class="anchor-link" href="#fn-line_col" title="Link">#</a></div><div class="ib"><p>Convert a byte offset into a 1-based <code>(line, column)</code> pair.</p></div></div>
 <div class="item" id="fn-lit"><div class="ih"><span class="badge bfn">fn</span><span class="name">lit</span><span class="sig">lit(s : String) : <a href="#type-Parser">Parser</a>(String)</span><a class="anchor-link" href="#fn-lit" title="Link">#</a></div><div class="ib"><p>Match a literal string at the current offset.</p><pre><code>Compares byte by byte with `string_byte_at`, so nothing is allocated while
 scanning and a mismatch past the end of the input behaves like any other
@@ -2499,8 +2499,8 @@ them matters to `alt` while parsing, not to the caller of `run`.
 **`run` succeeds on a valid PREFIX and ignores the rest.** That is the
 single most common way to get a wrong answer out of a combinator library:
 
-    march&gt; Parse.run(digits(), &quot;123xyz&quot;)
-    Ok(&quot;123&quot;)        -- the trailing `xyz` is never looked at
+    run(digits(), &quot;123xyz&quot;)   -&gt;  Ok(&quot;123&quot;)
+                                  -- the trailing `xyz` is never looked at
 
 That behaviour is correct for a parser you are composing INTO a larger one,
 and wrong for a top-level &quot;parse this whole input&quot; call. For the latter
@@ -2510,11 +2510,9 @@ the TOP level of a grammar: it turns &quot;parsed a prefix, silently dropped the
 rest&quot; into a real error that points at the first byte the grammar could not
 account for.
 
-    march&gt; Parse.run_all(digits(), &quot;123xyz&quot;)
-    Err(...)   -- renders as: 1:4: I was expecting end of input
-
-    march&gt; Parse.run_all(digits(), &quot;123&quot;)
-    Ok(&quot;123&quot;)
+    run_all(digits(), &quot;123xyz&quot;)  -&gt;  Err(..)
+                                     -- 1:4: I was expecting end of input
+    run_all(digits(), &quot;123&quot;)     -&gt;  Ok(&quot;123&quot;)
 
 Use `run` instead only when a leftover tail is meaningful — streaming, or
 hand-managing the offset yourself.</code></pre></div></div>

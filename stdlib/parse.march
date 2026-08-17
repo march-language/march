@@ -99,8 +99,8 @@ mod Parse do
   **`run` succeeds on a valid PREFIX and ignores the rest.** That is the
   single most common way to get a wrong answer out of a combinator library:
 
-      march> Parse.run(digits(), "123xyz")
-      Ok("123")        -- the trailing `xyz` is never looked at
+      run(digits(), "123xyz")   ->  Ok("123")
+                                    -- the trailing `xyz` is never looked at
 
   That behaviour is correct for a parser you are composing INTO a larger one,
   and wrong for a top-level "parse this whole input" call. For the latter
@@ -125,11 +125,9 @@ mod Parse do
   rest" into a real error that points at the first byte the grammar could not
   account for.
 
-      march> Parse.run_all(digits(), "123xyz")
-      Err(...)   -- renders as: 1:4: I was expecting end of input
-
-      march> Parse.run_all(digits(), "123")
-      Ok("123")
+      run_all(digits(), "123xyz")  ->  Err(..)
+                                       -- 1:4: I was expecting end of input
+      run_all(digits(), "123")     ->  Ok("123")
 
   Use `run` instead only when a leftover tail is meaningful — streaming, or
   hand-managing the offset yourself.
@@ -634,8 +632,8 @@ mod Parse do
   A hard failure is never relabelled either: past a commit point the specific
   error is the whole point.
 
-      march> Parse.run(Parse.label("a number", Parse.lit("0")), "x")
-      Err(...)   -- renders as: 1:1: I was expecting a number
+      run(label("a number", lit("0")), "x")  ->  Err(..)
+                                                 -- 1:1: I was expecting a number
   """
   fn label(name : String, p : Parser(a)) : Parser(a) do
     match p do

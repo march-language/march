@@ -147,6 +147,42 @@ left behind by a branch switch. Recorded because the distinction cost a
 detour: `ls` showed both numberings, `git ls-tree origin/main` showed only one.
 Check the tree, not the working directory.)
 
+## Process failure worth recording: `march>` makes an example EXECUTABLE
+
+The first push of this work added illustrative examples to the new `run`,
+`run_all` and `label` docs written with a `march>` prefix. That prefix is not
+decoration — `lib/doctest/doctest.ml` extracts those lines and `march test`
+RUNS them, comparing output. The examples referenced a `digits()` helper that
+exists only in the surrounding prose, so CI went red with eight
+`FAIL: "doctest Parse.run_all (1)" — unbound variable: digits`.
+
+Two things made it survive local verification:
+
+1. **`scripts/run-tests.sh` has no doctest coverage at all.** It runs the five
+   alcotest executables; doctests run from `march test` / CI's
+   `scripts/check-stdlib-doctests.py`. A green full local suite says nothing
+   about doctests — the same class of gap already recorded for
+   `@types-check`/`@grammar-check`.
+2. **CI's own `check-stdlib-doctests.py --check` SKIPS these**, reporting
+   "non-primitive value (bare REPL rendering differs from the doc)" rather
+   than failing, because `Result`/`ParseErr` do not render as a primitive. The
+   failure surfaced only through `march test`, in the `test` job. So the
+   dedicated doctest checker being green is *also* not sufficient evidence.
+
+The reproducer that actually works is `march test stdlib/<module>.march`.
+
+Fixed by dropping the `march>` prefix in favour of the plain indented
+`expr -> result` form the module already used everywhere else (see
+`then_commit`'s doc), which is illustrative rather than executed. That is the
+right register for these three: their values are `Result(_, ParseErr)`, whose
+REPL rendering is neither stable nor readable enough to assert on.
+
+Note when sweeping: `march test` on a *single* stdlib file loads the whole
+stdlib and runs every loaded module's doctests, so it reports pre-existing
+failures from unrelated modules (`HashMap.put`, `RRB.fold` — examples needing
+setup bindings). Verified against a pristine `origin/main` worktree that those
+predate this change; only `stdlib/parse.march` was touched here.
+
 ## Verification
 
 - `specs/lang/types/accept/t184_letstar_user_defined_type.march` — RED before,
