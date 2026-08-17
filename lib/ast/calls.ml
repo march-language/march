@@ -138,6 +138,8 @@ let rec spawned_actor_names (acc : string list) (e : Ast.expr) : string list =
   | Ast.ELetFn (_, _, _, body, _) -> spawned_actor_names acc body
   | Ast.ELetQ (_, rhs, body, _) ->
     spawned_actor_names (spawned_actor_names acc rhs) body
+  | Ast.ELetStar (_, rhs, body, _) ->
+    spawned_actor_names (spawned_actor_names acc rhs) body
   | Ast.EAssert (e, _) -> spawned_actor_names acc e
   | Ast.ESigil (_, content, _) -> spawned_actor_names acc content
   | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
