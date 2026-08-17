@@ -95,6 +95,7 @@ let stdlib_file_list = [
   "regex.march";
   "datetime.march";
   "queue.march";
+  "aho_corasick.march";
   "ring_buf.march";
   "enum.march";
   "random.march";

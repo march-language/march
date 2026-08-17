@@ -1,0 +1,391 @@
+-- AhoCorasick module: multi-pattern string search (pure March implementation).
+--
+-- Finds every occurrence of ANY of a set of fixed string patterns inside a
+-- haystack in a single pass, in O(haystack_len + total_pattern_len) time —
+-- independent of how many patterns there are. The naive alternative, N calls
+-- to `String.index_of`-style scanning (one per pattern), costs O(N *
+-- haystack_len). This is the classic Aho-Corasick automaton: a trie over the
+-- patterns, BFS-computed failure links (the "what state do I fall back to on
+-- a mismatch" edges), and output sets merged along the failure chain so a
+-- match of a shorter suffix pattern is reported even when the trie path
+-- actually walked belongs to a longer pattern (e.g. patterns "he" and "she"
+-- both match inside "ushers" — "she" is the trie path walked, but "he" is a
+-- suffix of it and must also be reported).
+--
+-- Two-phase use, matching the "compile once, scan many times" shape that
+-- makes the automaton worth building in the first place:
+--
+--   let ac = AhoCorasick.build(["he", "she", "his", "hers"])
+--   AhoCorasick.find_all(ac, "ushers")
+--   -- [{start: 1, stop: 4, pattern_index: 1, pattern: "she"},
+--   --  {start: 2, stop: 4, pattern_index: 0, pattern: "he"}]
+--
+-- Matches are returned in the order their END position is reached scanning
+-- left to right; matches sharing an end position are ordered longest-pattern-
+-- first (the pattern whose trie path was actually walked, then its suffixes
+-- via the failure chain, shortest last).
+--
+-- Byte-oriented throughout (like `Regex` and `Json`): `string_byte_at` /
+-- `string_byte_length`, no per-byte allocation. Since `string_chars` and
+-- friends operate on raw bytes rather than decoded Unicode codepoints, this
+-- is safe for UTF-8 input too — multibyte continuation bytes are always
+-- >= 0x80 and match only themselves.
+--
+-- An empty pattern (zero bytes) is skipped during `build`: it would match at
+-- every position with zero width, which is not useful for a "find these
+-- literal substrings" search and would need special-casing throughout. It is
+-- simply excluded from the automaton — no error, no match ever produced for
+-- it.
+
+mod AhoCorasick do
+
+  -- ── Internal representation ─────────────────────────────────────────────
+  --
+  -- AcNode(children, fail, outputs):
+  --   children — sparse (byte, child_node_id) assoc list; a trie edge exists
+  --              only for bytes actually present in some inserted pattern.
+  --   fail     — the failure-link target: the node reached by falling back
+  --              to the longest proper suffix of this node's path that is
+  --              also a prefix of some pattern (0 = root, for root itself).
+  --   outputs  — pattern indices whose pattern ends exactly at this node,
+  --              INCLUDING those inherited via the failure chain (merged in
+  --              during `build`, so scanning never has to walk the chain to
+  --              collect matches — only to find the next transition).
+  --
+  -- Nodes live in an `Array` indexed by node id (0 = root), giving O(log n)
+  -- amortised access while still allowing the trie to grow one node at a
+  -- time during insertion (`Array.push`).
+
+  ptype AcNode = AcNode(List((Int, Int)), Int, List(Int))
+
+  ptype Automaton = Automaton(Array(AcNode), Array(String))
+
+  -- One match: the pattern at `pattern_index` in the list passed to `build`
+  -- occurs in the haystack over the half-open byte range `[start, stop)`.
+  -- `pattern` is the matched pattern text itself (a reference to the
+  -- original pattern string — no substring of the haystack is allocated to
+  -- report a match, per the search-module discipline: allocate positions,
+  -- not copies).
+  type Match = { start : Int, stop : Int, pattern_index : Int, pattern : String }
+
+  -- ── Private helpers ──────────────────────────────────────────────────────
+
+  pfn rev(xs, acc) do
+    match xs do
+    Nil -> acc
+    Cons(h, t) -> rev(t, Cons(h, acc))
+    end
+  end
+
+  pfn list_append(xs, ys) do
+    match xs do
+    Nil -> ys
+    Cons(h, t) -> Cons(h, list_append(t, ys))
+    end
+  end
+
+  pfn assoc_get(xs, k) do
+    match xs do
+    Nil -> None
+    Cons((k2, v), rest) -> if k2 == k do Some(v) else assoc_get(rest, k) end
+    end
+  end
+
+  pfn child_of(nodes, state, b) do
+    match Array.get(nodes, state) do
+    AcNode(children, _, _) -> assoc_get(children, b)
+    end
+  end
+
+  pfn get_fail(nodes, state) do
+    match Array.get(nodes, state) do
+    AcNode(_, fail, _) -> fail
+    end
+  end
+
+  pfn get_outputs(nodes, state) do
+    match Array.get(nodes, state) do
+    AcNode(_, _, outputs) -> outputs
+    end
+  end
+
+  pfn own_outputs(nodes, state) do
+    get_outputs(nodes, state)
+  end
+
+  pfn set_fail_outputs(nodes, state, new_fail, merged_outputs) do
+    match Array.get(nodes, state) do
+    AcNode(children, _, _) -> Array.set(nodes, state, AcNode(children, new_fail, merged_outputs))
+    end
+  end
+
+  -- ── Trie construction ────────────────────────────────────────────────────
+
+  pfn mark_output(nodes, state, pat_idx) do
+    match Array.get(nodes, state) do
+    AcNode(children, fail, outputs) ->
+      Array.set(nodes, state, AcNode(children, fail, Cons(pat_idx, outputs)))
+    end
+  end
+
+  pfn insert_pattern(nodes, pat_idx, pattern) do
+    let plen = string_byte_length(pattern)
+    fn go(nodes, state, i) do
+      if i >= plen do
+        mark_output(nodes, state, pat_idx)
+      else do
+        let b = string_byte_at(pattern, i)
+        match Array.get(nodes, state) do
+        AcNode(children, fail, outputs) ->
+          match assoc_get(children, b) do
+          Some(child_id) -> go(nodes, child_id, i + 1)
+          None -> do
+            let new_id = Array.length(nodes)
+            let nodes2 = Array.push(nodes, AcNode(Nil, 0, Nil))
+            let nodes3 = Array.set(nodes2, state, AcNode(Cons((b, new_id), children), fail, outputs))
+            go(nodes3, new_id, i + 1)
+          end
+          end
+        end
+      end
+      end
+    end
+    go(nodes, 0, 0)
+  end
+
+  pfn insert_all(nodes, patterns, idx) do
+    match patterns do
+    Nil -> nodes
+    Cons(p, rest) ->
+      if string_byte_length(p) == 0 do
+        insert_all(nodes, rest, idx + 1)
+      else
+        insert_all(insert_pattern(nodes, idx, p), rest, idx + 1)
+      end
+    end
+  end
+
+  -- ── Failure-link construction (BFS over the trie) ────────────────────────
+  --
+  -- Standard Aho-Corasick: process nodes in strictly increasing depth order
+  -- (a queue gives this for free) so that by the time a node's failure link
+  -- is computed, every shallower node's failure link (and merged outputs)
+  -- is already final. `find_fail` walks the *already-computed* failure chain
+  -- of the parent to find where byte `b` leads — this is exactly the classic
+  -- "goto defined recursively via fail links of shallower nodes" construction,
+  -- without needing to materialize a dense per-byte transition table.
+
+  pfn find_fail(nodes, state, b) do
+    if state == 0 do
+      match child_of(nodes, 0, b) do
+      Some(nid) -> nid
+      None -> 0
+      end
+    else
+      match child_of(nodes, state, b) do
+      Some(nid) -> nid
+      None -> find_fail(nodes, get_fail(nodes, state), b)
+      end
+    end
+  end
+
+  pfn bfs_init_children(children, nodes, q) do
+    match children do
+    Nil -> (nodes, q)
+    Cons((_, child_id), rest) -> do
+      let nodes2 = set_fail_outputs(nodes, child_id, 0, own_outputs(nodes, child_id))
+      bfs_init_children(rest, nodes2, Queue.push_back(q, child_id))
+    end
+    end
+  end
+
+  pfn bfs_init(nodes) do
+    match Array.get(nodes, 0) do
+    AcNode(children, _, _) -> bfs_init_children(children, nodes, Queue.empty())
+    end
+  end
+
+  pfn bfs_children(children, fail_u, nodes, q) do
+    match children do
+    Nil -> (nodes, q)
+    Cons((b, v), rest) -> do
+      let new_fail = find_fail(nodes, fail_u, b)
+      let merged = list_append(own_outputs(nodes, v), get_outputs(nodes, new_fail))
+      let nodes2 = set_fail_outputs(nodes, v, new_fail, merged)
+      bfs_children(rest, fail_u, nodes2, Queue.push_back(q, v))
+    end
+    end
+  end
+
+  pfn bfs_loop(nodes, q) do
+    match Queue.pop_front(q) do
+    None -> nodes
+    Some((u, q2)) -> do
+      match Array.get(nodes, u) do
+      AcNode(children, fail_u, _) -> do
+        match bfs_children(children, fail_u, nodes, q2) do
+        (nodes2, q3) -> bfs_loop(nodes2, q3)
+        end
+      end
+      end
+    end
+    end
+  end
+
+  -- ── Scanning ──────────────────────────────────────────────────────────────
+
+  -- Advance one byte: follow a trie edge if one exists, otherwise fall back
+  -- along the failure chain (bottoming out at the root, which self-loops on
+  -- any byte with no trie edge). Amortised O(1) per byte over a whole scan.
+  pfn scan_step(nodes, state, b) do
+    match child_of(nodes, state, b) do
+    Some(nid) -> nid
+    None ->
+      if state == 0 do 0
+      else scan_step(nodes, get_fail(nodes, state), b)
+      end
+    end
+  end
+
+  pfn build_match(patterns, idx, end_pos) do
+    let pat = Array.get(patterns, idx)
+    let plen = string_byte_length(pat)
+    { start: end_pos - plen, stop: end_pos, pattern_index: idx, pattern: pat }
+  end
+
+  pfn emit_matches(patterns, outs, end_pos, acc) do
+    match outs do
+    Nil -> acc
+    Cons(idx, rest) -> emit_matches(patterns, rest, end_pos, Cons(build_match(patterns, idx, end_pos), acc))
+    end
+  end
+
+  -- ── Public API ────────────────────────────────────────────────────────────
+
+  doc """
+  Build an automaton matching any of `patterns` in a single linear pass over
+  a haystack. Building costs O(total pattern length); scanning with the
+  result costs O(haystack length), independent of the number of patterns —
+  build once, scan as many haystacks as you like with `find_all` / `matches`
+  / `find_first`.
+
+  Patterns are referenced by their position in `patterns` (`pattern_index`
+  on a `Match`). An empty pattern string is skipped (see module doc).
+
+      let ac = AhoCorasick.build(["he", "she", "his", "hers"])
+      AhoCorasick.matches(ac, "ushers")  -- true
+  """
+  fn build(patterns : List(String)) : Automaton do
+    let nodes0 = Array.push(Array.empty(), AcNode(Nil, 0, Nil))
+    let nodes1 = insert_all(nodes0, patterns, 0)
+    match bfs_init(nodes1) do
+    (nodes2, q) -> Automaton(bfs_loop(nodes2, q), Array.from_list(patterns))
+    end
+  end
+
+  doc """
+  Find every match of any pattern in `haystack`, in one linear pass. Matches
+  can overlap, and a shorter pattern that is a suffix of a longer matched
+  pattern is reported separately (see module doc's "he"/"she" example).
+
+      let ac = AhoCorasick.build(["he", "she"])
+      AhoCorasick.find_all(ac, "ushers")
+      -- [{start: 1, stop: 4, pattern_index: 1, pattern: "she"},
+      --  {start: 2, stop: 4, pattern_index: 0, pattern: "he"}]
+  """
+  fn find_all(automaton : Automaton, haystack : String) : List(Match) do
+    match automaton do
+    Automaton(nodes, patterns) -> do
+      let hlen = string_byte_length(haystack)
+      fn go(pos, state, acc) do
+        if pos >= hlen do
+          rev(acc, Nil)
+        else do
+          let b = string_byte_at(haystack, pos)
+          let state2 = scan_step(nodes, state, b)
+          let end_pos = pos + 1
+          let acc2 = emit_matches(patterns, get_outputs(nodes, state2), end_pos, acc)
+          go(end_pos, state2, acc2)
+        end
+        end
+      end
+      go(0, 0, Nil)
+    end
+    end
+  end
+
+  doc """
+  Find the first match (by end position, longest pattern first) of any
+  pattern in `haystack`, without building the full match list.
+
+      let ac = AhoCorasick.build(["he", "she"])
+      AhoCorasick.find_first(ac, "ushers")  -- Some({start: 1, stop: 4, ...})
+      AhoCorasick.find_first(ac, "xyz")     -- None
+  """
+  fn find_first(automaton : Automaton, haystack : String) : Option(Match) do
+    match automaton do
+    Automaton(nodes, patterns) -> do
+      let hlen = string_byte_length(haystack)
+      fn go(pos, state) do
+        if pos >= hlen do
+          None
+        else do
+          let b = string_byte_at(haystack, pos)
+          let state2 = scan_step(nodes, state, b)
+          let end_pos = pos + 1
+          match get_outputs(nodes, state2) do
+          Cons(idx, _) -> Some(build_match(patterns, idx, end_pos))
+          Nil -> go(end_pos, state2)
+          end
+        end
+        end
+      end
+      go(0, 0)
+    end
+    end
+  end
+
+  doc """
+  Whether any pattern matches anywhere in `haystack`.
+
+      let ac = AhoCorasick.build(["needle"])
+      AhoCorasick.matches(ac, "a needle in a haystack")  -- true
+      AhoCorasick.matches(ac, "nothing here")             -- false
+  """
+  fn matches(automaton : Automaton, haystack : String) : Bool do
+    match find_first(automaton, haystack) do
+    Some(_) -> true
+    None -> false
+    end
+  end
+
+  doc """
+  The pattern text at `index` (its position in the list passed to `build`),
+  or `None` if out of range.
+
+      let ac = AhoCorasick.build(["he", "she"])
+      AhoCorasick.pattern_at(ac, 1)   -- Some("she")
+      AhoCorasick.pattern_at(ac, 99)  -- None
+  """
+  fn pattern_at(automaton : Automaton, index : Int) : Option(String) do
+    match automaton do
+    Automaton(_, patterns) ->
+      if index < 0 || index >= Array.length(patterns) do None
+      else Some(Array.get(patterns, index))
+      end
+    end
+  end
+
+  doc """
+  The number of patterns `automaton` was built from (including any empty
+  ones, which are stored but never match — see module doc).
+
+      AhoCorasick.pattern_count(AhoCorasick.build(["a", "b", "c"]))  -- 3
+  """
+  fn pattern_count(automaton : Automaton) : Int do
+    match automaton do
+    Automaton(_, patterns) -> Array.length(patterns)
+    end
+  end
+
+end

@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 115 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 116 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -976,6 +976,7 @@ tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
 | `IOList` | Lazy string builder |
 | `Random` | Random number generation |
 | `Regex` | Regular expressions |
+| `AhoCorasick` | Multi-pattern string search (build once, scan many) |
 | `BigInt` | Arbitrary-precision integers |
 | `Decimal` | Exact decimal arithmetic |
 | `Csv` | CSV parsing |

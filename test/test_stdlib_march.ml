@@ -131,6 +131,8 @@ let all_stdlib_decls =
     "logger.march";
     "flow.march";
     "regex.march";
+    "queue.march";
+    "aho_corasick.march";
     "random.march";
     "stats.march";
     "test.march";
@@ -448,6 +450,10 @@ let () =
     ("regex", [
       Alcotest.test_case "Regex module"
         `Quick (run_stdlib_test "test_regex.march" "TestRegex");
+    ]);
+    ("aho_corasick", [
+      Alcotest.test_case "AhoCorasick module"
+        `Quick (run_stdlib_test "test_aho_corasick.march" "TestAhoCorasick");
     ]);
     ("parse", [
       Alcotest.test_case "Parse module"
