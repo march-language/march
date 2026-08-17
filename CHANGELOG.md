@@ -11,6 +11,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- The whole-program capability grant now bounds actor message handlers. A handler's body
+  was invisible to `main`'s grant reachability walk, so a program granted only
+  `Cap(IO.Console)` could `file_write` inside an actor handler — and it compiled, ran, and
+  wrote the file. The grant now follows `spawn(Actor)` edges into the actor's handlers, so a
+  handler's IO counts against the grant the moment the actor is spawned. A defined-but-never-
+  spawned actor stays free, like any other dead code. The manifest (`needs`) side already
+  tracked handlers; only the grant did not.
+
 ### Added
 
 - **`Parse.run_all`** — run a parser and require it to consume the *whole*
@@ -60,6 +70,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A partial-grant error (e.g. `main` granted `Cap(IO.Console)` but the program reaches
+  `IO.Spawn`) now suggests the precise least-privilege fix — add a `Cap(IO.Spawn)` parameter
+  to `main` — before the broad `Cap(IO)` escape hatch, matching the no-grant diagnostic's
+  suggested-signature help. It previously offered only "widen the grant (e.g. `Cap(IO)`)",
+  steering users to the widest grant against the system's own least-privilege ethos.
 - **`String.index_of`/`index_of_from`/`contains` (and everything else that shares
   `march_memmem` in `runtime/march_runtime.c`) now scan for the needle's first byte with a
   hand-written SIMD kernel** instead of delegating to libc `memchr`: SSE2 on x86-64 (the ABI

@@ -604,6 +604,7 @@ let test_nested_actor_handler_satisfied_by_declaring_module () =
   accepts "nested actor handler covered by Inner's needs"
     {|
 mod CeilActorOuter do
+  needs IO.Console
   mod Inner do
     needs IO.Console
     actor Weeble do
@@ -619,7 +620,7 @@ mod CeilActorOuter do
       send(pid, Zorp("hi"))
     end
   end
-  fn main() do
+  fn main(cap : Cap(IO.Console)) do
     Inner.run_it()
   end
 end
@@ -631,7 +632,13 @@ end
    which is the property this test pins.  Same re-pointing the severity flip
    applied to the other direct routes; the ceiling half of the fix is
    witnessed by the ACCEPT test above, where the declaration must satisfy
-   attribution or the build fails on `CeilActorOuter`. *)
+   attribution or the build fails on `CeilActorOuter`.
+
+   NOTE (2026-08-16): the ACCEPT test's `main` carries a `Cap(IO.Console)`
+   grant.  Before spawn->handler grant edges existed, a parameterless `main`
+   here compiled because the handler's `println` was invisible to
+   [check_main_grant]; that was the actor grant-bypass this change fixes, so
+   the program now correctly requires the grant it always should have. *)
 let test_nested_actor_handler_violation_names_inner () =
   rejects_at_typecheck "nested actor handler without needs blames Inner"
     ~expect:"`Inner` declares no matching `needs`"
