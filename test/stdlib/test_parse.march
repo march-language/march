@@ -9,13 +9,13 @@ mod TestParse do
 -- A self-referential grammar: `nested := "(" nested ")" | "x"`, returning the
 -- nesting depth. Written with `delay` so mentioning `nested()` inside its own
 -- definition does not recurse at construction time.
-pfn nested() : Parse.Parser(Int) do
-  Parse.alt(
-    Parse.map(
-      Parse.skip_first(Parse.lit("("),
-        Parse.skip_then(Parse.delay(fn -> nested()), Parse.lit(")"))),
+pfn nested() : Parser.Parser(Int) do
+  Parser.alt(
+    Parser.map(
+      Parser.skip_first(Parser.lit("("),
+        Parser.skip_then(Parser.delay(fn -> nested()), Parser.lit(")"))),
       fn n -> n + 1),
-    Parse.map(Parse.lit("x"), fn _ -> 0))
+    Parser.map(Parser.lit("x"), fn _ -> 0))
 end
 
 describe "Parse" do
@@ -23,35 +23,35 @@ describe "Parse" do
   describe "lit" do
 
     test "matches a literal prefix" do
-      match Parse.run(Parse.lit("ab"), "ab") do
+      match Parser.run(Parser.lit("ab"), "ab") do
         Ok(s)  -> assert (s == "ab")
         Err(_) -> assert false
       end
     end
 
     test "matches a prefix of a longer input" do
-      match Parse.run(Parse.lit("ab"), "abcd") do
+      match Parser.run(Parser.lit("ab"), "abcd") do
         Ok(s)  -> assert (s == "ab")
         Err(_) -> assert false
       end
     end
 
     test "fails at offset 0 when the first byte differs" do
-      match Parse.run(Parse.lit("ab"), "xy") do
+      match Parser.run(Parser.lit("ab"), "xy") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 0)
       end
     end
 
     test "fails when input runs out mid-literal" do
-      match Parse.run(Parse.lit("abc"), "ab") do
+      match Parser.run(Parser.lit("abc"), "ab") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 0)
       end
     end
 
     test "failure carries the literal in its expected-set" do
-      match Parse.run(Parse.lit("ab"), "xy") do
+      match Parser.run(Parser.lit("ab"), "xy") do
         Ok(_) -> assert false
         Err(e) ->
           match e.expected do
@@ -62,7 +62,7 @@ describe "Parse" do
     end
 
     test "an empty literal always succeeds without consuming" do
-      match Parse.run(Parse.lit(""), "xy") do
+      match Parser.run(Parser.lit(""), "xy") do
         Ok(s)  -> assert (s == "")
         Err(_) -> assert false
       end
@@ -73,16 +73,16 @@ describe "Parse" do
   describe "and_then" do
 
     test "sequences two parsers and pairs their results" do
-      let p = Parse.and_then(Parse.lit("ab"), Parse.lit("cd"))
-      match Parse.run(p, "abcd") do
+      let p = Parser.and_then(Parser.lit("ab"), Parser.lit("cd"))
+      match Parser.run(p, "abcd") do
         Ok((x, y)) -> assert (x == "ab" && y == "cd")
         Err(_)     -> assert false
       end
     end
 
     test "reports the second parser's offset when it fails" do
-      let p = Parse.and_then(Parse.lit("ab"), Parse.lit("cd"))
-      match Parse.run(p, "abZZ") do
+      let p = Parser.and_then(Parser.lit("ab"), Parser.lit("cd"))
+      match Parser.run(p, "abZZ") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 2)
       end
@@ -93,16 +93,16 @@ describe "Parse" do
   describe "alt" do
 
     test "takes the first alternative that succeeds" do
-      let p = Parse.alt(Parse.lit("ab"), Parse.lit("xy"))
-      match Parse.run(p, "abc") do
+      let p = Parser.alt(Parser.lit("ab"), Parser.lit("xy"))
+      match Parser.run(p, "abc") do
         Ok(s)  -> assert (s == "ab")
         Err(_) -> assert false
       end
     end
 
     test "falls through to the second alternative" do
-      let p = Parse.alt(Parse.lit("ab"), Parse.lit("xy"))
-      match Parse.run(p, "xyz") do
+      let p = Parser.alt(Parser.lit("ab"), Parser.lit("xy"))
+      match Parser.run(p, "xyz") do
         Ok(s)  -> assert (s == "xy")
         Err(_) -> assert false
       end
@@ -113,16 +113,16 @@ describe "Parse" do
     -- Reporting the LAST alternative's error would point at column 0 while
     -- the real mistake is at 2, which is the classic bad combinator message.
     test "reports the alternative that got furthest, not the last one" do
-      let deep    = Parse.and_then(Parse.lit("ab"), Parse.lit("cd"))
-      let shallow = Parse.lit("z")
-      match Parse.run(Parse.alt(deep, shallow), "abZZ") do
+      let deep    = Parser.and_then(Parser.lit("ab"), Parser.lit("cd"))
+      let shallow = Parser.lit("z")
+      match Parser.run(Parser.alt(deep, shallow), "abZZ") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 2)
       end
     end
 
     test "merges the expected-sets of alternatives that tie at one offset" do
-      match Parse.run(Parse.alt(Parse.lit("x"), Parse.lit("y")), "q") do
+      match Parser.run(Parser.alt(Parser.lit("x"), Parser.lit("y")), "q") do
         Ok(_) -> assert false
         Err(e) ->
           assert (e.pos == 0)
@@ -134,8 +134,8 @@ describe "Parse" do
     -- entire point of committing. Without this, a malformed `if` silently
     -- falls through to be parsed as something else (plan §2.2).
     test "does not try the second alternative after a hard failure" do
-      let committed = Parse.and_then(Parse.lit("ab"), Parse.commit(Parse.lit("cd")))
-      match Parse.run(Parse.alt(committed, Parse.and_then(Parse.lit("ab"), Parse.lit("ZZ"))), "abZZ") do
+      let committed = Parser.and_then(Parser.lit("ab"), Parser.commit(Parser.lit("cd")))
+      match Parser.run(Parser.alt(committed, Parser.and_then(Parser.lit("ab"), Parser.lit("ZZ"))), "abZZ") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 2)
       end
@@ -146,7 +146,7 @@ describe "Parse" do
   describe "commit" do
 
     test "leaves a success untouched" do
-      match Parse.run(Parse.commit(Parse.lit("ab")), "ab") do
+      match Parser.run(Parser.commit(Parser.lit("ab")), "ab") do
         Ok(s)  -> assert (s == "ab")
         Err(_) -> assert false
       end
@@ -162,19 +162,19 @@ describe "Parse" do
     -- backtracks and the real error is replaced by a shallow one.
     test "committing the tail reports the real failure, not a shallow one" do
       let member =
-        Parse.ctx("member",
-          Parse.then_commit(Parse.take_while1("a key", fn b -> b >= 97 && b <= 122),
-            Parse.skip_first(Parse.lit(":"),
-              Parse.label("a value",
-                Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)))))
+        Parser.ctx("member",
+          Parser.then_commit(Parser.take_while1("a key", fn b -> b >= 97 && b <= 122),
+            Parser.skip_first(Parser.lit(":"),
+              Parser.label("a value",
+                Parser.take_while1("a digit", fn b -> b >= 48 && b <= 57)))))
       let obj =
-        Parse.skip_first(Parse.lit("{"),
-          Parse.skip_then(Parse.sep_by(member, Parse.lit(",")),
-                          Parse.commit(Parse.lit("}"))))
-      match Parse.run(obj, "{a:}") do
+        Parser.skip_first(Parser.lit("{"),
+          Parser.skip_then(Parser.sep_by(member, Parser.lit(",")),
+                          Parser.commit(Parser.lit("}"))))
+      match Parser.run(obj, "{a:}") do
         Ok(_) -> assert false
         Err(e) ->
-          let msg = Parse.render("{a:}", e)
+          let msg = Parser.render("{a:}", e)
           assert (msg == "1:4: I was expecting a value in the member that started at 1:2")
       end
     end
@@ -183,14 +183,14 @@ describe "Parse" do
     -- empty construct stops parsing.
     test "an empty construct still parses" do
       let member =
-        Parse.then_commit(Parse.take_while1("a key", fn b -> b >= 97 && b <= 122),
-          Parse.skip_first(Parse.lit(":"),
-            Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)))
+        Parser.then_commit(Parser.take_while1("a key", fn b -> b >= 97 && b <= 122),
+          Parser.skip_first(Parser.lit(":"),
+            Parser.take_while1("a digit", fn b -> b >= 48 && b <= 57)))
       let obj =
-        Parse.skip_first(Parse.lit("{"),
-          Parse.skip_then(Parse.sep_by(member, Parse.lit(",")),
-                          Parse.commit(Parse.lit("}"))))
-      match Parse.run(obj, "{}") do
+        Parser.skip_first(Parser.lit("{"),
+          Parser.skip_then(Parser.sep_by(member, Parser.lit(",")),
+                          Parser.commit(Parser.lit("}"))))
+      match Parser.run(obj, "{}") do
         Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
       end
@@ -201,9 +201,9 @@ describe "Parse" do
   describe "ctx" do
 
     test "names the construct a committed failure happened inside" do
-      let inner = Parse.commit(Parse.lit("cd"))
-      let p     = Parse.and_then(Parse.lit("ab"), Parse.ctx("block", inner))
-      match Parse.run(p, "abZZ") do
+      let inner = Parser.commit(Parser.lit("cd"))
+      let p     = Parser.and_then(Parser.lit("ab"), Parser.ctx("block", inner))
+      match Parser.run(p, "abZZ") do
         Ok(_) -> assert false
         Err(e) ->
           match e.context do
@@ -220,8 +220,8 @@ describe "Parse" do
     -- Raw expected-sets degrade into token soup; a label replaces them with
     -- one human-named class (plan §3.4).
     test "replaces the expected-set when the parser consumed nothing" do
-      let p = Parse.label("digit", Parse.alt(Parse.lit("0"), Parse.lit("1")))
-      match Parse.run(p, "z") do
+      let p = Parser.label("digit", Parser.alt(Parser.lit("0"), Parser.lit("1")))
+      match Parser.run(p, "z") do
         Ok(_) -> assert false
         Err(e) ->
           match e.expected do
@@ -235,8 +235,8 @@ describe "Parse" do
     -- failing, its specific inner error is more useful than the label, so the
     -- label must not hide it.
     test "keeps the inner error when the parser consumed input" do
-      let p = Parse.label("pair", Parse.and_then(Parse.lit("ab"), Parse.lit("cd")))
-      match Parse.run(p, "abZZ") do
+      let p = Parser.label("pair", Parser.and_then(Parser.lit("ab"), Parser.lit("cd")))
+      match Parser.run(p, "abZZ") do
         Ok(_) -> assert false
         Err(e) ->
           assert (e.pos == 2)
@@ -252,28 +252,28 @@ describe "Parse" do
   describe "byte and byte_if" do
 
     test "byte matches one byte by code" do
-      match Parse.run(Parse.byte(97), "abc") do
+      match Parser.run(Parser.byte(97), "abc") do
         Ok(b)  -> assert (b == 97)
         Err(_) -> assert false
       end
     end
 
     test "byte fails on a different code" do
-      match Parse.run(Parse.byte(97), "xyz") do
+      match Parser.run(Parser.byte(97), "xyz") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 0)
       end
     end
 
     test "byte_if fails at end of input" do
-      match Parse.run(Parse.byte_if("digit", fn b -> b >= 48 && b <= 57), "") do
+      match Parser.run(Parser.byte_if("digit", fn b -> b >= 48 && b <= 57), "") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 0)
       end
     end
 
     test "byte_if accepts a byte passing the predicate" do
-      match Parse.run(Parse.byte_if("digit", fn b -> b >= 48 && b <= 57), "7") do
+      match Parser.run(Parser.byte_if("digit", fn b -> b >= 48 && b <= 57), "7") do
         Ok(b)  -> assert (b == 55)
         Err(_) -> assert false
       end
@@ -284,16 +284,16 @@ describe "Parse" do
   describe "eof" do
 
     test "succeeds only at end of input" do
-      let p = Parse.skip_then(Parse.lit("ab"), Parse.eof())
-      match Parse.run(p, "ab") do
+      let p = Parser.skip_then(Parser.lit("ab"), Parser.eof())
+      match Parser.run(p, "ab") do
         Ok(s)  -> assert (s == "ab")
         Err(_) -> assert false
       end
     end
 
     test "rejects trailing input" do
-      let p = Parse.skip_then(Parse.lit("ab"), Parse.eof())
-      match Parse.run(p, "abc") do
+      let p = Parser.skip_then(Parser.lit("ab"), Parser.eof())
+      match Parser.run(p, "abc") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 2)
       end
@@ -304,14 +304,14 @@ describe "Parse" do
   describe "many" do
 
     test "collects zero occurrences without failing" do
-      match Parse.run(Parse.many(Parse.lit("a")), "xyz") do
+      match Parser.run(Parser.many(Parser.lit("a")), "xyz") do
         Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
       end
     end
 
     test "collects repeated occurrences in order" do
-      match Parse.run(Parse.many(Parse.lit("a")), "aaab") do
+      match Parser.run(Parser.many(Parser.lit("a")), "aaab") do
         Ok(xs) -> assert (List.length(xs) == 3)
         Err(_) -> assert false
       end
@@ -320,15 +320,15 @@ describe "Parse" do
     -- A parser that succeeds without consuming would spin forever inside
     -- `many`. The guard turns that into a stop, not a hang.
     test "terminates on a zero-width parser" do
-      match Parse.run(Parse.many(Parse.lit("")), "abc") do
+      match Parser.run(Parser.many(Parser.lit("")), "abc") do
         Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
       end
     end
 
     test "propagates a hard failure instead of stopping" do
-      let item = Parse.and_then(Parse.lit("a"), Parse.commit(Parse.lit("b")))
-      match Parse.run(Parse.many(item), "abaX") do
+      let item = Parser.and_then(Parser.lit("a"), Parser.commit(Parser.lit("b")))
+      match Parser.run(Parser.many(item), "abaX") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 3)
       end
@@ -339,14 +339,14 @@ describe "Parse" do
   describe "sep_by" do
 
     test "parses a separated list" do
-      match Parse.run(Parse.sep_by(Parse.lit("a"), Parse.lit(",")), "a,a,a") do
+      match Parser.run(Parser.sep_by(Parser.lit("a"), Parser.lit(",")), "a,a,a") do
         Ok(xs) -> assert (List.length(xs) == 3)
         Err(_) -> assert false
       end
     end
 
     test "parses the empty list" do
-      match Parse.run(Parse.sep_by(Parse.lit("a"), Parse.lit(",")), "") do
+      match Parser.run(Parser.sep_by(Parser.lit("a"), Parser.lit(",")), "") do
         Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
       end
@@ -361,14 +361,14 @@ describe "Parse" do
     -- being CONSTRUCTED, before any input is read. `delay` defers the
     -- construction into the parse itself.
     test "allows a self-referential grammar to terminate" do
-      match Parse.run(nested(), "((x))") do
+      match Parser.run(nested(), "((x))") do
         Ok(n)  -> assert (n == 2)
         Err(_) -> assert false
       end
     end
 
     test "still reports failures from inside the deferred parser" do
-      match Parse.run(nested(), "((x)") do
+      match Parser.run(nested(), "((x)") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 4)
       end
@@ -379,14 +379,14 @@ describe "Parse" do
   describe "take_while1" do
 
     test "returns the matched run as one string" do
-      match Parse.run(Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57), "123ab") do
+      match Parser.run(Parser.take_while1("a digit", fn b -> b >= 48 && b <= 57), "123ab") do
         Ok(s)  -> assert (s == "123")
         Err(_) -> assert false
       end
     end
 
     test "fails when the first byte does not match" do
-      match Parse.run(Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57), "ab") do
+      match Parser.run(Parser.take_while1("a digit", fn b -> b >= 48 && b <= 57), "ab") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 0)
       end
@@ -397,14 +397,14 @@ describe "Parse" do
   describe "optional" do
 
     test "yields Some when the parser matches" do
-      match Parse.run(Parse.optional(Parse.lit("-")), "-1") do
+      match Parser.run(Parser.optional(Parser.lit("-")), "-1") do
         Ok(Some(s)) -> assert (s == "-")
         _           -> assert false
       end
     end
 
     test "yields None without consuming when it does not" do
-      match Parse.run(Parse.and_then(Parse.optional(Parse.lit("-")), Parse.lit("1")), "1") do
+      match Parser.run(Parser.and_then(Parser.optional(Parser.lit("-")), Parser.lit("1")), "1") do
         Ok((None, d)) -> assert (d == "1")
         _             -> assert false
       end
@@ -419,9 +419,9 @@ describe "Parse" do
     -- items follow — length-prefixed data, the shape most wire protocols have.
     test "chooses the next parser from the previous result" do
       let counted =
-        Parse.flat_map(Parse.byte_if("a digit", fn b -> b >= 48 && b <= 57),
-                       fn d -> Parse.repeat(Parse.lit("x"), d - 48))
-      match Parse.run(counted, "3xxx") do
+        Parser.flat_map(Parser.byte_if("a digit", fn b -> b >= 48 && b <= 57),
+                       fn d -> Parser.repeat(Parser.lit("x"), d - 48))
+      match Parser.run(counted, "3xxx") do
         Ok(xs) -> assert (List.length(xs) == 3)
         Err(_) -> assert false
       end
@@ -429,17 +429,17 @@ describe "Parse" do
 
     test "reports the dependent parser's own failure" do
       let counted =
-        Parse.flat_map(Parse.byte_if("a digit", fn b -> b >= 48 && b <= 57),
-                       fn d -> Parse.repeat(Parse.lit("x"), d - 48))
-      match Parse.run(counted, "3xy") do
+        Parser.flat_map(Parser.byte_if("a digit", fn b -> b >= 48 && b <= 57),
+                       fn d -> Parser.repeat(Parser.lit("x"), d - 48))
+      match Parser.run(counted, "3xy") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 2)
       end
     end
 
     test "propagates a failure in the first parser without running the second" do
-      let counted = Parse.flat_map(Parse.lit("n"), fn _ -> Parse.lit("y"))
-      match Parse.run(counted, "zz") do
+      let counted = Parser.flat_map(Parser.lit("n"), fn _ -> Parser.lit("y"))
+      match Parser.run(counted, "zz") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 0)
       end
@@ -450,21 +450,21 @@ describe "Parse" do
   describe "repeat" do
 
     test "parses exactly n occurrences" do
-      match Parse.run(Parse.repeat(Parse.lit("a"), 3), "aaaa") do
+      match Parser.run(Parser.repeat(Parser.lit("a"), 3), "aaaa") do
         Ok(xs) -> assert (List.length(xs) == 3)
         Err(_) -> assert false
       end
     end
 
     test "fails when there are fewer than n" do
-      match Parse.run(Parse.repeat(Parse.lit("a"), 3), "aa") do
+      match Parser.run(Parser.repeat(Parser.lit("a"), 3), "aa") do
         Ok(_)  -> assert false
         Err(e) -> assert (e.pos == 2)
       end
     end
 
     test "zero occurrences succeeds without consuming" do
-      match Parse.run(Parse.repeat(Parse.lit("a"), 0), "aaa") do
+      match Parser.run(Parser.repeat(Parser.lit("a"), 0), "aaa") do
         Ok(xs) -> assert (List.length(xs) == 0)
         Err(_) -> assert false
       end
@@ -477,9 +477,9 @@ describe "Parse" do
     -- The mirror of "alt does not try the second alternative after a hard
     -- failure": `fence` scopes the commit, so a sibling can still be tried.
     test "downgrades a hard failure so alt can continue" do
-      let committed = Parse.and_then(Parse.lit("ab"), Parse.commit(Parse.lit("cd")))
-      let fallback  = Parse.and_then(Parse.lit("ab"), Parse.lit("ZZ"))
-      match Parse.run(Parse.alt(Parse.fence(committed), fallback), "abZZ") do
+      let committed = Parser.and_then(Parser.lit("ab"), Parser.commit(Parser.lit("cd")))
+      let fallback  = Parser.and_then(Parser.lit("ab"), Parser.lit("ZZ"))
+      match Parser.run(Parser.alt(Parser.fence(committed), fallback), "abZZ") do
         Ok((_, y)) -> assert (y == "ZZ")
         Err(_)     -> assert false
       end
@@ -490,16 +490,16 @@ describe "Parse" do
   describe "recover" do
 
     test "yields Ok and consumes normally when the parser succeeds" do
-      match Parse.run(Parse.recover(Parse.lit("ok"), Parse.lit(";")), "ok") do
+      match Parser.run(Parser.recover(Parser.lit("ok"), Parser.lit(";")), "ok") do
         Ok(Ok(s)) -> assert (s == "ok")
         _         -> assert false
       end
     end
 
     test "yields Err and resynchronizes past the sync parser" do
-      let p = Parse.and_then(Parse.recover(Parse.lit("ok"), Parse.lit(";")),
-                             Parse.lit("rest"))
-      match Parse.run(p, "BAD;rest") do
+      let p = Parser.and_then(Parser.recover(Parser.lit("ok"), Parser.lit(";")),
+                             Parser.lit("rest"))
+      match Parser.run(p, "BAD;rest") do
         Ok((Err(e), tail)) -> assert (e.pos == 0 && tail == "rest")
         _                  -> assert false
       end
@@ -508,8 +508,8 @@ describe "Parse" do
     -- The point of §3.6: one pass, several errors, plus a partial result —
     -- rather than stopping at the first problem.
     test "collects several errors from a single pass" do
-      let items = Parse.many(Parse.recover(Parse.lit("ok"), Parse.lit(";")))
-      match Parse.run(items, "ok;BAD;ok") do
+      let items = Parser.many(Parser.recover(Parser.lit("ok"), Parser.lit(";")))
+      match Parser.run(items, "ok;BAD;ok") do
         Ok(xs) ->
           assert (List.length(xs) == 4)
           assert (List.length(List.filter(xs, fn r -> Result.is_err(r))) == 2)
@@ -523,22 +523,22 @@ describe "Parse" do
   describe "render" do
 
     test "reports 1-based line and column, not a byte offset" do
-      let p   = Parse.skip_then(Parse.lit("ab\ncd"), Parse.lit("Z"))
-      match Parse.run(p, "ab\ncdX") do
+      let p   = Parser.skip_then(Parser.lit("ab\ncd"), Parser.lit("Z"))
+      match Parser.run(p, "ab\ncdX") do
         Ok(_)  -> assert false
         Err(e) ->
-          let msg = Parse.render("ab\ncdX", e)
+          let msg = Parser.render("ab\ncdX", e)
           assert (String.starts_with(msg, "2:3:"))
       end
     end
 
     test "names the enclosing construct when there is a context frame" do
-      let inner = Parse.commit(Parse.lit("cd"))
-      let p     = Parse.and_then(Parse.lit("ab"), Parse.ctx("block", inner))
-      match Parse.run(p, "abZZ") do
+      let inner = Parser.commit(Parser.lit("cd"))
+      let p     = Parser.and_then(Parser.lit("ab"), Parser.ctx("block", inner))
+      match Parser.run(p, "abZZ") do
         Ok(_)  -> assert false
         Err(e) ->
-          let msg = Parse.render("abZZ", e)
+          let msg = Parser.render("abZZ", e)
           assert (String.contains(msg, "block"))
           assert (String.contains(msg, "1:3"))
       end
@@ -553,11 +553,11 @@ describe "Parse" do
   describe "run_all" do
 
     test "rejects a valid prefix that leaves input unconsumed" do
-      let digits = Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)
-      match Parse.run_all(digits, "123xyz") do
+      let digits = Parser.take_while1("a digit", fn b -> b >= 48 && b <= 57)
+      match Parser.run_all(digits, "123xyz") do
         Ok(_)  -> assert false
         Err(e) ->
-          let msg = Parse.render("123xyz", e)
+          let msg = Parser.render("123xyz", e)
           -- points at the first unconsumed byte, not at the start
           assert (String.starts_with(msg, "1:4:"))
           assert (String.contains(msg, "end of input"))
@@ -565,16 +565,16 @@ describe "Parse" do
     end
 
     test "accepts input the parser consumes entirely" do
-      let digits = Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)
-      match Parse.run_all(digits, "123") do
+      let digits = Parser.take_while1("a digit", fn b -> b >= 48 && b <= 57)
+      match Parser.run_all(digits, "123") do
         Ok(v)  -> assert (v == "123")
         Err(_) -> assert false
       end
     end
 
     test "plain run still accepts the same prefix" do
-      let digits = Parse.take_while1("a digit", fn b -> b >= 48 && b <= 57)
-      match Parse.run(digits, "123xyz") do
+      let digits = Parser.take_while1("a digit", fn b -> b >= 48 && b <= 57)
+      match Parser.run(digits, "123xyz") do
         Ok(v)  -> assert (v == "123")
         Err(_) -> assert false
       end
@@ -589,10 +589,10 @@ describe "Parse" do
   describe "label" do
 
     test "substitutes its name when the parser failed without consuming" do
-      match Parse.run(Parse.label("a number", Parse.lit("0")), "x") do
+      match Parser.run(Parser.label("a number", Parser.lit("0")), "x") do
         Ok(_)  -> assert false
         Err(e) ->
-          let msg = Parse.render("x", e)
+          let msg = Parser.render("x", e)
           assert (String.contains(msg, "a number"))
       end
     end
@@ -600,11 +600,11 @@ describe "Parse" do
     test "keeps the inner error when the parser had already consumed" do
       -- `ab` matches, `cd` does not: the failure is at 1:3, past the start,
       -- so the specific inner expectation must survive the label.
-      let p = Parse.label("a pair", Parse.and_then(Parse.lit("ab"), Parse.lit("cd")))
-      match Parse.run(p, "abZZ") do
+      let p = Parser.label("a pair", Parser.and_then(Parser.lit("ab"), Parser.lit("cd")))
+      match Parser.run(p, "abZZ") do
         Ok(_)  -> assert false
         Err(e) ->
-          let msg = Parse.render("abZZ", e)
+          let msg = Parser.render("abZZ", e)
           assert (String.contains(msg, "cd"))
       end
     end

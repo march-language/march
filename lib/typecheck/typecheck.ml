@@ -14470,3 +14470,66 @@ let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   unify env' ~span:sp ~reason:(Some (RLetBind sp)) t_ok pat_ty;
   ignore (leave_level env');
   bind_vars bindings env
+
+(** REPL counterpart of [ELetStar]'s [infer_expr] arm: bind [p] to the payload
+    of [e]'s monadic value so the binding persists across prompts.
+
+    Shares [ELetStar]'s resolution EXACTLY -- current scope first, then the
+    stdlib module loader -- so `let* x = e` at the prompt can never resolve a
+    different `flat_map` than the same line inside a function would.  There is
+    no continuation at a prompt, so unlike [ELetStar] this only needs the
+    payload type [A] from `flat_map`'s `M(a) -> (a -> M(b)) -> M(b)` shape;
+    the result type is discarded.  See [lib/repl/repl.ml]'s [ReplLetStar] arm
+    for the matching runtime semantics (bind the FIRST value yielded). *)
+let check_letstar_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
+  let env' = enter_level env in
+  let result_ty = infer_expr env' e in
+  let sp = span_of_expr e in
+  let bindings_opt =
+    match repr result_ty with
+    | TCon (head_name, _) ->
+      let flat_map_name = head_name ^ ".flat_map" in
+      let env'', scheme_opt =
+        match lookup_var flat_map_name env' with
+        | Some sc -> env', Some sc
+        | None    -> resolve_qualified_var flat_map_name env'
+      in
+      (match scheme_opt with
+       | None ->
+         Err.error env''.errors ~span:sp
+           (Printf.sprintf
+              "`let*` needs `%s`, but it doesn't exist.\n\
+               Define `flat_map(x : %s(a), f : a -> %s(b)) : %s(b)` in a \
+               module named `%s` to make `let*` work with `%s`."
+              flat_map_name head_name head_name head_name head_name head_name);
+         None
+       | Some scheme ->
+         (match repr (instantiate env''.level env'' scheme) with
+          | TArrow (m_arg, TArrow (TArrow (a_ty, _), _)) ->
+            unify env'' ~span:sp
+              ~reason:(Some (RBuiltin
+                (Printf.sprintf
+                   "The right-hand side of `let*` must match `%s`'s own type."
+                   flat_map_name)))
+              result_ty m_arg;
+            let bindings, pat_ty = infer_pattern ~expected:a_ty env'' p in
+            unify env'' ~span:sp ~reason:(Some (RLetBind sp)) a_ty pat_ty;
+            Some bindings
+          | _ ->
+            Err.error env''.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` doesn't have the shape `let*` needs: \
+                  `%s(a) -> (a -> %s(b)) -> %s(b)`."
+                 flat_map_name head_name head_name head_name);
+            None))
+    | _ ->
+      Err.error env'.errors ~span:sp
+        "`let*`'s right-hand side must have a concrete type (e.g. `Option(a)`, \
+         `Result(a, e)`) so `let*` can find its `flat_map` — its type could \
+         not be determined here.";
+      None
+  in
+  ignore (leave_level env');
+  match bindings_opt with
+  | Some bindings -> bind_vars bindings env
+  | None -> env

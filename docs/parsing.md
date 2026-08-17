@@ -30,14 +30,14 @@ mod Main do
 
   pfn is_digit(b : Int) : Bool do b >= 48 && b <= 57 end
 
-  pfn number() : Parse.Parser(String) do
-    Parse.take_while1("a number", is_digit)
+  pfn number() : Parser.Parser(String) do
+    Parser.take_while1("a number", is_digit)
   end
 
   fn main(_c : Cap(IO.Console)) : Unit do
-    match Parse.run_all(number(), "123") do
+    match Parser.run_all(number(), "123") do
       Ok(v)  -> println("parsed " ++ v)
-      Err(e) -> println(Parse.render("123", e))
+      Err(e) -> println(Parser.render("123", e))
     end
   end
 end
@@ -45,12 +45,12 @@ end
 
 Two things to notice, because both are load-bearing.
 
-**`Parse.run_all`, not `Parse.run`.** `run` succeeds as soon as *its* parser
+**`Parser.run_all`, not `Parser.run`.** `run` succeeds as soon as *its* parser
 is satisfied and silently ignores whatever is left over:
 
 ```march
-Parse.run(number(), "123xyz")      -- Ok("123")  — the `xyz` is never looked at
-Parse.run_all(number(), "123xyz")  -- Err — 1:4: I was expecting end of input
+Parser.run(number(), "123xyz")      -- Ok("123")  — the `xyz` is never looked at
+Parser.run_all(number(), "123xyz")  -- Err — 1:4: I was expecting end of input
 ```
 
 `run` is the right call when you are composing a parser into a larger one, or
@@ -60,7 +60,7 @@ always a bug waiting to happen, so reach for `run_all` by default.
 **Bytes, not characters.** Predicates take a byte code (`0`–`255`), and
 positions are byte offsets. This is what keeps the scanning loop
 allocation-free. Offsets are converted to line/column exactly once, at render
-time, by `Parse.render` or `Parse.line_col`.
+time, by `Parser.render` or `Parser.line_col`.
 
 ---
 
@@ -110,14 +110,14 @@ recurse while being *constructed* — before reading a byte — and never return
 Wrap the back-edge in `delay`:
 
 ```march
-pfn expr() : Parse.Parser(String) do
-  Parse.alt(
-    Parse.take_while1("a number", is_digit),
-    Parse.skip_first(Parse.lit("("),
-      Parse.skip_then(Parse.delay(fn -> expr()), Parse.lit(")"))))
+pfn expr() : Parser.Parser(String) do
+  Parser.alt(
+    Parser.take_while1("a number", is_digit),
+    Parser.skip_first(Parser.lit("("),
+      Parser.skip_then(Parser.delay(fn -> expr()), Parser.lit(")"))))
 end
 
-Parse.run_all(expr(), "(((7)))")   -- Ok("7")
+Parser.run_all(expr(), "(((7)))")   -- Ok("7")
 ```
 
 This is not a March quirk — every combinator library in a strict language needs
@@ -137,7 +137,7 @@ Without labels an expected-set degrades into `expected `-`, `0`..`9`, `(`, or
 `fn``. Name the class instead:
 
 ```march
-Parse.label("a number", Parse.take_while1("a number", is_digit))
+Parser.label("a number", Parser.take_while1("a number", is_digit))
 ```
 
 A label only substitutes when the parser failed **without consuming input**. If
@@ -147,7 +147,7 @@ label can never hide real progress.
 ### `ctx` — say which construct you were inside
 
 ```march
-Parse.ctx("entry", ...)
+Parser.ctx("entry", ...)
 -- 1:9: I was expecting a number in the entry that started at 1:1
 ```
 
@@ -180,11 +180,11 @@ soft one so one construct's commit cannot abort a sibling.
 ### All three together
 
 ```march
-pfn entry() : Parse.Parser((String, String)) do
-  Parse.ctx("entry",
-    Parse.and_then(
-      Parse.skip_then(key(), Parse.skip_then(ws(), Parse.lit("="))),
-      Parse.commit(Parse.skip_first(ws(), number()))))
+pfn entry() : Parser.Parser((String, String)) do
+  Parser.ctx("entry",
+    Parser.and_then(
+      Parser.skip_then(key(), Parser.skip_then(ws(), Parser.lit("="))),
+      Parser.commit(Parser.skip_first(ws(), number()))))
 end
 ```
 
@@ -203,10 +203,10 @@ a failure into a *value* and resynchronises, so `many` collects the lot in one
 pass:
 
 ```march
-let item = Parse.skip_then(Parse.lit("ok"), Parse.optional(Parse.lit(";")))
-let p    = Parse.many(Parse.recover(item, Parse.lit(";")))
+let item = Parser.skip_then(Parser.lit("ok"), Parser.optional(Parser.lit(";")))
+let p    = Parser.many(Parser.recover(item, Parser.lit(";")))
 
-Parse.run(p, "ok;BAD;ok;NOPE")
+Parser.run(p, "ok;BAD;ok;NOPE")
 -- Ok([Ok(..), Err(..), Ok(..), Err(..)])  — 2 parsed, 2 errors, one pass
 ```
 
@@ -221,28 +221,34 @@ spurious error per separator.
 
 ## Rendering
 
-`Parse.render(input, err)` produces a diagnostic in the compiler's own voice:
+`Parser.render(input, err)` produces a diagnostic in the compiler's own voice:
 
 ```
 2:3: I was expecting `end` in the block that started at 1:1
 ```
 
-`Parse.line_col(input, pos)` gives the raw 1-based `(line, column)` if you want
+`Parser.line_col(input, pos)` gives the raw 1-based `(line, column)` if you want
 to build your own.
 
 ---
 
-## Known limitation: `let*` does not work with `Parser` yet
+## Context-sensitive grammars with `let*`
 
-[`let*`](/docs/) resolves a type's `flat_map` in the module of the *same name*
-as the type. This library's type is `Parser` but its module is `Parse`, so
-`let* x = some_parser()` reports that `Parser.flat_map` does not exist.
-
-Use `flat_map` directly for now:
+`flat_map` picks the next parser from a value you just parsed. [`let*`](/docs/)
+is the readable spelling of the same thing, and it works with `Parser` because
+the module and the type share a name:
 
 ```march
-Parse.flat_map(digit(), fn n -> Parse.repeat(item(), n))
+-- a leading digit says how many items follow
+pfn counted() : Parser.Parser(List(String)) do
+  let* n = digit()
+  Parser.repeat(Parser.lit("x"), n - 48)
+end
+
+Parser.run_all(counted(), "3xxx")   -- Ok(["x", "x", "x"])
 ```
 
-Resolving this — by renaming the module, or by extending `let*`'s lookup — is
-tracked in `specs/todos/2026-08-14-letstar-repl-and-parse-module-gaps.md`.
+Each `let*` binds the parsed value and sequences the rest, so length-prefixed
+formats, indentation-sensitive grammars and version negotiation all read as
+ordinary top-to-bottom code. `Parser.flat_map` remains available directly if
+you prefer it.
