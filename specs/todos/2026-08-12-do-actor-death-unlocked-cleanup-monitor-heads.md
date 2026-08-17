@@ -32,7 +32,7 @@ of, any task in this plan.
 static void do_actor_death(void *actor, march_death_reason reason,
                            const char *message, size_t message_len) {
     ...
-    pthread_mutex_unlock(&g_tbl_mu);   /* :3673 — monitor_head already detached above, under the lock */
+    pthread_mutex_unlock(&g_tbl_mu);   /* :3677 — monitor_head already detached above, under the lock */
 
     if (meta && meta->cleanup_head) {                    /* :3681, UNLOCKED */
         march_cleanup_node *node = meta->cleanup_head;
