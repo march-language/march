@@ -843,6 +843,15 @@ type env = {
       ceiling: a stdlib wrapper's body caps roll up to the user module that
       calls it, exactly as [March_tir.Cap_attrib]'s [~transparent] does on the
       `--compile` side. Keyed like [cap_closures]. *)
+  ceiling_extra_roots : (string, unit) Hashtbl.t;
+  (** Function-name keys that are ALWAYS-reachable ceiling roots regardless of
+      whether the program has a `main` — mirroring the unconditional roots
+      [March_tir.Dce.root_names] keeps: module-level [let] bindings (lowered
+      into the always-run `__march_setup__`, so their side effects cannot be
+      skipped) and `_migrate_state` functions. Without seeding the ceiling's
+      reachability walk with these, a module-level `let` reaching a
+      stdlib-mediated capability would be pruned as "unreachable from main" and
+      the ceiling would miss it — a violation `--compile` still catches. *)
   fn_refs : (string, string list) Hashtbl.t;
   (** Per-function REFERENCE edges: fully-qualified function name ("Mod.fn",
       or the BARE name for a top-level function of the entry module — the same
@@ -964,6 +973,7 @@ let make_env errors type_map = {
   own_cap_closures = Hashtbl.create 64;
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
+  ceiling_extra_roots = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
   fn_row_bodies = Hashtbl.create 64;
   fn_grant_points = Hashtbl.create 16;
@@ -9487,7 +9497,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          it binds — any of them can be the route a caller takes. *)
       | Ast.DLet (_, b, dsp) ->
         List.iter
-          (fun n -> record_expr_owner ~sp:dsp (cap_qname n) [] [ b.Ast.bind_expr ])
+          (fun n ->
+             let q = cap_qname n in
+             (* A module-level [let] is an always-run setup effect: mark it a
+                ceiling root so its stdlib-mediated caps are never pruned as
+                unreachable-from-main (mirrors [March_tir.Dce.root_names]). *)
+             Hashtbl.replace env.ceiling_extra_roots q ();
+             record_expr_owner ~sp:dsp q [] [ b.Ast.bind_expr ])
           (free_vars_pattern b.Ast.bind_pat)
       (* An interface DEFAULT body is keyed by a mangled name for exactly the
          reason an impl method is, and the bare name is only a dispatch edge.
@@ -14012,11 +14028,21 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
   let reachable : (string, unit) Hashtbl.t = Hashtbl.create 64 in
   if has_main then begin
     let q = Queue.create () in
+    let seed k =
+      if not (Hashtbl.mem reachable k) then
+        (Hashtbl.replace reachable k (); Queue.push k q)
+    in
+    (* Seed with the SAME unconditional roots [March_tir.Dce.root_names] keeps
+       alongside `main`: the entry itself, module-level `let`s and
+       `_migrate_state` functions (always-run setup effects). Missing any of
+       these would silently drop a violation `--compile` still reports. *)
     Hashtbl.iter
       (fun k _ ->
          if k = "main"
             || (String.length k > 5 && String.sub k (String.length k - 5) 5 = ".main")
-         then (Hashtbl.replace reachable k (); Queue.push k q))
+            || is_migrate_fn_name k
+            || Hashtbl.mem env.ceiling_extra_roots k
+         then seed k)
       env.fn_refs;
     while not (Queue.is_empty q) do
       let n = Queue.pop q in
