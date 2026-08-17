@@ -11600,6 +11600,80 @@ let eval_stdlib_decls (decls : decl list) : unit =
   in
   ignore (go decls !env_ref)
 
+(** Bind `let* p = e` at a REPL prompt.
+
+    There is no continuation at a prompt, so this cannot be the ordinary
+    [ELetStar] expansion.  Instead it runs the value's OWN `flat_map` with a
+    callback that captures the first value it is handed and then returns the
+    original monadic value, which is well-typed as the callback's `M(b)`
+    result for any `M` without needing a generic `pure` the language does not
+    have.  `flat_map`'s result is discarded -- only the captured payload
+    matters.
+
+    Semantics, chosen to match `let?`'s prompt behaviour: bind the FIRST value
+    yielded.  For `Option`/`Result` there is at most one, so this is exactly
+    "unwrap".  For a multi-value monad like `List` the callback runs once per
+    element and the first wins, which is the reading `let* x = [1,2,3]` most
+    naturally suggests.  A value that yields NOTHING (`None`, `Err`, `[]`)
+    binds nothing and is reported rather than silently succeeding.
+
+    Returns [Ok bindings] or [Error message]. *)
+let letstar_repl_bind (env : env) (p : pattern) (e : expr)
+    : ((string * value) list, string) result =
+  let v = eval_expr env e in
+  (* [type_name_of_value] reads [ctor_type_tbl], which is populated by
+     [register_variant_ctors] from a March-source [DType].  Option/Result/List
+     are BUILTIN types with no such declaration, so in a REPL session they
+     resolve to [None] and `let* x = Some(1)` would report "cannot determine
+     the type" for the three types a user is most likely to try first.  Map
+     their constructors directly -- the same builtin triple already spelled
+     out for the collision seed above.  A user-defined type needs none of
+     this: its DType registers its ctors normally. *)
+  let builtin_ctor_type = function
+    | "Some" | "None" -> Some "Option"
+    | "Ok"   | "Err"  -> Some "Result"
+    | "Cons" | "Nil"  -> Some "List"
+    | _ -> None
+  in
+  let head_opt =
+    match type_name_of_value v with
+    | Some t -> Some t
+    | None -> (match v with VCon (tag, _) -> builtin_ctor_type tag | _ -> None)
+  in
+  match head_opt with
+  | None ->
+    Error (Printf.sprintf "let*: cannot determine the type of %s"
+             (value_to_string v))
+  | Some head_name ->
+    let flat_map_name = head_name ^ ".flat_map" in
+    (match (try Some (lookup flat_map_name env) with _ -> None) with
+     | None ->
+       Error (Printf.sprintf
+                "let* needs `%s`, but it doesn't exist" flat_map_name)
+     | Some flat_map_fn ->
+       let captured = ref None in
+       let k = VBuiltin ("$letstar_repl_k", function
+           | [x] ->
+             (match !captured with None -> captured := Some x | Some _ -> ());
+             v
+           | args ->
+             eval_error "let* continuation: expected 1 argument, got %d"
+               (List.length args))
+       in
+       ignore (apply flat_map_fn [v; k]);
+       (match !captured with
+        | None ->
+          Error (Printf.sprintf
+                   "let*: %s yielded no value to bind"
+                   (value_to_string v))
+        | Some x ->
+          (match match_pattern x p with
+           | Some bs -> Ok bs
+           | None ->
+             Error (Printf.sprintf
+                      "let* pattern did not match the value %s"
+                      (value_to_string x)))))
+
 (** Run the module: evaluate it, then call [main()] or drive the [app] lifecycle. *)
 let run_module (m : module_) : unit =
   (* Reset global app state for fresh run *)

@@ -54,16 +54,27 @@ functions before `let*`, for exactly this reason — nothing about them is
 This is a real, load-bearing convention, but it is **not compiler-enforced**
 outside of `let*` itself — nothing stops a module from being named
 differently than its primary type. `let*` is the first thing in the compiler
-that actually depends on it holding. When it doesn't hold — `stdlib/
-parse.march`'s `Parser` type lives in a module named `Parse`, not `Parser` —
-`let*` cannot find `Parser.flat_map` and reports a clear, actionable error
-naming exactly what's missing (§5), not a crash or a silent fallback.
-**`let*` does not (yet) work with `stdlib/parse.march`'s `Parser` type for
-this reason** — the module doing the eventual JSON/TOML-combinator or
-`~p` sigil work should either rename `Parse` to `Parser` (aligning with the
-convention every other stdlib container type follows) or extend this
-resolution with a second, explicit path, as a follow-up. Filed, not silently
-worked around.
+that actually depends on it holding. When it doesn't hold, `let*` cannot find
+`M.flat_map` and reports a clear, actionable error naming exactly what's
+missing (§5), not a crash or a silent fallback.
+
+The combinator library was the one place in the stdlib that broke the
+convention: its type was `Parser` but its module was `Parse`, so `let*` — a
+feature whose own motivating example was a *parser* — did not work with it.
+Resolved 2026-08-17 by renaming the module to `Parser`, so the type and
+module names agree the way they already do for `Option`/`Result`/`List`
+(`specs/progress/2026-08-17-letstar-followups.md`). Corpus witness:
+`specs/lang/types/accept/t185_letstar_parser_combinator.march`.
+
+The alternative — teaching `let*` a second resolution path, e.g. falling back
+to the module that DECLARES the type — was considered and not taken. It would
+avoid the `Parser.Parser(a)` stutter an external type annotation now reads
+with, but the resolution is duplicated across three layers (typecheck, TIR
+lowering, and the interpreter, each with its own tables), and this codebase
+has repeatedly been bitten by exactly that shape of multi-site walker drifting
+apart — see `lib/ast/calls.ml`'s header, where the drift was fail-OPEN. The
+rename needs no compiler change at all. If a second library ever wants to
+break the convention, revisit it then, with one decision rather than two.
 
 ## 3. Type checking
 
@@ -141,12 +152,17 @@ so `flat_map`'s own March body calling `f(x)` invokes it transparently.
 
 ## 6. What's explicitly out of scope
 
-- **The REPL.** `let?` has a dedicated `ReplLetQ` top-level form
-  (`lib/ast/ast.ml`, handled in `lib/repl/repl.ml`) with its own
-  `Result`-hardwired typecheck/eval path for binding into the session's
-  persistent environment. `let*` has no REPL equivalent yet — `let*
-  x = e` typed at the REPL prompt is a parse error, not a crash. Filed as a
-  follow-up, not silently half-supported.
+- ~~**The REPL.**~~ **Shipped 2026-08-17.** `let* p = e` at a prompt binds
+  through the value's own `flat_map` (`ReplLetStar`, `Typecheck.
+  check_letstar_repl`, `Eval.letstar_repl_bind`), in the terminal REPL, the
+  notty TUI and the browser REPL. There is no continuation at a prompt, so
+  the binding runs `flat_map` with a callback that captures the FIRST value
+  yielded and returns the original monadic value — well-typed as the
+  callback's `M(b)` for any `M` without needing a generic `pure` the language
+  does not have. For `Option`/`Result` "first" is just "unwrap"; for `List`
+  it is the reading `let* x = [1,2,3]` suggests. A value that yields nothing
+  (`None`, `Err`, `[]`) binds nothing and says so rather than silently
+  succeeding.
 - **`stdlib/parse.march`'s `Parser` type**, per §2 above.
 - **A `let*`/`let?` unification.** The parsing-and-string-search plan (§9
   decision 5) left open whether `let?` should eventually be re-expressed as

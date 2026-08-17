@@ -1,4 +1,4 @@
--- Parse module: parser combinator core.
+-- Parser module: parser combinator core.
 --
 -- Design: specs/plans/2026-08-09-parsing-and-string-search.md
 --
@@ -37,7 +37,7 @@
 -- Still to come: an OCaml-side renderer into lib/errors so library and
 -- compiler diagnostics are indistinguishable.
 
-mod Parse do
+mod Parser do
 
   -- What a parser was looking for at the offset it failed.  `ExpLabel` is the
   -- human-named class a `label` combinator substitutes for raw token soup.

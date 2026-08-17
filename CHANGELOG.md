@@ -23,6 +23,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`let*` now works at the REPL prompt.** `let* x = e` binds through the
+  value's own `flat_map`, so `Option`, `Result`, `List` and your own types all
+  work interactively, not just inside a function. There is no continuation at
+  a prompt, so it binds the **first** value the expression yields — for
+  `Option`/`Result` that is simply "unwrap"; for a list it is the first
+  element. A value that yields nothing (`None`, `Err`, `[]`) binds nothing and
+  tells you so instead of silently leaving the name undefined. Works in the
+  terminal REPL, the TUI and the browser REPL.
+
 - **`Parse.run_all`** — run a parser and require it to consume the *whole*
   input. `Parse.run` succeeds on a valid PREFIX and silently discards the rest
   (`run(number(), "123xyz")` is `Ok("123")`), which is the usual way a
@@ -69,6 +78,22 @@ git log is authoritative for exact commits.
   undocumented public function.
 
 ### Changed
+
+- **BREAKING: the parser combinator module is now `Parser`, not `Parse`.**
+  `Parse.lit(...)` becomes `Parser.lit(...)`, and the type is
+  `Parser.Parser(a)`. This is what makes `let*` usable with parsers: `let*`
+  finds a type's `flat_map` in the module named after the type, and the type
+  has always been `Parser` — so the sugar did not work with the one library
+  whose motivating example it was built from. Context-sensitive grammars now
+  read as ordinary code:
+  ```march
+  pfn counted() : Parser.Parser(List(String)) do
+    let* n = digit()                      -- a leading digit says how many follow
+    Parser.repeat(Parser.lit("x"), n - 48)
+  end
+  ```
+  Migration is a rename: `Parse.` → `Parser.`. Nothing outside the library's
+  own tests used it.
 
 - A partial-grant error (e.g. `main` granted `Cap(IO.Console)` but the program reaches
   `IO.Spawn`) now suggests the precise least-privilege fix — add a `Cap(IO.Spawn)` parameter

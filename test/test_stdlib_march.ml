@@ -98,7 +98,7 @@ let all_stdlib_decls =
     (* Loaded before iolist/msgpack so their same-named constructors (Str,
        Array, ...) keep winning bare lookups exactly as they did before
        json.march joined this list. *)
-    "parse.march";
+    "parser.march";
     "json.march";
     "json_stream.march";
     "iolist.march";
