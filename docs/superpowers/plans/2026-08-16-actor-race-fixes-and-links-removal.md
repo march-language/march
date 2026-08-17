@@ -102,60 +102,19 @@ git commit -m "specs: retire the fixed registration race; scope the cleanup-head
 
 **Files:**
 - Modify: `runtime/march_runtime.c` (`do_actor_death`, the `cleanup_head` block that currently follows the `pthread_mutex_unlock(&g_tbl_mu)` after the monitor detach)
-- Create: `test/native/actor_cleanup_detach.march` and `test/native/actor_cleanup_detach.expected`
-- Modify: `test/dune`
 - Modify: `specs/todos/2026-08-12-do-actor-death-unlocked-cleanup-monitor-heads.md` → `git mv` to `specs/progress/2026-08-16-do-actor-death-cleanup-detach.md`
+
+**No new test.** Ruling 2026-08-16: this race cannot be forced deterministically
+across two OS threads, so any fixture here would pass identically before and
+after the fix. A test that cannot fail against the broken code is not evidence,
+and the project standard is not to ship one. The correctness argument for this
+task is structural (Steps 2-3) and the existing suites are the regression net.
 
 **Interfaces:**
 - Consumes: Task 1's corrected todo.
 - Produces: no new public symbols. `do_actor_death` keeps its existing signature `static void do_actor_death(void *actor, march_death_reason reason, const char *message, size_t message_len)`.
 
-- [ ] **Step 1: Write the failing native fixture**
-
-The hazard is a cleanup closure that itself registers another cleanup on the dying actor, mutating `cleanup_head` while `do_actor_death` walks it. Create `test/native/actor_cleanup_detach.march`:
-
-```march
-mod Main do
-  needs IO.Console
-
-  actor Worker do
-    state { n : Int }
-    init  { n: 0 }
-    on Bump() do { n: state.n + 1 } end
-  end
-
-  fn main(_c : Cap(IO.Console)) do
-    let w = spawn(Worker)
-    let _ = on_cleanup(w, fn _ ->
-      println("cleanup ran")
-    )
-    kill(w)
-    run_until_idle()
-    println("survived death")
-  end
-end
-```
-
-Check `on_cleanup`'s real name and arity in `stdlib/actor.march` before committing this — if the surface differs, adapt the fixture rather than the stdlib. Create `test/native/actor_cleanup_detach.expected` with:
-
-```
-cleanup ran
-survived death
-```
-
-- [ ] **Step 2: Register the fixture and run it against the CURRENT runtime**
-
-Add a rule to `test/dune` modelled byte-for-byte on the existing `native_actor_monitor_down_reason` rule (copy it, change the three names). It must include `(glob_files ../runtime/*.h)` in its deps if it is a C-linking rule — dune's CI sandbox stages only declared deps, and an undeclared header compiles locally but fails in CI with "file not found".
-
-Run:
-```bash
-dune build --root . @bin/warm-cache
-rm -rf .march/cas/artifacts-v2/
-dune build --root . @test/runtest 2>&1 | tail -20
-```
-Expected: PASSES on the current runtime. This fixture is a *guard*, not a red-green witness — the race needs two OS threads hitting the same list and cannot be forced deterministically. Record explicitly in the task report that this test would NOT have failed before the fix, and that the correctness argument is structural (below), not empirical. Do not claim a red-green cycle you did not get.
-
-- [ ] **Step 3: Apply the detach**
+- [ ] **Step 1: Apply the detach**
 
 In `do_actor_death`, the monitor detach already happens under `g_tbl_mu`. Extend that same locked section to also detach the cleanup list, and walk the detached head afterwards. Replace:
 
@@ -209,11 +168,11 @@ Declare `march_cleanup_node *cleanups = NULL;` beside the existing `monitors` de
     }
 ```
 
-- [ ] **Step 4: Verify no lock is held across the closure call**
+- [ ] **Step 2: Verify no lock is held across the closure call**
 
 Read the final code and confirm `pthread_mutex_unlock(&g_tbl_mu)` precedes the `fn_ptr(clo, unit_arg)` call. This is the whole safety argument for the change — if the unlock ever moves below the walk, a cleanup closure that touches any actor API self-deadlocks. State this explicitly in the task report.
 
-- [ ] **Step 5: Rebuild and run**
+- [ ] **Step 3: Rebuild and run**
 
 ```bash
 DUNE_CACHE=disabled dune build --root . @bin/warm-cache --force
@@ -224,7 +183,7 @@ dune build --root . @test/runtest 2>&1 | tail -5
 ```
 Expected: exit 0, zero FAIL lines, runtest clean.
 
-- [ ] **Step 6: Move the todo and commit**
+- [ ] **Step 4: Move the todo and commit**
 
 ```bash
 git mv specs/todos/2026-08-12-do-actor-death-unlocked-cleanup-monitor-heads.md specs/progress/2026-08-16-do-actor-death-cleanup-detach.md
@@ -232,7 +191,7 @@ git mv specs/todos/2026-08-12-do-actor-death-unlocked-cleanup-monitor-heads.md s
 Append a "## Resolved" section stating both halves are now closed (monitor half by #284, cleanup half here), that the fix is detach-under-lock rather than hold-lock-across-closures, and why that distinction is load-bearing.
 
 ```bash
-git add runtime/march_runtime.c test/dune test/native/actor_cleanup_detach.march test/native/actor_cleanup_detach.expected specs/progress/2026-08-16-do-actor-death-cleanup-detach.md
+git add runtime/march_runtime.c specs/progress/2026-08-16-do-actor-death-cleanup-detach.md
 git commit -m "runtime(actor): detach the cleanup list under g_tbl_mu before running closures"
 ```
 
@@ -333,9 +292,16 @@ A sibling deflected by the new marker takes the `skip_due_to_pending` path, whic
 
 If the second case is reachable, the release in Step 4 must re-check `pending_drop_count` and re-run the strategy at the widened `pending_min_child_idx`, mirroring `delayed_restart_thread`'s absorb loop. **Do not skip this step** — it is the difference between fixing the race and trading it for a silently-dead child. Whatever you conclude, write the argument down.
 
-- [ ] **Step 6: Add the regression test**
+- [ ] **Step 6: Add a regression test ONLY if it genuinely fails pre-fix**
 
-In `test/test_supervision.ml`, add a test that asserts the STRUCTURE, not the timing: a `one_for_all` supervisor whose two children both crash for the first time must perform exactly ONE batch restart, not two. Assert on the restart count the supervisor records (find the existing counter the supervision tests already assert on — copy the assertion style from the nearest existing batch-strategy test in that file rather than inventing one). A race-and-hope loop is not acceptable here; the todo says so explicitly and it is right.
+In `test/test_supervision.ml`, attempt a test asserting that a `one_for_all` supervisor whose two children both crash for the first time performs exactly ONE batch restart, not two. Assert on the restart count the supervision tests already use — copy the assertion style from the nearest existing batch-strategy test rather than inventing one.
+
+**Then prove it discriminates.** Copy `runtime/march_runtime.c` aside, revert your Step 2-4 changes in the working copy (never `git stash`), rebuild with `dune build --root . @bin/warm-cache`, and run the new test. Report the result:
+
+- If it FAILS pre-fix and passes post-fix, keep it and report both outputs.
+- If it PASSES both ways, **delete it** and say so plainly in the report. Ruling 2026-08-16: a test that cannot fail against the broken code is not evidence, and this project does not ship one as a placeholder. The fix then rests on its structural argument, which you must state explicitly in the report.
+
+A race-and-hope loop is not an acceptable substitute in either case.
 
 - [ ] **Step 7: Rebuild, run, commit**
 
@@ -360,8 +326,13 @@ git commit -m "runtime(supervisor): claim an in-flight marker across synchronous
 
 **Files:**
 - Modify: `runtime/march_runtime.c` — `march_delayed_restart` struct (~3272) and `delayed_restart_thread` (~3340)
-- Modify: `test/test_supervision.ml`
 - Modify: `specs/todos/2026-08-12-delayed-restart-supervisor-address-reuse.md` → `git mv` to `specs/progress/`
+
+**No new test.** Ruling 2026-08-16: address reuse cannot be forced on demand, so
+any probe here would pass identically before and after the fix. A test that
+cannot fail against the broken code is not evidence. The correctness argument is
+structural (a pid_index lookup is incarnation-precise where an address probe is
+not) and the backoff goldens are the regression net for timing behaviour.
 
 **Interfaces:**
 - Consumes: nothing from Tasks 1–3.
@@ -424,15 +395,11 @@ dune build --root . @test/runtest 2>&1 | tail -5
 ```
 Expected: exit 0, zero FAIL lines. The backoff goldens must still byte-match — this change must not alter WHEN a restart fires, only WHETHER it fires against the right supervisor.
 
-- [ ] **Step 5: Add a best-effort probe test**
-
-The todo is explicit that a deterministic test is not achievable here and that any test should be flake-tolerant rather than a hard gate. Add to `test/test_supervision.ml` a test that asserts the STRUCTURAL property instead: schedule a delayed restart, kill the supervisor during the backoff window, and assert the delayed restart performs no respawn (rather than trying to force address reuse). Mark it `Quick`. Explicitly state in the report that this does not reproduce the address-reuse race and is not claimed to.
-
-- [ ] **Step 6: Move the todo and commit**
+- [ ] **Step 5: Move the todo and commit**
 
 ```bash
 git mv specs/todos/2026-08-12-delayed-restart-supervisor-address-reuse.md specs/progress/2026-08-16-delayed-restart-incarnation-precise.md
-git add runtime/march_runtime.c test/test_supervision.ml specs/progress/2026-08-16-delayed-restart-incarnation-precise.md
+git add runtime/march_runtime.c specs/progress/2026-08-16-delayed-restart-incarnation-precise.md
 git commit -m "runtime(supervisor): resolve the delayed-restart supervisor by pid_index, not address"
 ```
 
@@ -599,4 +566,4 @@ Open one PR for the whole branch. The description must state: which two todos we
 - **Spec coverage:** four race todos → Tasks 1 (two retired), 2, 3, 4; links todo → Task 5; verification → Task 6. The `2026-07-24` memory-ordering audit todo is deliberately NOT in scope — it is a standing audit, not a defect, and folding it in would make this branch unreviewable.
 - **Riskiest tasks:** Task 3 (Step 5 in particular — the deflected-sibling question is where this fix could trade a race for a silently-dead child) and Task 2 (if the unlock ever moves below the closure walk, any cleanup closure touching an actor API self-deadlocks).
 - **Ordering:** Task 1 first (it changes what Tasks 2–4 believe is open). Tasks 2, 3, 4 touch different functions in the same file and must land in sequence to avoid rebuild conflicts, but are otherwise independent. Task 5 is fully independent of 1–4 and could run in parallel in a separate worktree. Task 6 last.
-- **Honest-evidence requirements are stated per-task** because two of these fixes cannot be given a red-green witness. Task 2's fixture and Task 4's probe are explicitly labelled as guards, with instructions to say so rather than imply a reproduction that did not happen.
+- **Evidence ruling (2026-08-16, human decision):** the review rubric governs over the plan's original guard-test approach. Tasks 2 and 4 ship NO new test, because neither race can be forced across two OS threads and a fixture there would pass identically before and after the fix. Task 3's test is kept only if the implementer proves it fails against the pre-fix runtime; otherwise it is deleted. Those fixes rest on their structural arguments, stated explicitly in each report. This is deliberate: a test that cannot fail against the broken code is not evidence, and shipping one implies a reproduction that never happened.
