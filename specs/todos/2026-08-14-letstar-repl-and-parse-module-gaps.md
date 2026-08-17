@@ -16,6 +16,32 @@
    every `Parse.foo(...)` call site across `stdlib/parse.march` and any
    consumers — check blast radius before choosing.
 
+   **Blast radius measured 2026-08-16** (`specs/progress/2026-08-16-parse-usability-pass.md`
+   §5), which removes the main unknown here:
+   - The **only** consumers of `Parse.` anywhere in the repo are its own two
+     test files (`test/stdlib/test_parse.march`, `test_parse_errors.march`) —
+     243 call sites, no stdlib module and no example depends on it. The rename
+     is therefore cheap and self-contained.
+   - `mod X do type X(a) = X(a) ... end` is **legal** (verified), so either
+     direction is mechanically possible.
+   - A module rename **alone suffices** — no file rename and no
+     `lib/modules/stdlib_manifest.ml` change — because the eager stdlib load
+     registers each module under its declared `mod` name, and (since the
+     2026-08-16 fix) `let*` resolves `flat_map` from the current scope rather
+     than by guessing a filename.
+   - **Both directions stutter**, which is the real reason this is still open:
+     `mod Parse` → `mod Parser` makes external type annotations read
+     `Parser.Parser(a)`; renaming the *type* `Parser` → `Parse` gives
+     `Parse.Parse(a)` instead but keeps all 243 `Parse.foo(...)` call sites
+     working, so it is strictly less churn.
+
+   Worth deciding at the same time: the stutter is forced by `let*`'s
+   "module name == type name" convention itself, which cannot be satisfied
+   *without* stutter by any module that defines both a type and its
+   operations. If more such types are expected, fixing the convention (a
+   second, explicit resolution path) may beat renaming each library to fit
+   it. Documented for users meanwhile in `docs/parsing.md`.
+
 2. **`let*` has no REPL support.** `let?` has a dedicated `ReplLetQ`
    top-level AST form with its own `Result`-hardwired typecheck/eval path
    (`lib/repl/repl.ml`) for binding into the REPL session's persistent

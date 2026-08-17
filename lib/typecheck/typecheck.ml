@@ -7041,7 +7041,24 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (match repr result_ty with
           | TCon (head_name, _) ->
             let flat_map_name = head_name ^ ".flat_map" in
-            let env', scheme_opt = resolve_qualified_var flat_map_name env in
+            (* Look in the CURRENT SCOPE first, and only then fall back to
+               loading a stdlib module off disk.  [resolve_qualified_var] can
+               only find a module that has a FILE whose snake_case name
+               matches it ([Module_registry.ensure_loaded]) — true of
+               Option/Result/List, false of every user-defined type, whether
+               declared in this file or imported.  Those are already bound in
+               [env.vars] under their qualified name, so consulting the env
+               first is what makes `let*`'s documented extension point ("define
+               `flat_map` in a module named `M`") actually work for user types.
+               Resolving env-first also matches how an ordinary hand-written
+               `Box.flat_map(...)` call already resolves, so `let*` can never
+               disagree with the equivalent explicit call.  Regression witness:
+               specs/lang/types/accept/t184_letstar_user_defined_type.march. *)
+            let env', scheme_opt =
+              match lookup_var flat_map_name env with
+              | Some s -> env, Some s
+              | None   -> resolve_qualified_var flat_map_name env
+            in
             (match scheme_opt with
              | None ->
                Err.error env'.errors ~span:sp
