@@ -117,6 +117,93 @@ let test_letq_ok_propagates () =
    | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt 6]) -> ()
    | _ -> Alcotest.fail (Printf.sprintf "expected Ok(6), got: %s" (March_eval.Eval.value_to_string v)))
 
+(* ── `let*` at a REPL prompt (Eval.letstar_repl_bind) ─────────────────────
+   There is no continuation at a prompt, so this cannot be the ordinary
+   ELetStar expansion: it runs the value's own flat_map with a capturing
+   callback.  These pin the documented semantics -- bind the FIRST value
+   yielded, and report rather than silently succeed when NOTHING is yielded.
+   The pair matters: a version that bound nothing at all would still pass a
+   test that only checked the None/Err cases. *)
+(* `Box` is NESTED so its `flat_map` lands under `Box.flat_map`, which is what
+   `let*` resolves for a value of type `Box` -- a top-level `flat_map` here
+   would be `Test.flat_map` and would not be found. *)
+let letstar_repl_env () =
+  eval_module {|mod Test do
+    mod Box do
+      type Box(a) = Box(a)
+      fn flat_map(m : Box(a), f : a -> Box(b)) : Box(b) do
+        match m do
+          Box(x) -> f(x)
+        end
+      end
+    end
+  end|}
+
+(* Same, plus the real stdlib `List` module, so the multi-value case resolves
+   `List.flat_map` for real rather than against a stub. *)
+let letstar_repl_env_with_list () =
+  let list_mod = load_stdlib_file_for_test "list.march" in
+  let m = parse_and_desugar {|mod Test do
+    fn placeholder() do 0 end
+  end|} in
+  March_eval.Eval.eval_module_env
+    { m with March_ast.Ast.mod_decls = list_mod :: m.March_ast.Ast.mod_decls }
+
+(* Goes through [parse_repl], so this also pins the new `LET STAR` REPL
+   productions -- before them, `let* v = ...` at a prompt was a parse error. *)
+let letstar_bind_expr env src =
+  match parse_repl (Printf.sprintf "let* v = %s" src) with
+  | March_ast.Ast.ReplLetStar (p, e) ->
+    March_eval.Eval.letstar_repl_bind env p
+      (March_desugar.Desugar.desugar_expr e)
+  | _ -> Alcotest.fail (Printf.sprintf "expected ReplLetStar for %S" src)
+
+let test_letstar_repl_binds_option () =
+  match letstar_bind_expr (letstar_repl_env ()) "Some(41)" with
+  | Ok [("v", March_eval.Eval.VInt 41)] -> ()
+  | Ok bs -> Alcotest.fail (Printf.sprintf "unexpected bindings (%d)" (List.length bs))
+  | Error m -> Alcotest.fail ("expected a binding, got error: " ^ m)
+
+let test_letstar_repl_binds_result () =
+  match letstar_bind_expr (letstar_repl_env ()) "Ok(7)" with
+  | Ok [("v", March_eval.Eval.VInt 7)] -> ()
+  | Ok _ -> Alcotest.fail "wrong bindings"
+  | Error m -> Alcotest.fail ("expected a binding, got error: " ^ m)
+
+(* A multi-value monad binds the FIRST value, which is the reading
+   `let* x = [1,2,3]` most naturally suggests. *)
+let test_letstar_repl_binds_first_of_list () =
+  match letstar_bind_expr (letstar_repl_env_with_list ()) "[5, 6, 7]" with
+  | Ok [("v", March_eval.Eval.VInt 5)] -> ()
+  | Ok bs ->
+    Alcotest.fail (Printf.sprintf "expected the FIRST element, got: %s"
+      (String.concat ", " (List.map (fun (n, v) ->
+         n ^ "=" ^ March_eval.Eval.value_to_string v) bs)))
+  | Error m -> Alcotest.fail ("expected a binding, got error: " ^ m)
+
+let test_letstar_repl_user_type () =
+  match letstar_bind_expr (letstar_repl_env ()) "Box.Box(9)" with
+  | Ok [("v", March_eval.Eval.VInt 9)] -> ()
+  | Ok _ -> Alcotest.fail "wrong bindings"
+  | Error m -> Alcotest.fail ("expected a binding, got error: " ^ m)
+
+(* Nothing yielded => nothing bound, and SAID so.  Silently succeeding here
+   would leave the prompt with an unbound name and no explanation. *)
+let test_letstar_repl_none_binds_nothing () =
+  match letstar_bind_expr (letstar_repl_env ()) "None" with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "None must not bind"
+
+let test_letstar_repl_err_binds_nothing () =
+  match letstar_bind_expr (letstar_repl_env ()) {|Err("boom")|} with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "Err must not bind"
+
+let test_letstar_repl_empty_list_binds_nothing () =
+  match letstar_bind_expr (letstar_repl_env ()) "[]" with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "[] must not bind"
+
 let test_letq_err_short_circuits () =
   let env = eval_module {|mod Test do
     fn safe_div(a, b) do
@@ -4878,6 +4965,13 @@ let eval_suites =
           Alcotest.test_case "let? err short-circuits" `Quick test_letq_err_short_circuits;
           Alcotest.test_case "let? chain first err" `Quick test_letq_chain_first_err;
           Alcotest.test_case "let? in lambda"      `Quick test_letq_in_lambda;
+          Alcotest.test_case "let* repl binds Option"  `Quick test_letstar_repl_binds_option;
+          Alcotest.test_case "let* repl binds Result"  `Quick test_letstar_repl_binds_result;
+          Alcotest.test_case "let* repl binds first of List" `Quick test_letstar_repl_binds_first_of_list;
+          Alcotest.test_case "let* repl binds user type" `Quick test_letstar_repl_user_type;
+          Alcotest.test_case "let* repl None binds nothing" `Quick test_letstar_repl_none_binds_nothing;
+          Alcotest.test_case "let* repl Err binds nothing" `Quick test_letstar_repl_err_binds_nothing;
+          Alcotest.test_case "let* repl [] binds nothing" `Quick test_letstar_repl_empty_list_binds_nothing;
           Alcotest.test_case "closure"             `Quick test_eval_closure;
           Alcotest.test_case "unary minus"         `Quick test_eval_unary_minus;
           Alcotest.test_case "list literal"        `Quick test_eval_list_literal;

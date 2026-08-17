@@ -135,7 +135,6 @@ type actor_inst = {
   mutable ai_terminal_reason : monitor_down_reason;
   (* Phase 1: supervision infrastructure *)
   mutable ai_monitors : (int * int) list;   (** (monitor_ref, watcher_pid) pairs *)
-  mutable ai_links    : int list;            (** bidirectionally linked pids *)
   mutable ai_mailbox  : value Queue.t;      (** pending Down/Crashed messages *)
   (* Phase 2: supervisor support *)
   mutable ai_supervisor : int option;        (** pid of supervising actor, if any *)
@@ -1049,7 +1048,6 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_alive    = s.ais_alive;
                      ai_terminal_reason = s.ais_terminal_reason;
                      ai_monitors = [];
-                     ai_links    = [];
                      ai_mailbox  = Queue.create ();
                      ai_supervisor = None;
                      ai_restart_count = [];
@@ -2237,7 +2235,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_env_ref = child_env_ref;
       ai_state = child_init_state; ai_alive = true;
       ai_terminal_reason = Normal;
-      ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+      ai_monitors = []; ai_mailbox = Queue.create ();
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [];
@@ -2511,9 +2509,9 @@ and notify_supervisor (sup_pid : int) (crashed_pid : int) : unit =
         | OneForAll  -> one_for_all_restart sup_pid crashed_pid
         | RestForOne -> rest_for_one_restart sup_pid crashed_pid))
 
-(** Crash an actor: mark dead, deliver Down to monitors, propagate to links,
+(** Crash an actor: mark dead, deliver Down to monitors,
     and notify any supervising actor for restart. *)
-and crash_actor_with_reason (pid : int) (reason : string)
+and crash_actor_with_reason (pid : int) (_reason : string)
     (down_reason : monitor_down_reason) : unit =
   match Hashtbl.find_opt actor_registry pid with
   | None -> ()
@@ -2522,10 +2520,7 @@ and crash_actor_with_reason (pid : int) (reason : string)
     let supervisor = inst.ai_supervisor in
     inst.ai_terminal_reason <- down_reason;
     inst.ai_alive <- false;
-    (* Phase 6a: run resource cleanup in reverse acquisition order.
-       This runs for the actor being crashed directly.
-       Linked actors are crashed by recursive calls to crash_actor below,
-       so each linked actor's cleanup runs inside its own crash_actor invocation. *)
+    (* Phase 6a: run resource cleanup in reverse acquisition order. *)
     List.iter (fun (_, cleanup) ->
       try cleanup ()
       with exn ->
@@ -2573,18 +2568,6 @@ and crash_actor_with_reason (pid : int) (reason : string)
         Queue.push (monitor_down_message mon_ref pid down_reason) watcher.ai_mailbox
       | _ -> ()
     ) inst.ai_monitors;
-    (* Propagate crash to all linked actors *)
-    let links = inst.ai_links in
-    inst.ai_links <- [];  (* Clear to prevent re-entrancy *)
-    List.iter (fun linked_pid ->
-      (* Remove back-link first to avoid infinite loop *)
-      (match Hashtbl.find_opt actor_registry linked_pid with
-       | Some linked_inst ->
-         linked_inst.ai_links <- List.filter (fun p -> p <> pid) linked_inst.ai_links
-       | None -> ());
-      crash_actor linked_pid
-        (Printf.sprintf "linked to %d which crashed: %s" pid reason)
-    ) links;
     (* Phase 2: notify supervisor for restart *)
     (match supervisor with
      | Some sup_pid -> notify_supervisor sup_pid pid
@@ -2651,19 +2634,6 @@ let demonitor_actor (mon_ref : int) : unit =
   Hashtbl.iter (fun _ (inst : actor_inst) ->
     inst.ai_monitors <- List.filter (fun (m, _) -> m <> mon_ref) inst.ai_monitors
   ) actor_registry
-
-(** Establish a bidirectional link between two actors. *)
-let link_actors (pid_a : int) (pid_b : int) : unit =
-  (match Hashtbl.find_opt actor_registry pid_a with
-   | Some ia ->
-     if not (List.mem pid_b ia.ai_links) then
-       ia.ai_links <- pid_b :: ia.ai_links
-   | None -> ());
-  (match Hashtbl.find_opt actor_registry pid_b with
-   | Some ib ->
-     if not (List.mem pid_a ib.ai_links) then
-       ib.ai_links <- pid_a :: ib.ai_links
-   | None -> ())
 
 (** Register an OS resource with an actor.
     [cleanup] is called in reverse acquisition order when the actor crashes.
@@ -4421,9 +4391,6 @@ let base_env : env =
   ; ("demonitor", VBuiltin ("demonitor", function
         | [VInt mon_ref] -> demonitor_actor mon_ref; VUnit
         | _ -> eval_error "demonitor: expected monitor ref"))
-  ; ("link", VBuiltin ("link", function
-        | [VPid a; VPid b] -> link_actors a b; VUnit
-        | _ -> eval_error "link: expected two pids"))
     (* Named registry (Task 4) — interpreter parity with
        march_actor_register/unregister/whereis/registered. [named_registry]
        maps name -> pid, mirroring the runtime's forward Vault table. *)
@@ -9846,7 +9813,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_env_ref = child_env_ref;
                  ai_state = child_init_state; ai_alive = true;
                  ai_terminal_reason = Normal;
-                 ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+                 ai_monitors = []; ai_mailbox = Queue.create ();
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
                  ai_resources = [];
@@ -9879,7 +9846,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
        let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
                     ai_state    = init_state; ai_alive = true;
                     ai_terminal_reason = Normal;
-                    ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+                    ai_monitors = []; ai_mailbox = Queue.create ();
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
                     ai_linear_values = [];
@@ -10797,7 +10764,7 @@ let spawn_from_spec (spec : value) : unit =
                 ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
                 ai_state = init_state; ai_alive = true;
                 ai_terminal_reason = Normal;
-                ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+                ai_monitors = []; ai_mailbox = Queue.create ();
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = []; ai_linear_values = [];
                 ai_mbox_limit = 0; ai_mbox_policy = 0 } in
@@ -11599,6 +11566,80 @@ let eval_stdlib_decls (decls : decl list) : unit =
       go rest env'
   in
   ignore (go decls !env_ref)
+
+(** Bind `let* p = e` at a REPL prompt.
+
+    There is no continuation at a prompt, so this cannot be the ordinary
+    [ELetStar] expansion.  Instead it runs the value's OWN `flat_map` with a
+    callback that captures the first value it is handed and then returns the
+    original monadic value, which is well-typed as the callback's `M(b)`
+    result for any `M` without needing a generic `pure` the language does not
+    have.  `flat_map`'s result is discarded -- only the captured payload
+    matters.
+
+    Semantics, chosen to match `let?`'s prompt behaviour: bind the FIRST value
+    yielded.  For `Option`/`Result` there is at most one, so this is exactly
+    "unwrap".  For a multi-value monad like `List` the callback runs once per
+    element and the first wins, which is the reading `let* x = [1,2,3]` most
+    naturally suggests.  A value that yields NOTHING (`None`, `Err`, `[]`)
+    binds nothing and is reported rather than silently succeeding.
+
+    Returns [Ok bindings] or [Error message]. *)
+let letstar_repl_bind (env : env) (p : pattern) (e : expr)
+    : ((string * value) list, string) result =
+  let v = eval_expr env e in
+  (* [type_name_of_value] reads [ctor_type_tbl], which is populated by
+     [register_variant_ctors] from a March-source [DType].  Option/Result/List
+     are BUILTIN types with no such declaration, so in a REPL session they
+     resolve to [None] and `let* x = Some(1)` would report "cannot determine
+     the type" for the three types a user is most likely to try first.  Map
+     their constructors directly -- the same builtin triple already spelled
+     out for the collision seed above.  A user-defined type needs none of
+     this: its DType registers its ctors normally. *)
+  let builtin_ctor_type = function
+    | "Some" | "None" -> Some "Option"
+    | "Ok"   | "Err"  -> Some "Result"
+    | "Cons" | "Nil"  -> Some "List"
+    | _ -> None
+  in
+  let head_opt =
+    match type_name_of_value v with
+    | Some t -> Some t
+    | None -> (match v with VCon (tag, _) -> builtin_ctor_type tag | _ -> None)
+  in
+  match head_opt with
+  | None ->
+    Error (Printf.sprintf "let*: cannot determine the type of %s"
+             (value_to_string v))
+  | Some head_name ->
+    let flat_map_name = head_name ^ ".flat_map" in
+    (match (try Some (lookup flat_map_name env) with _ -> None) with
+     | None ->
+       Error (Printf.sprintf
+                "let* needs `%s`, but it doesn't exist" flat_map_name)
+     | Some flat_map_fn ->
+       let captured = ref None in
+       let k = VBuiltin ("$letstar_repl_k", function
+           | [x] ->
+             (match !captured with None -> captured := Some x | Some _ -> ());
+             v
+           | args ->
+             eval_error "let* continuation: expected 1 argument, got %d"
+               (List.length args))
+       in
+       ignore (apply flat_map_fn [v; k]);
+       (match !captured with
+        | None ->
+          Error (Printf.sprintf
+                   "let*: %s yielded no value to bind"
+                   (value_to_string v))
+        | Some x ->
+          (match match_pattern x p with
+           | Some bs -> Ok bs
+           | None ->
+             Error (Printf.sprintf
+                      "let* pattern did not match the value %s"
+                      (value_to_string x)))))
 
 (** Run the module: evaluate it, then call [main()] or drive the [app] lifecycle. *)
 let run_module (m : module_) : unit =
