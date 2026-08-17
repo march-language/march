@@ -146,7 +146,47 @@ git log is authoritative for exact commits.
 - A grant violation now names the chain of the user's own functions that reaches the
   capability, instead of only the stdlib function that holds it.
 
+### Removed
+
+- **The unreachable `link` builtin is gone.** The interpreter carried a `link`
+  builtin and `ai_links` crash-propagation machinery that the typechecker never
+  exposed, so no March program could call it — `link(a, b)` failed with "I cannot
+  find `link`". Rather than finish it, March commits to monitors plus supervisors
+  as its fault model (see the actors chapter): a monitor's `Down(ref, pid, reason)`
+  now carries `Normal`/`Killed`/`Crash(msg)`, which is what a link's exit signal
+  would have told a peer, without bidirectional coupling or a `trap_exit` escape
+  hatch. No program can regress, because none could reach it.
+
 ### Fixed
+
+- **A delayed supervisor restart (a repeat crash backed off by exponential backoff, up to
+  ~3.2s before jitter) re-validated its supervisor with an address-based liveness probe**,
+  not an incarnation-precise one. If the supervisor died and the March allocator handed its
+  address to an unrelated new actor within that backoff window, the restart could run its
+  bookkeeping (child array, restart budget) against that unrelated actor's metadata instead
+  of silently no-oping. The recheck is now keyed off the supervisor's `pid_index` (per-spawn,
+  never reused) rather than its raw heap address, so a resolved match proves it is still the
+  original incarnation. Timing (when a restart fires) is unchanged; only which supervisor a
+  delayed restart validates against is affected.
+
+- **An actor's cleanup callbacks (registered via `register_resource`) were linked onto
+  and walked off the actor's cleanup list with no lock held**, unlike the equivalent
+  monitor list. A cleanup callback registered concurrently with that actor's death could
+  race the death path's walk-and-free: a node the registering thread just linked could be
+  freed out from under it, or dropped entirely, either leaking whatever OS resource the
+  callback was meant to release or crashing on the freed node. Both sides now detach/link
+  under the same lock the monitor list already uses; the cleanup closures themselves still
+  run lock-free, since they are arbitrary March code that can re-enter the runtime.
+
+- **Two children of a compiled `one_for_all`/`rest_for_one` supervisor crashing for the
+  first time at the same moment on different scheduler threads could run two restart
+  strategies concurrently** against the same supervisor's child array. A first crash
+  claimed no marker (only repeat, backed-off crashes did), so both threads saw "no restart
+  pending" and both proceeded. A synchronous batch restart now claims an in-flight marker
+  in the same critical section that decides it is not skipping, and holds it until the
+  strategy has fully returned; a sibling that crashes during that window is absorbed into
+  the in-flight restart (widening its child-index range) instead of starting a competing
+  one. Interpreted programs were never affected.
 
 - Fixed an internal compiler error (`Invalid_argument("List.nth")`) on the most common
   project shape: a `MARCH_LIB_PATH` dependency (any file loaded via `use`/import from a

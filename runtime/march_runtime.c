@@ -1894,6 +1894,15 @@ typedef struct march_actor_meta {
      * Never touched for one_for_one (a dead slot can't re-crash, so there's
      * nothing to double-restart). Zeroed by calloc at meta creation. */
     int                          delayed_batch_pending;
+    /* Set for the entire in-flight duration of a SYNCHRONOUS batch restart
+     * (one_for_all / rest_for_one, streak == 1, delay == 0), so a second
+     * first-time crash of a DIFFERENT child cannot call a strategy function
+     * concurrently against the same sup_children array. delayed_batch_pending
+     * does not cover this: a streak==1 crash never claims it (by design —
+     * round 1 kept every first crash on the original synchronous path), so
+     * two first crashes both observed "not pending" and both ran a strategy.
+     * Mutated only under g_supervise_mu; zeroed by calloc. */
+    int                          batch_restart_in_flight;
     /* Task 16 fix-up (review round 2): the lowest sup_children index among
      * all crashes that occurred while a batch restart was pending —
      * initialized to the index that CLAIMED delayed_batch_pending, then
@@ -1906,7 +1915,10 @@ typedef struct march_actor_meta {
      * its own, stays dead forever. Read (and reset) by delayed_restart_
      * thread under the same leaf-lock section that clears
      * delayed_batch_pending, immediately before running the strategy.
-     * Meaningless while delayed_batch_pending is 0; zeroed by calloc. */
+     * Meaningless while both delayed_batch_pending and
+     * batch_restart_in_flight are 0; zeroed by calloc. The synchronous
+     * in-flight path (batch_restart_in_flight) seeds, widens and absorbs
+     * through this exact same field pair. */
     int                          pending_min_child_idx;
     /* Task 16 fix-up (review round 3): incremented under g_supervise_mu on
      * EVERY crash dropped via skip_due_to_pending while a batch restart is
@@ -1920,8 +1932,11 @@ typedef struct march_actor_meta {
      * uncovered by any restart window, the same symptom class the
      * min-idx widening fixed, just at same/higher indexes). delayed_
      * restart_thread snapshots this counter before each strategy pass and
-     * compares it after; any advance means loop again. Meaningless while
-     * delayed_batch_pending is 0; zeroed by calloc. */
+     * compares it after; any advance means loop again. The synchronous
+     * batch_restart_in_flight path runs the identical absorb loop inline
+     * in march_supervisor_notify. Meaningless while both
+     * delayed_batch_pending and batch_restart_in_flight are 0; zeroed by
+     * calloc. */
     int64_t                      pending_drop_count;
     /* Named-registry reverse index (Task 3): every name currently registered
      * to THIS actor, as plain strdup'd C strings — NOT a March List(String),
@@ -3271,10 +3286,46 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
 
 typedef struct {
     void   *supervisor;
+    int64_t sup_pid_index;  /* incarnation-precise identity; see delayed_restart_thread */
     int     child_idx;
     int     strategy;       /* 0/1/2 — mirrors supervisor_strategy */
     int64_t not_before_ms;
 } march_delayed_restart;
+
+/* Incarnation-precise liveness check for a delayed restart's supervisor.
+ * march_is_alive(supervisor) alone is an ADDRESS probe: across a backoff
+ * window of up to ~3.2s the original supervisor can die and the March heap
+ * allocator can hand its address to an unrelated new actor, which reads as
+ * alive — the restart would then run against the wrong actor. Likewise
+ * find_meta(supervisor) is keyed by that same reused address, and
+ * g_actor_tbl's chain can hold a newer meta for a reused address ahead of
+ * the original (march_spawn allocates a fresh meta rather than re-linking a
+ * stale one on detected reuse — see march_actor_meta's pididx_linked
+ * comment), so an address-keyed lookup can silently resolve to the WRONG
+ * actor's metadata.
+ *
+ * find_meta_by_pid_index is keyed off the pid-index table instead, which is
+ * per-spawn and never reused (g_next_pid_index only ever increments, and
+ * g_pididx_tbl is insert-only — see its comment). The fix is the resolution
+ * at delayed_restart_thread's start (`sup_meta = find_meta_by_pid_index(
+ * sup_pid_index)`, done once, before the first liveness check): that pid-
+ * index lookup is what pins sup_meta to the original incarnation instead of
+ * whatever a reused supervisor address happens to point at now. The
+ * `find_meta_by_pid_index(sup_pid_index) == sup_meta` conjunct below is only
+ * a cheap invariant assertion on that pinning (g_pididx_tbl entries are
+ * never reassigned, so it can never observe a mismatch) — it is not itself
+ * what re-derives the correct meta. Combined with march_is_alive, this
+ * closes the identity-confusion half of the bug (running a restart's
+ * bookkeeping against an unrelated supervisor's meta); the residual narrow
+ * window where march_is_alive itself dereferences a reused address is the
+ * same "empirically rare, not addressed by existing sync" class of risk
+ * documented in
+ * specs/progress/2026-08-16-delayed-restart-incarnation-precise.md. */
+static int sup_still_live(int64_t sup_pid_index, march_actor_meta *sup_meta,
+                          void *supervisor) {
+    return find_meta_by_pid_index(sup_pid_index) == sup_meta
+        && march_is_alive(supervisor);
+}
 
 /* Runs on its own dedicated green thread (spawned by march_supervisor_notify
  * below), never on the crashing actor's scheduler thread. Parks until the
@@ -3342,8 +3393,16 @@ static void delayed_restart_thread(void *arg) {
     while (march_now_ms() < dr->not_before_ms)
         march_sched_park_self_until(dr->not_before_ms);
     void *supervisor = dr->supervisor;
+    int64_t sup_pid_index = dr->sup_pid_index;
     int child_idx = dr->child_idx, strategy = dr->strategy;
     free(dr);
+    /* Resolve sup_meta by pid_index, not by the (potentially reused)
+     * supervisor address — see sup_still_live's comment. This is also why
+     * the resolve now happens BEFORE the first liveness check, unlike the
+     * pre-fix code's find_meta(supervisor) after an address-only probe:
+     * sup_meta must exist before sup_still_live can compare against it. */
+    march_actor_meta *sup_meta = find_meta_by_pid_index(sup_pid_index);
+    if (!sup_meta) return;
     /* Note: if the supervisor is already dead here, we return without
      * touching delayed_batch_pending — it stays set on this (now orphaned)
      * meta forever. That's intentional, not an oversight: clearing it would
@@ -3353,12 +3412,12 @@ static void delayed_restart_thread(void *arg) {
      * skip_due_to_pending path keeps dropping such crashes — a no-op
      * against a supervisor nothing can ever revive, not a leak of live
      * behavior. */
-    if (!march_is_alive(supervisor)) return;   /* supervisor died meanwhile */
-    march_actor_meta *sup_meta = find_meta(supervisor);
-    if (!sup_meta) return;
+    if (!sup_still_live(sup_pid_index, sup_meta, supervisor))
+        return;   /* supervisor died (or its address was reused) meanwhile */
 
     if (strategy == 0) {
-        if (!march_is_alive(supervisor)) return;   /* Minor 1 TOCTOU recheck */
+        if (!sup_still_live(sup_pid_index, sup_meta, supervisor))
+            return;   /* Minor 1 TOCTOU recheck */
         march_one_for_one_restart(supervisor, sup_meta, child_idx);
         return;
     }
@@ -3369,7 +3428,7 @@ static void delayed_restart_thread(void *arg) {
          * call was running. Same "leave the flag set" reasoning as above
          * applies here too. */
         pthread_mutex_lock(&g_supervise_mu);
-        int alive = march_is_alive(supervisor);
+        int alive = sup_still_live(sup_pid_index, sup_meta, supervisor);
         int idx = sup_meta->pending_min_child_idx;
         int64_t drops_before = sup_meta->pending_drop_count;
         pthread_mutex_unlock(&g_supervise_mu);
@@ -3450,7 +3509,8 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
      * a batch restart. No user code runs here. */
     int64_t now;
     int32_t streak;
-    int skip_due_to_pending, claimed_batch;
+    int skip_due_to_pending, claimed_batch, claimed_sync_batch = 0;
+    int64_t drops_before = 0;
     pthread_mutex_lock(&g_supervise_mu);
     now = march_now_ms();
     int64_t window_ms = (int64_t)sup_meta->supervisor_window_secs * 1000;
@@ -3459,7 +3519,8 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
     child->crash_streak++;
     child->last_crash_ms = now;
     streak = child->crash_streak;
-    skip_due_to_pending = is_batch && sup_meta->delayed_batch_pending;
+    skip_due_to_pending = is_batch && (sup_meta->delayed_batch_pending
+                                       || sup_meta->batch_restart_in_flight);
     claimed_batch = 0;
     if (skip_due_to_pending) {
         /* Review round 2 fix: this crash is being dropped (no restart of
@@ -3481,6 +3542,20 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
         sup_meta->delayed_batch_pending = 1;
         sup_meta->pending_min_child_idx = child_idx;
         claimed_batch = 1;
+    } else if (is_batch) {
+        /* streak == 1: this crash will take the synchronous delay==0 path
+         * below. Claim the in-flight marker HERE, inside the same critical
+         * section that decided we are not skipping, so a sibling's
+         * first crash arriving on another thread sees it and is deflected
+         * into skip_due_to_pending (widening pending_min_child_idx and
+         * counting the drop) exactly as it would be for a delayed restart.
+         * drops_before is snapshotted in this SAME critical section, not
+         * after the unlock, so a sibling deflected in the gap between the
+         * unlock and the first strategy call is still absorbed. */
+        sup_meta->batch_restart_in_flight = 1;
+        sup_meta->pending_min_child_idx = child_idx;
+        drops_before = sup_meta->pending_drop_count;
+        claimed_sync_batch = 1;
     }
     pthread_mutex_unlock(&g_supervise_mu);
 
@@ -3507,13 +3582,84 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
     if (skip_due_to_pending) return;
 
     if (delay == 0) {
-        switch (strategy) { /* today's immediate path */
-            case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
-            case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
-            case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
-            default: break;
+        /* The first pass is unconditional and at child_idx, exactly as the
+         * pre-fix code was — that is what keeps the single-crash supervision
+         * goldens byte-identical. Everything below only engages when a
+         * sibling was actually deflected mid-flight (pending_drop_count
+         * advanced), which no golden does. */
+        int idx = child_idx;
+        for (;;) {
+            switch (strategy) { /* today's immediate path */
+                case 0: march_one_for_one_restart(supervisor, sup_meta, idx); break;
+                case 1: march_one_for_all_restart(supervisor, sup_meta, idx); break;
+                case 2: march_rest_for_one_restart(supervisor, sup_meta, idx); break;
+                default: break;
+            }
+            if (!claimed_sync_batch) return;
+            /* Absorb loop, mirroring delayed_restart_thread's. batch_restart_
+             * in_flight is STILL SET here, so any sibling crash that landed
+             * while the strategy above was running could only be DROPPED
+             * (skip_due_to_pending), never start a competing restart — but a
+             * drop performs no restart of its own, and NOTHING else will ever
+             * crash that slot again to trigger one. The synchronous path has
+             * no delayed_restart_thread to absorb those drops on its behalf,
+             * so it must do it here or trade the race for a permanently dead
+             * child. Two distinct ways a drop is left uncovered by the pass
+             * that just ran:
+             *   - rest_for_one's window is [idx, n): a deflected sibling at a
+             *     LOWER index is outside it entirely (this is exactly the
+             *     hazard pending_min_child_idx exists for on the delayed
+             *     path);
+             *   - either batch strategy: a slot this pass already respawned
+             *     can crash again before we get here. That drop does not
+             *     lower pending_min_child_idx, which is why the condition is
+             *     pending_drop_count (round 3's correction), not the min.
+             * Only once a pass completes with no further drops is the marker
+             * cleared. No extra delay is introduced: streak==1 has none. */
+            pthread_mutex_lock(&g_supervise_mu);
+            if (sup_meta->pending_drop_count != drops_before) {
+                drops_before = sup_meta->pending_drop_count;
+                idx = sup_meta->pending_min_child_idx;
+                /* The strategy can kill the SUPERVISOR (restart-intensity
+                 * exhaustion -> do_actor_death), so re-check liveness before
+                 * looping, as delayed_restart_thread does. If it died we
+                 * return leaving the marker SET — same deliberate reasoning
+                 * as there: clearing it on an orphaned meta would let some
+                 * later crash of a child still pointing at this dead
+                 * supervisor run a strategy against it. */
+                /* Known gap, left as address-keyed on purpose: unlike
+                 * sup_still_live's pid-index-pinned check on the delayed
+                 * path, this probe is a bare march_is_alive(supervisor) —
+                 * the same address-reuse exposure Task 4 closed there. It
+                 * was left alone here because the interval between passes
+                 * (a full march_one_for_all_restart/march_rest_for_one_
+                 * restart call, which runs arbitrary March spawn/cleanup
+                 * code and can yield) is not actually narrower than the
+                 * delayed path's backoff window, so "no backoff window"
+                 * undersells the exposure — it should be read as "smaller
+                 * blast radius", not "no window". If `supervisor`'s address
+                 * were reused during that interval, this reads the new
+                 * occupant's status word (memory-safe: it's live memory
+                 * belonging to that occupant) and continues the loop against
+                 * `sup_meta`, which is never freed (see
+                 * replace_stale_meta_locked), so at worst this runs one more
+                 * strategy pass against the ORIGINAL supervisor's meta after
+                 * that supervisor is actually gone — safe, just wasted work,
+                 * not corruption of an unrelated actor's state. A full fix
+                 * would also have to convert `sup_meta`'s function-entry
+                 * resolution above (`find_meta(supervisor)`, address-keyed)
+                 * to pid-index; upgrading only this recheck without that
+                 * would still leave sup_meta itself pinned to whatever
+                 * find_meta(supervisor) happened to resolve to at entry. */
+                int alive = march_is_alive(supervisor);
+                pthread_mutex_unlock(&g_supervise_mu);
+                if (!alive) return;
+                continue;
+            }
+            sup_meta->batch_restart_in_flight = 0;
+            pthread_mutex_unlock(&g_supervise_mu);
+            return;
         }
-        return;
     }
     march_delayed_restart *dr = malloc(sizeof *dr);
     if (!dr) {
@@ -3552,14 +3698,22 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
          * one-line change — documented here and in the trace above rather
          * than implemented, since OOM-at-malloc(sizeof(a few words)) is an
          * extreme, already-degraded scenario. */
-        if (claimed_batch) {
+        if (claimed_batch || claimed_sync_batch) {
+            /* claimed_sync_batch cannot actually reach here today (it is only
+             * ever set when streak == 1, which forces delay == 0 and returns
+             * above), but rolling it back alongside claimed_batch keeps the
+             * two claims symmetric: a stuck marker would silently disable
+             * this supervisor's healing forever. */
             pthread_mutex_lock(&g_supervise_mu);
             sup_meta->delayed_batch_pending = 0;
+            sup_meta->batch_restart_in_flight = 0;
             pthread_mutex_unlock(&g_supervise_mu);
         }
         return;
     }
     dr->supervisor = supervisor;
+    dr->sup_pid_index = atomic_load_explicit(&sup_meta->pid_index,
+                                             memory_order_relaxed);
     dr->child_idx = child_idx;
     dr->strategy = strategy;
     dr->not_before_ms = now + delay;
@@ -3642,6 +3796,7 @@ static void deliver_monitor_down(void *watcher, int64_t mon_ref, void *target,
 static void do_actor_death(void *actor, march_death_reason reason,
                            const char *message, size_t message_len) {
     march_monitor_node *monitors = NULL;
+    march_cleanup_node *cleanups = NULL;
 
     /* Claim terminal state and detach the monitor list atomically with
      * demonitor/monitor registration. Cleanup may invoke arbitrary March code,
@@ -3673,16 +3828,29 @@ static void do_actor_death(void *actor, march_death_reason reason,
         }
         monitors = meta->monitor_head;
         meta->monitor_head = NULL;
+        /* Detach the cleanup list under the SAME lock, for the same reason
+         * the monitor list is detached here: march_register_resource
+         * prepends to meta->cleanup_head under g_tbl_mu (see its own
+         * comment), so an unlocked walk-and-free here can race a concurrent
+         * prepend and free a node the other thread just linked, or drop a
+         * node the other thread is still linking onto what it thinks is the
+         * live head. The closures themselves must NOT run under the lock —
+         * they are arbitrary March code and can re-enter the runtime and
+         * re-acquire g_tbl_mu — so this only detaches the head; the walk
+         * below runs after unlocking, on a list nothing else can still
+         * reach. */
+        cleanups = meta->cleanup_head;
+        meta->cleanup_head = NULL;
     }
     pthread_mutex_unlock(&g_tbl_mu);
 
-    /* Run cleanup callbacks in reverse acquisition order (cleanup_head is
+    /* Run cleanup callbacks in reverse acquisition order (cleanup_head was
      * most recently registered → already LIFO order). */
-    if (meta && meta->cleanup_head) {
+    if (cleanups) {
         /* The cleanup function is a March closure: fn(_ : Unit) : Unit.
          * Call it via the closure dispatch convention:
          *   closure[16] = function pointer, called as fn(closure, unit_arg) */
-        march_cleanup_node *node = meta->cleanup_head;
+        march_cleanup_node *node = cleanups;
         while (node) {
             march_cleanup_node *next = node->next;
             void *clo = node->cleanup_fn;
@@ -3700,7 +3868,6 @@ static void do_actor_death(void *actor, march_death_reason reason,
             free(node);
             node = next;
         }
-        meta->cleanup_head = NULL;
     }
 
     /* Retire this actor's registered names BEFORE any Down notification
@@ -6342,7 +6509,17 @@ void march_run_until_idle(void) {
 
 /* register_resource: register a cleanup callback for an actor.
  * cleanup is a March closure of type Unit -> Unit.
- * Callbacks run in reverse acquisition order when kill() is called. */
+ * Callbacks run in reverse acquisition order when kill() is called.
+ *
+ * The prepend below takes g_tbl_mu, matching march_monitor/march_demonitor/
+ * march_unlink's discipline for monitor_head: do_actor_death detaches
+ * meta->cleanup_head under the same lock before walking it (see that
+ * function's comment), so an unlocked prepend here could race the detach —
+ * losing this node entirely, or linking it onto a head do_actor_death is
+ * concurrently nulling out from under us. find_meta above is lock-free and
+ * march_incrc is a relaxed atomic RMW on the object header with no
+ * destructor path, so neither can re-enter and re-acquire g_tbl_mu; only
+ * the two-line link itself needs to be inside the critical section. */
 void march_register_resource(void *pid, void *name, void *cleanup) {
     (void)name;  /* Name is for documentation only */
     if (!IS_HEAP_PTR(pid)) return;
@@ -6351,10 +6528,20 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
     march_cleanup_node *node = (march_cleanup_node *)malloc(sizeof(march_cleanup_node));
     if (!node) return;
     node->cleanup_fn = cleanup;
+    /* Retain before publishing: take the reference BEFORE the node becomes
+     * visible to do_actor_death's detach-and-walk (i.e. before the lock
+     * below), not after. Today's caller convention (the compiled call site
+     * holds its own live reference across this builtin call, and the
+     * cleanup walk never decrc's the closure) means the old publish-then-
+     * retain order never actually raced a concurrent drop — but publishing
+     * a node whose payload isn't yet retained is fragile against any future
+     * caller that doesn't hold its own reference, so retain first. */
+    march_incrc(cleanup);  /* Keep closure alive */
     /* Prepend: most recently registered is at head → LIFO on kill */
+    pthread_mutex_lock(&g_tbl_mu);
     node->next = meta->cleanup_head;
     meta->cleanup_head = node;
-    march_incrc(cleanup);  /* Keep closure alive */
+    pthread_mutex_unlock(&g_tbl_mu);
 }
 
 /* Intern an atom name to its i64 value: FNV-1a 64-bit of the (colon-less)

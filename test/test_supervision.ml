@@ -1,7 +1,7 @@
 (** Dedicated supervision tree tests for March.
 
     Covers:
-    - Phase 1: monitors, links, Down/crash propagation
+    - Phase 1: monitors, Down/crash propagation
     - Phase 2: supervisor restart strategies (one_for_one, one_for_all, rest_for_one)
     - Phase 3: epoch-based capability staleness
     - Phase 5: task_spawn_link
@@ -31,7 +31,6 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_alive         = alive;
   ai_terminal_reason = March_eval.Eval.Normal;
   ai_monitors      = [];
-  ai_links         = [];
   ai_mailbox       = Queue.create ();
   ai_supervisor    = None;
   ai_restart_count = [];
@@ -83,23 +82,10 @@ let is_alive pid =
   | None -> false
 
 (* ------------------------------------------------------------------ *)
-(* Phase 1 — Monitors and Links                                        *)
+(* Phase 1 — Monitors                                                   *)
 (* ------------------------------------------------------------------ *)
 
-(** Crash propagates through a chain: A → B → C via links. *)
-let test_link_chain_propagation () =
-  March_eval.Eval.reset_scheduler_state ();
-  let _ia = add_fresh_actor 0 "A" in
-  let _ib = add_fresh_actor 1 "B" in
-  let _ic = add_fresh_actor 2 "C" in
-  March_eval.Eval.link_actors 0 1;
-  March_eval.Eval.link_actors 1 2;
-  March_eval.Eval.crash_actor 0 "chain test";
-  Alcotest.(check bool) "A dead" false (is_alive 0);
-  Alcotest.(check bool) "B dead (linked to A)" false (is_alive 1);
-  Alcotest.(check bool) "C dead (linked to B)" false (is_alive 2)
-
-(** Monitor is independent from links: monitoring does not kill the watcher. *)
+(** Monitor is independent and observational: monitoring does not kill the watcher. *)
 let test_monitor_does_not_kill_watcher () =
   March_eval.Eval.reset_scheduler_state ();
   let _ia = add_fresh_actor 0 "A" in
@@ -616,8 +602,7 @@ let test_one_for_all_cleans_resources () =
 
 let () =
   Alcotest.run "supervision" [
-    ("phase1 monitors/links", [
-      Alcotest.test_case "link chain propagation"        `Quick (with_reset test_link_chain_propagation);
+    ("phase1 monitors", [
       Alcotest.test_case "monitor does not kill watcher" `Quick (with_reset test_monitor_does_not_kill_watcher);
       Alcotest.test_case "multiple monitors distinct refs" `Quick (with_reset test_monitor_multiple_distinct_refs);
       Alcotest.test_case "Down payload killed"           `Quick (with_reset test_monitor_down_payload_killed);

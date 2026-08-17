@@ -92,3 +92,62 @@ land than an ordinary use-after-free race would.
   have any chance of forcing the timing, and should be treated as a
   best-effort/flake-tolerant probe rather than a hard gate, same caveat the
   sibling registration-race todo gives its own regression test.
+
+## The fix
+
+`march_delayed_restart` gains `int64_t sup_pid_index;`, stamped at the
+`malloc` site in `march_supervisor_notify` from the already-resolved
+`sup_meta->pid_index` (atomic, relaxed load — same field, same discipline
+`find_meta_by_pid_index` itself uses).
+
+`delayed_restart_thread` now resolves `sup_meta` via
+`find_meta_by_pid_index(sup_pid_index)` — pid-index-keyed, per-spawn,
+never reused — instead of the old `find_meta(supervisor)` (address-keyed,
+and address chains can alias a reused address to a newer, unrelated
+actor's meta ahead of the original). This resolve had to move BEFORE the
+first liveness check, since the new check needs `sup_meta` in hand to
+compare against.
+
+All three liveness probes (initial, the `strategy == 0` recheck, and the
+per-pass TOCTOU recheck inside the batch loop) now go through a new
+`static int sup_still_live(int64_t sup_pid_index, march_actor_meta
+*sup_meta, void *supervisor)` helper — a function rather than the brief's
+suggested local `#define`/`#undef` macro, to match this file's house
+style (macros here are file-scope constants/table generators, not
+function-scoped logic). It checks `find_meta_by_pid_index(sup_pid_index)
+== sup_meta && march_is_alive(supervisor)`. The identity-confusion half of
+the bug is actually closed by the pid-index-keyed *resolution* that produces
+`sup_meta` in the first place — `delayed_restart_thread` now calls
+`find_meta_by_pid_index(sup_pid_index)` once, up front, instead of the old
+address-keyed `find_meta(supervisor)` — so restart bookkeeping is pinned to
+the original incarnation's meta before any liveness check ever runs. The
+`find_meta_by_pid_index(sup_pid_index) == sup_meta` conjunct inside
+`sup_still_live` is a cheap invariant assertion on top of that pinning
+(`g_pididx_tbl` is insert-only with never-reused keys, so this lookup always
+returns the same pointer `sup_meta` already holds — it can never observe a
+mismatch), not the mechanism that re-derives correctness on each call.
+`march_is_alive` still gates whether to actually restart.
+The dead-supervisor path's existing "leave `delayed_batch_pending` set,
+don't clear it" behaviour (established by Task 3, see
+`specs/progress/2026-08-16-sync-batch-restart-in-flight-marker.md`) is
+untouched — `sup_still_live` returning false takes the exact same early
+`return` that `march_is_alive(supervisor)` alone used to.
+
+**Residual scope, stated honestly:** `march_is_alive(supervisor)` itself
+still dereferences the raw address, which — if reused — now belongs to a
+different live actor's memory; that read is memory-safe (it's the new
+occupant's own live allocation) but can still read "alive" in the exact
+narrow reuse window the todo describes. What the fix eliminates is running
+this restart's *bookkeeping* (children array, `pending_min_child_idx`,
+restart budget) against the wrong supervisor's `sup_meta` — the actual
+corruption vector the todo's bug section describes. This matches the
+todo's own "Narrow-window honesty" section: the underlying allocator-reuse
+window isn't something this code can close outright.
+
+**No new test** — human ruling 2026-08-16: address reuse cannot be forced
+on demand, so a probe here would pass identically before and after the
+fix; a test that cannot fail against the broken code is not evidence.
+Evidence is the structural argument above, plus the existing suites
+(`run_stdlib`, `run_codegen`, `dune runtest`) staying green with the
+supervision backoff goldens byte-identical — this change alters WHICH
+supervisor a delayed restart validates against, not WHEN it fires.
