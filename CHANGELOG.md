@@ -11,6 +11,21 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **The capability ceiling now runs under `march --check` / `--check-json`, not only
+  `--compile`.** A module whose `needs` manifest is falsified by a stdlib-MEDIATED call
+  (`File.read(p)` rather than the builtin `file_read(p)` — the idiomatic way to do IO) was
+  caught only at `--compile` time by the TIR-side ceiling; `--check` exited 0. A sound
+  typecheck-side ceiling now closes that gap without lowering: it attributes a capability to
+  a module only through a clear `module.fn → stdlib… → builtin` chain (matching
+  `--compile`'s attribution), so it can only under-report, never break a build `--compile`
+  accepts. `--compile`'s ceiling remains the complete check. The violation carries a
+  machine-applicable `needs` fix, so `forge fix` and the LSP can now apply it — previously the
+  ceiling's fix payload reached neither, because `forge fix`'s only input is `--check-json`
+  and the ceiling never ran there.
+
+
 ### Fixed
 
 - The whole-program capability grant now bounds actor message handlers. A handler's body

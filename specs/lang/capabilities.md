@@ -46,7 +46,7 @@ That invisibility causes three recurring problems:
 
 **Audit blind spots.** Answering "which modules talk to the network?" in a large codebase means grepping and hoping, unless the compiler tracks it.
 
-March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph. Leaving out a capability declaration is a machine-verified, build-breaking guarantee, whether `Cap(X)` flows through a signature (a function/actor/extern parameter, or a transitive `use`) or a function body calls an IO builtin directly (a warning until 2026-08-06, an error since). One gap remains: a call routed through a stdlib wrapper (`File.read` rather than `file_read`) slips past this particular check. It's still caught, just by a different mechanism: the capability ceiling over emitted code, which runs on the compile path (on by default since 2026-08-07) rather than under `--check`. See "What the compiler tells you," below.
+March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph. Leaving out a capability declaration is a machine-verified, build-breaking guarantee, whether `Cap(X)` flows through a signature (a function/actor/extern parameter, or a transitive `use`) or a function body calls an IO builtin directly (a warning until 2026-08-06, an error since). A call routed through a stdlib wrapper (`File.read` rather than `file_read`) slips past *this particular* check, but not the system: the **capability ceiling** catches it. The ceiling runs over emitted code on the compile path (on by default since 2026-08-07) and, since 2026-08-17, a sound SUBSET of it also runs under `--check`/`--check-json` — enough to catch the common stdlib-mediated route without lowering. `--compile`'s ceiling remains the complete check. See "What the compiler tells you," below.
 
 ```march
 mod Price do
@@ -277,12 +277,16 @@ its own restatement of the capability that was missing.
 The error above is easy to over-read, so let's be precise about what it actually covers:
 
 - It catches a **direct** call to a capability builtin: `file_read(p)`.
-- It does **not** catch the same operation routed through a stdlib wrapper:
-  `File.read(p)`. That call is invisible to this check, and `--check` exits 0.
+- It does **not** catch, on its own, the same operation routed through a stdlib
+  wrapper: `File.read(p)`. That call is invisible to *this* check. It is caught
+  by the **capability ceiling** instead — which, since 2026-08-17, runs a sound
+  subset under `--check` too (not only `--compile`), so `--check` now exits 1 on
+  the common stdlib-mediated case rather than 0.
 - The complete check is the **capability ceiling**, below, which works on
   **emitted code** and therefore cannot be evaded by re-routing through a
   helper. It is on by default, but it runs on the compile path, so `--check`
-  alone still exits 0 on the stdlib-mediated call.
+  alone catches the common stdlib-mediated call as of 2026-08-17 (a subset of
+  the ceiling now runs under `--check`); `--compile` remains the complete check.
 
 So `needs` is a **mandatory, mechanically-verified manifest** of the builtins a
 module calls directly, not, on its own, proof that a module cannot reach a
@@ -505,7 +509,7 @@ marker at a module boundary; the *checks* are `needs`, the module ceiling, and
 
 ### When *not* to use IO caps
 
-**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee of the ERROR-level kind above **only for the signature/`use`/`extern` surface**: the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import, so this guarantee is strongest when the functions in question actually take `Cap(X)` parameters (or `use` something that does). Since 2026-08-06 a module with no `needs` that calls IO builtins directly in function bodies is REJECTED (`--check` exits 1), not merely warned. A stdlib-mediated call remains outside this check. See above.
+**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee of the ERROR-level kind above **only for the signature/`use`/`extern` surface**: the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import, so this guarantee is strongest when the functions in question actually take `Cap(X)` parameters (or `use` something that does). Since 2026-08-06 a module with no `needs` that calls IO builtins directly in function bodies is REJECTED (`--check` exits 1), not merely warned. A stdlib-mediated call is outside *this* check but, since 2026-08-17, is caught by the ceiling subset that now runs under `--check`. See above.
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels "less precise." Accurate beats narrow-but-wrong.
 
@@ -833,7 +837,7 @@ FFI is the part of this the compiler can never see: an `extern` C call, a `dlope
 
 | Option | What you do | What you get | Caveat |
 |---|---|---|---|
-| Nothing (the type system alone) | Just write March; `needs`/`Cap(X)` are required to reach any IO builtin | Compile-time proof of what the *code* can reach, for anything flowing through a signature or a direct body call | Proves nothing about the running binary. `extern`/FFI C code is invisible past `IO.Foreign`. A call routed through a stdlib wrapper (`File.read` rather than `file_read`) slips past `--check` too, though `march --compile`'s capability ceiling still catches it. |
+| Nothing (the type system alone) | Just write March; `needs`/`Cap(X)` are required to reach any IO builtin | Compile-time proof of what the *code* can reach, for anything flowing through a signature or a direct body call | Proves nothing about the running binary. `extern`/FFI C code is invisible past `IO.Foreign`. A call routed through a stdlib wrapper (`File.read` rather than `file_read`) is caught by the capability ceiling: `march --compile`'s ceiling completely, and since 2026-08-17 a sound subset also under `--check`. |
 | [`forge cap inspect`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary) | Run it against a compiled binary | An audit of what capabilities the binary appears to need | Read-only: reports, does not confine. |
 | `--cap-sandbox` (below) | Add the flag at compile time | The binary sandboxes *itself* at startup, from its own declared/used capabilities | Self-imposed and opt-in: a binary built without it is simply unconfined. Protects against your own bugs and compromised dependencies, not a hostile publisher. |
 | `forge cap run ./binary` (below) | Run through forge instead of directly | Forge installs the sandbox from *outside* the process, before it starts | Policy still derives from the binary's own claimed capabilities: an under-reporting binary gets an under-scoped policy. |

@@ -1,3 +1,48 @@
+# LANDED 2026-08-17 — capability ceiling now runs under `march --check`
+
+**Status: shipped.** This file was the forward-looking todo; the design it
+prescribed is implemented. What landed, and the two places the design was
+sharpened during implementation:
+
+- **A typecheck-side ceiling** (`Typecheck.check_stdlib_mediated_ceiling`), gated
+  by `Typecheck.cap_strict_ceiling` (the driver sets it on `--check`/`--check-json`,
+  respecting `--no-cap-strict`). Seeded from a new body-only capability table
+  (`env.body_cap_closures`, recorded at the body-scan sites, never the sig-caps
+  site — avoiding the `fn main(cap : Cap(IO))` false positive) and a
+  stdlib-membership set (`env.stdlib_fns`, marked span-accurately including
+  prelude functions).
+
+- **Design sharpening 1 — it is NOT the full `fn_refs` transitive closure the
+  todo suggested.** A full closure over-reports: it would charge a caller for
+  capabilities a *user* callee (in another module) reaches, which `--compile`
+  attributes to that other module. The correct closure is stdlib-TRANSPARENT —
+  roll caps up only through stdlib callees, stopping at user-module boundaries —
+  which exactly matches `Cap_attrib`'s roll-up and is a provable subset of the
+  `--compile` result. Verified: zero over-reports across all 143 `@types-check`
+  accept fixtures; reject witness `reject/t180`.
+
+- **Design sharpening 2 — the fail-closed `Unattributed` arm is deliberately
+  NOT reproduced.** It over-reports on closure-heavy code (indirect calls);
+  `--compile` remains the complete check for that route. `--check` under-reports
+  it, which is the tolerable direction.
+
+- **The FInsert cross-file trap (flagged below) is fixed:** the fix is suppressed
+  when the owner module's span is `dummy_span` (a cross-file dependency not in the
+  entry file's tree), and indented to the owner's own column otherwise. Also
+  delivers the todo's second motivation — the ceiling's fix payload now reaches
+  `--check-json`, so `forge fix`/LSP can apply it.
+
+**Known follow-ups (not blocking):** the check runs on the primary
+`bin/main.exe --check`/`--check-json` path; the separate `march check`
+(`run_check_cmd`) and LSP typecheck entry points do not yet enable
+`cap_strict_ceiling`. Cross-file dependency modules under-report (their spans
+are not in the entry file's `module_spans`) — sound, but the diagnostic lands
+without a fix there.
+
+---
+
+## Original todo (design rationale, retained)
+
 # Running the capability ceiling under `march --check` needs a body-only closure table
 
 Filed while working Task 7 of `specs/2026-08-13-capability-ux-plan.md` (Steps
