@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 299/299 — 143 accept, 156
+Exit 0 iff every program behaves as declared (currently 300/300 — 144 accept, 156
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -570,10 +570,11 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t177_main_mixed_param_list` | **R1 STAGE D — the signature relaxation is bounded (2026-08-10).** "one capability parameter" became "any number of capability parameters", NOT "arbitrary parameters": a mixed list is rejected because a grant describing only SOME of what `main` receives would not be a grant, and the runtime has no value to supply for a non-capability parameter | ``only arguments of type `Cap(IO)` `` |
 | `t178_grant_violated_through_stdlib` | **Task 8, capability-UX plan (2026-08-14) — the grant violation names the user's own call chain, not just the stdlib leaf.** `t166` already pins the through-a-helper shape, but its helper calls the builtin `file_write` directly, and every unit-test fixture in `test_compiler.ml`'s `cap_grant` suite does the same — the bare `parse_and_desugar` test harness loads no stdlib source, so a real stdlib call (`File.read`) silently exercises nothing there. This witness runs the real compiled binary against its real bundled stdlib: `main` (narrow `Cap(IO.Console)`) calls `slurp`, which calls the real `File.read`, which reaches `IO.FileRead`. Before this task the diagnostic named only `` (reached in `File.read`) `` — the stdlib leaf, useless to a reader who cannot act on it. After: the full chain, `main` included, down through `slurp` to `File.read` | ``reached from `main`: main → slurp`` |
 | `t180_ceiling_stdlib_mediated_under_check` | **cap-ceiling-under-`--check` (2026-08-17).** The `--check`-side capability ceiling now catches a stdlib-MEDIATED capability use (`File.read`, not the builtin `file_read`) that a module's own `needs` does not cover — the one route Check 1b's direct-builtin scan and Check 4's `use`-walk both miss. `main`'s grant is broad enough to satisfy the whole-program check, so `--check` used to exit 0 while `--compile` rejected it; now both reject. `IO.FileRead` is attributed to `Dep`, whose code reaches it. | ``module `Dep` uses `IO.FileRead` but does not declare `needs IO.FileRead``` |
+| `t181_ceiling_ignores_dead_stdlib_mediated` | **cap-ceiling-under-`--check` subset guard (2026-08-17).** The `--check` ceiling must not over-report DEAD code: a function unreachable from `main` whose stdlib-mediated use `--compile` prunes (via `March_tir.Dce`, which roots at `main`) must stay silent under `--check` too, or `--check` would break a build `--compile` accepts. Accept counterpart to `reject/t180`. | *(accepts — no error)* |
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`) — no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*` — trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 299 / 299 (143 accept, 156 reject).** `reject/t169`–`t170`
+**Result: 300 / 300 (144 accept, 156 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries — they mirror the existing `t164`/`t165` pattern

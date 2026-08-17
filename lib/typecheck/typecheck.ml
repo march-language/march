@@ -13993,8 +13993,46 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
      stdlib-mediated additions are attributed here, so the two checks never
      double-report the same cap. *)
   let reported : (string * string, unit) Hashtbl.t = Hashtbl.create 16 in
+  (* Match `--compile`'s reachability exactly, or this over-reports on dead
+     code.  [March_tir.Dce] roots reachability at `main` WHEN A `main` EXISTS
+     (a function `main` never calls is genuinely dead and its stdlib-mediated
+     use is pruned before [Cap_attrib] ever sees it); only a module WITHOUT a
+     `main` falls back to treating every user function as a root (a library
+     checked on its own — its public functions are its callable surface).  We
+     mirror both: reachable-from-`main` when present, else all user functions.
+     Getting this wrong is the difference between a strict subset and a false
+     positive on a half-wired helper. *)
+  let has_main =
+    Hashtbl.fold
+      (fun k _ found ->
+         found || k = "main"
+         || (String.length k > 5 && String.sub k (String.length k - 5) 5 = ".main"))
+      env.fn_refs false
+  in
+  let reachable : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  if has_main then begin
+    let q = Queue.create () in
+    Hashtbl.iter
+      (fun k _ ->
+         if k = "main"
+            || (String.length k > 5 && String.sub k (String.length k - 5) 5 = ".main")
+         then (Hashtbl.replace reachable k (); Queue.push k q))
+      env.fn_refs;
+    while not (Queue.is_empty q) do
+      let n = Queue.pop q in
+      List.iter
+        (fun r ->
+           if not (Hashtbl.mem reachable r) then begin
+             Hashtbl.replace reachable r ();
+             Queue.push r q
+           end)
+        (refs n)
+    done
+  end;
+  let is_reachable k = (not has_main) || Hashtbl.mem reachable k in
   let user_fns =
-    Hashtbl.fold (fun k _ acc -> if is_stdlib k then acc else k :: acc)
+    Hashtbl.fold
+      (fun k _ acc -> if is_stdlib k || not (is_reachable k) then acc else k :: acc)
       env.fn_refs []
   in
   List.iter

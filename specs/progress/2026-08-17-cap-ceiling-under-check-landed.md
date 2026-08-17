@@ -32,6 +32,21 @@ sharpened during implementation:
   delivers the todo's second motivation — the ceiling's fix payload now reaches
   `--check-json`, so `forge fix`/LSP can apply it.
 
+**Adversarial review (opus) found and fixed one Critical:** the first cut
+iterated ALL functions, but `--compile`'s ceiling runs post-DCE, and
+`March_tir.Dce` roots reachability at `main` when one exists — so a function
+unreachable from `main` is pruned there. The `--check` ceiling now mirrors it:
+reachable-from-`main` when a `main` exists, else all user functions (the
+main-less library case, matching DCE's `extra_root` fallback). Without this,
+`--check` over-reported a dead half-wired helper's stdlib-mediated use that
+`--compile` accepts. Pinned by accept witness `accept/t181` (dead use stays
+silent) against reject witness `reject/t180` (reachable use rejects).
+
+Two review-noted coverage gaps left as-is (both the SAFE under-report
+direction, and closing them risks the over-report the design forbids): a
+`let _ = File.read(...)` discarded binding, and an interface-`impl` method
+body, are not attributed under `--check`. `--compile` still catches both.
+
 **Known follow-ups (not blocking):** the check runs on the primary
 `bin/main.exe --check`/`--check-json` path; the separate `march check`
 (`run_check_cmd`) and LSP typecheck entry points do not yet enable
