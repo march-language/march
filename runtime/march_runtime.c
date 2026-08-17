@@ -3286,10 +3286,40 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
 
 typedef struct {
     void   *supervisor;
+    int64_t sup_pid_index;  /* incarnation-precise identity; see delayed_restart_thread */
     int     child_idx;
     int     strategy;       /* 0/1/2 — mirrors supervisor_strategy */
     int64_t not_before_ms;
 } march_delayed_restart;
+
+/* Incarnation-precise liveness check for a delayed restart's supervisor.
+ * march_is_alive(supervisor) alone is an ADDRESS probe: across a backoff
+ * window of up to ~3.2s the original supervisor can die and the March heap
+ * allocator can hand its address to an unrelated new actor, which reads as
+ * alive — the restart would then run against the wrong actor. Likewise
+ * find_meta(supervisor) is keyed by that same reused address, and
+ * g_actor_tbl's chain can hold a newer meta for a reused address ahead of
+ * the original (march_spawn allocates a fresh meta rather than re-linking a
+ * stale one on detected reuse — see march_actor_meta's pididx_linked
+ * comment), so an address-keyed lookup can silently resolve to the WRONG
+ * actor's metadata.
+ *
+ * find_meta_by_pid_index is keyed off the pid-index table instead, which is
+ * per-spawn and never reused (g_next_pid_index only ever increments, and
+ * g_pididx_tbl is insert-only — see its comment), so a lookup that still
+ * resolves to the SAME meta this restart was scheduled against is proof
+ * the original incarnation is the one being addressed, not a coincidental
+ * reuse. Combined with march_is_alive, this closes the identity-confusion
+ * half of the bug (running a restart's bookkeeping against an unrelated
+ * supervisor's meta); the residual narrow window where march_is_alive
+ * itself dereferences a reused address is the same "empirically rare, not
+ * addressed by existing sync" class of risk documented in
+ * specs/progress/2026-08-16-delayed-restart-incarnation-precise.md. */
+static int sup_still_live(int64_t sup_pid_index, march_actor_meta *sup_meta,
+                          void *supervisor) {
+    return find_meta_by_pid_index(sup_pid_index) == sup_meta
+        && march_is_alive(supervisor);
+}
 
 /* Runs on its own dedicated green thread (spawned by march_supervisor_notify
  * below), never on the crashing actor's scheduler thread. Parks until the
@@ -3357,8 +3387,16 @@ static void delayed_restart_thread(void *arg) {
     while (march_now_ms() < dr->not_before_ms)
         march_sched_park_self_until(dr->not_before_ms);
     void *supervisor = dr->supervisor;
+    int64_t sup_pid_index = dr->sup_pid_index;
     int child_idx = dr->child_idx, strategy = dr->strategy;
     free(dr);
+    /* Resolve sup_meta by pid_index, not by the (potentially reused)
+     * supervisor address — see sup_still_live's comment. This is also why
+     * the resolve now happens BEFORE the first liveness check, unlike the
+     * pre-fix code's find_meta(supervisor) after an address-only probe:
+     * sup_meta must exist before sup_still_live can compare against it. */
+    march_actor_meta *sup_meta = find_meta_by_pid_index(sup_pid_index);
+    if (!sup_meta) return;
     /* Note: if the supervisor is already dead here, we return without
      * touching delayed_batch_pending — it stays set on this (now orphaned)
      * meta forever. That's intentional, not an oversight: clearing it would
@@ -3368,12 +3406,12 @@ static void delayed_restart_thread(void *arg) {
      * skip_due_to_pending path keeps dropping such crashes — a no-op
      * against a supervisor nothing can ever revive, not a leak of live
      * behavior. */
-    if (!march_is_alive(supervisor)) return;   /* supervisor died meanwhile */
-    march_actor_meta *sup_meta = find_meta(supervisor);
-    if (!sup_meta) return;
+    if (!sup_still_live(sup_pid_index, sup_meta, supervisor))
+        return;   /* supervisor died (or its address was reused) meanwhile */
 
     if (strategy == 0) {
-        if (!march_is_alive(supervisor)) return;   /* Minor 1 TOCTOU recheck */
+        if (!sup_still_live(sup_pid_index, sup_meta, supervisor))
+            return;   /* Minor 1 TOCTOU recheck */
         march_one_for_one_restart(supervisor, sup_meta, child_idx);
         return;
     }
@@ -3384,7 +3422,7 @@ static void delayed_restart_thread(void *arg) {
          * call was running. Same "leave the flag set" reasoning as above
          * applies here too. */
         pthread_mutex_lock(&g_supervise_mu);
-        int alive = march_is_alive(supervisor);
+        int alive = sup_still_live(sup_pid_index, sup_meta, supervisor);
         int idx = sup_meta->pending_min_child_idx;
         int64_t drops_before = sup_meta->pending_drop_count;
         pthread_mutex_unlock(&g_supervise_mu);
@@ -3644,6 +3682,8 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
         return;
     }
     dr->supervisor = supervisor;
+    dr->sup_pid_index = atomic_load_explicit(&sup_meta->pid_index,
+                                             memory_order_relaxed);
     dr->child_idx = child_idx;
     dr->strategy = strategy;
     dr->not_before_ms = now + delay;

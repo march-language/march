@@ -76,6 +76,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A delayed supervisor restart (a repeat crash backed off by exponential backoff, up to
+  ~3.2s before jitter) re-validated its supervisor with an address-based liveness probe**,
+  not an incarnation-precise one. If the supervisor died and the March allocator handed its
+  address to an unrelated new actor within that backoff window, the restart could run its
+  bookkeeping (child array, restart budget) against that unrelated actor's metadata instead
+  of silently no-oping. The recheck is now keyed off the supervisor's `pid_index` (per-spawn,
+  never reused) rather than its raw heap address, so a resolved match proves it is still the
+  original incarnation. Timing (when a restart fires) is unchanged; only which supervisor a
+  delayed restart validates against is affected.
+
 - **Two children of a compiled `one_for_all`/`rest_for_one` supervisor crashing for the
   first time at the same moment on different scheduler threads could run two restart
   strategies concurrently** against the same supervisor's child array. A first crash
