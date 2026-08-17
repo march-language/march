@@ -1,0 +1,58 @@
+mod Main do
+  needs IO.Console
+  -- `let*` generalized monadic-bind operational witness (core-march.md,
+  -- widening slice — mirrors g42's let? witness but across THREE different
+  -- types, proving the type-directed `<Type>.flat_map` dispatch is genuinely
+  -- generic, not hardwired). Deterministic, no scheduler — byte-identical
+  -- interpreted vs compiled.
+
+  fn safe_div(a : Int, b : Int) : Option(Int) do
+    if b == 0 do None else Some(a / b) end
+  end
+
+  -- Option: propagates through two steps, short-circuits on the first None.
+  fn opt_chain(a : Int, b : Int, c : Int) : Option(Int) do
+    let* x = safe_div(a, b)
+    let* y = safe_div(x, c)
+    Some(y + 1)
+  end
+
+  fn step(x : Int) : Result(Int, String) do
+    if x > 0 do Ok(x + 1) else Err("neg") end
+  end
+
+  -- Result: same shape as g42's let?, to confirm let* subsumes it.
+  fn res_chain(x : Int) : Result(Int, String) do
+    let* a = step(x)
+    let* b = step(a)
+    Ok(b * 10)
+  end
+
+  -- List: the non-Result/Option case — flat_map as cartesian product,
+  -- proving let* is not secretly special-cased to short-circuiting types.
+  fn pairs(xs : List(Int), ys : List(Int)) : List(Int) do
+    let* x = xs
+    let* y = ys
+    [x * 10 + y]
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    match opt_chain(100, 5, 2) do
+      Some(v) -> println("opt some " ++ int_to_string(v))
+      None    -> println("opt none")
+    end
+    match opt_chain(100, 0, 2) do
+      Some(v) -> println("opt some " ++ int_to_string(v))
+      None    -> println("opt none")
+    end
+    match res_chain(5) do
+      Ok(v)  -> println("res ok " ++ int_to_string(v))
+      Err(e) -> println("res err " ++ e)
+    end
+    match res_chain(-1) do
+      Ok(v)  -> println("res ok " ++ int_to_string(v))
+      Err(e) -> println("res err " ++ e)
+    end
+    println(show(pairs([1, 2], [3, 4])))
+  end
+end

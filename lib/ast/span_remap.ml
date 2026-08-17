@@ -127,6 +127,8 @@ let rec remap_expr tbl = function
     Ast.ELetFn (remap_name tbl n, List.map (remap_param tbl) params, ret, remap_expr tbl body, remap_span tbl sp)
   | Ast.ELetQ (p, r, c, sp) ->
     Ast.ELetQ (remap_pattern tbl p, remap_expr tbl r, remap_expr tbl c, remap_span tbl sp)
+  | Ast.ELetStar (p, r, c, sp) ->
+    Ast.ELetStar (remap_pattern tbl p, remap_expr tbl r, remap_expr tbl c, remap_span tbl sp)
   | Ast.EAssert (e, sp) ->
     Ast.EAssert (remap_expr tbl e, remap_span tbl sp)
   | Ast.ESigil (c, e, sp) ->

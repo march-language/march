@@ -1,0 +1,26 @@
+-- `let*` position — a block MIXING `let?` and `let*` bindings PARSES, and
+-- `fold_letq` (which now folds BOTH binder shapes) threads each one's
+-- continuation into its body field right-associatively. This is the fold
+-- function's own genuinely new risk surface from adding `let*` -- a single
+-- shared fold now has to dispatch on TWO constructors, not one, and nest
+-- correctly regardless of which comes first. Complements p25 (let?-only) and
+-- t179 (a trailing let*, caught by the typechecker not the parser).
+-- Value-witnessed: prints `70` — only obtainable if both binders' fold arms
+-- nested the continuations correctly.
+mod Main do
+  needs IO.Console
+  fn step(x : Int) : Result(Int, String) do
+    if x > 0 do Ok(x + 1) else Err("neg") end
+  end
+  fn chain(x : Int) : Result(Int, String) do
+    let? a = step(x)
+    let* b = step(a)
+    Ok(b * 10)
+  end
+  fn main(_cap_console : Cap(IO.Console)) do
+    match chain(5) do
+      Ok(v)  -> println(int_to_string(v))
+      Err(e) -> println(e)
+    end
+  end
+end

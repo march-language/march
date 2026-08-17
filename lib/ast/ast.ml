@@ -81,6 +81,16 @@ type expr =
       (** Result-propagating binding: [let? p = e1; e2].
           The third field is the continuation (everything after the binding);
           [fold_letq] in the parser nests continuations at parse time. *)
+  | ELetStar of pattern * expr * expr * span
+      (** Generalized monadic-bind sugar: [let* p = e1; e2] desugars to
+          [M.flat_map(e1, fn p -> e2 end)], where [M] is the head type
+          constructor of [e1]'s inferred type (e.g. [Option], [Result],
+          [List]) -- resolved by convention: [M]'s `flat_map` is looked up
+          in the module of the SAME name as [M]. Unlike [ELetQ], not
+          hardwired to any one type. The third field is the continuation;
+          [fold_letq] in the parser nests continuations for both [ELetQ]
+          and [ELetStar] at parse time. See
+          specs/lang/let-star-generalized-bind.md. *)
   | EAssert of expr * span
       (** Test assertion: assert expr.
           When the inner expr is a binary comparison (==, !=, <, >, <=, >=),
@@ -446,5 +456,6 @@ let show_expr = function
   | EDbg _ -> "EDbg(...)"
   | ELetFn _ -> "ELetFn(...)"
   | ELetQ _ -> "ELetQ(...)"
+  | ELetStar _ -> "ELetStar(...)"
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"

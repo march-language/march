@@ -1,0 +1,131 @@
+name: Sync Docs Search Index
+
+# Keeps the committed Pagefind index (docs/pagefind/) in sync with docs sources,
+# automatically, on every push to main that touches docs.
+#
+# WHY THIS EXISTS
+# ───────────────
+# The index is a committed artifact because march-lang.org is served by GitHub's legacy
+# Jekyll over this repo's docs/ directly (repo Pages config: branch main, path /docs) with
+# no build hook, so the index can only reach production by being committed. See the header
+# of scripts/gen-docs-search-index.sh for the full explanation.
+#
+# ci.yml's doc-lint job runs `gen-docs-search-index.sh --check`, whose digest is a content
+# hash of EVERY tracked docs/*.{md,html}. That digest goes stale in a way no PR check can
+# prevent: two docs PRs that are each individually green (each regenerated its own index)
+# produce a STALE digest once BOTH merge — the merged tree contains both edits, but the
+# committed digest reflects only whichever .source-digest won the merge. main's doc-lint
+# then goes red with nothing to point at. This is the recurring failure this workflow ends.
+#
+# gen-stdlib-docs.yml already auto-regenerates the index, but only when stdlib/** changes.
+# This workflow covers the other case: any ordinary docs edit (a guide, a layout, an
+# include, _config.yml).
+#
+# WHY push-to-main, not pull_request
+# ──────────────────────────────────
+# The stale state can arise purely from MERGING two green PRs, so it only becomes visible
+# on main. A push-to-main self-heal is the only thing that can catch it. Contributors are
+# still free to regenerate in their PR (doc-lint will tell them if they forgot), but they
+# no longer HAVE to, and a merge-interaction staleness that no PR could have caught is
+# fixed within a minute of landing.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Any docs source can change what gets indexed …
+      - 'docs/**'
+      # … except the generated index itself — excluding it means this workflow's own
+      # commit (which touches only docs/pagefind/**) never re-triggers it.
+      - '!docs/pagefind/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Serialize with any other run of this workflow so two overlapping pushes cannot race each
+# other's `git push`. gen-stdlib-docs.yml pushes the index too; the rebase-retry loop in
+# the commit step below tolerates a concurrent push from it (or from a human) rather than
+# relying on a shared group across workflows.
+concurrency:
+  group: sync-docs-search-index
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need real history so the bot commit can be pushed as a fast-forward on top of
+          # main, and so the rebase-retry below has something to rebase onto.
+          fetch-depth: 0
+
+      # Fast path: `--check` only hashes the docs sources — no Jekyll, no Node, seconds.
+      # When the committed index already matches (the common case, e.g. the contributor
+      # regenerated in their PR), every heavy step below is skipped.
+      - name: Check whether the committed index is stale
+        id: check
+        run: |
+          if scripts/gen-docs-search-index.sh --check; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+      # Everything below runs only when the index is actually stale.
+      - name: Set up Ruby
+        if: steps.check.outputs.stale == 'true'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: docs
+
+      - name: Set up Node
+        if: steps.check.outputs.stale == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Regenerate, commit, and push the index
+        if: steps.check.outputs.stale == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Regenerate + commit + push, retrying against a moving main. The commit guard is
+          # the DIGEST (via --check), never the file list: Pagefind filenames embed a
+          # per-run content hash, so a plain `git status docs/pagefind` is dirty after every
+          # regeneration even when the sources are unchanged — gating on that would let two
+          # bots ping-pong regenerated indexes forever. Gating on --check means once the
+          # digest matches sources, there is nothing to do, whoever fixed it.
+          for attempt in 1 2 3; do
+            if scripts/gen-docs-search-index.sh --check; then
+              echo "Index is already in sync (fixed by a concurrent run) — nothing to do."
+              exit 0
+            fi
+
+            scripts/gen-docs-search-index.sh
+            git add docs/pagefind
+            # No [skip ci]: the commit touches docs/pagefind/**, which is in
+            # deploy-pages.yml's trigger paths (docs/**) so the fresh index gets published,
+            # but is EXCLUDED from this workflow's own trigger, so it does not self-loop.
+            git commit -m "docs: sync pagefind search index with docs sources"
+
+            if git push origin HEAD:main; then
+              echo "Pushed the regenerated index."
+              exit 0
+            fi
+
+            echo "Push rejected (main moved); rebasing and retrying (attempt $attempt)."
+            git fetch origin main
+            # Drop our just-made commit and re-evaluate against the new main. A hard reset
+            # is safe: the only local change was the regenerated index, which the loop
+            # rebuilds from scratch on the next pass if still needed.
+            git reset --hard origin/main
+          done
+
+          echo "::error::Could not sync the search index after 3 attempts (main kept moving)." >&2
+          exit 1

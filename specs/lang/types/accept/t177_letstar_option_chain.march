@@ -1,0 +1,20 @@
+-- `let*` generalized monadic-bind, Option instance. `M` is resolved from the
+-- RHS's inferred type (Option here) by looking up `Option.flat_map` -- not
+-- hardwired the way `let?` is to Result. Value-witnessed by golden g47.
+mod Main do
+  needs IO.Console
+  fn safe_div(a : Int, b : Int) : Option(Int) do
+    if b == 0 do None else Some(a / b) end
+  end
+  fn chain(a : Int, b : Int, c : Int) : Option(Int) do
+    let* x = safe_div(a, b)
+    let* y = safe_div(x, c)
+    Some(y + 1)
+  end
+  fn main(_cap_console : Cap(IO.Console)) do
+    match chain(100, 5, 2) do
+      Some(v) -> println(int_to_string(v))
+      None    -> println("none")
+    end
+  end
+end

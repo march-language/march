@@ -1,0 +1,49 @@
+-- Ad hoc benchmark for the SIMD-accelerated march_memmem kernel
+-- (runtime/march_runtime.c, backing String.index_of/index_of_from/contains).
+-- Not wired into the permanent suite (scratch/ad hoc, per the task
+-- instructions) -- bench/string_scan.march already exists in the permanent
+-- suite but its 1MB buffer is fast enough (~10ms) on both old and new
+-- kernels that /usr/bin/time can't distinguish them; this uses a much
+-- larger buffer, timed with IO.Clock the way bench/simd_kernels.march does,
+-- to get a clear signal.
+--
+-- Usage: march --compile --opt 2 bench/scratch_string_memmem.march -o /tmp/x && /tmp/x
+mod ScratchStringMemmem do
+  needs IO.Console
+  needs IO.Clock
+
+  pfn elapsed_ms(t0 : Float, t1 : Float) : Float do
+    (t1 -. t0) *. 1000.0
+  end
+
+  pfn scan_n(buf : String, needle : String, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let hit = match String.index_of(buf, needle) do
+        Some(k) -> k
+        None -> 0
+      end
+      scan_n(buf, needle, i + 1, n, acc + hit)
+    end
+  end
+
+  fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
+    -- 32MB haystack, needle absent (worst case: every byte examined).
+    let buf = String.repeat("abcdefghij", 3200000)
+    let t0 = unix_time(())
+    let absent = scan_n(buf, "ZZZZZZZZZZ", 0, 20, 0)
+    let t1 = unix_time(())
+    println("ABSENT_RESULT " ++ String.from_int(absent))
+    println("ABSENT_TIME_MS " ++ float_to_string(elapsed_ms(t0, t1)))
+
+    -- Needle near the very end (~99% through): realistic found-eventually case.
+    let cut = (String.byte_size(buf) * 99) / 100
+    let marked = String.slice(buf, 0, cut) ++ "QQMARKERQQ"
+                 ++ String.slice(buf, cut, String.byte_size(buf) - cut)
+    let t2 = unix_time(())
+    let late = scan_n(marked, "QQMARKERQQ", 0, 20, 0)
+    let t3 = unix_time(())
+    println("LATE_RESULT " ++ String.from_int(late))
+    println("LATE_TIME_MS " ++ float_to_string(elapsed_ms(t2, t3)))
+  end
+end

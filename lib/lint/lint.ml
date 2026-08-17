@@ -180,7 +180,7 @@ let collect_call_names expr =
     | Ast.ESpawn (e, _)      -> walk e
     | Ast.EDbg (Some e, _)   -> walk e
     | Ast.ELetFn (_, _, _, body, _) -> walk body
-    | Ast.ELetQ (_, r, c, _)        -> walk r; walk c
+    | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> walk r; walk c
     | Ast.EAssert (e, _)     -> walk e
     | Ast.ESigil (_, e, _)   -> walk e
     | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()

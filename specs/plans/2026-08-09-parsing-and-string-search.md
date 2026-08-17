@@ -346,7 +346,21 @@ therefore gated on a significant language feature whose costs (formatter, LSP,
 error messages for precedence mistakes) extend far beyond parsing. Ranked
 last unless user-defined operators are wanted on independent grounds.
 
-### 4.3 Monadic binding sugar — CHOSEN (2026-08-12)
+### 4.3 Monadic binding sugar — CHOSEN (2026-08-12), IMPLEMENTED (2026-08-14)
+
+**Shipped as `let*`.** Full design, corpus, and diagnostics:
+`specs/lang/let-star-generalized-bind.md`. One correction from the plan
+below: `Self(a) -> (a -> Self(b)) -> Self(b)` was never attempted as a
+constrained-polymorphism interface (§9 decision 5 already anticipated this
+was infeasible) — the shipped mechanism is exactly what this section
+predicts (§4.3's own text: "`let*` must be what `let?` already is: a native
+AST node, typechecked natively, resolving `flat_map` from the inferred type
+of its right-hand side"), with the dispatch convention made precise: `M`'s
+`flat_map` lives in a module of the SAME NAME as `M`. One real gap found
+during implementation, not anticipated here: `stdlib/parse.march`'s
+`Parser` type lives in a module named `Parse`, breaking that convention —
+`let*` does not (yet) work with `Parser`, and the fix (a module rename, or
+an explicit second resolution path) is filed as a follow-up, not bundled in.
 
 **Decision: build `let*`.** Rejected `~p` and confirmed `<|>` blocked; the
 evidence and costs are below and in §9 decisions 1, 5 and 6.

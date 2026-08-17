@@ -40,7 +40,7 @@ let rec check_expr (errctx : Err.ctx) (e : A.expr) : unit =
   | A.EBlock (es, _) -> List.iter go es
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELetFn (_, _, _, body, _) -> go body
-  | A.ELetQ (_, rhs, body, _) -> go rhs; go body
+  | A.ELetQ (_, rhs, body, _) | A.ELetStar (_, rhs, body, _) -> go rhs; go body
   | A.EMatch (scrut, arms, _) ->
     go scrut;
     List.iter

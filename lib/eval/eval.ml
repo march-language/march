@@ -9435,7 +9435,7 @@ let span_of_expr (e : expr) : span =
   | EIf (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
-  | ELetQ (_, _, _, sp) -> sp
+  | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | EVar n -> n.span
@@ -9951,6 +9951,32 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | (VCon ("Err", _)) as err -> err
      | other ->
        eval_error "let? expected a Result value, got %s" (value_to_string other))
+
+  | ELetStar (p, result_expr, cont, _) ->
+    (* Dynamic counterpart of TIR lowering's static `M.flat_map(result_expr,
+       fn p -> cont end)` expansion (lib/tir/lower.ml): the interpreter has
+       no compile-time type info, so it dispatches on the RUNTIME value's
+       type instead, via [type_name_of_value] (the same primitive `hash`/
+       `to_json`'s dynamic dispatch above uses), then looks up `<Type>.
+       flat_map` through the ordinary qualified-name env lookup every
+       `Module.member` call already goes through. The continuation is
+       passed to it as a plain [VBuiltin] closure -- [apply] dispatches a
+       [VBuiltin] exactly like a March closure, so `flat_map`'s own March
+       body calling `f(x)` invokes this OCaml callback transparently. *)
+    let v = eval_expr env result_expr in
+    let flat_map_fn =
+      match type_name_of_value v with
+      | Some head_name -> lookup (head_name ^ ".flat_map") env
+      | None -> eval_error "let*: cannot determine the type of `%s`" (value_to_string v)
+    in
+    let k = VBuiltin ("$letstar_k", function
+        | [x] ->
+          (match match_pattern x p with
+           | Some bs -> eval_expr (bs @ env) cont
+           | None -> eval_error "let* pattern match failed (unreachable after typecheck)")
+        | args -> eval_error "let* continuation: expected 1 argument, got %d" (List.length args))
+    in
+    apply flat_map_fn [v; k]
 
   | EAssert (inner, sp) ->
     (* Compiler-assisted assertion rewriting:

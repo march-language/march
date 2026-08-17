@@ -701,10 +701,11 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
    call heads (`List.length(_)` → the [EVar] `"List.length"` that
    [Refine_check.qualified_name]/the measure-alias machinery keys on), and
    nothing else: no pipe desugaring, no multi-head-fn desugaring, no
-   conn-scope tracking, no sigil expansion, no ELetFn/ELetQ handling.
+   conn-scope tracking, no sigil expansion, no ELetFn/ELetQ/ELetStar handling.
    Constructs that a predicate should never plausibly contain (ELam, ELetFn,
-   ELetQ, ESend, ESpawn, EPipe, ESigil, EAssert, EDbg) are left untouched by
-   the catch-all rather than risked through unrelated desugaring paths. *)
+   ELetQ, ELetStar, ESend, ESpawn, EPipe, ESigil, EAssert, EDbg) are left
+   untouched by the catch-all rather than risked through unrelated
+   desugaring paths. *)
 let rec flatten_pred_quals (e : expr) : expr =
   let go = flatten_pred_quals in
   match e with
@@ -745,8 +746,8 @@ let rec flatten_pred_quals (e : expr) : expr =
   | ERecordUpdate (b, fs, sp) ->
     ERecordUpdate (go b, List.map (fun (n, e) -> (n, go e)) fs, sp)
   | ELit _ | EVar _ | EHole _ | EResultRef _ -> e
-  | ELam _ | ELetFn _ | ELetQ _ | ESend _ | ESpawn _ | EPipe _ | ESigil _
-  | EAssert _ | EDbg _ -> e
+  | ELam _ | ELetFn _ | ELetQ _ | ELetStar _ | ESend _ | ESpawn _ | EPipe _
+  | ESigil _ | EAssert _ | EDbg _ -> e
 
 (** Structural [ty] walk whose ONLY effect is calling [flatten_pred_quals] on
     every [TyRefine] predicate it finds — mirrors [Desugar.respan_ty]'s shape
@@ -970,6 +971,18 @@ let rec desugar_expr (e : expr) : expr =
     let cont' =
       with_conn_scope (pat_binds_conn p) (fun () -> desugar_expr cont) in
     ELetQ (p, result', cont', sp)
+
+  | ELetStar (p, result, cont, sp) ->
+    (* Same conn-scope treatment as ELetQ above -- desugar only, no
+       rewriting into a flat_map/lambda/match tree here.  ELetStar stays a
+       first-class AST node through typecheck (which resolves WHICH
+       `flat_map` applies, from the RHS's inferred type) and is only
+       expanded at TIR-lowering time (lib/tir/lower.ml), mirroring how
+       ELetQ's own match-based expansion happens at lowering, not here. *)
+    let result' = desugar_expr result in
+    let cont' =
+      with_conn_scope (pat_binds_conn p) (fun () -> desugar_expr cont) in
+    ELetStar (p, result', cont', sp)
 
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
@@ -1440,6 +1453,7 @@ and respan_expr (e : expr) : expr =
     ELetFn (respan_name n, List.map respan_param ps, Option.map respan_ty rt,
             respan_expr body, fresh_synthetic_span ())
   | ELetQ (p, e1, e2, _) -> ELetQ (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
+  | ELetStar (p, e1, e2, _) -> ELetStar (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
   | EAssert (e, _)       -> EAssert (respan_expr e, fresh_synthetic_span ())
   | ESigil (s, e, _)     -> ESigil (s, respan_expr e, fresh_synthetic_span ())
 
@@ -2988,6 +3002,8 @@ let make_qualifier (prefix : string) (own_names : string list) =
       ELetFn (nm, ps, ret, go bound' body, sp)
     | ELetQ (pat, result, cont, sp) ->
       ELetQ (pat, go bound result, go (add_pat_vars bound pat) cont, sp)
+    | ELetStar (pat, result, cont, sp) ->
+      ELetStar (pat, go bound result, go (add_pat_vars bound pat) cont, sp)
     | EMatch (scrut, branches, sp) ->
       let branches' = List.map (fun br ->
           let bound' = add_pat_vars bound br.branch_pat in
@@ -3167,6 +3183,7 @@ let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
     | ELet (b, sp)              -> ELet ({ b with bind_expr = rw b.bind_expr }, sp)
     | ELetFn (nm, ps, ret, body, sp) -> ELetFn (nm, ps, ret, rw body, sp)
     | ELetQ (pat, result, cont, sp)  -> ELetQ (pat, rw result, rw cont, sp)
+    | ELetStar (pat, result, cont, sp) -> ELetStar (pat, rw result, rw cont, sp)
     | EMatch (scrut, branches, sp) ->
       let branches' = List.map (fun br ->
           { br with branch_body  = rw br.branch_body

@@ -133,7 +133,7 @@ let rec free_names (bound : StrSet.t) (e : expr) : StrSet.t =
         (StrSet.add name.txt bound) params
     in
     free_names inner_bound body
-  | ELetQ (p, result, cont, _) ->
+  | ELetQ (p, result, cont, _) | ELetStar (p, result, cont, _) ->
     let pat_bound = free_pattern_names p in
     StrSet.union (go result) (free_names (StrSet.union pat_bound bound) cont)
   | EPipe (l, r, _) -> StrSet.union (go l) (go r)
