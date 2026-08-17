@@ -76,6 +76,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Two children of a compiled `one_for_all`/`rest_for_one` supervisor crashing for the
+  first time at the same moment on different scheduler threads could run two restart
+  strategies concurrently** against the same supervisor's child array. A first crash
+  claimed no marker (only repeat, backed-off crashes did), so both threads saw "no restart
+  pending" and both proceeded. A synchronous batch restart now claims an in-flight marker
+  in the same critical section that decides it is not skipping, and holds it until the
+  strategy has fully returned; a sibling that crashes during that window is absorbed into
+  the in-flight restart (widening its child-index range) instead of starting a competing
+  one. Interpreted programs were never affected.
+
 - Fixed an internal compiler error (`Invalid_argument("List.nth")`) on the most common
   project shape: a `MARCH_LIB_PATH` dependency (any file loaded via `use`/import from a
   separate `.march` file) that violates the `--cap-strict` ceiling but declares no `needs`
