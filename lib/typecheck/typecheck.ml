@@ -826,6 +826,32 @@ type env = {
       [needs IO.Console] for its *handlers* must not be falsely flagged just
       because the module-wide merge would attribute that cap to it too.
       Read via [fn_own_capability_closures]. *)
+  body_cap_closures : (string, string list) Hashtbl.t;
+  (** Per-function DIRECT BODY capability set: fully-qualified function name
+      -> the caps its own body reaches by calling BUILTINS directly, WITHOUT
+      signature caps and WITHOUT the transitive/module-wide merges the other
+      two tables carry. This is the seed the `--check`-side capability ceiling
+      ([check_stdlib_mediated_ceiling]) needs: a `Cap(X)` parameter is not a
+      body USE (it is handled by Check 1/4), so folding sig caps in here would
+      reintroduce the `fn main(cap : Cap(IO))` false positive that
+      specs/progress/2026-08-08-ceiling-signature-only-fixed.md closed on the
+      `--compile` side. Recorded at the BODY-scan call sites only (never the
+      sig_caps site), keyed exactly like [cap_closures]. *)
+  stdlib_fns : (string, unit) Hashtbl.t;
+  (** The set of fully-qualified function names whose declaration is
+      stdlib-spanned (via [span_is_stdlib]) — i.e. the TRANSPARENT set for the
+      ceiling: a stdlib wrapper's body caps roll up to the user module that
+      calls it, exactly as [March_tir.Cap_attrib]'s [~transparent] does on the
+      `--compile` side. Keyed like [cap_closures]. *)
+  ceiling_extra_roots : (string, unit) Hashtbl.t;
+  (** Function-name keys that are ALWAYS-reachable ceiling roots regardless of
+      whether the program has a `main` — mirroring the unconditional roots
+      [March_tir.Dce.root_names] keeps: module-level [let] bindings (lowered
+      into the always-run `__march_setup__`, so their side effects cannot be
+      skipped) and `_migrate_state` functions. Without seeding the ceiling's
+      reachability walk with these, a module-level `let` reaching a
+      stdlib-mediated capability would be pruned as "unreachable from main" and
+      the ceiling would miss it — a violation `--compile` still catches. *)
   fn_refs : (string, string list) Hashtbl.t;
   (** Per-function REFERENCE edges: fully-qualified function name ("Mod.fn",
       or the BARE name for a top-level function of the entry module — the same
@@ -945,6 +971,9 @@ let make_env errors type_map = {
   deterministic_mod = false;
   cap_closures = Hashtbl.create 64;
   own_cap_closures = Hashtbl.create 64;
+  body_cap_closures = Hashtbl.create 64;
+  stdlib_fns = Hashtbl.create 64;
+  ceiling_extra_roots = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
   fn_row_bodies = Hashtbl.create 64;
   fn_grant_points = Hashtbl.create 16;
@@ -1918,6 +1947,17 @@ let _t_pid    = t_pid
     Mirrors [Refine_check.stdlib_source_files], which exists for the same
     "whose declaration is this really?" question. *)
 let stdlib_source_files : string list ref = ref []
+
+(* When set, [check_module_core] runs the `--check`-side capability ceiling
+   ([check_stdlib_mediated_ceiling]): every user module's stdlib-mediated
+   capability use must be covered by its own [needs]. Off by default so the
+   interpreter/eval/LSP/test paths are unaffected unless they opt in; the
+   driver sets it on the `--check`/`--check-json` path (respecting
+   `--no-cap-strict`), giving those paths parity with `--compile`'s TIR-side
+   ceiling for the common stdlib-mediated route. Deliberately a strict SUBSET
+   of the `--compile` ceiling — it under-reports rather than risk breaking a
+   build `--compile` accepts. *)
+let cap_strict_ceiling : bool ref = ref false
 
 let span_is_stdlib (sp : Ast.span) : bool =
   List.mem sp.Ast.file !stdlib_source_files
@@ -9271,6 +9311,25 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let merged_own = March_caps.Cap_lattice.normalize (own_caps @ prior_own) in
     Hashtbl.replace env.own_cap_closures fn_qname merged_own
   in
+  (* Body-only capability recording for the `--check`-side ceiling. [caps] must
+     be the function's DIRECT body-builtin caps (never signature caps).
+     Accumulates across a function's multiple recording sites like
+     [record_fn_caps]. [sp] is the declaration's span: a stdlib-spanned
+     function is marked TRANSPARENT, which serves two roles — its caps roll up
+     to the user callers that reach them, AND it is excluded from the set of
+     functions the ceiling holds against a module's [needs]. The latter is why
+     the marking must be span-accurate down to individual PRELUDE functions
+     (stdlib code unwrapped into the entry module, so bare-named): mistaking a
+     prelude function for an entry-module one would attribute every capability
+     the prelude touches to the entry module. Called for EVERY function
+     (even cap-free ones) so transparency is marked regardless of body caps. *)
+  let record_body_caps (fn_qname : string) (sp : Ast.span) (caps : string list) =
+    (if caps <> [] then
+       let prior = Option.value ~default:[] (Hashtbl.find_opt env.body_cap_closures fn_qname) in
+       Hashtbl.replace env.body_cap_closures fn_qname
+         (March_caps.Cap_lattice.normalize (caps @ prior)));
+    if span_is_stdlib sp then Hashtbl.replace env.stdlib_fns fn_qname ()
+  in
   (* Reference edges for the per-function TRANSITIVE capability closure
      ([fn_transitive_capability_closures]). Purely additive bookkeeping — no
      Check 1/1b/1c/2/3/4/5/6 diagnostic reads [env.fn_refs].
@@ -9367,9 +9426,11 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   (* Record one non-[DFn] expression owner: its own builtin-implied caps and
      its reference edges, with [bound] seeding [free_vars_expr] exactly the way
      [record_fn_refs] does for a clause's parameters. *)
-  let record_expr_owner (qname : string) (bound : string list)
+  let record_expr_owner ?(sp = Ast.dummy_span) (qname : string) (bound : string list)
       (es : Ast.expr list) =
-    record_fn_caps qname (List.concat_map builtin_caps_of_expr es);
+    let body_caps = List.concat_map builtin_caps_of_expr es in
+    record_fn_caps qname body_caps;
+    record_body_caps qname sp body_caps;
     record_fn_refs qname (List.map (fun e -> (bound, e)) es)
   in
   (* An [impl]'s target type, keyed the way lib/tir/lower.ml keys it when it
@@ -9434,9 +9495,19 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          way a [DFn] of that name would be keyed, so a reference to it
          resolves.  A destructuring binding attributes the body to EVERY name
          it binds — any of them can be the route a caller takes. *)
-      | Ast.DLet (_, b, _) ->
+      | Ast.DLet (_, b, dsp) ->
         List.iter
-          (fun n -> record_expr_owner (cap_qname n) [] [ b.Ast.bind_expr ])
+          (fun n ->
+             let q = cap_qname n in
+             (* Only the ENTRY module's top-level [let]s are always-run: lower.ml
+                splices those into `main`'s body, so DCE keeps them
+                unconditionally. A NESTED module's [let] lowers to an ordinary
+                zero-arg function DCE prunes when unreachable — rooting it here
+                would over-report a dead nested [let] `--compile` accepts. Gate
+                on the empty prefix, which is exactly the entry module. *)
+             if cap_qname_prefix = "" then
+               Hashtbl.replace env.ceiling_extra_roots q ();
+             record_expr_owner ~sp:dsp q [] [ b.Ast.bind_expr ])
           (free_vars_pattern b.Ast.bind_pat)
       (* An interface DEFAULT body is keyed by a mangled name for exactly the
          reason an impl method is, and the bare name is only a dispatch edge.
@@ -9460,7 +9531,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          reads [fn_own_capability_closures] unfiltered — no Check-4
          [mod_caps] filter stands between it and a deploy capability gate.
          Pinned by [test_interface_default_does_not_capture_a_same_named_fn]. *)
-      | Ast.DInterface (idef, _) ->
+      | Ast.DInterface (idef, idsp) ->
         List.iter (fun (m : Ast.method_decl) ->
             match m.Ast.md_default with
             | None -> ()
@@ -9469,7 +9540,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                 cap_qname
                   (idef.Ast.iface_name.Ast.txt ^ "$default." ^ m.Ast.md_name.Ast.txt)
               in
-              record_expr_owner mangled [] [ e ];
+              record_expr_owner ~sp:idsp mangled [] [ e ];
               if not (List.mem m.Ast.md_name.Ast.txt module_fn_names) then
                 record_dispatch_edge (cap_qname m.Ast.md_name.Ast.txt) mangled)
           idef.Ast.iface_methods
@@ -9488,7 +9559,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          target is chosen by type.  It is emitted only when this module
          declares no [DFn] of that name, so the dispatch node can never absorb
          a plain function's identity. *)
-      | Ast.DImpl (idef, _) ->
+      | Ast.DImpl (idef, idsp) ->
         let ty_key = impl_ty_key idef.Ast.impl_ty in
         List.iter (fun ((mn : Ast.name), (def : Ast.fn_def)) ->
             let mangled =
@@ -9496,7 +9567,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                 (idef.Ast.impl_iface.Ast.txt ^ "$" ^ ty_key ^ "." ^ mn.Ast.txt)
             in
             List.iter (fun (c : Ast.fn_clause) ->
-                record_expr_owner mangled (fn_clause_param_names c)
+                record_expr_owner ~sp:idsp mangled (fn_clause_param_names c)
                   (c.Ast.fc_body :: Option.to_list c.Ast.fc_guard
                    @ default_param_exprs c))
               def.Ast.fn_clauses;
@@ -9578,6 +9649,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               cap_of_builtin_call call_name
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
           record_fn_caps fn_qname body_caps;
+          record_body_caps fn_qname sp body_caps;
           record_fn_refs fn_qname
             [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
                h.Ast.ah_body) ]
@@ -9778,7 +9850,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
 
   let body_cap_uses : (string * Ast.span) list =
     let all = List.concat_map (function
-      | Ast.DFn (def, _) ->
+      | Ast.DFn (def, dfn_sp) ->
         let per_clause = List.map (fun clause ->
           List.filter_map (fun (call_name, call_span) ->
             match cap_of_builtin_call call_name with
@@ -9812,12 +9884,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             def.fn_clauses
         in
         record_fn_caps qname own_caps;
+        record_body_caps qname dfn_sp own_caps;
         record_fn_refs qname own_refs;
         (match arity_mangled_base def.fn_name.txt with
          | None -> ()
          | Some base ->
            let base_qname = cap_qname base in
            record_fn_caps base_qname own_caps;
+           record_body_caps base_qname dfn_sp own_caps;
            record_fn_refs base_qname own_refs);
         List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
@@ -13869,6 +13943,192 @@ let dump_cap_rows (env : env) : unit =
     Printf.eprintf "cap-row-summary total=%d unknown=%d\n" (List.length rows)
       unknown_count
 
+(* The `--check`-side capability ceiling.  Closes the one route the four
+   source-level checks miss: a stdlib-MEDIATED call (`File.read` rather than
+   the builtin `file_read`), which Check 1b's direct-builtin scan does not see
+   and Check 4's `use`-walk does not either (stdlib is ambient).  `--compile`
+   already catches it via [March_tir.Cap_attrib] over emitted TIR; this brings
+   the same rule to `--check`/`--check-json` without lowering.
+
+   Sound-by-construction as a strict SUBSET of the `--compile` ceiling: it
+   attributes a capability to a user module ONLY when a clear forward chain
+   `M.f -> stdlib... -> builtin` exists, mirroring Cap_attrib's roll-up of
+   transparent (stdlib) callees to the nearest user caller.  Anything it cannot
+   see this way it leaves alone — under-reporting, never breaking a build
+   `--compile` accepts.  It deliberately does NOT reproduce Cap_attrib's
+   fail-closed [Unattributed] arm (indirect-call caps), which over-reports on
+   closure-heavy code; `--compile` remains the complete check. *)
+let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
+    ~(entry_name : string) ~(entry_needs : string list)
+    ~(module_spans : (string * Ast.span) list) : unit =
+  (* [IO.Foreign]/[.Blocking] are emitted from the PRESENCE of an extern
+     block, not an attributed call site — Check 5 already errors on an
+     undeclared extern cap, and the `--compile` ceiling excludes them too. *)
+  let is_foreign_cap c = c = "IO.Foreign" || c = "IO.Foreign.Blocking" in
+  let is_stdlib q = Hashtbl.mem env.stdlib_fns q in
+  let body_caps q = Option.value ~default:[] (Hashtbl.find_opt env.body_cap_closures q) in
+  let refs q = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs q) in
+  (* Caps reachable from a STDLIB function through stdlib-only edges — its own
+     body builtins plus those of the stdlib helpers it calls.  Stops at the
+     first non-stdlib name (a user callee owns its own caps; an indirect
+     callback is not a static edge).  Memoized; cycle-guarded. *)
+  let reach_memo : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let rec stdlib_reach q =
+    match Hashtbl.find_opt reach_memo q with
+    | Some r -> r
+    | None ->
+      if Hashtbl.mem in_progress q then []  (* cycle: contribute nothing yet *)
+      else begin
+        Hashtbl.replace in_progress q ();
+        let acc =
+          List.fold_left
+            (fun acc r -> if is_stdlib r then stdlib_reach r @ acc else acc)
+            (body_caps q) (refs q)
+        in
+        Hashtbl.remove in_progress q;
+        let r = March_caps.Cap_lattice.normalize acc in
+        Hashtbl.replace reach_memo q r;
+        r
+      end
+  in
+  (* Owner module of a qualified function name: its last-dot prefix, or the
+     entry module for a bare name (the entry module's own functions are
+     unprefixed, matching TIR's entry unwrap). *)
+  let owner_of q =
+    (* Mirror [Cap_attrib.owner_of] exactly, including the interface-impl case:
+       an impl/interface-default method keys as `[Prefix.]Iface$Ty.method`, and
+       the naive last-dot prefix would yield the SYNTHETIC module `Iface$Ty` —
+       which no `needs` line can declare, so a correctly-declared program would
+       get a spurious violation (masked today only by a downstream dummy-span
+       filter — do not rely on that). The real owner is what precedes the
+       mangled segment: the declaring module, or the entry module when nothing
+       does. A user qname never contains `$`. *)
+    if String.contains q '$' then
+      let n =
+        match String.index_opt q '$' with
+        | Some j -> (
+          match String.rindex_from_opt q j '.' with
+          | Some i -> String.sub q 0 i
+          | None -> "")
+        | None -> q
+      in
+      if n = "" then entry_name else n
+    else
+      match String.rindex_opt q '.' with
+      | Some i -> String.sub q 0 i
+      | None -> entry_name
+  in
+  let declared m =
+    if m = entry_name then entry_needs
+    else Option.value ~default:[] (List.assoc_opt m env.module_caps)
+  in
+  let covered m c = List.exists (fun need -> cap_subsumes need c) (declared m) in
+  let span_of m =
+    Option.value ~default:Ast.dummy_span (List.assoc_opt m module_spans)
+  in
+  (* One (module, cap) per report.  A user function's OWN direct builtins are
+     deliberately excluded (Check 1b already reports those); only the
+     stdlib-mediated additions are attributed here, so the two checks never
+     double-report the same cap. *)
+  let reported : (string * string, unit) Hashtbl.t = Hashtbl.create 16 in
+  (* Match `--compile`'s reachability exactly, or this over-reports on dead
+     code.  [March_tir.Dce] roots reachability at `main` WHEN A `main` EXISTS
+     (a function `main` never calls is genuinely dead and its stdlib-mediated
+     use is pruned before [Cap_attrib] ever sees it); only a module WITHOUT a
+     `main` falls back to treating every user function as a root (a library
+     checked on its own — its public functions are its callable surface).  We
+     mirror both: reachable-from-`main` when present, else all user functions.
+     Getting this wrong is the difference between a strict subset and a false
+     positive on a half-wired helper. *)
+  let has_main =
+    Hashtbl.fold
+      (fun k _ found ->
+         found || k = "main"
+         || (String.length k > 5 && String.sub k (String.length k - 5) 5 = ".main"))
+      env.fn_refs false
+  in
+  let reachable : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  if has_main then begin
+    let q = Queue.create () in
+    let seed k =
+      if not (Hashtbl.mem reachable k) then
+        (Hashtbl.replace reachable k (); Queue.push k q)
+    in
+    (* Seed with the SAME unconditional roots [March_tir.Dce.root_names] keeps
+       alongside `main`: the entry itself, module-level `let`s and
+       `_migrate_state` functions (always-run setup effects). Missing any of
+       these would silently drop a violation `--compile` still reports. *)
+    Hashtbl.iter
+      (fun k _ ->
+         if k = "main"
+            || (String.length k > 5 && String.sub k (String.length k - 5) 5 = ".main")
+            || is_migrate_fn_name k
+            || Hashtbl.mem env.ceiling_extra_roots k
+         then seed k)
+      env.fn_refs;
+    while not (Queue.is_empty q) do
+      let n = Queue.pop q in
+      List.iter
+        (fun r ->
+           if not (Hashtbl.mem reachable r) then begin
+             Hashtbl.replace reachable r ();
+             Queue.push r q
+           end)
+        (refs n)
+    done
+  end;
+  let is_reachable k = (not has_main) || Hashtbl.mem reachable k in
+  let user_fns =
+    Hashtbl.fold
+      (fun k _ acc -> if is_stdlib k || not (is_reachable k) then acc else k :: acc)
+      env.fn_refs []
+  in
+  List.iter
+    (fun f ->
+       let owner = owner_of f in
+       let attributed =
+         List.fold_left
+           (fun acc r -> if is_stdlib r then stdlib_reach r @ acc else acc)
+           [] (refs f)
+       in
+       List.iter
+         (fun c ->
+            if (not (is_foreign_cap c)) && not (covered owner c)
+               && not (Hashtbl.mem reported (owner, c))
+            then begin
+              Hashtbl.replace reported (owner, c) ();
+              let sp = span_of owner in
+              let msg =
+                Printf.sprintf
+                  "module `%s` uses `%s` but does not declare `needs %s`.\n\
+                   help: add `needs %s` to the module body."
+                  owner c c c
+              in
+              (* Only attach the machine-applicable fix when the owner's span is
+                 real and in this file. A module absent from [module_spans] (a
+                 cross-file dependency) falls back to [dummy_span]
+                 (start_line = 0); inserting `needs` at line 0 of the ENTRY file
+                 would write it into the wrong module — see the latent-trap note
+                 in specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md.
+                 Under-deliver the fix there rather than mis-place it. *)
+              if sp == Ast.dummy_span || sp.Ast.start_line <= 0 then
+                Err.error errors ~span:sp msg
+              else
+                (* Indent the inserted line to the owner's own declaration
+                   column (the span points at its first `needs`/header), so a
+                   nested module's fix lands at the right depth rather than a
+                   hardcoded two spaces. *)
+                let indent = String.make (max 0 (sp.Ast.start_col)) ' ' in
+                Err.error_with_fix errors ~span:sp
+                  ~code:("cap_ceiling:" ^ c)
+                  ~fix:(Err.FInsert { after_line = sp.Ast.start_line;
+                                      text = indent ^ "needs " ^ c })
+                  msg
+            end)
+         (March_caps.Cap_lattice.normalize attributed))
+    user_fns
+
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   let type_map = match seed_env with
@@ -14180,6 +14440,39 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
   dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
+  (* The `--check`-side capability ceiling (opt-in via [cap_strict_ceiling],
+     set by the driver on the `--check`/`--check-json` path). Build a
+     module -> diagnostic-span map: each module's first [DNeeds] span, or its
+     header span if it declares none, so a violation and its `needs` fix land
+     where a user would add the line. The entry module is keyed by its own
+     name to match [owner_of]'s resolution of bare (entry-unwrapped) names. *)
+  if !cap_strict_ceiling then begin
+    let module_spans = ref [] in
+    let first_needs_span decls hdr =
+      let rec go = function
+        | Ast.DNeeds (_, sp) :: _ -> sp
+        | _ :: rest -> go rest
+        | [] -> hdr
+      in
+      go decls
+    in
+    let rec collect prefix decls hdr =
+      let name = if prefix = "" then m.Ast.mod_name.Ast.txt else prefix in
+      module_spans := (name, first_needs_span decls hdr) :: !module_spans;
+      List.iter
+        (function
+          | Ast.DMod (n, _, inner, msp) ->
+            let p = if prefix = "" then n.Ast.txt else prefix ^ "." ^ n.Ast.txt in
+            collect p inner msp
+          | _ -> ())
+        decls
+    in
+    collect "" m.Ast.mod_decls m.Ast.mod_name.Ast.span;
+    check_stdlib_mediated_ceiling final_env errors
+      ~entry_name:m.Ast.mod_name.Ast.txt
+      ~entry_needs:final_env.mod_needs
+      ~module_spans:!module_spans
+  end;
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;
@@ -14470,3 +14763,66 @@ let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   unify env' ~span:sp ~reason:(Some (RLetBind sp)) t_ok pat_ty;
   ignore (leave_level env');
   bind_vars bindings env
+
+(** REPL counterpart of [ELetStar]'s [infer_expr] arm: bind [p] to the payload
+    of [e]'s monadic value so the binding persists across prompts.
+
+    Shares [ELetStar]'s resolution EXACTLY -- current scope first, then the
+    stdlib module loader -- so `let* x = e` at the prompt can never resolve a
+    different `flat_map` than the same line inside a function would.  There is
+    no continuation at a prompt, so unlike [ELetStar] this only needs the
+    payload type [A] from `flat_map`'s `M(a) -> (a -> M(b)) -> M(b)` shape;
+    the result type is discarded.  See [lib/repl/repl.ml]'s [ReplLetStar] arm
+    for the matching runtime semantics (bind the FIRST value yielded). *)
+let check_letstar_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
+  let env' = enter_level env in
+  let result_ty = infer_expr env' e in
+  let sp = span_of_expr e in
+  let bindings_opt =
+    match repr result_ty with
+    | TCon (head_name, _) ->
+      let flat_map_name = head_name ^ ".flat_map" in
+      let env'', scheme_opt =
+        match lookup_var flat_map_name env' with
+        | Some sc -> env', Some sc
+        | None    -> resolve_qualified_var flat_map_name env'
+      in
+      (match scheme_opt with
+       | None ->
+         Err.error env''.errors ~span:sp
+           (Printf.sprintf
+              "`let*` needs `%s`, but it doesn't exist.\n\
+               Define `flat_map(x : %s(a), f : a -> %s(b)) : %s(b)` in a \
+               module named `%s` to make `let*` work with `%s`."
+              flat_map_name head_name head_name head_name head_name head_name);
+         None
+       | Some scheme ->
+         (match repr (instantiate env''.level env'' scheme) with
+          | TArrow (m_arg, TArrow (TArrow (a_ty, _), _)) ->
+            unify env'' ~span:sp
+              ~reason:(Some (RBuiltin
+                (Printf.sprintf
+                   "The right-hand side of `let*` must match `%s`'s own type."
+                   flat_map_name)))
+              result_ty m_arg;
+            let bindings, pat_ty = infer_pattern ~expected:a_ty env'' p in
+            unify env'' ~span:sp ~reason:(Some (RLetBind sp)) a_ty pat_ty;
+            Some bindings
+          | _ ->
+            Err.error env''.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` doesn't have the shape `let*` needs: \
+                  `%s(a) -> (a -> %s(b)) -> %s(b)`."
+                 flat_map_name head_name head_name head_name);
+            None))
+    | _ ->
+      Err.error env'.errors ~span:sp
+        "`let*`'s right-hand side must have a concrete type (e.g. `Option(a)`, \
+         `Result(a, e)`) so `let*` can find its `flat_map` — its type could \
+         not be determined here.";
+      None
+  in
+  ignore (leave_level env');
+  match bindings_opt with
+  | Some bindings -> bind_vars bindings env
+  | None -> env

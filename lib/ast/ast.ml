@@ -407,6 +407,11 @@ type repl_input =
   | ReplDecl of decl
   | ReplExpr of expr
   | ReplLetQ of pattern * expr
+  | ReplLetStar of pattern * expr
+      (** [let* p = e] at the prompt.  Unlike [ReplLetQ], which is hardwired
+          to [Result], this binds through the value's own [flat_map] -- see
+          [specs/lang/let-star-generalized-bind.md] and the REPL semantics
+          note in [lib/repl/repl.ml]. *)
   | ReplEOF
 
 (** Literal formatter matching ppx_deriving.show output — used by tir.ml's [@@deriving show]. *)

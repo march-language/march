@@ -21,34 +21,34 @@
 
 mod TestParseErrors do
 
-  pfn key() : Parse.Parser(String) do
-    Parse.label("a key",
-      Parse.alt(Parse.lit("name"),
-        Parse.alt(Parse.lit("port"), Parse.lit("host"))))
+  pfn key() : Parser.Parser(String) do
+    Parser.label("a key",
+      Parser.alt(Parser.lit("name"),
+        Parser.alt(Parser.lit("port"), Parser.lit("host"))))
   end
 
-  pfn value() : Parse.Parser(String) do
-    Parse.label("a value", Parse.alt(Parse.lit("42"), Parse.lit("\"x\"")))
+  pfn value() : Parser.Parser(String) do
+    Parser.label("a value", Parser.alt(Parser.lit("42"), Parser.lit("\"x\"")))
   end
 
   -- Committing after the key is what makes a malformed entry report itself
   -- rather than being silently skipped as "not an entry".
-  pfn entry() : Parse.Parser((String, String)) do
-    Parse.ctx("entry",
-      Parse.and_then(key(),
-        Parse.commit(
-          Parse.skip_first(Parse.lit("="),
-            Parse.skip_then(value(), Parse.lit(";"))))))
+  pfn entry() : Parser.Parser((String, String)) do
+    Parser.ctx("entry",
+      Parser.and_then(key(),
+        Parser.commit(
+          Parser.skip_first(Parser.lit("="),
+            Parser.skip_then(value(), Parser.lit(";"))))))
   end
 
   -- Assert the rendered diagnostic for an input that must fail.
   -- Panics with BOTH strings on mismatch: `assert (a == b)` reports only
   -- "condition was false", which is useless when the whole point is the text.
-  pfn expect_error(p : Parse.Parser(a), input : String, want : String) : Unit do
-    match Parse.run(p, input) do
+  pfn expect_error(p : Parser.Parser(a), input : String, want : String) : Unit do
+    match Parser.run(p, input) do
       Ok(_) -> panic("expected a parse error for input " ++ input)
       Err(e) ->
-        let got = Parse.render(input, e)
+        let got = Parser.render(input, e)
         if got == want do ()
         else
           panic("wrong diagnostic for input " ++ input
@@ -90,7 +90,7 @@ describe "Parse error messages" do
   describe "end of input" do
 
     test "trailing garbage after a complete parse is reported" do
-      let config = Parse.skip_then(Parse.many(entry()), Parse.eof())
+      let config = Parser.skip_then(Parser.many(entry()), Parser.eof())
       expect_error(config, "port=42;!!!", "1:9: I was expecting end of input")
     end
 
@@ -99,8 +99,8 @@ describe "Parse error messages" do
   describe "recovery collects several errors from one pass" do
 
     test "each bad entry is reported, and the good ones still parse" do
-      let items = Parse.many(Parse.recover(entry(), Parse.lit(";")))
-      match Parse.run(items, "port=42;bad=42;host=\"x\";") do
+      let items = Parser.many(Parser.recover(entry(), Parser.lit(";")))
+      match Parser.run(items, "port=42;bad=42;host=\"x\";") do
         Ok(xs) ->
           assert (List.length(xs) == 3)
           assert (List.length(List.filter(xs, fn r -> Result.is_err(r))) == 1)
