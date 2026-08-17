@@ -98,3 +98,57 @@ in the same critical section as the skip decision, so the claim and the
 "am I skipping?" test are atomic with respect to each other, and the marker
 is held across the entire strategy call. That is the identical invariant the
 delayed path already relies on.
+
+## Behavioural change: a repeat crash absorbed synchronously loses its backoff delay
+
+One real pacing change falls out of the fix and is worth stating explicitly,
+since it is not a bug but is a departure from pre-fix behaviour. Before this
+fix, a REPEAT (`streak > 1`) sibling crash landing while a synchronous batch
+restart was in flight took the `else if (is_batch && streak > 1)` branch,
+claimed `delayed_batch_pending`, and was picked up later by
+`delayed_restart_thread` — which runs after `march_restart_delay_ms`'s
+exponential backoff has parked the thread. After this fix, the same repeat
+crash instead observes `batch_restart_in_flight` already held, is deflected
+by `skip_due_to_pending`, and gets absorbed by the release-path loop
+described above — which re-runs the strategy immediately, with **no park
+and no backoff delay**, as soon as the in-flight pass returns.
+
+This is bounded by the same `march_restart_budget_ok` check that bounds the
+delayed absorb loop, and it mirrors a choice `delayed_restart_thread`
+already makes for its own absorbed siblings (that loop doesn't re-park
+between passes either). But there the crash reached the loop only after
+at least one backoff park had already happened upstream; here a repeat
+crasher can be re-run with zero delay if it lands inside the synchronous
+window. In a genuine crash storm this makes the synchronous path slightly
+more aggressive about immediately re-trying than the delayed path was for
+the same child, right up until the restart-budget bound kicks in and kills
+the supervisor. Flagged by Task 3's reviewer; not fixed, because bounding
+it further would mean re-deriving backoff timing inside a section that
+must not block, which is out of scope for this race fix.
+
+## Disposition of the two remaining review minors
+
+Two smaller items surfaced during Task 3's review and were deferred rather
+than fixed. Task 6's close-out re-examined both to decide, per item, whether
+they need a new todo or are adequately covered already:
+
+- **A `longjmp` escaping the strategy call would skip the marker release,
+  wedging that supervisor into skip-forever.** No new todo: this is not a
+  gap specific to `batch_restart_in_flight` but the general, already-tracked
+  hazard of a crash-trap `longjmp` unwinding past code that has not yet run
+  its cleanup — the exact defect shape closed for the RC field by
+  `specs/progress/2026-08-14-crash-trap-longjmp-heap-corruption.md`,
+  `specs/progress/2026-08-14-actor-dispatch-rc-clobber-uaf.md`, and (for the
+  crash trap's own RC skip) commit `acfa832c`
+  ("restore the actor RC the crash trap's longjmp skipped"). The delayed
+  path's `delayed_batch_pending` clear has carried the identical exposure
+  since it was written, so this fix introduces no new risk — it's covered by
+  the standing longjmp/crash-trap audit line of work, not a fresh gap.
+- **The no-drop case clears the marker unconditionally, even on a pass that
+  killed the supervisor** — a small asymmetry with the "leave it set on a
+  dead supervisor" rule two lines above. No new todo: Task 3's report argued
+  this matches pre-fix behaviour (a dead supervisor never re-enters
+  `march_supervisor_notify`, so a marker left set or cleared on it is
+  unobservable either way), and the reviewer accepted that argument. Recorded
+  here as the closing word rather than left as a dangling "accepted" in the
+  ledger.
