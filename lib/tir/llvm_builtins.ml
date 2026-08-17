@@ -869,7 +869,7 @@ let builtins : builtin list = [
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)" };
   { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx)" };
+    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type)" };
   { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
