@@ -13996,9 +13996,28 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
      entry module for a bare name (the entry module's own functions are
      unprefixed, matching TIR's entry unwrap). *)
   let owner_of q =
-    match String.rindex_opt q '.' with
-    | Some i -> String.sub q 0 i
-    | None -> entry_name
+    (* Mirror [Cap_attrib.owner_of] exactly, including the interface-impl case:
+       an impl/interface-default method keys as `[Prefix.]Iface$Ty.method`, and
+       the naive last-dot prefix would yield the SYNTHETIC module `Iface$Ty` —
+       which no `needs` line can declare, so a correctly-declared program would
+       get a spurious violation (masked today only by a downstream dummy-span
+       filter — do not rely on that). The real owner is what precedes the
+       mangled segment: the declaring module, or the entry module when nothing
+       does. A user qname never contains `$`. *)
+    if String.contains q '$' then
+      let n =
+        match String.index_opt q '$' with
+        | Some j -> (
+          match String.rindex_from_opt q j '.' with
+          | Some i -> String.sub q 0 i
+          | None -> "")
+        | None -> q
+      in
+      if n = "" then entry_name else n
+    else
+      match String.rindex_opt q '.' with
+      | Some i -> String.sub q 0 i
+      | None -> entry_name
   in
   let declared m =
     if m = entry_name then entry_needs

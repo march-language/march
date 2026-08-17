@@ -47,6 +47,31 @@ direction, and closing them risks the over-report the design forbids): a
 `let _ = File.read(...)` discarded binding, and an interface-`impl` method
 body, are not attributed under `--check`. `--compile` still catches both.
 
+**Four rounds of adversarial review shaped the reachability logic.** Each found
+a real divergence from `--compile`, in alternating directions — worth recording
+because the pattern is the lesson: mirroring another pass's semantics is easy to
+get *approximately* right and hard to get exactly right.
+
+1. Over-report: the first cut held EVERY function against its module's `needs`,
+   but `--compile`'s ceiling runs post-DCE, and `March_tir.Dce` roots at `main`.
+   A dead half-wired helper's stdlib-mediated use broke a build `--compile`
+   accepts. Fixed by mirroring DCE reachability (accept/t181).
+2. Under-report: seeding only `main` missed DCE's UNCONDITIONAL roots — an
+   entry-module top-level `let` is spliced into `main` by `lower.ml`, so its
+   always-run effect is never dead. Fixed by seeding those too (reject/t182).
+3. Over-report: that fix over-corrected, rooting EVERY module-level `let`. Only
+   the ENTRY module's are always-run; a nested module's `let` is an ordinary
+   DCE-prunable function. Fixed by gating on the entry prefix (accept/t183).
+4. Latent fragility: `owner_of` used a naive last-dot prefix, so an impl method
+   (`[Prefix.]Iface$Ty.method`) resolved to the SYNTHETIC module `Iface$Ty`,
+   which no `needs` can declare — emitting a spurious violation suppressed only
+   by a downstream dummy-span filter. Now mirrors `Cap_attrib.owner_of`'s
+   mangled-name handling directly, so it is correct on its own rather than
+   filtered.
+
+Final review verified the subset property holds across ~100 programs: no input
+found where `--check` reports a capability `--compile` accepts.
+
 **Known follow-ups (not blocking):** the check runs on the primary
 `bin/main.exe --check`/`--check-json` path; the separate `march check`
 (`run_check_cmd`) and LSP typecheck entry points do not yet enable
