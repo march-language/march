@@ -94,3 +94,57 @@ detach-under-lock while this half cannot: detach `cleanup_head` under
 `g_tbl_mu` (mirroring `monitors = meta->monitor_head; meta->monitor_head = NULL;`
 at `:3674`-`:3675`), unlock, and only then walk the detached list and invoke
 each closure.
+
+## Resolved 2026-08-16
+
+Both halves of this todo are now closed: the `monitor_head` half by #284
+(2026-08-15), and the `cleanup_head` half here.
+
+The fix has two sides, not one, because the original suggested-fix text
+(above) assumed `march_on_cleanup`/`march_register_resource`'s prepend onto
+`meta->cleanup_head` already ran under `g_tbl_mu` — it did not. Verified
+directly: `march_register_resource` (`runtime/march_runtime.c`, formerly
+~6346-6358) did the two-line prepend
+
+    node->next = meta->cleanup_head;
+    meta->cleanup_head = node;
+
+with no lock held at all. Locking only the `do_actor_death` side (as the
+monitor half did) would have been necessary but not sufficient: with the
+prepend still unlocked, a concurrent `march_register_resource` could still
+race the detach in `do_actor_death` — losing the node it just linked, or
+linking onto a head `do_actor_death` was concurrently nulling out.
+
+The landed fix locks both ends:
+
+1. `do_actor_death` detaches `cleanup_head` under `g_tbl_mu`, in the same
+   critical section as the existing `monitor_head` detach, and walks the
+   detached local (`cleanups`) after unlocking. The closures themselves
+   still run with no lock held — they are arbitrary March code via
+   `fn_ptr(clo, unit_arg)` and can re-enter the runtime and re-acquire
+   `g_tbl_mu`, which is exactly why the list is detached-then-walked rather
+   than walked-and-freed while locked.
+2. `march_register_resource` now takes `g_tbl_mu` around its two-line
+   prepend, matching the discipline `march_monitor`/`march_demonitor`/
+   `march_unlink` already use for `monitor_head`.
+
+Why the distinction (detach-under-lock, not hold-lock-across-closures) is
+load-bearing: if the lock were instead held across the `fn_ptr` call, any
+cleanup closure that touches an actor API (spawn, monitor, kill, another
+`march_register_resource`, ...) would re-acquire the same non-recursive
+`g_tbl_mu` on the same thread and self-deadlock. Detaching under the lock
+and walking after unlocking gets the same memory-safety guarantee (the list
+a thread walks is one nothing else can still reach) without that hazard.
+
+Lock-ordering check for the newly-locked `march_register_resource` path:
+it calls `find_meta` (lock-free bucket walk, no locking at all) and
+`march_incrc` (a relaxed `atomic_fetch_add` on the object header, no
+destructor path — only `march_decrc`, which is not called here, can free).
+Neither can re-enter and re-acquire `g_tbl_mu`, so no new lock-ordering
+hazard is introduced.
+
+No new test: per the 2026-08-16 ruling, this race cannot be forced
+deterministically across two OS threads, so a fixture here would pass
+identically before and after the fix. The evidence is the structural
+argument above plus the existing suites staying green (`run_stdlib`,
+`run_codegen`, and `dune build @test/runtest` all clean post-fix).

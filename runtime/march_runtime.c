@@ -3642,6 +3642,7 @@ static void deliver_monitor_down(void *watcher, int64_t mon_ref, void *target,
 static void do_actor_death(void *actor, march_death_reason reason,
                            const char *message, size_t message_len) {
     march_monitor_node *monitors = NULL;
+    march_cleanup_node *cleanups = NULL;
 
     /* Claim terminal state and detach the monitor list atomically with
      * demonitor/monitor registration. Cleanup may invoke arbitrary March code,
@@ -3673,16 +3674,29 @@ static void do_actor_death(void *actor, march_death_reason reason,
         }
         monitors = meta->monitor_head;
         meta->monitor_head = NULL;
+        /* Detach the cleanup list under the SAME lock, for the same reason
+         * the monitor list is detached here: march_register_resource
+         * prepends to meta->cleanup_head under g_tbl_mu (see its own
+         * comment), so an unlocked walk-and-free here can race a concurrent
+         * prepend and free a node the other thread just linked, or drop a
+         * node the other thread is still linking onto what it thinks is the
+         * live head. The closures themselves must NOT run under the lock —
+         * they are arbitrary March code and can re-enter the runtime and
+         * re-acquire g_tbl_mu — so this only detaches the head; the walk
+         * below runs after unlocking, on a list nothing else can still
+         * reach. */
+        cleanups = meta->cleanup_head;
+        meta->cleanup_head = NULL;
     }
     pthread_mutex_unlock(&g_tbl_mu);
 
-    /* Run cleanup callbacks in reverse acquisition order (cleanup_head is
+    /* Run cleanup callbacks in reverse acquisition order (cleanup_head was
      * most recently registered → already LIFO order). */
-    if (meta && meta->cleanup_head) {
+    if (cleanups) {
         /* The cleanup function is a March closure: fn(_ : Unit) : Unit.
          * Call it via the closure dispatch convention:
          *   closure[16] = function pointer, called as fn(closure, unit_arg) */
-        march_cleanup_node *node = meta->cleanup_head;
+        march_cleanup_node *node = cleanups;
         while (node) {
             march_cleanup_node *next = node->next;
             void *clo = node->cleanup_fn;
@@ -3700,7 +3714,6 @@ static void do_actor_death(void *actor, march_death_reason reason,
             free(node);
             node = next;
         }
-        meta->cleanup_head = NULL;
     }
 
     /* Retire this actor's registered names BEFORE any Down notification
@@ -6342,7 +6355,17 @@ void march_run_until_idle(void) {
 
 /* register_resource: register a cleanup callback for an actor.
  * cleanup is a March closure of type Unit -> Unit.
- * Callbacks run in reverse acquisition order when kill() is called. */
+ * Callbacks run in reverse acquisition order when kill() is called.
+ *
+ * The prepend below takes g_tbl_mu, matching march_monitor/march_demonitor/
+ * march_unlink's discipline for monitor_head: do_actor_death detaches
+ * meta->cleanup_head under the same lock before walking it (see that
+ * function's comment), so an unlocked prepend here could race the detach —
+ * losing this node entirely, or linking it onto a head do_actor_death is
+ * concurrently nulling out from under us. find_meta above is lock-free and
+ * march_incrc is a relaxed atomic RMW on the object header with no
+ * destructor path, so neither can re-enter and re-acquire g_tbl_mu; only
+ * the two-line link itself needs to be inside the critical section. */
 void march_register_resource(void *pid, void *name, void *cleanup) {
     (void)name;  /* Name is for documentation only */
     if (!IS_HEAP_PTR(pid)) return;
@@ -6352,8 +6375,10 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
     if (!node) return;
     node->cleanup_fn = cleanup;
     /* Prepend: most recently registered is at head → LIFO on kill */
+    pthread_mutex_lock(&g_tbl_mu);
     node->next = meta->cleanup_head;
     meta->cleanup_head = node;
+    pthread_mutex_unlock(&g_tbl_mu);
     march_incrc(cleanup);  /* Keep closure alive */
 }
 
