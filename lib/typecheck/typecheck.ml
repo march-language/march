@@ -9499,10 +9499,14 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         List.iter
           (fun n ->
              let q = cap_qname n in
-             (* A module-level [let] is an always-run setup effect: mark it a
-                ceiling root so its stdlib-mediated caps are never pruned as
-                unreachable-from-main (mirrors [March_tir.Dce.root_names]). *)
-             Hashtbl.replace env.ceiling_extra_roots q ();
+             (* Only the ENTRY module's top-level [let]s are always-run: lower.ml
+                splices those into `main`'s body, so DCE keeps them
+                unconditionally. A NESTED module's [let] lowers to an ordinary
+                zero-arg function DCE prunes when unreachable — rooting it here
+                would over-report a dead nested [let] `--compile` accepts. Gate
+                on the empty prefix, which is exactly the entry module. *)
+             if cap_qname_prefix = "" then
+               Hashtbl.replace env.ceiling_extra_roots q ();
              record_expr_owner ~sp:dsp q [] [ b.Ast.bind_expr ])
           (free_vars_pattern b.Ast.bind_pat)
       (* An interface DEFAULT body is keyed by a mangled name for exactly the
