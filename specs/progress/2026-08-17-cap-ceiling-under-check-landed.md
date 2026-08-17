@@ -1,3 +1,88 @@
+# LANDED 2026-08-17 — capability ceiling now runs under `march --check`
+
+**Status: shipped.** This file was the forward-looking todo; the design it
+prescribed is implemented. What landed, and the two places the design was
+sharpened during implementation:
+
+- **A typecheck-side ceiling** (`Typecheck.check_stdlib_mediated_ceiling`), gated
+  by `Typecheck.cap_strict_ceiling` (the driver sets it on `--check`/`--check-json`,
+  respecting `--no-cap-strict`). Seeded from a new body-only capability table
+  (`env.body_cap_closures`, recorded at the body-scan sites, never the sig-caps
+  site — avoiding the `fn main(cap : Cap(IO))` false positive) and a
+  stdlib-membership set (`env.stdlib_fns`, marked span-accurately including
+  prelude functions).
+
+- **Design sharpening 1 — it is NOT the full `fn_refs` transitive closure the
+  todo suggested.** A full closure over-reports: it would charge a caller for
+  capabilities a *user* callee (in another module) reaches, which `--compile`
+  attributes to that other module. The correct closure is stdlib-TRANSPARENT —
+  roll caps up only through stdlib callees, stopping at user-module boundaries —
+  which exactly matches `Cap_attrib`'s roll-up and is a provable subset of the
+  `--compile` result. Verified: zero over-reports across all 143 `@types-check`
+  accept fixtures; reject witness `reject/t180`.
+
+- **Design sharpening 2 — the fail-closed `Unattributed` arm is deliberately
+  NOT reproduced.** It over-reports on closure-heavy code (indirect calls);
+  `--compile` remains the complete check for that route. `--check` under-reports
+  it, which is the tolerable direction.
+
+- **The FInsert cross-file trap (flagged below) is fixed:** the fix is suppressed
+  when the owner module's span is `dummy_span` (a cross-file dependency not in the
+  entry file's tree), and indented to the owner's own column otherwise. Also
+  delivers the todo's second motivation — the ceiling's fix payload now reaches
+  `--check-json`, so `forge fix`/LSP can apply it.
+
+**Adversarial review (opus) found and fixed one Critical:** the first cut
+iterated ALL functions, but `--compile`'s ceiling runs post-DCE, and
+`March_tir.Dce` roots reachability at `main` when one exists — so a function
+unreachable from `main` is pruned there. The `--check` ceiling now mirrors it:
+reachable-from-`main` when a `main` exists, else all user functions (the
+main-less library case, matching DCE's `extra_root` fallback). Without this,
+`--check` over-reported a dead half-wired helper's stdlib-mediated use that
+`--compile` accepts. Pinned by accept witness `accept/t181` (dead use stays
+silent) against reject witness `reject/t180` (reachable use rejects).
+
+Two review-noted coverage gaps left as-is (both the SAFE under-report
+direction, and closing them risks the over-report the design forbids): a
+`let _ = File.read(...)` discarded binding, and an interface-`impl` method
+body, are not attributed under `--check`. `--compile` still catches both.
+
+**Four rounds of adversarial review shaped the reachability logic.** Each found
+a real divergence from `--compile`, in alternating directions — worth recording
+because the pattern is the lesson: mirroring another pass's semantics is easy to
+get *approximately* right and hard to get exactly right.
+
+1. Over-report: the first cut held EVERY function against its module's `needs`,
+   but `--compile`'s ceiling runs post-DCE, and `March_tir.Dce` roots at `main`.
+   A dead half-wired helper's stdlib-mediated use broke a build `--compile`
+   accepts. Fixed by mirroring DCE reachability (accept/t181).
+2. Under-report: seeding only `main` missed DCE's UNCONDITIONAL roots — an
+   entry-module top-level `let` is spliced into `main` by `lower.ml`, so its
+   always-run effect is never dead. Fixed by seeding those too (reject/t182).
+3. Over-report: that fix over-corrected, rooting EVERY module-level `let`. Only
+   the ENTRY module's are always-run; a nested module's `let` is an ordinary
+   DCE-prunable function. Fixed by gating on the entry prefix (accept/t183).
+4. Latent fragility: `owner_of` used a naive last-dot prefix, so an impl method
+   (`[Prefix.]Iface$Ty.method`) resolved to the SYNTHETIC module `Iface$Ty`,
+   which no `needs` can declare — emitting a spurious violation suppressed only
+   by a downstream dummy-span filter. Now mirrors `Cap_attrib.owner_of`'s
+   mangled-name handling directly, so it is correct on its own rather than
+   filtered.
+
+Final review verified the subset property holds across ~100 programs: no input
+found where `--check` reports a capability `--compile` accepts.
+
+**Known follow-ups (not blocking):** the check runs on the primary
+`bin/main.exe --check`/`--check-json` path; the separate `march check`
+(`run_check_cmd`) and LSP typecheck entry points do not yet enable
+`cap_strict_ceiling`. Cross-file dependency modules under-report (their spans
+are not in the entry file's `module_spans`) — sound, but the diagnostic lands
+without a fix there.
+
+---
+
+## Original todo (design rationale, retained)
+
 # Running the capability ceiling under `march --check` needs a body-only closure table
 
 Filed while working Task 7 of `specs/2026-08-13-capability-ux-plan.md` (Steps

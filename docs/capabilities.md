@@ -260,12 +260,16 @@ its own restatement of the capability that was missing.
 The error above is easy to over-read, so let's be precise about what it actually covers:
 
 - It catches a **direct** call to a capability builtin: `file_read(p)`.
-- It does **not** catch the same operation routed through a stdlib wrapper,
-  `File.read(p)`. That call is invisible to this check, and `--check` exits 0.
+- It does **not** catch, on its own, the same operation routed through a stdlib
+  wrapper, `File.read(p)`. That call is invisible to *this* check — it is caught
+  by the capability ceiling instead, a sound subset of which runs under
+  `--check` since 2026-08-17, so `--check` now exits 1 on the common
+  stdlib-mediated case rather than 0.
 - The complete check is the **capability ceiling**, below, which works on
   **emitted code** and therefore cannot be evaded by re-routing through a
   helper. It is on by default, but it runs on the compile path, so `--check`
-  alone still exits 0 on the stdlib-mediated call.
+  alone catches the common stdlib-mediated call as of 2026-08-17 (a subset of
+  the ceiling now runs under `--check`); `--compile` remains the complete check.
 
 So `needs` is a **mandatory, mechanically-verified manifest** of the builtins a
 module calls directly, not, on its own, proof that a module cannot reach a

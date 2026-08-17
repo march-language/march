@@ -1,0 +1,19 @@
+-- The `--check` ceiling must not over-report a DEAD nested-module `let`. Only
+-- the ENTRY module's top-level `let`s are always-run (lower.ml splices them
+-- into `main`); a nested module's `let` lowers to an ordinary function DCE
+-- prunes when unreachable. So this must `--check` clean (matching `--compile`),
+-- even though `Inner`'s `let` reaches `IO.FileRead` that `Inner` does not
+-- declare — because `main` never references it. (reject/t182 pins the ENTRY
+-- module's always-run `let`, which is a different, real violation.)
+mod NestedDeadLet do
+  needs IO.Console
+  mod Inner do
+    let _leaked = match File.read("/etc/hosts") do
+      Ok(s) -> s
+      Err(_) -> ""
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    println("hi")
+  end
+end

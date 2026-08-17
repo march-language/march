@@ -1,0 +1,20 @@
+-- The `--check`-side capability ceiling must not over-report DEAD code: a
+-- function unreachable from `main` that reaches a capability through a stdlib
+-- wrapper (`File.read`) is pruned before `--compile`'s TIR ceiling ever sees
+-- it (March_tir.Dce roots reachability at `main`). `--check` mirrors that — it
+-- is a strict subset of the `--compile` ceiling, so it stays silent here even
+-- though `helper` uses `IO.FileRead` that `Main` does not declare, because
+-- `main` never calls `helper`. (Make `helper` reachable and both paths reject:
+-- reject/t180 pins that direction.)
+mod Main do
+  needs IO.Console
+  fn helper() : String do
+    match File.read("/etc/hosts") do
+      Ok(s) -> s
+      Err(_) -> ""
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    println("helper is never called")
+  end
+end

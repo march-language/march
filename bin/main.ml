@@ -2508,6 +2508,13 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
+     (`--check`/`--check-json`), where the `--compile` path's TIR-side
+     [Cap_ceiling] never runs. On a full `--compile` this stays off so the two
+     ceilings do not double-report; the TIR one is the authoritative complete
+     check there. Respects `--no-cap-strict` for parity. *)
+  March_typecheck.Typecheck.cap_strict_ceiling :=
+    !cap_strict && (!do_check || !check_json);
   (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
      syntactic ban must leave the contracted names to it.  Set BEFORE
      [check_module_full] — the flag is read during that call.  [run_check_cmd]
