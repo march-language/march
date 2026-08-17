@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Parse.run_all`** — run a parser and require it to consume the *whole*
+  input. `Parse.run` succeeds on a valid PREFIX and silently discards the rest
+  (`run(number(), "123xyz")` is `Ok("123")`), which is the usual way a
+  combinator grammar quietly returns a wrong answer. `run_all` is `run` plus
+  `eof`, so the same call reports `1:4: I was expecting end of input`. `run` is
+  still the right choice when a leftover tail is meaningful.
+- **A parsing guide**, [docs/parsing.md](https://march-lang.org/docs/parsing/) —
+  the `Parse` library had a complete API reference but no narrative
+  introduction. Covers the building blocks, why recursive grammars need
+  `delay`, how `label`/`ctx`/`commit` combine to produce good diagnostics
+  (including the commit-placement trap, where both spellings accept all valid
+  input and only differ on the malformed input where the message mattered), and
+  collecting every error in one pass with `recover`.
+
 - **New `AhoCorasick` stdlib module** for multi-pattern string search: build an automaton
   once from a list of literal patterns (`AhoCorasick.build`), then find every match of any
   of them in a haystack in a single linear pass (`find_all` / `find_first` / `matches`),
@@ -25,6 +39,24 @@ git log is authoritative for exact commits.
 - An unrecognized capability in `needs` is now an error with a did-you-mean suggestion
   (`needs IO.FileWrit` → `needs IO.FileWrite`). Typos previously produced only a misleading
   "declared but no function requires it — remove the unused declaration" warning.
+
+### Fixed
+
+- **`let*` now works with user-defined types, not just `Option`/`Result`/`List`.**
+  Its documented extension point — "define `flat_map` in a module named after
+  the type" — was non-functional for any type you defined yourself, whether in
+  the same file or imported: resolution went exclusively through the stdlib
+  module loader, which finds a module only if a *file* of the matching
+  snake_case name exists. A user module is already bound in scope but has no
+  such file, so `let*` reported that `Box.flat_map` did not exist while telling
+  the reader to define precisely the function they had already defined.
+  Resolution now consults the current scope first, matching how an ordinary
+  `Box.flat_map(...)` call already resolved.
+- **`Parse.label` is documented again.** Its doc comment had been written but
+  sat above a *private* helper rather than above `label` itself, so it was
+  dropped from the generated reference entirely and `label` — the combinator
+  whose whole job is making error messages readable — was the module's only
+  undocumented public function.
 
 ### Changed
 
