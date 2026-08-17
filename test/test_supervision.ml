@@ -82,7 +82,7 @@ let is_alive pid =
   | None -> false
 
 (* ------------------------------------------------------------------ *)
-(* Phase 1 — Monitors and Links                                        *)
+(* Phase 1 — Monitors                                                   *)
 (* ------------------------------------------------------------------ *)
 
 (** Monitor is independent and observational: monitoring does not kill the watcher. *)

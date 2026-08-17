@@ -38,7 +38,13 @@ tests that exercised that machinery directly (`test/test_supervision.ml`,
 `test/test_stdlib_suite.ml`, `test/test_helpers.ml`). Documented the choice in
 `docs/actors.md` and `specs/lang/actors.md` (identical "Why there are no
 links" section in both, since they are drifted duplicates) and in
-`CHANGELOG.md` under `[Unreleased] / Removed`.
+`CHANGELOG.md` under `[Unreleased] / Removed`. **This removal is interpreter-side only** —
+the compiled/LLVM backend still declares and implements the identical
+unreachable `link`/`unlink` pair (`lib/tir/llvm_builtins.ml`,
+`runtime/march_runtime.c`); see
+`specs/todos/2026-08-17-compiled-link-builtin-still-unreachable.md` for that
+remaining half, including a finding that the two backends' `link`
+implementations never even agreed with each other while both existed.
 
 **Why option 2 and why now:** PR #284 (`actor: deliver reasoned local monitor
 Down messages`) gave monitors a reason-carrying `Down(ref, pid, reason)` with
