@@ -36,3 +36,31 @@ write (`march_respawn_child`'s `:2672`), acquire-load on read
 (`march_send_checked`'s `:5709`, and `march_is_cap_valid`'s `:5673` which has
 the same plain-read shape). Low risk, mechanical, same pattern already
 proven out twice in this plan.
+
+## Fix landed
+
+`march_actor_meta.epoch` (`runtime/march_runtime.c`) is now `_Atomic int64_t`,
+following the `pid_index`/`green_thread` precedent exactly:
+
+- `march_respawn_child`'s write (`new_meta->epoch = inherited_epoch;`) is now
+  `atomic_store_explicit(&new_meta->epoch, inherited_epoch,
+  memory_order_release)`.
+- The three genuinely cross-thread readers use `atomic_load_explicit(...,
+  memory_order_acquire)`: `march_get_cap` (builds a `Cap`'s epoch word —
+  same race shape as the two call sites named above, though not explicitly
+  enumerated in the original writeup), `march_is_cap_valid`, and
+  `march_send_checked`.
+- The one same-thread-only read (`march_respawn_child`'s own
+  `old_meta->epoch + 1` inheritance read — a child slot has exactly one
+  supervisor, and only that supervisor's thread ever calls
+  `march_respawn_child` for that slot, so this is intra-thread with respect
+  to any prior write) uses `memory_order_relaxed`, matching the intra-thread
+  `pid_index` reads elsewhere in the same function.
+
+Verified with `dune build --root . test/run_eval.exe test/run_codegen.exe
+test/run_stdlib.exe`, `scripts/run-tests.sh -q`, and the compiled
+capability-revocation/respawn-carrying golden tests (`@oracle`'s
+`cap_epoch_plane`, and the `native_actor_registry_restart`/`_batch` dune
+`runtest` rules). This closes a data race (formally UB, not just a
+theoretical torn read), not a functional-behavior change, so passing tests
+mainly confirm no regression was introduced.

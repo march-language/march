@@ -491,6 +491,175 @@ let test_receive_llvm_declaration () =
   Alcotest.(check bool) "body calls march_sched_recv" true
     (ir_contains ir "call ptr @march_sched_recv()")
 
+(* ── send_after / cancel_timer (specs/progress/2026-08-12-language-level-
+   timers.md) ─────────────────────────────────────────────────────────── *)
+(* Real wall-clock scheduling (Unix.gettimeofday, see eval.ml's
+   pending_timers/timer_service_tick), so these tests need an actual small
+   OCaml-side sleep between the "before deadline" and "after deadline"
+   checks -- there is no mock-clock hook. Kept short (60ms delay / 90ms
+   sleep) to stay fast while leaving comfortable margin against scheduling
+   jitter on a loaded CI box. Exercise the bare `actor_send_after`/
+   `actor_cancel_timer` builtins directly (same style as `send`/
+   `mailbox_size` elsewhere in this file) -- the Actor.send_after/
+   Actor.cancel_timer stdlib wrapper gets its own dedicated test below. *)
+
+let test_send_after_not_delivered_before_delay () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      let ref = actor_send_after(pid, Inc(), 60)
+      run_until_idle()
+      mailbox_size(pid)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "not delivered before the deadline" 0 (vint v)
+
+let test_send_after_delivers_after_delay () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      let ref = actor_send_after(pid, Inc(), 60)
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  Unix.sleepf 0.09;
+  March_eval.Eval.run_scheduler ();
+  let count =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "count" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  Alcotest.(check int) "delivered once the deadline has passed" 1 count
+
+let test_cancel_timer_prevents_delivery () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      let ref = actor_send_after(pid, Inc(), 60)
+      actor_cancel_timer(ref)
+      -- double-cancel must be a harmless no-op
+      actor_cancel_timer(ref)
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  Unix.sleepf 0.09;
+  March_eval.Eval.run_scheduler ();
+  let count =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "count" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  Alcotest.(check int) "cancelled before the deadline: never delivered" 0 count
+
+(** A timer whose target actor is killed before the deadline must not crash
+    (or hang) run_until_idle -- the message is simply never delivered (Actor
+    death, not the cancellation path; see march_send/actor_cast's identical
+    "dead target drops the message" convention on the compiled side, which
+    this mirrors for the interpreter). *)
+let test_send_after_dead_target_no_crash () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      let ref = actor_send_after(pid, Inc(), 60)
+      kill(pid)
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  Unix.sleepf 0.09;
+  March_eval.Eval.run_scheduler ();
+  let alive =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst -> inst.March_eval.Eval.ai_alive
+    | None -> false
+  in
+  Alcotest.(check bool) "dead target: no crash, actor stays dead" false alive
+
+(** Actor.send_after/Actor.cancel_timer (stdlib/actor.march) are thin
+    forwarding wrappers around actor_send_after/actor_cancel_timer, named
+    identically to their public-facing form -- the exact shape that
+    recurses into itself instead of reaching the builtin if the wrapper and
+    the builtin ever end up sharing a name (see the naming-rationale
+    comment on the "actor_" prefix in typecheck.ml). This test is what
+    would have caught that: it fails with a stack overflow, not a wrong
+    assertion, if the wrapper regresses to calling itself. *)
+let test_actor_send_after_stdlib_wrapper () =
+  let actor_decl = load_stdlib_file_for_test "actor.march" in
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      let ref = Actor.send_after(pid, Inc(), 60)
+      Actor.cancel_timer(ref)
+      pid
+    end
+  end|} in
+  let env = eval_with_stdlib [actor_decl] src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  Unix.sleepf 0.09;
+  March_eval.Eval.run_scheduler ();
+  let count =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "count" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  Alcotest.(check int) "Actor.cancel_timer via the stdlib wrapper: never delivered" 0 count
+
 let test_sort_small_empty () =
   check_int_list "sort_small [] = []" [] (sort_small [])
 
@@ -13288,6 +13457,18 @@ let stdlib_suites =
           (with_reset test_receive_ordering_fifo);
         Alcotest.test_case "receive emits march_sched_recv in LLVM" `Quick
           test_receive_llvm_declaration;
+      ]);
+      ("actor timers", [
+        Alcotest.test_case "send_after: not delivered before the deadline" `Quick
+          (with_reset test_send_after_not_delivered_before_delay);
+        Alcotest.test_case "send_after: delivered after the deadline" `Quick
+          (with_reset test_send_after_delivers_after_delay);
+        Alcotest.test_case "cancel_timer: prevents delivery (incl. double-cancel)" `Quick
+          (with_reset test_cancel_timer_prevents_delivery);
+        Alcotest.test_case "send_after: dead target does not crash" `Quick
+          (with_reset test_send_after_dead_target_no_crash);
+        Alcotest.test_case "Actor.send_after/cancel_timer stdlib wrapper" `Quick
+          (with_reset test_actor_send_after_stdlib_wrapper);
       ]);
       ("file builtins", [
         Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;

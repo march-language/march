@@ -212,11 +212,201 @@ let run_stdlib_test test_filename _mod_name () =
     Alcotest.failf "%d/%d tests failed in %s" n_failed total test_filename
 
 (* ------------------------------------------------------------------ *)
+(* Registry-drift guard                                                *)
+(*                                                                      *)
+(* Nothing used to check that every test/stdlib/test_*.march file on   *)
+(* disk is actually reachable from the Alcotest.run list below -- that *)
+(* is exactly how test_json.march once fell out of the build (wired    *)
+(* into no runner, unnoticed). See                                     *)
+(* specs/progress/2026-07-31-open-follow-up-test-file-registry-drift.md*)
+(* ------------------------------------------------------------------ *)
+
+let find_own_source () =
+  let candidates = [
+    "test/test_stdlib_march.ml";
+    "../../../test/test_stdlib_march.ml";
+    "../../test/test_stdlib_march.ml";
+    "test_stdlib_march.ml";
+  ] in
+  match find_file candidates with
+  | Some p -> p
+  | None ->
+    failwith "cannot locate test/test_stdlib_march.ml (needed for the \
+              registry-drift self-check)"
+
+let find_test_stdlib_dir () =
+  let candidates = [
+    "test/stdlib";
+    "../../../test/stdlib";
+    "../../test/stdlib";
+  ] in
+  match find_file candidates with
+  | Some p -> p
+  | None ->
+    failwith "cannot locate test/stdlib (needed for the registry-drift \
+              self-check)"
+
+(** Strip OCaml [(* ... *)] comments (nesting-aware) before scanning this
+    file's own source for registrations, so a commented-out entry (e.g.
+    test_flow.march below, whose registration is deliberately disabled a
+    few dozen lines up) isn't mistaken for a live one. *)
+let strip_ocaml_comments src =
+  let n = String.length src in
+  let buf = Buffer.create n in
+  let rec skip_comment i depth =
+    if i >= n then i
+    else if i + 1 < n && src.[i] = '(' && src.[i + 1] = '*' then
+      skip_comment (i + 2) (depth + 1)
+    else if i + 1 < n && src.[i] = '*' && src.[i + 1] = ')' then
+      (if depth = 1 then i + 2 else skip_comment (i + 2) (depth - 1))
+    else skip_comment (i + 1) depth
+  in
+  let rec go i =
+    if i >= n then ()
+    else if i + 1 < n && src.[i] = '(' && src.[i + 1] = '*' then
+      go (skip_comment (i + 2) 1)
+    else begin
+      Buffer.add_char buf src.[i];
+      go (i + 1)
+    end
+  in
+  go 0;
+  Buffer.contents buf
+
+(** Every [run_stdlib_test "test_FOO.march"] filename literal that appears
+    (outside comments) in this very file's source -- i.e. the actual
+    registry the [Alcotest.run] list below is built from. Parsed rather
+    than hand-duplicated so this check can never itself drift from the
+    real registration list. *)
+let registered_stdlib_test_files () =
+  let src = strip_ocaml_comments (read_file (find_own_source ())) in
+  let marker = "run_stdlib_test \"" in
+  let mlen = String.length marker in
+  let slen = String.length src in
+  let rec scan i acc =
+    if i + mlen > slen then List.rev acc
+    else if String.sub src i mlen = marker then
+      let start = i + mlen in
+      match String.index_from_opt src start '"' with
+      | None -> List.rev acc
+      | Some close -> scan (close + 1) (String.sub src start (close - start) :: acc)
+    else scan (i + 1) acc
+  in
+  scan 0 []
+
+let stdlib_test_files_on_disk () =
+  let dir = find_test_stdlib_dir () in
+  Sys.readdir dir
+  |> Array.to_list
+  |> List.filter (fun f ->
+       String.length f > 5 && String.sub f 0 5 = "test_" && Filename.check_suffix f ".march")
+  |> List.sort compare
+
+(** [test/stdlib/test_*.march] files that are, as of this writing, known to
+    be unregistered here -- see
+    specs/todos/2026-08-11-test-stdlib-march-files-not-in-ci.md for the full
+    audit (37 files, hundreds of passing tests, runnable manually via
+    `march test test/stdlib/test_FOO.march` but wired into no automated
+    runner). Fixing that is a separate, larger effort than this guard.
+
+    This allowlist exists so the check below stays FATAL for any *new* file
+    quietly falling out of the registry -- the failure mode that motivated
+    this guard in the first place (test_json.march, see
+    specs/progress/2026-07-31-open-follow-up-test-file-registry-drift.md) --
+    without turning this whole binary red over the pre-existing gap.
+
+    Shrink this list as files get wired up under that todo. Do NOT add a
+    newly-orphaned file here to silence a real failure; register it
+    properly instead, or if it's a deliberate deferral, say why inline
+    (test_flow.march is the one entry with its own reason: its registration
+    a few dozen lines up is commented out because it targets an older,
+    function-transformer Flow API that predates the current Seq-based
+    flow.march). *)
+let known_unregistered_stdlib_test_files = [
+  "test_actor.march";
+  "test_array.march";
+  "test_bigint.march";
+  "test_bytes.march";
+  "test_check.march";
+  "test_cli.march";
+  "test_csv.march";
+  "test_dataframe.march";
+  "test_datetime.march";
+  "test_decimal.march";
+  "test_derive_json.march";
+  "test_derive_json_multi.march";
+  "test_dir.march";
+  "test_enum.march";
+  "test_file.march";
+  "test_flow.march";
+  "test_gen.march";
+  "test_hamt.march";
+  "test_html.march";
+  "test_iolist.march";
+  "test_island_bridges.march";
+  "test_iterable.march";
+  "test_map.march";
+  "test_math.march";
+  "test_option.march";
+  "test_path.march";
+  "test_plot.march";
+  "test_prelude.march";
+  "test_properties.march";
+  "test_queue.march";
+  "test_result.march";
+  "test_set.march";
+  "test_sigil.march";
+  "test_sort.march";
+  "test_string.march";
+  "test_string_utf8.march";
+  "test_task.march";
+]
+
+let check_registry_drift () =
+  let on_disk = stdlib_test_files_on_disk () in
+  let registered = registered_stdlib_test_files () in
+  let orphaned =
+    List.filter
+      (fun f ->
+         not (List.mem f registered)
+         && not (List.mem f known_unregistered_stdlib_test_files))
+      on_disk
+  in
+  let stale_allowlist_entries =
+    List.filter
+      (fun f -> not (List.mem f on_disk) || List.mem f registered)
+      known_unregistered_stdlib_test_files
+  in
+  if stale_allowlist_entries <> [] then
+    Printf.eprintf
+      "[test_stdlib_march] note: known_unregistered_stdlib_test_files names \
+       %s, which is no longer an orphan (already registered, or no longer \
+       on disk) -- trim the allowlist.\n%!"
+      (String.concat ", " stale_allowlist_entries);
+  if orphaned <> [] then
+    Alcotest.failf
+      "%d file(s) under test/stdlib/test_*.march are not registered in \
+       test_stdlib_march.ml's Alcotest.run list, and are not in the \
+       documented pre-existing-gap allowlist \
+       (known_unregistered_stdlib_test_files): %s. Either add a \
+       `run_stdlib_test \"FILE\" \"ModName\"` entry to the Alcotest.run \
+       list above, or -- if this is an intentional, tracked deferral like \
+       the other 37 -- add it to known_unregistered_stdlib_test_files with \
+       a one-line reason."
+      (List.length orphaned)
+      (String.concat ", " orphaned)
+
+(* ------------------------------------------------------------------ *)
 (* Test cases                                                          *)
 (* ------------------------------------------------------------------ *)
 
 let () =
   Alcotest.run "stdlib_march" [
+    ("registry", [
+      Alcotest.test_case
+        "every test/stdlib/test_*.march file is registered or documented as deferred"
+        `Quick check_registry_drift;
+    ]);
     ("http", [
       Alcotest.test_case "Http module"
         `Quick (run_stdlib_test "test_http.march" "TestHttp");

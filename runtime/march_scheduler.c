@@ -114,11 +114,44 @@ static _Atomic int      g_sched_shutdown = 0;
  * below). Forward-declared here so march_sched_init can reset g_timer_len.
  * `gen` (Task 16 fix-up, Important 1) is the proc's park_gen at the moment
  * this entry was pushed — see park_gen's field comment in march_scheduler.h
- * for what makes an entry LIVE vs. a ghost. */
-typedef struct { int64_t deadline_ms; struct march_proc *proc; int64_t gen; } march_timer_ent;
+ * for what makes an entry LIVE vs. a ghost.
+ *
+ * `kind` (send_after/cancel_timer, specs/progress/2026-08-12-language-level-
+ * timers.md) distinguishes the original WAKE entries (park_self_until /
+ * recv_until: `proc` is the parked proc to wake, `gen` its park_gen
+ * snapshot; `msg`/`token` unused) from SEND entries (march_sched_send_after:
+ * `proc` is the DELIVERY TARGET rather than a parked proc — no relation to
+ * ITS park_gen, so `gen` is unused; `msg` is an owned message reference,
+ * `token` an owned, opaque cancellation-token reference checked/released
+ * through march_sched_set_timer_token_ops). Reusing one heap/one array for
+ * both kinds avoids a second mutex-guarded structure for what is otherwise
+ * an identical "sorted by deadline, popped by timer_service" data shape. */
+typedef enum { MARCH_TIMER_WAKE = 0, MARCH_TIMER_SEND = 1 } march_timer_kind;
+typedef struct {
+    int64_t            deadline_ms;
+    struct march_proc *proc;    /* WAKE: proc to wake. SEND: delivery target (may be NULL). */
+    int64_t            gen;     /* WAKE only. */
+    march_timer_kind   kind;
+    void              *msg;     /* SEND only: owned message reference. */
+    void              *token;   /* SEND only: owned cancellation-token reference. */
+} march_timer_ent;
 static pthread_mutex_t  g_timer_mu = PTHREAD_MUTEX_INITIALIZER;
 static march_timer_ent *g_timer_heap = NULL;
 static int              g_timer_len = 0, g_timer_cap = 0;
+
+/* Registered by march_runtime.c (march_sched_set_timer_token_ops) so this
+ * module can check/release a SEND entry's cancellation token without
+ * depending on March's GC — see that function's doc comment in
+ * march_scheduler.h. Defaults match "no cancellation support registered
+ * yet": never cancelled, release is a no-op. */
+static int64_t (*g_timer_token_is_cancelled)(void *token) = NULL;
+static void    (*g_timer_token_release)(void *token) = NULL;
+
+void march_sched_set_timer_token_ops(int64_t (*is_cancelled)(void *),
+                                     void (*release)(void *)) {
+    g_timer_token_is_cancelled = is_cancelled;
+    g_timer_token_release = release;
+}
 
 /* Live procs that are NOT daemons (main, task procs).  When this reaches 0
  * after shutdown is requested, only actor recv loops remain — the idle
@@ -1723,10 +1756,29 @@ void march_sched_wait_idle(void) {
              * (not per-scheduler-thread) record of every proc parked on a
              * deadline. Locked independently of g_registry_mu (never nested
              * with it elsewhere in this file), so there is no new
-             * lock-ordering hazard. */
+             * lock-ordering hazard.
+             *
+             * send_after/cancel_timer (specs/progress/2026-08-12-language-
+             * level-timers.md) design decision: a MARCH_TIMER_SEND entry is
+             * deliberately EXCLUDED from this count, unlike a MARCH_TIMER_
+             * WAKE entry. A scheduled send targets some OTHER proc's
+             * mailbox at a future deadline — it is not evidence that
+             * anything is currently waiting on it the way a parked proc is
+             * waiting on its own wake. Counting it as busy would make a
+             * long-duration send_after (a periodic tick, a multi-second
+             * retry backoff) keep every run_until_idle() call — the
+             * test-harness idle-drain primitive — blocked for the FULL
+             * remaining delay, which is surprising for a primitive whose
+             * whole contract is "return once nothing is happening right
+             * now". A real server does not rely on wait_idle to stay
+             * alive — it drives march_sched_run() directly, or simply has
+             * other non-daemon/actor-daemon procs keeping the process up —
+             * and still gets its message delivered on schedule regardless
+             * of what this function reports. */
             pthread_mutex_lock(&g_timer_mu);
             int timers_pending = 0;
             for (int ti = 0; ti < g_timer_len && !timers_pending; ti++) {
+                if (g_timer_heap[ti].kind != MARCH_TIMER_WAKE) continue;
                 march_proc *tp = g_timer_heap[ti].proc;
                 if (!tp) continue;
                 if (atomic_load_explicit(&tp->park_gen, memory_order_relaxed)
@@ -2453,7 +2505,10 @@ int64_t march_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void timer_heap_push(int64_t deadline_ms, march_proc *p, int64_t gen) {
+/* Shared push: grow-if-full + sift-up, on an already-constructed entry.
+ * timer_heap_push (WAKE) and timer_heap_push_send (SEND) below are thin
+ * wrappers that build the entry and call this. */
+static void timer_heap_push_ent(march_timer_ent ent) {
     pthread_mutex_lock(&g_timer_mu);
     if (g_timer_len == g_timer_cap) {
         g_timer_cap = g_timer_cap ? g_timer_cap * 2 : 64;
@@ -2462,7 +2517,7 @@ static void timer_heap_push(int64_t deadline_ms, march_proc *p, int64_t gen) {
         if (!g_timer_heap) { fputs("march_sched: OOM (timer)\n", stderr); abort(); }
     }
     int i = g_timer_len++;
-    g_timer_heap[i] = (march_timer_ent){ deadline_ms, p, gen };
+    g_timer_heap[i] = ent;
     while (i > 0) {
         int par = (i - 1) / 2;
         if (g_timer_heap[par].deadline_ms <= g_timer_heap[i].deadline_ms) break;
@@ -2474,9 +2529,28 @@ static void timer_heap_push(int64_t deadline_ms, march_proc *p, int64_t gen) {
     pthread_mutex_unlock(&g_timer_mu);
 }
 
-/* Pop every expired entry and wake its proc. Called from preempt_daemon.
+static void timer_heap_push(int64_t deadline_ms, march_proc *p, int64_t gen) {
+    timer_heap_push_ent((march_timer_ent){
+        .deadline_ms = deadline_ms, .proc = p, .gen = gen,
+        .kind = MARCH_TIMER_WAKE, .msg = NULL, .token = NULL });
+}
+
+static void timer_heap_push_send(int64_t deadline_ms, march_proc *target,
+                                 void *msg, void *token) {
+    timer_heap_push_ent((march_timer_ent){
+        .deadline_ms = deadline_ms, .proc = target, .gen = 0,
+        .kind = MARCH_TIMER_SEND, .msg = msg, .token = token });
+}
+
+void march_sched_send_after(march_proc *target, void *msg, void *token,
+                            int64_t deadline_ms) {
+    timer_heap_push_send(deadline_ms, target, msg, token);
+}
+
+/* Pop every expired entry and act on it: wake its proc (WAKE) or deliver/
+ * dispose its message (SEND). Called from preempt_daemon.
  *
- * Task 16 fix-up (Important 1, optional half): an entry whose `gen` no
+ * Task 16 fix-up (Important 1, optional half): a WAKE entry whose `gen` no
  * longer matches its proc's current park_gen is a ghost — the proc already
  * woke for some other reason (message arrival, spurious wake, or it parked
  * again with a fresh entry) and this stale entry is just waiting to be
@@ -2484,15 +2558,24 @@ static void timer_heap_push(int64_t deadline_ms, march_proc *p, int64_t gen) {
  * harmless (every park site loops and re-checks its own condition) but
  * pointless, so skip the march_sched_wake call for it — the real fix for
  * "run_until_idle blocks on a proc that already woke" lives in
- * march_sched_wait_idle below, which checks the SAME gen match. */
+ * march_sched_wait_idle below, which checks the SAME gen match.
+ *
+ * A SEND entry has no such gen/staleness concept (its `proc` is a delivery
+ * target, not a parked waiter) — it is instead skipped (message disposed,
+ * not delivered) when the registered is_cancelled callback says so, or
+ * when march_sched_send itself reports the target DEAD (never spawned, or
+ * died before the deadline). Every SEND entry's message and token are
+ * always disposed/released exactly once here, popped or not — see
+ * march_sched_send_after's doc comment for the RC contract. */
 static void timer_service(int64_t now_ms) {
     for (;;) {
-        march_proc *victim = NULL;
+        march_timer_ent ent;
+        int have_ent = 0;
         int stale = 0;
         pthread_mutex_lock(&g_timer_mu);
         if (g_timer_len > 0 && g_timer_heap[0].deadline_ms <= now_ms) {
-            victim = g_timer_heap[0].proc;
-            int64_t vgen = g_timer_heap[0].gen;
+            ent = g_timer_heap[0];
+            have_ent = 1;
             g_timer_heap[0] = g_timer_heap[--g_timer_len];
             int i = 0;
             for (;;) {
@@ -2505,11 +2588,53 @@ static void timer_service(int64_t now_ms) {
                 g_timer_heap[i] = t;
                 i = m;
             }
-            stale = (atomic_load_explicit(&victim->park_gen, memory_order_relaxed) != vgen);
+            if (ent.kind == MARCH_TIMER_WAKE)
+                stale = (atomic_load_explicit(&ent.proc->park_gen, memory_order_relaxed) != ent.gen);
         }
         pthread_mutex_unlock(&g_timer_mu);
-        if (!victim) return;
-        if (!stale) march_sched_wake(victim);   /* outside the lock: wake can spin */
+        if (!have_ent) return;
+        if (ent.kind == MARCH_TIMER_WAKE) {
+            if (!stale) march_sched_wake(ent.proc);   /* outside the lock: wake can spin */
+            continue;
+        }
+        /* MARCH_TIMER_SEND: deliver, or dispose msg if cancelled/dead. Both
+         * march_sched_send and the dispose/release callbacks are safe to
+         * call with no scheduler lock held (already released above) — see
+         * march_sched_set_msg_dtor's re-entrancy contract, which
+         * march_sched_set_timer_token_ops mirrors.
+         *
+         * KNOWN LIMITATION: if ent.proc's mailbox is bounded under
+         * MARCH_MBOX_BLOCK and currently full, march_sched_send blocks THIS
+         * thread (the preempt daemon, a genuine foreign OS thread from the
+         * scheduler's point of view — see mbox_block_register_and_park's
+         * `!self` sleep-poll branch) until capacity frees. That stalls
+         * SIGUSR1 delivery and every other pending timer for as long as the
+         * mailbox stays full. Pre-existing hazard class (any foreign-thread
+         * sender under BLOCK already sleep-polls the calling thread); not
+         * addressed here — flagged in specs/progress/2026-08-12-language-
+         * level-timers.md's implementation notes as a known trade-off
+         * rather than fixed, since fixing it means a non-blocking send path
+         * this codebase does not have yet. */
+        /* ent.token may legitimately be NULL — march_sched_send_after's
+         * contract documents it as "no cancellation support", and an entry
+         * pushed that way is simply never cancelled. Guard the token as well
+         * as the callback: the registered is_cancelled reads a field off the
+         * token and would fault on NULL, whereas the release side happens to
+         * tolerate it (march_decrc's IS_HEAP_PTR check), so the asymmetry is
+         * easy to miss. */
+        int cancelled = (ent.token && g_timer_token_is_cancelled)
+            ? g_timer_token_is_cancelled(ent.token) : 0;
+        if (cancelled) {
+            march_mbox_dispose(ent.msg);
+        } else {
+            int rc = march_sched_send(ent.proc, ent.msg);
+            if (rc == MARCH_SEND_DEAD) march_mbox_dispose(ent.msg);
+            /* MARCH_SEND_DROPPED: march_sched_send already disposed msg via
+             * the DROP_NEW overflow policy. MARCH_SEND_OK: ownership
+             * transferred to the target's mailbox. Neither needs anything
+             * further here. */
+        }
+        if (ent.token && g_timer_token_release) g_timer_token_release(ent.token);
     }
 }
 

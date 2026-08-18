@@ -504,9 +504,6 @@ int64_t march_is_alive(void *actor);
 void march_kill(void *actor);
 ```
 
-#### `march_link` / `march_unlink(void *actor_a, void *actor_b)`
-Bidirectional links between actors (declared in `march_runtime.h`).
-
 #### `march_actor_get_int(void *actor, int64_t index)` — `runtime/march_runtime.c`
 - **Purpose**: Drain pending messages, then read an integer state field by index
 

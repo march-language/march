@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Actor.send_after(pid, msg, delay_ms)` / `Actor.cancel_timer(ref)`: schedule a
+  message for delayed delivery to an actor, with cancellation.** Previously an actor
+  that wanted to poll, retry, time something out, or tick had to burn a green thread
+  in a yield loop — the scheduler already had a timer heap backing `Actor.call`
+  deadlines and supervisor restart backoff, but nothing surfaced it to March code.
+  `send_after` returns an opaque `TimerRef`; `cancel_timer` is safe to call at any
+  time, including after the timer already fired or was already cancelled (both are
+  no-ops). A cancelled or dead-target timer's message is disposed with no leak — see
+  `specs/progress/2026-08-12-language-level-timers.md` for the RC design and a
+  pre-existing scheduler-callback registration bug this also fixed along the way.
+
 - **The capability ceiling now runs under `march --check` / `--check-json`, not only
   `--compile`.** A module whose `needs` manifest is falsified by a stdlib-MEDIATED call
   (`File.read(p)` rather than the builtin `file_read(p)` — the idiomatic way to do IO) was
@@ -27,6 +38,24 @@ git log is authoritative for exact commits.
 
 
 ### Fixed
+
+- Fixed a data race in the capability-revocation plane: an actor's `epoch`
+  field (backing `march_get_cap`/`march_is_cap_valid`/`march_send_checked`)
+  was written by a supervisor's restart without any lock or atomic and read
+  as a plain field on an arbitrary sender's thread, the same unsynchronized
+  plain-write/plain-read shape as the previously-fixed `pid_index` race. A
+  sender holding a `Cap` captured before a supervised restart could race the
+  epoch comparison against the respawn's write, with no ordering guarantee
+  between the two. `epoch` is now `_Atomic`, release-stored on write and
+  acquire-loaded on every cross-thread read.
+
+- `march_actor_broadcast_migrate` no longer leaks its malloc'd migrate-control
+  message when a target actor's green thread dies between the broadcast's
+  snapshot and send phases. The send's delivery-status return value
+  (`MARCH_SEND_DEAD`) was previously ignored; it is now checked, and the
+  message is `free()`'d on that path instead of being abandoned. Bounded
+  (at most `MARCH_MIGRATE_SNAPSHOT` = 2048 matched actors per broadcast call)
+  but real prior to this fix.
 
 - **`forge run` now passes `forge.toml`'s `[ffi]` sources to the compiler, so an app
   that uses FFI can be run interpreted.** Previously the interpreted path built its
@@ -61,6 +90,16 @@ git log is authoritative for exact commits.
   handler's IO counts against the grant the moment the actor is spawned. A defined-but-never-
   spawned actor stays free, like any other dead code. The manifest (`needs`) side already
   tracked handlers; only the grant did not.
+
+- **`forge publish`'s semver-bump enforcement actually runs now.** Its API-surface extractor
+  scanned source text for `pub fn ... -> T`, a syntax March doesn't have (no `pub` keyword;
+  return types are `: T`, not `-> T`), so it silently read an empty public surface for every
+  real package. With both the old and new surface empty, the diff was always empty and the
+  gate always said "Ok" — a breaking change could be published under a patch bump with no
+  warning. Bounded in practice by a separate pre-1.0 exemption, but a live landmine for the
+  first package to reach 1.0.0. The extractor now reads the public surface off the real AST
+  (same parser `forge cap` already uses), so it also sees multi-head clauses, default
+  arguments, and signatures wrapped across lines that a line scanner never could.
 
 ### Added
 
@@ -197,6 +236,18 @@ git log is authoritative for exact commits.
   now carries `Normal`/`Killed`/`Crash(msg)`, which is what a link's exit signal
   would have told a peer, without bidirectional coupling or a `trap_exit` escape
   hatch. No program can regress, because none could reach it.
+
+- **The compiled/LLVM backend's identical unreachable `link`/`unlink` builtin is
+  also gone**, finishing the removal above (that pass was interpreter-only). The
+  `march_link`/`march_unlink` runtime functions, their builtin-table entries, and
+  the forward declarations every compiled module's prelude carried are all
+  deleted. Worth recording: the two backends' `link` never actually agreed even
+  before removal — the interpreter did genuine bidirectional crash propagation,
+  while the compiled backend implemented `link` as two one-way `monitor` calls
+  that only queued a `Down` message and never crashed the peer. So there was no
+  "restore it" path without designing fresh semantics from scratch; this
+  reinforces that removing `link` outright, rather than exposing it as-is, was
+  correct.
 
 ### Fixed
 
