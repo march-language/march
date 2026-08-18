@@ -1800,6 +1800,12 @@ typedef struct {
      * there). Both are only ever touched from march_supervisor_notify,
      * which Task 16 serializes with g_supervise_mu — see that function's
      * comment for the concurrent-crash race this closes. */
+    /* Restart policy for this child: 0 permanent, 1 transient, 2 temporary.
+     * Set once at registration and never mutated, so unlike the two backoff
+     * fields below it needs no g_supervise_mu protection to read. Like them,
+     * it MUST be assigned explicitly at registration — sup_children grows via
+     * realloc, which does not zero the new memory. */
+    int32_t restart_type;
     int32_t crash_streak;     /* consecutive crashes without surviving a full
                                   supervisor_window_secs window */
     int64_t last_crash_ms;    /* march_now_ms() at the most recent crash; 0
@@ -6386,7 +6392,8 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
  * so it stays valid for every future restart, exactly like a cleanup
  * closure stored on meta->cleanup_head. */
 void march_actor_register_child(void *supervisor, void *child,
-                                 void *spawn_clo, int64_t word_idx) {
+                                 void *spawn_clo, int64_t word_idx,
+                                 int64_t restart_type) {
     march_actor_meta *sup_meta = find_or_create_meta(supervisor);
     march_actor_meta *child_meta = find_or_create_meta(child);
     /* The child was prepared by march_spawn_supervised, so no actor loop can
@@ -6400,6 +6407,7 @@ void march_actor_register_child(void *supervisor, void *child,
                                       (size_t)(idx + 1) * sizeof(march_sup_child));
     sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
+    sup_meta->sup_children[idx].restart_type = (int32_t)restart_type;
     sup_meta->sup_children[idx].crash_streak = 0;
     sup_meta->sup_children[idx].last_crash_ms = 0;
     sup_meta->sup_num_children = idx + 1;
