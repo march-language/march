@@ -369,7 +369,12 @@ let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
       (match call_path g ~entry:"main" ~target:enclosing with
        | None | Some [ _ ] -> ""
        | Some path ->
-         chain_marker ^ String.concat " → " path)
+         (* [path] already has `main` (the entry) as its first element —
+            [render_cap_chain] (lib/typecheck/typecheck.ml), shared with the
+            sibling grant-violation diagnostic in [Typecheck.check_main_
+            grant], just joins the given chain, so no `main ::` prepend is
+            needed here the way the typecheck side needs one. *)
+         chain_marker ^ March_typecheck.Typecheck.render_cap_chain path)
   in
   let emit_if_missing enclosing call_name call_span =
     match cap_of_call call_name with

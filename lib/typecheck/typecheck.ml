@@ -13652,6 +13652,26 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
    paths. Used by [check_main_grant] to attribute a grant violation to the
    user's own call chain instead of only the stdlib function that directly
    holds the capability. *)
+(* The single shared rendering of a capability call chain, used by both
+   diagnostics in the compiler that print one to a user: this module's own
+   [check_main_grant] (a grant-violation attribution) and
+   [March_refinecheck.Cap_infer.chain_note] (a missing-`needs` body-scan
+   attribution). [chain] is the full path from the entry point, with `main`
+   (or whichever entry) as its first element — callers that compute a path
+   NOT including the entry (like [cap_reach_chain] below) must prepend it
+   before calling this.
+
+   Before this function existed the two call sites each built the string
+   inline and happened to agree only by construction; they diverged once
+   (one truncated past 4 frames with an ASCII `->` and dropped the entry
+   frame, the other did not) before being brought back in sync by hand. This
+   is the one place both now go through, so a future format change (e.g. a
+   frame cap) is made once and both diagnostics move together. Deciding
+   whether to add such a cap is intentionally NOT done here — see
+   specs/progress/2026-08-17-capability-chain-rendering-unify-elision.md. *)
+let render_cap_chain (chain : string list) : string =
+  String.concat " \xe2\x86\x92 " chain
+
 let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
   : string list option =
   let holds k =
@@ -13879,17 +13899,17 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  `fn main(…, %s)`), or widen the whole grant to `Cap(IO)`, \
                  or remove the use."
                 show_grant c
-                (* Render exactly like the sibling missing-`needs` diagnostic's
-                   [Cap_infer.chain_note] (lib/refinecheck/cap_infer.ml): the
-                   FULL chain (no elision — neither diagnostic elides today;
-                   see specs/todos/2026-08-14-capability-chain-rendering-unify-elision.md
-                   for unifying the two under a shared, capped renderer),
-                   `main` included as the first frame, joined with `→`. Both
-                   read as a matched pair, so they must render the same way. *)
+                (* Renders exactly like the sibling missing-`needs`
+                   diagnostic's [Cap_infer.chain_note]
+                   (lib/refinecheck/cap_infer.ml) through the shared
+                   [render_cap_chain] above: the FULL chain (no elision —
+                   neither diagnostic elides today), `main` included as the
+                   first frame, joined with `→`. Both read as a matched
+                   pair, so they must render the same way. *)
                 (match cap_reach_chain env ~from:"main" ~cap:c with
                  | Some (_ :: _ as chain) ->
                    Printf.sprintf " (reached from `main`: %s)"
-                     (String.concat " \xe2\x86\x92 " ("main" :: chain))
+                     (render_cap_chain ("main" :: chain))
                  | _ -> "")
                 c c param_hint))
       (List.sort_uniq String.compare closure)
