@@ -212,6 +212,7 @@
 %token <string> SIGIL_PREFIX
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE
+%token RESTART PERMANENT TRANSIENT TEMPORARY
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -625,9 +626,9 @@ supervise_block:
     MAX_RESTARTS; max_r = INT; WITHIN; win = INT;
     children = list(supervise_child);
     END
-    { let names = List.map fst children in
-      let tyfields = List.map (fun (n, t) ->
-        { sf_name = n; sf_ty = t }) children in
+    { let names = List.map (fun (n, _, _) -> n) children in
+      let tyfields = List.map (fun (n, t, r) ->
+        { sf_name = n; sf_ty = t; sf_restart = r }) children in
       { sc_fields = tyfields;
         sc_strategy = strat;
         sc_max_restarts = max_r;
@@ -635,8 +636,22 @@ supervise_block:
         sc_order = names } }
 
 supervise_child:
-  | actor_type = upper_name; field_name = lower_name
-    { (field_name, TyCon (actor_type, [])) }
+  | actor_type = upper_name; field_name = lower_name;
+    r = option(child_restart)
+    { (field_name, TyCon (actor_type, []),
+       (match r with Some t -> t | None -> Permanent)) }
+
+(* Optional per-child restart policy. Placed as a labelled trailing modifier so
+   a later `shutdown <ms>` field can be added in the same position without a
+   grammar rework. Omitted means Permanent, which is what every supervise block
+   written before this feature means. *)
+child_restart:
+  | RESTART; t = restart_type_tok  { t }
+
+restart_type_tok:
+  | PERMANENT  { Permanent }
+  | TRANSIENT  { Transient }
+  | TEMPORARY  { Temporary }
 
 restart_strategy_tok:
   | ONE_FOR_ONE  { OneForOne }

@@ -72,11 +72,29 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       in
       let after_string = function Parser.STRING _ -> true | _ -> false in
       let after_do = function Parser.DO -> true | _ -> false in
+      (* `restart` is a SOFT keyword: it only introduces a supervise-child
+         restart modifier when the very next token is one of the three policy
+         words. Everywhere else it demotes back to an ordinary identifier.
+
+         This is not hypothetical tidiness — stdlib/dist_supervisor.march names
+         a record field and a function parameter `restart` (:31, :54, :55), in
+         the module that models restart policy. Reserving the word outright
+         broke that file's parse, and if our own stdlib reaches for `restart`
+         as an identifier, user code will too.
+
+         The three policy words stay hard keywords: nothing in the repo uses
+         them as identifiers, and they have no lookahead signal to demote on
+         (this mechanism keys off the NEXT token, not the previous one). *)
+      let after_restart_type = function
+        | Parser.PERMANENT | Parser.TRANSIENT | Parser.TEMPORARY -> true
+        | _ -> false
+      in
       match tok with
       | Parser.TEST      -> demote "test"      ~keep_when:after_string
       | Parser.DESCRIBE  -> demote "describe"  ~keep_when:after_string
       | Parser.SETUP     -> demote "setup"     ~keep_when:after_do
       | Parser.SETUP_ALL -> demote "setup_all" ~keep_when:after_do
+      | Parser.RESTART   -> demote "restart"   ~keep_when:after_restart_type
       | _ -> restore (); tok
   in
   let stack : context Stack.t = Stack.create () in

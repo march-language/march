@@ -14526,6 +14526,81 @@ let csrf_suite =
         test_csrf_get_form_never_injected;
     ] )
 
+(** `restart` must stay usable as an ordinary identifier.
+
+    Reserving it outright broke stdlib/dist_supervisor.march, which names both a
+    record field and a function parameter `restart` (:31, :54, :55) — in the very
+    module that models restart policy. The token filter demotes it back to an
+    identifier unless the next token is one of the three policy words, so both
+    spellings coexist. This test pins the identifier half; the supervise-child
+    test below pins the keyword half. *)
+let test_restart_still_usable_as_identifier () =
+  let src = {|mod Test do
+    type Policy = Always | Never
+
+    fn should_go(restart : Policy) do
+      match restart do
+        Always -> true
+        Never  -> false
+      end
+    end
+  end|} in
+  let lexbuf = Lexing.from_string src in
+  let m = March_parser.Parser.module_
+            (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  Alcotest.(check bool) "module with a `restart` parameter parses"
+    true (List.length m.mod_decls > 0)
+
+(** Per-child restart policy on a supervise block (2026-08-17). The modifier is
+    OPTIONAL and defaults to Permanent, so every supervise block written before
+    this feature keeps parsing unchanged — the `a` child below is the guard for
+    that. See specs/2026-08-17-supervisor-restart-types-design.md. *)
+let test_parse_supervise_child_restart_types () =
+  let src = {|mod Test do
+    actor W do
+      state { n : Int }
+      init  { n: 0 }
+      on Go() do { n: state.n + 1 } end
+    end
+    actor S do
+      state { a : Int, b : Int, c : Int }
+      init  { a: 0, b: 0, c: 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        W a
+        W b restart transient
+        W c restart temporary
+      end
+    end
+  end|} in
+  let lexbuf = Lexing.from_string src in
+  let m = March_parser.Parser.module_
+            (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let sup =
+    List.find_map (fun d -> match d with
+      | March_ast.Ast.DActor (_, nm, ad, _) when nm.March_ast.Ast.txt = "S" ->
+        ad.March_ast.Ast.actor_supervise
+      | _ -> None) m.mod_decls
+  in
+  match sup with
+  | None -> Alcotest.fail "expected actor S to carry a supervise config"
+  | Some sc ->
+    let restart_of name =
+      match List.find_opt (fun (sf : March_ast.Ast.supervise_field) ->
+              sf.March_ast.Ast.sf_name.txt = name) sc.March_ast.Ast.sc_fields with
+      | Some sf ->
+        (match sf.March_ast.Ast.sf_restart with
+         | March_ast.Ast.Permanent -> "permanent"
+         | March_ast.Ast.Transient -> "transient"
+         | March_ast.Ast.Temporary -> "temporary")
+      | None -> Alcotest.failf "no supervise field named %s" name
+    in
+    Alcotest.(check string) "omitted modifier defaults to permanent"
+      "permanent" (restart_of "a");
+    Alcotest.(check string) "restart transient" "transient" (restart_of "b");
+    Alcotest.(check string) "restart temporary" "temporary" (restart_of "c")
+
 let compiler_suites =
   [
       sigil_interp_suite;
@@ -15594,5 +15669,7 @@ let compiler_suites =
           Alcotest.test_case "dependency mod, self-qualified call: errors"          `Quick test_tce_non_entry_self_qualified_call_errors;
           Alcotest.test_case "dependency mod, nested mod: errors"                   `Quick test_tce_non_entry_nested_mod_errors;
           Alcotest.test_case "dependency mod, structural recursion: no error"       `Quick test_tce_non_entry_structural_recursion_no_error;
+          Alcotest.test_case "supervise child restart types"                       `Quick test_parse_supervise_child_restart_types;
+          Alcotest.test_case "restart usable as identifier"                       `Quick test_restart_still_usable_as_identifier;
         ] );
   ]

@@ -77,6 +77,10 @@ let () =
       ("strategy", STRATEGY);
       ("max_restarts", MAX_RESTARTS);
       ("within", WITHIN);
+      ("restart",   RESTART);
+      ("permanent", PERMANENT);
+      ("transient", TRANSIENT);
+      ("temporary", TEMPORARY);
       ("one_for_one", ONE_FOR_ONE);
       ("one_for_all", ONE_FOR_ALL);
       ("rest_for_one", REST_FOR_ONE);
