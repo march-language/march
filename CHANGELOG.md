@@ -28,6 +28,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Two actors with the same name in different modules no longer share one capability
+  closure. Handler closures were keyed by the actor's bare `<Actor>_<Msg>` name, so
+  `Safe.Worker` and `Danger.Worker` collided on `Worker_Go` and their capabilities were
+  merged — spawning either one was charged the union of both, rejecting valid code with a
+  chain that pointed at the wrong actor. Handler and actor keys are now qualified by the
+  declaring module. The over-approximation was sound (it could only over-charge, never mask
+  a leak), so this is a false-positive fix, not a security fix.
+
 - The whole-program capability grant now bounds actor message handlers. A handler's body
   was invisible to `main`'s grant reachability walk, so a program granted only
   `Cap(IO.Console)` could `file_write` inside an actor handler — and it compiled, ran, and
