@@ -454,21 +454,33 @@ let list_archive_tasks archive_root =
       if Sys.file_exists full then Some (cmd, full, doc) else None
     ) tasks
 
-(** Resolve the stdlib directory using the same strategy as the compiler:
-    1. MARCH_STDLIB env var  2. exe-relative paths  3. CWD fallback *)
+(** Resolve the stdlib directory to hand to a `march` subprocess:
+    1. MARCH_STDLIB env var (explicit override)
+    2. the resolved toolchain's own stdlib -- see [Toolchain.stdlib_dir]
+    3. forge-exe-relative paths, ONLY when no toolchain version is resolved
+
+    Step 2 is load-bearing and must not fall through to step 3. The stdlib has
+    to come from the same install as the `march` that will be executed; forge's
+    own executable is the wrong reference point whenever the two live in
+    different prefixes. When a toolchain is resolved but ships no stdlib/, the
+    answer is None -- emitting no MARCH_STDLIB lets the compiler resolve its own
+    exe-relative stdlib, which is correct by construction. *)
 let find_stdlib_dir () =
   match Sys.getenv_opt "MARCH_STDLIB" with
   | Some p when Sys.file_exists p -> Some p
   | _ ->
-    let exe_dir = Filename.dirname Sys.executable_name in
-    let candidates = [
-      Filename.concat exe_dir "../stdlib";
-      Filename.concat exe_dir "../../stdlib";
-      Filename.concat exe_dir "../share/march/stdlib";
-      Filename.concat exe_dir "../share/march";
-      "stdlib";
-    ] in
-    List.find_opt Sys.file_exists candidates
+    match Toolchain.resolve_version () with
+    | Some _ -> Toolchain.stdlib_dir ()
+    | None ->
+      let exe_dir = Filename.dirname Sys.executable_name in
+      let candidates = [
+        Filename.concat exe_dir "../stdlib";
+        Filename.concat exe_dir "../../stdlib";
+        Filename.concat exe_dir "../share/march/stdlib";
+        Filename.concat exe_dir "../share/march";
+        "stdlib";
+      ] in
+      List.find_opt Sys.file_exists candidates
 
 (** Run a task module file with the given arguments.
     FORGE_TASK_ARGS carries newline-separated args; MARCH_LIB_PATH lets tasks

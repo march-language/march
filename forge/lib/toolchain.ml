@@ -125,6 +125,23 @@ let toolchain_drift ~locked ~resolved =
       r l)
   | _ -> None
 
+(* The stdlib that belongs to the toolchain [march_command] resolves to.
+
+   A toolchain is installed as versions/<tag>/{bin,stdlib,runtime}, and the
+   compiler finds its own stdlib exe-relative (bin/../stdlib). So when a version
+   IS resolved, that toolchain's stdlib is the only correct answer, and None
+   (meaning: set no MARCH_STDLIB, let the compiler self-resolve) is the only
+   correct fallback. Deriving it from forge's OWN executable instead pairs one
+   generation's compiler with another's stdlib whenever forge and the resolved
+   toolchain come from different prefixes -- e.g. an opam-installed forge at
+   ~/.opam/march/bin/forge driving a pinned ~/.march/versions/<tag>/bin/march. *)
+let stdlib_dir ?(cwd = Sys.getcwd ()) () =
+  match resolve_version ~cwd () with
+  | None -> None
+  | Some tag ->
+    let d = Filename.concat (version_dir tag) "stdlib" in
+    if Sys.file_exists d then Some d else None
+
 (* A shell prefix that puts the resolved toolchain's bin/ first on PATH, so a
    bare `march` in a forge subprocess uses the pinned/global version. Empty when
    nothing is resolved (PATH fallback). Error when a pin is not installed. *)

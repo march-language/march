@@ -28,6 +28,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`forge` no longer pairs one install's compiler with another install's stdlib.**
+  `forge` set `MARCH_STDLIB` from its OWN executable location
+  (`<forge>/../share/march`) while running the `march` chosen by toolchain
+  resolution (`~/.march/current/bin/march`). When the two live in different
+  prefixes — an opam-installed `forge` driving a pinned toolchain — every forge
+  subprocess typechecked a newer compiler against an older stdlib. The symptom is
+  a flood of type errors in source that is actually correct: a pre-`Vault(v)`
+  stdlib under a post-`Vault(v)` compiler produced 47 bogus "expected `Int` but
+  got …" Vault errors in one project, while the identical files checked clean
+  under a direct `march --check`. The stdlib is now derived from the resolved
+  toolchain (`versions/<tag>/stdlib`), and when a toolchain is resolved but ships
+  no `stdlib/`, `MARCH_STDLIB` is left unset so the compiler resolves its own
+  exe-relative stdlib rather than falling back to forge's prefix. `forge notebook`
+  had a second copy of the same guess and now shares the fixed resolver; its
+  `march` lookup is toolchain-aware for the same reason.
+
 - Two actors with the same name in different modules no longer share one capability
   closure. Handler closures were keyed by the actor's bare `<Actor>_<Msg>` name, so
   `Safe.Worker` and `Danger.Worker` collided on `Worker_Go` and their capabilities were
