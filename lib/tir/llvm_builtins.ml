@@ -468,6 +468,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)" };
   { march_name = "actor_reply"; c_name = Some "march_actor_reply"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_actor_reply(ptr %ref, ptr %result)" };
+  (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-language-
+     level-timers.md). Same (ptr, ptr, i64) -> ptr shape as actor_call above
+     -- pid and msg go through the general EApp path exactly like
+     actor_cast/actor_call's do (no special-casing needed: msg is
+     conventionally always an actor-message constructor, same as
+     actor_cast's, and pid is exactly as unconstrained). *)
+  { march_name = "actor_send_after"; c_name = Some "march_send_after"; ret_ty = Some (Tir.TCon ("TimerRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_send_after(ptr %actor, ptr %msg, i64 %delay_ms)" };
+  { march_name = "actor_cancel_timer"; c_name = Some "march_timer_cancel"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_timer_cancel(ptr %tok)" };
   { march_name = "receive"; c_name = Some "march_sched_recv"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sched_recv()" };
   { march_name = "tcp_listen"; c_name = Some "march_tcp_listen"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
@@ -1325,6 +1335,8 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_actor_get_int";
   PDeclare "march_actor_call";
   PDeclare "march_actor_reply";
+  PDeclare "march_send_after";
+  PDeclare "march_timer_cancel";
   PDeclare "march_run_scheduler";
   PDeclare "march_task_spawn_thunk";
   PDeclare "march_task_await";

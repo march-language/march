@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Actor.send_after(pid, msg, delay_ms)` / `Actor.cancel_timer(ref)`: schedule a
+  message for delayed delivery to an actor, with cancellation.** Previously an actor
+  that wanted to poll, retry, time something out, or tick had to burn a green thread
+  in a yield loop — the scheduler already had a timer heap backing `Actor.call`
+  deadlines and supervisor restart backoff, but nothing surfaced it to March code.
+  `send_after` returns an opaque `TimerRef`; `cancel_timer` is safe to call at any
+  time, including after the timer already fired or was already cancelled (both are
+  no-ops). A cancelled or dead-target timer's message is disposed with no leak — see
+  `specs/progress/2026-08-12-language-level-timers.md` for the RC design and a
+  pre-existing scheduler-callback registration bug this also fixed along the way.
+
 - **The capability ceiling now runs under `march --check` / `--check-json`, not only
   `--compile`.** A module whose `needs` manifest is falsified by a stdlib-MEDIATED call
   (`File.read(p)` rather than the builtin `file_read(p)` — the idiomatic way to do IO) was

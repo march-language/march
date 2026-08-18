@@ -136,6 +136,40 @@ void    march_simd_bounds_panic(int64_t i, int64_t lanes, int64_t len);
 void    march_simd_lane_panic(int64_t i, int64_t lanes);
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
 
+/* send_after/cancel_timer cancellation token (specs/progress/2026-08-12-
+ * language-level-timers.md). An ordinary march_alloc'd, RC'd heap value —
+ * NOT a bespoke malloc'd struct like march_cancel_token (runtime/
+ * march_scheduler.h) — specifically so Perceus's normal, type-driven
+ * inc_rc/dec_rc insertion (needs_rc(TCon _) = true; see lib/tir/
+ * rc_types.ml) operates correctly on it without any special-casing: any
+ * TimerRef held/copied more than once (e.g. checked for cancellation and
+ * then discarded) gets a real inc_rc against a real march_hdr, unlike a raw
+ * malloc'd struct where that would corrupt whatever bytes happen to sit at
+ * the assumed rc offset. Layout: [rc][tag][pad][cancelled@16] (24 bytes);
+ * cancelled is 0/1, mutated with atomic ops by march_timer_cancel and read
+ * the same way by the scheduler's registered is_cancelled callback (see
+ * march_sched_set_timer_token_ops in runtime/march_scheduler.h). Two owners
+ * across its lifetime: the timer heap entry (from march_send_after's push
+ * until the entry is popped, fired or not) and the March-level TimerRef
+ * binding returned to the caller — ordinary RC, no leak, no cancel-after-
+ * fire UAF (the object only dies once BOTH release it). */
+#define MARCH_TIMER_TOKEN_TAG ((int32_t)-5)
+
+/* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
+ * the actor `actor` after delay_ms milliseconds. RC contract matches
+ * march_send: receives exactly one owned reference to msg (transferred into
+ * the timer heap until delivery or disposal). Returns a new TimerRef (see
+ * MARCH_TIMER_TOKEN_TAG above), one reference transferred to the caller. */
+void   *march_send_after(void *actor, void *msg, int64_t delay_ms);
+
+/* cancel_timer(ref) — cancel a pending send_after timer. Consumes (and
+ * releases) the one reference to `tok` it receives, matching the RC
+ * contract of any builtin that takes ownership of its argument. Safe to
+ * call at any time, including after the timer has already fired (no-op) or
+ * been cancelled already (no-op) — the token's own RC keeps it alive for as
+ * long as the caller holds a valid TimerRef, by construction. */
+void    march_timer_cancel(void *tok);
+
 /* Reserved constructor-tag ABI for runtime-originated local-monitor values.
  * Keep in sync with lib/tir/llvm_builtins.ml. Ordinary constructors and the
  * two compiler global-tag allocators are bounded below this range. */

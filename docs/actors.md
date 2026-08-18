@@ -708,6 +708,8 @@ under the interpreter, but broken or unreliable compiled today.
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
 | `Actor.set_queue_limit(pid, limit, policy)` | `→ ()` | both (policy `3` is compiled-only; interpreted treats it as unbounded) | Bound an actor's mailbox — see [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure) |
+| `Actor.send_after(pid, msg, delay_ms)` | `→ TimerRef` | both | Schedule `msg` for delivery to `pid` after `delay_ms`. Built on the same timer heap that backs `Actor.call`'s timeout and supervisor restart backoff. A pending timer does not keep `run_until_idle()` waiting. |
+| `Actor.cancel_timer(ref)` | `→ ()` | both | Cancel a pending `send_after` timer. Safe to call at any time, including after the timer already fired or was already cancelled (both are no-ops). |
 
 ---
 
