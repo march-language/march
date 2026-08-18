@@ -2835,6 +2835,26 @@ let builtin_bindings : (string * scheme) list =
       Poly ([get_id pid_a; get_id msg_b; get_id ret_c], [],
         TArrow (pid_a, TArrow (msg_b, TArrow (t_int, t_result ret_c t_string)))));
     ("actor_reply", poly2 (fun a b -> TArrow (a, TArrow (b, t_unit))));
+    (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-language-
+       level-timers.md): schedule msg for delivery to pid after delay_ms
+       milliseconds, returning an opaque TimerRef; actor_cancel_timer(ref)
+       cancels a still-pending one. Named with the "actor_" raw-builtin
+       prefix (like actor_cast/actor_call/actor_reply, all wrapped by clean
+       Actor.* names in stdlib/actor.march) rather than left bare like
+       self/spawn/send: a bare `send_after`/`cancel_timer` March-level
+       wrapper of the SAME name recursing into itself instead of reaching
+       the builtin is exactly the documented System.mem_peak_bytes/
+       peak_rss_bytes pitfall (stdlib/system.march) — March has no way to
+       call a shadowed global from inside a same-named local fn. `a` (the
+       pid slot) is left just as unconstrained as actor_cast's — self()
+       returns Int, a real spawn() Pid(a) is a distinct heap type, and both
+       already flow through actor_cast's identically-unconstrained first
+       parameter. TimerRef carries no type parameter (not CancelToken(a)-
+       shaped): a timer is not associated with any particular actor's state
+       type. *)
+    ("actor_send_after", poly2 (fun a b ->
+        TArrow (a, TArrow (b, TArrow (t_int, TCon ("TimerRef", []))))));
+    ("actor_cancel_timer", Mono (TArrow (TCon ("TimerRef", []), t_unit)));
     (* Logger builtins — 0-arg variants typed as Mono(result) so foo() works *)
     ("logger_set_level",   Mono (TArrow (t_int, t_unit)));
     ("logger_get_level",   Mono t_int);

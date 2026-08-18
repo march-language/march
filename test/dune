@@ -2751,6 +2751,75 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_call_timeout.expected native_actor_call_timeout.out)))
 
+; ── Regression: Actor.send_after/Actor.cancel_timer (specs/progress/2026-08-12-
+; language-level-timers.md) — a scheduled message must not be delivered
+; before its deadline, must be delivered once the deadline passes, and
+; cancel_timer called before the deadline (including a harmless
+; double-cancel) must prevent delivery entirely.
+(rule
+ (targets native_timer_send_after native_timer_send_after.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/timer_send_after.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_timer_send_after
+        native/timer_send_after.march)
+   (with-stdout-to native_timer_send_after.out
+        (system "./native_timer_send_after")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/timer_send_after.expected native_timer_send_after.out)))
+
+; ── Leak guard for send_after/cancel_timer message + TimerRef-token disposal
+; (specs/progress/2026-08-12-language-level-timers.md) — the cancelled-before-
+; deadline and dead-target-at-deadline dispose paths in timer_service
+; (runtime/march_scheduler.c), neither of which goes through a normal
+; deliver-to-mailbox. Same three-rule structure as native_arr_fold_leak_probe
+; above (run / stdout diff / threshold assertion) and the same live_allocs()
+; rationale — see test/native/timer_leak_probe.march's header comment.
+(rule
+ (targets native_timer_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/timer_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_timer_leak_probe
+       native/timer_leak_probe.march)))
+
+(rule
+ (targets native_timer_leak_probe.out native_timer_leak_probe.live)
+ (deps native_timer_leak_probe)
+ (action
+  (with-stdout-to native_timer_leak_probe.out
+   (with-stderr-to native_timer_leak_probe.live
+    (run ./native_timer_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/timer_leak_probe.expected
+        native_timer_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_timer_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat native_timer_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from native_timer_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 100 || { echo \"native_timer_leak_probe leaked: live_allocs delta ${live} >= 100 objects. cancelled_leg (5000 cancel-before-deadline sends) and dead_target_leg (5000 sends to an already-dead actor) must each dispose their message AND TimerRef token when timer_service pops the entry, not just when a message is actually delivered -- healthy is a small constant (0 on this fixture), a missing dispose call adds exactly 5000. Check the cancelled/MARCH_SEND_DEAD branches in timer_service (runtime/march_scheduler.c) still call march_mbox_dispose(ent.msg) and g_timer_token_release(ent.token).\" >&2; exit 1; }; \
+    echo \"native_timer_leak_probe live_allocs delta = ${live} objects\"")))
+
 ; ── Regression: pid_of_int must return a real actor pointer, not a raw
 ; int-to-ptr cast (compiled march_pid_of_int used to reinterpret a small
 ; pid_index integer as a heap address, corrupting/hanging on any use).

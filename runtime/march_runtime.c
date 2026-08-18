@@ -2314,6 +2314,13 @@ void march_sandbox_install(void) {
 void march_sandbox_install(void) { /* not built with --cap-sandbox */ }
 #endif
 
+/* Forward declaration: defined below (near march_actor_msg_dispose /
+ * march_timer_token_is_cancelled / march_timer_token_release), called from
+ * BOTH scheduler-lazy-init sites below that guard on g_sched_initialized's
+ * 0->1 CAS (this function itself, and march_spawn_common's) — see this
+ * function's own definition for why a single call site is not enough. */
+static void march_register_sched_callbacks(void);
+
 void march_spawn_main(void (*fn)(void)) {
     /* Drop privileges before the scheduler starts and before any user code
      * runs.  No-op unless built with --cap-sandbox. */
@@ -2323,6 +2330,24 @@ void march_spawn_main(void (*fn)(void)) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* march_spawn_main is the FIRST lazy-init site to actually run in a
+         * normal compiled program: the emitted @main calls it (via
+         * march_spawn_main(@march_main), llvm_toplevel.ml) unconditionally,
+         * strictly before user code -- including the first actor spawn --
+         * ever executes. That means it, not march_spawn_common's block
+         * below, wins the g_sched_initialized 0->1 CAS in practice, so the
+         * scheduler callback registrations MUST also happen here or they
+         * never run in a compiled program at all: march_spawn_common's own
+         * registration call is dead code once this branch has already
+         * flipped the flag. Discovered while wiring send_after/cancel_timer
+         * (specs/progress/2026-08-12-language-level-timers.md) -- cancel_timer
+         * silently never took effect because march_sched_set_timer_token_ops
+         * was never called, which on inspection turned out to be true of
+         * march_sched_set_msg_dtor too (Task 14's DROP_NEW/DROP_OLD/dead-
+         * proc-reap message disposal), pre-existing and unrelated to this
+         * feature. Both are registered from the same helper so neither can
+         * drift out of sync with the other again. */
+        march_register_sched_callbacks();
     }
     march_sched_spawn(main_fn_green_thread, (void *)(uintptr_t)fn);
 }
@@ -4064,14 +4089,12 @@ static void *march_spawn_common(void *actor, int defer_activation) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
-        /* Task 14: give the scheduler a real disposer for messages it never
-         * delivers (mailbox-overflow drops, and every message still queued
-         * in a proc's mailbox when it is reaped dead) instead of leaking
-         * them. See march_actor_msg_dispose's own comment for the two
-         * message shapes it discriminates between, and the re-entrancy
-         * contract on march_sched_set_msg_dtor for why the scheduler always
-         * calls this with no scheduler lock held. */
-        march_sched_set_msg_dtor(march_actor_msg_dispose);
+        /* Reachable when something spawns an actor before march_spawn_main
+         * has run (e.g. REPL/JIT, hot-reload, or any other embedding entry
+         * point that does not go through the emitted @main -> march_spawn_
+         * main path) -- see march_register_sched_callbacks' definition and
+         * march_spawn_main's own call to it for why BOTH sites need this. */
+        march_register_sched_callbacks();
     }
     /* A normal actor is runnable immediately. A supervise-block child uses
      * the deferred entry point and is activated by register_child only after
@@ -4592,6 +4615,98 @@ void *march_send(void *actor, void *msg) {
     int64_t *fld = (int64_t *)((char *)some + 16);
     fld[0] = 0;
     return some;
+}
+
+/* ── send_after / cancel_timer (specs/progress/2026-08-12-language-level-
+   timers.md) ──────────────────────────────────────────────────────────── */
+/* A TimerRef's single field: cancelled (0/1), at offset 16 (right after the
+ * 16-byte march_hdr) — see MARCH_TIMER_TOKEN_TAG's doc comment in
+ * march_runtime.h for the full RC design. Accessed directly (not via the
+ * MARCH_FIELD macro, defined just below this point) since this function
+ * comes first in file order. */
+#define MARCH_TIMER_TOKEN_CANCELLED(tok) (((int64_t *)(tok))[2])
+
+/* Registered with the scheduler below (march_sched_set_timer_token_ops) so
+ * march_scheduler.c can check/release a SEND-kind timer entry's token
+ * without depending on March's GC internals — same rationale, and same
+ * indirection shape, as march_sched_set_msg_dtor / march_actor_msg_dispose
+ * just above. */
+static int64_t march_timer_token_is_cancelled(void *tok) {
+    return atomic_load_explicit((_Atomic int64_t *)&MARCH_TIMER_TOKEN_CANCELLED(tok),
+                                 memory_order_acquire);
+}
+static void march_timer_token_release(void *tok) {
+    march_decrc(tok);
+}
+
+/* Register every scheduler callback the runtime layer supplies (the message
+ * dtor for undelivered/orphaned mailbox messages, Task 14; the timer-token
+ * ops for send_after/cancel_timer, this feature) in one place, so the two
+ * lazy-init call sites that race to win g_sched_initialized's 0->1 CAS
+ * (march_spawn_main and march_spawn_common, above) can never register only
+ * one of the two and silently leave the other permanently unregistered for
+ * the life of the process — exactly the bug this helper replaces: before
+ * it, march_spawn_common called march_sched_set_msg_dtor/
+ * march_sched_set_timer_token_ops directly, but march_spawn_main (which
+ * runs first, and hence wins the CAS, in every normal compiled program)
+ * called neither. */
+static void march_register_sched_callbacks(void) {
+    /* Task 14: give the scheduler a real disposer for messages it never
+     * delivers (mailbox-overflow drops, and every message still queued
+     * in a proc's mailbox when it is reaped dead) instead of leaking
+     * them. See march_actor_msg_dispose's own comment for the two
+     * message shapes it discriminates between, and the re-entrancy
+     * contract on march_sched_set_msg_dtor for why the scheduler always
+     * calls this with no scheduler lock held. */
+    march_sched_set_msg_dtor(march_actor_msg_dispose);
+    /* send_after/cancel_timer (specs/progress/2026-08-12-language-level-
+     * timers.md): give the scheduler's timer heap a way to check/release
+     * a SEND-kind entry's TimerRef token without depending on March's GC
+     * internals — same rationale as the message dtor just above. */
+    march_sched_set_timer_token_ops(march_timer_token_is_cancelled,
+                                    march_timer_token_release);
+}
+
+/* send_after(pid, msg, delay_ms) : TimerRef — see march_runtime.h's doc
+ * comment on the declaration for the RC contract.
+ *
+ * actor is resolved to its current green thread ONCE, here, exactly like
+ * march_send above — NOT re-resolved at fire time. If the actor is
+ * respawned (e.g. a supervised restart) before the deadline, this timer
+ * still targets the ORIGINAL process instance, which by then reads DEAD;
+ * march_sched_send_after/timer_service treat that uniformly with "never
+ * spawned" (gt == NULL) and "died before firing" — the message is disposed,
+ * never silently redirected to the new instance. This matches march_send's
+ * own pid-is-a-process-identity semantics and needs no extra bookkeeping.
+ *
+ * delay_ms <= 0 fires on the next timer_service tick (deadline = now). */
+void *march_send_after(void *actor, void *msg, int64_t delay_ms) {
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
+                                                  memory_order_acquire)
+                          : NULL;
+
+    void *tok = march_alloc(16 + 8);
+    ((march_hdr *)tok)->tag = MARCH_TIMER_TOKEN_TAG;
+    MARCH_TIMER_TOKEN_CANCELLED(tok) = 0;
+    /* Second reference: the timer heap's own hold, released by
+     * march_timer_token_release (via the registered ops) when timer_service
+     * pops this entry — fired or not. The first reference (rc=1 from
+     * march_alloc) is the one we return to the caller below. */
+    march_incrc(tok);
+
+    int64_t deadline = march_now_ms() + (delay_ms > 0 ? delay_ms : 0);
+    march_sched_send_after(gt, msg, tok, deadline);
+    return tok;
+}
+
+/* cancel_timer(ref) — see march_runtime.h's doc comment for the RC
+ * contract: consumes (and releases) the one reference to tok it receives. */
+void march_timer_cancel(void *tok) {
+    if (!tok) return;
+    atomic_store_explicit((_Atomic int64_t *)&MARCH_TIMER_TOKEN_CANCELLED(tok),
+                          1, memory_order_release);
+    march_decrc(tok);
 }
 
 /* ── Heap layout helpers (used by actor_call and file I/O) ────────────── */

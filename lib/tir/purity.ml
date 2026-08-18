@@ -31,6 +31,7 @@ let impure_builtins = [
   (* Signal watchers — register/remove a deferred OS-signal handler; self-raise *)
   "signal_watch"; "signal_unwatch"; "signal_raise_self";
   "actor_cast"; "actor_call"; "actor_reply";
+  "actor_send_after"; "actor_cancel_timer";
   (* Process control *)
   "process_exit"; "process_spawn_sync";
   "process_set_env";

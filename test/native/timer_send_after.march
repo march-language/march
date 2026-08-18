@@ -1,0 +1,71 @@
+-- Regression: Actor.send_after/Actor.cancel_timer (specs/progress/2026-08-12-
+-- language-level-timers.md) actually delay delivery -- not before the
+-- deadline, delivered once it passes -- and cancel_timer really prevents
+-- delivery when called before the deadline (including a harmless
+-- double-cancel).
+--
+-- wait_ms uses the SAME timer-heap mechanism send_after itself is built on
+-- (Actor.call's timeout, march_sched_park_self_until) as a real blocking
+-- sleep: Silent's handler never replies, so the call always times out after
+-- exactly `ms` milliseconds -- see native/actor_call_timeout.march for the
+-- same trick used to test the timeout enforcement itself.
+mod TimerSendAfter do
+  needs IO.Console
+  type CallGet = CallGet
+
+  actor Silent do
+    state { value : Int }
+    init { value: 0 }
+    on GetValue(_ref) do
+      state
+    end
+  end
+
+  actor Counter do
+    state { count : Int }
+    init { count: 0 }
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+
+  fn wait_ms(silent, ms) do
+    match Actor.call(silent, CallGet, ms) do
+    Ok(_)  -> ()
+    Err(_) -> ()
+    end
+  end
+
+  fn get_count(pid) do
+    match get_actor_field(pid, "count") do
+    Some(n) -> n
+    None -> -1
+    end
+  end
+
+  fn main(_cap : Cap(IO.Console)) : Unit do
+    let silent = spawn(Silent)
+    let counter = spawn(Counter)
+
+    -- Delivery timing: not yet delivered right after scheduling, delivered
+    -- once the deadline has genuinely passed.
+    let ref1 = Actor.send_after(counter, Inc(), 60)
+    run_until_idle()
+    println("before_deadline_count=" ++ int_to_string(get_count(counter)))
+    wait_ms(silent, 150)
+    run_until_idle()
+    println("after_deadline_count=" ++ int_to_string(get_count(counter)))
+
+    -- Cancellation: cancelled before its deadline, so the SECOND Inc never
+    -- lands -- count stays at 1, not 2. Double-cancel is a harmless no-op.
+    let ref2 = Actor.send_after(counter, Inc(), 60)
+    Actor.cancel_timer(ref2)
+    Actor.cancel_timer(ref2)
+    wait_ms(silent, 150)
+    run_until_idle()
+    println("after_cancel_count=" ++ int_to_string(get_count(counter)))
+
+    kill(silent)
+    kill(counter)
+  end
+end

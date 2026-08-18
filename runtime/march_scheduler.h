@@ -504,6 +504,57 @@ void *march_sched_recv_user_until(int64_t deadline_ms);
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);
 
+/* ── send_after / cancel_timer (specs/progress/2026-08-12-language-level-
+ * timers.md) — a SEND-kind entry in the same timer min-heap that already
+ * backs march_sched_park_self_until/march_sched_recv_until, but firing
+ * delivers a message (march_sched_send) instead of only waking a proc.
+ *
+ * Schedule `msg` for delivery to `target` at `deadline_ms` (march_now_ms
+ * clock, absolute — same convention as march_sched_park_self_until/
+ * march_sched_recv_until; the caller adds the delay). `target` may be NULL
+ * (actor never spawned, or already known dead) -- treated uniformly with a
+ * target that dies before the deadline: at fire time msg is disposed via
+ * the registered message dtor (march_sched_set_msg_dtor) instead of sent.
+ *
+ * RC contract: receives exactly one owned reference to `msg` (same as
+ * march_sched_send) and exactly one owned reference to `token` (may be
+ * NULL, meaning "no cancellation support" -- the entry is simply never
+ * checked for cancellation). Both are released exactly once, when
+ * timer_service pops this entry -- fired, disposed, or skipped as
+ * cancelled makes no difference to that release. `token`'s reference is
+ * released via the registered ops (march_sched_set_timer_token_ops), never
+ * by this module directly -- march_scheduler.c has no dependency on
+ * March's GC (march_incrc/march_decrc); see march_sched_set_msg_dtor's own
+ * doc comment for the identical rationale on the message side.
+ *
+ * Design decision: a pending SEND-kind entry does NOT count as "work
+ * pending" for march_sched_wait_idle (unlike a WAKE-kind park/recv
+ * deadline, which does). A long send_after would otherwise keep
+ * run_until_idle() -- the test-harness idle-drain primitive -- from ever
+ * returning; a real server drives its event loop via march_sched_run() (or
+ * stays alive on non-daemon procs / other actors), which is unaffected by
+ * this and still delivers the message on schedule regardless of what
+ * wait_idle reports. See the timers_pending loop in
+ * march_sched_wait_idle's body for the corresponding kind check. */
+void march_sched_send_after(march_proc *target, void *msg, void *token,
+                            int64_t deadline_ms);
+
+/* march_timer_cancel (the March-facing cancel_timer builtin) is declared in
+ * march_runtime.h, not here -- it needs march_decrc to release the token's
+ * reference, which this module (march_scheduler.c) deliberately has no
+ * dependency on; see this file's own module-level rationale for why. */
+
+/* Register the callbacks used to check/release a SEND-kind timer entry's
+ * cancellation token, mirroring march_sched_set_msg_dtor's indirection (and
+ * re-entrancy contract: never called with any scheduler lock held) so this
+ * module stays free of any direct dependency on March's GC. Until
+ * registered (or in the standalone scheduler unit tests that link
+ * march_scheduler.c alone), every SEND-kind entry is treated as
+ * never-cancelled -- is_cancelled defaults to "always false" -- and
+ * release is a no-op (token, if any, is simply not freed). */
+void march_sched_set_timer_token_ops(int64_t (*is_cancelled)(void *token),
+                                     void (*release)(void *token));
+
 /* ── Phase 4: compiled-code reduction counting ────────────────────────── */
 
 /* Thread-local reduction budget for LLVM-compiled code.
