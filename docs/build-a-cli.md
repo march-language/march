@@ -152,6 +152,8 @@ Putting it together — replace `lib/mcount.march` with:
 ```march
 mod Mcount do
   needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
 
   -- Count lines, words, and bytes in a string.
   fn count(text : String) : (Int, Int, Int) do
