@@ -6394,23 +6394,63 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
 void march_actor_register_child(void *supervisor, void *child,
                                  void *spawn_clo, int64_t word_idx,
                                  int64_t restart_type) {
+    /* Both metas are resolved BEFORE the g_supervise_mu section below:
+     * find_or_create_meta takes g_tbl_mu, and per g_supervise_mu's leaf-lock
+     * contract nothing that takes another lock may run while it is held. */
     march_actor_meta *sup_meta = find_or_create_meta(supervisor);
     march_actor_meta *child_meta = find_or_create_meta(child);
-    /* The child was prepared by march_spawn_supervised, so no actor loop can
-     * observe this metadata halfway through publication. */
-    pthread_mutex_lock(&g_tbl_mu);
-    child_meta->supervisor = supervisor;
-    child_meta->sup_child_index = sup_meta->sup_num_children;
-    pthread_mutex_unlock(&g_tbl_mu);
+
+    /* Append this child's slot under g_supervise_mu.  The realloc and the
+     * sup_num_children bump are one indivisible step: without the lock, two
+     * threads registering children of the SAME supervisor could both read
+     * idx == N, both realloc the array (the loser's block is freed under the
+     * winner, and any concurrent reader of the old pointer is left dangling),
+     * and both store sup_num_children = N + 1 — one child silently lost, its
+     * slot never written, and a torn `sup_children` pointer visible to
+     * march_supervisor_notify.  This is the same leaf-lock discipline
+     * march_restart_budget_ok already applies to the sibling sup_restart_ts
+     * realloc.  Everything under the lock is a plain C field read/write: no
+     * March closure, no do_actor_death, no swapcontext, no second lock.
+     *
+     * Today this interleaving is LATENT rather than live: lower_actor.ml
+     * emits the register_supervisor_child calls as a straight-line ELet chain
+     * inside the supervisor's own <Name>_spawn body, against a $spawned
+     * pointer no other thread can yet reach, so one supervisor's children are
+     * always registered sequentially by one green thread.  The lock makes
+     * that an enforced invariant rather than an accident of lowering. */
+    pthread_mutex_lock(&g_supervise_mu);
     int idx = sup_meta->sup_num_children;
-    sup_meta->sup_children = realloc(sup_meta->sup_children,
-                                      (size_t)(idx + 1) * sizeof(march_sup_child));
+    march_sup_child *grown = (march_sup_child *)realloc(
+        sup_meta->sup_children, (size_t)(idx + 1) * sizeof(march_sup_child));
+    if (!grown) {
+        pthread_mutex_unlock(&g_supervise_mu);
+        fputs("march: out of memory registering supervised child\n", stderr);
+        exit(1);
+    }
+    sup_meta->sup_children = grown;
+    /* realloc does not zero the new tail — every field is assigned here.
+     * See march_sup_child's field comments. */
     sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
     sup_meta->sup_children[idx].restart_type = (int32_t)restart_type;
     sup_meta->sup_children[idx].crash_streak = 0;
     sup_meta->sup_children[idx].last_crash_ms = 0;
     sup_meta->sup_num_children = idx + 1;
+    pthread_mutex_unlock(&g_supervise_mu);
+
+    /* Publish the child's back-pointer only after its slot exists, so a
+     * crash-trap lookup that finds child_meta->supervisor set can always
+     * index sup_children[sup_child_index].  `idx` is the value this thread
+     * claimed under g_supervise_mu, not a fresh (racy) re-read of
+     * sup_num_children.  The child was prepared by march_spawn_supervised, so
+     * no actor loop can observe this metadata halfway through publication. */
+    pthread_mutex_lock(&g_tbl_mu);
+    child_meta->supervisor = supervisor;
+    child_meta->sup_child_index = idx;
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    /* Outside every lock: this spawns a green thread (stack allocation plus
+     * scheduler-internal locking) and must never run under g_supervise_mu. */
     activate_actor_green_thread(child_meta);
 }
 
