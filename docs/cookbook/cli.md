@@ -132,6 +132,8 @@ for streaming side effects.
 ```march
 mod Cat do
   needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
 
   fn dump(path : String) do
     match File.read(path) do
