@@ -4404,6 +4404,14 @@ void *march_task_spawn_thunk(void *clo_ptr) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* Every site that can win this CAS must register the callbacks —
+         * whichever one wins is the ONLY one that runs, so a site that skips
+         * this leaves them unregistered for the life of the process. Reached
+         * first whenever a task_spawn precedes both march_spawn_main and any
+         * actor spawn, which is exactly what a REPL/JIT session or a
+         * --compile-so embedding does (neither emits the @main wrapper that
+         * calls march_spawn_main). See march_register_sched_callbacks. */
+        march_register_sched_callbacks();
     }
     /* Perceus treats task_spawn as a consuming call: the caller transfers its
      * reference to the task.  No IncRC needed here; the closure's existing
@@ -4469,6 +4477,8 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* Same reasoning as march_task_spawn_thunk's call just above. */
+        march_register_sched_callbacks();
     }
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
@@ -4641,15 +4651,24 @@ static void march_timer_token_release(void *tok) {
 
 /* Register every scheduler callback the runtime layer supplies (the message
  * dtor for undelivered/orphaned mailbox messages, Task 14; the timer-token
- * ops for send_after/cancel_timer, this feature) in one place, so the two
- * lazy-init call sites that race to win g_sched_initialized's 0->1 CAS
- * (march_spawn_main and march_spawn_common, above) can never register only
- * one of the two and silently leave the other permanently unregistered for
- * the life of the process — exactly the bug this helper replaces: before
- * it, march_spawn_common called march_sched_set_msg_dtor/
- * march_sched_set_timer_token_ops directly, but march_spawn_main (which
- * runs first, and hence wins the CAS, in every normal compiled program)
- * called neither. */
+ * ops for send_after/cancel_timer, this feature) in one place, so no
+ * lazy-init call site can register only some of them and silently leave the
+ * rest permanently unregistered for the life of the process — exactly the
+ * bug this helper replaces: before it, march_spawn_common called
+ * march_sched_set_msg_dtor directly, but march_spawn_main (which runs
+ * first, and hence wins the CAS, in every normal compiled program) called
+ * nothing.
+ *
+ * ALL FOUR sites that CAS g_sched_initialized 0->1 must call this, because
+ * exactly one of them wins and the losers' bodies never run:
+ *   - march_spawn_main                    (compiled @main; wins normally)
+ *   - march_spawn_common                  (actor spawned before @main)
+ *   - march_task_spawn_thunk              (task_spawn before either)
+ *   - march_task_spawn_with_cancel_thunk  (ditto, with a cancel token)
+ * The last two matter for the REPL/JIT and --compile-so embedding paths,
+ * which never emit the @main wrapper that calls march_spawn_main, so a
+ * leading task_spawn there is genuinely the first site reached. Adding a
+ * fifth CAS site without calling this reintroduces the bug. */
 static void march_register_sched_callbacks(void) {
     /* Task 14: give the scheduler a real disposer for messages it never
      * delivers (mailbox-overflow drops, and every message still queued

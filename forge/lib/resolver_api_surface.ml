@@ -169,8 +169,24 @@ let extract_from_string src =
   | Error _   -> empty_surface
   | Ok decls  -> extract_decls decls empty_surface
 
-(** Recursively collect all .march files under a directory, in sorted order
-    for deterministic output. *)
+(** Recursively collect the .march files that make up a package's PUBLIC API,
+    in sorted order for deterministic output.
+
+    Two kinds of directory are pruned, because what lands here is what
+    `forge publish` treats as the package's public API surface and holds the
+    author to under semver:
+
+    - Dot-directories (`.march/`, `.git/`, …). `.march/` is forge's own build
+      tree, physically under the project root; anything cached there would be
+      counted a second time, and a vendored dependency's sources would be
+      folded into THIS package's surface, so a dependency upgrade alone would
+      demand a major bump.
+    - The package's top-level `test/` directory — forge's own convention
+      (see [Cmd_test], which resolves tests as `<root>/test`). Test helpers
+      are not API: without this, renaming a fixture helper reads as
+      [ChangedFn] → [Major] and blocks an otherwise legitimate patch release.
+      Pruned only at the root, so a `src/test_utils.march` (a real module
+      that happens to be named for testing) still counts. *)
 let march_files_under root =
   let files = ref [] in
   let rec walk dir =
@@ -178,7 +194,11 @@ let march_files_under root =
        let entries = Sys.readdir dir in
        Array.iter (fun name ->
            let path = Filename.concat dir name in
-           if Sys.is_directory path then walk path
+           if Sys.is_directory path then begin
+             let is_dot_dir = String.length name > 0 && name.[0] = '.' in
+             let is_root_test_dir = dir = root && name = "test" in
+             if not (is_dot_dir || is_root_test_dir) then walk path
+           end
            else if Filename.check_suffix name ".march" then
              files := path :: !files
          ) entries
@@ -187,20 +207,33 @@ let march_files_under root =
   walk root;
   List.sort String.compare !files
 
-(** Extract the combined API surface of a package source tree. A file that
-    fails to parse is skipped (with a warning on stderr) rather than aborting
-    the whole extraction — but note this is where the fix's own failure mode
-    lives: skip silently and the surface goes quiet again. See the
-    non-emptiness regression test in test_api_surface.ml. *)
-let extract_from_directory root_dir =
+(** Extract the combined API surface of a package source tree, together with
+    the files that could not be parsed.
+
+    A parse failure is NOT benign here. Every public item in an unreadable
+    file is simply absent from the surface, and absence is indistinguishable
+    from deletion: if the OLD tree has an unparseable file, [diff] sees none
+    of its functions and reports no [RemovedFn] for them, so a genuinely
+    breaking release classifies as [Patch] and publishes unchallenged — the
+    same silent-pass this module was rewritten to eliminate, just reached by
+    a different route. Callers that gate on the verdict must treat a
+    non-empty file list as "surface incomplete, verdict not trustworthy"
+    rather than as a warning; [Cmd_publish] refuses to certify a bump. *)
+let extract_from_directory_checked root_dir =
   let files = march_files_under root_dir in
-  List.fold_left (fun surf path ->
+  List.fold_left (fun (surf, failed) path ->
       match parse_file path with
       | Error msg ->
         Printf.eprintf "forge: api-surface: %s: %s\n%!" path msg;
-        surf
-      | Ok decls -> extract_decls decls surf
-    ) empty_surface files
+        (surf, (path, msg) :: failed)
+      | Ok decls -> (extract_decls decls surf, failed)
+    ) (empty_surface, []) files
+  |> fun (surf, failed) -> (surf, List.rev failed)
+
+(** Surface only, discarding parse failures. For callers that are not gating
+    a release on completeness; [extract_from_directory_checked] is what
+    [Cmd_publish] uses. *)
+let extract_from_directory root_dir = fst (extract_from_directory_checked root_dir)
 
 (* ------------------------------------------------------------------ *)
 (*  Change classification                                              *)

@@ -2767,7 +2767,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file native/timer_send_after.march))
+       (file native/timer_send_after.march)
+       ; The fixture calls Actor.send_after/Actor.cancel_timer/Actor.call,
+       ; all defined in stdlib/actor.march — without this dep dune neither
+       ; re-runs the test when that module changes nor guarantees the stdlib
+       ; is staged for the compile (a stale _build/default/stdlib made
+       ; cancel_timer look unexported while this test was being written).
+       (source_tree ../stdlib))
  (action
   (progn
    (run %{exe:../bin/main.exe} --compile -o native_timer_send_after

@@ -2615,7 +2615,14 @@ static void timer_service(int64_t now_ms) {
          * level-timers.md's implementation notes as a known trade-off
          * rather than fixed, since fixing it means a non-blocking send path
          * this codebase does not have yet. */
-        int cancelled = g_timer_token_is_cancelled
+        /* ent.token may legitimately be NULL — march_sched_send_after's
+         * contract documents it as "no cancellation support", and an entry
+         * pushed that way is simply never cancelled. Guard the token as well
+         * as the callback: the registered is_cancelled reads a field off the
+         * token and would fault on NULL, whereas the release side happens to
+         * tolerate it (march_decrc's IS_HEAP_PTR check), so the asymmetry is
+         * easy to miss. */
+        int cancelled = (ent.token && g_timer_token_is_cancelled)
             ? g_timer_token_is_cancelled(ent.token) : 0;
         if (cancelled) {
             march_mbox_dispose(ent.msg);
@@ -2627,7 +2634,7 @@ static void timer_service(int64_t now_ms) {
              * transferred to the target's mailbox. Neither needs anything
              * further here. */
         }
-        if (g_timer_token_release) g_timer_token_release(ent.token);
+        if (ent.token && g_timer_token_release) g_timer_token_release(ent.token);
     }
 }
 

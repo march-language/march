@@ -98,7 +98,19 @@ static void free_migrate_msg(test_migrate_msg_t *mm) {
     g_outstanding--;
 }
 
-/* march_actor_broadcast_migrate's Phase 2 body, FIXED version. */
+/* A RE-IMPLEMENTATION of march_actor_broadcast_migrate's Phase 2 body,
+ * FIXED version -- not the production function itself.
+ *
+ * READ THIS BEFORE TRUSTING A GREEN RUN: this file links march_scheduler.c
+ * only (see test/dune), so it cannot call march_actor_broadcast_migrate,
+ * which lives in march_runtime.c. Deleting the `== MARCH_SEND_DEAD` check
+ * from the real Phase 2 therefore leaves this test PASSING. What it does
+ * establish is the property the fix rests on -- that march_sched_send
+ * returns MARCH_SEND_DEAD for an already-dead target and takes no ownership
+ * of the message on that path, so the caller must free it -- plus a red
+ * control showing the ignore-the-return-value shape really does leak.
+ * The residual gap (no end-to-end guard on the production call site) is
+ * tracked in specs/todos/2026-08-18-broadcast-migrate-no-end-to-end-guard.md. */
 static void phase2_fixed(march_proc *target) {
     test_migrate_msg_t *mm = alloc_migrate_msg();
     if (march_sched_send(target, mm) == MARCH_SEND_DEAD) {
@@ -115,7 +127,10 @@ static void phase2_prefix_buggy(march_proc *target) {
 }
 
 int main(void) {
-    printf("=== march_actor_broadcast_migrate dead-target leak regression ===\n\n");
+    printf("=== march_sched_send dead-target ownership contract "
+           "(underpins the march_actor_broadcast_migrate leak fix) ===\n");
+    printf("    note: exercises a re-implementation of Phase 2, not "
+           "march_actor_broadcast_migrate itself -- see phase2_fixed's comment\n\n");
 
     /* Deterministically, single-threadedly, drive `victim` to PROC_DEAD.
      * No background scheduler thread is ever started here (that is a

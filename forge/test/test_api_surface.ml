@@ -232,6 +232,63 @@ end
        Alcotest.(check bool) "no_trailing_slash excluded (private)"
          false (List.mem "no_trailing_slash" fn_names))
 
+(* The walk must not treat a package's own tests or its build tree as public
+   API. Both live physically under the project root (forge resolves tests as
+   <root>/test, and .march/ is the build directory), so without pruning,
+   renaming a test helper reads as a breaking change and blocks a patch
+   release, and a vendored dep cached under .march/ would be folded into this
+   package's surface. *)
+let test_extract_from_directory_prunes_tests_and_build_dir () =
+  let tmpdir = Filename.temp_dir "test_api_surface_prune_" "" in
+  Fun.protect ~finally:(fun () ->
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in ())
+    (fun () ->
+       let write dir base contents =
+         let d = Filename.concat tmpdir dir in
+         let _ = Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote d)) in
+         let oc = open_out (Filename.concat d base) in
+         output_string oc contents; close_out oc
+       in
+       write "src" "lib.march"
+         "mod Lib do\n  fn real_api(x) do x end\nend\n";
+       write "test" "test_lib.march"
+         "mod TestLib do\n  fn make_fixture(n) do n end\nend\n";
+       write ".march/build" "cached.march"
+         "mod Cached do\n  fn vendored_helper(y) do y end\nend\n";
+       let surf = Resolver_api_surface.extract_from_directory tmpdir in
+       let fn_names = List.map (fun f -> f.Resolver_api_surface.name) surf.Resolver_api_surface.fns in
+       Alcotest.(check bool) "src/ fn is part of the surface" true
+         (List.mem "real_api" fn_names);
+       Alcotest.(check bool) "top-level test/ fn is NOT public API" false
+         (List.mem "make_fixture" fn_names);
+       Alcotest.(check bool) "dot-dir (.march/) fn is NOT public API" false
+         (List.mem "vendored_helper" fn_names))
+
+(* A file that fails to parse must be reported, not silently skipped: its
+   public items vanish from the surface, and an absent item is
+   indistinguishable from a deleted one, so a removal in that file would
+   classify as Patch and publish unchallenged. *)
+let test_extract_from_directory_reports_parse_failures () =
+  let tmpdir = Filename.temp_dir "test_api_surface_bad_" "" in
+  Fun.protect ~finally:(fun () ->
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in ())
+    (fun () ->
+       let write base contents =
+         let oc = open_out (Filename.concat tmpdir base) in
+         output_string oc contents; close_out oc
+       in
+       write "good.march" "mod Good do\n  fn kept(x) do x end\nend\n";
+       write "bad.march"  "mod Bad do\n  fn oops( <<<not march>>>\n";
+       let surf, failed = Resolver_api_surface.extract_from_directory_checked tmpdir in
+       let fn_names = List.map (fun f -> f.Resolver_api_surface.name) surf.Resolver_api_surface.fns in
+       Alcotest.(check bool) "parseable file still contributes" true
+         (List.mem "kept" fn_names);
+       Alcotest.(check int) "one file reported as unparseable" 1 (List.length failed);
+       Alcotest.(check bool) "the reported path is bad.march" true
+         (match failed with
+          | [(p, _)] -> Filename.basename p = "bad.march"
+          | _ -> false))
+
 (* ------------------------------------------------------------------ *)
 (*  diff                                                               *)
 (* ------------------------------------------------------------------ *)
@@ -401,6 +458,10 @@ let () =
         test_extract_from_directory_forge_own_source_nonempty;
       Alcotest.test_case "extract_from_directory over a real file is non-empty" `Quick
         test_extract_from_directory_nonempty;
+      Alcotest.test_case "test/ and dot-dirs are not part of the public surface" `Quick
+        test_extract_from_directory_prunes_tests_and_build_dir;
+      Alcotest.test_case "unparseable files are reported, not silently skipped" `Quick
+        test_extract_from_directory_reports_parse_failures;
     ];
     "diff", [
       Alcotest.test_case "no change → empty diff"            `Quick test_diff_no_change;
