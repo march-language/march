@@ -549,6 +549,81 @@ let test_project_env_walks_transitive_path_deps () =
                   "transitive dep leafc's lib/ is on the test MARCH_LIB_PATH"
                   true (List.mem c_lib all_lib_paths))))
 
+(* --------------------------------------------------------------- forge run *)
+
+(** [forge run] (INTERPRETED) must pass forge.toml's [[ffi]] sources through to
+    the compiler as --ffi-c, exactly as `forge build` and interpreted
+    `forge test` already do.
+
+    Without them the compiler's [setup_interpreter_ffi] sees an empty
+    [ffi_c_files], builds no shim .so, and every extern call dies at RUNTIME
+    with "symbol not found for interpreter FFI (build the runtime, or run with
+    --compile)" — i.e. an app declaring [[ffi]] sources could not be run
+    interpreted AT ALL, only via --compile.
+
+    This asserts on the PROGRAM'S OUTPUT (42), not merely on an Ok result:
+    the extern is only actually resolved and called if the shim was built and
+    dlopened, so a constant/short-circuit cannot satisfy it.  A status-only
+    assertion would also be satisfied by a run that never reached the extern. *)
+let test_run_interpreted_passes_ffi_sources () =
+  with_project ~project_type:Project.App (fun name root ->
+      (* A C shim OUTSIDE the runtime: the symbol exists nowhere unless
+         forge passes --ffi-c and the compiler builds the shim .so. *)
+      let c_dir = Filename.concat root "c" in
+      Unix.mkdir c_dir 0o755;
+      write_file (Filename.concat c_dir "shim.c")
+        "#include <stdint.h>\nint64_t forge_run_ffi_triple(int64_t x) { return x * 3; }\n";
+      let toml_path = Filename.concat root "forge.toml" in
+      let oc = open_out_gen [Open_append] 0o644 toml_path in
+      Printf.fprintf oc "\n[ffi]\nsources = [\"c/shim.c\"]\n";
+      close_out oc;
+      (* Overwrite the scaffolded entry with one that calls the extern. *)
+      let entry = Filename.concat root (Filename.concat "lib" (name ^ ".march")) in
+      let mod_name =
+        String.mapi (fun i c -> if i = 0 then Char.uppercase_ascii c else c) name in
+      write_file entry (Printf.sprintf
+        "mod %s do\n\
+        \  needs IO.Console\n\
+        \  needs Ffi\n\
+        \  needs IO.Foreign\n\n\
+        \  extern \"shim\" : Cap(Ffi) do\n\
+        \    fn triple(x: Int): Int = \"forge_run_ffi_triple\"\n\
+        \  end\n\n\
+        \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do\n\
+        \    println(int_to_string(triple(14)))\n\
+        \  end\n\
+         end\n" mod_name);
+      (* Capture stdout: the assertion is on the VALUE the extern returned. *)
+      let out_file = Filename.concat root "run.out" in
+      let saved = Unix.dup Unix.stdout in
+      let fd = Unix.openfile out_file [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o644 in
+      Unix.dup2 fd Unix.stdout;
+      Unix.close fd;
+      let result =
+        Fun.protect
+          ~finally:(fun () ->
+              flush stdout; Unix.dup2 saved Unix.stdout; Unix.close saved)
+          (fun () -> let r = Cmd_run.run () in flush stdout; r)
+      in
+      let output =
+        try
+          let ic = open_in_bin out_file in
+          let n = in_channel_length ic in
+          let s = really_input_string ic n in
+          close_in ic; s
+        with _ -> "(no output captured)"
+      in
+      (match result with
+       | Error m ->
+         Alcotest.fail
+           ("forge run (interpreted) with [ffi] sources failed: " ^ m
+            ^ "\n--- program output ---\n" ^ output)
+       | Ok () -> ());
+      Alcotest.(check bool)
+        ("the extern actually ran and returned 14*3=42 (got: "
+         ^ String.trim output ^ ")")
+        true (contains output "42"))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -584,5 +659,9 @@ let () =
         test_project_env_honors_toolchain_pin;
       Alcotest.test_case "project_env walks transitive path deps" `Quick
         test_project_env_walks_transitive_path_deps;
+    ];
+    "forge run", [
+      Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick
+        test_run_interpreted_passes_ffi_sources;
     ];
   ]
