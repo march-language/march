@@ -12034,6 +12034,47 @@ let test_compiled_vault_scalar_roundtrip () =
     Alcotest.(check int)
       "compiled Vault scalar (Bool/Int) round-trips correctly" 0 run_rc
 
+(* Regression: Vault.ns_get on a namespace that was never written returned
+   Some(<garbage>) instead of None when compiled.  Root cause: the
+   namespace-missing path in march_vault_ns_get (runtime/march_extras.c)
+   built a boxed "Option" by hand — march_alloc(16) with tag word 0 at
+   offset 8 — but Option is niche-encoded (see make_some/make_none in the
+   same file): None is the NULL pointer itself, Some(v) is v itself, with
+   no boxed tag/payload struct at all.  The hand-built value was a non-NULL
+   pointer, so the niche encoding decoded it as Some(<uninitialized/garbage
+   pointer>) rather than None.  Destructuring that Some payload dereferences
+   garbage, hanging or crashing.  Fix: return the real make_none() (NULL) on
+   that path, mirroring march_vault_get.  End-to-end guard: ns_get a key from
+   a namespace that has never been written, and exit 0 only if it is None. *)
+let test_compiled_vault_ns_get_missing_namespace () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_vaultnsget" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "v.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod VaultNsGetMissing do\n\
+    \  needs IO.Process\n\
+    \  needs IO.Mut\n\
+    \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
+    \    match Vault.ns_get(\"never_written_ns_xyz\", \"k\") do\n\
+    \      None -> ()\n\
+    \      Some(_) -> process_exit(1)\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "vnsbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled Vault.ns_get on never-written namespace is None" 0 run_rc
+
 (* Regression: march_vault_update SIGSEGV'd (exit 139) when compiled — no
    compiled test exercised Vault.update before this, only Vault.set/get (see
    test_compiled_vault_scalar_roundtrip above).  Root cause was two stacked
@@ -14121,6 +14162,8 @@ let stdlib_suites =
           test_compiled_recursive_closure_capture;
         Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Slow
           test_compiled_vault_scalar_roundtrip;
+        Alcotest.test_case "Vault.ns_get on never-written namespace is None (compiled)" `Slow
+          test_compiled_vault_ns_get_missing_namespace;
         Alcotest.test_case "Vault.update applies fn for Int/String, no SIGSEGV (compiled)" `Slow
           test_compiled_vault_update;
         Alcotest.test_case "Vault.update applies fn for Int/String, no SIGSEGV (compiled, --opt 0)" `Slow
