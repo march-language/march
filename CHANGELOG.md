@@ -28,6 +28,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `march_actor_broadcast_migrate` no longer leaks its malloc'd migrate-control
+  message when a target actor's green thread dies between the broadcast's
+  snapshot and send phases. The send's delivery-status return value
+  (`MARCH_SEND_DEAD`) was previously ignored; it is now checked, and the
+  message is `free()`'d on that path instead of being abandoned. Bounded
+  (at most `MARCH_MIGRATE_SNAPSHOT` = 2048 matched actors per broadcast call)
+  but real prior to this fix.
+
 - Two actors with the same name in different modules no longer share one capability
   closure. Handler closures were keyed by the actor's bare `<Actor>_<Msg>` name, so
   `Safe.Worker` and `Danger.Worker` collided on `Worker_Go` and their capabilities were
