@@ -38,8 +38,17 @@ let run ?(dump_phases=false) ?(compiled=false) ?target () =
            prepends the resolved toolchain to PATH. *)
         let lib_path_env = Cmd_build.lib_path_env proj in
         let dump_flag = if dump_phases then " --dump-phases" else "" in
-        let cmd = Printf.sprintf "%smarch%s %s"
-          lib_path_env dump_flag (Filename.quote entry) in
+        (* Link the same FFI shims as `forge build` and interpreted
+           `forge test` (see Cmd_test.invoke_march_interp).  Without these,
+           the compiler never receives --ffi-c, so setup_interpreter_ffi
+           builds no shim .so and every extern call into it dies with
+           "symbol not found for interpreter FFI" — making an app with
+           [ffi] sources impossible to run interpreted at all. *)
+        match Cmd_build.ffi_flags_full proj with
+        | Error msg -> Error msg
+        | Ok ffi_flags ->
+        let cmd = Printf.sprintf "%smarch%s%s %s"
+          lib_path_env dump_flag ffi_flags (Filename.quote entry) in
         let rc = Sys.command cmd in
         if rc = 0 then Ok ()
         else Error (Printf.sprintf "program exited with code %d" rc)
