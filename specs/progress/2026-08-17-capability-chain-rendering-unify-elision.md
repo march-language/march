@@ -1,4 +1,24 @@
-# Unify the two capability-chain renderers under one (capped) implementation
+# LANDED 2026-08-17 — capability-chain renderers share one implementation
+
+**Status: shipped, pure refactor, no behavior change.** `Typecheck.
+render_cap_chain : string list -> string` (`lib/typecheck/typecheck.ml`,
+next to `cap_reach_chain`) now does the actual `" → "` join; both call
+sites — `check_main_grant`'s violation branch and `Cap_infer.chain_note`
+(`lib/refinecheck/cap_infer.ml`, which already depended on `march_typecheck`
+per its `dune` file, confirming the todo's guess about the build graph) —
+call it instead of each independently concatenating with `String.concat
+" → "`. `chain_note`'s BFS path already includes the entry (`main`) as its
+first element; `check_main_grant`'s does not, so that call site still does
+`"main" :: chain` itself before handing the full list to the shared
+function. Deciding whether a frame cap belongs in the shared renderer is
+still open — not part of this change; see the "Proposed fix" note below,
+kept as the historical record of what was filed. Output is byte-identical
+before and after: verified against `test_grant_violation_names_the_user_
+module` (typecheck side) and `test_cap_chain_crosses_module_boundary` /
+`test_cap_chain_absent_*` (refinecheck side) in `test/test_compiler.ml`,
+all unchanged and passing.
+
+---
 
 Filed during Task 8 fix round 1 of `specs/2026-08-13-capability-ux-plan.md`.
 The task-8 brief asserted that the grant-violation chain
