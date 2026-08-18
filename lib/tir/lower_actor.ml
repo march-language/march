@@ -353,6 +353,15 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   (* If this actor declares a supervise block, call march_register_supervisor
      from the spawn function body so the runtime knows the supervision strategy.
      Encoding: OneForOne=0, OneForAll=1, RestForOne=2. *)
+  (* Per-child restart policy, mirroring strategy_int. Must agree with
+     march_sup_child.restart_type's encoding in runtime/march_runtime.c:
+     0 permanent, 1 transient, 2 temporary. *)
+  let restart_type_int (r : Ast.restart_type) : int =
+    match r with
+    | Ast.Permanent -> 0
+    | Ast.Transient -> 1
+    | Ast.Temporary -> 2
+  in
   let strategy_int (s : Ast.restart_strategy) : int =
     match s with
     | Ast.OneForOne  -> 0
@@ -399,13 +408,15 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
             } in
             let reg_child_var : Tir.var = {
               v_name = "register_supervisor_child";
-              v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit; Tir.TInt], Tir.TUnit);
+              v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit;
+                                 Tir.TInt; Tir.TInt], Tir.TUnit);
               v_lin  = Tir.Unr;
             } in
             Tir.ELet ({ v_name = "$reg_child_" ^ fname; v_ty = Tir.TUnit; v_lin = Tir.Unr },
               Tir.EApp (reg_child_var, [
                 sup_atom; Tir.AVar child_ptr_var; Tir.AVar child_spawn_fn_var;
                 Tir.ALit (Ast.LitInt (field_word_idx fname));
+                Tir.ALit (Ast.LitInt (restart_type_int sf.Ast.sf_restart));
               ]),
               acc)
           ) sc.Ast.sc_fields rest

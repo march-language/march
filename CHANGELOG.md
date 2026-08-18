@@ -36,6 +36,14 @@ git log is authoritative for exact commits.
   declaring module. The over-approximation was sound (it could only over-charge, never mask
   a leak), so this is a false-positive fix, not a security fix.
 
+- **`Vault.ns_get` on a namespace that was never written now correctly
+  returns `None` instead of `Some(<garbage>)` in compiled binaries.** The
+  namespace-missing path hand-built a boxed "Option" (a non-NULL allocation
+  with a tag word of 0), but Option is niche-encoded everywhere else in the
+  runtime — `None` is the NULL pointer itself. The non-NULL stand-in decoded
+  as `Some` of an uninitialized pointer, so destructuring it could hang or
+  crash. The tree-walking interpreter uses a separate code path and was
+  unaffected.
 - The whole-program capability grant now bounds actor message handlers. A handler's body
   was invisible to `main`'s grant reachability walk, so a program granted only
   `Cap(IO.Console)` could `file_write` inside an actor handler — and it compiled, ran, and
