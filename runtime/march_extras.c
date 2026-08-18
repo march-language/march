@@ -1334,10 +1334,11 @@ void *march_vault_ns_get(void *ns_val, void *key_val) {
     }
     pthread_mutex_unlock(&vault_registry_mutex);
     free(name);
-    /* Namespace doesn't exist — return None (boxed: tag=0) */
-    void *none = march_alloc(16);
-    *(int32_t *)((char *)none + 8) = 0;
-    return none;
+    /* Namespace doesn't exist — return None.  Option is niche-encoded
+     * (see make_some/make_none above): None = NULL, Some(v) = v itself.
+     * A boxed tag=0 allocation here is a non-NULL pointer, which the niche
+     * encoding decodes as Some(<garbage>) instead of None. */
+    return make_none();
 }
 
 void *march_vault_ns_drop(void *ns_val, void *key_val) {
