@@ -57,6 +57,16 @@ git log is authoritative for exact commits.
   (at most `MARCH_MIGRATE_SNAPSHOT` = 2048 matched actors per broadcast call)
   but real prior to this fix.
 
+- **`forge run` now passes `forge.toml`'s `[ffi]` sources to the compiler, so an app
+  that uses FFI can be run interpreted.** Previously the interpreted path built its
+  `march` command line with no `--ffi-c` flags at all, so the compiler built no shim
+  `.so` and every `extern` call failed at runtime with "symbol not found for
+  interpreter FFI (build the runtime, or run with `--compile`)" — an app declaring
+  `[ffi]` sources could only be run with `--compile`. `forge build` and `forge test`
+  already threaded these flags through; `forge run` now matches them. Note that FFI
+  arguments of function type (callbacks/upcalls) still require `--compile`, and a
+  project declaring only `[ffi.rust]` (no C sources) is still interpreter-unsupported.
+
 - Two actors with the same name in different modules no longer share one capability
   closure. Handler closures were keyed by the actor's bare `<Actor>_<Msg>` name, so
   `Safe.Worker` and `Danger.Worker` collided on `Worker_Go` and their capabilities were
