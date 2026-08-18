@@ -1,5 +1,43 @@
 # Same-named actors across modules can trigger a spurious grant error
 
+**Shipped 2026-08-17.** Actor handler capability closures (and the actor-NAME
+grant bridge node) are now keyed by the DECLARING MODULE — `Safe.Worker_Go`,
+not bare `Worker_Go` — so two same-named actors in different modules get
+DISTINCT closures and spawning one no longer charges the other's capabilities.
+
+What the investigation turned up, correcting the "fix direction" below: TIR
+does **not** disambiguate same-named handler symbols. `lower_actor` names every
+handler `<Actor>_<Msg>` bare, and `lower.ml`'s nested-`DActor` arm records the
+declaring module OUT OF BAND in `March_tir.Handler_owner` precisely because the
+name cannot carry it (the `spawn` symbol and the HCR manifest both assert the
+bare spelling). So there was no disambiguated TIR name to key against. The fix
+instead qualifies the TYPECHECK-side keys — which is safe because every consumer
+(`Cap_rows.solve`'s `resolve`, `cap_reach_chain`) resolves a bare reference
+against the referring key's module prefix first — and bridges back to TIR's bare
+spelling at the one place that needs it, the HCR manifest, via `Handler_owner`.
+
+Two extra pieces were needed:
+- a bare ALIAS node (`Weeble -> Sub.Weeble`, no caps of its own), so a nested
+  actor spawned by its bare name from OUTSIDE its module still reaches its
+  handlers. Without it, qualifying the keys would have DROPPED that edge —
+  the fail-open direction.
+- `bin/main.ml`'s `own_caps_of_this_module` `belongs` filter, which enumerated
+  handler keys bare, now qualifies them (and additionally admits the actor-NAME
+  node, so an `init` that performs IO widens the `--cap-sandbox` profile).
+
+Side effect, intentional and aligning: the `--check` ceiling's `owner_of` now
+resolves a nested actor's handler to its DECLARING module rather than to the
+entry module, which is what `--compile`'s `Cap_attrib` already did via
+`Handler_owner`. A nested module whose handler reaches a stdlib-mediated
+capability must declare it itself — the same answer `--compile` gives.
+
+Regression tests: `test/test_compiler.ml` `cap_grant` group — "same-named
+actors: only spawned one charged" (accept), "same-named actors: spawned one
+still rejected" (reject, and asserts the chain names `Safe.Worker_Go`),
+"nested actor bare spawn from entry: charged" (the alias path).
+
+---
+
 Filed while fixing the actor grant bypass
 (`specs/progress/2026-08-16-actor-handler-grant-bypass.md`). This is a
 FALSE POSITIVE — it rejects valid code. It is SOUND (over-approximation:

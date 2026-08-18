@@ -1178,15 +1178,21 @@ let own_caps_of_this_module ~stdlib_files typecheck_env
               idef.March_ast.Ast.impl_methods
           end
         | March_ast.Ast.DActor (_, name, actor, sp) ->
-          (* Handlers are keyed BARE ("Weeble_Zorp") regardless of nesting —
-             the HCR-manifest convention [check_module_needs]'s DActor branch
-             mirrors — so deliberately no [prefix] here. *)
-          if not (is_stdlib sp) then
+          (* Handler closures are keyed by the DECLARING MODULE
+             ("Sub.Weeble_Zorp"), same as a sibling [DFn] — see
+             [check_module_needs]'s DActor branch, which stopped keying them
+             bare so that two same-named actors in different modules get
+             DISTINCT closures.  The actor-NAME node (which carries `init`'s
+             caps) is keyed the same way, and is added here too: an `init` that
+             writes a file must widen the sandbox profile. *)
+          if not (is_stdlib sp) then begin
+            add prefix name.March_ast.Ast.txt;
             List.iter (fun (h : March_ast.Ast.actor_handler) ->
-                add ""
+                add prefix
                   (name.March_ast.Ast.txt ^ "_"
                    ^ h.March_ast.Ast.ah_msg.March_ast.Ast.txt))
               actor.March_ast.Ast.actor_handlers
+          end
         | March_ast.Ast.DMod (nm, _, inner, _) ->
           walk (qname prefix nm.March_ast.Ast.txt) inner
         | _ -> ()) decls
@@ -4195,7 +4201,22 @@ let compile filename =
           List.iter (fun (name, caps) -> Hashtbl.replace fn_caps_tbl name caps)
             (March_typecheck.Typecheck.fn_own_capability_closures typecheck_env);
           let caps_for name =
-            match Hashtbl.find_opt fn_caps_tbl name with
+            (* Manifest names are TIR names.  An actor handler's TIR name is
+               BARE ("Weeble_Zorp") while the typechecker keys its closure by
+               the declaring module ("Sub.Weeble_Zorp") — two same-named actors
+               in different modules must not share one closure.  Bridge the two
+               spellings through [Handler_owner], the ownership channel lowering
+               already records for exactly this reason; a top-level actor has no
+               owner registered and hits the direct lookup. *)
+            let key =
+              if Hashtbl.mem fn_caps_tbl name then Some name
+              else
+                match March_tir.Handler_owner.owner_of name with
+                | Some owner when Hashtbl.mem fn_caps_tbl (owner ^ "." ^ name) ->
+                  Some (owner ^ "." ^ name)
+                | _ -> None
+            in
+            match Option.bind key (Hashtbl.find_opt fn_caps_tbl) with
             | Some caps -> List.sort_uniq String.compare caps
             | None -> []
           in

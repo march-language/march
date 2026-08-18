@@ -4063,6 +4063,127 @@ let test_actor_init_io_is_charged_to_grant () =
   Alcotest.(check bool) "init-reached IO.FileWrite is charged to main's grant"
     true (has_error_with ctx "granted `Cap(IO.Console)`")
 
+(* ── Same-named actors in different modules (2026-08-17) ────────────────────
+   Handler capability closures used to be keyed by the actor's BARE name
+   (`Worker_Go`), matching TIR's synthesized symbol.  TIR does not disambiguate
+   that name across modules either — it records ownership out-of-band in
+   [Handler_owner] — so two `Worker`s in different modules collided on one key
+   and [record_fn_caps] UNIONed their closures: spawning EITHER charged the
+   merged caps of BOTH, with a chain that named the wrong actor.  Sound but a
+   false positive.  Keys are now module-qualified ("Safe.Worker_Go").
+
+   Both directions are pinned: the accept side (only the safe actor spawned) and
+   the reject side (the SPAWNED actor genuinely exceeds the grant), because a
+   fix in this area can trivially turn the over-approximation into a
+   FAIL-OPEN under-approximation. *)
+let test_same_named_actors_only_spawned_one_charged () =
+  let ctx = typecheck {|mod App do
+    mod Safe do
+      needs IO.Console
+      actor Worker do
+        state { n : Int }
+        init  { n: 0 }
+        on Go() do
+          println("safe")
+          { n: state.n + 1 }
+        end
+      end
+      fn run() : () do
+        let _p = spawn(Worker)
+        ()
+      end
+    end
+    mod Danger do
+      needs IO.FileWrite
+      actor Worker do
+        state { n : Int }
+        init  { n: 0 }
+        on Go() do
+          let _ = file_write("/tmp/cap_same_name_actor_test", "x")
+          { n: state.n + 1 }
+        end
+      end
+    end
+    needs IO.Console
+    fn main(cap : Cap(IO.Console)) : () do
+      Safe.run()
+    end
+  end|} in
+  Alcotest.(check bool)
+    "spawning Safe.Worker is not charged Danger.Worker's IO.FileWrite"
+    false (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "no diagnostic mentions the other actor's capability"
+    false (has_error_with ctx "IO.FileWrite")
+
+let test_same_named_actors_spawned_one_still_rejected () =
+  let ctx = typecheck {|mod App do
+    mod Safe do
+      needs IO.FileWrite
+      actor Worker do
+        state { n : Int }
+        init  { n: 0 }
+        on Go() do
+          let _ = file_write("/tmp/cap_same_name_actor_test2", "x")
+          { n: state.n + 1 }
+        end
+      end
+      fn run() : () do
+        let _p = spawn(Worker)
+        ()
+      end
+    end
+    mod Quiet do
+      needs IO.Console
+      actor Worker do
+        state { n : Int }
+        init  { n: 0 }
+        on Go() do
+          println("quiet")
+          { n: state.n + 1 }
+        end
+      end
+    end
+    needs IO.Console
+    fn main(cap : Cap(IO.Console)) : () do
+      Safe.run()
+    end
+  end|} in
+  Alcotest.(check bool)
+    "the SPAWNED same-named actor's undeclared capability is still a grant error"
+    true (has_error_with ctx "granted `Cap(IO.Console)`");
+  Alcotest.(check bool) "the escaping capability is named"
+    true (has_error_with ctx "IO.FileWrite");
+  Alcotest.(check bool) "the chain names the actor that actually holds it"
+    true (has_error_with ctx "Safe.Worker_Go")
+
+(* A nested actor spawned by its BARE name from OUTSIDE its declaring module:
+   the referring key ("main") has no module prefix, so prefix-first resolution
+   cannot reach "Sub.Weeble".  A bare ALIAS node forwards it — without that,
+   qualifying the handler keys would have DROPPED the edge, which is the
+   fail-open direction. *)
+let test_nested_actor_bare_spawn_from_entry_is_charged () =
+  let ctx = typecheck {|mod App do
+    mod Sub do
+      needs IO.FileWrite
+      actor Weeble do
+        state { n : Int }
+        init  { n: 0 }
+        on Zorp() do
+          let _ = file_write("/tmp/cap_bare_spawn_test", "x")
+          { n: state.n + 1 }
+        end
+      end
+    end
+    needs IO.Console
+    fn main(cap : Cap(IO.Console)) : () do
+      let _p = spawn(Weeble)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a bare cross-module spawn still charges the handler to main's grant"
+    true (has_error_with ctx "granted `Cap(IO.Console)`")
+
 (* TRMC (Task 9): constructor-wrapped structural recursion — `Succ(bump(k))` —
    is compiled into a loop by TRMC, so the warning must NOT prescribe an
    accumulator parameter, and must say the compiler handles this shape.
@@ -15083,6 +15204,10 @@ let compiler_suites =
           Alcotest.test_case "actor spawned not sent: charged" `Quick test_actor_spawned_not_sent_still_charged;
           Alcotest.test_case "actor defined never spawned: free" `Quick test_actor_defined_never_spawned_is_free;
           Alcotest.test_case "actor init IO charged to grant" `Quick test_actor_init_io_is_charged_to_grant;
+          (* Same-named actors across modules (2026-08-17): distinct closures *)
+          Alcotest.test_case "same-named actors: only spawned one charged" `Quick test_same_named_actors_only_spawned_one_charged;
+          Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;
+          Alcotest.test_case "nested actor bare spawn from entry: charged" `Quick test_nested_actor_bare_spawn_from_entry_is_charged;
           (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
           Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
           Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;

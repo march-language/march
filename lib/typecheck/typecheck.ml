@@ -9631,20 +9631,41 @@ let check_module_needs (env : env) (mod_name : Ast.name)
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
     | Ast.DActor (_, name, actor, sp) ->
-      (* C1 fix: also record each handler's own per-function cap closure,
-         keyed EXACTLY the way TIR names the synthesized handler function
-         (see lib/tir/lower.ml's [lower_handler]: [fn_name = name ^ "_" ^
-         h.ah_msg.txt], where [name] there is the actor's OWN BARE name —
-         never module-prefixed, confirmed empirically: a handler on actor
-         [Weeble] nested inside [App.Sub] still lowers to bare
-         [Weeble_Zorp], NOT [Sub.Weeble_Zorp], even though sibling [DFn]s in
-         the same nested module DO get the "Sub." prefix). So the handler's
-         qualified name must use the actor's bare [name.txt] directly — NOT
-         [cap_qname name.txt] — while the signature-cap diagnostics above
-         and the body-scanned caps below still merge in [module_wide_caps]
-         via [record_fn_caps] the same way [DFn] does. *)
+      (* Record each handler's own per-function cap closure under a
+         MODULE-QUALIFIED key ("Sub.Weeble_Zorp"), exactly like a sibling
+         [DFn].
+
+         The C1 fix (2026-08-06) originally keyed these BARE, to match the
+         name TIR gives the synthesized handler function (lib/tir/
+         lower_actor.ml's [lower_handler]: [fn_name = name ^ "_" ^
+         h.ah_msg.txt], with [name] the actor's own bare name — a handler on
+         actor [Weeble] nested inside [App.Sub] still lowers to bare
+         [Weeble_Zorp]).  But TIR does NOT disambiguate that name across
+         modules either: it records ownership out-of-band instead
+         ([March_tir.Handler_owner], registered from lower.ml's nested-[DActor]
+         arm).  Keying the cap closure bare therefore made two same-named
+         actors in different modules share ONE key, and [record_fn_caps]
+         UNIONs — so spawning either actor charged the merged capabilities of
+         BOTH (specs/todos/2026-08-16-actor-grant-same-name-false-positive.md:
+         sound, but a false positive that rejects valid code with a chain
+         pointing at the wrong actor).
+
+         Qualifying the key is safe because every consumer of the closure
+         tables resolves a bare reference against the referring key's module
+         prefix FIRST ([Cap_rows.solve]'s [resolve], [cap_reach_chain]'s
+         two-way push): a `spawn(Weeble)` inside `Sub` resolves to
+         `Sub.Weeble`.  The one consumer that must see the BARE TIR spelling
+         is the HCR manifest (bin/main.ml), which now bridges the two through
+         [Handler_owner] — the same ownership channel TIR already keeps.  A
+         bare ALIAS node is registered below so a bare spawn from OUTSIDE the
+         declaring module still resolves.
+
+         The signature-cap diagnostics above and the body-scanned caps below
+         still merge in [module_wide_caps] via [record_fn_caps] the same way
+         [DFn] does. *)
+      let actor_qname = cap_qname name.txt in
       List.iter (fun (h : Ast.actor_handler) ->
-          let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
+          let fn_qname = actor_qname ^ "_" ^ h.ah_msg.txt in
           let body_caps = List.filter_map (fun (call_name, _) ->
               cap_of_builtin_call call_name
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
@@ -9655,12 +9676,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                h.Ast.ah_body) ]
         ) actor.actor_handlers;
       (* Bridge the actor-NAME node to its handler functions, so a `spawn(A)`
-         site — which [record_fn_refs] records as a reference to the bare name
-         [A] (see its [spawn_refs]) — reaches [A]'s handlers in the closure
-         walk.  Keyed by the actor's OWN bare [name.txt], matching both the
-         handler qnames above and the name a spawn site writes. *)
+         site — which [record_fn_refs] records as a reference to the name as
+         WRITTEN (see its [spawn_refs]) — reaches [A]'s handlers in the closure
+         walk.  Keyed module-qualified, matching the handler qnames above:
+         a bare `spawn(A)` written inside A's own module resolves to
+         [actor_qname] through the referring key's prefix. *)
       let handler_qnames =
-        List.map (fun (h : Ast.actor_handler) -> name.txt ^ "_" ^ h.Ast.ah_msg.txt)
+        List.map (fun (h : Ast.actor_handler) -> actor_qname ^ "_" ^ h.Ast.ah_msg.txt)
           actor.actor_handlers
       in
       (* The `init { ... }` initializer runs at spawn time, so its transitive
@@ -9673,17 +9695,35 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         List.filter_map (fun (call_name, _) -> cap_of_builtin_call call_name)
           (March_ast.Calls.names_and_name_spans actor.Ast.actor_init)
       in
-      record_fn_caps name.txt init_caps;
+      record_fn_caps actor_qname init_caps;
       let prior_actor_refs =
-        Option.value ~default:[] (Hashtbl.find_opt env.fn_refs name.txt)
+        Option.value ~default:[] (Hashtbl.find_opt env.fn_refs actor_qname)
       in
       let init_refs = free_vars_expr [] actor.Ast.actor_init in
       let init_spawn_refs =
         March_ast.Calls.spawned_actor_names [] actor.Ast.actor_init
       in
-      Hashtbl.replace env.fn_refs name.txt
+      Hashtbl.replace env.fn_refs actor_qname
         (List.sort_uniq compare
            (handler_qnames @ init_refs @ init_spawn_refs @ prior_actor_refs));
+      (* Bare ALIAS node, for a nested actor spawned by its BARE name from
+         outside its declaring module (`use Sub` then `spawn(Weeble)` at the
+         entry level): there the referring key has no module prefix, so
+         [Cap_rows.solve]'s [resolve] falls through to the raw name and would
+         find nothing — dropping the handler edge entirely, which is the
+         FAIL-OPEN direction.  The alias carries no caps of its own; it only
+         forwards to the qualified actor node.  When two modules declare the
+         same actor name the alias forwards to BOTH, which restores the old
+         union — but only for this genuinely ambiguous bare-spawn shape, not
+         for the resolvable one the bug was about. *)
+      if actor_qname <> name.txt then begin
+        record_fn_caps name.txt [];
+        let prior_alias =
+          Option.value ~default:[] (Hashtbl.find_opt env.fn_refs name.txt)
+        in
+        Hashtbl.replace env.fn_refs name.txt
+          (List.sort_uniq compare (actor_qname :: prior_alias))
+      end;
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
