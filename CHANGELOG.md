@@ -52,6 +52,16 @@ git log is authoritative for exact commits.
   spawned actor stays free, like any other dead code. The manifest (`needs`) side already
   tracked handlers; only the grant did not.
 
+- **`forge publish`'s semver-bump enforcement actually runs now.** Its API-surface extractor
+  scanned source text for `pub fn ... -> T`, a syntax March doesn't have (no `pub` keyword;
+  return types are `: T`, not `-> T`), so it silently read an empty public surface for every
+  real package. With both the old and new surface empty, the diff was always empty and the
+  gate always said "Ok" — a breaking change could be published under a patch bump with no
+  warning. Bounded in practice by a separate pre-1.0 exemption, but a live landmine for the
+  first package to reach 1.0.0. The extractor now reads the public surface off the real AST
+  (same parser `forge cap` already uses), so it also sees multi-head clauses, default
+  arguments, and signatures wrapped across lines that a line scanner never could.
+
 ### Added
 
 - **`let*` now works at the REPL prompt.** `let* x = e` binds through the
