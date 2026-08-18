@@ -3583,29 +3583,6 @@ let test_actor_compile_monitor_emitted () =
   Alcotest.(check bool) "march_monitor in IR" true
     (ir_contains ir "march_monitor")
 
-(** Compiled link: link call emitted. *)
-let test_actor_compile_link_emitted () =
-  let ir = emit_actor_ir {|mod Test do
-    actor A do
-      state { x : Int }
-      init { x: 0 }
-      on Ping() do { x: 1 } end
-    end
-    actor B do
-      state { x : Int }
-      init { x: 0 }
-      on Pong() do { x: 1 } end
-    end
-    fn main() : Unit do
-      let a = spawn(A)
-      let b = spawn(B)
-      let _ = link(a, b)
-      ()
-    end
-  end|} in
-  Alcotest.(check bool) "march_link in IR" true
-    (ir_contains ir "march_link")
-
 (** Compiled multi-actor: multiple actors in same module compile without crash. *)
 let test_actor_compile_multi_actor_no_crash () =
   let ir = emit_actor_ir {|mod Test do
@@ -5255,7 +5232,6 @@ let eval_suites =
           Alcotest.test_case "handlers emitted"             `Quick test_actor_compile_handlers_emitted;
           Alcotest.test_case "supervisor registers"         `Quick test_actor_compile_supervisor_registers;
           Alcotest.test_case "monitor emitted"              `Quick test_actor_compile_monitor_emitted;
-          Alcotest.test_case "link emitted"                 `Quick test_actor_compile_link_emitted;
           Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
           Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;

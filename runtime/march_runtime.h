@@ -406,15 +406,10 @@ typedef enum {
     MARCH_DEATH_CRASH  = 2,
 } march_death_reason;
 
-/* Actor link builtins. */
-/* link: establish a bidirectional crash-propagation link between two actors.
-   If either dies, the other receives a Down notification (and may crash too). */
-void    march_link(void *actor_a, void *actor_b);
-/* unlink: cancel a previously established link (best-effort, no-op if absent). */
-void    march_unlink(void *actor_a, void *actor_b);
 /* register_supervisor: record an actor as a supervisor with a given restart
    strategy (0=one_for_one, 1=one_for_all, 2=rest_for_one), max_restarts, and
-   time window in seconds.  Children are registered separately via march_link. */
+   time window in seconds.  Children are registered separately via
+   march_actor_register_child. */
 void    march_register_supervisor(void *supervisor, int64_t strategy,
                                    int64_t max_restarts, int64_t window_secs);
 

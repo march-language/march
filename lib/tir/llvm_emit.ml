@@ -515,10 +515,10 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        the garbage result — which SIGBUSed on
        `apply1(file_read, "/etc/hosts")` (first-class builtin regression).
        A LOCAL binding whose name happens to collide with a builtin (e.g. a
-       user variable named `link`, which is also the actor-linking builtin)
+       user variable named `kill`, which is also the actor-kill builtin)
        lives in var_slot and must shadow the builtin — fall through to the
        local-load path so we load the local value instead of emitting the
-       runtime global @march_link. *)
+       runtime global @march_kill. *)
     let fn_name = llvm_name (mangle_extern v.Tir.v_name) in
     let wrap_name = fn_name ^ "$clo_wrap" in
     if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin

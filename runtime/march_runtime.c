@@ -6315,56 +6315,6 @@ void march_demonitor(int64_t ref) {
     pthread_mutex_unlock(&g_tbl_mu);
 }
 
-/* link: establish a bidirectional crash-propagation link.
-   Implemented as two one-way monitors; when either actor dies, the other
-   gets a Down notification (and the default behaviour is to crash too —
-   supervision should be used if restart is desired).
-   No-op if either pointer is not a valid heap actor. */
-void march_link(void *actor_a, void *actor_b) {
-    if (!IS_HEAP_PTR(actor_a) || !IS_HEAP_PTR(actor_b)) return;
-    /* Two one-way monitors: a watches b and b watches a. */
-    march_monitor(actor_a, actor_b);
-    march_monitor(actor_b, actor_a);
-}
-
-/* unlink: cancel the bidirectional link between two actors.
-   Best-effort: scans for and removes both one-way monitor nodes. */
-void march_unlink(void *actor_a, void *actor_b) {
-    if (!IS_HEAP_PTR(actor_a) || !IS_HEAP_PTR(actor_b)) return;
-    /* Scan actor_b's monitor list for a node watching actor_a. */
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *mb = g_actor_tbl[actor_bucket(actor_b)];
-    while (mb && mb->actor != actor_b) mb = mb->tbl_next;
-    if (mb) {
-        march_monitor_node **pp = &mb->monitor_head;
-        while (*pp) {
-            if ((*pp)->watcher == actor_a) {
-                march_monitor_node *dead = *pp;
-                *pp = dead->next;
-                free(dead);
-                break;
-            }
-            pp = &(*pp)->next;
-        }
-    }
-    /* Scan actor_a's monitor list for a node watching actor_b. */
-    march_actor_meta *ma = g_actor_tbl[actor_bucket(actor_a)];
-    while (ma && ma->actor != actor_a) ma = ma->tbl_next;
-    if (ma) {
-        march_monitor_node **pp = &ma->monitor_head;
-        while (*pp) {
-            if ((*pp)->watcher == actor_b) {
-                march_monitor_node *dead = *pp;
-                *pp = dead->next;
-                free(dead);
-                break;
-            }
-            pp = &(*pp)->next;
-        }
-    }
-    pthread_mutex_unlock(&g_tbl_mu);
-}
-
 /* register_supervisor: record supervision metadata for an actor.
    strategy: 0=one_for_one, 1=one_for_all, 2=rest_for_one.
    The actor must already be registered via march_spawn.
@@ -6519,8 +6469,8 @@ void march_run_until_idle(void) {
  * cleanup is a March closure of type Unit -> Unit.
  * Callbacks run in reverse acquisition order when kill() is called.
  *
- * The prepend below takes g_tbl_mu, matching march_monitor/march_demonitor/
- * march_unlink's discipline for monitor_head: do_actor_death detaches
+ * The prepend below takes g_tbl_mu, matching march_monitor/march_demonitor's
+ * discipline for monitor_head: do_actor_death detaches
  * meta->cleanup_head under the same lock before walking it (see that
  * function's comment), so an unlocked prepend here could race the detach —
  * losing this node entirely, or linking it onto a head do_actor_death is

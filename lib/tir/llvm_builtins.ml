@@ -862,10 +862,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pid_of_int(i64 %n)" };
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_actor_field(ptr %pid, ptr %name)" };
-  { march_name = "link"; c_name = Some "march_link"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_link(ptr %actor_a, ptr %actor_b)" };
-  { march_name = "unlink"; c_name = Some "march_unlink"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_unlink(ptr %actor_a, ptr %actor_b)" };
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)" };
   { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
@@ -1548,8 +1544,6 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_is_cap_valid";
   PDeclare "march_pid_of_int";
   PDeclare "march_get_actor_field";
-  PDeclare "march_link";
-  PDeclare "march_unlink";
   PDeclare "march_register_supervisor";
   PDeclare "march_actor_register_child";
   PDeclare "march_pid_index_of";

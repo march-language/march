@@ -980,7 +980,6 @@ Directly callable without module qualification (built into the evaluator).
 | `kill(pid)` | Kill actor |
 | `is_alive(pid)` | Liveness check |
 | `monitor(pid)` / `demonitor(ref)` | Monitor |
-| `link(pid)` | Link actors |
 | `mailbox_size(pid)` | Mailbox size |
 | `actor_cast(pid, msg)` | Async send |
 | `actor_call(pid, msg, timeout)` | Sync send |
