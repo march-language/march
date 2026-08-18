@@ -216,6 +216,18 @@ git log is authoritative for exact commits.
   would have told a peer, without bidirectional coupling or a `trap_exit` escape
   hatch. No program can regress, because none could reach it.
 
+- **The compiled/LLVM backend's identical unreachable `link`/`unlink` builtin is
+  also gone**, finishing the removal above (that pass was interpreter-only). The
+  `march_link`/`march_unlink` runtime functions, their builtin-table entries, and
+  the forward declarations every compiled module's prelude carried are all
+  deleted. Worth recording: the two backends' `link` never actually agreed even
+  before removal — the interpreter did genuine bidirectional crash propagation,
+  while the compiled backend implemented `link` as two one-way `monitor` calls
+  that only queued a `Down` message and never crashed the peer. So there was no
+  "restore it" path without designing fresh semantics from scratch; this
+  reinforces that removing `link` outright, rather than exposing it as-is, was
+  correct.
+
 ### Fixed
 
 - **A delayed supervisor restart (a repeat crash backed off by exponential backoff, up to
