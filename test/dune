@@ -179,6 +179,30 @@
  (deps    (file test_scheduler_churn_runner))
  (action  (run ./test_scheduler_churn_runner)))
 
+; ── march_actor_broadcast_migrate dead-target message leak regression ────
+; Same minimal, decoupled dependency set as test_scheduler_mbox above (only
+; march_scheduler.c, no march_runtime.c): this test mirrors the fixed
+; malloc + march_sched_send + conditional-free pattern from
+; march_actor_broadcast_migrate's Phase 2 directly against march_sched_send,
+; rather than driving march_actor_broadcast_migrate itself end to end -- see
+; test_broadcast_migrate_leak.c's header comment for why a fully
+; deterministic single-threaded repro of the real function's snapshot-to-
+; send race isn't achievable without test-only hooks in production code.
+(rule
+ (targets test_broadcast_migrate_leak_runner)
+ (deps    test_broadcast_migrate_leak.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_broadcast_migrate_leak.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_broadcast_migrate_leak_runner))
+ (action  (run ./test_broadcast_migrate_leak_runner)))
+
 ; ── HCR versioned dispatch table unit test ───────────────────────────────
 (rule
  (targets test_dispatch_runner)

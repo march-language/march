@@ -4134,14 +4134,31 @@ void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
     }
     pthread_mutex_unlock(&g_tbl_mu);
 
-    /* Phase 2: inject migrate messages outside the lock. */
+    /* Phase 2: inject migrate messages outside the lock.
+     *
+     * march_sched_send's contract (march_scheduler.h) is: MARCH_SEND_OK
+     * means mm was enqueued (the mailbox now owns it — freed later either
+     * by actor_green_thread's receive loop or, if the proc dies with it
+     * still queued, by march_actor_msg_dispose at reap time); MARCH_SEND_
+     * DROPPED means mm was rejected by an overflow policy but already
+     * handed to march_actor_msg_dispose (registered via
+     * march_sched_set_msg_dtor), which frees() it since it recognizes
+     * MARCH_MIGRATE_TAG — so both of those leave mm's disposal to someone
+     * else. Only MARCH_SEND_DEAD (target died in the snapshot-to-send
+     * window) leaves mm un-enqueued AND undisposed, per march_send's own
+     * handling of the same return value just above: we still own the one
+     * reference we allocated, so we must free() it ourselves. free(),
+     * never march_decrc, matching march_actor_msg_dispose's mirror-image
+     * disposal of this same malloc'd (not march-heap-allocated) shape. */
     for (int i = 0; i < n; i++) {
         march_migrate_msg_t *mm = (march_migrate_msg_t *)malloc(sizeof(*mm));
         if (mm) {
             mm->_rc        = 1;
             mm->_tag       = MARCH_MIGRATE_TAG;
             mm->migrate_fn = migrate_fn;
-            march_sched_send(snaps[i]->green_thread, mm);
+            if (march_sched_send(snaps[i]->green_thread, mm) == MARCH_SEND_DEAD) {
+                free(mm);
+            }
         }
         march_decrc(snaps[i]->actor);
     }
