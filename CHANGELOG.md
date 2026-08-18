@@ -28,6 +28,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Fixed a data race in the capability-revocation plane: an actor's `epoch`
+  field (backing `march_get_cap`/`march_is_cap_valid`/`march_send_checked`)
+  was written by a supervisor's restart without any lock or atomic and read
+  as a plain field on an arbitrary sender's thread, the same unsynchronized
+  plain-write/plain-read shape as the previously-fixed `pid_index` race. A
+  sender holding a `Cap` captured before a supervised restart could race the
+  epoch comparison against the respawn's write, with no ordering guarantee
+  between the two. `epoch` is now `_Atomic`, release-stored on write and
+  acquire-loaded on every cross-thread read.
+
 - Two actors with the same name in different modules no longer share one capability
   closure. Handler closures were keyed by the actor's bare `<Actor>_<Msg>` name, so
   `Safe.Worker` and `Danger.Worker` collided on `Worker_Go` and their capabilities were

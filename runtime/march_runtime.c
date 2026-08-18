@@ -1861,8 +1861,14 @@ typedef struct march_actor_meta {
     int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
     int64_t                     supervisor_max_restarts;
     int64_t                     supervisor_window_secs;
-    /* Capability revocation (used by march_is_cap_valid): */
-    int64_t                     epoch;    /* Current epoch; incremented on revocation */
+    /* Capability revocation (used by march_is_cap_valid). _Atomic: written
+     * once per respawn by march_respawn_child (on the supervisor's thread,
+     * under g_tbl_mu, but g_tbl_mu is a writer-side critical section only —
+     * it does not protect the lock-free readers below), and read on an
+     * arbitrary sender's thread by march_get_cap, march_is_cap_valid, and
+     * march_send_checked. Release-store on write, acquire-load on every
+     * cross-thread read — same shape as pid_index/green_thread (Tasks 10/15). */
+    _Atomic int64_t              epoch;    /* Current epoch; incremented on revocation */
     /* Phase 5: non-zero for actors compiled with --hot-reload.
      * Holds the dispatch-table NAME_ID of the actor's _dispatch function.
      * Used by actor_green_thread for dispatch-table lookup (enabling function
@@ -3134,7 +3140,12 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     march_sup_child *child = &sup_meta->sup_children[child_idx];
     int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
     march_actor_meta *old_meta = find_meta_by_pid_index(old_pid_index);
-    int64_t inherited_epoch = old_meta ? old_meta->epoch + 1 : 0;
+    /* old_meta->epoch here is only ever written by THIS same supervisor
+     * thread (a child slot has exactly one supervisor, and only its thread
+     * ever calls march_respawn_child for that slot), so relaxed suffices —
+     * matching the intra-thread pid_index reads elsewhere in this function. */
+    int64_t inherited_epoch = old_meta ? atomic_load_explicit(&old_meta->epoch,
+                                              memory_order_relaxed) + 1 : 0;
 
     /* spawn_clo is a March closure cell (offset-16 word = $clo_wrap function
      * pointer), NOT a raw C function pointer — see march_sup_child's field
@@ -3151,7 +3162,7 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     pthread_mutex_lock(&g_tbl_mu);
     new_meta->supervisor = supervisor;
     new_meta->sup_child_index = child_idx;
-    new_meta->epoch = inherited_epoch;
+    atomic_store_explicit(&new_meta->epoch, inherited_epoch, memory_order_release);
     pthread_mutex_unlock(&g_tbl_mu);
     ((int64_t *)supervisor)[4 + child->word_idx] =
         atomic_load_explicit(&new_meta->pid_index, memory_order_relaxed);
@@ -6592,7 +6603,7 @@ void *march_get_cap(void *pid) {
     int64_t *w = (int64_t *)cap;
     w[2] = (int64_t)(uintptr_t)pid;
     w[3] = atomic_load_explicit(&meta->pid_index, memory_order_relaxed);
-    w[4] = meta->epoch;
+    w[4] = atomic_load_explicit(&meta->epoch, memory_order_acquire);
     return cap;
 }
 
@@ -6662,7 +6673,7 @@ int64_t march_is_cap_valid(void *cap) {
     if (revoc_contains(pid_index, epoch)) return 0;
     march_actor_meta *m = find_meta_by_pid_index(pid_index);
     if (!m || !march_is_alive(m->actor)) return 0;
-    if (m->epoch != epoch) return 0;
+    if (atomic_load_explicit(&m->epoch, memory_order_acquire) != epoch) return 0;
     return 1;
 }
 
@@ -6698,7 +6709,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     march_actor_meta *meta = find_meta(actor);
     if (!meta ||
         atomic_load_explicit(&meta->pid_index, memory_order_relaxed) != pidx ||
-        meta->epoch != epoch
+        atomic_load_explicit(&meta->epoch, memory_order_acquire) != epoch
         || !march_is_alive(actor)) {
         march_decrc(msg);
         return march_atom_of_name("error");
