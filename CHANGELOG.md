@@ -39,6 +39,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`forge` no longer pairs one install's compiler with another install's stdlib.**
+  `forge` set `MARCH_STDLIB` from its OWN executable location
+  (`<forge>/../share/march`) while running the `march` chosen by toolchain
+  resolution (`~/.march/current/bin/march`). When the two live in different
+  prefixes — an opam-installed `forge` driving a pinned toolchain — every forge
+  subprocess typechecked a newer compiler against an older stdlib. The symptom is
+  a flood of type errors in source that is actually correct: a pre-`Vault(v)`
+  stdlib under a post-`Vault(v)` compiler produced 47 bogus "expected `Int` but
+  got …" Vault errors in one project, while the identical files checked clean
+  under a direct `march --check`. The stdlib is now derived from the resolved
+  toolchain (`versions/<tag>/stdlib`), and when a toolchain is resolved but ships
+  no `stdlib/`, `MARCH_STDLIB` is left unset so the compiler resolves its own
+  exe-relative stdlib rather than falling back to forge's prefix. `forge notebook`
+  had a second copy of the same guess and now shares the fixed resolver; its
+  `march` lookup is toolchain-aware for the same reason.
+
 - Fixed a data race in the capability-revocation plane: an actor's `epoch`
   field (backing `march_get_cap`/`march_is_cap_valid`/`march_send_checked`)
   was written by a supervisor's restart without any lock or atomic and read

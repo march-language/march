@@ -15,21 +15,22 @@
 (* Stdlib / march binary discovery                                     *)
 (* ------------------------------------------------------------------ *)
 
-let find_stdlib_dir () =
-  let exe = Sys.executable_name in
-  let candidates = [
-    "stdlib";
-    Filename.concat (Filename.dirname exe) "../stdlib";
-    Filename.concat (Filename.dirname exe) "../../stdlib";
-    Filename.concat (Filename.dirname exe) "../../../stdlib";
-  ] in
-  List.find_opt Sys.file_exists candidates
+(* Shared with the archive-task path so the stdlib always comes from the same
+   install as the `march` that runs -- a forge-exe-relative guess pairs the
+   wrong generation's stdlib with a pinned toolchain. *)
+let find_stdlib_dir () = Archive_store.find_stdlib_dir ()
 
+(* Must agree with [find_stdlib_dir] above: the compiler and the stdlib have to
+   come from one install. Prefer the resolved toolchain, and only then fall back
+   to a march sitting beside forge, or PATH. *)
 let find_march () =
-  let exe_dir = Filename.dirname Sys.executable_name in
-  let sibling = Filename.concat exe_dir "march" in
-  if Sys.file_exists sibling then sibling
-  else "march"
+  match Toolchain.march_command () with
+  | Ok exe when not (Filename.is_relative exe) -> exe
+  | _ ->
+    let exe_dir = Filename.dirname Sys.executable_name in
+    let sibling = Filename.concat exe_dir "march" in
+    if Sys.file_exists sibling then sibling
+    else "march"
 
 (* ------------------------------------------------------------------ *)
 (* Find the scroll archive task (installed via `forge install scroll`) *)
