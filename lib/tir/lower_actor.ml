@@ -110,8 +110,32 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
     (* Load each state field from actor struct and let-bind it.
        Build the continuation bottom-up: first build inner body, wrap in lets. *)
 
-    (* Step 1: lower the handler body (uses `state` variable) *)
+    (* Step 1: lower the handler body (uses `state` variable).
+
+       The handler's own params must be registered in [_fn_param_types] for the
+       duration of that lowering, exactly as [lower_fn_def] does for a normal
+       function's parameters and as lower.ml's [EBlock]/[ELet] case does for
+       let-bound names.  That table is the shield [resolve_use_alias] checks
+       FIRST: without it, a bare reference to a param whose name matches any
+       top-level function linked into the program is rewritten into a qualified
+       GLOBAL reference (e.g. `text` -> `HttpServer.text`), silently dropping the
+       binder and emitting the function's raw code address as the value.  Params
+       that happen not to collide worked only by name coincidence with the TIR
+       param var.  Additive save/restore (not [lower_fn_def]'s clear-all) so no
+       entry the enclosing scope relies on is removed. *)
+    let saved_shadowed : (string * Tir.ty) list =
+      List.filter_map (fun (v : Tir.var) ->
+          match Hashtbl.find_opt Lower_state._fn_param_types v.Tir.v_name with
+          | Some ty -> Some (v.Tir.v_name, ty)
+          | None -> None) params
+    in
+    List.iter (fun (v : Tir.var) ->
+        Hashtbl.replace Lower_state._fn_param_types v.Tir.v_name v.Tir.v_ty) params;
     let body_tir = Lower_match.lower_expr env h.ah_body in
+    List.iter (fun (v : Tir.var) ->
+        Hashtbl.remove Lower_state._fn_param_types v.Tir.v_name) params;
+    List.iter (fun (n, ty) ->
+        Hashtbl.replace Lower_state._fn_param_types n ty) saved_shadowed;
 
     let state_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
     (* Step 2: let $result = body_tir *)

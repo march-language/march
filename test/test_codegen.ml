@@ -660,6 +660,53 @@ let test_actor_struct_ereuse_unconditional () =
   Alcotest.(check bool) "no atomic RC load guarding the actor-struct reuse"
     false (ir_contains ir "load atomic i64")
 
+(** An actor message-handler binder must SHADOW a same-named top-level function.
+
+    [lower_fn_def] registers a function's parameters in [_fn_param_types] for the
+    duration of lowering its body; that table is the shield [resolve_use_alias]
+    consults before rewriting a bare name into a qualified global. [lower_handler]
+    did not do the same for [ah_params], so a handler binder whose name matched
+    ANY top-level function linked into the program was silently discarded and the
+    bare reference resolved to the FUNCTION — emitting its raw code address where
+    the bound value belonged.
+
+    Found in the wild 2026-08-19: an Envoy actor with
+    [on Deliver(session_id, kind, text, approved)] collided with stdlib
+    [HttpServer.text], so the compiled server passed [ptr @HttpServer.text] as the
+    message text. Refcounting that code address writes at ptr+0 into read-only
+    __TEXT — SIGBUS, exit 138 — while the INTERPRETER handled the same program
+    correctly (a compiled-only miscompile). Non-colliding binders worked only by
+    name coincidence with the TIR param var.
+
+    Witness: the handler passes its own binder, never the imported function. *)
+let test_actor_handler_binder_shadows_toplevel_fn () =
+  let ir = emit_actor_ir {|mod Test do
+  needs IO.Console
+    mod Helper do
+      fn text(s : String) : String do s end
+    end
+    import Helper
+    fn emit(label : String, v : String) : String do label ++ v end
+    actor Host do
+      state { n : Int }
+      init  { n: 0 }
+      on Msg(text) do
+        let _ = emit("got: ", text)
+        { n: state.n + 1 }
+      end
+    end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do
+      let pid = spawn(Host)
+      let _ = send(pid, Msg("hello"))
+      run_until_idle()
+    end
+  end|} in
+  (* The bug emitted the function's address as a call argument. Match the
+     ARGUMENT form (comma-preceded) so this cannot alias the `define` line. *)
+  Alcotest.(check bool)
+    "handler binder is not replaced by the imported Helper.text function"
+    false (ir_contains ir ", ptr @Helper.text")
+
 (** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
     always-in-place gate must be STRUCTURAL (does this type's field 0 carry
     the compiler-only "$d_dispatch" marker lower_actor.ml alone can construct
@@ -13906,6 +13953,8 @@ let codegen_suites =
             `Quick test_actor_struct_ereuse_unconditional;
           Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
             `Quick test_actor_suffix_named_user_type_not_treated_as_actor;
+          Alcotest.test_case "handler binder shadows a same-named top-level fn"
+            `Quick test_actor_handler_binder_shadows_toplevel_fn;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
