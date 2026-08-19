@@ -60,6 +60,10 @@ type value =
   | VPid    of int                      (** Actor process id *)
   | VTask         of int                 (** Task handle *)
   | VCancelToken  of bool ref            (** Cancellation token (shared mutable flag) *)
+  | VTimerRef of timer_entry
+      (** send_after handle (specs/progress/2026-08-12-language-level-timers.md).
+          cancel_timer sets [tt_cancelled]; [timer_service_tick] (called from
+          [run_scheduler]) checks it at [tt_fire_at]. *)
   | VWorkPool                            (** Work-stealing pool capability *)
   | VCap    of int * int                (** Epoch-stamped capability: (pid, epoch) *)
   | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
@@ -117,6 +121,22 @@ and mpst_endpoint = {
   me_in_qs    : (string, value Queue.t) Hashtbl.t;  (** source_role → recv queue *)
 }
 
+(** A pending [send_after] timer (specs/progress/2026-08-12-language-level-
+    timers.md): deliver [tt_msg] to the actor at pid [tt_target] once real
+    time reaches [tt_fire_at] (milliseconds, [Unix.gettimeofday] clock),
+    unless [tt_cancelled] is set first. Serviced by [timer_service_tick],
+    called once per [run_scheduler] pass — see that function's doc comment
+    for why a not-yet-due timer does NOT make [run_until_idle] block (the
+    same design decision the compiled runtime's [march_sched_wait_idle]
+    makes for the identical reason; see its doc comment in
+    runtime/march_scheduler.c). *)
+and timer_entry = {
+  tt_fire_at    : float;
+  tt_target     : int;      (** actor_registry pid *)
+  tt_msg        : value;
+  mutable tt_cancelled : bool;
+}
+
 (** Association-list environment mapping names to values. *)
 and env = (string * value) list
 
@@ -163,6 +183,11 @@ let actor_defs_tbl : (string, actor_def * env ref) Hashtbl.t = Hashtbl.create 8
 
 (** Live actor instances — reset per module eval. *)
 let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
+
+(** Pending [send_after] timers (specs/progress/2026-08-12-language-level-
+    timers.md) — reset per module eval, same lifecycle as [actor_registry].
+    Serviced by [timer_service_tick]. *)
+let pending_timers : timer_entry list ref = ref []
 
 (** Named registry (Task 4): name -> pid, mirroring the runtime's
     march_actor_register/unregister/whereis/registered C API. Reset per
@@ -1257,6 +1282,7 @@ let rec vault_key_of_value (v : value) : string =
        | VPid _         -> "a Pid"
        | VTask _        -> "a Task"
        | VCancelToken _ -> "a CancelToken"
+       | VTimerRef _    -> "a TimerRef"
        | _              -> "an unsupported value")
 
 (** Resolve a vault handle; panics with a clear message on bad handles. *)
@@ -1599,6 +1625,7 @@ let rec value_to_string v =
   | VPid pid -> "Pid(" ^ string_of_int pid ^ ")"
   | VTask id -> Printf.sprintf "<task:%d>" id
   | VCancelToken r -> Printf.sprintf "<cancel_token:%s>" (if !r then "cancelled" else "active")
+  | VTimerRef t -> Printf.sprintf "<timer_ref:%s>" (if t.tt_cancelled then "cancelled" else "pending")
   | VWorkPool -> "<work_pool>"
   | VCap (pid, epoch) -> Printf.sprintf "Cap(%d, epoch=%d)" pid epoch
   | VActorId pid -> Printf.sprintf "ActorId(%d)" pid
@@ -8125,6 +8152,28 @@ let base_env : env =
         | [VInt ref_id; result] ->
           Hashtbl.replace pending_replies ref_id result; VUnit
         | _ -> eval_error "actor_reply: expected (Int, value)"))
+  (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-language-
+     level-timers.md). Real wall-clock scheduling: the entry sits in
+     [pending_timers] until [timer_service_tick] (called once per
+     [run_scheduler] pass, i.e. from run_until_idle) observes
+     [Unix.gettimeofday] has reached [tt_fire_at]. No pid-liveness check at
+     schedule time — mirrors actor_cast/march_send: a dead or never-spawned
+     target simply drops the message when the timer fires (checked in
+     timer_service_tick, not here). Named with the "actor_" prefix (not
+     bare) so the Actor.send_after/Actor.cancel_timer wrappers in
+     stdlib/actor.march can reuse the friendly names without recursing into
+     themselves — see typecheck.ml's identical naming-rationale comment. *)
+  ; ("actor_send_after", VBuiltin ("actor_send_after", function
+        | [VPid pid; msg; VInt delay_ms] ->
+          let fire_at = Unix.gettimeofday () *. 1000. +. float_of_int (max 0 delay_ms) in
+          let entry = { tt_fire_at = fire_at; tt_target = pid; tt_msg = msg;
+                        tt_cancelled = false } in
+          pending_timers := entry :: !pending_timers;
+          VTimerRef entry
+        | _ -> eval_error "actor_send_after: expected (Pid, message, Int)"))
+  ; ("actor_cancel_timer", VBuiltin ("actor_cancel_timer", function
+        | [VTimerRef entry] -> entry.tt_cancelled <- true; VUnit
+        | _ -> eval_error "actor_cancel_timer: expected a TimerRef"))
 
   (* ── NativeArray builtins ────────────────────────────────────────────────
      Flat OCaml int/float arrays with tight-loop implementations of common
@@ -10099,6 +10148,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_registry;
   Hashtbl.clear named_registry;
   Hashtbl.clear reg_names_pending;
+  pending_timers := [];
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
@@ -10144,6 +10194,39 @@ let reset_scheduler_state () : unit =
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
    tracing is needed, add the same pattern inside the handler dispatch block below. *)
 
+(** Deliver every [pending_timers] entry whose deadline has passed (real
+    wall-clock time, [Unix.gettimeofday]) and drop the rest of this pass's
+    bookkeeping for it either way — a fired-or-cancelled entry is removed
+    from [pending_timers] regardless of which happened. A cancelled entry's
+    message is simply not delivered (OCaml's GC reclaims [tt_msg]; there is
+    no explicit dtor to run here the way the compiled runtime needs one, per
+    march_sched_set_msg_dtor's doc comment — the interpreter has no separate
+    RC to release). A target that died or was never spawned is treated the
+    same as march_send/actor_cast already treat it: the message is simply
+    dropped.
+
+    Called once per [run_scheduler] pass (see below), so [run_until_idle]
+    delivers any timer that's already due — but does NOT wait for one that
+    isn't: a pass where nothing else changes and no timer is due yet lets
+    the pass loop's [changed] stay false and [run_scheduler] return, exactly
+    mirroring the compiled runtime's march_sched_wait_idle design decision
+    (see its doc comment in runtime/march_scheduler.c) that a pending
+    send_after should not block that primitive. *)
+let timer_service_tick () =
+  if !pending_timers <> [] then begin
+    let now = Unix.gettimeofday () *. 1000. in
+    let due, still_pending =
+      List.partition (fun t -> t.tt_cancelled || now >= t.tt_fire_at) !pending_timers
+    in
+    pending_timers := still_pending;
+    List.iter (fun t ->
+        if not t.tt_cancelled then
+          match Hashtbl.find_opt actor_registry t.tt_target with
+          | Some inst when inst.ai_alive -> mailbox_enqueue inst t.tt_msg
+          | _ -> ()
+      ) due
+  end
+
 (** Drain all actor mailboxes cooperatively.
     Each pass iterates over all live actors; for each with a non-empty mailbox
     it pops one message, finds the matching [on Msg] handler, and runs it.
@@ -10152,6 +10235,7 @@ let run_scheduler () =
   let changed = ref true in
   while !changed && not !shutdown_requested do
     changed := false;
+    timer_service_tick ();
     (* Drain deferred OS-signal watchers (Signal.watch): apply each pending
        handler on a normal green-thread stack, coalescing repeats to one call.
        The handler is typed [() -> ()] but may be spelled [fn -> body] (0-arg)
@@ -11294,6 +11378,7 @@ let eval_module_env (m : module_) : env =
   Hashtbl.clear actor_registry;
   Hashtbl.clear named_registry;
   Hashtbl.clear reg_names_pending;
+  pending_timers := [];
   next_pid := 0;
   dropped_messages_count := 0;
   Hashtbl.clear task_registry;

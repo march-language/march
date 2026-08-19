@@ -121,4 +121,41 @@ mod Actor do
     actor_registered()
   end
 
+  doc """
+  Schedule msg for delivery to pid after delay_ms milliseconds — a fire-once
+  timer built on the same scheduler primitive that already backs Actor.call's
+  timeout and supervisor restart backoff. Returns a TimerRef usable with
+  cancel_timer. Message delivery goes through the actor's normal mailbox, so
+  msg follows the same "constructor the actor has an `on` handler for"
+  convention as Actor.cast — cast(pid, Inc(1)) and
+  send_after(pid, Inc(1), 1000) reach the exact same dispatch path, just on
+  different schedules.
+
+  A pending timer does not keep run_until_idle() waiting: if nothing else is
+  happening, run_until_idle() returns even while a send_after is still
+  pending, and delivers it whenever it's next called after the deadline has
+  passed. A real long-running process (an IO.Process-style server) is kept
+  alive by its own non-daemon/actor processes, not by run_until_idle, so this
+  does not affect whether the message eventually arrives — only whether
+  waiting for it blocks a test harness.
+
+      let pid = spawn(Worker)
+      let ref = Actor.send_after(pid, Tick, 100)
+      -- ... later, before it fires ...
+      Actor.cancel_timer(ref)
+  """
+  fn send_after(pid, msg, delay_ms) do
+    actor_send_after(pid, msg, delay_ms)
+  end
+
+  doc """
+  Cancel a pending Actor.send_after timer. Safe to call at any time,
+  including after the timer has already fired or been cancelled already
+  (both are harmless no-ops) — delivers nothing if called before the
+  deadline.
+  """
+  fn cancel_timer(ref) do
+    actor_cancel_timer(ref)
+  end
+
 end

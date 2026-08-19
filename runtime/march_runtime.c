@@ -1861,8 +1861,14 @@ typedef struct march_actor_meta {
     int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
     int64_t                     supervisor_max_restarts;
     int64_t                     supervisor_window_secs;
-    /* Capability revocation (used by march_is_cap_valid): */
-    int64_t                     epoch;    /* Current epoch; incremented on revocation */
+    /* Capability revocation (used by march_is_cap_valid). _Atomic: written
+     * once per respawn by march_respawn_child (on the supervisor's thread,
+     * under g_tbl_mu, but g_tbl_mu is a writer-side critical section only —
+     * it does not protect the lock-free readers below), and read on an
+     * arbitrary sender's thread by march_get_cap, march_is_cap_valid, and
+     * march_send_checked. Release-store on write, acquire-load on every
+     * cross-thread read — same shape as pid_index/green_thread (Tasks 10/15). */
+    _Atomic int64_t              epoch;    /* Current epoch; incremented on revocation */
     /* Phase 5: non-zero for actors compiled with --hot-reload.
      * Holds the dispatch-table NAME_ID of the actor's _dispatch function.
      * Used by actor_green_thread for dispatch-table lookup (enabling function
@@ -2308,6 +2314,13 @@ void march_sandbox_install(void) {
 void march_sandbox_install(void) { /* not built with --cap-sandbox */ }
 #endif
 
+/* Forward declaration: defined below (near march_actor_msg_dispose /
+ * march_timer_token_is_cancelled / march_timer_token_release), called from
+ * BOTH scheduler-lazy-init sites below that guard on g_sched_initialized's
+ * 0->1 CAS (this function itself, and march_spawn_common's) — see this
+ * function's own definition for why a single call site is not enough. */
+static void march_register_sched_callbacks(void);
+
 void march_spawn_main(void (*fn)(void)) {
     /* Drop privileges before the scheduler starts and before any user code
      * runs.  No-op unless built with --cap-sandbox. */
@@ -2317,6 +2330,24 @@ void march_spawn_main(void (*fn)(void)) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* march_spawn_main is the FIRST lazy-init site to actually run in a
+         * normal compiled program: the emitted @main calls it (via
+         * march_spawn_main(@march_main), llvm_toplevel.ml) unconditionally,
+         * strictly before user code -- including the first actor spawn --
+         * ever executes. That means it, not march_spawn_common's block
+         * below, wins the g_sched_initialized 0->1 CAS in practice, so the
+         * scheduler callback registrations MUST also happen here or they
+         * never run in a compiled program at all: march_spawn_common's own
+         * registration call is dead code once this branch has already
+         * flipped the flag. Discovered while wiring send_after/cancel_timer
+         * (specs/progress/2026-08-12-language-level-timers.md) -- cancel_timer
+         * silently never took effect because march_sched_set_timer_token_ops
+         * was never called, which on inspection turned out to be true of
+         * march_sched_set_msg_dtor too (Task 14's DROP_NEW/DROP_OLD/dead-
+         * proc-reap message disposal), pre-existing and unrelated to this
+         * feature. Both are registered from the same helper so neither can
+         * drift out of sync with the other again. */
+        march_register_sched_callbacks();
     }
     march_sched_spawn(main_fn_green_thread, (void *)(uintptr_t)fn);
 }
@@ -3134,7 +3165,12 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     march_sup_child *child = &sup_meta->sup_children[child_idx];
     int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
     march_actor_meta *old_meta = find_meta_by_pid_index(old_pid_index);
-    int64_t inherited_epoch = old_meta ? old_meta->epoch + 1 : 0;
+    /* old_meta->epoch here is only ever written by THIS same supervisor
+     * thread (a child slot has exactly one supervisor, and only its thread
+     * ever calls march_respawn_child for that slot), so relaxed suffices —
+     * matching the intra-thread pid_index reads elsewhere in this function. */
+    int64_t inherited_epoch = old_meta ? atomic_load_explicit(&old_meta->epoch,
+                                              memory_order_relaxed) + 1 : 0;
 
     /* spawn_clo is a March closure cell (offset-16 word = $clo_wrap function
      * pointer), NOT a raw C function pointer — see march_sup_child's field
@@ -3151,7 +3187,7 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     pthread_mutex_lock(&g_tbl_mu);
     new_meta->supervisor = supervisor;
     new_meta->sup_child_index = child_idx;
-    new_meta->epoch = inherited_epoch;
+    atomic_store_explicit(&new_meta->epoch, inherited_epoch, memory_order_release);
     pthread_mutex_unlock(&g_tbl_mu);
     ((int64_t *)supervisor)[4 + child->word_idx] =
         atomic_load_explicit(&new_meta->pid_index, memory_order_relaxed);
@@ -4053,14 +4089,12 @@ static void *march_spawn_common(void *actor, int defer_activation) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
-        /* Task 14: give the scheduler a real disposer for messages it never
-         * delivers (mailbox-overflow drops, and every message still queued
-         * in a proc's mailbox when it is reaped dead) instead of leaking
-         * them. See march_actor_msg_dispose's own comment for the two
-         * message shapes it discriminates between, and the re-entrancy
-         * contract on march_sched_set_msg_dtor for why the scheduler always
-         * calls this with no scheduler lock held. */
-        march_sched_set_msg_dtor(march_actor_msg_dispose);
+        /* Reachable when something spawns an actor before march_spawn_main
+         * has run (e.g. REPL/JIT, hot-reload, or any other embedding entry
+         * point that does not go through the emitted @main -> march_spawn_
+         * main path) -- see march_register_sched_callbacks' definition and
+         * march_spawn_main's own call to it for why BOTH sites need this. */
+        march_register_sched_callbacks();
     }
     /* A normal actor is runnable immediately. A supervise-block child uses
      * the deferred entry point and is activated by register_child only after
@@ -4123,14 +4157,31 @@ void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
     }
     pthread_mutex_unlock(&g_tbl_mu);
 
-    /* Phase 2: inject migrate messages outside the lock. */
+    /* Phase 2: inject migrate messages outside the lock.
+     *
+     * march_sched_send's contract (march_scheduler.h) is: MARCH_SEND_OK
+     * means mm was enqueued (the mailbox now owns it — freed later either
+     * by actor_green_thread's receive loop or, if the proc dies with it
+     * still queued, by march_actor_msg_dispose at reap time); MARCH_SEND_
+     * DROPPED means mm was rejected by an overflow policy but already
+     * handed to march_actor_msg_dispose (registered via
+     * march_sched_set_msg_dtor), which frees() it since it recognizes
+     * MARCH_MIGRATE_TAG — so both of those leave mm's disposal to someone
+     * else. Only MARCH_SEND_DEAD (target died in the snapshot-to-send
+     * window) leaves mm un-enqueued AND undisposed, per march_send's own
+     * handling of the same return value just above: we still own the one
+     * reference we allocated, so we must free() it ourselves. free(),
+     * never march_decrc, matching march_actor_msg_dispose's mirror-image
+     * disposal of this same malloc'd (not march-heap-allocated) shape. */
     for (int i = 0; i < n; i++) {
         march_migrate_msg_t *mm = (march_migrate_msg_t *)malloc(sizeof(*mm));
         if (mm) {
             mm->_rc        = 1;
             mm->_tag       = MARCH_MIGRATE_TAG;
             mm->migrate_fn = migrate_fn;
-            march_sched_send(snaps[i]->green_thread, mm);
+            if (march_sched_send(snaps[i]->green_thread, mm) == MARCH_SEND_DEAD) {
+                free(mm);
+            }
         }
         march_decrc(snaps[i]->actor);
     }
@@ -4353,6 +4404,14 @@ void *march_task_spawn_thunk(void *clo_ptr) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* Every site that can win this CAS must register the callbacks —
+         * whichever one wins is the ONLY one that runs, so a site that skips
+         * this leaves them unregistered for the life of the process. Reached
+         * first whenever a task_spawn precedes both march_spawn_main and any
+         * actor spawn, which is exactly what a REPL/JIT session or a
+         * --compile-so embedding does (neither emits the @main wrapper that
+         * calls march_spawn_main). See march_register_sched_callbacks. */
+        march_register_sched_callbacks();
     }
     /* Perceus treats task_spawn as a consuming call: the caller transfers its
      * reference to the task.  No IncRC needed here; the closure's existing
@@ -4418,6 +4477,8 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
             &g_sched_initialized, &expected, 1,
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
+        /* Same reasoning as march_task_spawn_thunk's call just above. */
+        march_register_sched_callbacks();
     }
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
@@ -4564,6 +4625,107 @@ void *march_send(void *actor, void *msg) {
     int64_t *fld = (int64_t *)((char *)some + 16);
     fld[0] = 0;
     return some;
+}
+
+/* ── send_after / cancel_timer (specs/progress/2026-08-12-language-level-
+   timers.md) ──────────────────────────────────────────────────────────── */
+/* A TimerRef's single field: cancelled (0/1), at offset 16 (right after the
+ * 16-byte march_hdr) — see MARCH_TIMER_TOKEN_TAG's doc comment in
+ * march_runtime.h for the full RC design. Accessed directly (not via the
+ * MARCH_FIELD macro, defined just below this point) since this function
+ * comes first in file order. */
+#define MARCH_TIMER_TOKEN_CANCELLED(tok) (((int64_t *)(tok))[2])
+
+/* Registered with the scheduler below (march_sched_set_timer_token_ops) so
+ * march_scheduler.c can check/release a SEND-kind timer entry's token
+ * without depending on March's GC internals — same rationale, and same
+ * indirection shape, as march_sched_set_msg_dtor / march_actor_msg_dispose
+ * just above. */
+static int64_t march_timer_token_is_cancelled(void *tok) {
+    return atomic_load_explicit((_Atomic int64_t *)&MARCH_TIMER_TOKEN_CANCELLED(tok),
+                                 memory_order_acquire);
+}
+static void march_timer_token_release(void *tok) {
+    march_decrc(tok);
+}
+
+/* Register every scheduler callback the runtime layer supplies (the message
+ * dtor for undelivered/orphaned mailbox messages, Task 14; the timer-token
+ * ops for send_after/cancel_timer, this feature) in one place, so no
+ * lazy-init call site can register only some of them and silently leave the
+ * rest permanently unregistered for the life of the process — exactly the
+ * bug this helper replaces: before it, march_spawn_common called
+ * march_sched_set_msg_dtor directly, but march_spawn_main (which runs
+ * first, and hence wins the CAS, in every normal compiled program) called
+ * nothing.
+ *
+ * ALL FOUR sites that CAS g_sched_initialized 0->1 must call this, because
+ * exactly one of them wins and the losers' bodies never run:
+ *   - march_spawn_main                    (compiled @main; wins normally)
+ *   - march_spawn_common                  (actor spawned before @main)
+ *   - march_task_spawn_thunk              (task_spawn before either)
+ *   - march_task_spawn_with_cancel_thunk  (ditto, with a cancel token)
+ * The last two matter for the REPL/JIT and --compile-so embedding paths,
+ * which never emit the @main wrapper that calls march_spawn_main, so a
+ * leading task_spawn there is genuinely the first site reached. Adding a
+ * fifth CAS site without calling this reintroduces the bug. */
+static void march_register_sched_callbacks(void) {
+    /* Task 14: give the scheduler a real disposer for messages it never
+     * delivers (mailbox-overflow drops, and every message still queued
+     * in a proc's mailbox when it is reaped dead) instead of leaking
+     * them. See march_actor_msg_dispose's own comment for the two
+     * message shapes it discriminates between, and the re-entrancy
+     * contract on march_sched_set_msg_dtor for why the scheduler always
+     * calls this with no scheduler lock held. */
+    march_sched_set_msg_dtor(march_actor_msg_dispose);
+    /* send_after/cancel_timer (specs/progress/2026-08-12-language-level-
+     * timers.md): give the scheduler's timer heap a way to check/release
+     * a SEND-kind entry's TimerRef token without depending on March's GC
+     * internals — same rationale as the message dtor just above. */
+    march_sched_set_timer_token_ops(march_timer_token_is_cancelled,
+                                    march_timer_token_release);
+}
+
+/* send_after(pid, msg, delay_ms) : TimerRef — see march_runtime.h's doc
+ * comment on the declaration for the RC contract.
+ *
+ * actor is resolved to its current green thread ONCE, here, exactly like
+ * march_send above — NOT re-resolved at fire time. If the actor is
+ * respawned (e.g. a supervised restart) before the deadline, this timer
+ * still targets the ORIGINAL process instance, which by then reads DEAD;
+ * march_sched_send_after/timer_service treat that uniformly with "never
+ * spawned" (gt == NULL) and "died before firing" — the message is disposed,
+ * never silently redirected to the new instance. This matches march_send's
+ * own pid-is-a-process-identity semantics and needs no extra bookkeeping.
+ *
+ * delay_ms <= 0 fires on the next timer_service tick (deadline = now). */
+void *march_send_after(void *actor, void *msg, int64_t delay_ms) {
+    march_actor_meta *meta = find_meta(actor);
+    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
+                                                  memory_order_acquire)
+                          : NULL;
+
+    void *tok = march_alloc(16 + 8);
+    ((march_hdr *)tok)->tag = MARCH_TIMER_TOKEN_TAG;
+    MARCH_TIMER_TOKEN_CANCELLED(tok) = 0;
+    /* Second reference: the timer heap's own hold, released by
+     * march_timer_token_release (via the registered ops) when timer_service
+     * pops this entry — fired or not. The first reference (rc=1 from
+     * march_alloc) is the one we return to the caller below. */
+    march_incrc(tok);
+
+    int64_t deadline = march_now_ms() + (delay_ms > 0 ? delay_ms : 0);
+    march_sched_send_after(gt, msg, tok, deadline);
+    return tok;
+}
+
+/* cancel_timer(ref) — see march_runtime.h's doc comment for the RC
+ * contract: consumes (and releases) the one reference to tok it receives. */
+void march_timer_cancel(void *tok) {
+    if (!tok) return;
+    atomic_store_explicit((_Atomic int64_t *)&MARCH_TIMER_TOKEN_CANCELLED(tok),
+                          1, memory_order_release);
+    march_decrc(tok);
 }
 
 /* ── Heap layout helpers (used by actor_call and file I/O) ────────────── */
@@ -6315,56 +6477,6 @@ void march_demonitor(int64_t ref) {
     pthread_mutex_unlock(&g_tbl_mu);
 }
 
-/* link: establish a bidirectional crash-propagation link.
-   Implemented as two one-way monitors; when either actor dies, the other
-   gets a Down notification (and the default behaviour is to crash too —
-   supervision should be used if restart is desired).
-   No-op if either pointer is not a valid heap actor. */
-void march_link(void *actor_a, void *actor_b) {
-    if (!IS_HEAP_PTR(actor_a) || !IS_HEAP_PTR(actor_b)) return;
-    /* Two one-way monitors: a watches b and b watches a. */
-    march_monitor(actor_a, actor_b);
-    march_monitor(actor_b, actor_a);
-}
-
-/* unlink: cancel the bidirectional link between two actors.
-   Best-effort: scans for and removes both one-way monitor nodes. */
-void march_unlink(void *actor_a, void *actor_b) {
-    if (!IS_HEAP_PTR(actor_a) || !IS_HEAP_PTR(actor_b)) return;
-    /* Scan actor_b's monitor list for a node watching actor_a. */
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *mb = g_actor_tbl[actor_bucket(actor_b)];
-    while (mb && mb->actor != actor_b) mb = mb->tbl_next;
-    if (mb) {
-        march_monitor_node **pp = &mb->monitor_head;
-        while (*pp) {
-            if ((*pp)->watcher == actor_a) {
-                march_monitor_node *dead = *pp;
-                *pp = dead->next;
-                free(dead);
-                break;
-            }
-            pp = &(*pp)->next;
-        }
-    }
-    /* Scan actor_a's monitor list for a node watching actor_b. */
-    march_actor_meta *ma = g_actor_tbl[actor_bucket(actor_a)];
-    while (ma && ma->actor != actor_a) ma = ma->tbl_next;
-    if (ma) {
-        march_monitor_node **pp = &ma->monitor_head;
-        while (*pp) {
-            if ((*pp)->watcher == actor_b) {
-                march_monitor_node *dead = *pp;
-                *pp = dead->next;
-                free(dead);
-                break;
-            }
-            pp = &(*pp)->next;
-        }
-    }
-    pthread_mutex_unlock(&g_tbl_mu);
-}
-
 /* register_supervisor: record supervision metadata for an actor.
    strategy: 0=one_for_one, 1=one_for_all, 2=rest_for_one.
    The actor must already be registered via march_spawn.
@@ -6519,8 +6631,8 @@ void march_run_until_idle(void) {
  * cleanup is a March closure of type Unit -> Unit.
  * Callbacks run in reverse acquisition order when kill() is called.
  *
- * The prepend below takes g_tbl_mu, matching march_monitor/march_demonitor/
- * march_unlink's discipline for monitor_head: do_actor_death detaches
+ * The prepend below takes g_tbl_mu, matching march_monitor/march_demonitor's
+ * discipline for monitor_head: do_actor_death detaches
  * meta->cleanup_head under the same lock before walking it (see that
  * function's comment), so an unlocked prepend here could race the detach —
  * losing this node entirely, or linking it onto a head do_actor_death is
@@ -6592,7 +6704,7 @@ void *march_get_cap(void *pid) {
     int64_t *w = (int64_t *)cap;
     w[2] = (int64_t)(uintptr_t)pid;
     w[3] = atomic_load_explicit(&meta->pid_index, memory_order_relaxed);
-    w[4] = meta->epoch;
+    w[4] = atomic_load_explicit(&meta->epoch, memory_order_acquire);
     return cap;
 }
 
@@ -6662,7 +6774,7 @@ int64_t march_is_cap_valid(void *cap) {
     if (revoc_contains(pid_index, epoch)) return 0;
     march_actor_meta *m = find_meta_by_pid_index(pid_index);
     if (!m || !march_is_alive(m->actor)) return 0;
-    if (m->epoch != epoch) return 0;
+    if (atomic_load_explicit(&m->epoch, memory_order_acquire) != epoch) return 0;
     return 1;
 }
 
@@ -6698,7 +6810,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     march_actor_meta *meta = find_meta(actor);
     if (!meta ||
         atomic_load_explicit(&meta->pid_index, memory_order_relaxed) != pidx ||
-        meta->epoch != epoch
+        atomic_load_explicit(&meta->epoch, memory_order_acquire) != epoch
         || !march_is_alive(actor)) {
         march_decrc(msg);
         return march_atom_of_name("error");

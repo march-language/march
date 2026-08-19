@@ -1,13 +1,23 @@
 (** Public API surface extraction and semver change classification.
 
-    Parses .march source files to extract the public API surface:
-      - Public function signatures: `pub fn name(params...) -> RetType`
-      - Public type declarations: `pub type Name = ...`
+    Parses each .march source file with the real March parser
+    ([March_parser.Parser.module_]) and walks the resulting AST to extract a
+    package's public API surface:
+      - Public function signatures: `fn name(params...) : RetType`
+      - Public type declarations: `type Name = ...` /
+        `always_linear type Name = ...`
 
-    This is intentionally text-based (regex-free, simple heuristic parsing)
-    rather than full AST-based, since forge does not link the march compiler.
-    Full type-system-aware diffing (linearity annotation changes, generic
-    constraint changes) requires compiler integration and is Phase 6 work.
+    Visibility in March is `fn` (public) / `pfn` (private) — `type` is public
+    by default. There is no `pub` keyword. An earlier version of this module
+    scanned source text line-by-line for an invented `pub fn ... -> T`
+    dialect that March does not have, which made [extract_from_directory]
+    return an empty surface for every real package (silently — no parse
+    error, just nothing found). See
+    specs/progress/2026-08-03-forge-api-surface-parser-wrong-syntax.md.
+
+    Reading the surface off the AST (rather than off source text) also means
+    multi-head clauses, default arguments, and signatures wrapped across
+    lines are captured for free — a line scanner cannot see any of those.
 
     Change classification follows the plan's rules:
       MAJOR: remove a public fn or type, change a fn signature
@@ -17,21 +27,27 @@
     Pre-1.0.0 packages skip enforcement entirely.
 *)
 
+module Ast = March_ast.Ast
+module Fmt = March_format.Format
+
 (* ------------------------------------------------------------------ *)
 (*  Surface representation                                             *)
 (* ------------------------------------------------------------------ *)
 
-(** A public function signature as extracted from source. *)
+(** A public function signature as read off the AST. *)
 type fn_sig = {
   name       : string;
-  params_raw : string;   (** raw parameter list as written (unparsed) *)
-  return_raw : string;   (** raw return type annotation (empty if absent) *)
+  params_raw : string;   (** rendered parameter list, e.g. "x : Int, y : Int".
+                              A multi-head function's clauses are joined with
+                              " | ", each parenthesized, so a change to any
+                              head shows up in the diff. *)
+  return_raw : string;   (** rendered return type annotation (empty if absent) *)
 }
 
 (** A public type declaration. *)
 type type_decl = {
   type_name : string;
-  body_raw  : string;   (** raw RHS of the type declaration (one line) *)
+  body_raw  : string;   (** rendered RHS of the type declaration *)
 }
 
 (** The public API surface of a package. *)
@@ -43,101 +59,134 @@ type surface = {
 let empty_surface = { fns = []; types = [] }
 
 (* ------------------------------------------------------------------ *)
-(*  Simple source parser                                               *)
+(*  Rendering (surface-syntax text, for diffing/display purposes only) *)
 (* ------------------------------------------------------------------ *)
 
-let trim = String.trim
+let render_clause_params (clause : Ast.fn_clause) =
+  String.concat ", " (List.map Fmt.fmt_fn_param clause.Ast.fc_params)
 
-(** Check if a string starts with [prefix]. *)
-let starts_with_prefix prefix s =
-  let pl = String.length prefix and sl = String.length s in
-  sl >= pl && String.sub s 0 pl = prefix
+(** Render a function's full parameter surface across all of its clauses. *)
+let render_fn_params (fn : Ast.fn_def) =
+  match fn.Ast.fn_clauses with
+  | [clause] -> render_clause_params clause
+  | clauses  ->
+    String.concat " | "
+      (List.map (fun c -> "(" ^ render_clause_params c ^ ")") clauses)
 
-(** Extract everything after [prefix] from [s].  Assumes [starts_with_prefix]. *)
-let after_prefix prefix s =
-  trim (String.sub s (String.length prefix) (String.length s - String.length prefix))
+let render_return (fn : Ast.fn_def) =
+  match fn.Ast.fn_ret_ty with
+  | None    -> ""
+  | Some ty -> Fmt.fmt_ty ty
 
-(** Parse a `pub fn name(params) -> RetType` declaration from a line.
-    Returns None if the line doesn't match the expected pattern.
-    Handles:
-      pub fn foo(x: Int, y: String) -> Bool
-      pub fn bar()
-      pub fn baz(x: Linear T) -> Unit
-*)
-let parse_fn_sig line =
-  let s = trim line in
-  if not (starts_with_prefix "pub fn " s) then None
-  else begin
-    let rest = after_prefix "pub fn " s in
-    (* Find the function name: everything up to '(' *)
-    match String.index_opt rest '(' with
-    | None ->
-      (* No parens: treat the whole thing as name with no params *)
-      let name = trim rest in
-      Some { name; params_raw = ""; return_raw = "" }
-    | Some paren_pos ->
-      let name = trim (String.sub rest 0 paren_pos) in
-      (* Find matching closing paren *)
-      let after_open = String.sub rest (paren_pos + 1)
-          (String.length rest - paren_pos - 1) in
-      (match String.index_opt after_open ')' with
-       | None ->
-         Some { name; params_raw = trim after_open; return_raw = "" }
-       | Some close_pos ->
-         let params_raw = trim (String.sub after_open 0 close_pos) in
-         let after_close = trim (String.sub after_open (close_pos + 1)
-             (String.length after_open - close_pos - 1)) in
-         (* After ')' may be "-> RetType" or "do" or empty *)
-         let return_raw =
-           if starts_with_prefix "->" after_close then
-             (* Extract up to " do" or end of line *)
-             let rt = after_prefix "->" after_close in
-             (match String.index_opt rt 'd' with
-              | Some di when di > 0 &&
-                             String.length rt > di + 1 &&
-                             String.sub rt (di - 1) 3 = " do" ->
-                trim (String.sub rt 0 (di - 1))
-              | _ -> trim rt)
-           else ""
-         in
-         Some { name; params_raw; return_raw })
-  end
+let render_type_def (tdef : Ast.type_def) =
+  match tdef with
+  | Ast.TDAlias ty -> Fmt.fmt_ty ty
+  | Ast.TDVariant variants ->
+    let var_str (v : Ast.variant) =
+      match v.Ast.var_args with
+      | []  -> v.Ast.var_name.Ast.txt
+      | tys -> Printf.sprintf "%s(%s)" v.Ast.var_name.Ast.txt (Fmt.fmt_tys tys)
+    in
+    String.concat " | " (List.map var_str variants)
+  | Ast.TDRecord fields ->
+    let fld_str (f : Ast.field) =
+      Printf.sprintf "%s%s : %s"
+        (Fmt.fmt_lin f.Ast.fld_lin) f.Ast.fld_name.Ast.txt (Fmt.fmt_ty f.Ast.fld_ty)
+    in
+    "{ " ^ String.concat ", " (List.map fld_str fields) ^ " }"
 
-(** Parse a `pub type Name = ...` declaration from a line. *)
-let parse_type_decl line =
-  let s = trim line in
-  if not (starts_with_prefix "pub type " s) then None
-  else begin
-    let rest = after_prefix "pub type " s in
-    match String.index_opt rest '=' with
-    | None ->
-      (* Type with no body on this line (e.g. pub type Foo) *)
-      Some { type_name = trim rest; body_raw = "" }
-    | Some eq_pos ->
-      let type_name = trim (String.sub rest 0 eq_pos) in
-      let body_raw  = trim (String.sub rest (eq_pos + 1)
-          (String.length rest - eq_pos - 1)) in
-      Some { type_name; body_raw }
-  end
+(* ------------------------------------------------------------------ *)
+(*  Parsing                                                             *)
+(* ------------------------------------------------------------------ *)
 
-(** Extract the public API surface from the contents of one .march file. *)
-let extract_from_string content =
-  let lines = String.split_on_char '\n' content in
-  let fns   = ref [] in
-  let types = ref [] in
-  List.iter (fun line ->
-      let s = trim line in
-      (match parse_fn_sig s with
-       | Some sig_ -> fns := sig_ :: !fns
-       | None -> ());
-      (match parse_type_decl s with
-       | Some td -> types := td :: !types
-       | None -> ())
-    ) lines;
-  { fns   = List.rev !fns;
-    types = List.rev !types }
+(** Parse a .march file with the real parser, the same way
+    [Cmd_cap.parse_file] does for `forge cap`. *)
+let parse_file path : (Ast.decl list, string) result =
+  try
+    let ic  = open_in path in
+    let src = really_input_string ic (in_channel_length ic) in
+    close_in ic;
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <-
+      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+    let m = March_parser.Parser.module_
+        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    Ok m.Ast.mod_decls
+  with
+  | Sys_error msg -> Error msg
+  | exn -> Error (Printexc.to_string exn)
 
-(** Recursively collect all .march files under a directory. *)
+(** Parse a string of March source (a whole module body) and return its
+    declarations. Used by [extract_from_string] and by tests. *)
+let parse_string ?(fname = "<string>") src : (Ast.decl list, string) result =
+  try
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <-
+      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = fname };
+    let m = March_parser.Parser.module_
+        (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    Ok m.Ast.mod_decls
+  with exn -> Error (Printexc.to_string exn)
+
+(* ------------------------------------------------------------------ *)
+(*  Extraction                                                         *)
+(* ------------------------------------------------------------------ *)
+
+(** Walk [decls], accumulating every public `fn`/`type`/`always_linear type`,
+    descending into nested `mod ... end` blocks. Private (`pfn`) declarations
+    and anything inside `describe`/`test` blocks are not part of the public
+    surface and are skipped. *)
+let rec extract_decls decls surf =
+  List.fold_left extract_one surf decls
+
+and extract_one surf (d : Ast.decl) =
+  match d with
+  | Ast.DFn (fn, _) ->
+    (match fn.Ast.fn_vis with
+     | Ast.Private -> surf
+     | Ast.Public ->
+       let s = { name       = fn.Ast.fn_name.Ast.txt;
+                 params_raw = render_fn_params fn;
+                 return_raw = render_return fn } in
+       { surf with fns = surf.fns @ [s] })
+  | Ast.DType (Ast.Private, _, _, _, _) -> surf
+  | Ast.DType (Ast.Public, name, _params, tdef, _) ->
+    let t = { type_name = name.Ast.txt; body_raw = render_type_def tdef } in
+    { surf with types = surf.types @ [t] }
+  | Ast.DAlwaysLinearType (Ast.Private, _, _, _, _) -> surf
+  | Ast.DAlwaysLinearType (Ast.Public, name, _params, tdef, _) ->
+    let t = { type_name = name.Ast.txt; body_raw = render_type_def tdef } in
+    { surf with types = surf.types @ [t] }
+  | Ast.DMod (_, _, inner, _) ->
+    extract_decls inner surf
+  | _ -> surf
+
+(** Extract the public API surface from a string of March source
+    (a single module body — no `mod ... do ... end` wrapper needed, since
+    [March_parser.Parser.module_] accepts a bare sequence of declarations). *)
+let extract_from_string src =
+  match parse_string src with
+  | Error _   -> empty_surface
+  | Ok decls  -> extract_decls decls empty_surface
+
+(** Recursively collect the .march files that make up a package's PUBLIC API,
+    in sorted order for deterministic output.
+
+    Two kinds of directory are pruned, because what lands here is what
+    `forge publish` treats as the package's public API surface and holds the
+    author to under semver:
+
+    - Dot-directories (`.march/`, `.git/`, …). `.march/` is forge's own build
+      tree, physically under the project root; anything cached there would be
+      counted a second time, and a vendored dependency's sources would be
+      folded into THIS package's surface, so a dependency upgrade alone would
+      demand a major bump.
+    - The package's top-level `test/` directory — forge's own convention
+      (see [Cmd_test], which resolves tests as `<root>/test`). Test helpers
+      are not API: without this, renaming a fixture helper reads as
+      [ChangedFn] → [Major] and blocks an otherwise legitimate patch release.
+      Pruned only at the root, so a `src/test_utils.march` (a real module
+      that happens to be named for testing) still counts. *)
 let march_files_under root =
   let files = ref [] in
   let rec walk dir =
@@ -145,7 +194,11 @@ let march_files_under root =
        let entries = Sys.readdir dir in
        Array.iter (fun name ->
            let path = Filename.concat dir name in
-           if Sys.is_directory path then walk path
+           if Sys.is_directory path then begin
+             let is_dot_dir = String.length name > 0 && name.[0] = '.' in
+             let is_root_test_dir = dir = root && name = "test" in
+             if not (is_dot_dir || is_root_test_dir) then walk path
+           end
            else if Filename.check_suffix name ".march" then
              files := path :: !files
          ) entries
@@ -154,24 +207,33 @@ let march_files_under root =
   walk root;
   List.sort String.compare !files
 
-(** Extract the combined API surface of a package source tree. *)
-let extract_from_directory root_dir =
+(** Extract the combined API surface of a package source tree, together with
+    the files that could not be parsed.
+
+    A parse failure is NOT benign here. Every public item in an unreadable
+    file is simply absent from the surface, and absence is indistinguishable
+    from deletion: if the OLD tree has an unparseable file, [diff] sees none
+    of its functions and reports no [RemovedFn] for them, so a genuinely
+    breaking release classifies as [Patch] and publishes unchallenged — the
+    same silent-pass this module was rewritten to eliminate, just reached by
+    a different route. Callers that gate on the verdict must treat a
+    non-empty file list as "surface incomplete, verdict not trustworthy"
+    rather than as a warning; [Cmd_publish] refuses to certify a bump. *)
+let extract_from_directory_checked root_dir =
   let files = march_files_under root_dir in
-  List.fold_left (fun surf path ->
-      let content =
-        try
-          let ic = open_in path in
-          let n = in_channel_length ic in
-          let buf = Bytes.create n in
-          really_input ic buf 0 n;
-          close_in ic;
-          Bytes.to_string buf
-        with Sys_error _ -> ""
-      in
-      let file_surf = extract_from_string content in
-      { fns   = surf.fns   @ file_surf.fns;
-        types = surf.types @ file_surf.types }
-    ) empty_surface files
+  List.fold_left (fun (surf, failed) path ->
+      match parse_file path with
+      | Error msg ->
+        Printf.eprintf "forge: api-surface: %s: %s\n%!" path msg;
+        (surf, (path, msg) :: failed)
+      | Ok decls -> (extract_decls decls surf, failed)
+    ) (empty_surface, []) files
+  |> fun (surf, failed) -> (surf, List.rev failed)
+
+(** Surface only, discarding parse failures. For callers that are not gating
+    a release on completeness; [extract_from_directory_checked] is what
+    [Cmd_publish] uses. *)
+let extract_from_directory root_dir = fst (extract_from_directory_checked root_dir)
 
 (* ------------------------------------------------------------------ *)
 (*  Change classification                                              *)
@@ -295,9 +357,9 @@ let string_of_change = function
                     \      now: fn %s(%s)%s"
       old_f.name
       old_f.name old_f.params_raw
-      (if old_f.return_raw = "" then "" else " -> " ^ old_f.return_raw)
+      (if old_f.return_raw = "" then "" else " : " ^ old_f.return_raw)
       new_f.name new_f.params_raw
-      (if new_f.return_raw = "" then "" else " -> " ^ new_f.return_raw)
+      (if new_f.return_raw = "" then "" else " : " ^ new_f.return_raw)
   | AddedFn f ->
     Printf.sprintf "  • Added function `%s`" f.name
   | RemovedType t ->

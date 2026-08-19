@@ -1,0 +1,89 @@
+-- Leak guard for send_after/cancel_timer message + TimerRef-token disposal
+-- (specs/progress/2026-08-12-language-level-timers.md).
+--
+-- Two disposal paths that never go through a normal deliver-to-mailbox:
+--   1. cancelled_leg: send_after then cancel_timer before the deadline. The
+--      message must still be released when timer_service later pops the
+--      (now-cancelled) entry — see march_sched_send_after's RC contract in
+--      runtime/march_scheduler.h.
+--   2. dead_target_leg: send_after to an already-dead actor. march_sched_
+--      send returns MARCH_SEND_DEAD and never disposes msg itself (that
+--      contract matches march_send); timer_service must dispose it.
+--
+-- Both paths also own a reference to the TimerRef token itself (the timer
+-- heap's own hold, released via the registered ops regardless of which of
+-- the two paths above fired) — a bug in EITHER release would show up here
+-- as leaked objects, not just a leaked message.
+--
+-- SIGNAL: live_allocs(), not RSS — see native/native_arr_fold_leak_probe.march
+-- for why (a live-object COUNT needs no platform-specific calibration; an
+-- RSS threshold does and has already gone red once on a healthy tree from
+-- nothing but a different OS's process baseline).
+--
+-- Falsifiability was checked by hand, not just asserted: temporarily
+-- skipping the cancelled-branch dispose in timer_service (runtime/
+-- march_scheduler.c) turned this probe's delta from 0 to 5000 (one leaked
+-- object per cancelled_leg iteration); temporarily skipping the
+-- MARCH_SEND_DEAD dispose turned it from 0 to 5000 the same way for
+-- dead_target_leg. The dune rule's threshold (< 100) sits far below either
+-- signal and far above the healthy delta (0 on this fixture), matching
+-- native_arr_fold_leak_probe's margin discipline.
+mod TimerLeakProbe do
+  needs IO.Console
+
+  actor Sink do
+    state { count : Int }
+    init { count: 0 }
+    on Bump(n : Int) do
+      { count: state.count + n }
+    end
+  end
+
+  fn spin_until(t0, ms) do
+    if System.monotonic_time() - t0 >= ms do
+      ()
+    else
+      spin_until(t0, ms)
+    end
+  end
+
+  fn cancelled_leg(pid, i, n) do
+    if i >= n do
+      ()
+    else
+      let ref = Actor.send_after(pid, Bump(i), 20)
+      Actor.cancel_timer(ref)
+      cancelled_leg(pid, i + 1, n)
+    end
+  end
+
+  fn dead_target_leg(pid, i, n) do
+    if i >= n do
+      ()
+    else
+      let ref = Actor.send_after(pid, Bump(i), 20)
+      dead_target_leg(pid, i + 1, n)
+    end
+  end
+
+  fn main(cap : Cap(IO.Console)) do
+    let live_pid = spawn(Sink)
+    let dead_pid = spawn(Sink)
+    kill(dead_pid)
+
+    let t0 = System.monotonic_time()
+    let before = live_allocs()
+    cancelled_leg(live_pid, 0, 5000)
+    dead_target_leg(dead_pid, 0, 5000)
+
+    -- 20ms delay on every entry pushed over a short loop: 200ms is ample
+    -- margin for every one of the 10,000 entries to have reached
+    -- timer_service by the time we measure.
+    spin_until(t0, 200)
+    run_until_idle()
+
+    let after = live_allocs()
+    IO.warn(int_to_string(after - before))
+    println("done")
+  end
+end

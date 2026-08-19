@@ -48,9 +48,27 @@ let run ~old_source_dir ~dry_run ~registry ~insecure () =
             | Ok p    -> p.Project.version
             | Error _ -> "0.0.0"
           in
-          let old_surf = Resolver_api_surface.extract_from_directory old_dir in
-          let new_surf = Resolver_api_surface.extract_from_directory proj.Project.root in
+          let old_surf, old_failed =
+            Resolver_api_surface.extract_from_directory_checked old_dir in
+          let new_surf, new_failed =
+            Resolver_api_surface.extract_from_directory_checked proj.Project.root in
+          let failed = old_failed @ new_failed in
           let changes  = Resolver_api_surface.diff ~old_:old_surf ~new_:new_surf in
+          if failed <> [] then begin
+            (* An unparseable file makes the surface incomplete, and a missing
+               public item is indistinguishable from a deleted one — so a
+               "no breaking changes" verdict here would be unsound rather than
+               merely approximate. Refuse to certify the bump instead of
+               waving the release through on a partial surface. *)
+            Printf.eprintf
+              "error: cannot verify the semver bump: %d source file(s) failed to \
+               parse, so the API surface is incomplete and a removed public item \
+               would be indistinguishable from one that was never seen:\n%!"
+              (List.length failed);
+            List.iter (fun (path, msg) ->
+                Printf.eprintf "  %s: %s\n%!" path msg) failed;
+            false
+          end else
           (match Resolver_api_surface.check_semver_bump
                    ~old_version ~new_version:version ~changes with
            | Resolver_api_surface.Ok ->

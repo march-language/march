@@ -468,6 +468,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)" };
   { march_name = "actor_reply"; c_name = Some "march_actor_reply"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_actor_reply(ptr %ref, ptr %result)" };
+  (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-language-
+     level-timers.md). Same (ptr, ptr, i64) -> ptr shape as actor_call above
+     -- pid and msg go through the general EApp path exactly like
+     actor_cast/actor_call's do (no special-casing needed: msg is
+     conventionally always an actor-message constructor, same as
+     actor_cast's, and pid is exactly as unconstrained). *)
+  { march_name = "actor_send_after"; c_name = Some "march_send_after"; ret_ty = Some (Tir.TCon ("TimerRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_send_after(ptr %actor, ptr %msg, i64 %delay_ms)" };
+  { march_name = "actor_cancel_timer"; c_name = Some "march_timer_cancel"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_timer_cancel(ptr %tok)" };
   { march_name = "receive"; c_name = Some "march_sched_recv"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sched_recv()" };
   { march_name = "tcp_listen"; c_name = Some "march_tcp_listen"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
@@ -862,10 +872,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pid_of_int(i64 %n)" };
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_actor_field(ptr %pid, ptr %name)" };
-  { march_name = "link"; c_name = Some "march_link"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_link(ptr %actor_a, ptr %actor_b)" };
-  { march_name = "unlink"; c_name = Some "march_unlink"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_unlink(ptr %actor_a, ptr %actor_b)" };
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)" };
   { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
@@ -1325,6 +1331,8 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_actor_get_int";
   PDeclare "march_actor_call";
   PDeclare "march_actor_reply";
+  PDeclare "march_send_after";
+  PDeclare "march_timer_cancel";
   PDeclare "march_run_scheduler";
   PDeclare "march_task_spawn_thunk";
   PDeclare "march_task_await";
@@ -1548,8 +1556,6 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_is_cap_valid";
   PDeclare "march_pid_of_int";
   PDeclare "march_get_actor_field";
-  PDeclare "march_link";
-  PDeclare "march_unlink";
   PDeclare "march_register_supervisor";
   PDeclare "march_actor_register_child";
   PDeclare "march_pid_index_of";
