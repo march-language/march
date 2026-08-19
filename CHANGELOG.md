@@ -39,6 +39,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An actor message-handler binder now shadows a same-named top-level function
+  when compiled.** A handler param whose name matched ANY top-level function
+  linked into the program — no `import` of that module required — was silently
+  discarded, and the bare reference in the handler body resolved to the FUNCTION
+  instead, emitting its raw code address where the bound value belonged. Found in
+  the wild as `on Deliver(session_id, kind, text, approved)` colliding with stdlib
+  `HttpServer.text`: the compiled server passed the function's address as the
+  message text, and refcounting that code address wrote into read-only `__TEXT` —
+  SIGBUS, exit 138, presenting misleadingly as "the actor spawned in this handler
+  never starts". Params that happened not to collide worked only by name
+  coincidence with the TIR param var. The interpreter was always correct, so this
+  was compiled-only. `lower_fn_def` already registered a function's params in the
+  local-name scope that `resolve_use_alias` consults before rewriting a bare name
+  into a qualified global; `lower_handler` now does the same for `ah_params`.
+
 - **`forge` no longer pairs one install's compiler with another install's stdlib.**
   `forge` set `MARCH_STDLIB` from its OWN executable location
   (`<forge>/../share/march`) while running the `march` chosen by toolchain
