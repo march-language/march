@@ -242,6 +242,22 @@ typedef struct march_proc {
                                               * procs remain and nothing is runnable, parked
                                               * daemons are woken without a message so their
                                               * loops exit and the process can terminate. */
+    /* Set (via march_sched_request_stop) by the ONLY two callers entitled to
+     * end a blocking receive without delivering a message: the shutdown
+     * endgame (wake_idle_daemons) and actor death (do_actor_death, i.e.
+     * kill/crash/supervised stop). It is what makes MARCH_RECV_NO_MSG mean
+     * "you were told to stop" rather than "you happened to wake with an
+     * empty mailbox".
+     *
+     * Load-bearing: march_sched_send deposits a wake AFTER pushing, so two
+     * senders racing one receiver can produce a SECOND wake whose message
+     * the receiver already consumed on the first — it then resumes from a
+     * fresh park with a legitimately empty mailbox. Without this flag the
+     * untimed recv reported that as NO_MSG and actor_green_thread killed a
+     * perfectly live actor (bench/actors/fanin_flood.march, ~4% of runs; see
+     * specs/progress/2026-08-19-fanin-blocked-mailbox-spurious-actor-death.md).
+     * march_sched_recv_mode now re-parks unless this is set. */
+    _Atomic int                stop_requested;
     /* Compiled actor supervision: set (to a jmp_buf on THIS proc's own
      * green-thread stack) only while dispatching a message to an actor
      * that is a supervised child. march_panic longjmp's here instead of
@@ -326,6 +342,15 @@ void         march_sched_run(void);
  * Must be called before march_sched_run() (inline path) or before
  * joining the background scheduler thread (background path). */
 void         march_sched_request_shutdown(void);
+
+/* Ask `p`'s blocking receive to give up and return MARCH_RECV_NO_MSG rather
+ * than re-parking, then wake it so it observes that.  This is the ONLY way
+ * to end an untimed march_sched_recv/_user without delivering a message:
+ * plain march_sched_wake no longer suffices, because a wake with an empty
+ * mailbox is indistinguishable from the benign send/consume race described
+ * on march_proc.stop_requested and is therefore treated as spurious.
+ * Idempotent; safe to call on a proc that is already dead or running. */
+void         march_sched_request_stop(march_proc *p);
 
 /* Spawn a new green thread.  Returns the new process, or NULL on failure.
  * Safe to call from within a running process (nested spawn). */

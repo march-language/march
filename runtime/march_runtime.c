@@ -3982,7 +3982,11 @@ static void do_actor_death(void *actor, march_death_reason reason,
     if (meta) {
         march_proc *gt = atomic_load_explicit(&meta->green_thread,
                                               memory_order_acquire);
-        if (gt) march_sched_wake(gt);
+        /* request_stop, not a bare wake: since the untimed recv re-parks on a
+         * wake it cannot attribute to a message (see march_proc.stop_requested),
+         * a plain march_sched_wake would leave a killed actor parked forever
+         * instead of letting actor_green_thread observe NO_MSG and exit. */
+        if (gt) march_sched_request_stop(gt);
     }
 
     if (meta && meta->supervisor && reason != MARCH_DEATH_NORMAL) {

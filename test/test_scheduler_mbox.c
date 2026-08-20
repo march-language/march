@@ -139,6 +139,83 @@ static void test_block_spurious_wake_while_linked(void) {
      * this regression guards against. */
 }
 
+/* ── A wake with an empty mailbox must NOT end a blocking receive ────────
+ *
+ * march_sched_send pushes under mbox_lock but wakes AFTER releasing it, so
+ * two senders racing one receiver routinely issue two wakes for messages the
+ * receiver drains as a single batch. The second wake then lands after the
+ * receiver has already re-parked, resuming it with a legitimately empty
+ * mailbox. That is benign and must be treated as spurious: the receiver has
+ * to park again, NOT report MARCH_RECV_NO_MSG.
+ *
+ * It used to report NO_MSG, which actor_green_thread (march_runtime.c) reads
+ * as "I was killed" — it broke its dispatch loop and ran do_actor_death on an
+ * actor whose $alive word was still 1, so a later Actor.call on that pid
+ * failed with "actor not alive". Live-fire repro was
+ * bench/actors/fanin_flood.march at ~4% of runs; this is its deterministic
+ * form. NO_MSG is now reserved for a real stop request (see
+ * march_proc.stop_requested / march_sched_request_stop).
+ *
+ * Deterministic by construction, no race needed: the prodder spins until it
+ * OBSERVES the receiver in PROC_WAITING before issuing a bare wake (no
+ * message pushed at all), so the wake is guaranteed to hit a genuinely parked
+ * receiver with an empty mailbox — exactly the state the send/consume race
+ * produces, reached without needing to win that race.
+ *
+ * Both spin loops also break on PROC_DEAD, so the PRE-FIX binary fails fast
+ * on the assertion instead of grinding through the full bound: pre-fix the
+ * receiver returns NO_MSG on the bare wake and its proc dies, so it never
+ * returns to PROC_WAITING and g_sw_got_nomsg is set. */
+static _Atomic int g_sw_got_nomsg = 0;
+static _Atomic int g_sw_got_real  = 0;
+static _Atomic int g_sw_reparked  = 0;
+static march_proc *g_sw_rx = NULL;
+
+static void sw_rx_loop(void *arg) {
+    (void)arg;
+    void *m = march_sched_recv();
+    if (m == MARCH_RECV_NO_MSG) atomic_store(&g_sw_got_nomsg, 1);
+    else                        atomic_store(&g_sw_got_real, 1);
+}
+
+/* Spin (yielding, so the receiver actually gets turns even if this lands on
+ * its scheduler thread) until rx reaches PROC_WAITING. Returns 1 if it did. */
+static int sw_wait_until_parked(void) {
+    for (int i = 0; i < 200000; i++) {
+        march_proc_status st = atomic_load_explicit(&g_sw_rx->status,
+                                                    memory_order_acquire);
+        if (st == PROC_WAITING) return 1;
+        if (st == PROC_DEAD)    return 0;   /* pre-fix: it died on the wake */
+        march_sched_yield();
+    }
+    return 0;
+}
+
+static void sw_prodder_loop(void *arg) {
+    (void)arg;
+    if (!sw_wait_until_parked()) return;
+    /* The bare spurious wake: deliberately NO march_sched_send, so the
+     * mailbox is empty when the receiver resumes. */
+    march_sched_wake(g_sw_rx);
+    /* It must come back to WAITING under its own steam (i.e. it re-parked
+     * rather than reporting NO_MSG and exiting). */
+    if (sw_wait_until_parked()) atomic_store(&g_sw_reparked, 1);
+    /* Now a real delivery, to prove the receiver is still functional and the
+     * re-park did not cost us the message. */
+    march_sched_send(g_sw_rx, (void *)0x2);
+}
+
+static void test_spurious_wake_does_not_end_recv(void) {
+    march_sched_init();
+    g_sw_rx = march_sched_spawn(sw_rx_loop, NULL);
+    march_sched_spawn(sw_prodder_loop, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    assert(atomic_load(&g_sw_got_nomsg) == 0);  /* the wake was not fatal   */
+    assert(atomic_load(&g_sw_reparked)  == 1);  /* it genuinely re-parked   */
+    assert(atomic_load(&g_sw_got_real)  == 1);  /* and still got the message*/
+}
+
 /* ── Reserved control FIFO: policy isolation + dispatch isolation ──────
  *
  * A control value must survive DROP_OLD user traffic and actor dispatch's
@@ -304,6 +381,7 @@ int main(void) {
 
     test_block_live_scheduler();
     test_block_spurious_wake_while_linked();
+    test_spurious_wake_does_not_end_recv();
     test_control_fifo_bypasses_user_policy();
     test_cross_plane_global_fifo();
     test_dead_reap_drain();

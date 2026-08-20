@@ -39,6 +39,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A message arriving while an actor was already being woken no longer kills
+  that actor.** `march_sched_send` pushes under the mailbox lock but wakes after
+  releasing it, so two senders racing one receiver could issue two wakes for
+  messages the receiver drained as a single batch — the second wake then landed
+  after it had re-parked, resuming it with a legitimately empty mailbox. The
+  untimed receive reported that as "no message", which the actor dispatch loop
+  reads as "I was killed": it exited and ran the death path on an actor whose
+  `$alive` word was still 1. A later `Actor.call` on that pid then failed with
+  `actor not alive` — no crash, no diagnostic, exit code 0. A blocking receive
+  now re-parks on a wake it cannot attribute to a message, and "no message" is
+  reserved for a real stop request (shutdown, or actor death). Only reachable
+  compiled, with more than one scheduler thread; a bounded mailbox under the
+  `block` policy made it far likelier, because releasing blocked senders wakes
+  the whole herd at once — which is exactly the burst of concurrent senders the
+  race needs. Measured at ~4% of runs of `bench/actors/fanin_flood.march`, one
+  of the `scripts/actor-load.sh` gates. Note this broke the guarantee
+  `Actor.set_queue_limit`'s own documentation makes for policy 3, that no
+  request or reply is ever silently discarded. See
+  `specs/progress/2026-08-19-fanin-blocked-mailbox-spurious-actor-death.md`.
+
 - **An actor message-handler binder now shadows a same-named top-level function
   when compiled.** A handler param whose name matched ANY top-level function
   linked into the program — no `import` of that module required — was silently
