@@ -128,12 +128,24 @@ static void esc_url_whole(sink *s, const char *src, size_t len) {
 }
 
 /* ── JS string ─────────────────────────────────────────────────────────────
- * For a hole inside a JS string literal. Beyond the usual escapes:
+ * For a hole inside a JS string literal -- a position the context table now
+ * proves, rather than assumes. Beyond the usual escapes:
  *  - `</script` ends the element even inside a string literal, and `<!--`
  *    starts an HTML comment that some parsers honour inside <script>; both are
  *    neutralised by escaping `<` and `>`.
  *  - U+2028 and U+2029 are line terminators in JS but legal inside a JSON
- *    string, so a JSON-safe encoder is not JS-safe. */
+ *    string, so a JSON-safe encoder is not JS-safe.
+ *
+ * Both quote characters are escaped NUMERICALLY rather than with a backslash,
+ * because a JS string can live inside an HTML attribute
+ * (onclick="f('${x}')") and a backslash-escaped quote still contains the quote
+ * BYTE -- HTML has never heard of the backslash, so the attribute just ends
+ * there. The \u00XX spellings mean the same thing to a JS parser and contain
+ * no quote byte, which makes "an escaped hole never emits a raw quote" hold
+ * for every escaper here without exception. (Escaping `=` is what kept the
+ * backslash spelling from being exploitable -- a value that broke out still
+ * could not write onerror= -- and relying on the second line of defence for
+ * the first one's failure is not a position to stay in.) */
 static void esc_js_string(sink *s, const char *src, size_t len) {
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)src[i];
@@ -147,8 +159,8 @@ static void esc_js_string(sink *s, const char *src, size_t len) {
             continue;
         }
         switch (c) {
-        case '"':  put_str(s, "\\\""); break;
-        case '\'': put_str(s, "\\'"); break;
+        case '"':  put_str(s, "\\u0022"); break;
+        case '\'': put_str(s, "\\u0027"); break;
         case '\\': put_str(s, "\\\\"); break;
         case '\n': put_str(s, "\\n"); break;
         case '\r': put_str(s, "\\r"); break;
@@ -162,6 +174,36 @@ static void esc_js_string(sink *s, const char *src, size_t len) {
             else put1(s, (char)c);
         }
     }
+}
+
+/* ── JS expression position ────────────────────────────────────────────────
+ * For a hole that is NOT inside a string literal: `<script>var x = ${p}` or an
+ * `on*` handler outside any literal. Mirrors Escape.js_expr in
+ * lib/ctxesc/escape.ml.
+ *
+ * esc_js_string is WRONG here, and shipping it here was the 2026-08-20
+ * vulnerability: it escapes the delimiters of a literal the template never
+ * opened, so a payload built from identifiers, dots and parens --
+ * alert(document.cookie) -- contains nothing it touches and runs as written.
+ * No encoding makes an arbitrary string safe as bare JS CODE. The only sound
+ * move is to stop it being code, so this escaper supplies the delimiters the
+ * template did not and the value lands as a JS STRING: inert, and still
+ * legible at the far end. That also repairs the honest-input direction of the
+ * same bug, where the string escaper turned `1 < 2` into `1 < 2`.
+ *
+ * Single quotes. esc_js_string escapes both quote characters numerically, so
+ * the output contains exactly two raw quote bytes -- the two added here. That
+ * is what lets ONE escaper serve a <script> body and a double-quoted on* attr:
+ * the body can close neither the JS literal nor the HTML attribute. A
+ * SINGLE-quoted on* attribute is the one context these delimiters would break
+ * out of, and the context table rejects a hole there at compile time instead.
+ *
+ * Values that must reach JS as code go through Html.trust_js, which bypasses
+ * escaping entirely and never arrives here. */
+static void esc_js_expr(sink *s, const char *src, size_t len) {
+    put1(s, '\'');
+    esc_js_string(s, src, len);
+    put1(s, '\'');
 }
 
 /* CSS -- two positions, two escapers; see march_ctx_escape.h.
@@ -322,6 +364,7 @@ size_t march_ctx_escape(int escaper_id, const char *src, size_t len, char *out) 
     case MARCH_ESC_CSS_DECL:      esc_css(&s, src, len, 1); break;
     case MARCH_ESC_CSS_URL:       esc_css_url(&s, src, len); break;
     case MARCH_ESC_JS_STRING:     esc_js_string(&s, src, len); break;
+    case MARCH_ESC_JS_EXPR:       esc_js_expr(&s, src, len); break;
     case MARCH_ESC_NONE:          put(&s, src, len); break;
     default:
         /* An id the runtime does not know means the emitter and the runtime

@@ -4803,7 +4803,11 @@ let base_env : env =
          | VCon ("TrustedAttr", [VString s]) when id = 1 -> VString s
          | VCon ("TrustedUrl", [VString s]) when id = 2 || id = 3 -> VString s
          | VCon ("TrustedCss", [VString s]) when id = 4 || id = 7 -> VString s
-         | VCon ("TrustedJs", [VString s]) when id = 5 -> VString s
+         (* Both JS escapers: 5 inside a string literal, 9 at an expression
+            position. They differ in POSITION within one language, like the
+            url and css pairs above, and expression position is the only place
+            trusted JS is worth inserting at all. *)
+         | VCon ("TrustedJs", [VString s]) when id = 5 || id = 9 -> VString s
          (* Trusted, but not for THIS context -- escape it like anything else. *)
          | VCon (("Safe" | "TrustedHtml" | "TrustedAttr" | "TrustedUrl"
                  | "TrustedCss" | "TrustedJs"), [VString s]) ->

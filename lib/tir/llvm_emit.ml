@@ -2014,7 +2014,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         | "TrustedAttr" -> Some [ 1 ]
         | "TrustedUrl" -> Some [ 2; 3 ]
         | "TrustedCss" -> Some [ 4; 7 ]
-        | "TrustedJs" -> Some [ 5 ]
+        (* A js trust covers BOTH JS escapers. 5 is a hole inside a string
+           literal, 9 a hole at an expression position; they differ in
+           POSITION within one language, exactly as the url and css pairs
+           above do, and trusting a string as JS trusts it as JS wherever JS
+           is being written. This is also what keeps `Html.trust_js` usable at
+           all after the 2026-08-20 fix: expression position is the only place
+           trusted JS is ever worth inserting, and it is precisely the place
+           an untrusted value now gets quoted into inertness. *)
+        | "TrustedJs" -> Some [ 5; 9 ]
         | _ -> None
     in
     let trusted_ids =

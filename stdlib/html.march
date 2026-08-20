@@ -231,7 +231,27 @@ mod Html do
 
   doc "Attribute names whose value is a whole URL. Mirrors `[attrs]` in specs/security/html-contexts.tbl."
   pfn url_attr_names() : List(String) do
-    ["href", "src", "action", "formaction", "poster", "cite", "background"]
+    -- The last five arrived with the 2026-08-20 fix: an attribute the table
+    -- does not list falls through to the plain attribute escaper, which
+    -- entity-encodes quotes and lets `javascript:` past. `xlink:href` and
+    -- `data` were live XSS; `ping`, `manifest` and `longdesc` were unvalidated
+    -- fetches. `data` is matched EXACTLY, so `data-*` attributes are untouched.
+    ["href", "src", "action", "formaction", "poster", "cite", "background",
+     "xlink:href", "data", "ping", "manifest", "longdesc"]
+  end
+
+  doc """
+  Attribute names no escaper can serve, which `Html.tag` refuses outright.
+
+  `srcset` is a comma-separated candidate LIST, so a whole-URL scheme check
+  validates only the first entry. `srcdoc` is HTML-decoded by the browser and
+  the result parsed as a document, so the entity escaping that makes every
+  other attribute safe is undone before the markup is read. The `~H` desugar
+  rejects a hole in either at compile time; `Html.tag` can only refuse at run
+  time. Mirrors the `srcset` and `htmldoc` classes in the `.tbl`.
+  """
+  pfn refused_attr_names() : List(String) do
+    ["srcset", "srcdoc"]
   end
 
   -- Escaper ids from Context.escaper_id (lib/ctxesc/context.ml) and
@@ -294,12 +314,20 @@ mod Html do
       panic("Html.tag: refusing the event-handler attribute `" ++ k ++ "`. Its "
         ++ "value is JavaScript, and Html.tag cannot tell whether you meant "
         ++ "that — use a ~H template, where the parse context is known.")
+    else if List.member(refused_attr_names(), lk) do
+      panic("Html.tag: refusing the attribute `" ++ k ++ "`. `srcset` is a "
+        ++ "candidate LIST, so a whole-URL check would validate only its first "
+        ++ "entry; `srcdoc` is HTML-decoded and then parsed as a document, so "
+        ++ "attribute escaping is undone before the markup is read. Neither "
+        ++ "can be made safe by escaping — the ~H desugar rejects a hole in "
+        ++ "either at compile time.")
     else if name_shape_ok(k, attr_char_ok) do k
     else
       panic("Html.tag: `" ++ k ++ "` is not a valid attribute name. An "
         ++ "attribute name built from untrusted input cannot be made safe by "
         ++ "escaping — use a ~H template with a literal attribute instead.")
-    end end
+    -- One `end` per `if`, not one per chain: three `if`s, three `end`s.
+    end end end
   end
 
   doc """
