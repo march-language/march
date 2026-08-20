@@ -66,6 +66,7 @@ int main(void) {
         { MARCH_ESC_NONE,          "none" },
         { MARCH_ESC_CSS_DECL,      "css_decl" },
         { MARCH_ESC_CSS_URL,       "css_url" },
+        { MARCH_ESC_JS_EXPR,       "js_expr" },
     };
     for (int i = 0; i < MARCH_ESC__COUNT; i++) {
         checks++;
@@ -143,11 +144,58 @@ int main(void) {
     expect_absent(MARCH_ESC_JS_STRING, "</script>", "</script",
                   "js escapes a script close");
     expect_absent(MARCH_ESC_JS_STRING, "<!--", "<!--", "js escapes a comment open");
-    expect(MARCH_ESC_JS_STRING, "a\"b", "a\\\"b", "js escapes a quote");
+    /* NUMERIC, not a backslash escape: a JS string can sit inside an HTML
+       attribute (onclick="f('${x}')"), and `\"` still contains a raw `"` that
+       ends the attribute. */
+    expect(MARCH_ESC_JS_STRING, "a\"b", "a\\u0022b",
+           "js escapes a double quote numerically, so it cannot end an on* attr");
+    expect(MARCH_ESC_JS_STRING, "a'b", "a\\u0027b",
+           "js escapes a single quote numerically too");
+    expect_absent(MARCH_ESC_JS_STRING, "x\" onerror=\"alert(1)", "\"",
+                  "js string emits no raw double quote at all");
     expect(MARCH_ESC_JS_STRING, "a\\b", "a\\\\b", "js escapes a backslash");
     expect(MARCH_ESC_JS_STRING, "a\nb", "a\\nb", "js escapes a newline");
     expect(MARCH_ESC_JS_STRING, "\xe2\x80\xa8", "\\u2028", "js escapes U+2028");
     expect(MARCH_ESC_JS_STRING, "\xe2\x80\xa9", "\\u2029", "js escapes U+2029");
+
+    /* ── JS expression position ──────────────────────────────────────────
+       The escaper that did not exist until 2026-08-20, when every script
+       context got MARCH_ESC_JS_STRING instead and `<script>var x = ${p}`
+       executed p. There is no encoding that makes an arbitrary string safe as
+       bare JS code, so this one refuses to produce code at all: it wraps the
+       value in quotes of its OWN and hands back an inert string literal.
+
+       The two properties that matter, asserted separately below because they
+       fail independently:
+         1. the value cannot escape the JS literal, and
+         2. the OUTPUT contains no raw quote byte except the two delimiters,
+            so it can also sit inside a double-quoted HTML attribute. A
+            backslash-escaped quote would satisfy (1) and fail (2) -- HTML has
+            never heard of the backslash. */
+    expect(MARCH_ESC_JS_EXPR, "alert(document.cookie)",
+           "'alert(document.cookie)'",
+           "js_expr renders a payload as an inert string, not as code");
+    expect(MARCH_ESC_JS_EXPR, "", "''", "js_expr handles empty");
+    expect(MARCH_ESC_JS_EXPR, "a'b", "'a\\u0027b'",
+           "js_expr escapes its own delimiter numerically");
+    expect(MARCH_ESC_JS_EXPR, "a\"b", "'a\\u0022b'",
+           "js_expr escapes the double quote numerically too, for on* attrs");
+    expect(MARCH_ESC_JS_EXPR, "a\\b", "'a\\\\b'",
+           "js_expr escapes a backslash, so it cannot escape the delimiter");
+    expect_absent(MARCH_ESC_JS_EXPR, "');alert(1);('", "';",
+                  "js_expr: a quote-and-semicolon breakout cannot close it");
+    expect_absent(MARCH_ESC_JS_EXPR, "</script><script>alert(1)</script>",
+                  "</script", "js_expr escapes a script close");
+    expect_absent(MARCH_ESC_JS_EXPR, "x\" onerror=\"alert(1)", "\"",
+                  "js_expr emits no raw double quote: safe in an on* attribute");
+    expect(MARCH_ESC_JS_EXPR, "\xe2\x80\xa8", "'\\u2028'",
+           "js_expr escapes U+2028, which would end the JS line");
+    /* The honest-input direction of the same bug: the string escaper turned
+       arithmetic into a syntax error. It is a string now -- not arithmetic,
+       but valid JS whose value is the text the author wrote. */
+    expect(MARCH_ESC_JS_EXPR, "1 < 2 && 3 > 2",
+           "'1 \\u003c 2 \\u0026\\u0026 3 \\u003e 2'",
+           "js_expr renders honest input as valid JS rather than a syntax error");
 
     /* ── CSS ─────────────────────────────────────────────────────────────
        Two positions. A VALUE (after `:`) may not contain `:` or `;` -- either

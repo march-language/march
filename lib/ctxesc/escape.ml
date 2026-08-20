@@ -87,7 +87,18 @@ let url_whole s =
 
 (* `</script` ends the element even inside a JS string literal, and U+2028 /
    U+2029 are line terminators in JS though legal in a JSON string — so a
-   JSON-safe encoder is not JS-safe. *)
+   JSON-safe encoder is not JS-safe.
+
+   Both quote characters are escaped NUMERICALLY rather than with a backslash.
+   That matters because a JS string can live inside an HTML attribute
+   (`onclick="f('${x}')"`), and a backslash-escaped quote still contains the
+   quote BYTE — HTML has never heard of the backslash, so the attribute simply
+   ends there. The \\u00XX spellings mean exactly the same thing to a JS parser
+   and contain no quote byte at all, which makes "an escaped hole never emits a
+   raw quote" hold for every escaper here without exception. (Escaping `=` is
+   what kept the backslash spelling from being exploitable: a value that broke
+   out of the attribute still could not write `onerror=`. Relying on a second
+   line of defence for the first one's failure is not a position to stay in.) *)
 let js_string s =
   let n = String.length s in
   let b = Buffer.create n in
@@ -104,8 +115,8 @@ let js_string s =
     end
     else begin
       (match c with
-       | '"' -> Buffer.add_string b "\\\""
-       | '\'' -> Buffer.add_string b "\\'"
+       | '"' -> Buffer.add_string b "\\u0022"
+       | '\'' -> Buffer.add_string b "\\u0027"
        | '\\' -> Buffer.add_string b "\\\\"
        | '\n' -> Buffer.add_string b "\\n"
        | '\r' -> Buffer.add_string b "\\r"
@@ -121,6 +132,33 @@ let js_string s =
     end
   done;
   Buffer.contents b
+
+(* A hole at a JS EXPRESSION position — `<script>var x = ${p}</script>`, or an
+   `on*` handler outside any string literal. Mirrors esc_js_expr in
+   runtime/march_ctx_escape.c.
+
+   `js_string` is WRONG here and was what shipped until 2026-08-20: it escapes
+   the delimiters of a literal the template never opened, so a payload made of
+   nothing but identifiers, dots and parens — `alert(document.cookie)` — went
+   through untouched and ran. There is no escaping that makes an arbitrary
+   string safe as bare JS *code*; the only sound move is to stop it being code.
+
+   So the escaper supplies the delimiters the template did not, and the value
+   lands as a JS string literal: inert, and still readable at the far end.
+   `1 < 2 && 3 > 2` becomes the string `'1 < 2 ...'` rather than the
+   syntax error the old escaper produced, so this fixes the honest-input case
+   as well as the hostile one.
+
+   Single quotes. [js_string] escapes both quote characters numerically, so the
+   output carries exactly two raw quote bytes — the two this function adds. In
+   a `<script>` body that is simply a JS string; in a double-quoted `on*`
+   attribute the `'` cannot close the attribute and nothing inside can either.
+   A SINGLE-quoted `on*` attribute is rejected by the table instead, since
+   these delimiters would end it.
+
+   Code that genuinely needs to reach JS as code uses `Html.trust_js`, which
+   never gets here. *)
+let js_expr s = "'" ^ js_string s ^ "'"
 
 (* CSS -- two positions, two escapers; mirrors runtime/march_ctx_escape.c.
    Both allow calls to an ALLOWLISTED set of functions. Escaping every `(` is
@@ -225,13 +263,14 @@ let apply (e : C.escaper) s =
   | C.EscCssDecl -> css ~decl:true s
   | C.EscCssUrl -> css_url s
   | C.EscJsString -> js_string s
+  | C.EscJsExpr -> js_expr s
   | C.EscNone -> s
 
 let apply_id id s =
   match List.find_opt (fun e -> C.escaper_id e = id)
           [ C.EscHtml; C.EscAttr; C.EscUrlComponent; C.EscUrlWhole;
             C.EscCssValue; C.EscJsString; C.EscNone; C.EscCssDecl;
-            C.EscCssUrl ] with
+            C.EscCssUrl; C.EscJsExpr ] with
   | Some e -> apply e s
   | None ->
     invalid_arg
