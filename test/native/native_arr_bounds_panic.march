@@ -1,0 +1,46 @@
+-- Compiled NativeArray element accessors must bounds-check, like the
+-- interpreter already does and like stdlib/native_array.march documents
+-- ("Panics if out of bounds", lines 73/138/206/266/326).
+--
+-- They did not: every get/set was a raw load/store at
+-- `arr + NATIVE_ARR_HDR + i * sizeof(elem)` with no range test, so safe March
+-- code could read and write arbitrary heap memory. `set` was the worse half —
+-- both its FBIP in-place path and its copy path stored at the unchecked
+-- offset. See specs/progress/2026-08-20-nativearray-get-set-unchecked-oob-compiled.md.
+--
+-- One binary, ten selectors, driven by test/dune: a panic ends the process, so
+-- each accessor needs its own run. The dune rule asserts the exact message for
+-- each, which also pins interp/compiled parity — the messages are byte-identical
+-- to eval.ml's (lib/eval/eval.ml:8201-8596).
+--
+-- Index 1000000 is far past every array here, so a missing check reads or
+-- writes ~1 MB out of bounds rather than landing in adjacent padding, which is
+-- what makes the pre-fix failure visible rather than silently benign.
+mod Main do
+  needs IO.Console
+  needs IO.Process
+
+  fn selector() : String do
+    match System.argv() do
+      Cons(_exe, Cons(w, _)) -> w
+      _ -> "missing-selector"
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_process : Cap(IO.Process)) : () do
+    let i = 1000000
+    match selector() do
+      "int_get"   -> println(int_to_string(NativeArray.get_int(NativeArray.make_int(4, 7), i)))
+      "int_set"   -> println(int_to_string(NativeArray.get_int(NativeArray.set_int(NativeArray.make_int(4, 7), i, 1), 0)))
+      "float_get" -> println(float_to_string(NativeArray.get_float(NativeArray.make_float(4, 7.0), i)))
+      "float_set" -> println(float_to_string(NativeArray.get_float(NativeArray.set_float(NativeArray.make_float(4, 7.0), i, 1.0), 0)))
+      "f32_get"   -> println(float_to_string(NativeArray.get_f32(NativeArray.make_f32(4, 7.0), i)))
+      "f32_set"   -> println(float_to_string(NativeArray.get_f32(NativeArray.set_f32(NativeArray.make_f32(4, 7.0), i, 1.0), 0)))
+      "i32_get"   -> println(int_to_string(NativeArray.get_i32(NativeArray.make_i32(4, 7), i)))
+      "i32_set"   -> println(int_to_string(NativeArray.get_i32(NativeArray.set_i32(NativeArray.make_i32(4, 7), i, 1), 0)))
+      "u8_get"    -> println(int_to_string(NativeArray.get_u8(NativeArray.make_u8(4, 7), i)))
+      "u8_set"    -> println(int_to_string(NativeArray.get_u8(NativeArray.set_u8(NativeArray.make_u8(4, 7), i, 1), 0)))
+      _           -> println("unknown selector")
+    end
+  end
+end

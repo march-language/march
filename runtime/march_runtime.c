@@ -7450,11 +7450,50 @@ void *native_int_arr_make(int64_t len, int64_t def) {
     return arr;
 }
 
+/* Index bounds check for the NativeArray element accessors.
+ *
+ * Every native_*_arr_get/_set used to be a raw load/store at
+ * `arr + NATIVE_ARR_HDR + i * sizeof(elem)` with no range test, so an
+ * out-of-range index from SAFE March code read or wrote arbitrary heap
+ * memory — `_set` worst of all, since both its FBIP in-place path and its
+ * copy path stored at the unchecked offset. stdlib/native_array.march has
+ * always documented "Panics if out of bounds" and the interpreter has always
+ * honoured it (lib/eval/eval.ml), so this was an interp/compiled divergence
+ * as well as a memory-safety hole — and one the oracle sweep could not see,
+ * because it only compares programs that stay in range.
+ *
+ * `fn` names the accessor so the message pins WHICH one tripped, and the
+ * "<fn>: index N out of bounds (len=M)" tail is byte-identical to the
+ * interpreter's wording; test/native/native_arr_bounds_panic.march asserts
+ * that substring for all ten accessors, so the two backends cannot drift.
+ * The "march: runtime error: " prefix matches the other compiled bounds
+ * panics (typed_array_check_bounds, march_simd_bounds_panic) rather than the
+ * interpreter's bare form — see simd_bounds_panic.march's note that the two
+ * backends deliberately differ in prefix only.
+ *
+ * Length lives at byte offset 16 for every native array width, which is what
+ * the per-width native_*_arr_length accessors read.
+ *
+ * Scope: the USER-FACING accessors only. The inline map/fold fast paths
+ * (llvm_emit's $mapfast$ / nmap_body clones, and the *_fold bodies here)
+ * generate their own indices from a length they just read, so they are in
+ * range by construction; checking them would add a branch per element to
+ * exactly the loops NativeArray exists to make fast. */
+static void native_arr_check_bounds(const char *fn, int64_t i, int64_t len) {
+    if (i < 0 || i >= len) {
+        fprintf(stderr,
+            "march: runtime error: %s: index %lld out of bounds (len=%lld)\n",
+            fn, (long long)i, (long long)len);
+        exit(1);
+    }
+}
+
 int64_t native_int_arr_length(void *arr) {
     return *(int64_t *)((char *)arr + 16);
 }
 
 int64_t native_int_arr_get(void *arr, int64_t i) {
+    native_arr_check_bounds("native_int_arr_get", i, native_int_arr_length(arr));
     return *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
 }
 
@@ -7480,6 +7519,7 @@ int64_t native_int_arr_get(void *arr, int64_t i) {
  * alias keeps its own). The rc == 1 gate also excludes interned/immortal
  * arrays (rc >= MARCH_RC_IMMORTAL), which are never mutated in place. */
 void *native_int_arr_set(void *arr, int64_t i, int64_t val) {
+    native_arr_check_bounds("native_int_arr_set", i, native_int_arr_length(arr));
     if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
         *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = val;
         return arr;
@@ -7669,6 +7709,7 @@ int64_t native_float_arr_length(void *arr) {
 }
 
 double native_float_arr_get(void *arr, int64_t i) {
+    native_arr_check_bounds("native_float_arr_get", i, native_float_arr_length(arr));
     double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); return v;
 }
 
@@ -7676,6 +7717,7 @@ double native_float_arr_get(void *arr, int64_t i) {
  * ownership contract (identical: owned/consumed arg, unique-owner mutates in
  * place, shared array copies-on-write then releases our reference). */
 void *native_float_arr_set(void *arr, int64_t i, double val) {
+    native_arr_check_bounds("native_float_arr_set", i, native_float_arr_length(arr));
     if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
         memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &val, 8);
         return arr;
@@ -7878,9 +7920,11 @@ void *PREFIX##_make(int64_t len, int64_t def) {                               \
 }                                                                             \
 int64_t PREFIX##_length(void *arr) { return *(int64_t *)((char *)arr + 16); } \
 int64_t PREFIX##_get(void *arr, int64_t i) {                                  \
+    native_arr_check_bounds(#PREFIX "_get", i, PREFIX##_length(arr));         \
     return (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
 }                                                                             \
 void *PREFIX##_set(void *arr, int64_t i, int64_t val) {                       \
+    native_arr_check_bounds(#PREFIX "_set", i, PREFIX##_length(arr));         \
     if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {                    \
         *(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)) = (CTYPE)val; \
         return arr;                                                           \
@@ -7993,11 +8037,13 @@ void *native_f32_arr_make(int64_t len, double def) {
 int64_t native_f32_arr_length(void *arr) { return *(int64_t *)((char *)arr + 16); }
 
 double native_f32_arr_get(void *arr, int64_t i) {
+    native_arr_check_bounds("native_f32_arr_get", i, native_f32_arr_length(arr));
     return (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
 }
 
 /* FBIP/COW contract identical to native_float_arr_set above. */
 void *native_f32_arr_set(void *arr, int64_t i, double val) {
+    native_arr_check_bounds("native_f32_arr_set", i, native_f32_arr_length(arr));
     if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
         *(float *)((char *)arr + NATIVE_ARR_HDR + i * 4) = (float)val;
         return arr;

@@ -11,6 +11,22 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Compiled `NativeArray.get_*` / `set_*` now bounds-check, as the docs and the
+  interpreter always promised.** Every element accessor was a raw load/store at
+  `arr + header + i * sizeof(elem)` with no range test, so an out-of-range index
+  from ordinary safe March code read or wrote arbitrary heap memory — `set` worst
+  of all, since both its in-place fast path and its copy path stored at the
+  unchecked offset. `stdlib/native_array.march` has always documented "Panics if
+  out of bounds" and the interpreter has always honoured it, so this was also an
+  interpreter/compiled divergence, and one the differential oracle could not see
+  because it only compares programs that stay in range. All ten accessors (five
+  element widths × get/set) now panic with the interpreter's exact message. The
+  bulk map/fold paths are deliberately unguarded — they derive indices from a
+  length they just read, so they are in range by construction — which is why the
+  cost is ~1% on a pure-indexing loop and nothing measurable on bulk numeric work.
+
 ### Added
 
 - **The AddressSanitizer CI gate now covers the SIMD, narrow-width `NativeArray`

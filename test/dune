@@ -4430,6 +4430,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
+; ── NativeArray element accessors bounds-check (P0 memory safety) ────────
+; Every native_*_arr_get/_set was a raw load/store at
+; `arr + NATIVE_ARR_HDR + i * sizeof(elem)` with no range test, so safe March
+; code could read and write arbitrary heap memory -- `_set` worst, since both
+; its FBIP in-place path and its copy path stored at the unchecked offset.
+; stdlib/native_array.march documents "Panics if out of bounds" and the
+; interpreter always honoured it, so this was an interp/compiled divergence
+; too, invisible to the oracle sweep (which only compares in-range programs).
+;
+; A panic ends the process, so the ten accessors cannot share one run: the
+; fixture selects one via argv and this rule drives all ten, asserting the
+; exact message each time. That pins interp/compiled parity as well as the
+; check itself -- the "<fn>: index N out of bounds (len=M)" tail is
+; byte-identical to lib/eval/eval.ml's wording.
+(rule
+ (targets native_arr_bounds_panic)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_bounds_panic.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o native_arr_bounds_panic
+       native/native_arr_bounds_panic.march)))
+
+(rule
+ (alias runtest)
+ (deps (file native_arr_bounds_panic))
+ (action
+  (run bash -c
+    "fail=0; \
+     for sel in int_get int_set float_get float_set f32_get f32_set i32_get i32_set u8_get u8_set; do \
+       fam=${sel%_*}; dir=${sel##*_}; \
+       out=$(./native_arr_bounds_panic \"$sel\" 2>&1); rc=$?; \
+       want=\"native_${fam}_arr_${dir}: index 1000000 out of bounds (len=4)\"; \
+       if [ $rc -eq 0 ]; then \
+         echo \"native_arr_bounds_panic[$sel]: NO PANIC (exit 0) -- an out-of-range index read or wrote out of bounds silently. Output: $out\" >&2; fail=1; \
+       elif ! printf '%s' \"$out\" | grep -qF \"$want\"; then \
+         echo \"native_arr_bounds_panic[$sel]: panicked but the message does not match the interpreter's. want substring: $want -- got: $out\" >&2; fail=1; \
+       fi; \
+     done; \
+     exit $fail")))
+
 ; Compiled/interpreted parity witness for NativeArray.fold_int/fold_float/
 ; fold_f32/fold_i32/fold_u8 (SIMD follow-ups Task 2). fold_int/fold_float
 ; previously had no compiled implementation (link error); fold_f32/fold_i32/
