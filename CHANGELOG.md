@@ -78,6 +78,22 @@ git log is authoritative for exact commits.
   `Html.trust_js`, if you need its JS type. See
   `specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md`.
 
+### Documentation
+
+- **Added an 0.2.x → 0.3.0 upgrade guide** (`docs/upgrading-to-0-3-0.md`),
+  covering every breaking change in this release: the default-on capability
+  ceiling (`needs`/`main`-grant errors and the `forge check`/`build`
+  orphan-task-module blind spot), typed `Vault(v)` table handles (the
+  split-by-element-type fix pattern, and a filed compiler bug around
+  non-`String` keys), the `Parse` → `Parser` rename, the `Js.`-namespaced
+  JS-only stdlib modules, today's `~H` bare-JS-expression-hole escaping
+  change, `List.nth`'s new (advisory) bounds contract, and two toolchain
+  traps (a stray `.march-version` pin, and stale `~/.march/cas/deps/`
+  copies of path-overridden dependencies) that produce compiler-bug-shaped
+  symptoms but aren't. Written from migrating eight real downstream
+  packages (bastion, depot, forgepm, conduit, sigil, scroll, march_doc,
+  marathon) against `main` ahead of the release.
+
 - **Folds no longer leak the accumulator chain (~32 B/element, unbounded).** Every
   `NativeArray.fold_*` / `typed_array_fold` runtime helper carried the accumulator through
   the loop in its boxed form and never released the previous one, so a fold with a `Float`
