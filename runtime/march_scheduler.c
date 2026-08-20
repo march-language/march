@@ -1221,7 +1221,7 @@ static int wake_idle_daemons(void) {
         if (!q || !q->is_daemon) continue;
         if (atomic_load_explicit(&q->status, memory_order_acquire) == PROC_WAITING
                 && !mbox_waiting_has_deliverable(q)) {
-            march_sched_wake(q);
+            march_sched_request_stop(q);
             woken++;
         }
     }
@@ -1577,6 +1577,15 @@ static void *sched_thread_entry(void *arg) {
 
 void march_sched_request_shutdown(void) {
     atomic_store_explicit(&g_sched_shutdown, 1, memory_order_release);
+}
+
+/* See the header for the contract. The release store pairs with the acquire
+ * load in march_sched_recv_mode's loop, which re-reads this on every wake;
+ * the wake that follows is what gets a currently-parked p to look. */
+void march_sched_request_stop(march_proc *p) {
+    if (!p) return;
+    atomic_store_explicit(&p->stop_requested, 1, memory_order_release);
+    march_sched_wake(p);
 }
 
 void march_sched_run(void) {
@@ -2240,6 +2249,36 @@ int64_t march_sched_mbox_count(march_proc *p) {
     return atomic_load_explicit(&p->mbox_count, memory_order_relaxed);
 }
 
+/* One park + resume for march_sched_recv_mode's loop, in its OWN NOINLINE
+ * function so the `tl_sched` read happens FRESH on every iteration.
+ *
+ * This split is load-bearing, not style -- exactly the same hazard (and the
+ * same remedy) as mbox_block_register_and_park, whose comment spells it out:
+ * a proc that parks here is resumed by whichever scheduler wins the wake, so
+ * it can come back on a DIFFERENT OS thread than the one it parked from.
+ * `tl_sched` is _Thread_local. With the swapcontext written inline in the
+ * caller's loop, the optimizer is free to load tl_sched once and reuse that
+ * register on later iterations (noinline on the caller only stops ITS callers
+ * from hoisting, not the caller's own loop-invariant code motion) -- so after
+ * a migration, iteration 2 would swapcontext into a STALE scheduler's
+ * sched_ctx. The real scheduler then never runs the PROC_PARKED -> PROC_WAITING
+ * transition for this proc, every waker spins on PROC_PARKED forever, and the
+ * program deadlocks with a message sitting undelivered in the mailbox.
+ * (Observed exactly that way while fixing the spurious-death bug: sink stuck
+ * at status=PROC_PARKED, mbox_count=1, all scheduler threads idle.)
+ *
+ * Caching `p` across iterations IS fine: the proc object is the same one
+ * regardless of which OS thread resumes it. Only the per-thread scheduler
+ * pointer must be re-read. */
+__attribute__((noinline))
+static void mbox_recv_park_once(march_proc *p) {
+    march_scheduler *s = tl_sched;
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(s);
+    swapcontext(&p->ctx, &s->sched_ctx);
+    MARCH_ASAN_SWITCH_DONE(p);
+}
+
 /* NOINLINE: migration barrier, same rationale as march_sched_yield — a proc
  * that parks here can be woken and re-dispatched on a different OS thread.
  * The body reads tl_sched only BEFORE the swapcontext (safe); noinline
@@ -2262,47 +2301,76 @@ static void *march_sched_recv_mode(int user_only) {
      * seemingly-random locations under load). The lock is cheap when
      * uncontended (the common case), so always taking it here is the
      * correct, minimal fix. */
-    mbox_lock_acquire(p);
-    if (user_only ? p->mailbox != NULL
-                  : (p->control_mailbox != NULL || p->mailbox != NULL)) {
-        void *msg = user_only ? mbox_pop_user(p) : mbox_pop_any(p);
-        mbox_wake_send_waiters_if_low(p);
+    /* Park in a LOOP, re-checking the mailbox on every wake.
+     *
+     * A wake is NOT proof that a message is waiting for us. march_sched_send
+     * pushes under mbox_lock, then wakes AFTER releasing it, so two senders
+     * racing one receiver routinely produce two wakes for what the receiver
+     * drains as a single batch: sender A's wake resumes us, we pop A's and
+     * B's messages and run the handlers, we come back here and re-park —
+     * and only THEN does sender B's already-issued wake land, resuming us
+     * with a legitimately empty mailbox. Nothing is wrong; we simply have
+     * nothing to do and must park again.
+     *
+     * This function used to return MARCH_RECV_NO_MSG for that case, which
+     * actor_green_thread reads as "I was killed": it broke its dispatch loop
+     * and called do_actor_death on an actor whose $alive word was still 1.
+     * The visible symptom was a later Actor.call on that pid failing with
+     * "actor not alive" (bench/actors/fanin_flood.march, ~4% of runs, only
+     * with >1 scheduler thread and only under a bounded MARCH_MBOX_BLOCK
+     * mailbox — the wake-all in mbox_wake_send_waiters_if_low releases a
+     * herd of blocked senders at once, which is what makes the window
+     * reachable so often). march_actor_call's TIMED path already looped for
+     * exactly this reason ("Woken with an empty mailbox but time remains");
+     * the untimed path is now consistent with it.
+     *
+     * MARCH_RECV_NO_MSG is therefore reserved for a real stop request —
+     * see march_proc.stop_requested and march_sched_request_stop. Both
+     * callers that must be able to end a blocking receive without a message
+     * (the shutdown endgame in wake_idle_daemons, and actor death in
+     * do_actor_death) go through that flag.
+     *
+     * No lost wakeup is introduced by looping: the emptiness check and the
+     * PROC_PARKED store below both happen under mbox_lock, which senders
+     * also hold across push-then-read-status, so the two critical sections
+     * are serialized. Either the sender pushes first (we see a non-empty
+     * mailbox and never park) or we publish PROC_PARKED first (the sender
+     * reads it and wakes us). */
+    for (;;) {
+        mbox_lock_acquire(p);
+        if (user_only ? p->mailbox != NULL
+                      : (p->control_mailbox != NULL || p->mailbox != NULL)) {
+            void *msg = user_only ? mbox_pop_user(p) : mbox_pop_any(p);
+            mbox_wake_send_waiters_if_low(p);
+            atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
+            mbox_lock_release(p);
+            return msg;
+        }
+        /* Checked under the same lock as the emptiness test, and re-checked
+         * on every iteration: a stop can be requested while we are parked. */
+        if (atomic_load_explicit(&p->stop_requested, memory_order_acquire)
+                || atomic_load_explicit(&p->status, memory_order_acquire) == PROC_DEAD) {
+            atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
+            mbox_lock_release(p);
+            return MARCH_RECV_NO_MSG;
+        }
+        /* PROC_PARKED: we're about to call swapcontext but haven't yet saved our
+         * context.  Wakers that see PROC_PARKED must spin-wait until the
+         * scheduler transitions us to PROC_WAITING (context saved) before
+         * pushing us to a run-deque.  Without this, a waker could push us
+         * while we are still executing, causing two schedulers to resume the
+         * same process concurrently. */
+        atomic_store_explicit(&p->mbox_wait_mode, user_only ? 2 : 1,
+                              memory_order_relaxed);
+        atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
         mbox_lock_release(p);
-        return msg;
-    }
-    /* PROC_PARKED: we're about to call swapcontext but haven't yet saved our
-     * context.  Wakers that see PROC_PARKED must spin-wait until the
-     * scheduler transitions us to PROC_WAITING (context saved) before
-     * pushing us to a run-deque.  Without this, a waker could push us
-     * while we are still executing, causing two schedulers to resume the
-     * same process concurrently. */
-    atomic_store_explicit(&p->mbox_wait_mode, user_only ? 2 : 1,
-                          memory_order_relaxed);
-    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
-    mbox_lock_release(p);
 
-    MARCH_ASAN_SWITCH_TO_SCHED(p);
-    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
-    swapcontext(&p->ctx, &tl_sched->sched_ctx);
-    MARCH_ASAN_SWITCH_DONE(p);
-    /* Context is now saved.  The scheduler (sched_loop) transitions us from
-     * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
-     * its side, making it safe for a waker to push us to a deque. */
-
-    /* Resumed — a sender woke us.  Pop under lock; return sentinel if empty
-     * (the actor was woken for a reason other than a new message, e.g. kill). */
-    mbox_lock_acquire(p);
-    atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
-    void *msg;
-    if (user_only ? p->mailbox != NULL
-                  : (p->control_mailbox != NULL || p->mailbox != NULL)) {
-        msg = user_only ? mbox_pop_user(p) : mbox_pop_any(p);
-        mbox_wake_send_waiters_if_low(p);
-    } else {
-        msg = MARCH_RECV_NO_MSG;
+        mbox_recv_park_once(p);
+        /* Context is now saved.  The scheduler (sched_loop) transitions us from
+         * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
+         * its side, making it safe for a waker to push us to a deque. */
+        atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
     }
-    mbox_lock_release(p);
-    return msg;
 }
 
 __attribute__((noinline))
@@ -2594,7 +2662,7 @@ static void timer_service(int64_t now_ms) {
         pthread_mutex_unlock(&g_timer_mu);
         if (!have_ent) return;
         if (ent.kind == MARCH_TIMER_WAKE) {
-            if (!stale) march_sched_wake(ent.proc);   /* outside the lock: wake can spin */
+            if (!stale) march_sched_wake(ent.proc);   /* outside the lock: wake can spin */   /* outside the lock: wake can spin */
             continue;
         }
         /* MARCH_TIMER_SEND: deliver, or dispose msg if cancelled/dead. Both
