@@ -1,4 +1,4 @@
-`[P0]` Compiled `NativeArray.get_*` / `set_*` do no bounds check — safe March code can read and write arbitrary heap memory
+# Compiled `NativeArray.get_*` / `set_*` did no bounds check — safe March code could read and write arbitrary heap memory (FIXED 2026-08-20)
 
 Filed 2026-08-20, found while building the deliberate-out-of-bounds RED proof for
 the SIMD/NativeArray extension of the ASAN gate
@@ -124,3 +124,67 @@ out-of-range `set`. Note these will be *excluded* from
 `specs/lang/golden/sanitize.sh`'s curated native list by the same rule the
 existing panic fixtures are — that gate asserts a zero exit — which is fine;
 their coverage is the stderr diff in `test/dune`.
+
+
+---
+
+# Fixed 2026-08-20
+
+`native_arr_check_bounds(fn, i, len)` in `runtime/march_runtime.c`, called as the
+first statement of all ten accessors. `i32`/`u8` are covered by one edit inside
+`DEF_NARROW_INT_ARR` (the message stringifies `PREFIX`), so there are six edit
+sites for ten functions. For `_set` the check precedes BOTH the FBIP in-place
+path and the copy path, which is where the write-side hole was.
+
+The message is `march: runtime error: <fn>: index N out of bounds (len=M)`. The
+prefix follows the other compiled bounds panics (`typed_array_check_bounds`,
+`march_simd_bounds_panic`); the tail is byte-identical to the interpreter's
+wording in `lib/eval/eval.ml`, so the regression test pins interp/compiled
+parity as well as the check itself.
+
+## Deliberately NOT checked: the bulk paths
+
+Only the user-facing accessors are guarded. The inline map/fold fast paths
+(`llvm_emit`'s `$mapfast$` / `nmap_body` clones, and the `*_fold` bodies) derive
+their indices from a length they just read, so they are in range by
+construction, and a per-element branch there would tax exactly the loops
+NativeArray exists to make fast. Confirmed empirically: a `bench/simd_map.march`
+binary contains **zero** occurrences of the check string, i.e. the bulk path
+does not reach a guarded accessor at all.
+
+## Cost, measured (A/B, same box, interleaved)
+
+Worst case is a loop that does nothing but indexed access — 10M `set_int` plus
+10M `get_int`, `--compile --opt 2`, baseline vs fixed runtime, first-position
+warmup discarded:
+
+| | median | min |
+|---|---|---|
+| baseline | 108.0 ms | 104 ms |
+| with check | 109.5 ms | 108 ms |
+| delta | **+1.4%** | +3.8% |
+
+So ~1-4% on a pure-indexing loop, and nothing measurable on bulk numeric work.
+That is the price of not being able to read and write arbitrary heap memory from
+safe code.
+
+## Regression test
+
+`test/native/native_arr_bounds_panic.march` + the `runtest` rule in `test/dune`.
+One binary, ten selectors chosen by `System.argv()` (a panic ends the process,
+so the accessors cannot share a run); the rule drives all ten and asserts the
+exact message for each, naming the selector on failure.
+
+Non-vacuity: against the pre-fix runtime (file-copy swap, not `git stash`),
+**10/10 selectors do not panic and exit 0**, so the rule exits 1. With the fix,
+all ten panic with the parity message.
+
+Boundary behaviour verified separately: `i = len-1` works, `i = len` panics,
+`i = -1` panics.
+
+## Note on the verification run
+
+`native_signal_watch` reddened during this work and is **unrelated** — a
+pre-existing ~7% output-ordering flake, measured at 4/60 on BOTH the baseline and
+fixed runtimes when run interleaved. Filed as
+`specs/todos/2026-08-20-signal-watch-output-ordering-flake.md`.
