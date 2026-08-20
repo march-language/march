@@ -143,13 +143,32 @@ let consume_literal t (start : C.t) (src : string) =
 (* ── Consuming a hole ─────────────────────────────────────────────────── *)
 
 (* The escaper is implied by the SUCCESSOR context rather than named in the
-   row, so the table cannot drift out of sync with the escaper set. *)
+   row, so the table cannot drift out of sync with the escaper set.
+
+   JS has TWO positions and they are not interchangeable. Until 2026-08-20 both
+   arms below said [EscJsString] unconditionally, which is correct only inside a
+   string literal: at an expression position it escaped the quotes of a value
+   that had no quotes around it, so `alert(document.cookie)` went through
+   untouched as executable code — and, in the other direction, honest
+   arithmetic came out as a syntax error. See
+   specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md. The table now
+   tracks JS string literals, so the two positions arrive here distinguished.
+
+   The rejected JS sub-positions (comment, regex, template literal) never reach
+   this function — the table carries a diagnostic for each, and [consume_interp]
+   returns [Error] before asking for an escaper. They still map to the strictest
+   JS escaper here rather than being left to a catch-all, so that adding an
+   accepting row for one of them by mistake fails closed. *)
 let escaper_for (c : C.t) =
+  let js = function
+    | C.AtJsString -> C.EscJsString
+    | _ -> C.EscJsExpr
+  in
   match c.C.state with
   | C.Pcdata -> C.EscHtml
   | C.Rcdata ->
     (match c.C.element with
-     | C.ElScript -> C.EscJsString
+     | C.ElScript -> js c.C.attr
      | C.ElStyle ->
        (* a url() inside a <style> body is a URL, not a CSS value *)
        if c.C.attr = C.AtCssUrl then C.EscCssUrl else C.EscCssDecl
@@ -161,8 +180,12 @@ let escaper_for (c : C.t) =
      | C.AtStyle -> C.EscCssDecl
      | C.AtStyleValue -> C.EscCssValue
      | C.AtCssUrl -> C.EscCssUrl
-     | C.AtScript -> C.EscJsString
-     | C.AtNormal -> C.EscAttr)
+     | (C.AtScript | C.AtJsString | C.AtJsComment | C.AtJsRegex
+       | C.AtJsTemplate) as a -> js a
+     (* srcset and srcdoc are rejected by the table; EscAttr is what they were
+        getting before, and is what makes srcdoc's escaped markup come back to
+        life once the browser decodes the attribute. Never reached. *)
+     | C.AtSrcset | C.AtHtmlDoc | C.AtNormal -> C.EscAttr)
   | _ -> C.EscAttr  (* unreachable: every other state rejects holes *)
 
 let consume_interp t (c : C.t) =

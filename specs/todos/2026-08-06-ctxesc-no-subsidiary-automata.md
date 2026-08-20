@@ -1,12 +1,46 @@
 # `~H` has no subsidiary automata — nested languages are handled coarsely
 
 **Filed:** 2026-08-06
-**Priority:** P3 — a correctness/usability defect, not a known vulnerability
+**Priority:** ~~P3 — a correctness/usability defect, not a known vulnerability~~
+**Re-rated 2026-08-20: the JS half of this divergence WAS a vulnerability.**
+See `specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md`.
 
-The contextual escaping in `specs/plans/2026-08-05-contextual-autoescaping.md`
-matches the paper (Samuel et al., arXiv:2605.16561v1) on transition tables, the
-context tuple, substitutions, terminal validity and diagnostics. It **diverges
-on one element**: subsidiary automata.
+## Status
+
+- **CSS `url()` — DONE.** `cssurl` / `EscCssUrl` landed; the two symptoms in
+  "The cost, measured" below no longer reproduce.
+- **JS — DONE, and it was exploitable.** Fixed 2026-08-20. A hole in a
+  `<script>` body or an `on*` handler got the JS *string* escaper regardless of
+  whether it sat inside a string literal, so `<script>var x = ${p}</script>`
+  rendered `alert(document.cookie)` as executable code. The table now tracks JS
+  string literals, comments, regex literals and template literals, and
+  expression position has its own escaper.
+- **URL — still flat**, and still not known to be exploitable; see below.
+
+## What this file got wrong, which is the part worth keeping
+
+The technical analysis was right. The **risk assessment** was not, and the way
+it was wrong is reusable:
+
+> the P3 rating reasoned through URL and CSS only, and concluded "not currently
+> reachable" / "not exploitable as it stands". It never analysed JS — the one
+> nested language where the same divergence *was* exploitable.
+
+The flattening was a deliberate, documented trade-off, and the trade-off is
+still defensible for URL. The defect was scoping the risk to the two languages
+that had been looked at and rating the whole divergence from them. A divergence
+from a security design is only as safe as its **worst** instance, and the
+instance nobody examined is not evidence of safety.
+
+It also left the deciding question open, and then did not come back to it:
+
+> "The full paper design ... is only worth it if a nested language appears whose
+> *position* matters in ways the flat model cannot express. The `url(` case does
+> not need it."
+
+JS was that language. Position was the entire difference between "inside a
+string literal, where escaping the delimiters is exactly right" and "in open
+code, where there are no delimiters and escaping them accomplishes nothing".
 
 ## What the paper does
 
@@ -20,60 +54,41 @@ tracked alongside the context value.
 
 ## What we do instead
 
-The nested language is flattened into the `attr` field of the 4-tuple
-(`url` / `urlmid` / `style` / `stylevalue` / `script`), and the escaper does that
-language's work in one shot. There is no separate automaton object and no codec.
+The nested language is flattened into the `attr` field of the 4-tuple, and the
+escaper does that language's work in one shot. There is no separate automaton
+object and no codec. The JS fix went further than the earlier ones — it uses
+`attr` for the JS position AND `delim` for the open string literal's quote — but
+it is still a flat encoding of a sub-automaton, not a nested one.
 
-Two positions instead of a real automaton: `url` → `urlmid` on the first literal
-character, and `style` → `stylevalue` on a `:`. A real URL automaton would track
-scheme / authority / path / query / fragment; a real CSS one would track far
-more than declaration-vs-value.
+| Nested language | Sub-positions | Escapers |
+|---|---|---|
+| URL | `url` → `urlmid` | `EscUrlWhole`, `EscUrlComponent` |
+| CSS | `style` → `stylevalue` → `cssurl` | `EscCssDecl`, `EscCssValue`, `EscCssUrl` |
+| JS | `script` ⇄ `jsstring`, plus `jscomment` / `jsregex` / `jstemplate` | `EscJsExpr`, `EscJsString` |
 
-## The cost, measured
+## What is left
 
-The codec's absence turns out **not** to be exploitable, because the attribute
-escaper escapes `&` after the URL check, so an entity cannot be decoded a second
-time:
+**URL.** A real URL automaton would track scheme / authority / path / query /
+fragment; we have two positions. The codec's absence is still not exploitable,
+because the attribute escaper escapes `&` after the URL check, so an entity
+cannot be decoded a second time:
 
 ```
 href="${'javascript&#58;alert(1)'}"  ->  href="javascript&amp;#58;alert(1)"
 ```
 
-The coarseness does bite for a URL nested inside CSS:
+Note that this reasoning is exactly the shape that failed for JS: it argues from
+the cases examined. It is recorded here as an argument, not as a clearance.
 
-```
-style="background:url(${'/img/logo.png'})"
-  -> url(\2F img\2F logo.png)          slashes escaped, legitimate URL BROKEN
-
-<style>a{background:url(${'javascript:alert(1)'})}</style>
-  -> url(javascript:alert\28 1\29 )    colon SURVIVES; only the parens escaped
-```
-
-The first is a plain usability defect: a legitimate relative URL in `url()` is
-mangled.
-
-The second is not exploitable as it stands — the escaped parens leave the JS
-malformed, and current browsers do not execute `javascript:` in a CSS `url()` —
-but the colon surviving is a smell, and it is there only because a `<style>`
-body is treated as declaration position throughout, when inside `url(...)` it is
-really a URL position.
-
-**Not currently reachable.** Nothing in bastion or forgepm interpolates inside a
-CSS `url()` — checked.
-
-## Fix
-
-Give `url(` a context of its own. Minimally: add `cssurl` to the `attr` field
-with transitions `style|stylevalue --url(--> cssurl` and `cssurl --)--> back`,
-and select the URL escaper there. That is a table change plus one escaper
-mapping, and it uses machinery that already exists.
-
-The full paper design — a real subsidiary automaton with a codec — is a larger
-change and is only worth it if a nested language appears whose *position* matters
-in ways the flat model cannot express. The `url(` case does not need it.
+**A real nested automaton with codecs** is still not built, and the JS fix shows
+the flat model can be pushed further than expected before it breaks. The
+question to revisit is no longer "is the flat model expressive enough" — it is
+whether the flat model's failure mode is acceptable, and the answer for JS was
+that we could not tell until someone wrote an attack string and looked at the
+output. See the "coverage class" note in the progress file.
 
 ## Do not "fix" this by widening the CSS allowlist
 
-Adding `/` to the CSS-safe character set would repair the broken-URL symptom and
+Adding `/` to the CSS-safe character set would repair a broken-URL symptom and
 reintroduce a hole: `/` is how a CSS comment (`/*`) starts. The escaper's
 allowlist is deliberate — see `specs/security/README.md`.

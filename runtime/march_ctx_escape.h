@@ -5,6 +5,15 @@
  * lib/ctxesc/automaton.ml and inlined as a constant id at the call site, so
  * nothing here ever inspects a value to decide what it is.
  *
+ * JS has two escapers for the same reason CSS has two, and learning that cost
+ * a real vulnerability. A hole INSIDE a JS string literal only has to be unable
+ * to end that literal (MARCH_ESC_JS_STRING). A hole at an EXPRESSION position
+ * has no literal around it at all and cannot be made safe as code, so
+ * MARCH_ESC_JS_EXPR supplies its own quotes and renders the value as an inert
+ * string. Until 2026-08-20 every script context got the string escaper, so
+ * `<script>var x = ${p}</script>` executed p; see
+ * specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md.
+ *
  * CSS has two escapers because a style attribute alternates between two
  * positions with different syntax: a DECLARATION list (`color:red;...`), where
  * `:` and `;` are structural, and a VALUE (`#fff`, `var(--x)`), where either
@@ -32,7 +41,8 @@
 #define MARCH_ESC_NONE          6
 #define MARCH_ESC_CSS_DECL      7
 #define MARCH_ESC_CSS_URL       8
-#define MARCH_ESC__COUNT        9
+#define MARCH_ESC_JS_EXPR       9
+#define MARCH_ESC__COUNT        10
 
 /* What a URL that failed the scheme allowlist is replaced with. Chosen to be
  * inert in every context: it navigates nowhere and executes nothing. */

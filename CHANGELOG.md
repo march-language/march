@@ -39,6 +39,31 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Security: `~H` no longer renders an interpolated value as executable
+  JavaScript, and its URL-attribute list no longer misses live vectors.** Found
+  and fixed pre-release; no tagged version shipped it. Three defects, all in the
+  context table rather than in any escaper:
+  `<script>var x = ${p}</script>` and `<button onclick="n = ${p}">` gave every
+  script context the JS *string* escaper, which only stops a value ENDING a
+  string literal — at an expression position there is no literal, so
+  `alert(document.cookie)` passed through as code (and, in the other direction,
+  honest arithmetic came out a syntax error). `xlink:href`, `object data` and
+  `ping` were absent from the URL-attribute list, so they fell through to plain
+  attribute escaping and passed `javascript:` untouched. `srcdoc` was correctly
+  entity-escaped as an attribute, but browsers HTML-decode it and parse the
+  result as a document, so the escaping is undone before the markup is read.
+  The table now models JS positions properly — string literal, expression,
+  comment, regex literal, template literal — with a new JS-expression escaper
+  that renders a value as an inert quoted string rather than as code;
+  `xlink:href`, `data`, `ping`, `manifest` and `longdesc` are classified as
+  URLs; and `srcdoc`, `srcset`, JS comments, regex and template literals are
+  compile errors that say why. `Html.trust_js` still inserts trusted JS
+  verbatim. **Note for template authors:** a hole at a JS expression position
+  now renders as a JS string, so `<script>var n = ${count}</script>` yields
+  `'42'`, not `42` — put the value in a quoted JS string, or use
+  `Html.trust_js`, if you need its JS type. See
+  `specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md`.
+
 - **Folds no longer leak the accumulator chain (~32 B/element, unbounded).** Every
   `NativeArray.fold_*` / `typed_array_fold` runtime helper carried the accumulator through
   the loop in its boxed form and never released the previous one, so a fold with a `Float`

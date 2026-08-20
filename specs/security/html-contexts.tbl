@@ -17,14 +17,30 @@ title              | title
 
 [attrs]
 # attr-name-pattern | attr class    (first match wins -- keep on* first)
+#
+# EVERY attribute whose value a browser will FETCH or NAVIGATE TO belongs here.
+# Classification is exact-match unless the pattern ends in `*`, so an attribute
+# that is missing falls through to `*` -> normal -> the plain attribute escaper,
+# which entity-encodes quotes and angle brackets and passes `javascript:`
+# through untouched. That is how `xlink:href`, `object data` and `ping` were
+# live XSS/SSRF vectors until 2026-08-20; see
+# specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md. A miss here is
+# silent, so err towards listing an attribute.
 on*                 | script
 href                | url
+xlink:href          | url    # the SVG spelling of href -- executes javascript:
 src                 | url
 action              | url
 formaction          | url
 poster              | url
 cite                | url
 background          | url
+data                | url    # <object data="javascript:..."> executes. EXACT match, so data-* attributes are untouched.
+ping                | url    # fetched on click, so an unvalidated value is an outbound request the page never showed
+manifest            | url
+longdesc            | url
+srcset              | srcset   # a candidate LIST, not one URL -- rejected, see below
+srcdoc              | htmldoc  # HTML-decoded, then parsed as a document -- rejected, see below
 style               | style
 *                   | normal
 
@@ -134,6 +150,49 @@ attrvalue,*,stylevalue,*  | lit:";"        |  | =,=,style,=              |
 attrvalue,*,style,*       | interp         |  | =,=,=,=                  |
 attrvalue,*,stylevalue,*  | interp         |  | =,=,=,=                  |
 
+# -- JS position tracking inside an on* handler attribute --
+# Same split as a <script> body below, and for the same reason: the JS string
+# escaper is correct ONLY inside a string literal. `onclick="n = ${p}"` used to
+# get it, so `alert(document.cookie)` -- which contains no quote, no angle
+# bracket and nothing else that escaper touches -- passed through as code.
+#
+# The JS string delimiter is implied by the HTML one, and cannot be recorded in
+# `delim` because the HTML delimiter is already there. That is not a
+# limitation: inside a double-quoted attribute a raw `"` ends the ATTRIBUTE
+# (the rows at the top of this section, which run first), so the only JS string
+# a double-quoted handler can contain is a single-quoted one, and vice versa.
+attrvalue,*,script,double   | lit:"'"        |  | =,=,jsstring,=           |
+attrvalue,*,script,single   | lit:"\""       |  | =,=,jsstring,=           |
+attrvalue,*,jsstring,double | lit:"\\'"      |  | =,=,=,=                  |
+attrvalue,*,jsstring,single | lit:"\\\""     |  | =,=,=,=                  |
+attrvalue,*,jsstring,*      | cls+:[\\]      |  | =,=,=,=                  |
+attrvalue,*,jsstring,double | lit:"'"        |  | =,=,script,=             |
+attrvalue,*,jsstring,single | lit:"\""       |  | =,=,script,=             |
+attrvalue,*,script,*        | lit:"//"       |  | =,=,jscomment,=          |
+attrvalue,*,script,*        | lit:"/*"       |  | =,=,jscomment,=          |
+attrvalue,*,script,*        | lit:"/"        |  | =,=,jsregex,=            |
+attrvalue,*,script,*        | lit:"`"        |  | =,=,jstemplate,=         |
+attrvalue,*,jscomment,*     | lit:"\n"       |  | =,=,script,=             |
+attrvalue,*,jscomment,*     | lit:"*/"       |  | =,=,script,=             |
+attrvalue,*,jsregex,*       | cls+:[\\]      |  | =,=,=,=                  |
+attrvalue,*,jsregex,*       | lit:"/"        |  | =,=,script,=             |
+attrvalue,*,jstemplate,*    | cls+:[\\]      |  | =,=,=,=                  |
+attrvalue,*,jstemplate,*    | lit:"`"        |  | =,=,script,=             |
+attrvalue,*,jsstring,*      | interp         |  | =,=,=,=                  |
+# A single-quoted handler is the ONE context the JS-expression escaper cannot
+# serve: it renders the value as a single-quoted JS string, and those
+# delimiters would close the attribute. Everywhere else its output contains no
+# raw quote at all.
+attrvalue,*,script,single   | interp         |  | =,=,=,=                  | Cannot interpolate at a JavaScript expression position inside a SINGLE-quoted event-handler attribute. The value is rendered as a single-quoted JS string, and its delimiters would close the attribute. Use a double-quoted attribute, or put the hole inside a double-quoted JS string: onclick='f("${x}")'.
+attrvalue,*,script,*        | interp         |  | =,=,=,=                  |
+attrvalue,*,jscomment,*     | interp         |  | =,=,=,=                  | Cannot interpolate inside a JavaScript comment. The value is dead text until a newline or an unbalanced */ moves it into live code, so a hole here is always a mistake -- move it into the code the comment describes.
+attrvalue,*,jsregex,*       | interp         |  | =,=,=,=                  | Cannot interpolate inside a JavaScript regular-expression literal: an unescaped / in the value ends the literal and everything after it is parsed as code, and no escaping fixes that. If this / was meant as division, note the table cannot tell the two apart and deliberately assumes the regex -- move the arithmetic out of the template.
+attrvalue,*,jstemplate,*    | interp         |  | =,=,=,=                  | Cannot interpolate inside a JavaScript template literal: a backtick closes it and ${ opens a substitution, which is arbitrary code, and the JS string escaper escapes neither. Use a single- or double-quoted JS string instead.
+
+# -- URL-ish attributes that no escaper can serve --
+attrvalue,*,srcset,*      | interp         |  | =,=,=,=                  | Cannot interpolate into a srcset attribute: the value is a comma-separated list of candidates, so the whole-URL scheme check would validate only the first one and wave the rest through. Interpolate a single URL into src instead, or assemble the candidate list from values you already control.
+attrvalue,*,htmldoc,*     | interp         |  | =,=,=,=                  | Cannot interpolate into a srcdoc attribute: the browser HTML-decodes the attribute and then parses the result as a whole DOCUMENT, so the entity escaping that makes every other attribute safe is undone before the markup is parsed and an onerror handler fires. Point the iframe at a src URL instead.
+
 # -- generic within-value rows --
 attrvalue,*,*,*           | interp         |  | =,=,=,=                  |
 attrvalue,*,*,*           | any            |  | =,=,=,=                  |
@@ -147,10 +206,92 @@ rcdata,style,*,*      | ilit:"url("       |  | =,=,cssurl,=            |
 rcdata,style,cssurl,* | lit:")"           |  | =,=,normal,=            |
 rcdata,style,cssurl,* | interp            |  | =,=,=,=                 |
 
-rcdata,script,*,*     | ilit:"</script"   |  | closetagname,normal,=,= |
+# `</script` ends the element from EVERY JS sub-position below, including from
+# inside a string literal -- the HTML tokenizer does not know JS exists. This
+# row must therefore stay ABOVE the per-position `any` rows that follow, and it
+# clears the JS position on the way out.
+rcdata,script,*,*     | ilit:"</script"   |  | closetagname,normal,normal,none |
 rcdata,style,*,*      | ilit:"</style"    |  | closetagname,normal,=,= |
 rcdata,textarea,*,*   | ilit:"</textarea" |  | closetagname,normal,=,= |
 rcdata,title,*,*      | ilit:"</title"    |  | closetagname,normal,=,= |
+
+# JS inside a <script> BODY -----------------------------------------------
+# The subsidiary automaton the paper calls for, expressed in the flat context
+# tuple: `attr` carries the JS position, and `delim` -- free here, since a
+# script body has no HTML attribute around it -- carries the quote that opened
+# the current string literal.
+#
+# WHY THIS EXISTS. Every script context used to select the JS STRING escaper,
+# which is correct only between quotes. In expression position it escaped
+# characters that were not delimiting anything and left alone the ones that
+# matter, so `<script>var x = ${p}</script>` rendered `alert(document.cookie)`
+# verbatim as code, while honest arithmetic came out as a syntax error. Wrong
+# in both directions, from one root cause. See
+# specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md.
+#
+# THE INVARIANT the rest of this block is arranged to keep:
+#
+#     the walk must never land at `jsstring` when the hole is really in
+#     expression position.
+#
+# That direction is the dangerous one -- it is the bug above. The reverse costs
+# an over-strict escaper or a compile error, which is loud and harmless. So
+# every construct that can hide a stray quote is tracked: a comment, a template
+# literal, and a regex literal. Each would otherwise leave the quote count off
+# by one and hand the NEXT hole the string escaper while it sat in open code.
+#
+# A hole is ACCEPTED in expression position and inside a quote-delimited string
+# literal. Comments, regex literals and template literals reject: a comment
+# hides the value until it does not, a regex literal ends at an unescaped `/`
+# that no escaper here escapes, and a template literal reads a dollar-brace as
+# a substitution -- arbitrary code -- and a backtick as its terminator, neither
+# of which the JS string escaper touches.
+
+# -- expression position; the state a script body opens in --
+# `//` and `/*` must precede the bare `/`, and the bare `/` is deliberately
+# greedy: division is read as the start of a regex literal. See the diagnostic.
+rcdata,script,normal,*        | lit:"//"          |  | =,=,jscomment,=         |
+rcdata,script,normal,*        | lit:"/*"          |  | =,=,jscomment,=         |
+rcdata,script,normal,*        | lit:"/"           |  | =,=,jsregex,=           |
+rcdata,script,normal,*        | lit:"'"           |  | =,=,jsstring,single     |
+rcdata,script,normal,*        | lit:"\""          |  | =,=,jsstring,double     |
+rcdata,script,normal,*        | lit:"`"           |  | =,=,jstemplate,=        |
+rcdata,script,normal,*        | interp            |  | =,=,=,=                 |
+rcdata,script,normal,*        | any               |  | =,=,=,=                 |
+
+# -- string literal; `delim` remembers which quote opened it --
+# The two-character escape rows come first, so a backslash-quote cannot close
+# the string. `cls+` then swallows any remaining RUN of backslashes: an odd run
+# followed by a quote makes the walk leave the string one escape early, which
+# is the over-strict direction and therefore safe.
+rcdata,script,jsstring,*      | lit:"\\'"         |  | =,=,=,=                 |
+rcdata,script,jsstring,*      | lit:"\\\""        |  | =,=,=,=                 |
+rcdata,script,jsstring,*      | cls+:[\\]         |  | =,=,=,=                 |
+rcdata,script,jsstring,single | lit:"'"           |  | =,=,normal,none         |
+rcdata,script,jsstring,double | lit:"\""          |  | =,=,normal,none         |
+rcdata,script,jsstring,*      | interp            |  | =,=,=,=                 |
+rcdata,script,jsstring,*      | any               |  | =,=,=,=                 |
+
+# -- comment; one class for both forms, carrying both terminators --
+# Conflating `//` with `/* */` can only end a comment EARLY, which returns to
+# expression position -- the safe direction.
+rcdata,script,jscomment,*     | lit:"\n"          |  | =,=,normal,=            |
+rcdata,script,jscomment,*     | lit:"*/"          |  | =,=,normal,=            |
+rcdata,script,jscomment,*     | interp            |  | =,=,=,=                 | Cannot interpolate inside a JavaScript comment. The value is dead text until a newline or an unbalanced */ moves it into live code, so a hole here is always a mistake -- move it into the code the comment describes.
+rcdata,script,jscomment,*     | any               |  | =,=,=,=                 |
+
+# -- regular-expression literal --
+rcdata,script,jsregex,*       | cls+:[\\]         |  | =,=,=,=                 |
+rcdata,script,jsregex,*       | lit:"/"           |  | =,=,normal,=            |
+rcdata,script,jsregex,*       | interp            |  | =,=,=,=                 | Cannot interpolate inside a JavaScript regular-expression literal: an unescaped / in the value would end the literal and everything after it would be parsed as code, and no escaping prevents that. If this / was meant as division, the table cannot tell the two apart and deliberately assumes the regex -- move the arithmetic out of the template.
+rcdata,script,jsregex,*       | any               |  | =,=,=,=                 |
+
+# -- template literal --
+rcdata,script,jstemplate,*    | cls+:[\\]         |  | =,=,=,=                 |
+rcdata,script,jstemplate,*    | lit:"`"           |  | =,=,normal,=            |
+rcdata,script,jstemplate,*    | interp            |  | =,=,=,=                 | Cannot interpolate inside a JavaScript template literal: a backtick would close it and a dollar-brace would open a substitution, which is arbitrary code, and the JS string escaper escapes neither. Use a single- or double-quoted JS string instead.
+rcdata,script,jstemplate,*    | any               |  | =,=,=,=                 |
+
 rcdata,*,*,*          | interp            |  | =,=,=,=                 |
 rcdata,*,*,*          | any               |  | =,=,=,=                 |
 
