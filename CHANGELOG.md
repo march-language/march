@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **The AddressSanitizer CI gate now covers the SIMD, narrow-width `NativeArray`
+  (`f32`/`i32`/`u8`) and array-backed `Bytes` lowerings**, which no sanitizer had
+  ever compiled. `specs/lang/golden/sanitize.sh` swept only
+  `specs/lang/golden/*.march`, and that corpus contains zero SIMD/NativeArray/Bytes
+  programs, so every raw-memory path in that area sat outside the project's only
+  ASAN gate while `dune runtest` exercised it uninstrumented on both OSes. The
+  script now sweeps a second corpus: 24 curated, by-name `test/native/*.march`
+  fixtures, kept separate in the output so a failure names the corpus it came from.
+  Programs were added by name rather than moved into `specs/lang/golden/` because
+  that directory is also the cross-compile oracle corpus and has a doc-lint-pinned
+  count. The gate also now reports how many programs it actually swept and fails
+  if that number is zero — it exits 0 without running anything on a Mac with
+  CrowdStrike Falcon, so a green exit code alone was never evidence it ran.
+
 - **`Actor.send_after(pid, msg, delay_ms)` / `Actor.cancel_timer(ref)`: schedule a
   message for delayed delivery to an actor, with cancellation.** Previously an actor
   that wanted to poll, retry, time something out, or tick had to burn a green thread
