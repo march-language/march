@@ -7306,6 +7306,44 @@ void *march_typed_array_filter(void *arr, void *mask) {
     return new_arr;
 }
 
+/* Release a fold's PREVIOUS accumulator — the missing half of the fold RC
+ * discipline. [prev] is the accumulator just handed to the closure, [result]
+ * is what the closure returned, [acc] is the fold's INITIAL accumulator, which
+ * belongs to our CALLER and must never be released here.
+ *
+ * The MARCH_FLOAT_TAG guard IS the safety argument, not a shortcut. An apply
+ * fn does NOT return an owned reference in general: for a `ptr` parameter
+ * returned unchanged it emits a bare `ret ptr %x` with no inc_rc, handing back
+ * a BORROWED alias of something still owned elsewhere (a live array element, a
+ * closure capture). Releasing that is a use-after-free — verified by reading
+ * the emitted IR for `fn (acc, x) -> x`.
+ *
+ * A Float is provably different. The uniform-ptr ABI unboxes a Float parameter
+ * to a raw `double` in the apply fn's entry prologue (Llvm_toplevel.emit_fn)
+ * and re-boxes on return via march_alloc_float (Llvm_ctx.coerce); Float
+ * closure captures are stored as raw doubles too. So EVERY Float-typed value
+ * coming out of an apply fn is a FRESH box that this loop solely owns — it
+ * cannot alias the array, the caller's accumulator, or a capture. The tag is
+ * the runtime's only witness of that, hence the check.
+ *
+ * `prev != result` additionally covers a closure that threads its accumulator
+ * through unchanged, and a wire-tagged (non-pointer) accumulator is handled by
+ * the IS_HEAP_PTR guard before the tag is ever loaded.
+ *
+ * STILL OPEN — a heap NON-Float accumulator (String, List, record) still leaks
+ * one object per element here, for the borrowed-return reason above. Fixing it
+ * needs the compiler to guarantee owned returns, not a runtime-side guess. See
+ * specs/todos/2026-08-20-fold-heap-accumulator-borrowed-return-leak.md.
+ *
+ * Pinned by test/native/native_arr_fold_acc_leak_probe.march (leak direction)
+ * and that fixture's identity leg (double-free direction). */
+static inline void fold_release_prev_acc(void *prev, void *result, void *acc) {
+    if (prev == result || prev == acc) return;
+    if (!IS_HEAP_PTR(prev)) return;
+    if (((march_hdr *)prev)->tag != MARCH_FLOAT_TAG) return;
+    march_decrc(prev);
+}
+
 /* RC contract identical to march_typed_array_map above: [f] is one
  * transferred reference, called once per element, march_incrc before each
  * call balances that call's internal $clo drop, final march_decrc releases
@@ -7315,8 +7353,10 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
     void *result = acc;
     for (int64_t i = 0; i < len; i++) {
         void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        void *prev = result;
         march_incrc(f);
-        result = call_closure_2(f, result, elem);
+        result = call_closure_2(f, prev, elem);
+        fold_release_prev_acc(prev, result, acc);
     }
     march_decrc(f);
     return result;
@@ -7550,8 +7590,10 @@ void *native_int_arr_fold(void *acc, void *arr, void *f) {
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
         void *elem = (void *)(intptr_t)((x << 1) | 1);   /* wire-tag */
+        void *prev = result;
         march_incrc(f);
-        result = call_closure_2(f, result, elem);
+        result = call_closure_2(f, prev, elem);
+        fold_release_prev_acc(prev, result, acc);
     }
     march_decrc(f);
     return result;
@@ -7752,14 +7794,13 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
  * pinned by test/native/native_arr_fold_leak_probe.march; deleting it takes
  * that fixture's peak RSS from 48 MB to 171 MB.
  *
- * STILL OPEN — the accumulator (result) has the identical borrowed-argument
- * shape and also isn't freed by the callee, so a fold whose accumulator is
- * itself a Float leaks a SECOND ~32B/element as each iteration's
- * march_alloc_float becomes the next accumulator. That half is inherited
- * from the reference march_typed_array_fold (above in this file) and is out
- * of scope here; it is measured and tracked in
- * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md, and
- * the fix most likely belongs in march_typed_array_fold rather than here. */
+ * The ACCUMULATOR half — each iteration's march_alloc_float result becoming
+ * the next accumulator with nobody releasing the previous one — was the
+ * second ~32 B/element leak in this loop. Fixed 2026-08-20 by the
+ * fold_release_prev_acc call below; see that helper for why the release is
+ * MARCH_FLOAT_TAG-guarded rather than unconditional, and for the residual
+ * (non-Float heap accumulators) that is still open. Pinned by
+ * test/native/native_arr_fold_acc_leak_probe.march. */
 void *native_float_arr_fold(void *acc, void *arr, void *f) {
     int64_t len = native_float_arr_length(arr);
     void *result = acc;
@@ -7767,9 +7808,11 @@ void *native_float_arr_fold(void *acc, void *arr, void *f) {
         double x;
         memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
         void *elem = march_alloc_float(x);
+        void *prev = result;
         march_incrc(f);
-        result = call_closure_2(f, result, elem);
+        result = call_closure_2(f, prev, elem);
         march_decrc(elem);
+        fold_release_prev_acc(prev, result, acc);
     }
     march_decrc(f);
     return result;
@@ -7896,8 +7939,10 @@ void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
     for (int64_t i = 0; i < len; i++) {                                      \
         int64_t x = (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
         void *elem = (void *)(intptr_t)((x << 1) | 1);                       \
+        void *prev = result;                                                 \
         march_incrc(f);                                                      \
-        result = call_closure_2(f, result, elem);                            \
+        result = call_closure_2(f, prev, elem);                              \
+        fold_release_prev_acc(prev, result, acc);                            \
     }                                                                        \
     march_decrc(f);                                                          \
     return result;                                                           \
@@ -8014,18 +8059,19 @@ void *native_f32_arr_map2(void *arr1, void *arr2, void *f) {
  * above for why this is confirmed safe (borrowed-argument convention, no
  * alias survives the call) rather than a use-after-free. Pinned by
  * test/native/native_arr_fold_leak_probe.march's f32 leg. The accumulator
- * chain leaks the same way here as there when the accumulator is a Float —
- * still open, see that comment and
- * specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md. */
+ * chain is released by fold_release_prev_acc, exactly as in
+ * native_float_arr_fold above (fixed 2026-08-20). */
 void *native_f32_arr_fold(void *acc, void *arr, void *f) {
     int64_t len = native_f32_arr_length(arr);
     void *result = acc;
     for (int64_t i = 0; i < len; i++) {
         double x = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
         void *elem = march_alloc_float(x);
+        void *prev = result;
         march_incrc(f);
-        result = call_closure_2(f, result, elem);
+        result = call_closure_2(f, prev, elem);
         march_decrc(elem);
+        fold_release_prev_acc(prev, result, acc);
     }
     march_decrc(f);
     return result;

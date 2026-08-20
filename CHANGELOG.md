@@ -78,6 +78,19 @@ git log is authoritative for exact commits.
   `Html.trust_js`, if you need its JS type. See
   `specs/progress/2026-08-20-h-sigil-js-and-url-attr-xss.md`.
 
+- **Folds no longer leak the accumulator chain (~32 B/element, unbounded).** Every
+  `NativeArray.fold_*` / `typed_array_fold` runtime helper carried the accumulator through
+  the loop in its boxed form and never released the previous one, so a fold with a `Float`
+  accumulator — summing, averaging, dot products — leaked one heap object per element:
+  measured `live_allocs()` delta 4,000,007 over two 2,000,000-element folds, now 9 (a
+  constant, verified identical at 500k/2M/8M elements). All five fold bodies are fixed,
+  including the shared `march_typed_array_fold` root the others were copied from. The
+  release is deliberately guarded rather than unconditional: an apply fn returns a
+  *borrowed* alias when it passes a `ptr` parameter straight through, so releasing every
+  previous accumulator would free live array elements. Folds with an `Int` accumulator were
+  never affected. See `specs/progress/2026-08-20-fold-accumulator-chain-leak-fix.md`; the
+  residual for non-`Float` heap accumulators is tracked in `specs/todos/`.
+
 - **A message arriving while an actor was already being woken no longer kills
   that actor.** `march_sched_send` pushes under the mailbox lock but wakes after
   releasing it, so two senders racing one receiver could issue two wakes for

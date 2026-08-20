@@ -4484,12 +4484,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; The healthy delta is a constant, not a per-element quantity: if it starts
 ; tracking the element count, that is a new leak, not drift in this bound.
 ;
-; The probe's accumulator is an INT, deliberately. A Float accumulator would
-; also trip this rule, but for a DIFFERENT and still-open reason -- the
-; accumulator-chain leak of
-; specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md -- which
-; would make the rule fire for something it is not guarding. See the header
-; comment in the fixture.
+; The probe's accumulator is an INT, deliberately, so this rule measures the
+; per-ELEMENT box in isolation. The accumulator-chain leak is a DIFFERENT
+; defect in the same helpers -- fixed 2026-08-20 and guarded separately by
+; native_arr_fold_acc_leak_probe below
+; (specs/progress/2026-08-20-fold-accumulator-chain-leak-fix.md). Keeping the
+; accumulator Int here keeps the two signals separable: a regression in either
+; one must name the right defect. See the header comment in the fixture.
 ;
 ; Three rules, all load-bearing, for the reasons spelled out at length on
 ; simd_leak_probe below: (a) the run's exit status is dune's, (b) stdout is
@@ -4529,6 +4530,61 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
     test -n \"$live\" || { echo 'could not read live_allocs delta from native_arr_fold_leak_probe.live' >&2; exit 1; }; \
     test \"$live\" -lt 1000 || { echo \"native_arr_fold_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. Folding 4,000,000 elements must not accumulate per-element march_alloc_float boxes -- healthy is a small constant (~3 objects, independent of element count), each missing march_decrc(elem) adds exactly 4,000,000. Check that native_float_arr_fold and native_f32_arr_fold in runtime/march_runtime.c still call march_decrc(elem) after call_closure_2.\" >&2; exit 1; }; \
     echo \"native_arr_fold_leak_probe live_allocs delta = ${live} objects\"")))
+
+; Sibling of native_arr_fold_leak_probe above: that one guards the per-ELEMENT
+; box (and deliberately uses an INT accumulator so it measures the element box
+; in isolation); this one guards the per-ACCUMULATOR box and deliberately uses
+; a FLOAT accumulator, which is the shape that leaks. Both are needed and
+; neither subsumes the other -- see the fixture header for the full rationale,
+; including why the release in runtime/march_runtime.c is MARCH_FLOAT_TAG-
+; guarded rather than unconditional (an apply fn returns a BORROWED alias for
+; a ptr param returned unchanged, so an unconditional release is a UAF).
+;
+; SIGNAL: live_allocs(), NOT RSS -- same reasoning as the sibling rule and
+; simd_leak_probe: an absolute RSS threshold is not portable (Linux's ~122 MB
+; process baseline sent the RSS-era rules RED on CI), a live-object count
+; needs no calibration.
+;
+; Same three load-bearing rules as the sibling: (a) the run's exit status is
+; dune's, (b) stdout is diffed so a crash-after-partial-output cannot pass --
+; which matters especially here, because the fixture's identity leg exists to
+; CRASH if the release is over-eager, (c) only then is the delta read from a
+; captured FILE rather than from a pipeline whose status belongs to its last
+; stage.
+(rule
+ (targets native_arr_fold_acc_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold_acc_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_arr_fold_acc_leak_probe
+       native/native_arr_fold_acc_leak_probe.march)))
+
+(rule
+ (targets native_arr_fold_acc_leak_probe.out native_arr_fold_acc_leak_probe.live)
+ (deps native_arr_fold_acc_leak_probe)
+ (action
+  (with-stdout-to native_arr_fold_acc_leak_probe.out
+   (with-stderr-to native_arr_fold_acc_leak_probe.live
+    (run ./native_arr_fold_acc_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/native_arr_fold_acc_leak_probe.expected
+        native_arr_fold_acc_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_arr_fold_acc_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat native_arr_fold_acc_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from native_arr_fold_acc_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"native_arr_fold_acc_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. Folding 2,000,000 elements with a FLOAT accumulator must not accumulate per-element march_alloc_float boxes -- healthy is a small constant (9 objects, measured identical at 500k/2M/8M elements), and dropping the accumulator release makes it 4,000,007. Check that native_float_arr_fold and native_f32_arr_fold in runtime/march_runtime.c still call fold_release_prev_acc after call_closure_2.\" >&2; exit 1; }; \
+    echo \"native_arr_fold_acc_leak_probe live_allocs delta = ${live} objects\"")))
+
 
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
 ; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,

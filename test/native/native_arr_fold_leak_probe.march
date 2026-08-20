@@ -24,17 +24,19 @@
 -- the macOS-derived band never accounted for. An absolute-RSS threshold is
 -- not portable; a live-object count needs no calibration at all.
 --
--- ACCUMULATOR TYPE IS LOAD-BEARING. There is a SECOND, still-open leak in
+-- ACCUMULATOR TYPE IS LOAD-BEARING. There is a SECOND, independent leak in
 -- these same helpers: when the accumulator is itself a Float, each
--- iteration's march_alloc_float result becomes the next accumulator and is
+-- iteration's march_alloc_float result becomes the next accumulator and was
 -- never released either (one more object per element on top of the element
--- box) -- inherited from the reference march_typed_array_fold and tracked in
--- specs/todos/2026-08-13-native-array-fold-accumulator-chain-leak.md. An
+-- box) -- inherited from the reference march_typed_array_fold. That one was
+-- fixed 2026-08-20
+-- (specs/progress/2026-08-20-fold-accumulator-chain-leak-fix.md) and is
+-- guarded by the sibling fixture native_arr_fold_acc_leak_probe.march. An
 -- INT accumulator is wire-tagged, never heap-allocated, so it contributes
 -- zero live objects and this probe measures the element box in ISOLATION.
--- Do not "simplify" either fold body to `acc +. x` -- that would make the
--- rule fail for the OTHER, known-open leak and destroy its ability to pin
--- this one.
+-- Do not "simplify" either fold body to `acc +. x` -- that would fold the two
+-- signals together and destroy this probe's ability to name which defect
+-- regressed.
 --
 -- Both legs are needed: the two decrc(elem) calls are separate lines in
 -- separate C functions, and deleting either one alone must go RED. Because
