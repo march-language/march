@@ -13,7 +13,7 @@
 #   doc-lint                            (standalone, ~10s)
 #   test          (ubuntu, macos)       `dune runtest`
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
-#   sanitize-gate (ubuntu)              golden-corpus ASAN gate
+#   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated SIMD/NativeArray
 #   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
 #                  ubuntu leg only ─┼─ cross-linux-oracle
 #                                   └─ property-oracle × 8
@@ -347,6 +347,16 @@ jobs:
           eval $(opam env)
           dune fmt 2>&1 || true
 
+  # AddressSanitizer sweep, run TWICE on this runner (plain, then MARCH_TRMC=1).
+  # sanitize.sh covers two corpora: every specs/lang/golden/*.march, plus a
+  # curated by-name list of test/native/*.march SIMD / NativeArray-narrow-width /
+  # array-backed-Bytes programs — that second corpus was added 2026-08-20 because
+  # no sanitizer had ever compiled that code (the golden corpus contains zero
+  # SIMD/NativeArray programs). See the script header for why the curated list is
+  # a list and not a glob, and why those programs are not simply new goldens.
+  #
+  # Ubuntu-only: the gate no-ops on a Mac running CrowdStrike Falcon, whose
+  # syscall interception hangs ASAN's shadow-memory setup.
   sanitize-gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -357,7 +367,7 @@ jobs:
         timeout-minutes: 12
         uses: ./.github/actions/march-setup
 
-      - name: Golden corpus AddressSanitizer gate (RC/UAF guard)
+      - name: AddressSanitizer gate (RC/UAF guard) — golden + curated SIMD/NativeArray
         timeout-minutes: 15
         run: |
           eval $(opam env)
@@ -366,7 +376,7 @@ jobs:
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
 
-      - name: Golden corpus AddressSanitizer gate — TRMC enabled
+      - name: AddressSanitizer gate — TRMC enabled
         timeout-minutes: 15
         run: |
           eval $(opam env)
