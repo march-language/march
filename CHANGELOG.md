@@ -85,20 +85,24 @@ git log is authoritative for exact commits.
   narrow-collision table the pattern side uses, so both sides agree on the
   qualified key. See `lib/tir/lower.ml` (ECon).
 
-- **A Boxed-ADT `Float` field is now stored and loaded as a boxed
-  `march_float_box`, not raw inline double bits.** Three same-family
-  defects fixed together: `record_get`'s boxed `Some(Float)` cell stored
-  raw IEEE-754 bits that `march_unbox_float` then dereferenced as a heap
-  pointer (SIGSEGV — depot's "Float type default in blank");
-  ADT structural equality loaded a `TFloat` ctor field as a raw `double`,
-  so `Some(0.0)` from a record/Vault read compared unequal to a
-  constructed `Some(0.0)`; and constructor emission + match-branch field
-  extraction stored/loaded the raw double inline, so a multi-ctor ADT
-  with a Float payload (depot's `SqlValue.PFloat`) round-tripped garbage
-  through construction → match → `to_string`. All ctor-field sites now
-  agree on the boxed convention `march_string_to_float` already
-  documented. See
-  `specs/progress/2026-08-20-record-put-get-float-niche-segfault.md`.
+- **A non-`String` `Vault` key no longer crashes, and a key stored by
+  `Vault.set` can now actually be read back by `Vault.get`.** Two defects.
+  `vault_key_cstr` assumed every key was a `march_string *` and dereferenced
+  it unconditionally, so any Int/Bool/Atom key read the tag word as a length
+  and the payload as a data pointer — SIGSEGV/SIGBUS on the first Int key,
+  even though `stdlib/vault.march` documents Int/String/Bool/Atom keys. It now
+  dispatches on the uniform representation (tagged scalar → `"i:<decimal>"`,
+  matching the interpreter's form; string → its raw bytes, unchanged, so
+  `Vault.keys()` still returns genuine Strings; boxed Float → its bits), and
+  panics with an actionable message for a Tuple/Ctor key rather than folding
+  every value of one ctor onto a single bucket — a heap cell carries no arity,
+  so there is nothing to walk. Separately, only the *write* builtins coerced
+  the key to `ptr`; `vault_get`/`drop`/`update`/`incr` and the `ns_*` trio fell
+  through to the general call path and passed the key with its natural LLVM
+  type, so an Int key arrived at `march_vault_get` raw while `march_vault_set`
+  had stored it tagged — the two hashed different strings and the value was
+  unreachable. Both sides now agree, and Int keys round-trip identically
+  compiled and interpreted.
 
 - **Security: `~H` no longer renders an interpolated value as executable
   JavaScript, and its URL-attribute list no longer misses live vectors.** Found

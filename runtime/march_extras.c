@@ -368,11 +368,9 @@ static void *rec_box_none_float(void) {
     return march_alloc(16);                     /* tag=0 (None), no fields */
 }
 static void *rec_box_some_float(int64_t bits) {
-    double f;
-    memcpy(&f, &bits, sizeof(f));               /* raw IEEE-754 bits -> double */
     void *r = march_alloc(16 + 8);
     *(int32_t *)((char *)r + 8)  = 1;           /* tag = 1 = Some */
-    *(void  **)((char *)r + 16) = march_alloc_float(f);  /* boxed, per the Boxed-ADT convention above */
+    *(int64_t *)((char *)r + 16) = bits;        /* raw IEEE-754 double bits */
     return r;
 }
 
@@ -835,17 +833,90 @@ static int64_t vault_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000LL + (int64_t)(ts.tv_nsec / 1000000);
 }
 
-/* Convert a March string value to a C string key.
- * The key is always a march_string* — cast directly to read its content.
- * Previously this called march_value_to_string() which reads the len field
- * as a tag (int32_t), returning "#<tag:N>" for all strings of length N,
- * causing all same-length keys to collide in the vault. */
+void march_panic(void *s);   /* march_runtime.c — also declared below for the record helpers */
+
+static void vault_panic(const char *msg) {
+    march_panic(march_string_lit(msg, (int64_t)strlen(msg)));
+}
+
+/* Same test as REC_PLAUSIBLE_HEAP (defined further down for the record
+   helpers): even, above the first page, positive.  Duplicated as a function
+   here because this vault code sits earlier in the file than that macro. */
+static int vault_plausible_heap(void *p) {
+    uint64_t b = (uint64_t)(uintptr_t)p;
+    return (b & 1u) == 0 && b >= 4096u && (int64_t)b > 0;
+}
+
+/* Convert a March vault key to a C string.
+ *
+ * stdlib/vault.march documents that a key may be any plain value (Int,
+ * String, Bool, Atom, Tuple, Ctor) and is STRINGIFIED on the way in.  The
+ * key reaches here in UNIFORM representation, with no static type: scalars
+ * (Int/Bool/Unit/Atom) are low-bit tagged ((n<<1)|1, always odd), heap
+ * values are raw pointers.  This function used to assume "always a
+ * march_string*" and dereference unconditionally, so every non-String key
+ * read the tag word as a length and the payload as a data pointer —
+ * SIGSEGV/SIGBUS on the first Int key
+ * (specs/todos/2026-08-20-vault-non-string-key-native-crash.md).
+ *
+ * Encoding, by representation:
+ *   tagged scalar  -> "i:<decimal>"   (matches the interpreter's Int form in
+ *                     eval.ml's vault_key_of_value, so an Int key hashes the
+ *                     same string on both backends)
+ *   march_string   -> the raw bytes, UNCHANGED.  Deliberately not the
+ *                     interpreter's length-prefixed "s:<len>:<bytes>": the
+ *                     stored key is what march_vault_keys hands back to
+ *                     March as a String, so prefixing here would change the
+ *                     observable result of Vault.keys() for every existing
+ *                     caller (depot/conduit/bastion all round-trip
+ *                     keys() -> get()/drop()).  Compiled keys() therefore
+ *                     keeps returning genuine, unencoded Strings.
+ *   boxed Float    -> "f:<bits>" via the raw IEEE-754 bits, so two distinct
+ *                     floats never collide and NaN keys stay stable.
+ *
+ * KNOWN LIMITS, both inherent to the erased uniform representation (the
+ * interpreter carries full values and so does not share them):
+ *   - Int/Bool/Unit/Atom are all tagged i64 and indistinguishable here, so
+ *     Bool true and Int 1 hash to the same key.  The interpreter separates
+ *     them ("b:true" vs "i:1").
+ *   - A String key spelled exactly "i:5" collides with the Int key 5.
+ *     Storing strings raw (see above) is what makes that possible.
+ * Tuple/Ctor keys cannot be encoded at all: a heap cell carries no arity in
+ * its header, so there is nothing to walk.  Rather than fold every value of
+ * one ctor onto a single "#<tag:N>" bucket (a silent wrong-answer, which is
+ * how this function's own history began), that case panics with an
+ * actionable message. */
 static char *vault_key_cstr(void *key) {
-    march_string *ms = (march_string *)key;
-    char *buf = malloc((size_t)ms->len + 1);
-    memcpy(buf, ms->data, (size_t)ms->len);
-    buf[ms->len] = '\0';
-    return buf;
+    /* Tagged scalar: untag arithmetically (sign-preserving), render decimal. */
+    if (((uintptr_t)key & 1u) != 0) {
+        int64_t n = (intptr_t)key >> 1;
+        char *buf = malloc(32);
+        snprintf(buf, 32, "i:%lld", (long long)n);
+        return buf;
+    }
+    if (!vault_plausible_heap(key))
+        vault_panic("Vault: key is not a plain value (got a null/unit key). "
+                    "Keys must be Int, String, Bool or Atom.");
+    int32_t tag = ((march_hdr *)key)->tag;
+    if (tag == MARCH_STRING_TAG) {
+        march_string *ms = (march_string *)key;
+        char *buf = malloc((size_t)ms->len + 1);
+        memcpy(buf, ms->data, (size_t)ms->len);
+        buf[ms->len] = '\0';
+        return buf;
+    }
+    if (tag == MARCH_FLOAT_TAG) {
+        union { double d; uint64_t u; } bits;
+        bits.d = march_unbox_float(key);
+        char *buf = malloc(32);
+        snprintf(buf, 32, "f:%llx", (unsigned long long)bits.u);
+        return buf;
+    }
+    vault_panic("Vault: unsupported key kind (a constructor/tuple value). "
+                "A heap value carries no arity at runtime, so it cannot be "
+                "stringified into a key. Use an Int, String, Bool or Atom "
+                "key — e.g. build one with to_string.");
+    return NULL; /* unreachable — vault_panic does not return */
 }
 
 /* Create a new vault_data wrapped in a March heap handle. */
