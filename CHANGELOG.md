@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`typed_array_*` returned corrupt values for scalar elements when compiled.**
+  The family threads a genuinely generic `'a` through a uniform erased slot, so a
+  scalar element has to arrive boxed (an `Int` tagged, a `Float` boxed) — but
+  `typed_array_create` / `set` / `fold` stored the raw bits instead, and the
+  conditional untag on the way back out then corrupted every ODD value:
+  `typed_array_create(3, 7)` followed by `get(0)` returned `3`. Because
+  `get`/`map`/`filter` only read back what those three stored, every operation in
+  the family was affected at once, and an even-valued element survived untouched —
+  which is why it looked half-working. A `Float` element was worse than wrong: the
+  raw double bits reached `march_unbox_float` as a pointer and segfaulted. The
+  interpreter was correct throughout.
+
+
+### Fixed
+
 - **Compiled `NativeArray.get_*` / `set_*` now bounds-check, as the docs and the
   interpreter always promised.** Every element accessor was a raw load/store at
   `arr + header + i * sizeof(elem)` with no range test, so an out-of-range index

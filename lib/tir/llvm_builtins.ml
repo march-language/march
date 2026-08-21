@@ -1710,6 +1710,31 @@ let builtin_boxed_generic_params_tbl : (string, int list) Hashtbl.t =
   Hashtbl.replace tbl "native_f32_arr_fold" [0];
   Hashtbl.replace tbl "native_i32_arr_fold" [0];
   Hashtbl.replace tbl "native_u8_arr_fold" [0];
+  (* typed_array_* : the whole family stores/threads a genuinely generic 'a.
+     Missed when this table was first written, and the omission is transitive
+     — get/map/filter never touch a raw scalar themselves, they just read back
+     what create/set/fold stored, so ALL of them returned corrupt values:
+
+       typed_array_create(3, 7)  then  get(0)   ->  3   (want 7)
+       typed_array_fold(a, 0, (+))                ->  48  (want 56)
+       typed_array_map(a, (+1))  then  get(0)   ->  4   (want 8)
+
+     7 was stored raw; the erased-i64 conditional untag then read odd 7 back
+     as 7>>1 = 3 — the identical mechanism this table's ring_buf_push note
+     describes. An EVEN element (42) survived untouched, which is exactly why
+     the family looked half-working. A Float element is worse than wrong: the
+     raw double bits reach march_unbox_float as a pointer and SIGSEGV.
+
+     Indices are into the DECLARE signature, which for these three matches the
+     March argument order:
+       typed_array_create(i64 %len, ptr %default_val)        -> 1
+       typed_array_set(ptr %arr, i64 %i, ptr %val)           -> 2
+       typed_array_fold(ptr %arr, ptr %acc, ptr %f)          -> 1
+     (note fold's acc is index 1 here, unlike native_*_arr_fold's index 0 —
+     those declare acc first). *)
+  Hashtbl.replace tbl "typed_array_create" [1];
+  Hashtbl.replace tbl "typed_array_set" [2];
+  Hashtbl.replace tbl "typed_array_fold" [1];
   tbl
 
 (** True iff parameter [idx] of builtin [name] is a generic erased slot that

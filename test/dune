@@ -4606,6 +4606,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_narrow.expected native_arr_narrow.out)))
 
+; ── typed_array_* scalar representation across the erased slot ───────────
+; The family threads a generic 'a through a uniform erased slot, so a scalar
+; element must be BOXED (Int tagged, Float boxed) on the way in. All three
+; storing builtins were missing from builtin_boxed_generic_params_tbl, so they
+; stored raw and the conditional untag corrupted every ODD value on the way
+; back out (create(3,7) -> get(0) == 3). The fixture keeps an EVEN value too:
+; even values survive a raw store untouched, which is exactly why the family
+; looked half-working, and a test using only even values would pass against
+; the bug.
+(rule
+ (targets typed_array_scalar_repr typed_array_scalar_repr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/typed_array_scalar_repr.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o typed_array_scalar_repr
+        native/typed_array_scalar_repr.march)
+   (with-stdout-to typed_array_scalar_repr.out
+        (system "./typed_array_scalar_repr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/typed_array_scalar_repr.expected typed_array_scalar_repr.out)))
+
 ; ── NativeArray element accessors bounds-check (P0 memory safety) ────────
 ; Every native_*_arr_get/_set was a raw load/store at
 ; `arr + NATIVE_ARR_HDR + i * sizeof(elem)` with no range test, so safe March
