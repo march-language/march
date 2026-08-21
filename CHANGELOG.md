@@ -43,6 +43,38 @@ git log is authoritative for exact commits.
   ones failed immediately. `connect()` is now issued once, with `EINTR` (and
   `EINPROGRESS`) recovered by waiting for writability and reading `SO_ERROR`.
   The `EINTR` retries on `recv`/`send`/`writev` are correct and unchanged.
+- **`Vault.get` mis-decoded a `Vault(Option(_))`, `Vault(Float)` or `Vault(Unit)`
+  entry when compiled.** The runtime always hands back the niche encoding of
+  `Option` (`None` = null, `Some(v)` = `v`), because a vault handle's element
+  type is a phantom the C runtime never sees — but the compiled call site decodes
+  by the static type, which is the BOXED encoding for any element that is not
+  niche-safe. A present entry's payload was therefore read as a constructor cell:
+  the tag load landed inside the payload's own heap layout, matched no arm, and
+  fell through to `panic: non-exhaustive pattern match` (a SIGSEGV for the `Unit`
+  element). `Vault.get` now re-encodes at the call site, which is the one place
+  that knows both halves. `Vault(Int)` / `Vault(String)` and every other
+  niche-safe element type are untouched. The interpreter was correct throughout.
+
+- **A `Float` read out of a dynamically-shaped `Record` segfaulted when
+  compiled.** Three defects, one repro. `record_get`'s boxed `Option(Float)` cell
+  stored the raw IEEE-754 bits where the compiler's own decode calls
+  `march_unbox_float` on the field, so it dereferenced the double's bit pattern as
+  a heap address. An erased read — and `record_values` / `record_entries`, whose
+  element types are always erased — handed those raw bits out into a uniform slot
+  instead of a boxed `Float`. And `to_string`/`println` on a value whose type the
+  compiler cannot know (`record_get(r, k)` is `Option('a)` with nothing to pin
+  `'a`, and a dangling type variable defaults to `String`) treated it as a string
+  pointer. Erased values now cross that boundary in the honest uniform
+  representation, and the erased `show` classifies it at runtime rather than
+  assuming. `println(record_get(r, "y"))` prints `Some(0.5)` compiled, matching
+  the interpreter; storing `0.0` in an erased slot also no longer reads back as
+  `None`. Concrete monomorphic `Float` fields keep their inline-`double` ABI —
+  nothing in the field-slot type rules changed.
+
+- **`to_string` on an erased value crashed for short strings.** The type-erased
+  formatter never recognised March's inline (small-string) representation — a
+  string of 7 bytes or fewer is a value, not an address — and dereferenced it. It
+  also dereferenced any other non-heap word instead of printing it.
 
 - **`typed_array_*` returned corrupt values for scalar elements when compiled.**
   The family threads a genuinely generic `'a` through a uniform erased slot, so a

@@ -6923,6 +6923,45 @@ void *march_value_to_string(void *v) {
         int64_t n = (intptr_t)v >> 1;
         return march_int_to_string(n);
     }
+    /* Inline (SSO) string: bit63 set, low bit clear.  This is a VALUE, not an
+     * address, so it MUST be classified before anything dereferences v — and
+     * before IS_HEAP_PTR, which the encoding is deliberately built to fail
+     * (march_runtime.h's small-string section).  Inline strings are
+     * refcount-free, so returning v unchanged already satisfies the +1
+     * contract.  Missing this arm made every erased short string fall through
+     * to the h->tag load below and SIGSEGV. */
+    if (march_str_is_inline(v)) return v;
+    /* Not a heap pointer and not one of the immediate encodings: there is no
+     * header to read, so print the bits rather than dereferencing them.  This
+     * is the last line of defence for a value that reached an erased slot in a
+     * non-uniform representation (raw Float bits were the historical source —
+     * see rec_box_erased_float in march_extras.c, which now prevents it). */
+    if (!IS_HEAP_PTR(v)) {
+        char buf[64];
+        int n = snprintf(buf, sizeof(buf), "#<value:0x%llx>",
+                         (unsigned long long)(uintptr_t)v);
+        return march_string_lit(buf, n);
+    }
+    march_hdr *h = (march_hdr *)v;
+    int32_t tag = h->tag;
+    /* String heap cell: every march_string carries MARCH_STRING_TAG at the
+     * tag word, so to_string on a value whose static type erased to a TVar but
+     * actually holds a string returns the string verbatim (identity), matching
+     * the interpreter — instead of misreading the layout (len-as-tag) and
+     * printing "#<tag:len>".  Result is +1: alias the borrowed input.
+     *
+     * Tested BEFORE the actor-Pid lookup below: this is the hot case now that
+     * Show$String.show routes through here (lib/tir/lower.ml), and an actor's
+     * heap cell always carries an ordinary ctor/record tag (>= 0), never one of
+     * the reserved negative sentinels — so the reorder cannot change a verdict. */
+    if (tag == MARCH_STRING_TAG) { march_incrc(v); return v; }
+    /* Boxed float in an erased slot: render the value, not "#<tag:-3>"
+     * (float-boxing design; also closes a cousin of the to_string-on-erased
+     * divergence). */
+    if (tag == MARCH_FLOAT_TAG) return march_float_to_string(march_unbox_float(v));
+    /* Boxed SIMD vector in an erased slot: render lane-for-lane like
+       impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
+    if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
     /* Check if this pointer is a registered actor → display as Pid(n) */
     march_actor_meta *meta = find_meta(v);
     if (meta) {
@@ -6932,21 +6971,6 @@ void *march_value_to_string(void *v) {
                                                             memory_order_relaxed));
         return march_string_lit(buf, n);
     }
-    march_hdr *h = (march_hdr *)v;
-    int32_t tag = h->tag;
-    /* String heap cell: every march_string carries MARCH_STRING_TAG at the
-     * tag word, so to_string on a value whose static type erased to a TVar but
-     * actually holds a string returns the string verbatim (identity), matching
-     * the interpreter — instead of misreading the layout (len-as-tag) and
-     * printing "#<tag:len>".  Result is +1: alias the borrowed input. */
-    if (tag == MARCH_STRING_TAG) { march_incrc(v); return v; }
-    /* Boxed float in an erased slot: render the value, not "#<tag:-3>"
-     * (float-boxing design; also closes a cousin of the to_string-on-erased
-     * divergence). */
-    if (tag == MARCH_FLOAT_TAG) return march_float_to_string(march_unbox_float(v));
-    /* Boxed SIMD vector in an erased slot: render lane-for-lane like
-       impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
-    if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
     return march_string_lit(buf, n);

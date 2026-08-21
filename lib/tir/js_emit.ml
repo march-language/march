@@ -579,6 +579,15 @@ and emit_val_impl ctx expr =
         emit_atom ctx a
       | "float_to_int", [a] | "float_truncate", [a] ->
         emit ctx "Math.trunc("; emit_atom ctx a; emit ctx ")"
+      (* Show$String.show's body (lib/tir/lower.ml) — a dynamic identity that
+         classifies the UNIFORM representation at runtime, because Mono defaults
+         a dangling type variable to String and an erased value may really be a
+         tagged Int or a boxed Float.  JS has no uniform representation and no
+         erasure: values arrive as their own JS types, so the identity that this
+         body replaced is still exactly right here.  Emitting it keeps the JS
+         backend byte-for-byte unchanged instead of calling an undefined symbol. *)
+      | "march_value_to_string", [a] ->
+        emit_atom ctx a
       | "int_to_string",   [a] ->
         emit ctx "String("; emit_atom ctx a; emit ctx ")"
       | "bool_to_string",  [a] ->

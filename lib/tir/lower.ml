@@ -1276,12 +1276,34 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         [mk_var "x" tir_ty];
       reg_method "show" ty_name mangled
     ) show_specs;
-  (* Show$String.show: identity — the string is already its own representation *)
+  (* Show$String.show: a DYNAMIC identity.  A string is already its own
+     representation, so on a genuine String [march_value_to_string] returns it
+     verbatim (+1) — observationally the same as the `fn x -> x` this used to be.
+     The reason it can no longer be a static identity is that [Tir.TString] is
+     also what [Mono.default_residual_tvars] assigns to a DANGLING type variable,
+     and that assumption ("no concrete value ever flows through it") is false at
+     an erased runtime boundary: `record_get(r, "y")` has type Option('a) with
+     nothing to pin 'a, so `println` specializes to Show$Option.show$Option_String
+     and the static identity handed a tagged Int / boxed Float straight to
+     march_string_concat3 as a march_string* — SIGSEGV, and the residual left
+     open by PR #315 (specs/progress/2026-08-20-record-put-get-float-niche-
+     segfault.md).  march_value_to_string classifies the uniform representation
+     at runtime, which is the only thing that CAN be right here: the compiler
+     provably does not know the type.
+
+     Cost: the common `"${s}"` interpolation never reaches this body — lower.ml
+     elides `Show$String.show` at the source when the argument is concretely a
+     String (see the elision a few hundred lines below, and its note on the
+     Perceus inc/dec pair that motivated it).  What reaches here is the
+     mono-resolved generic-container path (Show$List/Show$Option/string_join
+     elements), which already pays a call and an allocation per element. *)
   let str_x = mk_var "x" Tir.TString in
   let show_str_fn : Tir.fn_def = {
     fn_name = "Show$String.show"; fn_params = [str_x];
     fn_ret_ty = Tir.TString;
-    fn_body = Tir.EAtom (Tir.AVar str_x);
+    fn_body = Tir.EApp (mk_var "march_value_to_string"
+                          (Tir.TFn ([Tir.TString], Tir.TString)),
+                        [Tir.AVar str_x]);
     fn_kind = Tir.FnNormal;
   } in
   fns := show_str_fn :: !fns;

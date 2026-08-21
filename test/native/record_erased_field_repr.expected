@@ -1,0 +1,12 @@
+Some(7)
+Some(8)
+Some(0.5)
+Some(0.)
+Some(str)
+None
+1.5
+1.
+concrete absent: NONE
+[a, b, c]
+[7, 0.5, s]
+[(a, 7), (b, 0.5), (c, s)]

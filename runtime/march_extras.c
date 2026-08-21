@@ -360,23 +360,67 @@ static void *make_none(void) { return (void *)0; }
  * shape; the uniform niche return would read stored 0.0 back as None and
  * make the boxed decoder dereference raw float bits as a pointer → SIGSEGV.
  *
- * Keyed on the CALL-SITE expected_kind, never the stored kind: an erased ('g')
- * read still gets the niche encoding both sides expect, so this does not
- * reintroduce the boxed-cell-misread-by-niche-decoder regression (the "74 depot
- * failures" that motivated niche-for-erased). */
+ * The OPTION ENCODING is keyed on the CALL-SITE expected_kind, never the stored
+ * kind: an erased ('g') read still gets the niche encoding both sides expect, so
+ * this does not reintroduce the boxed-cell-misread-by-niche-decoder regression
+ * (the "74 depot failures" that motivated niche-for-erased).  The PAYLOAD, by
+ * contrast, is keyed on the STORED kind — an erased read of a Float field gets
+ * the march_alloc_float box (rec_box_erased_float), because raw bits are not a
+ * representation any erased consumer can classify. */
 static void *rec_box_none_float(void) {
     return march_alloc(16);                     /* tag=0 (None), no fields */
 }
-static void *rec_box_some_float(int64_t bits) {
+/* [field] is already in the UNIFORM representation — for a Float that means a
+ * march_alloc_float box, never the raw IEEE-754 bits.  The paragraph above
+ * states that contract, and the decode side proves it: llvm_case loads
+ * Option.Some's field 0 with the type of the ctor's DECLARED field (`Some(a)` →
+ * TVar → "ptr"), and the branch body then reaches the concrete `Float` binder
+ * through Llvm_ctx.coerce ("ptr","double"), which IS
+ * `call double @march_unbox_float(ptr %f)`.  Storing raw bits here made
+ * march_unbox_float dereference 0x3FE0000000000000 (0.5) as a heap address —
+ * the SIGSEGV in this file's companion todo and depot's "Float type default in
+ * blank".
+ *
+ * Taking an already-uniform [field] rather than raw bits is what keeps the
+ * mixed case right: a Float written through an ERASED record_put is stored
+ * under kind 'g' as a box already, so re-boxing it would nest two cells.
+ *
+ * This is a RUNTIME-ONLY change and is NOT the boxing attempt PR #315 reverted:
+ * that one also remapped concrete `TFloat` ctor field SLOTS to "ptr" in
+ * llvm_eq/llvm_emit/llvm_case, which broke the inline-double ABI six native
+ * goldens pin (float_generic_field_abi et al).  Those slot rules are untouched
+ * here; only this cell's field is brought in line with how the compiler already
+ * reads it. */
+static void *rec_box_some_float(void *field) {
     void *r = march_alloc(16 + 8);
-    *(int32_t *)((char *)r + 8)  = 1;           /* tag = 1 = Some */
-    *(int64_t *)((char *)r + 16) = bits;        /* raw IEEE-754 double bits */
+    *(int32_t *)((char *)r + 8) = 1;            /* tag = 1 = Some */
+    *(void **)((char *)r + 16)  = field;
     return r;
 }
 
-static void *rec_some_k(int64_t bits, char kind) {
-    if (kind == 'f') return rec_box_some_float(bits);
-    return (void *)(uintptr_t)bits;
+/* A Float crossing into a type-ERASED (uniform ptr) slot is a march_alloc_float
+ * box (MARCH_FLOAT_TAG), never raw bits — the same convention Llvm_ctx.coerce
+ * ("double","ptr") emits on the compiled side, and the only form a downstream
+ * erased consumer can classify (march_value_to_string, generic eq, RC's
+ * IS_HEAP_PTR).  Raw bits both crash those consumers and alias the niche None
+ * for 0.0. */
+static void *rec_box_erased_float(int64_t bits) {
+    union { double d; int64_t i; } u;
+    u.i = bits;
+    return march_alloc_float(u.d);
+}
+
+/* [stored_kind] is the field's real kind, [kind] the CALL SITE's expected one.
+ * They differ whenever the static type is erased ('g') or lying, and a stored
+ * Float is the one case where the two representations are incompatible rather
+ * than merely differently-named — every other kind is already uniform in
+ * [bits].  So the only thing keyed on [stored_kind] is whether the payload
+ * still needs its box; the Option ENCODING stays keyed on [kind]. */
+static void *rec_some_k(int64_t bits, char stored_kind, char kind) {
+    void *uniform = (stored_kind == 'f')
+        ? rec_box_erased_float(bits)
+        : (void *)(uintptr_t)bits;
+    return (kind == 'f') ? rec_box_some_float(uniform) : uniform;
 }
 
 static void *rec_none_k(char kind) {
@@ -857,7 +901,7 @@ static int vault_plausible_heap(void *p) {
  * march_string*" and dereference unconditionally, so every non-String key
  * read the tag word as a length and the payload as a data pointer —
  * SIGSEGV/SIGBUS on the first Int key
- * (specs/todos/2026-08-20-vault-non-string-key-native-crash.md).
+ * (specs/progress/2026-08-20-vault-non-string-key-native-crash.md).
  *
  * Encoding, by representation:
  *   tagged scalar  -> "i:<decimal>"   (matches the interpreter's Int form in
@@ -2170,7 +2214,12 @@ static void rec_field_set(void *rec, int32_t i, int64_t bits) {
 
 /* Field value for ANY generic ptr-sized slot (List payload / Some payload /
  * record_entries pair snd / dynamic field read): the UNIFORM convention —
- * tag ints, raw float bits, incrc heap values. */
+ * tag ints, raw float bits, incrc heap values.
+ *
+ * A 'f' field comes back as RAW bits, so every caller that hands the result to
+ * an ERASED consumer must route it through [rec_box_erased_float] instead (see
+ * [rec_field_out_uniform] just below).  Kept raw here because
+ * [march_record_get]'s concrete-Option(Float) path re-boxes it itself. */
 static int64_t rec_field_out_adt(void *rec, int32_t i, char kind) {
     int64_t raw = rec_field_raw(rec, i);
     switch (kind) {
@@ -2179,6 +2228,19 @@ static int64_t rec_field_out_adt(void *rec, int32_t i, char kind) {
     default:  march_incrc((void *)(intptr_t)raw);   /* guarded for 'g' */
               return raw;
     }
+}
+
+/* [rec_field_out_adt] for a slot whose consumer is genuinely ERASED — a
+ * record_values list element, a record_entries pair snd.  Those are typed
+ * List('a) / List((String, 'a)) with nothing to pin 'a, so the value must be
+ * in the honest uniform representation: a Float is a march_alloc_float box,
+ * not raw IEEE-754 bits.  Raw bits there made `println(record_values(r))`
+ * SIGSEGV on the first Float field (march_value_to_string dereferencing the
+ * double's own bit pattern), and would equally break generic eq/hash/RC. */
+static int64_t rec_field_out_uniform(void *rec, int32_t i, char kind) {
+    if (kind == 'f')
+        return (int64_t)(intptr_t)rec_box_erased_float(rec_field_raw(rec, i));
+    return rec_field_out_adt(rec, i, kind);
 }
 
 /* Slot-to-slot copy within record cells (record_put rebuilding a cell):
@@ -2296,7 +2358,7 @@ void *march_record_values(void *rec) {
     march_record_shape *s = rec_shape_or_panic(rec, "record_values");
     void *list = rec_nil();
     for (int32_t i = s->nfields - 1; i >= 0; i--)
-        list = rec_cons(rec_field_out_adt(rec, i, s->kinds[i]), list);
+        list = rec_cons(rec_field_out_uniform(rec, i, s->kinds[i]), list);
     return list;
 }
 
@@ -2309,7 +2371,7 @@ void *march_record_entries(void *rec) {
     void *list = rec_nil();
     for (int32_t i = s->nfields - 1; i >= 0; i--) {
         void *k = march_string_lit(s->names[i], s->name_lens[i]);
-        void *pair = rec_pair(k, rec_field_out_adt(rec, i, s->kinds[i]));
+        void *pair = rec_pair(k, rec_field_out_uniform(rec, i, s->kinds[i]));
         list = rec_cons((int64_t)(intptr_t)pair, list);
     }
     return list;
@@ -2325,8 +2387,11 @@ void *march_record_get(void *rec, void *key, int64_t expected_kind) {
     int32_t i = rec_find_field(s, ks->data, ks->len);
     if (i < 0) return rec_none_k((char)expected_kind);
     /* Representation must match the call-site decoder (expected_kind), which for
-     * a concrete Option(Float) is BOXED — not the stored kind. */
-    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), (char)expected_kind);
+     * a concrete Option(Float) is BOXED — not the stored kind.  The stored kind
+     * still matters: an ERASED ('g') call site reading a Float field needs the
+     * uniform march_alloc_float box, which only [s->kinds[i]] can reveal. */
+    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]),
+                      s->kinds[i], (char)expected_kind);
 }
 
 /* record_has_key(rec, key) -> Bool (i64 0/1). */

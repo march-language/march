@@ -1,0 +1,12 @@
+nested row1: hello
+nested row2: world
+nested absent: NONE
+snapshot key: row1
+1.5
+1.
+float absent: NONE
+unit present: SOME
+unit absent: NONE
+Some(7)
+Some(8)
+None

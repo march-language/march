@@ -1,0 +1,134 @@
+-- march_vault_get/ns_get always return the NICHE Option encoding (None = raw
+-- null, Some(v) = v itself), because a Vault handle's element type is a phantom
+-- the C runtime never sees.  The compiled call site, though, decodes by the
+-- STATIC type, and Repr.repr_of_ty(Option(p)) is BOXED for every niche-UNSAFE
+-- payload p.  The two disagreed, so a present entry's payload was read as a
+-- boxed ctor cell: the tag load at [v+8] landed inside the payload's own heap
+-- layout, matched no arm, and fell through to the match's default arm.
+-- Compiled-only; the interpreter was correct throughout.
+--   Vault(Option(_))  panic: non-exhaustive pattern match  (the filed bug,
+--                     specs/progress/2026-08-20-nested-option-vault-boxed-niche-mismatch.md)
+--   Vault(Float)      panic: non-exhaustive pattern match
+--   Vault(Unit)       SIGSEGV (exit 139) — the tag load is off a tagged Unit
+--
+-- The Vault(Int) block at the bottom is the NICHE control: Option(Int) IS
+-- niche-safe, so it must keep going through the untouched fast path.  It uses
+-- an ODD key/value AND an EVEN one on purpose.  Every bug in this family is
+-- half-invisible on even values — an even Int survives a raw store untouched
+-- because the erased-i64 untag only shifts odd words — so an even-only test
+-- would pass against the broken compiler and prove nothing.  Do not "simplify"
+-- these to a single even value.
+mod Main do
+  needs IO
+
+  -- Vault(Option(a)): the `None -> (k, None)` arm unifies the handle's phantom
+  -- element type with Option(b), so Vault.get here returns Option(Option(b)) —
+  -- nested Option is niche-UNSAFE (Some(None) would encode as 0, the same word
+  -- as None), which is what forces the BOXED decode.  The handle is minted by
+  -- Vault.whereis rather than the Vault.new below precisely so its element type
+  -- is free to unify that way; this is depot's Depot.Test snapshot shape,
+  -- reduced.
+  fn snapshot_one(tbl, k) do
+    match Vault.get(tbl, k) do
+      Some(v) -> (k, v)
+      None -> (k, None)
+    end
+  end
+
+  fn snapshot_table(table_name) do
+    match Vault.whereis(table_name) do
+      None -> Nil
+      Some(tbl) ->
+        let ks = Vault.keys(tbl)
+        List.map(ks, fn k -> snapshot_one(tbl, k))
+    end
+  end
+
+  -- Only the KEY is printed, exactly as the filed repro did.  A snapshot value
+  -- here has static type Option(b) while the table was written through a
+  -- DIFFERENT handle carrying a String element type, so the two backends
+  -- legitimately render it differently (the interpreter sees the String it
+  -- really is; compiled code niche-decodes the Option the static type claims).
+  -- That is the documented name-keyed-handle caveat in stdlib/vault.march, not
+  -- this bug — reaching walk at all is the assertion, since the defect made
+  -- snapshot_one panic before returning.  The type-HONEST value check is the
+  -- Vault(Option(String)) block in main.
+  pfn walk(snaps) do
+    match snaps do
+      Nil -> ()
+      Cons((k, _snap), rest) ->
+        println("snapshot key: " ++ k)
+        walk(rest)
+    end
+  end
+
+  fn main(cap: Cap(IO)) do
+    -- ── nested Option element, type-honest: Vault(Option(String)) ────────
+    let o = Vault.new("vnu_opt")
+    Vault.set(o, "row1", Some("hello"))
+    Vault.set(o, "row2", Some("world"))
+    match Vault.get(o, "row1") do
+      Some(inner) ->
+        match inner do
+          Some(s) -> println("nested row1: " ++ s)
+          None -> println("nested row1: inner NONE")
+        end
+      None -> println("nested row1: outer NONE")
+    end
+    match Vault.get(o, "row2") do
+      Some(inner) ->
+        match inner do
+          Some(s) -> println("nested row2: " ++ s)
+          None -> println("nested row2: inner NONE")
+        end
+      None -> println("nested row2: outer NONE")
+    end
+    match Vault.get(o, "absent") do
+      Some(_) -> println("nested absent: SOME")
+      None -> println("nested absent: NONE")
+    end
+
+    -- ── the filed repro's own shape: a whereis-minted handle ─────────────
+    let n = Vault.new("vnu_nested")
+    Vault.set(n, "row1", "hello")
+    walk(snapshot_table("vnu_nested"))
+    walk(snapshot_table("vnu_never_registered"))
+
+    -- ── Float element (niche-unsafe: 0.0's bits are 0 = the None niche) ──
+    let f = Vault.new("vnu_float")
+    Vault.set(f, "half", 0.5)
+    Vault.set(f, "zero", 0.0)
+    match Vault.get(f, "half") do
+      Some(x) -> println(x + 1.0)
+      None -> println("float half: NONE")
+    end
+    match Vault.get(f, "zero") do
+      Some(x) -> println(x + 1.0)
+      None -> println("float zero: NONE")
+    end
+    match Vault.get(f, "absent") do
+      Some(x) -> println(x + 1.0)
+      None -> println("float absent: NONE")
+    end
+
+    -- ── Unit element (niche-unsafe: Unit is raw 0) ───────────────────────
+    let u = Vault.new("vnu_unit")
+    Vault.set(u, "k", ())
+    match Vault.get(u, "k") do
+      Some(_) -> println("unit present: SOME")
+      None -> println("unit present: NONE")
+    end
+    match Vault.get(u, "absent") do
+      Some(_) -> println("unit absent: SOME")
+      None -> println("unit absent: NONE")
+    end
+
+    -- ── Int element: the NICHE control, ODD and EVEN (see header) ────────
+    let i = Vault.new("vnu_int")
+    Vault.set(i, "odd", 7)
+    Vault.set(i, "even", 8)
+    println(Vault.get(i, "odd"))
+    println(Vault.get(i, "even"))
+    println(Vault.get(i, "absent"))
+  end
+end

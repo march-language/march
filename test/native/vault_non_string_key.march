@@ -1,0 +1,53 @@
+-- stdlib/vault.march documents that a Vault key can be any plain value (Int,
+-- String, Bool, Atom) and is STRINGIFIED on the way in.  On the native backend
+-- that promise was broken twice over, and forgepm's compiled test suite died
+-- mid-run with a bare SIGBUS (exit 138) and no assertion output:
+--   * runtime vault_key_cstr cast every key straight to march_string* — an Int
+--     key's tagged word was dereferenced as a heap string;
+--   * only the WRITE builtins coerced the key to the uniform ptr slot, so
+--     vault_get/drop/update/incr and the ns_* trio passed it with its NATURAL
+--     llvm type and stringified to a DIFFERENT key than set had stored.
+-- Both were fixed in PR #315 (specs/progress/2026-08-20-vault-non-string-key-
+-- native-crash.md) with no fixture; this is that fixture.
+--
+-- ODD, EVEN and NEGATIVE Int keys are all here on purpose.  The two halves of
+-- the bug hide on different values: an even Int survives a raw store untouched
+-- (the erased-i64 untag only shifts odd words), while an odd one round-trips
+-- CONSISTENTLY WRONG through set+get and looks fine unless you also print
+-- Vault.keys().  An even-only or odd-only test would pass against the broken
+-- compiler.  Do not "simplify" these to a single value.
+mod Main do
+  needs IO
+
+  fn main(cap: Cap(IO)) do
+    let t = Vault.new("vk")
+    Vault.set(t, 7, "odd")
+    Vault.set(t, 8, "even")
+    Vault.set(t, -3, "negative")
+    Vault.set(t, "s", "string")
+    Vault.set(t, true, "bool")
+    println(Vault.get(t, 7))
+    println(Vault.get(t, 8))
+    println(Vault.get(t, -3))
+    println(Vault.get(t, "s"))
+    println(Vault.get(t, true))
+    println(Vault.get(t, 9))
+    println(Vault.size(t))
+
+    -- read/delete builtins that used to skip the key coercion entirely
+    println(Vault.has(t, 8))
+    Vault.drop(t, 8)
+    println(Vault.has(t, 8))
+    println(Vault.put_new(t, 11, "put_new"))
+    println(Vault.get(t, 11))
+
+    let c = Vault.new("vk_c")
+    println(Vault.incr(c, 7, 3))
+    println(Vault.incr(c, 7, 4))
+
+    let u = Vault.new("vk_u")
+    Vault.set(u, 13, 1)
+    Vault.update(u, 13, fn x -> x + 41)
+    println(Vault.get(u, 13))
+  end
+end

@@ -1,0 +1,62 @@
+-- A dynamically-shaped Record's field read hands a value across the ERASED
+-- boundary, and both sides of that boundary used to get the representation
+-- wrong.  Compiled-only; the interpreter was correct throughout.
+-- (specs/progress/2026-08-20-record-put-get-float-niche-segfault.md)
+--
+-- 1. march_record_get's BOXED Some cell for a CONCRETE Option(Float) stored the
+--    raw IEEE-754 bits at +16, but llvm_case loads Option.Some's field 0 as
+--    `ptr` and the Float binder reaches it through coerce("ptr","double") =
+--    march_unbox_float — which dereferenced 0x3FE0000000000000 (0.5) as a heap
+--    address.  SIGSEGV (exit 139); depot's "Float type default in blank".
+-- 2. An ERASED ('g') read handed back the same raw bits, and record_values /
+--    record_entries did too, so `println` of any of them SIGSEGV'd.
+-- 3. The consumer half: `record_get(r, "y")` is Option('a) with nothing to pin
+--    'a, so Mono defaults the dangling variable to String and `println`
+--    specializes to Show$Option.show$Option_String.  Show$String.show was a
+--    static identity, which fed the erased value to march_string_concat3 as a
+--    march_string*.  Crash address 0x3FE0000000000010 for the Float (the
+--    double's bits + the ->data offset) and 0x1b for the Int 5 (tagged 11).
+--
+-- ODD and EVEN Int payloads are both here deliberately.  An even Int survives a
+-- raw store untouched — the erased-i64 untag only shifts odd words — so half of
+-- this family is invisible on even values and an even-only test would pass
+-- against the broken compiler.  Do not "simplify" these to one value.
+mod Main do
+  needs IO
+
+  fn main(cap: Cap(IO)) do
+    -- ── fully erased read: nothing constrains the payload type ───────────
+    let ri = record_put(record_from_list([]), "y", 7)      -- ODD Int
+    println(record_get(ri, "y"))
+    let re = record_put(record_from_list([]), "y", 8)      -- EVEN Int
+    println(record_get(re, "y"))
+    let rf = record_put(record_from_list([]), "y", 0.5)    -- Float
+    println(record_get(rf, "y"))
+    let rz = record_put(record_from_list([]), "y", 0.0)    -- Float 0.0
+    println(record_get(rz, "y"))
+    let rs = record_put(record_from_list([]), "y", "str")  -- heap String
+    println(record_get(rs, "y"))
+    println(record_get(rs, "missing"))
+
+    -- ── concrete Option(Float): the BOXED decode calls march_unbox_float ──
+    match record_get(rf, "y") do
+      Some(x) -> println(x + 1.0)
+      None -> println("concrete float: NONE")
+    end
+    match record_get(rz, "y") do
+      Some(x) -> println(x + 1.0)
+      None -> println("concrete zero: NONE")
+    end
+    match record_get(rf, "missing") do
+      Some(x) -> println(x + 1.0)
+      None -> println("concrete absent: NONE")
+    end
+
+    -- ── record_values / record_entries: always erased element types ──────
+    let mixed = record_put(record_put(record_put(
+                  record_from_list([]), "a", 7), "b", 0.5), "c", "s")
+    println(record_keys(mixed))
+    println(record_values(mixed))
+    println(record_entries(mixed))
+  end
+end
