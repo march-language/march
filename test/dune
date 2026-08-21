@@ -3345,6 +3345,72 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/task_await_ptr.expected native_task_await_ptr_multi.out)))
+; ── Regression: a Float-returning Task must work compiled.  Two defects made
+; ── EVERY Float task unusable natively while the interpreter was correct:
+; ── (1) task_await's "double" arm unboxed the march_float_box in the Ok
+; ── payload and stored raw double bits back, so the Ok(v) destructure unboxed
+; ── a SECOND time and dereferenced the IEEE-754 pattern -> SIGSEGV, no output;
+; ── (2) a zero-arg lambda's closure temp was typed from its span (the RETURN
+; ── type, not `() -> ret`), so Task.async's captured thunk emitted `load
+; ── double` for a closure ptr and clang rejected the module outright.
+; ── This leg covers the documented stdlib surface (async / await /
+; ── await_unwrap / await_many / async_stream) and needs BOTH fixes; the
+; ── task_spawn_float_thunk leg below isolates (1).  There was no Float task
+; ── coverage at all before these, which is why both shipped.  Floats print as
+; ── scaled Ints so the golden does not depend on float_to_string.  Run
+; ── single-threaded so the sequential await prints serialise; diff stdout.
+(rule
+ (targets native_task_await_float native_task_await_float.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_await_float.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_await_float
+        native/task_await_float.march)
+   (with-stdout-to native_task_await_float.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_float")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_await_float.expected native_task_await_float.out)))
+
+; ── Regression: the raw one-arg task_spawn/task_await builtin pair on a Float
+; ── payload — the minimal form of the bug above, isolating the task_await
+; ── codegen defect (a one-arg thunk never reaches the zero-arg typing defect).
+; ── Covers capture-free and capturing thunks (different RC paths into the same
+; ── trampoline).  The Int legs are the CONTROL: they took the identical path
+; ── and only ever passed by luck, with nothing pinning them.  Deterministic
+; ── under MARCH_NUM_SCHEDULERS=1; diff stdout.
+(rule
+ (targets native_task_spawn_float_thunk native_task_spawn_float_thunk.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_spawn_float_thunk.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_spawn_float_thunk
+        native/task_spawn_float_thunk.march)
+   (with-stdout-to native_task_spawn_float_thunk.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_spawn_float_thunk")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_spawn_float_thunk.expected native_task_spawn_float_thunk.out)))
 
 ; ── FFI Phase 2: borrowed extern args must be freed caller-side (no leak) ──
 (rule

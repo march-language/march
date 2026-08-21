@@ -1,0 +1,80 @@
+-- Regression: a Float-returning Task must survive the compiled backend.
+--
+-- Two independent defects made EVERY Float-returning task unusable natively
+-- while the interpreter returned the right answer:
+--
+--   1. `task_await`'s codegen unboxed the march_float_box in the Ok payload
+--      slot and stored the raw double bits back into it.  The `Ok(v)`
+--      destructure then unboxed a SECOND time, dereferencing the IEEE-754
+--      bit pattern as an address -> SIGSEGV (rc=139), no output.  Only the
+--      single ashr-1 that recovers apply_ret from task[3] belongs there; the
+--      box IS the uniform field representation.
+--   2. A zero-arg lambda's closure temp was typed from its source span, which
+--      yields the RETURN type rather than `() -> ret`.  `Task.async(f)` is
+--      `task_spawn(fn _ -> f())`, so the captured `f : () -> Float` was typed
+--      `Float`; codegen emitted `load double` for a closure pointer and clang
+--      rejected the module ("'%ldN' defined with type 'double' but expected
+--      'i64'") -- a hard build failure, not a crash.
+--
+-- Defect 1 is what this file's first leg pins; defect 2 gated every leg here,
+-- since all of them route through `Task.async`/`async_stream`'s zero-arg
+-- thunk.  There was NO Float task coverage at all before this fixture, which
+-- is why both shipped.  See test/native/task_spawn_float_thunk.march for the
+-- one-arg builtin form, which needs only defect 1.
+--
+-- Values are printed as scaled Ints rather than through float_to_string: the
+-- formatter has several backends (see specs/progress on float->string), and
+-- this fixture is about the Float *representation* crossing the task
+-- boundary, not about how it renders.  Every constant here is exactly
+-- representable in binary FP, so the scaling is exact.
+--
+-- All output is produced by the main green thread after a blocking await, and
+-- folds preserve list order, so the output is deterministic under
+-- MARCH_NUM_SCHEDULERS=1 (see test/dune).
+mod TaskAwaitFloat do
+
+  needs IO.Console
+  needs IO.Spawn
+
+  pfn scaled(f : Float) : String do
+    int_to_string(float_to_int(f *. 100.0))
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+    -- Task.await on Float: pre-fix this SIGSEGVed (after defect 2 was fixed)
+    -- or failed to compile at all (before it).  1.5 * 100 = 150.
+    let t = Task.async(fn () -> 1.5)
+    match Task.await(t) do
+      Ok(v)  -> println("await=" ++ scaled(v))
+      Err(e) -> println("await_err=" ++ e)
+    end
+
+    -- Task.await_unwrap goes through task_await_unwrap, whose "double" arm
+    -- DOES unbox (it yields the scalar as its value, not as an ADT field) --
+    -- the opposite of task_await's.  Pin that the two stay distinguished.
+    println("await_unwrap=" ++ scaled(Task.await_unwrap(Task.async(fn () -> 2.25))))
+
+    -- Task.await_many: in-order fold over [0.5, 0.25, 1.0] -> 1.75 -> 175.
+    let ts = [Task.async(fn () -> 0.5),
+              Task.async(fn () -> 0.25),
+              Task.async(fn () -> 1.0)]
+    let many_sum = List.fold_left(Task.await_many(ts), 0.0, fn (acc, r) ->
+      match r do
+        Ok(v)  -> acc +. v
+        Err(_) -> acc
+      end
+    )
+    println("await_many_sum=" ++ scaled(many_sum))
+
+    -- Task.async_stream: halves of 1..4 -> 0.5+1.0+1.5+2.0 = 5.0 -> 500.
+    let halves = Task.async_stream([1, 2, 3, 4], fn n -> int_to_float(n) *. 0.5)
+    let stream_sum = List.fold_left(halves, 0.0, fn (acc, r) ->
+      match r do
+        Ok(v)  -> acc +. v
+        Err(_) -> acc
+      end
+    )
+    println("stream_sum=" ++ scaled(stream_sum))
+  end
+
+end

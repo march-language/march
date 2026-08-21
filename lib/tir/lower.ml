@@ -160,7 +160,28 @@ let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : 
         instead of `:x`. *)
      | Tir.EAtom (Tir.AVar _ as a) -> k a
      | _ ->
-       let v = fresh_var (ty_of_expr env e) in
+       (* Prefer the type the LOWERING computed over the one the source span
+          records.  For a lambda, [lower_expr] returns
+          [ELetRec ([fn], EAtom (AVar fn_var))] and builds [fn_var.v_ty] as
+          [TFn (param_tys, ret_ty)] from the fn_def it just constructed — that
+          is authoritative by construction.  [ty_of_expr env e] consults the
+          shared type_map by span, which for a ZERO-ARG lambda hands back the
+          RETURN type instead of `() -> ret`, so the temp holding the closure
+          is typed as whatever the thunk computes.  Codegen then loads the
+          captured closure with the return type's LLVM representation:
+          `Task.async(fn () -> 1.5)` typed the captured `f : () -> Float` as
+          `Float`, emitted `load double` for a closure pointer and
+          `inttoptr i64 %d` on a `double`, and clang rejected the module
+          ('%ldN' defined with type 'double' but expected 'i64').  An Int thunk
+          is mistyped identically and merely survives because i64 and ptr share
+          a register — so this is a latent miscompile for every zero-arg
+          lambda, not only the Float one that made it visible.
+          See specs/progress/2026-08-21-float-returning-task-compiled.md. *)
+       let ty = match rhs with
+         | Tir.ELetRec ([_], Tir.EAtom (Tir.AVar fv)) -> fv.Tir.v_ty
+         | _ -> ty_of_expr env e
+       in
+       let v = fresh_var ty in
        Tir.ELet (v, rhs, k (Tir.AVar v)))
 
 (** Lower a list of expressions to atoms using CPS. *)
