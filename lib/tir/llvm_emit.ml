@@ -671,6 +671,20 @@ let emit_set_shape = Llvm_data.emit_set_shape
 let apply_ty_subst = Llvm_eq.apply_ty_subst
 let mangle_ty_for_eq = Llvm_eq.mangle_ty_for_eq
 let field_load_llty = Llvm_eq.field_load_llty
+
+(* Ctor-field slot type for construction/extraction sites: identical to
+   [llvm_ty] EXCEPT Float, whose Boxed-ADT field slot holds a
+   [march_alloc_float] box behind a `ptr` (see [Llvm_eq.field_load_llty]'s
+   doc comment and march_string_to_float's convention in
+   runtime/march_runtime.c).  Deliberately NOT [Llvm_eq.field_load_llty]:
+   that helper's `_ -> "ptr"` catch-all also remaps Atom (llvm_ty "i64") —
+   using it at construction sites silently switched Atom ctor fields from
+   raw interned-hash i64 to a tagged-scalar ptr slot and broke every
+   downstream reader that loads them via [llvm_ty] (bastion
+   Middleware.allow_methods, 2026-08-20). *)
+let ctor_field_llty : Tir.ty -> string = function
+  | Tir.TFloat -> "ptr"
+  | t -> llvm_ty t
 let ensure_adt_eq_fn = Llvm_eq.ensure_adt_eq_fn
 
 (* emit_raises_wrapper moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): the
@@ -4290,7 +4304,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              let entry = ctor_entry ctx ctor (List.length args) in
              let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_ty t | None -> "ptr" in
+               | Some t -> ctor_field_llty t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
              emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
              ("ptr", ptr))
@@ -4301,7 +4315,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
+              | Some t -> ctor_field_llty t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
           ) args;
@@ -4312,7 +4326,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
        List.iteri (fun i atom ->
          let field_ty = match List.nth_opt entry.ce_fields i with
-           | Some t -> llvm_ty t
+           | Some t -> ctor_field_llty t
            | None ->
              failwith (Printf.sprintf
                "LLVM emit: constructor %s has %d field(s) but field index %d \
@@ -4444,7 +4458,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           | atom :: tl ->
             rest := tl;
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
+              | Some t -> ctor_field_llty t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             Some (i, field_ty, coerce ctx v_ty v_val field_ty)
           | [] ->
@@ -4550,7 +4564,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit_store_tag ctx ptr entry.ce_tag;
     List.iteri (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t
+        | Some t -> ctor_field_llty t
         | None ->
           failwith (Printf.sprintf
             "LLVM emit: constructor %s has %d field(s) but field index %d \
@@ -4658,7 +4672,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              let entry = ctor_entry ctx ctor (List.length args) in
              let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_ty t | None -> "ptr" in
+               | Some t -> ctor_field_llty t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
              emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
              ("ptr", ptr))
@@ -4667,7 +4681,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
+              | Some t -> ctor_field_llty t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
           ) args;
@@ -4699,7 +4713,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_ty t
+          | Some t -> ctor_field_llty t
           | None -> failwith (Printf.sprintf
               "LLVM emit: constructor %s has %d field(s) but field index %d \
                was requested (arity mismatch)"
@@ -4741,7 +4755,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       emit_store_tag ctx rv entry.ce_tag;
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_ty t
+          | Some t -> ctor_field_llty t
           | None -> failwith (Printf.sprintf
               "LLVM emit: actor-struct reuse %s has %d field(s) but field index \
                %d was requested (arity mismatch)"
@@ -4779,7 +4793,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* Pre-compute all arg values before branching *)
     let arg_vals = List.mapi (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t
+        | Some t -> ctor_field_llty t
         | None ->
           failwith (Printf.sprintf
             "LLVM emit: constructor %s has %d field(s) but field index %d \

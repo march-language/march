@@ -38,10 +38,13 @@ let rec mangle_ty_for_eq : Tir.ty -> string = function
   | Tir.TTuple ts -> "Tup_" ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
   | _            -> "Ptr"
 
-(** LLVM load type for an ADT field: i64 for scalar types, double for float, ptr for heap. *)
+(** LLVM load type for an ADT field: i64 for scalar types, ptr for float
+    (a Boxed-ADT ctor field slot is uniformly pointer-width; a Float field
+    holds a march_alloc_float box, not an inline double — see the
+    march_string_to_float / rec_box_some_float convention in
+    runtime/march_extras.c and runtime/march_runtime.c), ptr for heap. *)
 let field_load_llty : Tir.ty -> string = function
   | Tir.TInt | Tir.TBool | Tir.TUnit -> "i64"
-  | Tir.TFloat -> "double"
   | _ -> "ptr"
 
 (** Ensure a structural equality function for [ty] exists in [ctx.extra_fns].
@@ -454,8 +457,13 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
                  e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
                  e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
                | Tir.TFloat ->
+                 (* fva/fvb are march_alloc_float boxes (field_load_llty now
+                    loads TFloat as ptr) — unbox before comparing doubles. *)
+                 let da = frsh "da" in let db = frsh "db" in
+                 e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" da fva);
+                 e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" db fvb);
                  let c = frsh "c" in
-                 e (Printf.sprintf "%s = fcmp oeq double %s, %s" c fva fvb);
+                 e (Printf.sprintf "%s = fcmp oeq double %s, %s" c da db);
                  e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
                | Tir.TString ->
                  e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" ok fva fvb)
@@ -538,8 +546,13 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
              e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
              e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
            | Tir.TFloat ->
+             (* fva/fvb are march_alloc_float boxes (field_load_llty now
+                loads TFloat as ptr) — unbox before comparing doubles. *)
+             let da = frsh "da" in let db = frsh "db" in
+             e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" da fva);
+             e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" db fvb);
              let c = frsh "c" in
-             e (Printf.sprintf "%s = fcmp oeq double %s, %s" c fva fvb);
+             e (Printf.sprintf "%s = fcmp oeq double %s, %s" c da db);
              e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
            | Tir.TString ->
              e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" ok fva fvb)

@@ -712,10 +712,36 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
                    ~type_name:(Some type_name) ~ctor_name:short_tag with
            | Some key -> key
            | None ->
-             if env.mod_prefix <> ""
-                && Lower_state.shared_ctor_collision_type env.mod_prefix short_tag <> None
-             then env.mod_prefix ^ type_name ^ "." ^ short_tag
-             else type_name ^ "." ^ short_tag)
+             (* Qualifier-carrying construction of a narrow-collision ctor:
+                the pattern-side counterpart (lower_match.ml's qualified-tag
+                branch) re-expands a written module qualifier (`Ast.Asc`)
+                into the 3-segment "Mod.Type.Ctor" key when
+                [shared_ctor_collision_type] resolves it.  Without the same
+                re-expansion here, the construction keyed bare
+                ("SortDir.Asc") while the pattern keyed qualified
+                ("Ast.SortDir.Asc"); codegen's [ctor_entry] suffix scan then
+                resolved the bare construction against whichever colliding
+                type registered first (stdlib DataFrame.SortDir.Asc, tag
+                33554493) while the match switch tested the pattern's tag
+                (Ast.SortDir.Asc, 33554516) — every qualified construction
+                of a collision ctor failed open to the match's default arm
+                at runtime (depot ORDER BY/GROUP BY, 2026-08-20). *)
+             let qualified_collision_key =
+               match String.rindex_opt tag '.' with
+               | None -> None
+               | Some i ->
+                 let qual = String.sub tag 0 (i + 1) in
+                 (match Lower_state.shared_ctor_collision_type qual short_tag with
+                  | Some _ -> Some (qual ^ type_name ^ "." ^ short_tag)
+                  | None -> None)
+             in
+             (match qualified_collision_key with
+              | Some key -> key
+              | None ->
+                if env.mod_prefix <> ""
+                   && Lower_state.shared_ctor_collision_type env.mod_prefix short_tag <> None
+                then env.mod_prefix ^ type_name ^ "." ^ short_tag
+                else type_name ^ "." ^ short_tag))
         | _ -> short_tag
       in
       (* For a NULLARY constructor (e.g. [None]) thread the enclosing type's

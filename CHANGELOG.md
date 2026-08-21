@@ -39,6 +39,37 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A module-qualified construction of a collision-set constructor no longer
+  resolves to the WRONG type's constructor.** Writing `Ast.Asc` as an
+  expression, when another module (e.g. stdlib `DataFrame`) declares a
+  same-named constructor on a same-short-named type and the collision is
+  public + impl-bearing, keyed the construction BARE (`SortDir.Asc`) while
+  the pattern side (fixed 2026-07-27) keyed it fully qualified
+  (`Ast.SortDir.Asc`) — codegen's suffix resolver then gave the constructed
+  value the OTHER type's runtime tag, so every match on it failed open to
+  the default arm at runtime (compiled only; the interpreter was correct).
+  Found via depot: 16+ ORDER BY/GROUP BY/WHERE tests panicked
+  "non-exhaustive pattern match" the moment any file pulling stdlib
+  DataFrame joined the whole-program build. The expression side now
+  re-expands a written module qualifier through the same
+  narrow-collision table the pattern side uses, so both sides agree on the
+  qualified key. See `lib/tir/lower.ml` (ECon).
+
+- **A Boxed-ADT `Float` field is now stored and loaded as a boxed
+  `march_float_box`, not raw inline double bits.** Three same-family
+  defects fixed together: `record_get`'s boxed `Some(Float)` cell stored
+  raw IEEE-754 bits that `march_unbox_float` then dereferenced as a heap
+  pointer (SIGSEGV — depot's "Float type default in blank");
+  ADT structural equality loaded a `TFloat` ctor field as a raw `double`,
+  so `Some(0.0)` from a record/Vault read compared unequal to a
+  constructed `Some(0.0)`; and constructor emission + match-branch field
+  extraction stored/loaded the raw double inline, so a multi-ctor ADT
+  with a Float payload (depot's `SqlValue.PFloat`) round-tripped garbage
+  through construction → match → `to_string`. All ctor-field sites now
+  agree on the boxed convention `march_string_to_float` already
+  documented. See
+  `specs/progress/2026-08-20-record-put-get-float-niche-segfault.md`.
+
 - **Security: `~H` no longer renders an interpolated value as executable
   JavaScript, and its URL-attribute list no longer misses live vectors.** Found
   and fixed pre-release; no tagged version shipped it. Three defects, all in the
