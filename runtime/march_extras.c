@@ -349,10 +349,16 @@ static void *make_none(void) { return (void *)0; }
  * collides with the None niche, and a nonzero float's bits are not a valid heap
  * pointer.  llvm_emit decodes a *concrete* Option(Float) as BOXED
  * (Repr.niche_payload_ok TFloat = false): None = tag-0 heap cell, Some(f) =
- * tag-1 cell with the double at offset 16 (see EAlloc alloc-none-boxed /
- * alloc-some-boxed).  So for an 'f' *call site* we must return that boxed shape;
- * the uniform niche return would read stored 0.0 back as None and make the boxed
- * decoder dereference raw float bits as a pointer → SIGSEGV.
+ * tag-1 cell with a `ptr` field at offset 16 holding a march_alloc_float box —
+ * NOT the raw double.  The compiler's generic Boxed-ADT ctor convention treats
+ * every ctor field slot as pointer-width and, for a Float field, loads it as
+ * `ptr` then calls march_unbox_float(ptr) to recover the double (see
+ * march_string_to_float's identical float-boxing convention, and the SIGSEGV
+ * that motivated it: storing the raw double bits directly at offset 16 makes
+ * march_unbox_float dereference the float's own bit pattern as a heap
+ * pointer). So for an 'f' *call site* we must return that boxed-of-boxed
+ * shape; the uniform niche return would read stored 0.0 back as None and
+ * make the boxed decoder dereference raw float bits as a pointer → SIGSEGV.
  *
  * Keyed on the CALL-SITE expected_kind, never the stored kind: an erased ('g')
  * read still gets the niche encoding both sides expect, so this does not
@@ -362,9 +368,11 @@ static void *rec_box_none_float(void) {
     return march_alloc(16);                     /* tag=0 (None), no fields */
 }
 static void *rec_box_some_float(int64_t bits) {
+    double f;
+    memcpy(&f, &bits, sizeof(f));               /* raw IEEE-754 bits -> double */
     void *r = march_alloc(16 + 8);
     *(int32_t *)((char *)r + 8)  = 1;           /* tag = 1 = Some */
-    *(int64_t *)((char *)r + 16) = bits;        /* raw IEEE-754 double bits */
+    *(void  **)((char *)r + 16) = march_alloc_float(f);  /* boxed, per the Boxed-ADT convention above */
     return r;
 }
 

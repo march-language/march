@@ -763,7 +763,15 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          below to decide which fields are genuine heap pointers (for IncRC). *)
       List.iteri (fun i (v : Tir.var) ->
         let field_ty = match List.nth_opt entry.Llvm_ctx.ce_fields i with
-          | Some t -> Llvm_ctx.llvm_ty t | None -> Llvm_ctx.llvm_ty v.Tir.v_ty in
+          (* TFloat only — a Boxed-ADT Float field holds a march_alloc_float
+             box behind a ptr slot; every other type keeps llvm_ty (notably
+             Atom stays raw i64 — see ctor_field_llty in llvm_emit.ml). *)
+          | Some Tir.TFloat -> "ptr"
+          | Some t -> Llvm_ctx.llvm_ty t
+          | None ->
+            (match v.Tir.v_ty with
+             | Tir.TFloat -> "ptr"
+             | t -> Llvm_ctx.llvm_ty t) in
         let fv = Llvm_data.emit_load_field ctx scrut_val i field_ty in
         let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
         Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
