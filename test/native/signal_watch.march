@@ -1,8 +1,27 @@
 -- Native golden (Phase 7.2, Signal.watch Stage B): a watched USR2 delivered by
 -- a self-raise must run its handler exactly once, from the scheduler drain, on
 -- a normal stack.  The handler prints AFTER main's body because dispatch is
--- deferred (the drain runs once main's green thread finishes).  A final drain
--- in march_sched_run makes the "raise then exit" ordering deterministic.
+-- deferred: that ordering is the ONLY thing distinguishing a deferred drain
+-- from a handler run synchronously inside Signal.raise, so it is the property
+-- this golden exists to pin.  Do not "simplify" it into an order-free check.
+--
+-- ORDERING HAZARD — this rule must run at MARCH_NUM_SCHEDULERS=1.
+-- march_signal_drain() is called at the TOP OF EVERY sched_loop iteration on
+-- EVERY scheduler thread (runtime/march_scheduler.c).  At the default of 4
+-- schedulers the other three threads are idle-spinning in that loop, so the
+-- self-raise's pending flag is claimed by whichever thread gets there first —
+-- typically a worker, microseconds later, running the handler CONCURRENTLY
+-- with main's own println.  That made this golden fail ~4% of the time under
+-- load, two ways: `caught usr2` landing before `after raise`, and the two
+-- threads' writes tearing into one line (`after raisecaught usr2`).  Measured
+-- 8/200 at the default vs 0/200 at MARCH_NUM_SCHEDULERS=1 on the same binary.
+-- See specs/progress/2026-08-21-signal-watch-output-ordering-flake.md.
+--
+-- At one scheduler nothing else can run while main's green thread runs, so the
+-- drain cannot happen until main finishes — the ordering is then a genuine
+-- guarantee rather than a typical outcome.  native_signal_watch_multisched
+-- keeps the >1-scheduler drain covered, with an assertion that does not depend
+-- on an interleaving the runtime never promised.
 mod Main do
   needs IO.Console
   needs IO.Signal
