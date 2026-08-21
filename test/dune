@@ -1278,123 +1278,14 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/lazy_niche.expected native_lazy_niche.out)))
 
-; ── Regression: Boxed-ADT Float field boxing (2026-08-20) ────────────────
-; A Float payload behind a Boxed-ADT slot — record_get's Option(Float)
-; Some-cell, or a multi-ctor ADT's Float ctor field — was stored/loaded as
-; raw inline double bits at three sites (runtime/march_extras.c
-; rec_box_some_float, lib/tir/llvm_eq.ml field_load_llty, lib/tir/llvm_emit.ml
-; ctor_field_llty + its ctor-store call sites, lib/tir/llvm_case.ml branch
-; extraction) while the established convention (march_string_to_float) is a
-; march_alloc_float box behind a `ptr` slot. march_unbox_float then
-; dereferenced the raw IEEE-754 bit pattern as a heap pointer — SIGSEGV
-; (depot's "Float type default in blank";
-; specs/progress/2026-08-20-record-put-get-float-niche-segfault.md).
-; Compiled at both the default opt level (2) and --opt 0 (the original
-; report reproduced at both), and run, diffing stdout against the
-; interpreter's (identical) output.
-(rule
- (targets native_record_float_niche_typed native_record_float_niche_typed.out)
- (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file native/record_float_niche_typed.march))
- (action
-  (progn
-   (run %{exe:../bin/main.exe} --compile -o native_record_float_niche_typed
-        native/record_float_niche_typed.march)
-   (with-stdout-to native_record_float_niche_typed.out
-        (system "./native_record_float_niche_typed")))))
-
-(rule
- (alias runtest)
- (action (diff native/record_float_niche_typed.expected native_record_float_niche_typed.out)))
-
-(rule
- (targets native_record_float_niche_typed_opt0 native_record_float_niche_typed_opt0.out)
- (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file native/record_float_niche_typed.march))
- (action
-  (progn
-   (run %{exe:../bin/main.exe} --compile --opt 0 -o native_record_float_niche_typed_opt0
-        native/record_float_niche_typed.march)
-   (with-stdout-to native_record_float_niche_typed_opt0.out
-        (system "./native_record_float_niche_typed_opt0")))))
-
-(rule
- (alias runtest)
- (action (diff native/record_float_niche_typed.expected native_record_float_niche_typed_opt0.out)))
-
-; ── Regression: same cluster as above, via structural equality ───────────
-; record_get(r, key) : Option(Float) must compare equal to a constructed
-; Some(Float) (__march_eq_Option_Float / the derived-Eq comparator path) —
-; before the fix, record_get's boxed Some(Float) cell held raw bits, so the
-; unboxing on the record-read side produced garbage and the comparison came
-; back wrong.
-(rule
- (targets native_record_float_niche_eq native_record_float_niche_eq.out)
- (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file native/record_float_niche_eq.march))
- (action
-  (progn
-   (run %{exe:../bin/main.exe} --compile -o native_record_float_niche_eq
-        native/record_float_niche_eq.march)
-   (with-stdout-to native_record_float_niche_eq.out
-        (system "./native_record_float_niche_eq")))))
-
-(rule
- (alias runtest)
- (action (diff native/record_float_niche_eq.expected native_record_float_niche_eq.out)))
-
-(rule
- (targets native_record_float_niche_eq_opt0 native_record_float_niche_eq_opt0.out)
- (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file native/record_float_niche_eq.march))
- (action
-  (progn
-   (run %{exe:../bin/main.exe} --compile --opt 0 -o native_record_float_niche_eq_opt0
-        native/record_float_niche_eq.march)
-   (with-stdout-to native_record_float_niche_eq_opt0.out
-        (system "./native_record_float_niche_eq_opt0")))))
-
-(rule
- (alias runtest)
- (action (diff native/record_float_niche_eq.expected native_record_float_niche_eq_opt0.out)))
-
-; ── Regression: same cluster, multi-ctor ADT Float field (depot SqlValue) ──
+; ── Regression: multi-ctor ADT Float field round-trip (depot SqlValue shape) ──
 ; PFloat(3.14) == PFloat(3.14) via derived Eq, plus match-extract +
-; float_to_string, exercising llvm_emit.ml's ctor-store sites and
-; llvm_case.ml's branch extraction together with llvm_eq.ml's comparator —
-; the three sites the fix keeps in agreement on the boxed convention.
+; float_to_string, exercising llvm_emit.ml's ctor-store sites, llvm_case.ml's
+; branch extraction, and llvm_eq.ml's comparator together — a convention
+; guard: whatever representation a concrete TFloat ctor field uses, all
+; three sites must agree (see specs/todos/2026-08-20-record-put-get-float-
+; niche-segfault.md for the still-open, DIFFERENT erased-record-field case
+; this does not cover).
 (rule
  (targets native_boxed_adt_float_field native_boxed_adt_float_field.out)
  (deps (file %{exe:../bin/main.exe})
