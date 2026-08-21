@@ -30,6 +30,20 @@ git log is authoritative for exact commits.
   lifetime); an erased self-recursive Float accumulator still leaks on its
   back-edge (tracked).
 
+- **`tcp_connect` reported a connection that had succeeded as
+  "Socket is already connected".** An interrupted `connect()` was retried on the
+  same fd (`do { connect } while (errno == EINTR)`), but POSIX completes an
+  interrupted `connect()` asynchronously in the kernel — the retry reports the
+  in-flight attempt as `EALREADY`/`EISCONN` instead of redoing it, so a
+  successful connection surfaced as `Err`. It read as a concurrency bug even
+  though the function holds no shared state: preemption delivers `SIGUSR1` to
+  every scheduler thread each millisecond, so a process making one outbound
+  request almost never took a signal inside `connect()` while a process making
+  several took them constantly — a single HTTPS client worked, four concurrent
+  ones failed immediately. `connect()` is now issued once, with `EINTR` (and
+  `EINPROGRESS`) recovered by waiting for writability and reading `SO_ERROR`.
+  The `EINTR` retries on `recv`/`send`/`writev` are correct and unchanged.
+
 - **`typed_array_*` returned corrupt values for scalar elements when compiled.**
   The family threads a genuinely generic `'a` through a uniform erased slot, so a
   scalar element has to arrive boxed (an `Int` tagged, a `Float` boxed) — but
