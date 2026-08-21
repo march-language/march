@@ -148,6 +148,27 @@ let clo_struct_name ~(fn_name : string) ~(lam_uid : int) : string =
 let apply_fn_name ~(fn_name : string) ~(lam_uid : int) : string =
   Printf.sprintf "%s$apply$%d" fn_name lam_uid
 
+(** Inverse of [apply_fn_name]'s prefix: ["go$apply$3621"] → [Some "go"];
+    [None] when [name] is not an apply-fn name.  Splits at the FIRST
+    ["$apply$"] marker — the [fn_name] half is the lambda's source-level
+    name as bound by defun's recursive self-binding ([add_self_binding]
+    emits [let fn_name = $clo]), which is exactly what a caller needs to
+    recognise a self-call through the closure: inside [go$apply$3621] an
+    [ECallPtr] whose callee variable is named [go] dispatches back to this
+    very function.  Used by llvm_emit's Float temp-box releases to keep a
+    self-tail-call free of post-call instructions (which would defeat
+    LLVM's tail-call elimination and turn an O(1)-stack loop into O(n)
+    frames — a measured stack overflow at 20k depth). *)
+let apply_fn_base (name : string) : string option =
+  let marker = "$apply$" in
+  let nl = String.length name and ml = String.length marker in
+  let rec scan i =
+    if i + ml > nl then None
+    else if String.sub name i ml = marker then Some (String.sub name 0 i)
+    else scan (i + 1)
+  in
+  scan 0
+
 (* ── Closure-struct parameter name: "$clo" ──────────────────────────────
    Producer: lib/tir/defun.ml binds every apply-wrapper's first parameter
    to this fixed name (the opaque pointer to the closure struct itself).

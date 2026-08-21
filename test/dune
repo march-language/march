@@ -4865,6 +4865,47 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
     test \"$live\" -lt 1000 || { echo \"native_arr_fold_acc_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. Folding 2,000,000 elements with a FLOAT accumulator must not accumulate per-element march_alloc_float boxes -- healthy is a small constant (9 objects, measured identical at 500k/2M/8M elements), and dropping the accumulator release makes it 4,000,007. Check that native_float_arr_fold and native_f32_arr_fold in runtime/march_runtime.c still call fold_release_prev_acc after call_closure_2.\" >&2; exit 1; }; \
     echo \"native_arr_fold_acc_leak_probe live_allocs delta = ${live} objects\"")))
 
+; Float-box uniform-ABI leak probe (call-site release of the erased-ABI Float
+; boxes at ECallPtr / devirtualized-EApp closure calls). Same three-rule shape
+; and rationale as native_arr_fold_acc_leak_probe above: compile, run with
+; stdout/stderr captured to FILES (the run's exit status is dune's own; the
+; identity_leg would CRASH here if a release were over-eager), then assert the
+; live_allocs delta read from the captured file.
+(rule
+ (targets native_float_box_abi_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_float_box_abi_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_float_box_abi_leak_probe
+       native/native_float_box_abi_leak_probe.march)))
+
+(rule
+ (targets native_float_box_abi_leak_probe.out native_float_box_abi_leak_probe.live)
+ (deps native_float_box_abi_leak_probe)
+ (action
+  (with-stdout-to native_float_box_abi_leak_probe.out
+   (with-stderr-to native_float_box_abi_leak_probe.live
+    (run ./native_float_box_abi_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/native_float_box_abi_leak_probe.expected
+        native_float_box_abi_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_float_box_abi_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat native_float_box_abi_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from native_float_box_abi_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"native_float_box_abi_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. A Float crossing the uniform-ptr closure ABI (argument box at the call site, result box on return) must be released by the call site -- healthy is a small constant, and the unfixed tree measured 7,200,003 over the probe's 5.1M closure calls (exactly the per-call box count stated in the probe header). Check the Float temp-box releases in lib/tir/llvm_emit.ml's ECallPtr dispatch arm and EApp Boundary-B (is_apply_fn) arm.\" >&2; exit 1; }; \
+    echo \"native_float_box_abi_leak_probe live_allocs delta = ${live} objects\"")))
+
+
 
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types
 ; (F32x4/F64x2/I32x4/I64x2/U8x16, Task 2 — every op including load/store,
