@@ -1,0 +1,11 @@
+-- Constructs the collision ctor with a WRITTEN MODULE QUALIFIER
+-- (`QcTypes.Asc`), from a module other than the declaring one — exactly
+-- the shape lib/tir/lower.ml's ECon fix targets: before the fix this keyed
+-- the EAlloc BARE ("SortDir.Asc") instead of qualified
+-- ("QcTypes.SortDir.Asc"), landing on whichever colliding SortDir
+-- registered first (stdlib DataFrame's, when DataFrame joins the
+-- whole-program build — see entry.march).
+mod QcConstruct do
+  fn make_asc() : QcTypes.SortDir do QcTypes.Asc end
+  fn make_desc() : QcTypes.SortDir do QcTypes.Desc end
+end

@@ -1,0 +1,15 @@
+-- Pattern-matches the collision ctor with the same written module
+-- qualifier (`QcTypes.Asc`). The pattern side (fixed 2026-07-27) already
+-- qualified correctly; before the ECon fix in this cluster, the
+-- CONSTRUCTION side (qc_construct.march) disagreed with this match's tag,
+-- so every match against a qualified-construction value fell through to
+-- the default arm ("non-exhaustive pattern match" panic at runtime).
+mod QcMatch do
+  fn describe(v : QcTypes.SortDir) : String do
+    match v do
+    QcTypes.Asc  -> "matched-asc"
+    QcTypes.Desc -> "matched-desc"
+    _            -> "matched-other"
+    end
+  end
+end

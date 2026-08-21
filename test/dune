@@ -1278,6 +1278,291 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/lazy_niche.expected native_lazy_niche.out)))
 
+; ── Regression: Boxed-ADT Float field boxing (2026-08-20) ────────────────
+; A Float payload behind a Boxed-ADT slot — record_get's Option(Float)
+; Some-cell, or a multi-ctor ADT's Float ctor field — was stored/loaded as
+; raw inline double bits at three sites (runtime/march_extras.c
+; rec_box_some_float, lib/tir/llvm_eq.ml field_load_llty, lib/tir/llvm_emit.ml
+; ctor_field_llty + its ctor-store call sites, lib/tir/llvm_case.ml branch
+; extraction) while the established convention (march_string_to_float) is a
+; march_alloc_float box behind a `ptr` slot. march_unbox_float then
+; dereferenced the raw IEEE-754 bit pattern as a heap pointer — SIGSEGV
+; (depot's "Float type default in blank";
+; specs/progress/2026-08-20-record-put-get-float-niche-segfault.md).
+; Compiled at both the default opt level (2) and --opt 0 (the original
+; report reproduced at both), and run, diffing stdout against the
+; interpreter's (identical) output.
+(rule
+ (targets native_record_float_niche_typed native_record_float_niche_typed.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/record_float_niche_typed.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_float_niche_typed
+        native/record_float_niche_typed.march)
+   (with-stdout-to native_record_float_niche_typed.out
+        (system "./native_record_float_niche_typed")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_float_niche_typed.expected native_record_float_niche_typed.out)))
+
+(rule
+ (targets native_record_float_niche_typed_opt0 native_record_float_niche_typed_opt0.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/record_float_niche_typed.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 0 -o native_record_float_niche_typed_opt0
+        native/record_float_niche_typed.march)
+   (with-stdout-to native_record_float_niche_typed_opt0.out
+        (system "./native_record_float_niche_typed_opt0")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_float_niche_typed.expected native_record_float_niche_typed_opt0.out)))
+
+; ── Regression: same cluster as above, via structural equality ───────────
+; record_get(r, key) : Option(Float) must compare equal to a constructed
+; Some(Float) (__march_eq_Option_Float / the derived-Eq comparator path) —
+; before the fix, record_get's boxed Some(Float) cell held raw bits, so the
+; unboxing on the record-read side produced garbage and the comparison came
+; back wrong.
+(rule
+ (targets native_record_float_niche_eq native_record_float_niche_eq.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/record_float_niche_eq.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_float_niche_eq
+        native/record_float_niche_eq.march)
+   (with-stdout-to native_record_float_niche_eq.out
+        (system "./native_record_float_niche_eq")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_float_niche_eq.expected native_record_float_niche_eq.out)))
+
+(rule
+ (targets native_record_float_niche_eq_opt0 native_record_float_niche_eq_opt0.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/record_float_niche_eq.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 0 -o native_record_float_niche_eq_opt0
+        native/record_float_niche_eq.march)
+   (with-stdout-to native_record_float_niche_eq_opt0.out
+        (system "./native_record_float_niche_eq_opt0")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_float_niche_eq.expected native_record_float_niche_eq_opt0.out)))
+
+; ── Regression: same cluster, multi-ctor ADT Float field (depot SqlValue) ──
+; PFloat(3.14) == PFloat(3.14) via derived Eq, plus match-extract +
+; float_to_string, exercising llvm_emit.ml's ctor-store sites and
+; llvm_case.ml's branch extraction together with llvm_eq.ml's comparator —
+; the three sites the fix keeps in agreement on the boxed convention.
+(rule
+ (targets native_boxed_adt_float_field native_boxed_adt_float_field.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/boxed_adt_float_field.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_boxed_adt_float_field
+        native/boxed_adt_float_field.march)
+   (with-stdout-to native_boxed_adt_float_field.out
+        (system "./native_boxed_adt_float_field")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/boxed_adt_float_field.expected native_boxed_adt_float_field.out)))
+
+(rule
+ (targets native_boxed_adt_float_field_opt0 native_boxed_adt_float_field_opt0.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/boxed_adt_float_field.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 0 -o native_boxed_adt_float_field_opt0
+        native/boxed_adt_float_field.march)
+   (with-stdout-to native_boxed_adt_float_field_opt0.out
+        (system "./native_boxed_adt_float_field_opt0")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/boxed_adt_float_field.expected native_boxed_adt_float_field_opt0.out)))
+
+; ── Negative control: an Atom ctor field must NOT go through the boxed- ──
+; ── Float convention ──────────────────────────────────────────────────
+; An earlier draft of the Boxed-ADT Float fix reused Llvm_eq.field_load_llty
+; (whose `_ -> ptr` catch-all also remaps Atom) at ctor construction sites,
+; which silently switched Atom ctor fields from raw interned-hash i64 to a
+; tagged-scalar ptr slot and broke every downstream reader that loads them
+; via llvm_ty — bastion's Middleware.allow_methods
+; (`List.any(allowed, fn a -> a == m)` over List(Atom)) regressed. This
+; fixture would fail (`false` instead of `true` on the first line) if that
+; over-broad fix ever reappears.
+(rule
+ (targets native_boxed_adt_atom_field_not_boxed native_boxed_adt_atom_field_not_boxed.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/boxed_adt_atom_field_not_boxed.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_boxed_adt_atom_field_not_boxed
+        native/boxed_adt_atom_field_not_boxed.march)
+   (with-stdout-to native_boxed_adt_atom_field_not_boxed.out
+        (system "./native_boxed_adt_atom_field_not_boxed")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/boxed_adt_atom_field_not_boxed.expected native_boxed_adt_atom_field_not_boxed.out)))
+
+(rule
+ (targets native_boxed_adt_atom_field_not_boxed_opt0 native_boxed_adt_atom_field_not_boxed_opt0.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/boxed_adt_atom_field_not_boxed.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 0 -o native_boxed_adt_atom_field_not_boxed_opt0
+        native/boxed_adt_atom_field_not_boxed.march)
+   (with-stdout-to native_boxed_adt_atom_field_not_boxed_opt0.out
+        (system "./native_boxed_adt_atom_field_not_boxed_opt0")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/boxed_adt_atom_field_not_boxed.expected native_boxed_adt_atom_field_not_boxed_opt0.out)))
+
+; ── Regression: ambiguous-ctor construction vs. pattern key mismatch ─────
+; (2026-08-20, lib/tir/lower.ml ECon `qualified_collision_key`) ──────────
+; A module-qualified construction of a narrow-collision ctor (public,
+; impl-bearing, short name AND a ctor name shared with stdlib DataFrame's
+; `SortDir = Asc | Desc`) keyed the EAlloc BARE instead of qualified, while
+; the pattern side (fixed 2026-07-27) already keyed qualified — codegen's
+; suffix resolver gave the constructed value whichever colliding SortDir
+; registered first (DataFrame's) while the match switch tested the other,
+; so the match failed open to the default arm ("non-exhaustive pattern
+; match" panic; interpreter was fine). DataFrame only joins the collision
+; table if something in the whole-program build actually references it
+; (see entry.march) — it is otherwise lazily loaded. Multi-file: the
+; declaring/constructing/matching modules are resolved via MARCH_LIB_PATH,
+; matching test/native/xmod_ctor_collision's pattern.
+(rule
+ (targets native_qctor_collision native_qctor_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files_rec native/qctor_collision/*.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_LIB_PATH native/qctor_collision/lib
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_qctor_collision
+         native/qctor_collision/entry.march)
+    (with-stdout-to native_qctor_collision.out
+         (system "./native_qctor_collision"))))))
+
+(rule
+ (alias runtest)
+ (action (diff native/qctor_collision.expected native_qctor_collision.out)))
+
+(rule
+ (targets native_qctor_collision_opt0 native_qctor_collision_opt0.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files_rec native/qctor_collision/*.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_LIB_PATH native/qctor_collision/lib
+   (progn
+    (run %{exe:../bin/main.exe} --compile --opt 0 -o native_qctor_collision_opt0
+         native/qctor_collision/entry.march)
+    (with-stdout-to native_qctor_collision_opt0.out
+         (system "./native_qctor_collision_opt0"))))))
+
+(rule
+ (alias runtest)
+ (action (diff native/qctor_collision.expected native_qctor_collision_opt0.out)))
+
 ; ── RingBuf compiled backend (runtime/march_runtime.c ring_buf_*) ──
 ; The ring_buf_* builtins existed only in the interpreter; a compiled program
 ; using RingBuf failed to link. This fixture exercises every op with both Int

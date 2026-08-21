@@ -1,0 +1,31 @@
+-- Regression (cross-module, native-only): ambiguous-ctor construction vs.
+-- pattern key mismatch (lib/tir/lower.ml ECon `qualified_collision_key`).
+-- Requires a public, impl-bearing colliding type (lib/qc_types.march's
+-- `SortDir`, derive Eq) whose short name AND a ctor name collide with
+-- stdlib DataFrame's `SortDir` — and DataFrame must actually join the
+-- whole-program build (it is otherwise lazily loaded, so its SortDir
+-- would never reach Lower_state.compute_shared_ctor_collisions). The
+-- `DataFrame.from_columns` call below exists ONLY to pull DataFrame in.
+--
+-- Before the fix: QcConstruct.make_asc()'s `QcTypes.Asc` was keyed bare
+-- ("SortDir.Asc") and landed on whichever colliding SortDir registered
+-- first at the runtime-tag level, while QcMatch.describe's pattern tested
+-- the qualified tag ("QcTypes.SortDir.Asc") — every match failed open to
+-- the default arm ("non-exhaustive pattern match" panic; interpreter was
+-- fine). Also exercises structural Eq (derive Eq for SortDir) and a
+-- second, non-collision-adjacent ctor (DescNullsLast) as a control.
+mod QcCollisionEntry do
+  needs IO.Console
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let _pulled_in = DataFrame.from_columns(Nil)
+
+    let a = QcConstruct.make_asc()
+    let d = QcConstruct.make_desc()
+
+    println(QcMatch.describe(a))
+    println(QcMatch.describe(d))
+    println(bool_to_string(a == QcTypes.Asc))
+    println(QcTypes.label(QcTypes.DescNullsLast))
+  end
+end
