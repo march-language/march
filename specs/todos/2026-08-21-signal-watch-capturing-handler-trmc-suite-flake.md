@@ -70,6 +70,18 @@ not strong enough alone to prove a real code defect over a marginal,
 load-sensitive race (e.g. in the signal-delivery drain point relative to
 when the 25-iteration loop launches/reaps the compiled subprocess).
 
+**UPDATE (2026-08-21, later same day):** PR #317 (`fix(codegen):
+typed_array_* must box a scalar entering its erased slot`, unrelated
+`lib`/`runtime` code touching `typed_array_*` builtins, not signal
+handling) merged with `trmc-suite` **passing cleanly**, including this
+exact test. Tally is now 2 passes (main's post-merge run of #315, #317) vs
+2 failures (both of #316's runs), across three different PRs touching
+unrelated code. This is strong confirmation of genuine intermittent
+flakiness rather than a defect in any of the PRs that happened to trip it —
+closing the loop on the "is this real" question raised above. The
+`## Suggested next step` below still applies to whoever picks this up; the
+flake itself remains unfixed.
+
 ## Suggested next step
 
 Same shape as the other Signal.watch flake's fix suggestion: either make
