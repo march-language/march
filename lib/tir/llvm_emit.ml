@@ -3585,12 +3585,53 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        actually matters (a self-tail-recursive accumulator) is instead the
        native TCO slot in [Llvm_toplevel.emit_fn], which never crosses a real
        call at all. *)
+    (* Float boxes created at THIS call site for a direct apply-fn call
+       (Boundary B) are released right after the call — the Float sibling of
+       the SIMD [record_temp_box] machinery above, with the same soundness
+       key: the release happens only when the CALLEE DEFINITION's declared
+       parameter is genuinely `double`, in which case its entry prologue
+       (Llvm_toplevel.emit_fn's is_apply_wrapper arm) unboxes the incoming
+       pointer once and never reads it again — the box has no owner but this
+       call site.  A param that stayed generic (`ptr` — an erased/polymorphic
+       apply fn) may RETAIN the argument, so its index is never listed and
+       that box still leaks (the safe direction); same arity guard as
+       [native_vec_idxs], since the indices are positional.  Measured before
+       this release: one leaked march_float_box per Float param per call,
+       unbounded (test/native/native_float_box_abi_leak_probe.march). *)
+    let apply_float_param_idxs =
+      if is_apply_fn resolved_name
+         (* Direct devirtualized SELF-call (known_call rewrote the recursive
+            back-edge): post-call instructions would defeat LLVM's tail-call
+            elimination and stack-overflow deep recursion — same exemption,
+            same rationale, as the ECallPtr arm's is_potential_self_call. *)
+         && resolved_name <> ctx.cur_emit_fn
+         && Hashtbl.find_opt ctx.top_fn_nparams resolved_name
+            = Some (List.length arg_pairs)
+      then
+        match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
+        | Some param_tirs ->
+          List.mapi (fun i t -> (i, llvm_ty t = "double")) param_tirs
+          |> List.filter (fun (_, is_dbl) -> is_dbl)
+          |> List.map fst
+        | None -> []
+      else []
+    in
+    let float_temp_boxes : string list ref = ref [] in
+    let release_float_temp_boxes () =
+      List.iter
+        (fun b ->
+           emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b))
+        !float_temp_boxes;
+      float_temp_boxes := []
+    in
     let arg_strs =
       if is_apply_fn resolved_name then
         List.mapi (fun i (ty, v) ->
           if ty = "i64" || ty = "double" || is_vec_ty ty then
             let v' = coerce ctx ty v "ptr" in
             record_temp_box i ~from_ty:ty ~to_ty:"ptr" v';
+            if ty = "double" && List.mem i apply_float_param_idxs then
+              float_temp_boxes := v' :: !float_temp_boxes;
             "ptr " ^ v'
           else ty ^ " " ^ v) arg_pairs
       else
@@ -3826,12 +3867,35 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     else if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
       release_temp_boxes ctx temp_boxes;
+      release_float_temp_boxes ();
       ("i64", "0")
     end else begin
       let r = fresh ctx "cr" in
       emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
       release_temp_boxes ctx temp_boxes;
-      (ret_ty, r)
+      release_float_temp_boxes ();
+      (* A Float-returning apply fn ALWAYS hands back a freshly-allocated
+         march_float_box: its `double` result has no other route into the
+         erased ptr slot than the return-path coerce / clo_wrap's
+         double-return arm, and that box goes straight to `ret` without being
+         stored anywhere.  This call site is therefore its sole owner: unbox
+         here and release the box, yielding the raw double (a consumer that
+         needs the erased form re-boxes fresh via coerce — Float is
+         immutable, so the copy is unobservable).  Before this release the
+         box leaked, one per call, unbounded — the return half of
+         test/native/native_float_box_abi_leak_probe.march.  The hot-reload
+         dispatch branch above deliberately skips this (and the temp-box
+         releases): dispatched apply-fn calls keep the old leak rather than
+         risk releasing across a version boundary — the safe direction. *)
+      if is_apply_fn resolved_name && llvm_ret_ty ret_tir = "double"
+         && resolved_name <> ctx.cur_emit_fn (* self-tail-call exemption *)
+      then begin
+        let d = fresh ctx "crf" in
+        emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r);
+        emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r);
+        ("double", d)
+      end else
+        (ret_ty, r)
     end
 
   (* ── ECallPtr to a `raises` extern: env-routed error wrapper ─────────── *)
@@ -4149,25 +4213,109 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        Float closure argument must cross as a BOXED ptr (float-boxing, Stage 2),
        matching coerce's ("double","ptr") arm.  clo_wrap unboxes on the far side
        for named-fn targets; lambda apply bodies unbox lazily via coerce. *)
+    let declared_param_llvm_tys = orig_param_llvm_tys in
     let orig_param_llvm_tys =
       List.map (fun t -> if t = "double" || t = "i64" then "ptr" else t) orig_param_llvm_tys in
     let fn_ty_str = Printf.sprintf "%s (%s)" ret_ty
         (String.concat ", " ("ptr" :: orig_param_llvm_tys)) in
-    let orig_arg_strs = List.map2 (fun pty a ->
+    (* Float ARGUMENT boxes created by this call site's own coerce (declared
+       param `double`, argument actually emitted as `double` — so the
+       ("double","ptr") arm just allocated a march_float_box) are released
+       right after the call.  Sole-ownership argument: a callee whose param
+       is genuinely `double` unboxes the pointer in its entry prologue and
+       never reads it again; a callee whose param slot stayed generic `ptr`
+       treats it as an opaque value and, under the borrowed-param discipline,
+       either leaves it alone or IncRCs it before storing it — either way the
+       call site's reference is still the box's own.  The one legal way the
+       box can come back to us is as the call's RESULT (a borrowed
+       flow-through alias, `fn x -> x` at an erased param — the shape that
+       made a plain call-site release a measured use-after-free on
+       2026-08-20, see specs/progress on this fix), hence the pointer-
+       equality guard against the raw returned value below: an aliased box is
+       skipped here and released once by the return-path release instead.
+       An argument that was ALREADY `ptr` at rest is never recorded — no box
+       was created, and the at-rest box belongs to whoever owns the value.
+       Measured before: one leaked box per Float arg per indirect call,
+       unbounded (test/native/native_float_box_abi_leak_probe.march). *)
+    (* SELF-TAIL-CALL EXEMPTION.  Inside an apply fn, a call through the
+       recursive self-binding (defun's [let go = $clo]; the callee variable's
+       name is exactly the lambda's source name) is the loop back-edge of a
+       local recursive fn.  Emitting ANY instruction between that call and
+       the merge/return — even the releases below — defeats LLVM's tail-call
+       elimination, and the recursion becomes O(n) real stack frames: a
+       measured green-thread stack overflow (SIGBUS) at 20,000 iterations on
+       a shape that ran 1,000,000 deep before.  So for a (potential)
+       self-call, skip every post-call release and hand the raw ptr result
+       through unchanged, exactly as before this fix — those per-iteration
+       boxes still leak (the pre-existing behavior; a false positive from
+       name shadowing also only leaks).  The real fix for that edge is
+       march-level TCO for self-recursive apply fns (native double slots, no
+       boxes at all) — tracked in specs/todos. *)
+    let is_potential_self_call =
+      match fn_atom with
+      | Tir.AVar v ->
+        (match Tir_names.apply_fn_base ctx.cur_emit_fn with
+         | Some base -> base = v.Tir.v_name
+         | None -> false)
+      | _ -> false
+    in
+    let float_arg_boxes : string list ref = ref [] in
+    let orig_arg_strs = List.map2 (fun (decl_ty, pty) a ->
         let (actual_ty, v) = emit_atom ctx a in
         let v' = coerce ctx actual_ty v pty in
+        if decl_ty = "double" && actual_ty = "double"
+           && not is_potential_self_call then
+          float_arg_boxes := v' :: !float_arg_boxes;
         pty ^ " " ^ v'
-      ) orig_param_llvm_tys args in
+      ) (List.combine declared_param_llvm_tys orig_param_llvm_tys) args in
     let all_arg_strs = Printf.sprintf "ptr %s" clo_ptr :: orig_arg_strs in
+    let release_float_arg_boxes ~(alias_of : string option) : unit =
+      List.iter (fun b ->
+        match alias_of with
+        | None ->
+          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b)
+        | Some r ->
+          let eq  = fresh ctx "fbaq" in
+          emit ctx (Printf.sprintf "%s = icmp eq ptr %s, %s" eq b r);
+          let rel  = fresh_block ctx "fbrel" in
+          let cont = fresh_block ctx "fbcont" in
+          emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                           eq cont rel);
+          emit_label ctx rel;
+          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b);
+          emit_term ctx (Printf.sprintf "br label %%%s" cont);
+          emit_label ctx cont
+      ) !float_arg_boxes;
+      float_arg_boxes := []
+    in
     if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call %s %s(%s)"
                   fn_ty_str fn_ptr (String.concat ", " all_arg_strs));
+      release_float_arg_boxes ~alias_of:None;
       ("i64", "0")
     end else begin
       let r = fresh ctx "cr" in
       emit ctx (Printf.sprintf "%s = call %s %s(%s)"
                   r fn_ty_str fn_ptr (String.concat ", " all_arg_strs));
-      (ret_ty, r)
+      release_float_arg_boxes ~alias_of:(Some r);
+      (* Float RESULT: the value in the erased ptr slot is a march_float_box
+         freshly allocated by the callee's return path — either its body's
+         ("double","ptr") coerce or clo_wrap_define's double-return arm; a
+         flow-through of an argument box re-boxes too whenever the callee's
+         param is a real `double` (unbox at entry, re-box at return), and a
+         GENERIC flow-through alias was left un-released by the guard above
+         precisely so this release is its single one.  Unbox and release
+         here, yielding the raw double; a consumer that needs the erased form
+         re-boxes fresh (Float is immutable, the copy is unobservable).
+         Before: one leaked box per Float-returning indirect call, unbounded
+         (the fret_leg of the probe above). *)
+      if llvm_ret_ty ret_tir = "double" && not is_potential_self_call then begin
+        let d = fresh ctx "crf" in
+        emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r);
+        emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r);
+        ("double", d)
+      end else
+        (ret_ty, r)
     end
 
   (* ── Capture-free lambda closure: static immortal global ────────────

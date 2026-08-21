@@ -1,0 +1,188 @@
+-- Leak guard for the uniform-ptr closure ABI Float boxes (compiled backend).
+--
+-- WHAT LEAKED. Closure dispatch uses a uniform ptr ABI: an apply wrapper's
+-- params and result are all `ptr` (a `double` would land in an FP register
+-- while the dispatch reads GP registers). So a Float crossing an indirect
+-- closure call is boxed by the CALL SITE on the way in (Llvm_ctx.coerce's
+-- "double"->"ptr" arm, march_alloc_float) and boxed by the CALLEE on the way
+-- out (same coerce / Llvm_calls.clo_wrap_define's double-return arm) — and
+-- before the fix NEITHER box was ever released: exactly two heap objects
+-- dropped per call, ~32 B each, unbounded in call count. This is not
+-- numeric-code-only: it costs every call to any higher-order function or
+-- closure taking or returning a Float — a comparator, a callback, List.map
+-- over Floats — so a long-running server leaks without bound.
+--
+-- WHY THE CALL SITE MAY RELEASE, AND ONLY THESE BOXES. Mirrors the ownership
+-- argument in native_arr_fold_acc_leak_probe.march (PR #313), where the C
+-- runtime is the caller: every Float crossing the erased ABI is a FRESH box.
+--   * the argument box is created by this call site's own coerce — the callee
+--     apply fn unboxes it in its entry prologue to a raw double and never
+--     reads the pointer again (Llvm_toplevel.emit_fn's is_apply_wrapper arm),
+--     so after the call the box has no other owner;
+--   * the result box is created by the callee's return path (there is no
+--     other way for a double to enter the erased ptr slot), so the caller is
+--     its sole owner once it has unboxed it.
+-- The one subtlety is a callee whose param slot stayed generic `ptr` (an
+-- erased/polymorphic apply fn): it may hand the ARGUMENT box back as its
+-- return value (a borrowed flow-through alias). Releasing both "the arg box"
+-- and "the ret box" would then free one object twice, which is why the arg
+-- release at an ECallPtr site is guarded by a pointer-equality check against
+-- the raw returned ptr. The identity_leg below is the witness for that shape.
+--
+-- SIGNAL: live_allocs(), NOT RSS — see native_arr_fold_leak_probe.march for
+-- the long rationale (an absolute RSS threshold went red on a healthy Linux
+-- tree; live_allocs counts the defect directly and is load-insensitive).
+--
+-- THE LIST-OF-CLOSURES SHAPE IS LOAD-BEARING: List.head_opt forces the
+-- closure through a genuinely indirect ECallPtr dispatch. A directly-applied
+-- or let-bound-then-devirtualized lambda lets known_call rewrite the call to
+-- EApp(apply_fn, ...) and (before this probe's fix) measured a different
+-- code path — devirt_leg pins that path separately.
+--
+-- Numbers measured on this fixture, Darwin arm64, --compile --opt 2:
+--   before the fix   live_allocs delta = 7,200,003
+--     (float_leg 2,000,001 = arg+ret per call; fparam_leg 1,000,000 = arg
+--      box only; fret_leg 1,000,000 = ret box only; int_leg 0;
+--      devirt_leg 3,000,002 = arg+ret through f PLUS the recursive go
+--      self-call's own Float-argument box, all three per iteration;
+--      identity_leg 200,000 = arg+ret per call)
+--   after the fix    live_allocs delta = (small constant — see dune rule)
+-- The healthy figure is a small constant; the leaking one scales with the
+-- iteration counts below. The dune rule asserts < 1000 — orders of magnitude
+-- above healthy, far below any single leaking leg, falsifiable both ways.
+mod NativeFloatBoxAbiLeakProbe do
+  needs IO.Console
+
+  -- Float argument AND Float result cross the indirect boundary: before the
+  -- fix this leaked exactly two boxes per call (2,000,001 for n=1,000,000).
+  pfn call_ff(f : (Float) -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call_ff(f, n - 1, f(acc)) end
+  end
+  pfn float_leg(n : Int) : Int do
+    let fs = [fn (x : Float) -> x +. 1.0, fn (x : Float) -> x +. 2.0]
+    match List.head_opt(fs) do
+      Some(f) -> float_to_int(call_ff(f, n, 0.0))
+      None    -> -1
+    end
+  end
+
+  -- Float ARGUMENT only (Int result): pins the argument-box half alone.
+  pfn call_fi(f : (Float) -> Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else call_fi(f, n - 1, acc + f(int_to_float(n))) end
+  end
+  pfn fparam_leg(n : Int) : Int do
+    let fs = [fn (x : Float) -> float_to_int(x), fn (x : Float) -> 0 - float_to_int(x)]
+    match List.head_opt(fs) do
+      Some(f) -> call_fi(f, n, 0)
+      None    -> -1
+    end
+  end
+
+  -- Float RESULT only (Int argument): pins the result-box half alone.
+  pfn call_if(f : (Int) -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call_if(f, n - 1, acc +. f(n)) end
+  end
+  pfn fret_leg(n : Int) : Int do
+    let fs = [fn (i : Int) -> int_to_float(i), fn (i : Int) -> 0.0 -. int_to_float(i)]
+    match List.head_opt(fs) do
+      Some(f) -> float_to_int(call_if(f, n, 0.0))
+      None    -> -1
+    end
+  end
+
+  -- Wire-tagged Int control, same shape: scalars cross the uniform ABI as
+  -- (n<<1)|1 immediates, never heap boxes — must stay at 0. If THIS leg ever
+  -- leaks, the defect is not float boxing. Do not "simplify" the Float legs
+  -- to this shape; it cannot exhibit the bug.
+  pfn call_ii(f : (Int) -> Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else call_ii(f, n - 1, f(acc)) end
+  end
+  pfn int_leg(n : Int) : Int do
+    let fs = [fn (x : Int) -> x + 1, fn (x : Int) -> x + 2]
+    match List.head_opt(fs) do
+      Some(f) -> call_ii(f, n, 0)
+      None    -> -1
+    end
+  end
+
+  -- Devirtualized boundary (EApp(apply_fn, ...) after known_call rewrites a
+  -- non-escaping closure call): the same two boxes leak through a different
+  -- emission path (llvm_emit's Boundary B), released via the same call-site
+  -- discipline keyed off the CALLEE DEFINITION's declared param types. The
+  -- enclosing loop is a top-level self-recursion, TIR-TCO'd into a back-edge
+  -- with a native double slot, so only f's call allocates. The lambda body
+  -- is DELIBERATELY BULKY: it must exceed inline.ml's 50-node threshold, or
+  -- the devirtualized call is inlined outright and this leg silently stops
+  -- exercising Boundary B (a trivial `x +. 1.0` lambda compiled to a bare
+  -- fadd — measured, no call left). Net effect is still exactly +. 1.0.
+  pfn devirt_leg(n : Int, acc : Float) : Float do
+    let f = fn (x : Float) ->
+      let a1 = x +. 1.0
+      let a2 = a1 +. 1.0
+      let a3 = a2 +. 1.0
+      let a4 = a3 +. 1.0
+      let a5 = a4 +. 1.0
+      let a6 = a5 +. 1.0
+      let a7 = a6 +. 1.0
+      let a8 = a7 +. 1.0
+      let a9 = a8 +. 1.0
+      let a10 = a9 +. 1.0
+      let a11 = a10 +. 1.0
+      let a12 = a11 +. 1.0
+      let a13 = a12 +. 1.0
+      let a14 = a13 +. 1.0
+      a14 -. 13.0
+    if n <= 0 do acc else devirt_leg(n - 1, f(acc)) end
+  end
+
+  -- DOUBLE-FREE / ALIAS WITNESS, not a leak leg. A flow-through closure whose
+  -- result may be the argument box itself (or a fresh re-box — either is
+  -- legal). If the call-site releases were over-eager (releasing the arg box
+  -- AND the aliased ret box), this crashes or returns garbage. Value-checked.
+  pfn call_id(f : (Float) -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call_id(f, n - 1, f(acc) +. 1.0) end
+  end
+  pfn identity_leg(n : Int) : Int do
+    let fs = [fn (x : Float) -> x, fn (x : Float) -> x +. 100.0]
+    match List.head_opt(fs) do
+      Some(f) -> float_to_int(call_id(f, n, 0.5))
+      None    -> -1
+    end
+  end
+
+  -- STACK-DEPTH CANARY, deliberately measured OUTSIDE the leak window (after
+  -- the closing live_allocs read). A LOCAL recursive fn's self-call through
+  -- its closure ($clo self-binding) is not TIR-TCO'd; it survives deep
+  -- recursion only because LLVM's tail-call elimination turns it into a
+  -- loop, and that elimination dies the moment ANY instruction is emitted
+  -- between the self-call and the return. The first draft of the call-site
+  -- releases did exactly that: SIGBUS (green-thread stack overflow) at
+  -- 20,000 iterations on this exact shape, on a tree where 1,000,000 ran
+  -- fine. The emitter now exempts (potential) self-calls from every
+  -- post-call release, so this leg's per-iteration boxes STILL LEAK — which
+  -- is why it runs outside the measurement window; the open remainder
+  -- (march-level TCO for self-recursive apply fns, closing both the leak
+  -- and the LLVM-dependence) is tracked in
+  -- specs/todos/2026-08-21-selfrec-closure-float-tail-call.md. If this leg
+  -- SIGBUSes, a post-call instruction crept back onto the self-call path.
+  pfn selfrec_leg(n : Int) : Int do
+    let f = fn (x : Float) -> x +. 3.0
+    fn go(i : Int, acc : Float) : Float do
+      if i <= 0 do acc else go(i - 1, f(acc)) end
+    end
+    float_to_int(go(n, 0.0))
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let before = live_allocs()
+    println(float_leg(1000000))
+    println(fparam_leg(1000000))
+    println(fret_leg(1000000))
+    println(int_leg(1000000))
+    println(float_to_int(devirt_leg(1000000, 0.0)))
+    println(identity_leg(100000))
+    let after = live_allocs()
+    IO.warn(int_to_string(after - before))
+    println(selfrec_leg(1000000))
+  end
+end

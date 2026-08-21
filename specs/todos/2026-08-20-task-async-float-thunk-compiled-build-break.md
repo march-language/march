@@ -170,3 +170,21 @@ with a regression test using the 1-arg repro, plus a `Task.async` variant.
 
 The full suite (`scripts/run-tests.sh`) stayed green through all of this, so it
 has no coverage of a Float-returning task at all.
+
+---
+
+# Re-measured 2026-08-21 (on d5576f20, during the uniform-ABI leak fix)
+
+Confirms the 1-arg repro exactly: `task_spawn(fn _ -> 2.5)` +
+`match task_await(t)` → compiled rc=139, interpreted `5`. One NEW fact that
+narrows layer 3: **`task_await_unwrap` on the same task WORKS** — compiled ==
+interpreted == correct value, and double-await of the same task returns the
+value twice. So the trampoline's store side and `task_await_unwrap`'s decode
+side agree; only `task_await`'s Ok-payload path (layer 2's in-place field
+rewrite) is on the crashing path. The working `task_await_unwrap` route was
+leak-probed instead: one Float box per await on top of the type-independent
+2-objects-per-spawn+await task leak — measurements and the ownership analysis
+(double-await makes an unbox-site release a UAF; the box's owner must be the
+Task object's free path) live in
+`specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md` and
+`specs/todos/2026-08-21-task-object-never-freed.md`.
