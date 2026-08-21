@@ -35,6 +35,7 @@
 #include <sys/uio.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -621,9 +622,50 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
         *(void **)((char *)r + 16) = s;
         return r;
     }
-    int crc;
-    do { crc = connect(fd, res->ai_addr, res->ai_addrlen); }
-    while (crc < 0 && errno == EINTR);   /* preemption signal — retry */
+    /* connect() is the one blocking call here that must NOT simply be
+     * re-issued on EINTR.  Unlike recv()/send(), an interrupted connect()
+     * leaves the handshake running in the KERNEL: POSIX says the connection
+     * is established asynchronously, and a second connect() on the same fd
+     * then reports the state of that in-flight attempt — EALREADY while it
+     * is still going, EISCONN once it has landed — rather than starting a
+     * new one.  The old `do { connect } while (errno == EINTR)` loop
+     * therefore turned a connection that had actually SUCCEEDED into a hard
+     * failure: "tcp_connect: Socket is already connected".
+     *
+     * That made it a concurrency bug even though this function holds no
+     * shared state.  march_block_preempt() below masks SIGUSR1, but the mask
+     * is per-OS-thread while green threads multiplex over those threads, so
+     * it does not reliably hold — and preemption fires every
+     * MARCH_QUANTUM_US (1ms) per scheduler thread.  A process running one
+     * green thread almost never takes a signal inside connect(); a process
+     * running several concurrent outbound requests takes them constantly.
+     * Symptom: a single HTTPS client worked, four concurrent ones failed
+     * immediately, each reporting EISCONN.
+     *
+     * The correct recovery from EINTR (and from EINPROGRESS, should the fd
+     * ever arrive non-blocking) is to wait for the socket to become
+     * writable and read the true outcome out of SO_ERROR. */
+    int crc = connect(fd, res->ai_addr, res->ai_addrlen);
+    if (crc < 0 && (errno == EINTR || errno == EINPROGRESS)) {
+        struct pollfd pfd;
+        pfd.fd     = fd;
+        pfd.events = POLLOUT;
+        int prc;
+        /* poll() may itself be interrupted; retrying IT is safe and correct. */
+        do { prc = poll(&pfd, 1, -1); } while (prc < 0 && errno == EINTR);
+        if (prc > 0) {
+            int       so_err = 0;
+            socklen_t so_len = sizeof(so_err);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) == 0) {
+                if (so_err == 0) { crc = 0; }
+                else             { crc = -1; errno = so_err; }
+            }
+        }
+    } else if (crc < 0 && errno == EISCONN) {
+        /* Belt and braces: an EISCONN here means the handshake we asked for
+         * completed, which is success, not failure. */
+        crc = 0;
+    }
     if (crc < 0) {
         int saved_errno = errno;
         march_unblock_preempt(&saved);
