@@ -3227,9 +3227,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; ── 4*n+3); march_task_await wraps that straight into Ok, and the Ok(n)
 ; ── destructure untags only once, leaving 2*n+1.  Pre-fix this printed
 ; ── await=85 / sum=123 / stream_sum=115 instead of 42 / 60 / 55.  Compile
-; ── natively, run single-threaded (deterministic), diff stdout.
+; ── natively and diff stdout.
+;
+; Run TWICE, both diffed against the SAME .expected: once pinned to
+; MARCH_NUM_SCHEDULERS=1 (the golden artifact -- deterministic by
+; construction) and once at the DEFAULT scheduler count (four OS threads).
+; The pin alone never exercises the multi-thread scheduler, and that is
+; exactly the configuration that hid the spurious-wake race fixed in PR #310
+; (a wake with an empty mailbox killed a live actor: compiled only, >1
+; scheduler thread only, ~4% of runs).  Task.await parks and is woken by the
+; completing task, so it rides the same park/wake path.  The unpinned run is
+; a SEPARATE target rather than a replacement for the pin: if multi-scheduler
+; output ever does turn nondeterministic, the failure names
+; native_task_await_int_multi.out and says so, instead of turning the
+; long-standing golden into a mystery flake.
 (rule
- (targets native_task_await_int native_task_await_int.out)
+ (targets native_task_await_int native_task_await_int.out
+          native_task_await_int_multi.out)
  (deps (file %{exe:../bin/main.exe})
        (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
        (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
@@ -3245,11 +3259,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run %{exe:../bin/main.exe} --compile -o native_task_await_int
         native/task_await_int.march)
    (with-stdout-to native_task_await_int.out
-        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_int")))))
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_int"))
+   (with-stdout-to native_task_await_int_multi.out
+        (system "./native_task_await_int")))))
 
 (rule
  (alias runtest)
  (action (diff native/task_await_int.expected native_task_await_int.out)))
+
+; Same golden, default (multi-OS-thread) scheduler -- see the PR #310 note above.
+(rule
+ (alias runtest)
+ (action (diff native/task_await_int.expected native_task_await_int_multi.out)))
 
 ; ── Actor + task runtime stress (test/apps/actor_stress.march): five actors,
 ; ── receive()-in-handler, FIFO ordering, and Task async/await/await_many/
@@ -3285,10 +3306,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; ── march_task_await wraps it into Ok, but the Ok(x) destructure loads a ptr
 ; ── field raw, so pre-fix the String/List payload was a wild ~2*addr pointer
 ; ── -> `march: out of memory` / SIGSEGV.  The i64 case (6*7 -> 42) guards the
-; ── shared single-ashr untag path (double-tag 4*n+3).  Run single-threaded so
-; ── the sequential await prints serialise deterministically; diff stdout.
+; ── shared single-ashr untag path (double-tag 4*n+3).  Diff stdout.
+;
+; Run TWICE against the SAME .expected, for the reason spelled out on
+; native_task_await_int above: the MARCH_NUM_SCHEDULERS=1 run is the
+; deterministic golden, and the second run at the DEFAULT scheduler count
+; buys coverage of the multi-OS-thread park/wake path -- the configuration
+; PR #310's spurious-wake actor kill hid in (compiled only, >1 scheduler
+; thread only, ~4% of runs).  Keeping them as separate targets means a
+; future multi-scheduler flake names native_task_await_ptr_multi.out.
 (rule
- (targets native_task_await_ptr native_task_await_ptr.out)
+ (targets native_task_await_ptr native_task_await_ptr.out
+          native_task_await_ptr_multi.out)
  (deps (file %{exe:../bin/main.exe})
        (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
        (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
@@ -3304,11 +3333,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run %{exe:../bin/main.exe} --compile -o native_task_await_ptr
         native/task_await_ptr.march)
    (with-stdout-to native_task_await_ptr.out
-        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_ptr")))))
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_ptr"))
+   (with-stdout-to native_task_await_ptr_multi.out
+        (system "./native_task_await_ptr")))))
 
 (rule
  (alias runtest)
  (action (diff native/task_await_ptr.expected native_task_await_ptr.out)))
+
+; Same golden, default (multi-OS-thread) scheduler -- see the PR #310 note above.
+(rule
+ (alias runtest)
+ (action (diff native/task_await_ptr.expected native_task_await_ptr_multi.out)))
 
 ; ── FFI Phase 2: borrowed extern args must be freed caller-side (no leak) ──
 (rule
@@ -6238,12 +6274,51 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; scheduler OS threads by default. Re-running the supervised crash witness
 ; exercises child preparation/registration, terminal publication, and Down
 ; delivery under cross-scheduler scheduling pressure.
+;
+; This loop used to redirect stdout to /dev/null and assert ONLY the exit
+; code, so a multi-scheduler run that exited 0 while printing silently wrong
+; Down payloads passed.  That is precisely the blind spot PR #310 lived in
+; (a wake with an empty mailbox killed a live actor: compiled only, >1
+; scheduler thread only, ~4% of runs) -- an exit-code-only loop cannot see a
+; dropped or wrong reason string.  Each iteration now captures stdout and
+; applies the SAME five assertions as the single-scheduler rule above.  They
+; are deliberately order-independent greps and not a diff against the golden:
+; at four schedulers these five lines legitimately interleave in a different
+; order than the pinned run emits them, so only the SET of lines is stable.
+; On failure the message names the iteration and the pattern and dumps the
+; offending output -- a bare non-zero exit from inside a 100-iteration loop
+; is miserable to debug in CI.
+;
+; Known PRE-EXISTING flake here, not introduced by the stdout capture: main
+; sends PrimeBounded *before* kill(killed) (actor_monitor_down_reason.march
+; lines 156-157) while the handler samples mailbox_size(watcher) at entry, so
+; at >1 scheduler the watcher can be dispatched before the Down is enqueued
+; and the binary exits 1 with `panic: bounded Down or mailbox count
+; mismatch`.  Measured on a loaded 14-core box at 7/12000 runs with the OLD
+; exit-code-only loop and 1/2500 with this one -- the rate is a property of
+; the fixture, and the old loop's `|| exit $?` tripped on it identically.
+; Tracked in specs/todos/2026-08-20-actor-monitor-bounded-mailbox-race.md.
 (rule
  (alias runtest)
  (deps (file native_actor_monitor_down_reason))
  (action
   (run bash -c
-   "i=0; while [ $i -lt 100 ]; do MARCH_NUM_SCHEDULERS=4 ./native_actor_monitor_down_reason >/dev/null || exit $?; i=$((i + 1)); done")))
+   "check() { printf '%s\\n' \"$out\" | grep -Eq \"$1\" || { \
+        printf 'native_actor_monitor_down_reason: MARCH_NUM_SCHEDULERS=4 iteration %s: output does not match /%s/\\noffending output:\\n%s\\n' \"$i\" \"$1\" \"$out\" >&2; \
+        exit 1; }; }; \
+    i=0; \
+    while [ $i -lt 100 ]; do \
+      out=$(MARCH_NUM_SCHEDULERS=4 ./native_actor_monitor_down_reason); rc=$?; \
+      [ $rc -eq 0 ] || { \
+        printf 'native_actor_monitor_down_reason: MARCH_NUM_SCHEDULERS=4 iteration %s: binary exited %s\\noffending output:\\n%s\\n' \"$i\" \"$rc\" \"$out\" >&2; \
+        exit 1; }; \
+      check '^down ref=[0-9]+ target=crashed reason=Crash\\(bang\\)$'; \
+      check '^down target=nulled reason=Crash\\(embedded-nul-ok\\)$'; \
+      check '^bounded mailbox=1 down=Killed ref=[0-9]+$'; \
+      check '^late down ref=[0-9]+ target=killed reason=Killed$'; \
+      check '^terminal watcher mailbox=0$'; \
+      i=$((i + 1)); \
+    done")))
 
 ; ── Named registry (Task 5): registry_retire_actor on actor death ────────
 ; (compiled + interpreted parity) ─────────────────────────────────────
