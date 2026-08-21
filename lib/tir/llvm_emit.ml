@@ -2744,6 +2744,79 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       "call ptr @march_vault_push_capped(ptr %s, ptr %s, ptr %s, i64 %s)" vt vk vv vmax);
     ("i64", "0")
 
+  (* ── Vault READS/deletes: the KEY needs the same ptr coercion the write
+     arms above already apply.  Only the writers were special-cased, so a
+     read fell through to the general EApp path and passed the key with its
+     NATURAL llvm type — an Int key reached march_vault_get as a raw i64
+     while march_vault_set had stored it tagged ((n<<1)|1).  The two then
+     stringified to different vault keys, so a value stored under an Int key
+     could never be read back (and, before vault_key_cstr learned to
+     classify the uniform representation, the raw i64 was dereferenced as a
+     march_string* → SIGSEGV).  Table/namespace/fn args are already ptr;
+     trailing scalar args (delta) stay i64.
+     See specs/todos/2026-08-20-vault-non-string-key-native-crash.md. *)
+  | Tir.EApp (f, [tbl; key])
+    when f.Tir.v_name = "vault_get" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    let r  = fresh ctx "vg" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_vault_get(ptr %s, ptr %s)" r vt vk);
+    ("ptr", r)
+
+  | Tir.EApp (f, [tbl; key])
+    when f.Tir.v_name = "vault_drop" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    emit ctx (Printf.sprintf
+      "call ptr @march_vault_drop(ptr %s, ptr %s)" vt vk);
+    ("i64", "0")
+
+  | Tir.EApp (f, [tbl; key; fn_atom])
+    when f.Tir.v_name = "vault_update" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    let vf = emit_atom_as ctx "ptr" fn_atom in
+    emit ctx (Printf.sprintf
+      "call ptr @march_vault_update(ptr %s, ptr %s, ptr %s)" vt vk vf);
+    ("i64", "0")
+
+  | Tir.EApp (f, [tbl; key; delta])
+    when f.Tir.v_name = "vault_incr" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    let vd = emit_atom_as ctx "i64" delta in
+    let r  = fresh ctx "vi" in
+    emit ctx (Printf.sprintf
+      "%s = call i64 @march_vault_incr(ptr %s, ptr %s, i64 %s)" r vt vk vd);
+    ("i64", r)
+
+  | Tir.EApp (f, [ns; key; value])
+    when f.Tir.v_name = "vault_ns_set" ->
+    let vn = emit_atom_as ctx "ptr" ns in
+    let vk = emit_atom_as ctx "ptr" key in
+    let vv = emit_atom_as ctx "ptr" value in
+    emit ctx (Printf.sprintf
+      "call ptr @march_vault_ns_set(ptr %s, ptr %s, ptr %s)" vn vk vv);
+    ("i64", "0")
+
+  | Tir.EApp (f, [ns; key])
+    when f.Tir.v_name = "vault_ns_get" ->
+    let vn = emit_atom_as ctx "ptr" ns in
+    let vk = emit_atom_as ctx "ptr" key in
+    let r  = fresh ctx "vng" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_vault_ns_get(ptr %s, ptr %s)" r vn vk);
+    ("ptr", r)
+
+  | Tir.EApp (f, [ns; key])
+    when f.Tir.v_name = "vault_ns_drop" ->
+    let vn = emit_atom_as ctx "ptr" ns in
+    let vk = emit_atom_as ctx "ptr" key in
+    emit ctx (Printf.sprintf
+      "call ptr @march_vault_ns_drop(ptr %s, ptr %s)" vn vk);
+    ("i64", "0")
+
   (* ── actor_reply: coerce result to tagged ptr so integers survive the
      void* round-trip through march_actor_reply / march_sched_send / recv ── *)
   (* actor_reply is declared as (ptr, ptr) → void.  The general EApp path emits

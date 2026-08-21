@@ -69,6 +69,41 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A module-qualified construction of a collision-set constructor no longer
+  resolves to the WRONG type's constructor.** Writing `Ast.Asc` as an
+  expression, when another module (e.g. stdlib `DataFrame`) declares a
+  same-named constructor on a same-short-named type and the collision is
+  public + impl-bearing, keyed the construction BARE (`SortDir.Asc`) while
+  the pattern side (fixed 2026-07-27) keyed it fully qualified
+  (`Ast.SortDir.Asc`) — codegen's suffix resolver then gave the constructed
+  value the OTHER type's runtime tag, so every match on it failed open to
+  the default arm at runtime (compiled only; the interpreter was correct).
+  Found via depot: 16+ ORDER BY/GROUP BY/WHERE tests panicked
+  "non-exhaustive pattern match" the moment any file pulling stdlib
+  DataFrame joined the whole-program build. The expression side now
+  re-expands a written module qualifier through the same
+  narrow-collision table the pattern side uses, so both sides agree on the
+  qualified key. See `lib/tir/lower.ml` (ECon).
+
+- **A non-`String` `Vault` key no longer crashes, and a key stored by
+  `Vault.set` can now actually be read back by `Vault.get`.** Two defects.
+  `vault_key_cstr` assumed every key was a `march_string *` and dereferenced
+  it unconditionally, so any Int/Bool/Atom key read the tag word as a length
+  and the payload as a data pointer — SIGSEGV/SIGBUS on the first Int key,
+  even though `stdlib/vault.march` documents Int/String/Bool/Atom keys. It now
+  dispatches on the uniform representation (tagged scalar → `"i:<decimal>"`,
+  matching the interpreter's form; string → its raw bytes, unchanged, so
+  `Vault.keys()` still returns genuine Strings; boxed Float → its bits), and
+  panics with an actionable message for a Tuple/Ctor key rather than folding
+  every value of one ctor onto a single bucket — a heap cell carries no arity,
+  so there is nothing to walk. Separately, only the *write* builtins coerced
+  the key to `ptr`; `vault_get`/`drop`/`update`/`incr` and the `ns_*` trio fell
+  through to the general call path and passed the key with its natural LLVM
+  type, so an Int key arrived at `march_vault_get` raw while `march_vault_set`
+  had stored it tagged — the two hashed different strings and the value was
+  unreachable. Both sides now agree, and Int keys round-trip identically
+  compiled and interpreted.
+
 - **Security: `~H` no longer renders an interpolated value as executable
   JavaScript, and its URL-attribute list no longer misses live vectors.** Found
   and fixed pre-release; no tagged version shipped it. Three defects, all in the
