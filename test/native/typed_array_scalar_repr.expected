@@ -1,0 +1,7 @@
+create/get odd  : 7
+set/get even    : 42
+set/get odd     : 9
+fold            : 58
+map/get         : 8
+float create/get: 3
+float fold      : 3

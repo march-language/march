@@ -1,0 +1,51 @@
+-- typed_array_* stores a genuinely generic 'a in a uniform erased slot, so a
+-- SCALAR element must arrive boxed (Int tagged (n<<1)|1, Float boxed) — not as
+-- raw i64/double bits.
+--
+-- The whole family was missing from Llvm_builtins.builtin_boxed_generic_params_tbl,
+-- so `create`/`set`/`fold` stored raw and the erased-i64 conditional untag then
+-- read an ODD value back shifted: create(3, 7) then get(0) returned 3, not 7.
+-- The corruption is transitive — get/map/filter never touch a raw scalar
+-- themselves, they only read back what create/set stored — so every operation
+-- in the family was wrong at once.
+--
+-- Two element values are deliberate:
+--   7  is ODD, so a raw store is corrupted by the untag (7 >> 1 = 3)
+--   42 is EVEN, so a raw store SURVIVES the untag untouched
+-- The even case is why the family looked half-working and why a test that used
+-- only even values would have passed against the bug. Keep both.
+--
+-- The Float leg is the same defect one representation later: raw double bits
+-- reach march_unbox_float as a pointer and SIGSEGV, so a wrong VALUE there is
+-- the good outcome and a crash is the real one.
+--
+-- Interp/compiled parity golden.
+mod Main do
+  needs IO.Console
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    -- odd default: raw storage would read back as 7 >> 1 = 3
+    let a = typed_array_create(3, 7)
+    println("create/get odd  : " ++ int_to_string(typed_array_get(a, 0)))
+
+    -- even value: survives a raw store, so this leg alone cannot catch the bug
+    let b = typed_array_set(a, 1, 42)
+    println("set/get even    : " ++ int_to_string(typed_array_get(b, 1)))
+
+    -- odd value through set, the direction `create` does not cover
+    let c = typed_array_set(b, 2, 9)
+    println("set/get odd     : " ++ int_to_string(typed_array_get(c, 2)))
+
+    -- fold threads the accumulator through the same erased slot
+    println("fold            : " ++ int_to_string(typed_array_fold(c, 0, fn (acc, x) -> acc + x)))
+
+    -- map reads elements back out and stores new ones
+    let d = typed_array_map(a, fn x -> x + 1)
+    println("map/get         : " ++ int_to_string(typed_array_get(d, 0)))
+
+    -- Float element: a raw store makes march_unbox_float deref the bit pattern
+    let e = typed_array_create(2, 1.5)
+    println("float create/get: " ++ int_to_string(float_to_int(typed_array_get(e, 0) *. 2.0)))
+    println("float fold      : " ++ int_to_string(float_to_int(typed_array_fold(e, 0.0, fn (acc, x) -> acc +. x))))
+  end
+end
