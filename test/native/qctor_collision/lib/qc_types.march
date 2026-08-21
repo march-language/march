@@ -1,0 +1,20 @@
+-- Library module (resolved via MARCH_LIB_PATH): declares a PUBLIC,
+-- impl-bearing `SortDir` type whose short name AND first ctor name
+-- (`Asc`) collide with stdlib DataFrame's `SortDir = Asc | Desc`
+-- (stdlib/dataframe.march). `derive Eq for SortDir` is what makes this
+-- type "impl-bearing" for Lower_state.compute_shared_ctor_collisions'
+-- narrow (public + impl-bearing) collision table.
+mod QcTypes do
+  type SortDir = Asc | Desc | AscNullsFirst | DescNullsLast
+
+  derive Eq for SortDir
+
+  fn label(v : SortDir) : String do
+    match v do
+    Asc           -> "asc"
+    Desc          -> "desc"
+    AscNullsFirst -> "asc_nulls_first"
+    DescNullsLast -> "desc_nulls_last"
+    end
+  end
+end

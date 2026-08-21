@@ -1,0 +1,27 @@
+-- Regression: a multi-ctor ADT's Float field (depot's SqlValue.PFloat shape)
+-- must round-trip through construction, structural equality, AND
+-- match-extract + float_to_string when compiled natively.
+--
+-- Before the fix, construction (lib/tir/llvm_emit.ml's ctor-store sites)
+-- and match extraction (lib/tir/llvm_case.ml) stored/loaded a TFloat ctor
+-- field as a raw inline double, while the derived-Eq comparator
+-- (lib/tir/llvm_eq.ml) loaded it through the boxed march_unbox_float
+-- convention — the mismatch corrupted both equality and the
+-- match-extracted value.
+mod Main do
+  needs IO.Console
+
+  type SqlValue = PInt(Int) | PFloat(Float) | PText(String) | PBool(Bool) | PNull
+
+  derive Eq for SqlValue
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let a = PFloat(3.14)
+    let b = PFloat(3.14)
+    println(bool_to_string(a == b))
+    match a do
+    PFloat(f) -> println(float_to_string(f))
+    _         -> println("MISS")
+    end
+  end
+end

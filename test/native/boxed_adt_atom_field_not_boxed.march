@@ -1,0 +1,33 @@
+-- Negative control for the Boxed-ADT Float field boxing fix
+-- (lib/tir/llvm_eq.ml field_load_llty, lib/tir/llvm_emit.ml ctor_field_llty,
+-- lib/tir/llvm_case.ml branch extraction): an ADT ctor field typed Atom
+-- must still store/load as a raw i64, NOT go through the Float-only boxed
+-- convention. An earlier draft of the fix reused Llvm_eq.field_load_llty's
+-- `_ -> ptr` catch-all for the new ctor_field_llty helper, which also
+-- remapped Atom (llvm_ty i64) to a boxed/ptr load and broke atom-list
+-- equality — bastion's Middleware.allow_methods
+-- (`List.any(allowed, fn a -> a == m)` over List(Atom)) regressed. This
+-- exercises both the bare List(Atom) equality path AND an ADT that mixes
+-- an Atom-payload ctor with a Float-payload ctor, so a regression that
+-- over-broadens the Float fix to Atom fields fails here.
+mod Main do
+  needs IO.Console
+
+  type Tagged = TagAtom(Atom) | TagFloat(Float)
+
+  derive Eq for Tagged
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let allowed = Cons(:get, Cons(:post, Nil))
+    let m = :post
+    println(bool_to_string(List.any(allowed, fn a -> a == m)))
+    let x = TagAtom(:get)
+    let y = TagAtom(:get)
+    println(bool_to_string(x == y))
+    let f = TagFloat(1.5)
+    match f do
+    TagFloat(v) -> println(float_to_string(v))
+    _           -> println("MISS")
+    end
+  end
+end
