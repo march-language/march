@@ -5,6 +5,9 @@
 
 mod TestSocket do
 
+  needs IO.NetListen
+  needs IO.NetConnect
+
   use Socket.*
 
   -- ── Error type ────────────────────────────────────────────────────────────
@@ -91,6 +94,38 @@ mod TestSocket do
       match result do
       Err(_) -> ()
       Ok(_)  -> panic("expected error")
+      end
+    end
+
+  end
+
+  -- ── recv_timeout ──────────────────────────────────────────────────────────
+
+  describe "recv_deadline" do
+
+    -- A listening socket accepts into the backlog without an accept() call,
+    -- so one process is enough: connect, then read from a peer that will
+    -- never speak.
+    test "returns Ok(None) when the peer sends nothing" do
+      match tcp_listen(29944) do
+      Err(msg) -> panic("listen failed: " ++ msg)
+      Ok(listen_fd) ->
+        match tcp_connect("127.0.0.1", 29944) do
+        Err(msg) -> do
+          tcp_close(listen_fd)
+          panic("connect failed: " ++ msg)
+        end
+        Ok(fd) -> do
+          let result = Socket.recv_deadline(fd, 1024, 200)
+          tcp_close(fd)
+          tcp_close(listen_fd)
+          match result do
+          Ok(None)    -> Test.assert_true(true, "timed out")
+          Ok(Some(_)) -> panic("expected a timeout, got data")
+          Err(_)      -> panic("expected a timeout, got an error")
+          end
+        end
+        end
       end
     end
 

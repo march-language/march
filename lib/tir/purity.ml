@@ -19,8 +19,8 @@ let impure_builtins = [
   "file_read"; "file_write"; "file_write_line";
   (* Network / TLS *)
   "tcp_connect"; "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_close"; "tcp_local_port";
-  "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout";
-  "tls_connect"; "tls_read"; "tls_write"; "tls_close";
+  "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout"; "tcp_recv_timeout";
+  "tls_connect"; "tls_read"; "tls_read_timeout"; "tls_write"; "tls_close";
   (* Randomness / non-determinism *)
   "random_bytes"; "stdlib_random_bytes";
   "uuid_v4";

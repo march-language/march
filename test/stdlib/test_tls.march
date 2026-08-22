@@ -215,6 +215,18 @@ mod TestTls do
       Err(_) -> assert false
       end
     end
+
+    -- `Ok(None)` is the cap expiring, which no stub connection can produce;
+    -- what is testable here is that the wrapper exists, unwraps the handle,
+    -- and hands back an Option rather than a bare String.
+    test "read_timeout returns an Option payload" do
+      let conn = make_stub_conn()
+      match Tls.read_timeout(conn, 4096, 100) do
+      Ok(None)    -> assert true
+      Ok(Some(_)) -> assert true
+      Err(_)      -> assert false
+      end
+    end
   end
 
   -- ── ctx_free ──────────────────────────────────────────────────────────

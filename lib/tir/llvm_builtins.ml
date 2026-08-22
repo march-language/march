@@ -596,6 +596,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_chunk_timeout(i64 %fd, i64 %max_bytes, i64 %timeout_ms)" };
   { march_name = "tcp_set_recv_timeout"; c_name = Some "march_tcp_set_recv_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_set_recv_timeout(i64 %fd, i64 %timeout_ms)" };
+  { march_name = "tcp_recv_timeout"; c_name = Some "march_tcp_recv_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Option", [Tir.TString]); Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_timeout(i64 %fd, i64 %max_bytes, i64 %timeout_ms)" };
   { march_name = "tcp_recv_http_headers"; c_name = Some "march_tcp_recv_http_headers"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_http_headers(i64 %fd)" };
   { march_name = "tcp_recv_chunked_frame"; c_name = Some "march_tcp_recv_chunked_frame"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -610,6 +612,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_accept(i64 %fd, i64 %ctx_handle)" };
   { march_name = "tls_read"; c_name = Some "march_tls_read"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_read(i64 %ssl_handle, i64 %max_bytes)" };
+  { march_name = "tls_read_timeout"; c_name = Some "march_tls_read_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Option", [Tir.TString]); Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_read_timeout(i64 %ssl_handle, i64 %max_bytes, i64 %timeout_ms)" };
   { march_name = "tls_write"; c_name = Some "march_tls_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_write(i64 %ssl_handle, ptr %data)" };
   { march_name = "tls_close"; c_name = Some "march_tls_close"; ret_ty = Some Tir.TUnit;
@@ -1431,6 +1435,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_tcp_recv_chunk";
   PDeclare "march_tcp_recv_chunk_timeout";
   PDeclare "march_tcp_set_recv_timeout";
+  PDeclare "march_tcp_recv_timeout";
   PDeclare "march_tcp_recv_http_headers";
   PDeclare "march_tcp_recv_chunked_frame";
   PComment "; TLS builtins";
@@ -1439,6 +1444,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_tls_connect";
   PDeclare "march_tls_accept";
   PDeclare "march_tls_read";
+  PDeclare "march_tls_read_timeout";
   PDeclare "march_tls_write";
   PDeclare "march_tls_close";
   PDeclare "march_tls_ctx_free";

@@ -68,6 +68,7 @@ let cap_table : (string * string) list = [
   ("tcp_recv_chunk_timeout","IO.NetConnect");
   ("tcp_set_recv_timeout",  "IO.NetConnect");
   ("tcp_recv_chunked_frame","IO.NetConnect");
+  ("tcp_recv_timeout",      "IO.NetConnect");
   ("ws_recv",               "IO.NetConnect");
   ("ws_send",               "IO.NetConnect");
   ("ws_select",             "IO.NetConnect");
@@ -132,6 +133,7 @@ let cap_table : (string * string) list = [
   ("tls_connect",           "IO.NetConnect.TLS");
   ("tls_accept",            "IO.NetConnect.TLS");
   ("tls_read",              "IO.NetConnect.TLS");
+  ("tls_read_timeout",      "IO.NetConnect.TLS");
   ("tls_write",             "IO.NetConnect.TLS");
   ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
   ("tls_peer_cn",           "IO.NetConnect.TLS");

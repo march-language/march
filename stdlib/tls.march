@@ -247,6 +247,23 @@ mod Tls do
   end
 
   doc """
+  Read up to max_bytes from a TLS connection, waiting at most timeout_ms.
+
+  `Ok(None)` is the cap expiring with nothing readable — the absence of an
+  event, not a broken connection. `Ok(Some(""))` signals a clean shutdown,
+  exactly as `read` does.
+  """
+  fn read_timeout(conn, max_bytes, timeout_ms) do
+    match conn do
+    TlsConn(h) ->
+      match tls_read_timeout(h, max_bytes, timeout_ms) do
+      Err(msg) -> Err(TlsReadError(msg))
+      Ok(data) -> Ok(data)
+      end
+    end
+  end
+
+  doc """
   Write data to a TLS connection.
   Returns Ok(Int) — bytes written — or Err(TlsError).
   """

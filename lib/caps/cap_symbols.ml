@@ -56,6 +56,7 @@ let table : (string * string) list = [
   ("march_tcp_recv_chunk_timeout", "IO.NetConnect");
   ("march_tcp_set_recv_timeout",   "IO.NetConnect");
   ("march_tcp_recv_chunked_frame", "IO.NetConnect");
+  ("march_tcp_recv_timeout",       "IO.NetConnect");
   (* IO.WebSocket *)
   ("march_ws_recv",                "IO.WebSocket");
   ("march_ws_send",                "IO.WebSocket");
@@ -125,6 +126,7 @@ let table : (string * string) list = [
   ("march_tls_connect",            "IO.NetConnect.TLS");
   ("march_tls_accept",             "IO.NetConnect.TLS");
   ("march_tls_read",               "IO.NetConnect.TLS");
+  ("march_tls_read_timeout",       "IO.NetConnect.TLS");
   ("march_tls_write",              "IO.NetConnect.TLS");
   ("march_tls_negotiated_alpn",    "IO.NetConnect.TLS");
   ("march_tls_peer_cn",            "IO.NetConnect.TLS");

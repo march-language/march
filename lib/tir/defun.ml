@@ -79,7 +79,7 @@ let builtin_names : StringSet.t =
       "tcp_connect"; "tcp_close"; "tcp_listen"; "tcp_accept"; "tcp_local_port";
       "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
       "tcp_recv_chunk"; "tcp_recv_chunked_frame";
-      "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout";
+      "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout"; "tcp_recv_timeout";
       (* HTTP builtins *)
       "http_parse_request"; "http_serialize_response"; "http_server_listen";
       "http_serialize_request"; "http_parse_response";
@@ -128,7 +128,7 @@ let builtin_names : StringSet.t =
       "float_to_int"; "float_from_string"; "float_is_nan"; "float_is_infinite";
       "float_infinity"; "float_neg_infinity"; "float_nan"; "float_epsilon";
       (* TLS builtins *)
-      "tls_connect"; "tls_accept"; "tls_close"; "tls_read"; "tls_write";
+      "tls_connect"; "tls_accept"; "tls_close"; "tls_read"; "tls_read_timeout"; "tls_write";
       "tls_client_ctx"; "tls_server_ctx"; "tls_ctx_free";
       "tls_negotiated_alpn"; "tls_peer_cn";
       (* Actor builtins *)

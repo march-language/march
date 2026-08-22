@@ -61,6 +61,10 @@ void *march_tcp_recv_chunk_timeout(int64_t fd, int64_t max_bytes, int64_t timeou
  * through OpenSSL — fail instead of hanging.  timeout_ms <= 0 clears it.
  * Returns Ok(Unit) or Err(reason). */
 void *march_tcp_set_recv_timeout(int64_t fd, int64_t timeout_ms);
+
+/* As march_tcp_recv_chunk_timeout, but an expired deadline is Ok(None)
+ * rather than an Err carrying a sentinel string. */
+void *march_tcp_recv_timeout(int64_t fd, int64_t max_bytes, int64_t timeout_ms);
 void *march_tcp_recv_http_headers(int64_t fd);
 void *march_tcp_recv_chunked_frame(int64_t fd);
 
