@@ -11333,6 +11333,71 @@ let test_string_codepoint_parity () =
     ~expected:"Aé\n<none><none>\n65,66\n233\n128512"
     ()
 
+(** The three builtins that were registered in typecheck.ml's table and absent
+    from codegen's, so they typechecked, lowered to LLVM, and then failed at
+    LINK time with a bare C symbol name and no March span
+    (specs/progress/2026-08-21-unix-time-ms-has-no-codegen-backing.md):
+
+      Undefined symbols for architecture arm64:
+        "_unix_time_ms", referenced from: ...
+
+    These are the RAW builtins, not `String.from_codepoint`/`String.to_codepoints`
+    — the pure-March codec in stdlib/string.march, covered by
+    [test_string_codepoint_parity] above, which exists precisely because these
+    did not link.  Both spellings are worth holding: the stdlib one is what
+    user code calls, these are what it could delegate to.
+
+    Interpreter/compiled parity is the assertion because that is the contract
+    that was broken; [test_every_builtin_c_name_is_declared] covers the
+    structural half (a table entry with no declare), and this covers the half
+    it cannot see (a declare with no definition to link against). *)
+let test_compiled_string_codepoint_builtin_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_string_codepoint_builtin"
+    ~src:"mod StringCodepointBuiltin do\n\
+    \  needs IO.Console\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \    println(string_to_codepoints(\"aé€𝄞\"))\n\
+         \    println(string_to_codepoints(\"\"))\n\
+         \    println(string_from_codepoint(65))\n\
+         \    println(string_from_codepoint(119070))\n\
+         \    println(string_from_codepoint(1114112))\n\
+         \    println(string_from_codepoint(55296))\n\
+         \  end\n\
+          end\n"
+    ~expected:"[97, 233, 8364, 119070]\n[]\nSome(A)\nSome(𝄞)\nNone\nNone"
+    ()
+
+(** unix_time_ms: same defect, but a wall clock has no reproducible output, so
+    every assertion is a RELATION that both backends must agree on rather than
+    a value.
+
+    What this does NOT check, deliberately recorded so nobody reads more into
+    it: that the builtin is registered IMPURE in lib/tir/purity.ml.  If it were
+    treated as pure, the two calls would be CSE'd into one read, and every
+    relation below — `t1 >= t0` included — would still hold, for the wrong
+    reason.  The honest test for that would have to assert two reads CAN
+    differ, which is inherently flaky at millisecond resolution.  The purity
+    registration is held by the list itself, not by this test. *)
+let test_compiled_unix_time_ms_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_unix_time_ms"
+    ~src:"mod UnixTimeMsParity do\n\
+    \  needs IO\n\
+         \  fn main(_cap : Cap(IO)) do\n\
+         \    let t0 = unix_time_ms(())\n\
+         \    let secs = unix_time(())\n\
+         \    println(t0 > 1700000000000)\n\
+         \    println(float_to_int(secs) > 1700000000)\n\
+         \    let drift = t0 - float_to_int(secs *. 1000.0)\n\
+         \    println(drift > -1000 && drift < 1000)\n\
+         \    let t1 = unix_time_ms(())\n\
+         \    println(t1 >= t0 && t1 - t0 < 60000)\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\ntrue\ntrue\ntrue"
+    ()
+
 (** int_div_euclid: native codegen must route through march_checked_ediv and
     match the interpreter's Euclidean quotient across all four sign quadrants.
     Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
@@ -12526,6 +12591,8 @@ declare double @march_math_log10(double %f)
 declare double @march_math_pow(double %b, double %e)
 ; Extended string builtins
 declare ptr  @march_string_chars(ptr %s)
+declare ptr  @march_string_to_codepoints(ptr %s)
+declare ptr  @march_string_from_codepoint(i64 %cp)
 declare ptr  @march_string_from_chars(ptr %list)
 declare i64  @march_string_contains(ptr %s, ptr %sub)
 declare i64  @march_string_starts_with(ptr %s, ptr %prefix)
@@ -12842,6 +12909,7 @@ declare void   @ring_buf_clear(ptr %rb)
 declare ptr    @ring_buf_to_list(ptr %rb)
 ; Time builtins
 declare double @march_unix_time()
+declare i64    @march_unix_time_ms()
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
@@ -12935,6 +13003,67 @@ declare void @march_yield_from_compiled()
 "
     in
     golden_preamble_core ^ golden_preamble_native_actor ^ tls_insert ^ golden_preamble_native_net_io
+
+(** Every builtin whose call site mangles to a C symbol must have that symbol
+    DECLARED in some preamble, or the emitted module references a name LLVM has
+    never heard of.  This is the invariant that broke for `unix_time_ms`
+    (specs/progress/2026-08-21-unix-time-ms-has-no-codegen-backing.md): the
+    table entry and the [PDeclare] list are two separate hand-maintained lists,
+    and an entry with no declare fails as
+
+      error: use of undefined value '@march_unix_time_ms'
+
+    at the FIRST caller, in whatever unrelated change happens to add one.
+    Checked against the union of every preamble configuration, so a
+    native-only or WASM-only symbol is not falsely flagged.
+
+    Two entries are legitimately absent and are listed rather than filtered by
+    pattern, so a third one cannot join them silently:
+
+      march_main             the program's own entry point — DEFINED by the
+                             emitted module, not declared into it.
+      march_atom_to_string   compile-time generated per module by
+                             [Llvm_toplevel.emit_atom_show_table] as a switch
+                             over ctx.atom_names; a `declare` alongside that
+                             `define` would be an LLVM redefinition, which is
+                             why its [declare_sig] is None (see the note on the
+                             entry itself in llvm_builtins.ml).
+
+    Note what this does NOT check: that the C symbol actually EXISTS at link
+    time. A declare with no definition still fails, just later and with a
+    linker error instead of an IR one — `test/native/builtin_link_backing`
+    covers that half by running a compiled program. *)
+let test_every_builtin_c_name_is_declared () =
+  let declared =
+    List.fold_left
+      (fun acc (is_wasm, repl) ->
+         let buf = Buffer.create 8192 in
+         March_tir.Llvm_builtins.emit_preamble ~is_wasm
+           ~triple:(if is_wasm then "wasm64-wasi" else "x86_64-unknown-linux-gnu")
+           ~repl buf;
+         Buffer.contents buf :: acc)
+      [] [ (false, false); (false, true); (true, false) ]
+  in
+  let is_declared sym =
+    List.exists
+      (fun text ->
+         try ignore (Str.search_forward (Str.regexp_string ("@" ^ sym ^ "(")) text 0); true
+         with Not_found -> false)
+      declared
+  in
+  let compiler_defined = [ "march_main"; "march_atom_to_string" ] in
+  let missing =
+    List.filter_map
+      (fun (b : March_tir.Llvm_builtins.builtin) ->
+         match b.c_name with
+         | Some sym when not (List.mem sym compiler_defined) && not (is_declared sym) ->
+           Some (b.march_name ^ " -> @" ^ sym)
+         | _ -> None)
+      March_tir.Llvm_builtins.builtins
+  in
+  Alcotest.(check (list string))
+    "every builtin c_name is declared in some preamble (or compiler-defined)"
+    [] missing
 
 let test_preamble_byte_identical_native () =
   let buf = Buffer.create 4096 in
@@ -14774,8 +14903,16 @@ let codegen_suites =
       ( "string_codepoint", [
           Alcotest.test_case "String.from_codepoint/to_codepoints usable compiled (pure-March codec)" `Quick
             test_string_codepoint_parity;
+          Alcotest.test_case "string_to_codepoints/string_from_codepoint builtins link and match interp" `Quick
+            test_compiled_string_codepoint_builtin_parity;
+        ] );
+      ( "unix_time_ms", [
+          Alcotest.test_case "unix_time_ms builtin links and matches interp" `Quick
+            test_compiled_unix_time_ms_parity;
         ] );
       ( "llvm_builtins_preamble_golden", [
+          Alcotest.test_case "every builtin c_name is declared in some preamble" `Quick
+            test_every_builtin_c_name_is_declared;
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
             test_preamble_byte_identical_native;
           Alcotest.test_case "native, REPL preamble byte-identical (W3C2.4 / H2)" `Quick

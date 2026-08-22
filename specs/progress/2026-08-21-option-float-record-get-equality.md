@@ -65,3 +65,61 @@ every `TFloat` ctor field a boxed `ptr` and regressed six goldens
 `native_arr_map_inline_{capture,float_box_reuse,unboxed}`) to garbage doubles
 and wrong arithmetic. Boxing is the convention only for a field DECLARED
 generic; a field declared concrete `Float` is an inline double.
+
+---
+
+## RESOLVED (2026-08-22) — the value restriction, as this file predicted
+
+The "Candidate fix, and why it was not taken here" section above is what
+shipped: `record_get` now gets `demote_to_monomorphic` on its result, in the
+same `infer_expr` arm style as `cap_narrow`, `mint_cap` and `from_json`
+(`lib/typecheck/typecheck.ml`). Nothing in `lib/tir` changed — `llvm_ty`,
+`field_load_llty`, `ctor_field_llty` and `llvm_case`'s extraction are untouched,
+so the six goldens #315 regressed (`float_generic_field_abi`, `record_pattern`,
+`native_arr_map2_inline`, `native_arr_map_inline_{capture,float_box_reuse,unboxed}`)
+never came into it. They pass.
+
+### It was generalization, and generalization here was unsound anyway
+
+Confirmed directly rather than inferred. Against the unfixed compiler:
+
+```march
+let d = record_get(r, "z")
+let u : Option(Float)  = d
+let v : Option(String) = d
+```
+
+typechecked and ran. One stored field has one representation; reading it at two
+payload types only type-checked because the erasure hid the contradiction. That
+program is now correctly rejected ("expected `String` but got `Float`"), which
+is the real content of the fix — the `==` answering `false` was the symptom.
+
+### Blast radius, measured rather than guessed
+
+The reason this was deferred out of #324 was fear that demoting would reject
+existing helpers. In-repo there are no `record_get` callers in `stdlib/` at all,
+and `dune runtest` is green. The cost is the one this file already named and
+`from_json` already pays: a single `record_get` application can no longer be
+used at two different payload types.
+
+### Test
+
+`test/native/record_get_let_bound_eq.march` + `.expected`, wired into
+`test/dune` next to the rest of the erased/uniform family. Inline, annotated and
+un-annotated `let` forms of `Float`; the same binding consumed by `match`; a
+missing key; and an `Int` control. The fixture's header records why the Int rows
+cannot carry the test: for `Int` the erased form is the low-bit tag, a
+bijection, so both encodings compare equal and an Int-only fixture passes
+against the broken compiler.
+
+RED, against the unfixed compiler (line 3 is the un-annotated `let`):
+
+```
+  1  true|true
+  2  true|true
+  3  true|false      <- d == Some(0.5)
+  ...
+```
+
+Interpreted was `true` throughout, which is what `.expected` was generated from.
+GREEN: zero diff.

@@ -4309,6 +4309,12 @@ let base_env : env =
         | [v] -> capture_writeln (show_dispatch v); VUnit
         | vs  -> List.iter (fun v -> capture_write (show_dispatch v)) vs;
                  capture_write "\n"; VUnit))
+    (* print_line: see typecheck.ml.  Interpreted output is one OCaml channel
+       with no vectored-write split, so this is just `print` plus a newline —
+       what matters is that the NAME exists on both backends. *)
+  ; ("print_line", VBuiltin ("print_line", function
+        | [v] -> capture_writeln (value_display v); VUnit
+        | _ -> eval_error "print_line: expected one string"))
   ; ("print_int", VBuiltin ("print_int", function
         | [VInt n] -> capture_write (string_of_int n); VUnit
         | _ -> eval_error "print_int: expected int"))

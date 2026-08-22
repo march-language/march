@@ -1,0 +1,61 @@
+-- Builtins that TYPECHECK but do not LINK.  The typecheck builtin table and
+-- the codegen builtin table are maintained by hand and nothing cross-checks
+-- them, so an entry can exist in the first and not the second.
+--
+-- `unix_time_ms` typechecked (`() -> Int`, capability `IO.Clock`) and lowered
+-- to LLVM, but had no entry in `lib/tir/llvm_builtins.ml` and no `march_*`
+-- symbol in the C runtime, so a COMPILED program that used it died at LINK
+-- time with a bare C symbol name and no March span:
+--
+--   Undefined symbols for architecture arm64:
+--     "_unix_time_ms", referenced from: ...
+--
+-- Interpreted it worked, which is the whole point: this fixture is here to
+-- hold the compiled backend to interpreter parity.
+-- Auditing the whole table for the same shape turned up two more with no
+-- `march_*` symbol and no codegen entry: `string_to_codepoints` and
+-- `string_from_codepoint`.  All three are pinned here.
+-- (specs/progress/2026-08-21-unix-time-ms-has-no-codegen-backing.md)
+--
+-- Nothing about a wall clock is reproducible, so every assertion below is a
+-- RELATION rather than a value: the epoch is past, `unix_time_ms` agrees with
+-- `unix_time` to within a second, and the clock does not run backwards across
+-- two reads.
+--
+-- What this does NOT check: that `unix_time_ms` is registered IMPURE in
+-- `lib/tir/purity.ml`.  If it were treated as pure the two calls would be CSE'd
+-- into one read and every relation here would STILL hold, `t1 >= t0` included.
+-- A real test for that would have to assert two reads CAN differ, which is
+-- flaky at millisecond resolution.  The registration is held by the list.
+mod Main do
+  needs IO
+
+  fn main(cap: Cap(IO)) do
+    let t0 = unix_time_ms(())
+    let secs = unix_time(())
+
+    -- 2023-11-14T22:13:20Z, comfortably in the past on any real clock
+    println(t0 > 1700000000000)
+    println(float_to_int(secs) > 1700000000)
+
+    -- the two builtins read the same clock, in different units
+    let drift = t0 - float_to_int(secs *. 1000.0)
+    println(drift > -1000 && drift < 1000)
+
+    let t1 = unix_time_ms(())
+    println(t1 >= t0)
+    println(t1 - t0 < 60000)
+
+    println(t0 + t1 > 0)
+
+    -- ── string_to_codepoints / string_from_codepoint ────────────────────
+    -- 1-, 2-, 3- and 4-byte UTF-8 in one string, so every decode arm runs.
+    println(string_to_codepoints("aé€𝄞"))
+    println(string_to_codepoints(""))
+    println(string_from_codepoint(65))
+    println(string_from_codepoint(119070))
+    -- out of range, and a lone UTF-16 surrogate half: both None
+    println(string_from_codepoint(1114112))
+    println(string_from_codepoint(55296))
+  end
+end

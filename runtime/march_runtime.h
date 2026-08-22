@@ -65,8 +65,13 @@ void march_frame_push(march_frame_t *frame);
 void march_frame_pop(void);
 void march_frame_reset(void);
 
+/* UTF-8 codepoint builtins. */
+void *march_string_to_codepoints(void *s);
+void *march_string_from_codepoint(int64_t cp);
+
 /* Time builtins. */
 double  march_unix_time(void);
+int64_t march_unix_time_ms(void);
 
 /* Process self-inspection: peak RSS in bytes, both platforms. */
 int64_t march_peak_rss_bytes(void);

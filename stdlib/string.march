@@ -441,9 +441,14 @@ mod String do
   end
 
   -- Pure-March UTF-8 encode. Reject out-of-range (> 0x10FFFF, < 0) and UTF-16
-  -- surrogate codepoints (0xD800-0xDFFF). Compiled-safe: no runtime extern
-  -- (the old `string_from_codepoint` builtin had no native impl, so any
-  -- compiled program calling this failed to link).
+  -- surrogate codepoints (0xD800-0xDFFF). Pure March, no runtime extern.
+  -- This was written because the `string_from_codepoint` builtin had no native
+  -- impl, so any compiled program calling it failed to link. That was fixed on
+  -- 2026-08-22 (`march_string_from_codepoint`), so this body is no longer
+  -- load-bearing and could delegate — see
+  -- specs/todos/2026-08-22-builtins-that-typecheck-but-do-not-link.md. Kept as
+  -- is for now: it is tested, it agrees with the builtin on every case
+  -- including truncated input, and swapping it is its own change.
   fn from_codepoint(cp : Int) : Option(String) do
     if cp < 0 do
       None
@@ -507,8 +512,9 @@ mod String do
     end
   end
 
-  -- Pure-March UTF-8 decode. Compiled-safe (the old `string_to_codepoints`
-  -- builtin had no native impl).
+  -- Pure-March UTF-8 decode. Same story as `from_codepoint` above: written
+  -- around a `string_to_codepoints` builtin that did not link when compiled,
+  -- which was fixed on 2026-08-22.
   fn to_codepoints(s : String) : List(Int) do
     let b = Bytes.from_string(s)
     decode_go(b, Bytes.length(b), 0, Nil)

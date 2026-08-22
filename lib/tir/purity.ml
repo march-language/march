@@ -11,7 +11,7 @@
     process control, actor/task creation, time. *)
 let impure_builtins = [
   (* Console IO *)
-  "print"; "println"; "march_print"; "march_println";
+  "print"; "println"; "print_line"; "march_print"; "march_println";
   "print_int"; "print_float"; "print_char";
   "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "process_read_line";
   (* File IO *)
@@ -25,7 +25,7 @@ let impure_builtins = [
   "random_bytes"; "stdlib_random_bytes";
   "uuid_v4";
   (* Time *)
-  "unix_time"; "sys_uptime_ms";
+  "unix_time"; "unix_time_ms"; "sys_uptime_ms";
   (* Actors / tasks / processes *)
   "send"; "kill"; "spawn"; "receive";
   "task_spawn"; "task_spawn_steal"; "task_spawn_link";

@@ -1968,6 +1968,7 @@ let builtin_cap_table : (string * string) list = [
   (* IO.Console *)
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
+  ("print_line",            "IO.Console");
   (* IO.FileRead *)
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
@@ -2358,6 +2359,13 @@ let builtin_bindings : (string * scheme) list =
     ("++",             Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("print",          Mono (TArrow (t_string, t_unit)));
     ("println",        Mono (TArrow (t_string, t_unit)));
+    (* print_line: a String and its newline in ONE write.  `println` is the
+       polymorphic prelude wrapper and cannot be this — a module-level `fn`
+       shadows the builtin of the same name, so [Prelude.println] was reaching
+       the backend as two separate `print` calls and never touched
+       `march_println` at all.  This is the name the wrapper's body calls to
+       get there.  See stdlib/prelude.march. *)
+    ("print_line",     Mono (TArrow (t_string, t_unit)));
     ("print_int",      Mono (TArrow (t_int,    t_unit)));
     ("print_float",    Mono (TArrow (t_float,  t_unit)));
     (* Tap bus: ∀a. a -> a  (sends value to tap bus, returns it unchanged) *)
@@ -6406,6 +6414,33 @@ let rec infer_expr env (e : Ast.expr) : ty =
          costs nothing that worked. *)
       demote_to_monomorphic f_ty;
       env.json_cap_sites := (sp, f_ty, jname) :: !(env.json_cap_sites);
+      rty
+
+    (* Value restriction for [record_get], for the same reason as [from_json]
+       above and for one more that is specific to it: the RUNTIME
+       REPRESENTATION of the result is chosen once, at this call site.
+       [march_record_get] takes an [expected_kind] that codegen derives from
+       the result's static type — [Option(Float)] asks for a BOXED [Some] cell
+       (kind 'f'), an unresolved [Option('_)] asks for the erased NICHE
+       encoding (kind 'g', payload verbatim).  A [record_get] APPLICATION is
+       expansive, so if [let d = record_get(r, "z")] generalizes [d] to
+       [∀b. Option(b)], every USE instantiates a fresh [b] and the binding's
+       own type — the one codegen reads — stays unbound forever.  The call site
+       then emits kind 'g' while [d == Some(0.5)] builds a boxed
+       [Option(Float)] on the other side, and the two encodings compare
+       unequal: [d == Some(0.5)] answered [false] compiled and [true]
+       interpreted.
+       Demoting the payload var to level 0 lets the use site's type flow back
+       to the binding, so the call site emits the kind the consumer decodes.
+       Consequence, and it is a real one: a single [record_get] application can
+       no longer be used at two DIFFERENT payload types.  That was never
+       meaningful — one stored field has one representation, and reading it as
+       both [Option(Float)] and [Option(String)] type-checked only because the
+       erasure hid the contradiction. *)
+    | Ast.EApp (Ast.EVar { txt = "record_get"; _ } as fv, ([_; _] as args), sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty args 0 in
+      demote_to_monomorphic rty;
       rty
 
     | Ast.EApp (f, args, sp) ->

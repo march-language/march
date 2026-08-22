@@ -17,7 +17,7 @@ let builtin_names : StringSet.t =
       "+."; "-."; "*."; "/.";
       "<"; ">"; "<="; ">="; "&&"; "||";
       "=="; "!="; "++";
-      "print"; "println"; "print_stderr"; "print_int"; "print_float";
+      "print"; "println"; "print_line"; "print_stderr"; "print_int"; "print_float";
       "int_to_string"; "float_to_string"; "bool_to_string"; "atom_to_string";
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_byte_at"; "string_is_empty";
@@ -138,8 +138,9 @@ let builtin_names : StringSet.t =
       "actor_send_after"; "actor_cancel_timer";
       (* String conversion builtins *)
       "string_chars"; "string_from_chars";
+      "string_to_codepoints"; "string_from_codepoint";
       (* Unix/time builtins *)
-      "unix_time";
+      "unix_time"; "unix_time_ms";
       (* Process self-inspection builtins *)
       "peak_rss_bytes"; "live_allocs";
       (* Comparison / hash builtins *)

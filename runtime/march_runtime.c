@@ -1033,20 +1033,47 @@ void march_print(void *s) {
     write(1, ms->data, (size_t)ms->len);
 }
 
+/* Serialises march_println against itself across OS threads.  See the comment
+ * in march_println for why the writev alone is not enough.
+ *
+ * Held only across the one writev(2) below, and march_println is never reached
+ * from a signal handler (the preempt handler does two volatile scalar stores;
+ * the SIGSEGV/SIGBUS stack-growth handler does not print), so this cannot
+ * self-deadlock.  march_print — no newline, one write(2), one buffer — has
+ * nothing to tear between and stays lock-free. */
+static pthread_mutex_t march_stdout_mu = PTHREAD_MUTEX_INITIALIZER;
+
 void march_println(void *s) {
     march_string *ms = (march_string *)s;
-    /* Emit the payload AND its trailing newline in a single writev(2) syscall so
-     * the whole line is atomic against concurrent green threads. Two separate
-     * write() calls let another thread's println interleave between the data and
-     * the '\n', tearing lines together (and stranding a lone newline) — visible
-     * in multi-node/multi-actor programs run with >1 OS scheduler thread. A
-     * single vectored write to a regular file/pipe is atomic (POSIX). */
+    /* Emit the payload AND its trailing newline in a single writev(2) syscall.
+     * Two separate write() calls let another thread's println interleave
+     * between the data and the '\n', tearing lines together (and stranding a
+     * lone newline) — visible in multi-node/multi-actor programs run with >1 OS
+     * scheduler thread.
+     *
+     * The single writev is necessary but NOT sufficient, and the comment that
+     * used to sit here claimed otherwise ("a single vectored write to a regular
+     * file/pipe is atomic (POSIX)").  POSIX says no such thing about competing
+     * writers, and darwin 25.5.0/arm64 demonstrably splits it: with four green
+     * threads spread over the scheduler pool printing a fixed 32-byte payload,
+     * EVERY run of 1200 lines tore, ~140 lines per run, always between the two
+     * iovecs — one thread's iov[0], then another thread's whole line, then the
+     * first thread's iov[1].  That is what produces the two signature shapes,
+     * a doubled line and a stranded empty one.  Reproduced to a regular file
+     * and to a pipe.
+     *
+     * So take a lock as well.  The lock is what actually provides the
+     * guarantee; the writev stays because halving the syscall count is worth
+     * keeping and because it keeps the critical section to one syscall.
+     * (specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md) */
     struct iovec iov[2];
     iov[0].iov_base = ms->data;
     iov[0].iov_len  = (size_t)ms->len;
     iov[1].iov_base = (void *)"\n";
     iov[1].iov_len  = 1;
+    pthread_mutex_lock(&march_stdout_mu);
     ssize_t rc = writev(1, iov, 2);
+    pthread_mutex_unlock(&march_stdout_mu);
     (void)rc;
 }
 
@@ -5309,6 +5336,67 @@ void *march_string_chars(void *s) {
     return list;
 }
 
+/* Returns List(Int).  Decodes UTF-8 exactly as the interpreter's
+ * `string_to_codepoints` does, INCLUDING its treatment of a truncated
+ * sequence: a lead byte whose continuation bytes run past the end of the
+ * string yields the lead BYTE itself rather than a replacement character.
+ * That is not obviously the right choice, but the two backends have to agree
+ * and the interpreter is the older one. */
+void *march_string_to_codepoints(void *s) {
+    march_string *ss = (march_string *)s;
+    const unsigned char *d = (const unsigned char *)ss->data;
+    int64_t len = ss->len;
+    /* Collect forward into a temporary array, then cons up in reverse — the
+     * list has to come out in source order and Cons builds back-to-front. */
+    int64_t cap = len > 0 ? len : 1, n = 0;
+    int64_t *cps = (int64_t *)malloc(sizeof(int64_t) * (size_t)cap);
+    for (int64_t i = 0; i < len; ) {
+        unsigned b = d[i];
+        if (b < 0x80)                        { cps[n++] = b;                      i += 1; }
+        else if (b < 0xE0 && i + 1 < len)    { cps[n++] = ((int64_t)(b - 0xC0) << 6)
+                                                        | (d[i+1] - 0x80);        i += 2; }
+        else if (b < 0xF0 && i + 2 < len)    { cps[n++] = ((int64_t)(b - 0xE0) << 12)
+                                                        | ((int64_t)(d[i+1] - 0x80) << 6)
+                                                        | (d[i+2] - 0x80);        i += 3; }
+        else if (b >= 0xF0 && i + 3 < len)   { cps[n++] = ((int64_t)(b - 0xF0) << 18)
+                                                        | ((int64_t)(d[i+1] - 0x80) << 12)
+                                                        | ((int64_t)(d[i+2] - 0x80) << 6)
+                                                        | (d[i+3] - 0x80);        i += 4; }
+        else                                 { cps[n++] = b;                      i += 1; }
+    }
+    void *list = make_nil();
+    for (int64_t i = n - 1; i >= 0; i--)
+        list = make_cons(make_some_i64(cps[i]), list);
+    free(cps);
+    return list;
+}
+
+/* Returns Option(String) in the NICHE encoding (None = 0, Some(p) = p), which
+ * is what a heap-pointer payload gets — same as march_process_env.
+ * None for an out-of-range codepoint or a UTF-16 surrogate half. */
+void *march_string_from_codepoint(int64_t cp) {
+    if (cp < 0 || cp > 0x10FFFF) return make_none();
+    if (cp >= 0xD800 && cp <= 0xDFFF) return make_none();
+    char buf[4];
+    int64_t n;
+    if (cp <= 0x7F) {
+        buf[0] = (char)cp; n = 1;
+    } else if (cp <= 0x7FF) {
+        buf[0] = (char)(0xC0 | (cp >> 6));
+        buf[1] = (char)(0x80 | (cp & 0x3F)); n = 2;
+    } else if (cp <= 0xFFFF) {
+        buf[0] = (char)(0xE0 | (cp >> 12));
+        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (cp & 0x3F)); n = 3;
+    } else {
+        buf[0] = (char)(0xF0 | (cp >> 18));
+        buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (cp & 0x3F)); n = 4;
+    }
+    return make_some_ptr(march_string_lit(buf, n));
+}
+
 void *march_string_split(void *s, void *sep) {
     march_string *ss = (march_string *)s;
     march_string *sp = (march_string *)sep;
@@ -6991,6 +7079,19 @@ double march_unix_time(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Milliseconds since the Unix epoch.  Deliberately NOT
+ * `(int64_t)(march_unix_time() * 1000.0)`: a double carries 53 bits of
+ * mantissa, so once the epoch reaches ~2^53 nanoseconds of precision the
+ * seconds-as-double round trip starts dropping sub-millisecond bits and two
+ * reads a millisecond apart can come back equal.  Compute in integers instead,
+ * which is also what the interpreter's `int_of_float (gettimeofday () *. 1000.)`
+ * gets right by accident at today's magnitudes. */
+int64_t march_unix_time_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
 }
 
 /* Peak resident set size of this process, in BYTES on every platform.
