@@ -2371,6 +2371,8 @@ True</code></pre></div></div>
 &quot;TLS certificate error: invalid CN&quot;
 &gt;&gt;&gt; Tls.error_to_string(TlsReadError(&quot;EOF&quot;))
 &quot;TLS read error: EOF&quot;
+&gt;&gt;&gt; Tls.error_to_string(TlsReadTimeout)
+&quot;TLS read timed out&quot;
 &gt;&gt;&gt; Tls.error_to_string(TlsWriteError(&quot;broken pipe&quot;))
 &quot;TLS write error: broken pipe&quot;
 &gt;&gt;&gt; Tls.error_to_string(TlsContextError(&quot;bad cert&quot;))
@@ -2387,7 +2389,11 @@ the underlying fd BEFORE Tls.connect -- SO_RCVTIMEO is the only mechanism
 that reaches a read made through OpenSSL, and setting it before the
 handshake bounds the handshake too.  A deadline that fires part-way through
 a TLS record leaves the session unusable, so treat an expired read as
-&quot;close the connection&quot;, not as something to retry.</code></pre></div></div>
+&quot;close the connection&quot;, not as something to retry.
+
+When that deadline expires this returns Err(TlsReadTimeout), which is a
+different fact from Err(TlsReadError(...)) -- the peer was silent, rather
+than the connection failing.  Both still mean close it.</code></pre></div></div>
 <div class="item" id="fn-server_config"><div class="ih"><span class="badge bfn">fn</span><span class="name">server_config</span><span class="sig">server_config(cert_path, key_path)</span><a class="anchor-link" href="#fn-server_config" title="Link">#</a></div><div class="ib"><p>Server configuration with a PEM cert+key and no client-cert verification.</p></div></div>
 <div class="item" id="fn-server_ctx"><div class="ih"><span class="badge bfn">fn</span><span class="name">server_ctx</span><span class="sig">server_ctx(config)</span><a class="anchor-link" href="#fn-server_ctx" title="Link">#</a></div><div class="ib"><p>Create a server-side TLS context from a TlsConfig. cert_file and key_file must be non-empty PEM paths. Returns Ok(TlsCtx) or Err(TlsError).</p></div></div>
 <div class="item" id="fn-verify_peer"><div class="ih"><span class="badge bfn">fn</span><span class="name">verify_peer</span><span class="sig">verify_peer(c)</span><a class="anchor-link" href="#fn-verify_peer" title="Link">#</a></div><div class="ib"></div></div>
