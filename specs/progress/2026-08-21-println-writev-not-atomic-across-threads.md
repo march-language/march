@@ -151,9 +151,17 @@ Net against `main`: faster uncontended, faster contended, and correct.
 
 The writev-splitting this file reports (17/400 under load, via a `Signal.watch`
 handler drained on an idle scheduler thread) was **not reproduced**. With
-`print_line` in place but the lock REMOVED, the single `writev` held for 0 torn
-runs out of 160 — ~256,000 lines, 8 and 12 scheduler threads, payloads of 32 and
-2 bytes, to both a regular file and a pipe, load ~58. Either the split needs the
+`print_line` in place but the lock REMOVED, the single `writev` held for **0
+torn runs across 280 runs / ~656,000 lines**, all at load ~58:
+
+| payload | schedulers | sink | runs x lines | torn |
+|---|---|---|---|---|
+| 32 bytes | default | file | 60 x 1200 | 0 |
+| 32 bytes | 8 | file | 60 x 1200 | 0 |
+| 2 bytes | 12 | file | 80 x 3200 | 0 |
+| 2 bytes | 12 | pipe | 80 x 3200 | 0 |
+
+Either the split needs the
 signal-drain thread specifically (a different code path from `task_spawn`, and
 this repo's own recorded evidence for it stands), or it needs conditions this
 box did not produce. The lock is kept on that recorded evidence and because it

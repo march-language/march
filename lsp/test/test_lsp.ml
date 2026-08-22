@@ -237,6 +237,33 @@ end|} in
   Alcotest.(check int) "no collision diagnostic for a safe shadow" 0
     (count_errors a)
 
+(** The other half of the `print_line` case above, and the reason both halves
+    are pinned: on 2026-08-22 the name `print` MOVED from the hazardous set to
+    the safe one.
+
+    [Prelude_collision] decides by computing Prelude's actual internal call
+    graph, not by consulting a hardcoded list. `print` was hazardous only
+    because `println`'s body called it bare; that body is now a single
+    `print_line(show(x))`, so nothing in prelude.march reaches for bare `print`
+    any more and shadowing it is as safe as shadowing `head`
+    (specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md).
+
+    This test exists so that "fixing" the checker by hardcoding the old list
+    fails loudly rather than quietly re-flagging code that is now fine. It is
+    the inverse assertion of [test_analyse_prelude_collision_produces_diagnostic],
+    and the two must not both pass for the same name. *)
+let test_analyse_print_no_longer_collides () =
+  let src = {|mod Shadow do
+  fn print(x : Int) : Unit do
+    ()
+  end
+end|} in
+  let a = An.analyse ~filename:"shadow_print.march" ~src in
+  Alcotest.(check int)
+    "`print` is no longer called from inside a Prelude body, so shadowing it \
+     is not a collision" 0
+    (count_errors a)
+
 let test_analyse_notes_appended_to_message () =
   (* A diagnostic with notes should include "note:" in its message. *)
   (* We can't easily manufacture a note without triggering a specific
@@ -6821,6 +6848,7 @@ let () =
       Alcotest.test_case "src field matches input"               `Quick test_analyse_src_field_matches_input;
       Alcotest.test_case "prelude collision → diagnostic"         `Quick test_analyse_prelude_collision_produces_diagnostic;
       Alcotest.test_case "safe builtin shadow → no diagnostic"    `Quick test_analyse_safe_shadow_no_collision_diagnostic;
+      Alcotest.test_case "`print` no longer collides (println calls print_line)" `Quick test_analyse_print_no_longer_collides;
     ];
     "document-symbols", [
       Alcotest.test_case "fn name in symbols"            `Quick test_document_symbols_fn;

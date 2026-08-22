@@ -20,10 +20,13 @@
 -- Nothing about a wall clock is reproducible, so every assertion below is a
 -- RELATION rather than a value: the epoch is past, `unix_time_ms` agrees with
 -- `unix_time` to within a second, and the clock does not run backwards across
--- two reads.  The last one also pins that `unix_time_ms` is registered IMPURE
--- (`lib/tir/purity.ml`) — a pure zero-arg call would be CSE'd into one read
--- and `t1 >= t0` would hold for the wrong reason, so the `sum` below forces
--- both reads to be observable.
+-- two reads.
+--
+-- What this does NOT check: that `unix_time_ms` is registered IMPURE in
+-- `lib/tir/purity.ml`.  If it were treated as pure the two calls would be CSE'd
+-- into one read and every relation here would STILL hold, `t1 >= t0` included.
+-- A real test for that would have to assert two reads CAN differ, which is
+-- flaky at millisecond resolution.  The registration is held by the list.
 mod Main do
   needs IO
 
@@ -43,7 +46,6 @@ mod Main do
     println(t1 >= t0)
     println(t1 - t0 < 60000)
 
-    -- force both reads to be materialised (see the purity note above)
     println(t0 + t1 > 0)
 
     -- ── string_to_codepoints / string_from_codepoint ────────────────────

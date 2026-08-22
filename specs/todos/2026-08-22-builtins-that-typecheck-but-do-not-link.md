@@ -42,6 +42,17 @@ Worth turning into a CI check rather than a periodic sweep: step 2 is
 mechanical, and the failure it prevents lands at LINK time with a C symbol name
 and no March span.
 
+## A now-removable workaround, while you are here
+
+`stdlib/string.march`'s `String.from_codepoint` / `String.to_codepoints` are a
+hand-written pure-March UTF-8 codec, and their comments say why: the builtins
+they would otherwise call did not link when compiled. They do now. The two
+implementations agree on every case including truncated multi-byte input (the C
+decoder deliberately reproduces the interpreter's lead-byte fallback), and
+`test/test_codegen.ml` has parity tests for both spellings, so delegating is a
+small, well-covered change — just not this one. Whoever picks up the audit above
+is in the right neighbourhood for it.
+
 ## Related
 
 - `specs/progress/2026-08-21-unix-time-ms-has-no-codegen-backing.md` — the
