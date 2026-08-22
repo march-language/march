@@ -41,6 +41,16 @@ void *march_tcp_connect(void *host, int64_t port);
 /* Read all bytes from fd until close or max_bytes. */
 void *march_tcp_recv_all(int64_t fd, int64_t max_bytes, int64_t timeout_ms);
 void *march_tcp_recv_chunk(int64_t fd, int64_t max_bytes);
+
+/* Read one chunk (up to max_bytes), waiting at most timeout_ms for data.
+ * Returns Ok(String), or Err("recv: timed out") when the deadline expires.
+ * timeout_ms <= 0 means no timeout. */
+void *march_tcp_recv_chunk_timeout(int64_t fd, int64_t max_bytes, int64_t timeout_ms);
+
+/* Set SO_RCVTIMEO on fd so later blocking reads — including reads made
+ * through OpenSSL — fail instead of hanging.  timeout_ms <= 0 clears it.
+ * Returns Ok(Unit) or Err(reason). */
+void *march_tcp_set_recv_timeout(int64_t fd, int64_t timeout_ms);
 void *march_tcp_recv_http_headers(int64_t fd);
 void *march_tcp_recv_chunked_frame(int64_t fd);
 

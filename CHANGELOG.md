@@ -11,6 +11,21 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`Socket.set_recv_timeout(fd, ms)`** — bounds every subsequent blocking read
+  on a descriptor (`SO_RCVTIMEO`). Unlike a per-call deadline this is a
+  persistent property of the fd, and that is the point: it is the only
+  mechanism that reaches reads made through OpenSSL, so a TLS client can call
+  it before `Tls.connect` to bound both the handshake and every later
+  `Tls.read` against a peer that goes silent. On timeout, close the connection
+  — a deadline firing part-way through a TLS record leaves the session
+  unusable, so the read must not be retried.
+- **`SocketError.RecvTimeout(Int)` and `SocketError.SocketOptionFailed(String)`.**
+  "The peer went quiet" and "the read failed" are different facts and only one
+  of them is worth retrying, so a timeout is now its own variant carrying the
+  deadline that expired, rather than a generic `RecvFailed`.
+
 ### Fixed
 
 - **Compiled closure calls no longer leak two heap boxes per call when a `Float`
@@ -29,6 +44,25 @@ git log is authoritative for exact commits.
   leaks its one result box per await (tracked, blocked on task-object
   lifetime); an erased self-recursive Float accumulator still leaks on its
   back-edge (tracked).
+- **`Socket.recv_timeout` ignored its timeout argument entirely.** The
+  parameter was `_timeout_ms` and the body was byte-for-byte the untimed
+  `recv/2` above it, so a caller who asked to be protected against a silent
+  peer was not — the call simply blocked forever. It now honours the deadline
+  (`poll` then `recv`, leaving no lasting property on the fd) and reports
+  `Err(RecvTimeout(ms))` when it expires. `tcp_recv_all` carried the same dead
+  `timeout_ms` parameter and now enforces it as a total deadline across the
+  whole read.
+- **Read deadlines on sockets were silently defeated by scheduler preemption.**
+  `SIGUSR1` is installed with `SA_RESTART`, so an interrupted `recv()` is
+  restarted by the kernel — and a restarted `recv()` restarts its `SO_RCVTIMEO`
+  timer from zero. With preemption firing every ~1ms, a deadline measured in
+  hundreds of ms could never accumulate: `setsockopt` succeeded, `getsockopt`
+  read the value back correctly, and the read still blocked forever.
+  `tcp_recv_chunk`, `tcp_recv_all` and every TLS entry point
+  (`SSL_read`/`SSL_write`/`SSL_connect`/`SSL_accept`) now mask the preemption
+  signal for the duration of the call, as `tcp_send_all` and `tcp_recv_exact`
+  already did. This is what made a March HTTPS client wedge permanently when a
+  provider accepted the connection and then sent nothing.
 
 - **`tcp_connect` reported a connection that had succeeded as
   "Socket is already connected".** An interrupted `connect()` was retried on the

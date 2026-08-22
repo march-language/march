@@ -5,4 +5,5 @@
    test/test_http_native.ml for why that wiring is the whole point. *)
 let () =
   Alcotest.run "march-stdlib"
-    (Test_stdlib_suite.stdlib_suites @ Test_http_native.suites)
+    (Test_stdlib_suite.stdlib_suites @ Test_http_native.suites
+     @ Test_socket_timeout.suites)

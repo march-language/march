@@ -53,6 +53,8 @@ let table : (string * string) list = [
   ("march_tcp_recv_http",          "IO.NetConnect");
   ("march_tcp_recv_http_headers",  "IO.NetConnect");
   ("march_tcp_recv_chunk",         "IO.NetConnect");
+  ("march_tcp_recv_chunk_timeout", "IO.NetConnect");
+  ("march_tcp_set_recv_timeout",   "IO.NetConnect");
   ("march_tcp_recv_chunked_frame", "IO.NetConnect");
   (* IO.WebSocket *)
   ("march_ws_recv",                "IO.WebSocket");

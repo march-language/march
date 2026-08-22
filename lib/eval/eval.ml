@@ -4207,6 +4207,31 @@ let simd_bounds_check (op : string) (i : int) (lanes : int) (len : int) : unit =
 (* Base environment                                                    *)
 (* ------------------------------------------------------------------ *)
 
+(* ── Socket read deadlines ──────────────────────────────────────────────
+   [recv_timeout_msg] is a contract shared with runtime/march_http.c
+   (MARCH_RECV_TIMEOUT_MSG) and stdlib/socket.march, which matches this exact
+   string to build Socket.RecvTimeout.  All three must agree, or a timeout
+   silently degrades into a generic RecvFailed in one execution mode only. *)
+let recv_timeout_msg = "recv: timed out"
+
+(* Wait until [sock] is readable or [deadline] (absolute, Unix.gettimeofday
+   scale) passes.  [None] means block indefinitely. *)
+let tcp_wait_readable (sock : Unix.file_descr) (deadline : float option)
+    : [ `Ready | `Timeout | `Error of string ] =
+  match deadline with
+  | None -> `Ready
+  | Some t ->
+    let remaining = t -. Unix.gettimeofday () in
+    if remaining <= 0. then `Timeout
+    else
+      (try
+         match Unix.select [sock] [] [] remaining with
+         | [], _, _ -> `Timeout
+         | _ -> `Ready
+       with
+       | Unix.Unix_error (Unix.EINTR, _, _) -> `Ready  (* re-poll on the next recv *)
+       | Unix.Unix_error (err, _, _) -> `Error (Unix.error_message err))
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -5960,14 +5985,25 @@ let base_env : env =
           loop 0
         | _ -> eval_error "tcp_send_all(fd, data)"))
   ; ("tcp_recv_all", VBuiltin ("tcp_recv_all", function
-        | [VInt fd; VInt max_bytes; VInt _timeout_ms] ->
+        | [VInt fd; VInt max_bytes; VInt timeout_ms] ->
           let sock = (Obj.magic fd : Unix.file_descr) in
           let buf = Buffer.create 4096 in
           let chunk = Bytes.create 4096 in
+          (* A TOTAL deadline for the whole read, matching march_tcp_recv_all:
+             a peer dribbling one byte per interval must not be able to hold
+             the caller forever by resetting a per-call timer. *)
+          let deadline =
+            if timeout_ms > 0 then Some (Unix.gettimeofday () +. float_of_int timeout_ms /. 1000.)
+            else None
+          in
           let rec loop total =
             if total >= max_bytes then
               VCon ("Ok", [VString (Buffer.contents buf)])
             else
+              match tcp_wait_readable sock deadline with
+              | `Timeout -> VCon ("Err", [VString recv_timeout_msg])
+              | `Error e -> VCon ("Err", [VString e])
+              | `Ready ->
               try
                 let to_read = min 4096 (max_bytes - total) in
                 let n = Unix.recv sock chunk 0 to_read [] in
@@ -6595,9 +6631,50 @@ let base_env : env =
           (try
             let n = Unix.recv sock buf 0 (Bytes.length buf) [] in
             VCon ("Ok", [VString (Bytes.sub_string buf 0 n)])
-          with Unix.Unix_error (err, _, _) ->
+          with
+          | Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+            (* An SO_RCVTIMEO deadline expired: the same fact
+               tcp_recv_chunk_timeout reports, so it gets the same sentinel. *)
+            VCon ("Err", [VString recv_timeout_msg])
+          | Unix.Unix_error (err, _, _) ->
             VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "tcp_recv_chunk(fd, max_bytes)"))
+  ; ("tcp_recv_chunk_timeout", VBuiltin ("tcp_recv_chunk_timeout", function
+        | [VInt fd; VInt max_bytes; VInt timeout_ms] ->
+          (* Read up to max_bytes, waiting at most timeout_ms for the peer to
+             send anything.  Mirrors march_tcp_recv_chunk_timeout, INCLUDING the
+             recv_timeout_msg spelling — stdlib/socket.march matches that string
+             to build RecvTimeout, and it must mean the same thing compiled and
+             interpreted. *)
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let deadline =
+            if timeout_ms > 0 then Some (Unix.gettimeofday () +. float_of_int timeout_ms /. 1000.)
+            else None
+          in
+          (match tcp_wait_readable sock deadline with
+           | `Timeout -> VCon ("Err", [VString recv_timeout_msg])
+           | `Error e -> VCon ("Err", [VString e])
+           | `Ready ->
+             let buf = Bytes.create (min max_bytes 8192) in
+             (try
+               let n = Unix.recv sock buf 0 (Bytes.length buf) [] in
+               VCon ("Ok", [VString (Bytes.sub_string buf 0 n)])
+             with Unix.Unix_error (err, _, _) ->
+               VCon ("Err", [VString (Unix.error_message err)])))
+        | _ -> eval_error "tcp_recv_chunk_timeout(fd, max_bytes, timeout_ms)"))
+  ; ("tcp_set_recv_timeout", VBuiltin ("tcp_set_recv_timeout", function
+        | [VInt fd; VInt timeout_ms] ->
+          (* SO_RCVTIMEO: a persistent property of the fd, so later reads fail
+             instead of hanging.  timeout_ms <= 0 clears it (POSIX: a zero
+             timeval blocks forever). *)
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let secs = if timeout_ms > 0 then float_of_int timeout_ms /. 1000. else 0. in
+          (try
+            Unix.setsockopt_float sock Unix.SO_RCVTIMEO secs;
+            VCon ("Ok", [VUnit])
+          with Unix.Unix_error (err, _, _) ->
+            VCon ("Err", [VString ("setsockopt(SO_RCVTIMEO): " ^ Unix.error_message err)]))
+        | _ -> eval_error "tcp_set_recv_timeout(fd, timeout_ms)"))
   ; ("tcp_recv_chunked_frame", VBuiltin ("tcp_recv_chunked_frame", function
         | [VInt fd] ->
           (* Read one HTTP chunked transfer frame: size\r\n data\r\n.

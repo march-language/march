@@ -79,6 +79,7 @@ let builtin_names : StringSet.t =
       "tcp_connect"; "tcp_close"; "tcp_listen"; "tcp_accept"; "tcp_local_port";
       "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
       "tcp_recv_chunk"; "tcp_recv_chunked_frame";
+      "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout";
       (* HTTP builtins *)
       "http_parse_request"; "http_serialize_response"; "http_server_listen";
       "http_serialize_request"; "http_parse_response";
