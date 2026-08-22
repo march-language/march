@@ -33,6 +33,8 @@
 
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <poll.h>
+#include <time.h>
 #include <sys/uio.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -591,6 +593,53 @@ void *march_tcp_recv_chunk_timeout(int64_t fd_arg, int64_t max_bytes, int64_t ti
         int timed_out = (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK);
         free(buf);
         return make_err(timed_out ? MARCH_RECV_TIMEOUT_MSG : "recv failed");
+    }
+
+    void *s = march_string_lit(buf, (int64_t)n);
+    free(buf);
+    return make_ok(s);
+}
+
+/* tcp_recv_timeout(fd, max_bytes, timeout_ms) → Result(Option(String), String)
+ *
+ * The same read as march_tcp_recv_chunk_timeout above — same preempt blocking,
+ * same errno capture, same march_wait_readable — and differs only in how it
+ * reports an expired deadline: Ok(None) rather than Err(MARCH_RECV_TIMEOUT_MSG).
+ *
+ * A timeout is the ABSENCE of an event, not an error about the connection, so
+ * a caller that wants to branch on it does not have to match a sentinel string
+ * that a future rewording would silently break.  Ok(Some("")) is still a clean
+ * EOF, as tcp_recv_chunk has always reported it.
+ *
+ * Option(String) is a nullable pointer at the C ABI, so Ok(None) is
+ * make_ok(NULL) — see march_file_read_line.
+ */
+void *march_tcp_recv_timeout(int64_t fd_arg, int64_t max_bytes, int64_t timeout_ms) {
+    int fd = (int)fd_arg;
+    size_t sz = max_bytes < 65536 ? (size_t)max_bytes : 65536;
+    char *buf = malloc(sz);
+    if (!buf) return make_err("OOM");
+    sigset_t saved;
+    march_block_preempt(&saved);
+    if (timeout_ms > 0) {
+        int ready = march_wait_readable(fd, timeout_ms);
+        if (ready <= 0) {
+            march_unblock_preempt(&saved);
+            free(buf);
+            return ready == 0 ? make_ok(NULL) : make_err("recv failed");
+        }
+    }
+    ssize_t n;
+    do { n = recv(fd, buf, sz, 0); } while (n < 0 && errno == EINTR);
+    int recv_errno = errno;
+    march_unblock_preempt(&saved);
+    if (n < 0) {
+        /* An fd carrying its own SO_RCVTIMEO can expire here too, even though
+         * this call's own budget had not run out. */
+        int timed_out = (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK);
+        free(buf);
+        if (timed_out) return make_ok(NULL);
+        return make_err("recv failed");
     }
     void *s = march_string_lit(buf, (int64_t)n);
     free(buf);

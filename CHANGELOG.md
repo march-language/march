@@ -25,6 +25,14 @@ git log is authoritative for exact commits.
   "The peer went quiet" and "the read failed" are different facts and only one
   of them is worth retrying, so a timeout is now its own variant carrying the
   deadline that expired, rather than a generic `RecvFailed`.
+- **`tcp_recv_timeout` and `tls_read_timeout` builtins, with
+  `Socket.recv_deadline` and `Tls.read_timeout` over them.** The same reads as
+  the deadline mechanisms above, reporting an expired deadline as `Ok(None)`
+  rather than an `Err` — the absence of an event rather than a kind of failure,
+  for callers that would otherwise match a sentinel string. `tls_read_timeout`
+  bounds a TLS read without touching `SO_RCVTIMEO`: it reads non-blocking and
+  waits on `WANT_READ`/`WANT_WRITE`, so it survives a record that needs several
+  socket reads, and leaves no lasting property on the fd.
 
 ### Fixed
 

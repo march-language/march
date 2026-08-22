@@ -55,6 +55,10 @@ void *march_tls_accept(int64_t fd, int64_t ctx_handle);
  * Returns Ok(String) or Err(String). Ok("") signals clean shutdown. */
 void *march_tls_read(int64_t ssl_handle, int64_t max_bytes);
 
+/* tls_read_timeout(ssl_handle, max_bytes, timeout_ms)
+ *   -> Result(Option(String), String); Ok(None) when the cap expires. */
+void *march_tls_read_timeout(int64_t ssl_handle, int64_t max_bytes, int64_t timeout_ms);
+
 /* Write data to a TLS connection.
  * Returns Ok(Int) — bytes written — or Err(String). */
 void *march_tls_write(int64_t ssl_handle, void *data);

@@ -6675,6 +6675,28 @@ let base_env : env =
           with Unix.Unix_error (err, _, _) ->
             VCon ("Err", [VString ("setsockopt(SO_RCVTIMEO): " ^ Unix.error_message err)]))
         | _ -> eval_error "tcp_set_recv_timeout(fd, timeout_ms)"))
+  ; ("tcp_recv_timeout", VBuiltin ("tcp_recv_timeout", function
+        | [VInt fd; VInt max_bytes; VInt timeout_ms] ->
+          (* As tcp_recv_chunk_timeout, but an expired deadline is Ok(None)
+             rather than an Err carrying a sentinel string.  Shares
+             tcp_wait_readable so both spellings agree on what "expired" means,
+             interpreted and compiled. *)
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let deadline =
+            if timeout_ms > 0 then Some (Unix.gettimeofday () +. float_of_int timeout_ms /. 1000.)
+            else None
+          in
+          (match tcp_wait_readable sock deadline with
+           | `Timeout -> VCon ("Ok", [VCon ("None", [])])
+           | `Error e -> VCon ("Err", [VString e])
+           | `Ready ->
+             let buf = Bytes.create (min max_bytes 8192) in
+             (try
+               let n = Unix.recv sock buf 0 (Bytes.length buf) [] in
+               VCon ("Ok", [VCon ("Some", [VString (Bytes.sub_string buf 0 n)])])
+             with Unix.Unix_error (err, _, _) ->
+               VCon ("Err", [VString (Unix.error_message err)])))
+        | _ -> eval_error "tcp_recv_timeout(fd, max_bytes, timeout_ms)"))
   ; ("tcp_recv_chunked_frame", VBuiltin ("tcp_recv_chunked_frame", function
         | [VInt fd] ->
           (* Read one HTTP chunked transfer frame: size\r\n data\r\n.
@@ -6981,6 +7003,14 @@ let base_env : env =
         | [VInt _ssl; VInt _max] ->
           VCon ("Ok", [VString ""])
         | _ -> eval_error "tls_read(ssl_handle, max_bytes)"))
+
+  (* tls_read_timeout(ssl_handle, max_bytes, timeout_ms)
+       → Ok(Option(String))|Err(String).  There is no real TLS in the
+       interpreter, so this mirrors the tls_read stub above. *)
+  ; ("tls_read_timeout", VBuiltin ("tls_read_timeout", function
+        | [VInt _ssl; VInt _max; VInt _timeout] ->
+          VCon ("Ok", [VCon ("Some", [VString ""])])
+        | _ -> eval_error "tls_read_timeout(ssl_handle, max_bytes, timeout_ms)"))
 
   (* tls_write(ssl_handle, data) → Ok(Int)|Err(String) *)
   ; ("tls_write", VBuiltin ("tls_write", function
