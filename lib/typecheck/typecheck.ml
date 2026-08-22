@@ -6408,6 +6408,41 @@ let rec infer_expr env (e : Ast.expr) : ty =
       env.json_cap_sites := (sp, f_ty, jname) :: !(env.json_cap_sites);
       rty
 
+    (* [record_get] is a REPRESENTATION-CHOOSING application, exactly like
+       [Vault.new] above and [from_json] here: the payload type is not just a
+       static claim, it selects the ENCODING the runtime hands back.  Codegen
+       passes [shape_kind_char] of the payload as march_record_get's
+       [expected_kind]: a concrete [Float] payload asks for the BOXED Option
+       cell, while a still-unresolved payload asks for the erased NICHE
+       encoding (see [rec_some_k] in runtime/march_extras.c).
+
+       Without a value restriction, [let d = record_get(r, k)] generalizes [d]
+       to [forall b. Option(b)].  Every use then instantiates a FRESH [b]
+       pinned to that use's type, while the single node this call recorded
+       stays an unbound quantified var — so the call site emits kind 'g'
+       (niche) even though the only use compares [d] against a concrete
+       [Some(0.5)], which is built BOXED.  The two encodings are then compared
+       against each other and never match: [d == Some(0.5)] was false compiled
+       and true interpreted (depot's "Float type default in blank" family).
+       The inline and type-annotated spellings already worked precisely
+       because they pin the payload before codegen reads it.
+
+       Demoting the result pins the payload at the binding, so the use site's
+       type flows back to this call and it emits the matching kind.
+
+       Consequence, and it is a real one: a single [record_get] application can
+       no longer be used at two DIFFERENT payload types.  That costs nothing
+       that worked — the runtime picks one encoding for the value this call
+       returns, so reading one field as two unrelated types was already
+       meaningless at run time (it is the same trade [Vault(v)] handles and
+       [from_json] already make).  Reading a field at several types is still
+       expressible: call [record_get] once per type. *)
+    | Ast.EApp ((Ast.EVar { txt = "record_get"; _ }) as fv, ([_; _] as rg_args), sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty rg_args 0 in
+      demote_to_monomorphic rty;
+      rty
+
     | Ast.EApp (f, args, sp) ->
       (* Default-arg call resolution.  [expand_defaults_decl] emits a default-arg
          fn as mangled `foo$R`..`foo$N` decls (one per supplied arity) with NO
