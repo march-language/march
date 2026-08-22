@@ -2001,6 +2001,7 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_recv_chunk_timeout","IO.NetConnect");
   ("tcp_set_recv_timeout",  "IO.NetConnect");
   ("tcp_recv_chunked_frame","IO.NetConnect");
+  ("tcp_recv_timeout",      "IO.NetConnect");
   (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect; a module that
      only speaks WebSocket can declare `needs IO.WebSocket` instead of the
      broader `needs IO.NetConnect`, mirroring IO.NetConnect.TLS. *)
@@ -2072,6 +2073,7 @@ let builtin_cap_table : (string * string) list = [
   ("tls_connect",           "IO.NetConnect.TLS");
   ("tls_accept",            "IO.NetConnect.TLS");
   ("tls_read",              "IO.NetConnect.TLS");
+  ("tls_read_timeout",      "IO.NetConnect.TLS");
   ("tls_write",             "IO.NetConnect.TLS");
   ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
   ("tls_peer_cn",           "IO.NetConnect.TLS");
@@ -2772,6 +2774,8 @@ let builtin_bindings : (string * scheme) list =
        including reads made through OpenSSL — fail instead of hanging. *)
     ("tcp_set_recv_timeout",    Mono (TArrow (t_int, TArrow (t_int, t_result t_unit t_string))));
     ("tcp_recv_chunked_frame",  Mono (TArrow (t_int, t_result t_string t_string)));
+    (* Ok(None) is the cap expiring: the absence of an event, not an error. *)
+    ("tcp_recv_timeout",        Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result (t_option t_string) t_string)))));
     (* http_serialize_request(method, host, path, query_opt, headers, body) -> String *)
     ("http_serialize_request",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string,
         TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
@@ -3215,6 +3219,8 @@ let builtin_bindings : (string * scheme) list =
         (TArrow (t_int, TArrow (t_int, t_result t_int t_string))));
     ("tls_read",             Mono
         (TArrow (t_int, TArrow (t_int, t_result t_string t_string))));
+    ("tls_read_timeout",     Mono
+        (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result (t_option t_string) t_string)))));
     ("tls_write",            Mono
         (TArrow (t_int, TArrow (t_string, t_result t_int t_string))));
     ("tls_close",            Mono (TArrow (t_int, t_unit)));

@@ -32,6 +32,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <poll.h>
+#include <time.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 
@@ -410,6 +415,121 @@ void *march_tls_read(int64_t ssl_handle, int64_t max_bytes) {
         snprintf(errbuf, sizeof errbuf, "SSL_read error %d", err);
     }
     return make_err(errbuf);
+}
+
+/* tls_read_timeout(ssl_handle, max_bytes, timeout_ms)
+ *     -> Result(Option(String), String)
+ *
+ * A bounded TLS read that leaves NO lasting property on the fd, unlike the
+ * SO_RCVTIMEO route march_tls_read relies on. Ok(None) is the deadline
+ * expiring: the absence of an event rather than a kind of failure.
+ *
+ * Polling the fd and THEN calling a blocking SSL_read does not work, and the
+ * first version of this did exactly that: right after a TLS 1.3 handshake the
+ * server sends session tickets, so the socket is readable while holding no
+ * application data at all. poll() returned ready, SSL_read consumed the
+ * tickets, and then blocked until the peer hung up sixty seconds later — the
+ * hang this exists to end. Readable bytes are not application data, and one
+ * TLS record can need several socket reads.
+ *
+ * So the read itself gives up: the fd goes non-blocking for the duration,
+ * SSL_read drives the loop, and WANT_READ/WANT_WRITE is what sends us to
+ * poll() with whatever remains of the deadline. That also covers
+ * renegotiation, where progress needs a WRITE and no amount of waiting to read
+ * would ever arrive.
+ *
+ * Preemption is masked for the whole wait, for the reason march_tls_read
+ * documents: under SA_RESTART the ~1ms SIGUSR1 tick restarts an interrupted
+ * wait, and a deadline that restarts with it never expires.
+ *
+ * The original fd flags are restored on EVERY exit path. The same connection
+ * is written to by a march_tls_write loop that assumes blocking semantics, and
+ * leaving O_NONBLOCK behind would turn its partial write into an error.
+ */
+void *march_tls_read_timeout(int64_t ssl_handle, int64_t max_bytes, int64_t timeout_ms) {
+    SSL *ssl = (SSL *)(uintptr_t)ssl_handle;
+    if (!ssl) return make_err("tls_read_timeout: null ssl handle");
+
+    int fd = SSL_get_fd(ssl);
+    if (fd < 0) return make_err("tls_read_timeout: no file descriptor");
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return make_err("tls_read_timeout: F_GETFL failed");
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return make_err("tls_read_timeout: F_SETFL failed");
+
+    int64_t cap = (max_bytes <= 0 || max_bytes > 1048576) ? 65536 : max_bytes;
+    char *buf = (char *)malloc((size_t)cap);
+    if (!buf) {
+        fcntl(fd, F_SETFL, flags);
+        return make_err("tls_read_timeout: out of memory");
+    }
+
+    /* EINTR and partial records must not restart the cap, so the deadline is
+     * absolute. */
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    sigset_t saved;
+    march_block_preempt(&saved);
+
+    void *result = NULL;
+    for (;;) {
+        int n = SSL_read(ssl, buf, (int)cap);
+        if (n > 0) {
+            result = make_ok_str(march_string_lit(buf, (int64_t)n));
+            break;
+        }
+
+        int err = SSL_get_error(ssl, n);
+        if (err == SSL_ERROR_ZERO_RETURN) {
+            /* Clean shutdown: Ok(Some("")), as tls_read has always said it. */
+            result = make_ok_str(march_string_lit("", 0));
+            break;
+        }
+        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+            if (err == SSL_ERROR_SYSCALL && n == 0) {
+                /* Peer vanished without a close_notify. Still an end, not a
+                 * timeout. */
+                result = make_ok_str(march_string_lit("", 0));
+                break;
+            }
+            char errbuf[256];
+            unsigned long e = ERR_get_error();
+            if (e) {
+                ERR_error_string_n(e, errbuf, sizeof errbuf);
+            } else {
+                snprintf(errbuf, sizeof errbuf, "SSL_read error %d", err);
+            }
+            result = make_err(errbuf);
+            break;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t spent = (now.tv_sec - start.tv_sec) * 1000
+                      + (now.tv_nsec - start.tv_nsec) / 1000000;
+        int64_t remaining = timeout_ms - spent;
+        if (remaining <= 0) { result = make_ok_str(NULL); break; }  /* None */
+
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN;
+        pfd.revents = 0;
+
+        int r = poll(&pfd, 1, (int)remaining);
+        if (r == 0) { result = make_ok_str(NULL); break; }          /* None */
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            result = make_err("tls_read_timeout: poll failed");
+            break;
+        }
+    }
+
+    march_unblock_preempt(&saved);
+    free(buf);
+    fcntl(fd, F_SETFL, flags);
+    return result;
 }
 
 void *march_tls_write(int64_t ssl_handle, void *data) {

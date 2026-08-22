@@ -13,6 +13,7 @@
 --   Socket.recv(fd, max_bytes)             : Result(String, SocketError)
 --   Socket.recv_timeout(fd, max, ms)       : Result(String, SocketError)
 --   Socket.set_recv_timeout(fd, ms)        : Result((), SocketError)
+--   Socket.recv_deadline(fd, max, ms)      : Result(Option(String), SocketError)
 --   Socket.close(fd)                       : ()
 --   Socket.with_connection(host, port, f)  : Result(a, SocketError)
 --   Socket.error_message(e)                : String
@@ -119,6 +120,25 @@ mod Socket do
     match tcp_set_recv_timeout(fd, timeout_ms) do
     Ok(_)    -> Ok(())
     Err(msg) -> Err(SocketOptionFailed(msg))
+    end
+  end
+
+  doc """
+  As `recv_timeout`, but an expired deadline is `Ok(None)` rather than an
+  `Err`.
+
+  The same read, reported differently. `Err(RecvTimeout(ms))` says a timeout
+  is a kind of failure; `Ok(None)` says it is the absence of an event, which
+  is what a caller polling a quiet peer usually means. Pick whichever makes
+  the calling code say what it means — a reader that treats silence as normal
+  and one that treats it as an error should not have to share a spelling.
+
+  `Ok(Some(""))` is a clean EOF, as in `recv`.
+  """
+  fn recv_deadline(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(Option(String), SocketError) do
+    match tcp_recv_timeout(fd, max_bytes, timeout_ms) do
+    Ok(data) -> Ok(data)
+    Err(msg) -> Err(RecvFailed(msg))
     end
   end
 
