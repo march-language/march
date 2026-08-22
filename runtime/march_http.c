@@ -86,7 +86,9 @@ int  base64_encode(const uint8_t *in, size_t len, char *out, size_t out_sz);
  * which matches it exactly to build Socket.RecvTimeout.  Changing the spelling
  * here without changing it there degrades every timeout back into a generic
  * RecvFailed — silently.  test_socket_timeout.ml asserts on it for that reason. */
+#ifndef MARCH_RECV_TIMEOUT_MSG
 #define MARCH_RECV_TIMEOUT_MSG "recv: timed out"
+#endif
 
 /* Milliseconds on CLOCK_MONOTONIC, for deadlines spanning several syscalls. */
 static int64_t march_now_ms(void) {

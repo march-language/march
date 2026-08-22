@@ -9,6 +9,16 @@
  * Translation units that need HTTP builtins should include march_http.h directly.
  */
 #pragma once
+
+/* The one spelling of "a read deadline expired", shared by march_http.c (plain
+ * recv) and march_tls.c (SSL_read over an SO_RCVTIMEO fd).  stdlib/socket.march
+ * and stdlib/tls.march both match it exactly to build their timeout variants;
+ * changing it here without changing them degrades every timeout into a generic
+ * failure, silently.  test_socket_timeout.ml asserts on it for that reason. */
+#ifndef MARCH_RECV_TIMEOUT_MSG
+#define MARCH_RECV_TIMEOUT_MSG "recv: timed out"
+#endif
+
 #include "march_runtime.h"
 #include <stdint.h>
 

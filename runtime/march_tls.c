@@ -21,7 +21,9 @@
 #include "march_tls.h"
 #include "march_runtime.h"
 #include "march_preempt.h"
+#include "march_http.h"   /* MARCH_RECV_TIMEOUT_MSG — one spelling of an expired deadline */
 
+#include <errno.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
@@ -365,7 +367,13 @@ void *march_tls_read(int64_t ssl_handle, int64_t max_bytes) {
      * forever.  See march_preempt.h. */
     sigset_t saved;
     march_block_preempt(&saved);
+    errno = 0;
     int n = SSL_read(ssl, buf, (int)cap);
+    /* Captured HERE, before march_unblock_preempt(), ERR_get_error() or any
+     * other call can overwrite it: the errno is the only thing distinguishing
+     * an expired SO_RCVTIMEO from a connection reset, and both arrive as
+     * SSL_ERROR_SYSCALL. */
+    int read_errno = errno;
     march_unblock_preempt(&saved);
     if (n > 0) {
         void *s = march_string_lit(buf, (int64_t)n);
@@ -379,6 +387,20 @@ void *march_tls_read(int64_t ssl_handle, int64_t max_bytes) {
         /* Clean shutdown */
         void *s = march_string_lit("", 0);
         return make_ok_str(s);
+    }
+    /* An SO_RCVTIMEO set on the fd before the handshake reaches this read (that
+     * is the whole reason set_recv_timeout exists).  OpenSSL reports its expiry
+     * as SSL_ERROR_WANT_READ on a BLOCKING socket — measured, not assumed: with
+     * the mapping removed, a peer that completed a handshake and then went
+     * silent produced "SSL_read error 2".  SSL_ERROR_SYSCALL with EAGAIN is the
+     * other shape the same event can take, so both are matched, and both are
+     * qualified by errno because SSL_ERROR_SYSCALL is equally what a connection
+     * reset looks like.  A caller that cannot tell a silent peer from a broken
+     * one cannot say why a stream ended, so an expired deadline gets the same
+     * sentinel the plain-recv path already uses. */
+    if ((err == SSL_ERROR_SYSCALL || err == SSL_ERROR_WANT_READ) &&
+        (read_errno == EAGAIN || read_errno == EWOULDBLOCK || read_errno == ETIMEDOUT)) {
+        return make_err(MARCH_RECV_TIMEOUT_MSG);
     }
     char errbuf[256];
     unsigned long e = ERR_get_error();
