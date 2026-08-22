@@ -101,6 +101,28 @@ git log is authoritative for exact commits.
   leaks none; the same fix covers `Option(Option(Float))` and any generic
   constructor with a `Float` field. Reading a shared value is unaffected — the
   release happens only where the containing cell is actually freed.
+- **A fold with a String, List or record accumulator no longer leaks one object
+  per element.** The runtime's fold helpers release the previous accumulator
+  only when they still own it, and until now the only case they could prove was
+  a Float (its box carries a tag saying the callee just allocated it). Both
+  shapes are ordinary March and the runtime sees the same closure for each:
+  `fn (acc, x) -> Cons(x, acc)` takes the caller's reference and must not be
+  released, `fn (acc, x) -> string_concat(acc, s)` does not and leaks without a
+  release. Borrow inference already knows which, so the compiler now stamps
+  that one bit into the closure object and the helpers read it back. Measured
+  over 1,000,000 elements with a String accumulator: 1,000,018 live objects
+  leaked, now 20. A closure built by a path that does not stamp — REPL/JIT,
+  hot reload — keeps the old behaviour rather than risking a double free.
+- **A self-recursive local function no longer leaks a Float box per iteration,
+  and no longer depends on LLVM's optimizer to avoid a stack overflow.** The
+  recursive call in `fn go(i, acc) do ... go(i - 1, f(acc)) end` went through
+  the closure it was invoked with, which our own tail-call optimization did not
+  recognise: it became a loop only if LLVM's tail-call elimination happened to
+  fire, and every Float argument crossing that erased edge was boxed and
+  dropped. The call is now resolved to a direct self-call, so it gets a real
+  back-edge writing a native `double` slot. Measured at 1,000,000 deep:
+  1,000,001 leaked boxes, now 1 — and the same program, compiled `--opt 0`,
+  went from SIGBUS to running clean at 10,000,000 deep.
 - **`record_get(r, k) == Some(<float>)` is no longer always false when
   compiled.** The two sides disagreed on which type decides a constructor
   field's slot. Construction takes the field types as DECLARED on the ctor —

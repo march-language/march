@@ -173,13 +173,18 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
   `test/native/native_arr_fold_acc_leak_probe.march`; see
   `specs/progress/2026-08-20-fold-accumulator-chain-leak-fix.md`.
 
-  One residual is still open: a fold whose accumulator is a **heap non-`Float`**
-  value (a `String`, `List` or record rebuilt each step) still leaks one object
-  per element, because an apply fn returns a *borrowed* alias when it passes a
-  `ptr` straight through, and the runtime cannot distinguish that from a freshly
-  allocated result. `Float` and `Int` accumulators — including `fold_int`,
-  `fold_i32` and `fold_u8` — are unaffected. Tracked in
-  `specs/todos/2026-08-20-fold-heap-accumulator-borrowed-return-leak.md`.
+  A fold whose accumulator is a **heap non-`Float`** value (a `String`, `List`
+  or record rebuilt each step) used to leak one object per element on top of
+  that, because the runtime could not tell whether the closure it had just
+  called consumed the accumulator it was handed. Fixed 2026-08-22: the compiler
+  now stamps that fact into the closure object and the fold helpers read it
+  back — see
+  `specs/progress/2026-08-22-fold-heap-accumulator-borrowed-return-leak.md`. It
+  is stamped only when borrow inference can prove the accumulator has no owning
+  use, so a callback that passes it to a builtin with undeclared borrow modes
+  still leaks; that residual is described in the progress note. `Float` and
+  `Int` accumulators — including `fold_int`, `fold_i32` and `fold_u8` — were
+  never affected.
 - **`DataFrame`**: `Sum`/`Mean` aggregation and `col_add_col` (column-column
   arithmetic, via `map2_int`/`map2_float`) use the vectorized `NativeArray`
   primitives above under the hood. `Min`/`Max`/`Std`/`Variance`/`Median`

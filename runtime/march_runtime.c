@@ -7436,12 +7436,17 @@ void *march_typed_array_filter(void *arr, void *mask) {
  * is what the closure returned, [acc] is the fold's INITIAL accumulator, which
  * belongs to our CALLER and must never be released here.
  *
- * The MARCH_FLOAT_TAG guard IS the safety argument, not a shortcut. An apply
- * fn does NOT return an owned reference in general: for a `ptr` parameter
- * returned unchanged it emits a bare `ret ptr %x` with no inc_rc, handing back
- * a BORROWED alias of something still owned elsewhere (a live array element, a
- * closure capture). Releasing that is a use-after-free — verified by reading
- * the emitted IR for `fn (acc, x) -> x`.
+ * NEITHER GUARD BELOW IS A SHORTCUT; each is a witness that this loop still
+ * owns [prev], and without one the release is a use-after-free. Two facts make
+ * that so. An apply fn does NOT return an owned reference in general: for a
+ * `ptr` parameter returned unchanged it emits a bare `ret ptr %x` with no
+ * inc_rc, handing back a BORROWED alias of something still owned elsewhere (a
+ * live array element, a closure capture) — verified by reading the emitted IR
+ * for `fn (acc, x) -> x`. And the closure-apply ABI CONSUMES its arguments
+ * (perceus.ml's ECallPtr case), so an apply fn with an owning use of the
+ * accumulator — `fn (acc, x) -> Cons(x, acc)` — stores the reference we passed
+ * into its own result with no inc_rc; releasing it there frees the tail of the
+ * list being built.
  *
  * A Float is provably different. The uniform-ptr ABI unboxes a Float parameter
  * to a raw `double` in the apply fn's entry prologue (Llvm_toplevel.emit_fn)
@@ -7449,23 +7454,40 @@ void *march_typed_array_filter(void *arr, void *mask) {
  * closure captures are stored as raw doubles too. So EVERY Float-typed value
  * coming out of an apply fn is a FRESH box that this loop solely owns — it
  * cannot alias the array, the caller's accumulator, or a capture. The tag is
- * the runtime's only witness of that, hence the check.
+ * a witness of that on its own, with no help from the compiler, hence the
+ * check survives unchanged.
+ *
+ * THE OTHER WITNESS: MARCH_CLO_ARG0_BORROWED (march_runtime.h). A heap
+ * NON-Float accumulator has no such intrinsic tell, so the COMPILER supplies
+ * one: Borrow inference already knows whether the apply fn has any OWNING use
+ * of its first user parameter, and lib/tir/clo_flags.ml stamps that one bit
+ * into the closure object's header pad word. When it is set, the callee
+ * neither consumed nor retained [prev] — it cannot have stored it (that is an
+ * owning use) and it cannot have returned it (likewise, and `prev != result`
+ * covers that case anyway) — so this loop still holds the only reference to
+ * [prev] and must release it. When it is clear (a closure from a path that
+ * does not stamp, or a genuinely accumulator-consuming closure such as
+ * `fn (acc, x) -> Cons(x, acc)`, which stores our reference into its result)
+ * nothing is released, which is exactly the pre-2026-08-22 behaviour.
  *
  * `prev != result` additionally covers a closure that threads its accumulator
  * through unchanged, and a wire-tagged (non-pointer) accumulator is handled by
  * the IS_HEAP_PTR guard before the tag is ever loaded.
  *
- * STILL OPEN — a heap NON-Float accumulator (String, List, record) still leaks
- * one object per element here, for the borrowed-return reason above. Fixing it
- * needs the compiler to guarantee owned returns, not a runtime-side guess. See
- * specs/todos/2026-08-20-fold-heap-accumulator-borrowed-return-leak.md.
- *
- * Pinned by test/native/native_arr_fold_acc_leak_probe.march (leak direction)
- * and that fixture's identity leg (double-free direction). */
-static inline void fold_release_prev_acc(void *prev, void *result, void *acc) {
+ * Pinned by test/native/native_arr_fold_acc_leak_probe.march: the Float and
+ * String accumulator legs (leak direction, one per witness) and the identity
+ * + element-alias legs (double-free direction). */
+static inline int fold_clo_arg0_borrowed(void *f) {
+    return IS_HEAP_PTR(f)
+        && (((march_hdr *)f)->pad & MARCH_CLO_ARG0_BORROWED) != 0;
+}
+
+static inline void fold_release_prev_acc(void *prev, void *result, void *acc,
+                                         void *f) {
     if (prev == result || prev == acc) return;
     if (!IS_HEAP_PTR(prev)) return;
-    if (((march_hdr *)prev)->tag != MARCH_FLOAT_TAG) return;
+    if (((march_hdr *)prev)->tag != MARCH_FLOAT_TAG
+        && !fold_clo_arg0_borrowed(f)) return;
     march_decrc(prev);
 }
 
@@ -7481,7 +7503,21 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
         void *prev = result;
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, result, acc);
+        /* Unlike every other fold helper here, [elem] is a pointer the ARRAY
+         * owns — borrowed, not materialised for the call (the int/i32/u8
+         * helpers wire-tag an immediate; the f64/f32 helpers box a fresh one
+         * and release it themselves). So a closure that hands the element
+         * straight back (`fn (acc, x) -> x`) returns a reference this loop
+         * does NOT own: the apply fn classifies that parameter as OWNED and
+         * moves it out without an inc_rc, but we never gave it one. Take a
+         * reference now, so that (a) the next iteration's
+         * fold_release_prev_acc releases OURS rather than the array's, and
+         * (b) the value we finally return to our caller is owned, as the
+         * calling convention requires. Guarded on prev != result so an
+         * accumulator that is itself an element is not double-counted. */
+        if (result == elem && result != prev && IS_HEAP_PTR(result))
+            march_incrc(result);
+        fold_release_prev_acc(prev, result, acc, f);
     }
     march_decrc(f);
     return result;
@@ -7758,7 +7794,7 @@ void *native_int_arr_fold(void *acc, void *arr, void *f) {
         void *prev = result;
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, result, acc);
+        fold_release_prev_acc(prev, result, acc, f);
     }
     march_decrc(f);
     return result;
@@ -7979,7 +8015,7 @@ void *native_float_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, result, acc);
+        fold_release_prev_acc(prev, result, acc, f);
     }
     march_decrc(f);
     return result;
@@ -8111,7 +8147,7 @@ void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
         void *prev = result;                                                 \
         march_incrc(f);                                                      \
         result = call_closure_2(f, prev, elem);                              \
-        fold_release_prev_acc(prev, result, acc);                            \
+        fold_release_prev_acc(prev, result, acc, f);                         \
     }                                                                        \
     march_decrc(f);                                                          \
     return result;                                                           \
@@ -8242,7 +8278,7 @@ void *native_f32_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, result, acc);
+        fold_release_prev_acc(prev, result, acc, f);
     }
     march_decrc(f);
     return result;

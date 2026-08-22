@@ -47,6 +47,9 @@
 --      self-call's own Float-argument box, all three per iteration;
 --      identity_leg 200,000 = arg+ret per call)
 --   after the fix    live_allocs delta = (small constant — see dune rule)
+-- Then 2026-08-22, when selfrec_leg moved INSIDE the window (see its comment):
+--   at 8897bb1a   live_allocs delta = 1,000,001  (one box per back-edge)
+--   after         live_allocs delta = 1
 -- The healthy figure is a small constant; the leaking one scales with the
 -- iteration counts below. The dune rule asserts < 1000 — orders of magnitude
 -- above healthy, far below any single leaking leg, falsifiable both ways.
@@ -150,21 +153,34 @@ mod NativeFloatBoxAbiLeakProbe do
     end
   end
 
-  -- STACK-DEPTH CANARY, deliberately measured OUTSIDE the leak window (after
-  -- the closing live_allocs read). A LOCAL recursive fn's self-call through
-  -- its closure ($clo self-binding) is not TIR-TCO'd; it survives deep
-  -- recursion only because LLVM's tail-call elimination turns it into a
-  -- loop, and that elimination dies the moment ANY instruction is emitted
-  -- between the self-call and the return. The first draft of the call-site
-  -- releases did exactly that: SIGBUS (green-thread stack overflow) at
-  -- 20,000 iterations on this exact shape, on a tree where 1,000,000 ran
-  -- fine. The emitter now exempts (potential) self-calls from every
-  -- post-call release, so this leg's per-iteration boxes STILL LEAK — which
-  -- is why it runs outside the measurement window; the open remainder
-  -- (march-level TCO for self-recursive apply fns, closing both the leak
-  -- and the LLVM-dependence) is tracked in
-  -- specs/todos/2026-08-21-selfrec-closure-float-tail-call.md. If this leg
-  -- SIGBUSes, a post-call instruction crept back onto the self-call path.
+  -- STACK DEPTH **AND** LEAK, asserted together and deliberately so. A LOCAL
+  -- recursive fn's self-call goes through its closure (defun's `let go =
+  -- $clo` self-binding). Both properties of that edge are cheap to fix by
+  -- breaking the other, so neither may be asserted alone:
+  --
+  --   * DEPTH. Until 2026-08-22 the self-call was an ECallPtr, invisible to
+  --     TIR-level TCO (Llvm_tco only recognises EApp-to-self), and the
+  --     recursion survived deep inputs ONLY because LLVM's tail-call
+  --     elimination turned the emitted call into a loop. That elimination
+  --     dies the moment ANY instruction is emitted between the self-call and
+  --     the return: the first draft of the call-site releases below did
+  --     exactly that and SIGBUSed (green-thread stack overflow) at 20,000
+  --     iterations on this shape, on a tree where 1,000,000 ran fine.
+  --   * LEAK. And while the edge was erased, every iteration boxed the Float
+  --     accumulator for the uniform-ptr ABI and dropped the box: measured
+  --     1,000,001 for n = 1,000,000, i.e. one box per iteration, unbounded.
+  --
+  -- Known_call now resolves that self-binding to a direct EApp, so the edge
+  -- is an ordinary self tail call: TCO gives it a real back-edge writing the
+  -- native `double` parameter slot, and nothing is boxed or pushed. Hence
+  -- this leg now runs INSIDE the measurement window. A regression that
+  -- restores the erased edge shows up as ~n leaked objects; a regression
+  -- that puts an instruction back on the self-call path shows up as a SIGBUS
+  -- here rather than as a wrong number, because 1,000,000 real frames do not
+  -- fit on a green thread's stack. The `--opt 0` control that proves the
+  -- depth is ours and not LLVM's is in the progress note
+  -- (specs/progress/2026-08-22-selfrec-closure-float-tail-call.md): at HEAD
+  -- this shape exited 138 under --opt 0 and passed under --opt 2.
   pfn selfrec_leg(n : Int) : Int do
     let f = fn (x : Float) -> x +. 3.0
     fn go(i : Int, acc : Float) : Float do
@@ -181,8 +197,8 @@ mod NativeFloatBoxAbiLeakProbe do
     println(int_leg(1000000))
     println(float_to_int(devirt_leg(1000000, 0.0)))
     println(identity_leg(100000))
+    println(selfrec_leg(1000000))
     let after = live_allocs()
     IO.warn(int_to_string(after - before))
-    println(selfrec_leg(1000000))
   end
 end

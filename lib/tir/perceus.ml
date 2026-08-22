@@ -1941,6 +1941,18 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
   _rc_fresh_ctr := 0;
   (* Phase 0: borrow inference *)
   let borrow_map = Borrow.infer_module m in
+  (* Phase 0b: publish, for every function, whether its FIRST USER ARGUMENT is
+     free of owning uses.  [Llvm_emit] stamps that bit into the header of each
+     closure object it materialises so the C runtime's fold helpers can tell
+     whether they still own the accumulator they handed to a closure — see
+     [Clo_flags] for why the runtime cannot decide this itself and why a
+     missing entry is safe.  Reset first: the table is process-global and the
+     REPL / test drivers compile many modules in one process. *)
+  Clo_flags.reset ();
+  List.iter (fun fn ->
+    Clo_flags.register fn.Tir.fn_name
+      (Borrow.first_user_arg_borrowed borrow_map fn)
+  ) m.Tir.tm_fns;
   let extern_names =
     List.fold_left (fun s (ed : Tir.extern_decl) ->
       StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs

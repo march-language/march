@@ -18,7 +18,7 @@
 -- length. Measured at ~32 B/element: a 5,000,000-element Float fold cost
 -- 193.6 MB against a 40.4 MB Int-accumulator control.
 --
--- WHY RELEASING THE PREVIOUS ACCUMULATOR IS SOUND, AND ONLY FOR FLOAT.
+-- WHY RELEASING THE PREVIOUS ACCUMULATOR NEEDS A WITNESS, AND WHAT FLOAT'S IS.
 -- An apply fn does NOT return an owned reference in general. For a `ptr`
 -- parameter returned unchanged it emits a bare `ret ptr %x` with no inc_rc --
 -- i.e. it hands back a BORROWED alias of a value someone else still owns
@@ -33,57 +33,89 @@
 -- box that the fold loop solely owns -- there is no path by which it aliases
 -- the array, the caller's accumulator, or a capture. That is why the release
 -- in the runtime is guarded on MARCH_FLOAT_TAG rather than applied to every
--- accumulator: the tag is the runtime's only witness of "this box was
--- certainly freshly allocated by the callee".
+-- accumulator: the tag is a witness of "this box was certainly freshly
+-- allocated by the callee" that the runtime can read off the VALUE, with no
+-- help from the compiler.
 --
--- STILL OPEN, deliberately not asserted here: a heap NON-Float accumulator
--- (String, List, record) threaded through typed_array_fold still leaks, for
--- exactly the borrowed-return reason above. Measured at 1,000,000 elements
--- with a String accumulator: live_allocs delta = 1,000,000. Fixing it needs
--- the compiler to guarantee owned returns, not a runtime-side guess. Tracked
--- in specs/todos/2026-08-20-fold-heap-accumulator-borrowed-return-leak.md.
--- Do NOT add a String-accumulator leg to this probe expecting green.
+-- THE OTHER HALF: A HEAP NON-FLOAT ACCUMULATOR. There is no tag that says
+-- "freshly allocated String", so for those the COMPILER supplies the witness
+-- instead: Borrow inference already knows whether an apply fn has any OWNING
+-- use of its accumulator parameter, and lib/tir/clo_flags.ml stamps that one
+-- bit (MARCH_CLO_ARG0_BORROWED) into the closure object's header pad word.
+-- Set = the callee neither consumed nor retained the accumulator we passed,
+-- so the fold loop still holds the only reference and must release it. The
+-- string_acc_* legs below pin that half; they leaked exactly one String per
+-- element before it (numbers at the bottom of this header).
+--
+-- Both witnesses are still needed. The Float one is intrinsic to the value
+-- and survives every path that builds a closure; the stamped one is absent
+-- (and the release correctly does not happen) whenever a closure is built by
+-- a path that does not stamp -- REPL/JIT fragments, hot reload, the
+-- cross-heap message copier.
 --
 -- ACCUMULATOR TYPE IS LOAD-BEARING, in the opposite direction from the
--- sibling probe. A wire-tagged Int accumulator is an immediate, never
--- heap-allocated, and so cannot exhibit this leak at all -- which is why all
--- four in-tree stdlib callers of typed_array_fold (stdlib/dataframe.march,
--- col_null_count) are Int-accumulator and why nothing in-tree caught this.
--- Do not "simplify" any leg here to an Int accumulator.
+-- sibling probe, and it is the whole reason this defect hid twice. A
+-- wire-tagged Int accumulator is an IMMEDIATE: never heap-allocated, so it
+-- cannot exhibit this leak at all -- which is why all four in-tree stdlib
+-- callers of typed_array_fold (stdlib/dataframe.march, col_null_count) are
+-- Int-accumulator and why nothing in-tree caught either half. Every leg here
+-- must keep a HEAP accumulator: Float for the tag-witnessed half, String for
+-- the compiler-witnessed half. Do NOT "simplify" any of them to an Int --
+-- the probe would still pass, measuring nothing.
+--
+-- THE CLOSURE BODY IS LOAD-BEARING TOO, for the String legs specifically.
+-- The stamped bit is only set when borrow inference can see that the
+-- accumulator has no owning use, so the accumulator may only be passed to
+-- callees whose borrow modes are DECLARED (borrow.ml's extern_borrow_table:
+-- string_starts_with is, string_length is not) or ignored outright. Rewriting
+-- `string_starts_with(acc, "s")` into `string_length(acc)` below turns the
+-- accumulator owned, clears the bit, and re-leaks -- correctly, since a
+-- consuming callee is exactly the case that must NOT be released.
 --
 -- SIGNAL: live_allocs(), NOT RSS -- see the long rationale in
 -- native_arr_fold_leak_probe.march. Short version: an absolute RSS threshold
 -- is not portable (a healthy Linux process baseline is ~122 MB and went RED
 -- on CI), while live_allocs() counts the defect directly.
 --
--- THE LAST LEG IS A DOUBLE-FREE WITNESS, not a leak witness, and it is the
--- reason the naive fix is not what landed. `if (result != acc)
--- march_decrc(prev)` is wrong in two ways this leg pins:
+-- THE LAST THREE LEGS ARE DOUBLE-FREE WITNESSES, not leak witnesses, and they
+-- are the reason the naive fix is not what landed. `if (result != acc)
+-- march_decrc(prev)` is wrong in every way they pin:
 --
---   * the closure returns its accumulator ARGUMENT unchanged
+--   * identity_leg -- the closure returns its accumulator ARGUMENT unchanged
 --     (`fn (acc, _) -> acc`), so nothing fresh was ever allocated and
---     releasing the "previous" result would release a live object;
---   * `base` is still held by the caller and USED after the fold returns.
---     The initial accumulator belongs to the CALLER; a fold that releases it
---     hands back a dangling String and the trailing string_length(base) reads
---     freed memory.
+--     releasing the "previous" result would release a live object; and `base`
+--     is still held by the caller and USED after the fold returns. The initial
+--     accumulator belongs to the CALLER; a fold that releases it hands back a
+--     dangling String and the trailing string_length(base) reads freed memory.
+--   * elem_alias_leg -- the closure returns the ELEMENT, which the array owns
+--     and the fold only borrows, so the chain of accumulators walks into the
+--     array's own storage.
+--   * consume_acc_leg -- the closure STORES the accumulator into its result,
+--     which is the one shape where the callee really did take our reference
+--     and the release must not happen at all.
 --
 -- A wire-tagged (non-pointer) accumulator must likewise never reach
 -- march_decrc; the sibling probe's Int legs cover that direction.
 --
 -- Numbers measured on this fixture, Darwin arm64, --compile --opt 2:
---   fixed                          live_allocs delta = 9
---   accumulator release removed    live_allocs delta = 4,000,007
--- The leaked figure is exactly one object per element summed over the two
--- leaking legs (2,000,000 + 2,000,000), i.e. the defect stated exactly
--- rather than estimated. The dune rule asserts < 1000, which is orders of
--- magnitude above the healthy constant and below the leaked figure, so it is
--- falsifiable in both directions with an enormous margin.
+--   fixed (both witnesses)            live_allocs delta =        20
+--   whole compiler+runtime at 8897bb1a (i.e. before the closure borrow bit,
+--   with the Float half already in)   live_allocs delta = 1,000,018
+--   accumulator release removed altogether, measured 2026-08-20 on this
+--   fixture's Float legs only         live_allocs delta = 4,000,007
+-- Each leaked figure is exactly one object per element summed over the legs
+-- that witness it (500,000 + 500,000 String; 2,000,000 + 2,000,000 Float),
+-- i.e. the defect stated exactly rather than estimated. The dune rule asserts
+-- < 1000, orders of magnitude above the healthy constant and below either
+-- leaked figure, so it is falsifiable in both directions with an enormous
+-- margin. NOTE that stdout is IDENTICAL in the leaking and fixed builds --
+-- the .expected diff cannot catch this defect, only the delta can.
 --
 -- The healthy delta is a small CONSTANT, independent of element count -- not
--- an assumption: it was measured at exactly 9 for 500,000, 2,000,000 and
--- 8,000,000 elements per leg, a 16x range. If it ever starts growing with the
--- counts below, that is a real new leak, not drift in this bound.
+-- an assumption: the Float half was measured at exactly 9 for 500,000,
+-- 2,000,000 and 8,000,000 elements per leg, a 16x range. If the total ever
+-- starts growing with the counts below, that is a real new leak, not drift in
+-- this bound.
 mod NativeArrFoldAccLeakProbe do
   needs IO.Console
 
@@ -104,17 +136,39 @@ mod NativeArrFoldAccLeakProbe do
 
   -- NOTE ON THE SHARED ROOT. march_typed_array_fold -- the reference
   -- implementation the three native_*_arr_fold helpers copied their RC
-  -- discipline from -- gets the identical fix in runtime/march_runtime.c, but
-  -- it CANNOT be pinned by a leak leg here, because its compiled path is
-  -- independently broken for exactly the accumulator types that would show
-  -- the leak: `typed_array_fold(arr, 0, fn (acc, x) -> acc + x)` over five
-  -- 7s returns 15 instead of 35, and the same fold with a Float accumulator
-  -- SIGSEGVs. Both are pre-existing and unrelated to reference counting
-  -- (the interpreter is correct on both), tracked in
+  -- discipline from -- cannot be given a FLOAT-accumulator leak leg here,
+  -- because its compiled path is independently broken for exactly the
+  -- accumulator types that would show it: `typed_array_fold(arr, 0,
+  -- fn (acc, x) -> acc + x)` over five 7s returns 15 instead of 35, and the
+  -- same fold with a Float accumulator SIGSEGVs. Both are pre-existing and
+  -- unrelated to reference counting (the interpreter is correct on both),
+  -- tracked in
   -- specs/todos/2026-08-20-typed-array-fold-compiled-scalar-accumulator-broken.md.
-  -- A leg built on that path would be measuring the wrong defect. The
-  -- identity leg below still exercises march_typed_array_fold on the shape
-  -- that DOES work (a heap accumulator), as a double-free witness.
+  -- Its HEAP-accumulator path is sound, and that is the one exercised here:
+  -- string_acc_typed_leg (leak direction) plus identity_leg and
+  -- elem_alias_leg (double-free direction).
+
+  -- STRING accumulator through march_typed_array_fold -- the compiler-witnessed
+  -- half. The closure READS the accumulator (through a callee whose borrow
+  -- modes are declared) and returns a fresh, constant-length String, so every
+  -- iteration drops one heap object on the floor unless the fold releases it.
+  pfn string_acc_typed_leg() : Int do
+    let arr = typed_array_create(500000, 7)
+    let base = int_to_string(0)
+    let r = typed_array_fold(arr, base,
+      fn (acc, x) -> if string_starts_with(acc, "s") do int_to_string(x) else int_to_string(x + 1) end)
+    string_length(base) + string_length(r)
+  end
+
+  -- Same, through native_int_arr_fold: the accumulator is a heap String while
+  -- the ELEMENTS are wire-tagged immediates, so this leg isolates the
+  -- accumulator chain from the per-element box the sibling probe measures.
+  pfn string_acc_native_int_leg() : Int do
+    let arr = NativeArray.make_int(500000, 3)
+    let base = int_to_string(0)
+    let r = NativeArray.fold_int(arr, base, fn (_acc, x) -> int_to_string(x))
+    string_length(base) + string_length(r)
+  end
 
   -- DOUBLE-FREE WITNESS (see header). Not a leak leg: it exists to crash, or
   -- print a garbage length, if the accumulator release is over-eager.
@@ -125,11 +179,39 @@ mod NativeArrFoldAccLeakProbe do
     string_length(base) + string_length(r)
   end
 
+  -- DOUBLE-FREE WITNESS #2: the closure returns the ELEMENT, which the ARRAY
+  -- owns and this fold only borrows. The accumulator parameter is unused, so
+  -- the borrow bit IS set and the release IS live here -- the reason this
+  -- cannot free the array's element out from under it is the pointer-equality
+  -- guard in march_typed_array_fold, which takes a reference of its own when
+  -- the callee hands an element back. Reading an element AFTER the fold, and
+  -- the length of the returned value, are what would fault or print garbage.
+  pfn elem_alias_leg() : Int do
+    let arr = typed_array_create(1000, int_to_string(4242))
+    let base = int_to_string(9999)
+    let r = typed_array_fold(arr, base, fn (_acc, x) -> x)
+    string_length(r) + string_length(typed_array_get(arr, 0)) + string_length(base)
+  end
+
+  -- DOUBLE-FREE WITNESS #3: the closure CONSUMES the accumulator into its
+  -- result (`Cons(x, acc)` stores the caller's reference with no inc_rc).
+  -- The borrow bit must be CLEAR here; releasing the previous accumulator
+  -- would free the tail of the list still being built.
+  pfn consume_acc_leg() : Int do
+    let arr = NativeArray.make_int(200, 3)
+    let r = NativeArray.fold_int(arr, Nil, fn (acc, x) -> Cons(x, acc))
+    List.length(r)
+  end
+
   fn main(_cap_console : Cap(IO.Console)) do
     let before = live_allocs()
     println(f64_acc_leg())
     println(f32_acc_leg())
+    println(string_acc_typed_leg())
+    println(string_acc_native_int_leg())
     println(identity_leg())
+    println(elem_alias_leg())
+    println(consume_acc_leg())
     let after = live_allocs()
     IO.warn(int_to_string(after - before))
   end

@@ -726,15 +726,19 @@ let intern_string_site ctx s =
    RC ops emitted against it (needs_rc (TFn _) = true), and a constant may be
    placed in read-only memory where a stray increment would fault.  Same
    reasoning, same choice as the string-literal cell. *)
-let intern_static_closure ctx fn_name wrap_name =
+(* [pad] is the header pad word (offset 12) — [Clo_flags.pad_for] of the
+   function this closure dispatches to, i.e. 0 or MARCH_CLO_ARG0_BORROWED.
+   It is a pure function of [fn_name], so memoizing on [fn_name] alone stays
+   correct: the same closure never wants two different pads. *)
+let intern_static_closure ?(pad = 0) ctx fn_name wrap_name =
   match Hashtbl.find_opt ctx.static_clos fn_name with
   | Some g -> g
   | None ->
     let g = Printf.sprintf "@%s$static_clo" fn_name in
     Buffer.add_string ctx.preamble
       (Printf.sprintf
-         "%s = internal global { i64, i32, i32, ptr } { i64 1099511627776, i32 0, i32 0, ptr @%s }\n"
-         g wrap_name);
+         "%s = internal global { i64, i32, i32, ptr } { i64 1099511627776, i32 0, i32 %d, ptr @%s }\n"
+         g pad wrap_name);
     Hashtbl.replace ctx.static_clos fn_name g;
     g
 

@@ -129,6 +129,29 @@ void   *march_alloc_float(double v);
 /* Read the double out of a boxed Float. Undefined if [p] is not a float box. */
 double  march_unbox_float(void *p);
 
+/* ── Closure header flags (march_hdr.pad of a "$Clo_..." object) ──────────
+ *
+ * A closure's pad word is otherwise unused (tag is 0, the shape-id and
+ * SIMD-kind uses of pad below are per-tag and never apply to a closure), so
+ * the compiler uses it to hand the runtime ONE fact about the function the
+ * closure dispatches to, which no dynamic test can recover:
+ *
+ *   MARCH_CLO_ARG0_BORROWED — the callee neither consumes nor retains its
+ *   FIRST USER argument.  `fn (acc, x) -> int_to_string(len(acc) + x)` sets
+ *   it; `fn (acc, x) -> Cons(x, acc)` and `fn (acc, _) -> acc` do not,
+ *   because those store / hand back the caller's reference.
+ *
+ * The fold helpers in march_runtime.c need it to decide whether they still
+ * own the accumulator they passed to call_closure_2 — see the comment on
+ * fold_release_prev_acc there, and lib/tir/clo_flags.ml for the emission
+ * side and the argument that a missing flag is always the SAFE direction
+ * (it degrades to the pre-existing leak, never to a double free).
+ *
+ * march_alloc zeroes the header, so any closure built by a path that does
+ * not stamp — the cross-heap message copier, hot reload, C-built cells —
+ * reads back as "nothing known". */
+#define MARCH_CLO_ARG0_BORROWED ((int32_t)1)
+
 /* 128-bit SIMD vector box: march_hdr(16) + 16-byte payload = 32 bytes,
  * payload 16-aligned. kind lives in the hdr pad slot (byte offset 12):
  * 0=f32x4 1=f64x2 2=i32x4 3=i64x2 4=u8x16. Leaf cell — no interior

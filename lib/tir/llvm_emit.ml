@@ -434,7 +434,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     if static_closure_ok ctx v.Tir.v_name then
-      ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
+      ("ptr", Llvm_ctx.intern_static_closure
+                ~pad:(Clo_flags.pad_for v.Tir.v_name) ctx fn_name wrap_name)
     else begin
       let hp = fresh ctx "cwrap" in
       emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -540,7 +541,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_ltys target_ret fn_name)
     end;
     if static_closure_ok ctx v.Tir.v_name then
-      ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
+      ("ptr", Llvm_ctx.intern_static_closure
+                ~pad:(Clo_flags.pad_for v.Tir.v_name) ctx fn_name wrap_name)
     else begin
       let hp = fresh ctx "cwrap" in
       emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -592,7 +594,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
            (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name)
        end;
        if static_closure_ok ctx resolved then
-         ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
+         ("ptr", Llvm_ctx.intern_static_closure
+                   ~pad:(Clo_flags.pad_for resolved) ctx fn_name wrap_name)
        else begin
          let hp  = fresh ctx "cwrap" in
          emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -4491,6 +4494,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          && (match fn_ptr_atom with
              | Tir.AVar _ | Tir.ADefRef _ -> true
              | Tir.ALit _ -> false) ->
+    let apply_tir_name =
+      match fn_ptr_atom with
+      | Tir.AVar v    -> v.Tir.v_name
+      | Tir.ADefRef d -> d.Tir.did_name
+      | Tir.ALit _    -> assert false
+    in
     let apply_sym =
       match fn_ptr_atom with
       | Tir.AVar v    -> llvm_name v.Tir.v_name
@@ -4503,7 +4512,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            here rather than miscompiling silently. *)
         assert false
     in
-    ("ptr", Llvm_ctx.intern_static_closure ctx (llvm_name tcon_name) apply_sym)
+    ("ptr", Llvm_ctx.intern_static_closure
+              ~pad:(Clo_flags.pad_for apply_tir_name)
+              ctx (llvm_name tcon_name) apply_sym)
 
   (* ── Heap allocation ───────────────────────────────────────────────── *)
   | Tir.EAlloc (Tir.TCon (ctor, alloc_params), args) ->
@@ -4520,7 +4531,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           | ps -> String.concat "," (List.map mangle_ty_for_eq ps))
         ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
     in
-    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
+    let alloc_result =
+     (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
      | Repr.Newtype payload ->
        audit "Newtype" "alloc";
        (* Newtype: no allocation. Emit the single payload atom directly. *)
@@ -4739,6 +4751,35 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | None -> ()
        end;
        ("ptr", ptr))
+    in
+    (* Closure objects carry ONE bit of borrow information about the function
+       they dispatch to, stamped into the header pad word (offset 12, the same
+       otherwise-unused slot the actor-shape stamp above uses): whether the
+       callee leaves its first user argument BORROWED.  The C runtime's fold
+       helpers read it back (MARCH_CLO_ARG0_BORROWED, runtime/march_runtime.h)
+       to decide whether they still own the accumulator they passed in — a
+       question no dynamic test can answer; see [Clo_flags] for the full
+       argument.  Scoped to closure structs only ("$Clo_..."), like the actor
+       stamp above, and emitted only when the bit is SET, so the common
+       no-information case costs nothing. *)
+    (match alloc_result with
+     (* "ptr" specifically: a closure struct is always Boxed, and a
+        non-pointer result would mean the repr classification changed under
+        us — GEPing into it would be nonsense, so fall through instead. *)
+     | ("ptr", clo_ptr) when Tir_names.is_clo_struct ctor ->
+       let pad =
+         match args with
+         | Tir.AVar v :: _    -> Clo_flags.pad_for v.Tir.v_name
+         | Tir.ADefRef d :: _ -> Clo_flags.pad_for d.Tir.did_name
+         | _ -> 0
+       in
+       if pad <> 0 then begin
+         let pp = fresh ctx "clopad" in
+         emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" pp clo_ptr);
+         emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" pad pp)
+       end
+     | _ -> ());
+    alloc_result
 
   | Tir.EAlloc (_, args) ->
     (* Non-TCon allocation (tuples / erased cells): UNIFORM slots — readers

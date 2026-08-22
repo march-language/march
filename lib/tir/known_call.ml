@@ -55,7 +55,14 @@ let is_clo_name = Tir_names.is_clo_struct
 (** Environment: maps local variable name → apply function name. *)
 type clo_env = (string * string) list
 
-let rec go ~changed (env : clo_env) : Tir.expr -> Tir.expr = function
+(** For an apply function, its own ($clo parameter name, own name) — the pair
+    that lets the traversal recognise the SELF-binding defun emits for a local
+    recursive fn.  [None] for every other function (only an apply fn has a
+    [$clo] parameter, so keying off "parameter 0" anywhere else would resolve
+    an ordinary user value to a function). *)
+type self_clo = (string * string) option
+
+let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = function
 
   (* ── Track closure allocations ──────────────────────────────────────── *)
   (* ELet(v, EAlloc("$Clo_...", AVar(apply_fn) :: fv_atoms), body) *)
@@ -64,7 +71,7 @@ let rec go ~changed (env : clo_env) : Tir.expr -> Tir.expr = function
       body)
     when is_clo_name clo_name ->
     let env' = (v.Tir.v_name, fn_ptr.Tir.v_name) :: env in
-    Tir.ELet (v, rhs, go ~changed env' body)
+    Tir.ELet (v, rhs, go ~changed ~self env' body)
 
   (* Same but for stack-promoted closures (after Escape analysis). *)
   | Tir.ELet (v,
@@ -72,7 +79,34 @@ let rec go ~changed (env : clo_env) : Tir.expr -> Tir.expr = function
       body)
     when is_clo_name clo_name ->
     let env' = (v.Tir.v_name, fn_ptr.Tir.v_name) :: env in
-    Tir.ELet (v, rhs, go ~changed env' body)
+    Tir.ELet (v, rhs, go ~changed ~self env' body)
+
+  (* ── Track the SELF-binding of a local recursive fn ─────────────────── *)
+  (* Defun lifts `fn go(...) ... go(...) ... end` to an apply function whose
+     body opens with [let go = $clo] — the lambda's own name rebound to the
+     closure it was invoked through — and compiles the recursive call as
+     [ECallPtr(AVar go, args)].  That variable is not bound to any [EAlloc]
+     in this function, so the two rules above cannot see it; but its apply
+     function is known with certainty: it is the one being traversed.
+
+     Resolving it matters for more than the indirect-call hop.  As an
+     [ECallPtr] the back-edge is invisible to the self-TCO analysis
+     ([Llvm_tco]), which only recognises [EApp]-to-self, so a local recursive
+     fn got no back-edge from us at all — it survived deep inputs only
+     because LLVM's tail-call elimination turned the emitted self-call into a
+     loop, and every Float argument crossing that erased edge was boxed and
+     leaked once per iteration ([march-level TCO] in
+     specs/progress/2026-08-22-selfrec-closure-float-tail-call.md).  As an
+     [EApp] to a known callee it is an ordinary self tail call: TCO gives it
+     a real back-edge writing native parameter slots, so no argument is
+     boxed and no frame is pushed. *)
+  | Tir.ELet (v, (Tir.EAtom (Tir.AVar src) as rhs), body)
+    when (match self with
+          | Some (clo_param, _) -> String.equal src.Tir.v_name clo_param
+          | None -> false) ->
+    let apply_name = match self with Some (_, n) -> n | None -> assert false in
+    let env' = (v.Tir.v_name, apply_name) :: env in
+    Tir.ELet (v, rhs, go ~changed ~self env' body)
 
   (* ── Convert known ECallPtr to direct EApp ──────────────────────────── *)
   | Tir.ECallPtr (Tir.AVar v, args) ->
@@ -89,20 +123,27 @@ let rec go ~changed (env : clo_env) : Tir.expr -> Tir.expr = function
 
   (* ── Recursive traversal ────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
-    Tir.ELet (v, go ~changed env rhs, go ~changed env body)
+    Tir.ELet (v, go ~changed ~self env rhs, go ~changed ~self env body)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (
-      List.map (fun fd -> { fd with Tir.fn_body = go ~changed env fd.Tir.fn_body }) fns,
-      go ~changed env body)
+      List.map (fun fd -> { fd with Tir.fn_body = go ~changed ~self env fd.Tir.fn_body }) fns,
+      go ~changed ~self env body)
   | Tir.ECase (a, branches, default) ->
     Tir.ECase (a,
-      List.map (fun b -> { b with Tir.br_body = go ~changed env b.Tir.br_body }) branches,
-      Option.map (go ~changed env) default)
+      List.map (fun b -> { b with Tir.br_body = go ~changed ~self env b.Tir.br_body }) branches,
+      Option.map (go ~changed ~self env) default)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (go ~changed env e1, go ~changed env e2)
+    Tir.ESeq (go ~changed ~self env e1, go ~changed ~self env e2)
   | other -> other
 
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   { m with Tir.tm_fns = List.map (fun fd ->
-    { fd with Tir.fn_body = go ~changed [] fd.Tir.fn_body }
+    let self =
+      if Tir_names.is_apply_fn fd.Tir.fn_name then
+        match fd.Tir.fn_params with
+        | clo :: _ -> Some (clo.Tir.v_name, fd.Tir.fn_name)
+        | [] -> None
+      else None
+    in
+    { fd with Tir.fn_body = go ~changed ~self [] fd.Tir.fn_body }
   ) m.Tir.tm_fns }

@@ -52,7 +52,7 @@ dispatch — a sizeable architectural change") and deliberately deferred it;
 what it did not record is that the deferral is an unbounded OBJECT leak for
 fresh args, not just "extra Inc/Dec pairs". This is the same disease as the
 fold-heap-accumulator borrowed-return item
-(`specs/todos/2026-08-20-fold-heap-accumulator-borrowed-return-leak.md`),
+(`specs/progress/2026-08-22-fold-heap-accumulator-borrowed-return-leak.md`),
 seen from the argument side.
 
 ## Constraints on any fix, learned the hard way (read the progress file above)
@@ -65,9 +65,23 @@ seen from the argument side.
   params legitimately infer OWNED (body stores/returns them) and would
   underflow. Normalising the external ABI to borrowed requires the callee to
   self-inc at entry when its body wants ownership.
-* Either normalisation would also subsume the Float alias guard and the
-  self-tail-call exemption
-  (`specs/todos/2026-08-21-selfrec-closure-float-tail-call.md`).
+* Either normalisation would also subsume the Float alias guard. (The
+  self-tail-call exemption it would once have subsumed is now moot: the
+  self-call is resolved to a direct `EApp` and TCO'd —
+  `specs/progress/2026-08-22-selfrec-closure-float-tail-call.md`.)
+
+## 2026-08-22: half the plumbing now exists
+
+The fold-accumulator fix built exactly the channel the P5 comment deferred,
+for ONE bit and ONE consumer: `lib/tir/clo_flags.ml` carries
+"the callee has no owning use of user argument 0" from Perceus (which owns
+the converged borrow map) to `Llvm_emit`, which stamps it into the closure
+object's header pad word, where the C runtime reads it as
+`MARCH_CLO_ARG0_BORROWED`. Generalising it to per-ARGUMENT modes for every
+call site is the same mechanism with a wider bit-field — a closure header has
+31 spare bits in that word — plus the caller-side decision this item is
+really about. Anything built here should reuse that channel rather than
+inventing a second one.
 
 ## Why there is no narrow fix — established 2026-08-22
 
