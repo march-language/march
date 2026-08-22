@@ -28,6 +28,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled closure calls no longer leak two heap boxes per call when a `Float`
+  crosses the closure boundary.** Closure dispatch erases every argument and
+  result to a uniform pointer, so a `Float` argument was boxed at the call site
+  and a `Float` result boxed on return — and neither ~32-byte box was ever
+  released. Any higher-order code over Floats paid it on every single call — a
+  comparator passed to sort, a callback, `List.map` over Floats — unbounded, so
+  a long-running server leaked without bound (measured: 7.2M leaked objects
+  over a 5.1M-call probe; a small constant after). The call site now releases
+  both boxes, with an alias guard for erased callees that return their argument
+  unchanged and an exemption for recursive self-calls — the latter preserving
+  the tail-call elimination that keeps deep local-fn recursion from
+  overflowing the stack. The interpreter was never affected. Guarded by a
+  `live_allocs()` probe in `@runtest`. Awaiting a Float-returning task still
+  leaks its one result box per await (tracked, blocked on task-object
+  lifetime); an erased self-recursive Float accumulator still leaks on its
+  back-edge (tracked).
 - **`Socket.recv_timeout` ignored its timeout argument entirely.** The
   parameter was `_timeout_ms` and the body was byte-for-byte the untimed
   `recv/2` above it, so a caller who asked to be protected against a silent
