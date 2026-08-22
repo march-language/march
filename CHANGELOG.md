@@ -75,6 +75,20 @@ git log is authoritative for exact commits.
   formatter never recognised March's inline (small-string) representation — a
   string of 7 bytes or fewer is a value, not an address — and dereferenced it. It
   also dereferenced any other non-heap word instead of printing it.
+- **A Float-returning `Task` was unusable when compiled.** Two independent
+  defects: `task_await`'s codegen decoded the Float box sitting in the `Ok`
+  payload and stored the raw `double` bits back into the field, so the `Ok(v)`
+  destructure decoded it a second time and dereferenced the IEEE-754 bit
+  pattern as an address — **any** Float-returning task segfaulted with no
+  output at every `--opt` level. Underneath that, a zero-arg lambda's closure
+  was typed as its own return type rather than `() -> ret`, so the
+  `Task.async(fn () -> 1.5)` spelling did not even compile (clang rejected the
+  emitted IR with `'%ldN' defined with type 'double' but expected 'i64'`). The
+  interpreter was correct throughout, so `Task.async` / `Task.await` /
+  `Task.await_unwrap` / `Task.await_many` / `Task.async_stream` on a Float all
+  worked in the REPL and failed natively. The zero-arg-lambda mistyping applied
+  to every result type, not just Float — an `Int` thunk was mistyped identically
+  and merely survived because i64 and ptr share a register.
 
 - **`typed_array_*` returned corrupt values for scalar elements when compiled.**
   The family threads a genuinely generic `'a` through a uniform erased slot, so a

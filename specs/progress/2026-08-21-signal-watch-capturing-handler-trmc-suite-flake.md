@@ -94,3 +94,55 @@ any runtime-side fix — this repo has a documented history
 (`project_prefix_control_before_attributing`,
 `project_bench_load_contamination` in memory) of misattributing
 load-induced timing noise to unrelated code changes.
+
+---
+
+## Resolution (landed 2026-08-21) — mitigation, not a proven root-cause fix
+
+Read this section's caveat before treating the item as closed.
+
+**What was ruled out.** The sibling flake
+(`specs/progress/2026-08-21-signal-watch-output-ordering-flake.md`) was
+root-caused the same day to concurrent `march_signal_drain()` on idle scheduler
+threads. That mechanism does **not** explain this failure:
+
+- The drain is RC-safe under concurrency. `march_signal_drain` claims each
+  pending edge with `atomic_exchange`, and `march_incrc`/`march_decrc` are
+  `atomic_fetch_add`/`sub` (`runtime/march_runtime.c`), so two threads running
+  the watcher concurrently cannot corrupt the closure's refcount. No `RC
+  underflow` path.
+- Output interleaving cannot make the assertion fail. `read_cmd_output` reads
+  the process's *entire* output, and observed tears fall between `writev`'s two
+  iovecs, leaving each message's own bytes contiguous — so `ir_contains "done"`
+  survives them. Reproduced directly: the very first local run printed
+  `donecaught 99`, and still satisfied all three conditions.
+
+**What was reproduced.** Running the test's exact program 6000 times at the
+default scheduler count under load produced **1 failure, and it was `EXIT:137`**
+— the binary SIGKILLed with otherwise-correct output. That is host-level
+pressure, the same shape as the `exit 137` observations recorded in
+`specs/progress/2026-08-21-actor-monitor-bounded-mailbox-race.md` (which saw it
+in both arms of a 24000-run measurement). It is a plausible fit for what CI hit
+— PR #316 added ~10 more native-compile dune rules to the same `dune runtest`,
+raising memory/CPU pressure on a shared runner — but it is **not proof**, and
+the ubuntu-24.04 failure itself was never reproduced.
+
+**What changed.** `test_signal_watch_capturing_handler_repeated_delivery_compiled`
+now retries a failing iteration once, and fails via `Alcotest.failf` with the
+captured output of both attempts plus the iteration number.
+
+The retry cannot mask the regression this test guards, because that regression
+is deterministic: pre-fix, the capturing watcher was freed on delivery 1 and
+*every* run crashed dispatching delivery 2. A deterministic crash fails both
+attempts. What the retry absorbs is a one-off environmental kill.
+
+The diagnosability change is arguably the more important half. The old form
+asserted a bare bool, so both CI failures printed only `Expected: true /
+Received: false` — no captured output, no iteration number, and the
+`.output` log was not retained past the job. That was this todo's core
+complaint. If this recurs now, *both* attempts failed, which is real signal
+rather than noise, and the failure message itself carries the evidence.
+
+**Not verified:** no ubuntu-24.04 (or Docker-approximated) run was performed,
+and no measurement of this test on Linux exists. If it recurs there, the new
+failure output is the next lead.
