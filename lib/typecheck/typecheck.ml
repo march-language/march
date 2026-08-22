@@ -1998,6 +1998,8 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_recv_http",         "IO.NetConnect");
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
+  ("tcp_recv_chunk_timeout","IO.NetConnect");
+  ("tcp_set_recv_timeout",  "IO.NetConnect");
   ("tcp_recv_chunked_frame","IO.NetConnect");
   (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect; a module that
      only speaks WebSocket can declare `needs IO.WebSocket` instead of the
@@ -2763,6 +2765,12 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_recv_http",           Mono (TArrow (t_int, TArrow (t_int, t_result t_string t_string))));
     ("tcp_recv_http_headers",   Mono (TArrow (t_int, t_result (TTuple [t_string; t_int; t_bool]) t_string)));
     ("tcp_recv_chunk",          Mono (TArrow (t_int, TArrow (t_int, t_result t_string t_string))));
+    (* tcp_recv_chunk_timeout(fd, max_bytes, timeout_ms): one chunk, bounded by a
+       per-call deadline.  Err("recv: timed out") when the peer stays silent. *)
+    ("tcp_recv_chunk_timeout",  Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string t_string)))));
+    (* tcp_set_recv_timeout(fd, timeout_ms): SO_RCVTIMEO on fd, so later reads —
+       including reads made through OpenSSL — fail instead of hanging. *)
+    ("tcp_set_recv_timeout",    Mono (TArrow (t_int, TArrow (t_int, t_result t_unit t_string))));
     ("tcp_recv_chunked_frame",  Mono (TArrow (t_int, t_result t_string t_string)));
     (* http_serialize_request(method, host, path, query_opt, headers, body) -> String *)
     ("http_serialize_request",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string,

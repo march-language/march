@@ -582,6 +582,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_all(i64 %fd, i64 %max_bytes, i64 %timeout_ms)" };
   { march_name = "tcp_recv_chunk"; c_name = Some "march_tcp_recv_chunk"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_chunk(i64 %fd, i64 %max_bytes)" };
+  { march_name = "tcp_recv_chunk_timeout"; c_name = Some "march_tcp_recv_chunk_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_chunk_timeout(i64 %fd, i64 %max_bytes, i64 %timeout_ms)" };
+  { march_name = "tcp_set_recv_timeout"; c_name = Some "march_tcp_set_recv_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_set_recv_timeout(i64 %fd, i64 %timeout_ms)" };
   { march_name = "tcp_recv_http_headers"; c_name = Some "march_tcp_recv_http_headers"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_recv_http_headers(i64 %fd)" };
   { march_name = "tcp_recv_chunked_frame"; c_name = Some "march_tcp_recv_chunked_frame"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -1411,6 +1415,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PComment "; TCP recv-all";
   PDeclare "march_tcp_recv_all";
   PDeclare "march_tcp_recv_chunk";
+  PDeclare "march_tcp_recv_chunk_timeout";
+  PDeclare "march_tcp_set_recv_timeout";
   PDeclare "march_tcp_recv_http_headers";
   PDeclare "march_tcp_recv_chunked_frame";
   PComment "; TLS builtins";

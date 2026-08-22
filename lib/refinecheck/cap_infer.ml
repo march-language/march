@@ -65,6 +65,8 @@ let cap_table : (string * string) list = [
   ("tcp_recv_http",         "IO.NetConnect");
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
+  ("tcp_recv_chunk_timeout","IO.NetConnect");
+  ("tcp_set_recv_timeout",  "IO.NetConnect");
   ("tcp_recv_chunked_frame","IO.NetConnect");
   ("ws_recv",               "IO.NetConnect");
   ("ws_send",               "IO.NetConnect");

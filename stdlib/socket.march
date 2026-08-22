@@ -12,6 +12,7 @@
 --   Socket.write(fd, data)                 : Result((), SocketError)
 --   Socket.recv(fd, max_bytes)             : Result(String, SocketError)
 --   Socket.recv_timeout(fd, max, ms)       : Result(String, SocketError)
+--   Socket.set_recv_timeout(fd, ms)        : Result((), SocketError)
 --   Socket.close(fd)                       : ()
 --   Socket.with_connection(host, port, f)  : Result(a, SocketError)
 --   Socket.error_message(e)                : String
@@ -22,6 +23,8 @@ mod Socket do
     = ConnectionFailed(String)
     | WriteFailed(String)
     | RecvFailed(String)
+    | RecvTimeout(Int)
+    | SocketOptionFailed(String)
 
   doc "Return a human-readable description of a SocketError."
   fn error_message(e : SocketError) : String do
@@ -29,6 +32,8 @@ mod Socket do
     ConnectionFailed(msg) -> "connection failed: " ++ msg
     WriteFailed(msg)      -> "write failed: " ++ msg
     RecvFailed(msg)       -> "receive failed: " ++ msg
+    RecvTimeout(ms)       -> "receive timed out after " ++ int_to_string(ms) ++ "ms"
+    SocketOptionFailed(m) -> "socket option failed: " ++ m
     end
   end
 
@@ -48,19 +53,72 @@ mod Socket do
     end
   end
 
-  doc "Receive up to max_bytes from fd (no timeout). Returns Ok(data) or Err."
+  doc """
+  Receive up to max_bytes from fd, with no per-call deadline.
+
+  This still reports Err(RecvTimeout(0)) if the fd carries a deadline from
+  set_recv_timeout and that deadline expires -- the 0 records that the bound
+  came from the descriptor rather than from this call, which had none of its
+  own.  Otherwise it blocks until the peer sends or the connection closes.
+  """
   fn recv(fd : Int, max_bytes : Int) : Result(String, SocketError) do
     match tcp_recv_chunk(fd, max_bytes) do
     Ok(data) -> Ok(data)
-    Err(msg) -> Err(RecvFailed(msg))
+    Err(msg) ->
+      if msg == "recv: timed out" do
+        Err(RecvTimeout(0))
+      else
+        Err(RecvFailed(msg))
+      end
     end
   end
 
-  doc "Receive up to max_bytes from fd with timeout_ms timeout (0 = no timeout)."
-  fn recv_timeout(fd : Int, max_bytes : Int, _timeout_ms : Int) : Result(String, SocketError) do
-    match tcp_recv_chunk(fd, max_bytes) do
+  doc """
+  Receive up to max_bytes from fd, waiting at most timeout_ms for the peer to
+  send anything.  timeout_ms <= 0 means no timeout.
+
+  Returns Err(RecvTimeout(timeout_ms)) when the deadline expires with the peer
+  still silent -- a distinct fact from Err(RecvFailed(...)), because only one
+  of the two is worth retrying.  The deadline applies to this call alone and
+  leaves no lasting property on fd; to bound reads made through TLS, use
+  set_recv_timeout instead.
+
+  On a peer that accepts the connection and then sends nothing, this returns
+  Err(RecvTimeout(timeout_ms)) rather than blocking.
+  """
+  fn recv_timeout(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(String, SocketError) do
+    match tcp_recv_chunk_timeout(fd, max_bytes, timeout_ms) do
     Ok(data) -> Ok(data)
-    Err(msg) -> Err(RecvFailed(msg))
+    Err(msg) ->
+      -- "recv: timed out" is emitted only by the deadline path, in both the
+      -- C runtime (MARCH_RECV_TIMEOUT_MSG) and the interpreter.
+      if msg == "recv: timed out" do
+        Err(RecvTimeout(timeout_ms))
+      else
+        Err(RecvFailed(msg))
+      end
+    end
+  end
+
+  doc """
+  Bound every subsequent blocking read on fd to timeout_ms (SO_RCVTIMEO).
+  timeout_ms <= 0 clears the deadline.
+
+  Unlike recv_timeout this is a persistent property of the descriptor, and
+  that is the point: it is the only mechanism that reaches reads made through
+  OpenSSL, so a TLS client calls it on the fd BEFORE Tls.connect to bound both
+  the handshake and every later Tls.read against a peer that goes silent.
+
+  The cost of that reach: a deadline firing part-way through a TLS record
+  leaves the session unusable.  On timeout, close the connection -- do not
+  retry the read.
+
+  Returns Ok(()) once the option is applied.
+  """
+  fn set_recv_timeout(fd : Int, timeout_ms : Int) : Result((), SocketError) do
+    match tcp_set_recv_timeout(fd, timeout_ms) do
+    Ok(_)    -> Ok(())
+    Err(msg) -> Err(SocketOptionFailed(msg))
     end
   end
 

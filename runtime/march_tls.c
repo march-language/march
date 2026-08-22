@@ -20,6 +20,7 @@
 
 #include "march_tls.h"
 #include "march_runtime.h"
+#include "march_preempt.h"
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -290,7 +291,13 @@ void *march_tls_connect(int64_t fd, int64_t ctx_handle, void *hostname) {
         return make_err(e);
     }
 
+    /* Guarded for the same reason as SSL_read: the handshake blocks reading
+     * the peer's response, and an unguarded restart loop defeats any
+     * SO_RCVTIMEO deadline set on the fd.  See march_preempt.h. */
+    sigset_t saved;
+    march_block_preempt(&saved);
     int rc = SSL_connect(ssl);
+    march_unblock_preempt(&saved);
     if (rc != 1) {
         char buf[512];
         int err = SSL_get_error(ssl, rc);
@@ -318,7 +325,13 @@ void *march_tls_accept(int64_t fd, int64_t ctx_handle) {
         return make_err(e);
     }
 
+    /* Guarded for the same reason as SSL_read: the handshake blocks reading
+     * the peer's response, and an unguarded restart loop defeats any
+     * SO_RCVTIMEO deadline set on the fd.  See march_preempt.h. */
+    sigset_t saved;
+    march_block_preempt(&saved);
     int rc = SSL_accept(ssl);
+    march_unblock_preempt(&saved);
     if (rc != 1) {
         char buf[512];
         int err = SSL_get_error(ssl, rc);
@@ -345,7 +358,15 @@ void *march_tls_read(int64_t ssl_handle, int64_t max_bytes) {
     char *buf = (char *)malloc((size_t)cap);
     if (!buf) return make_err("tls_read: out of memory");
 
+    /* Masking SIGUSR1 is what makes an SO_RCVTIMEO deadline on the underlying
+     * fd actually reach this read: unguarded, the preemption signal restarts
+     * the socket recv() beneath OpenSSL every ~1ms under SA_RESTART, restarting
+     * the receive timer with it, and a peer that goes silent wedges the caller
+     * forever.  See march_preempt.h. */
+    sigset_t saved;
+    march_block_preempt(&saved);
     int n = SSL_read(ssl, buf, (int)cap);
+    march_unblock_preempt(&saved);
     if (n > 0) {
         void *s = march_string_lit(buf, (int64_t)n);
         free(buf);
@@ -379,7 +400,10 @@ void *march_tls_write(int64_t ssl_handle, void *data) {
     int64_t written = 0;
 
     while (written < total) {
+        sigset_t saved;
+        march_block_preempt(&saved);
         int n = SSL_write(ssl, src + written, (int)(total - written));
+        march_unblock_preempt(&saved);
         if (n <= 0) {
             int err = SSL_get_error(ssl, n);
             char errbuf[256];

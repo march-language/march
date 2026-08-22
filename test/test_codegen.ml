@@ -12696,6 +12696,8 @@ declare i64  @march_process_wait_proc(ptr %proc)
 ; TCP recv-all
 declare ptr  @march_tcp_recv_all(i64 %fd, i64 %max_bytes, i64 %timeout_ms)
 declare ptr  @march_tcp_recv_chunk(i64 %fd, i64 %max_bytes)
+declare ptr  @march_tcp_recv_chunk_timeout(i64 %fd, i64 %max_bytes, i64 %timeout_ms)
+declare ptr  @march_tcp_set_recv_timeout(i64 %fd, i64 %timeout_ms)
 declare ptr  @march_tcp_recv_http_headers(i64 %fd)
 declare ptr  @march_tcp_recv_chunked_frame(i64 %fd)
 ; TLS builtins

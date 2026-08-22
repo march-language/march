@@ -13,6 +13,9 @@
 --   Ok(ctx) ->
 --     match tcp_connect("example.com", 443) do
 --     Ok(fd) ->
+--       -- Bound reads against a peer that accepts and then goes silent.
+--       -- Must be set BEFORE the handshake to bound the handshake too.
+--       Socket.set_recv_timeout(fd, 30000)
 --       match Tls.connect(fd, ctx, "example.com") do
 --       Ok(conn) ->
 --         Tls.write(conn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -211,6 +214,14 @@ mod Tls do
   doc """
   Read up to max_bytes from a TLS connection.
   Returns Ok(String) or Err(TlsError). Ok("") signals a clean shutdown.
+
+  This read has no deadline of its own and will wait indefinitely for a peer
+  that has gone silent.  To bound it, call Socket.set_recv_timeout(fd, ms) on
+  the underlying fd BEFORE Tls.connect -- SO_RCVTIMEO is the only mechanism
+  that reaches a read made through OpenSSL, and setting it before the
+  handshake bounds the handshake too.  A deadline that fires part-way through
+  a TLS record leaves the session unusable, so treat an expired read as
+  "close the connection", not as something to retry.
   """
   fn read(conn, max_bytes) do
     match conn do
