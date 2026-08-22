@@ -18,6 +18,39 @@
     threaded explicitly across the module boundary rather than implicitly
     via [and]. *)
 
+(** Does this case arm DIVERGE — i.e. can control never actually arrive at the
+    arm's merge block through it?
+
+    Both merge paths below ([Repr.Niche]'s and the general boxed one) may
+    unbox-and-free the ptr they merged, but only when EVERY arm reaching the
+    merge produced a "double" pre-coercion — the proof that the ptr is a
+    march_float_box this emit_case's own coerce allocated.  A
+    match-compilation fallback default ([Lower_state.nonexhaustive_panic],
+    `panic_("non-exhaustive pattern match")`) is emitted as an ordinary arm:
+    it calls @march_panic_ext, declared to return ptr, and stores that ptr
+    like any other arm.  Its "ptr" spoiled the proof for EVERY match on a
+    boxed ADT whose arms are Floats — the `match opt do Some(x) -> x;
+    None -> 1.0 end` shape — so the freshly allocated box was handed to the
+    caller as an opaque live ptr and never freed.
+
+    Precision matters in one direction only: a FALSE positive here would
+    unbox-and-free a ptr some other arm legitimately produced, i.e. a
+    use-after-free.  So this recognises exactly the primitives that call
+    @march_panic / @march_panic_ext and never return to their caller
+    (march_panic aborts, or longjmps to the test runner under
+    march_test_in_test) — the same four names llvm_emit's [is_known_fn] table
+    lists.  A user-written `panic("…")` routed through a March prelude wrapper
+    is NOT recognised (its callee is an ordinary March fn) and keeps the
+    pre-existing leak: the safe direction. *)
+let rec arm_diverges (e : Tir.expr) : bool =
+  match e with
+  | Tir.EApp (f, _) ->
+    (match f.Tir.v_name with
+     | "panic" | "panic_" | "todo_" | "unreachable_" -> true
+     | _ -> false)
+  | Tir.ESeq (_, e2) | Tir.ELet (_, _, e2) -> arm_diverges e2
+  | _ -> false
+
 let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
   let scrut_tir_ty_init =
@@ -262,6 +295,16 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     in
     let result_slot_n = Llvm_ctx.fresh ctx "res_slot" in
     Llvm_ctx.emit ctx (Printf.sprintf "%s = alloca ptr" result_slot_n);
+    (* Same bookkeeping, and the same ownership argument, as [arm_result_tys]
+       in the boxed path below — this merge simply never had it.  Measured on
+       a 20,000-iteration `Option(Option(Float))` loop (the outer Option is
+       niche-encoded because its payload is a heap pointer, the inner one is
+       boxed because 0.0 collides with the None niche): 20,000 leaked
+       march_float_box cells, one per evaluation, entirely from this merge. *)
+    let niche_arm_tys = ref [] in
+    let record_niche_arm_ty (body : Tir.expr) (ty : string) =
+      if not (arm_diverges body) then niche_arm_tys := ty :: !niche_arm_tys
+    in
     let merge_lbl_n = Llvm_ctx.fresh_block ctx "niche_merge" in
     let none_lbl    = Llvm_ctx.fresh_block ctx "niche_none" in
     let some_lbl    = Llvm_ctx.fresh_block ctx "niche_some" in
@@ -280,6 +323,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      | Some br ->
        let body = strip_decrc_niche br.Tir.br_body in
        let (bty, bval) = emit_expr ctx body in
+       record_niche_arm_ty body bty;
        Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
                    (Llvm_ctx.coerce ctx bty bval "ptr") result_slot_n);
        Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
@@ -288,6 +332,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        (match default_opt with
         | Some d ->
           let (dty, dval) = emit_expr ctx d in
+          record_niche_arm_ty d dty;
           Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
                       (Llvm_ctx.coerce ctx dty dval "ptr") result_slot_n);
           Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
@@ -318,6 +363,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
           - Some(ptr): stripping is REQUIRED — scrut IS the payload *)
        let body = strip_decrc_niche br.Tir.br_body in
        let (bty, bval) = emit_expr ctx body in
+       record_niche_arm_ty body bty;
        Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
                    (Llvm_ctx.coerce ctx bty bval "ptr") result_slot_n);
        Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
@@ -325,6 +371,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        (match default_opt with
         | Some d ->
           let (dty, dval) = emit_expr ctx d in
+          record_niche_arm_ty d dty;
           Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
                       (Llvm_ctx.coerce ctx dty dval "ptr") result_slot_n);
           Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
@@ -333,7 +380,19 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     Llvm_ctx.emit_label ctx merge_lbl_n;
     let r_n = Llvm_ctx.fresh ctx "niche_r" in
     Llvm_ctx.emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r_n result_slot_n);
-    ("ptr", r_n)
+    (* All arms that reach this merge were "double", so the ptr just loaded is
+       a march_float_box allocated by this emit_case's own coerce-to-ptr calls
+       above — never escaped, never aliased.  Unbox and free it instead of
+       handing the caller a live box it has no way to own.  Identical to the
+       boxed path's merge below; see [niche_arm_tys] for the measurement. *)
+    if !niche_arm_tys <> [] && List.for_all (fun t -> t = "double") !niche_arm_tys
+    then begin
+      let d = Llvm_ctx.fresh ctx "niche_rd" in
+      Llvm_ctx.emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r_n);
+      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r_n);
+      ("double", d)
+    end else
+      ("ptr", r_n)
   | _ ->
 
   (* Tags produced by PatLit patterns: lowercase "true"/"false" (Bool),
@@ -428,9 +487,18 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      instead of handing the still-live box to the caller as a generic "ptr",
      which is what leaked one [march_alloc_float] cell per case/match
      evaluation (specs/todos/2026-08-11-float-boxing-erasure-boundary-per-call-leak.md).
-     Arms that don't reach merge (e.g. the `unreachable` default) contribute
-     nothing, so they can't spoil the all-double proof. *)
+     Arms that don't reach merge — the `unreachable` default, and any arm
+     [arm_diverges] recognises — contribute nothing, so they can't spoil the
+     all-double proof.  Before [arm_diverges] existed only the first of those
+     was excluded, and the non-exhaustive-panic default's "ptr" cost 20,000
+     leaked boxes on a 20,000-iteration `Option(Float)` loop
+     (specs/progress/2026-08-22-erased-slot-ownership-leaks.md). *)
   let arm_result_tys = ref [] in
+
+  (* Record an arm's pre-coercion type unless the arm diverges. *)
+  let record_arm_ty (body : Tir.expr) (ty : string) =
+    if not (arm_diverges body) then arm_result_tys := ty :: !arm_result_tys
+  in
 
   (* Detect string-literal case: br_tag starts with '"' *)
   let is_string_case = List.exists (fun br ->
@@ -743,6 +811,24 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     Llvm_ctx.emit_label ctx lbl;
     (* Bind branch variables from scrutinee fields *)
     let heap_field_vals = ref [] in
+    (* Fields that are physically a march_float_box in an ERASED slot — see the
+       [is_boxed_float] comment at the binding site below. *)
+    let boxed_float_field_vals = ref [] in
+    (* FBIP whole-cell reuse changes the answer for erased Float fields, so it
+       has to be known BEFORE the fields are bound.  When the body reuses the
+       scrutinee's own storage, binding the field as a raw double means any
+       reconstruction re-boxes (coerce double->ptr allocates) and stores a
+       FRESH box into the reused cell — orphaning the one already in the slot,
+       which is a new leak in exchange for the one this fixes.  Keep the
+       pre-existing ptr binding on that path instead: the reuse shape then
+       behaves exactly as it did before and keeps its own (pre-existing)
+       accounting.  The safe direction, and the same conservatism the reuse
+       counterpart of the leading-dec path already applies. *)
+    let body_reuses_scrut_here =
+      match scrut_atom with
+      | Tir.AVar v -> body_reuses_scrut v.Tir.v_name br.Tir.br_body
+      | _ -> false
+    in
     if is_ptr_scrut then begin
       let entry = Llvm_data.ctor_entry ctx (qualified_br_key br.Tir.br_tag) (List.length br.Tir.br_vars) in
       (* Concrete field types — uses scrutinee type to instantiate type variables.
@@ -765,23 +851,56 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         let field_ty = match List.nth_opt entry.Llvm_ctx.ce_fields i with
           | Some t -> Llvm_ctx.llvm_ty t | None -> Llvm_ctx.llvm_ty v.Tir.v_ty in
         let fv = Llvm_data.emit_load_field ctx scrut_val i field_ty in
-        let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
-        Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
-        Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot);
-        Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot field_ty;
-        (* Track heap-type fields for conditional IncRC.
-           Use the concrete field type (with type-vars resolved) so scalar
-           fields (Int, Bool, Float) in polymorphic ctors are NOT IncRC'd.
-           Also guard on field_ty: when the scrutinee's TIR type is TVar "_"
-           (unknown — happens for sub-vars from the pattern-matrix compiler),
-           Llvm_data.resolve_ctor_fields falls back to a TVar "_" placeholder, making
-           concrete_field_ty = "ptr" even for primitive fields.  field_ty is
-           always correct (resolved via the concrete ctor_info key) so using
-           both as a conjunction prevents false positives. *)
+        (* Concrete field type, with the scrutinee's type arguments resolved.
+           Use it (not [field_ty]) to decide which fields are genuine heap
+           pointers, so scalar fields (Int, Bool, Float) in polymorphic ctors
+           are NOT IncRC'd.  Also guard on field_ty: when the scrutinee's TIR
+           type is TVar "_" (unknown — happens for sub-vars from the
+           pattern-matrix compiler), Llvm_data.resolve_ctor_fields falls back
+           to a TVar "_" placeholder, making concrete_field_ty = "ptr" even for
+           primitive fields.  field_ty is always correct (resolved via the
+           concrete ctor_info key) so using both as a conjunction prevents
+           false positives. *)
         let concrete_field_ty = match List.nth_opt concrete_fields i with
           | Some t -> Llvm_ctx.llvm_ty t | None -> field_ty in
+        (* A FLOAT IN AN ERASED SLOT.  The ctor's declared field is generic
+           (ce_fields says "ptr") but the scrutinee instantiates it at Float,
+           so what the slot physically holds is a march_alloc_float BOX, not
+           the double — [Option(Float)] is the everyday instance, and it is
+           niche-UNSAFE (0.0 bitcasts to the None niche) so it cannot escape
+           into the unboxed representation.
+
+           Bind the raw double, exactly as Llvm_toplevel.emit_fn's
+           [is_apply_wrapper && ty = "double"] prologue does for a Float
+           parameter arriving through the same uniform-ptr ABI.  Binding the
+           BOX instead is what leaked: the box's reference belongs to the
+           cell, the destructure transfers it to this binder (the cell's free
+           is shallow), and the binder is a Float — [Rc_types.needs_rc TFloat]
+           is false, so Perceus emits no drop for it and the transferred
+           reference died on the floor.  Copying the double out means the
+           binder aliases nothing, which is what makes the release below a
+           release of a genuinely unowned box rather than of a live one. *)
+        let is_boxed_float =
+          concrete_field_ty = "double" && field_ty = "ptr"
+          && not body_reuses_scrut_here
+        in
+        let bind_ty = if is_boxed_float then "double" else field_ty in
+        let bind_val =
+          if is_boxed_float then begin
+            let d = Llvm_ctx.fresh ctx "fbxf" in
+            Llvm_ctx.emit ctx
+              (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d fv);
+            d
+          end else fv
+        in
+        let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
+        Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot bind_ty);
+        Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" bind_ty bind_val slot);
+        Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot bind_ty;
         if concrete_field_ty = "ptr" && field_ty = "ptr" then
           heap_field_vals := fv :: !heap_field_vals
+        else if is_boxed_float then
+          boxed_float_field_vals := fv :: !boxed_float_field_vals
       ) br.Tir.br_vars
     end;
     (* When this branch has heap fields AND the body starts with dec_rc(scrutinee),
@@ -795,6 +914,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     let body_to_emit =
       match scrut_name, !heap_field_vals with
       | Some sn, (_ :: _ as fields) ->
+        let fboxes = !boxed_float_field_vals in
         (match strip_scrut_decrc sn br.Tir.br_body with
          | Some (_scrut_v, rest) ->
            (* Emit: march_decrc_freed(scrut); if not freed, incrc each heap field *)
@@ -808,14 +928,27 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
            let body_lbl   = Llvm_ctx.fresh_block ctx "br_body" in
            Llvm_ctx.emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
                             freed_bool unique_lbl shared_lbl);
-           (* Shared path: IncRC each extracted heap field *)
+           (* Shared path: IncRC each extracted heap field.  Erased-slot Float
+              boxes are deliberately absent: the cell survives and keeps owning
+              them, and the binder holds a COPY of the double (see
+              [is_boxed_float] above), so it aliases nothing to account for. *)
            Llvm_ctx.emit_label ctx shared_lbl;
            List.iter (fun fv ->
              Llvm_ctx.emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv)
            ) fields;
            Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
-           (* Unique path: no IncRC needed *)
+           (* Unique path: the cell has just been freed, so each ordinary heap
+              field's reference transfers to its binder and Perceus will drop
+              it later — nothing to do for those.  An erased-slot Float box has
+              no such successor: its binder is a raw double, [needs_rc TFloat]
+              is false, and the cell's free is shallow — so its reference has
+              no owner at all from here on and this is the one place that can
+              release it.  It is emitted on the FREED path only, which is
+              exactly the proof that nobody else still holds the box. *)
            Llvm_ctx.emit_label ctx unique_lbl;
+           List.iter (fun fv ->
+             Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" fv)
+           ) fboxes;
            Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
            Llvm_ctx.emit_label ctx body_lbl;
            rest   (* emit the rest of the body without the leading dec_rc *)
@@ -848,6 +981,36 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
            Llvm_ctx.emit_label ctx body_lbl;
            br.Tir.br_body
          | None -> br.Tir.br_body)
+      | Some sn, [] when !boxed_float_field_vals <> [] ->
+        (* No ordinary heap fields, but at least one erased-slot Float box.
+           Same shape as the arm above, minus the shared-path IncRC (a Float
+           binder is a copied double and aliases nothing): split on
+           march_decrc_freed purely so the box release lands on the path where
+           the cell is provably gone.  The EReuse guard from the [] arm below
+           is kept — when the body reuses the scrutinee's storage the leading
+           dec must be stripped without a substitute release, or the reused
+           cell is torn down under the EReuse. *)
+        let fboxes = !boxed_float_field_vals in
+        (match strip_scrut_decrc sn br.Tir.br_body with
+         | Some (_, rest) when body_reuses_scrut sn rest -> rest
+         | Some (_, rest) ->
+           let freed = Llvm_ctx.fresh ctx "freed" in
+           Llvm_ctx.emit ctx (Printf.sprintf "%s = call i64 @march_decrc_freed(ptr %s)"
+                       freed scrut_val);
+           let freed_bool = Llvm_ctx.fresh ctx "freed_b" in
+           Llvm_ctx.emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" freed_bool freed);
+           let unique_lbl = Llvm_ctx.fresh_block ctx "fb_unique" in
+           let body_lbl   = Llvm_ctx.fresh_block ctx "fb_body" in
+           Llvm_ctx.emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                            freed_bool unique_lbl body_lbl);
+           Llvm_ctx.emit_label ctx unique_lbl;
+           List.iter (fun fv ->
+             Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" fv)
+           ) fboxes;
+           Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
+           Llvm_ctx.emit_label ctx body_lbl;
+           rest
+         | None -> br.Tir.br_body)
       | Some sn, [] ->
         (* No heap fields; still need to strip a leading dec_rc(scrut) if the body
            also contains an EReuse(scrut) — otherwise dec_rc and EReuse both
@@ -858,7 +1021,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       | _ -> br.Tir.br_body
     in
     let (br_ty, br_val) = emit_expr ctx body_to_emit in
-    arm_result_tys := br_ty :: !arm_result_tys;
+    record_arm_ty body_to_emit br_ty;
     let stored = Llvm_ctx.coerce ctx br_ty br_val "ptr" in
     Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
     Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
@@ -908,7 +1071,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        Llvm_ctx.emit_term ctx "unreachable"
    | Some d ->
      let (d_ty, d_val) = emit_expr ctx d in
-     arm_result_tys := d_ty :: !arm_result_tys;
+     record_arm_ty d d_ty;
      let stored = Llvm_ctx.coerce ctx d_ty d_val "ptr" in
      Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
      Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl));

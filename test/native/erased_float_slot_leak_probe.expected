@@ -1,0 +1,12 @@
+boxed=300
+niche=200
+mixed=1400
+mixed_shared=2600
+shared=200
+int=8
+boxed20k=1500000
+niche20k=1000000
+mixed20k=7000000
+mixed_shared20k=13000000
+shared20k=1000000
+int20k=40000

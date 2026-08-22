@@ -5185,6 +5185,86 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
     test \"$live\" -lt 1000 || { echo \"native_float_box_abi_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. A Float crossing the uniform-ptr closure ABI (argument box at the call site, result box on return) must be released by the call site -- healthy is a small constant, and the unfixed tree measured 7,200,003 over the probe's 5.1M closure calls (exactly the per-call box count stated in the probe header). Check the Float temp-box releases in lib/tir/llvm_emit.ml's ECallPtr dispatch arm and EApp Boundary-B (is_apply_fn) arm.\" >&2; exit 1; }; \
     echo \"native_float_box_abi_leak_probe live_allocs delta = ${live} objects\"")))
 
+; Erased-slot Float ownership probe (lib/tir/llvm_case.ml: the case/niche merge
+; box, and a Float field extracted out of a generic ctor slot). Same three-rule
+; shape and rationale as native_float_box_abi_leak_probe above: compile, run
+; with stdout/stderr captured to FILES -- the two *_shared legs are DOUBLE-FREE
+; witnesses whose printed sums go wrong (or crash the run, which is dune's own
+; exit status here) if a release fires on the shared path -- then assert the
+; live_allocs delta read from the captured file.
+(rule
+ (targets native_erased_float_slot_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/erased_float_slot_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_erased_float_slot_leak_probe
+       native/erased_float_slot_leak_probe.march)))
+
+(rule
+ (targets native_erased_float_slot_leak_probe.out native_erased_float_slot_leak_probe.live)
+ (deps native_erased_float_slot_leak_probe)
+ (action
+  (with-stdout-to native_erased_float_slot_leak_probe.out
+   (with-stderr-to native_erased_float_slot_leak_probe.live
+    (run ./native_erased_float_slot_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/erased_float_slot_leak_probe.expected
+        native_erased_float_slot_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_erased_float_slot_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat native_erased_float_slot_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from native_erased_float_slot_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"native_erased_float_slot_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. A Float in an erased (uniform-ptr) slot is a march_alloc_float box and needs an owner -- healthy is a small constant (6 on this fixture, independent of the iteration counts), and the unfixed tree measured 230,006 over the probe's 20,000 iterations per leg. Check (a) that lib/tir/llvm_case.ml's [arm_diverges] still keeps a non-exhaustive-panic arm out of arm_result_tys/niche_arm_tys so both merges can still prove all-double and unbox-and-free the merged box, and (b) that a destructured [is_boxed_float] field is still bound as a raw double and released on the march_decrc_freed UNIQUE path.\" >&2; exit 1; }; \
+    echo \"native_erased_float_slot_leak_probe live_allocs delta = ${live} objects\"")))
+
+; Task-handle lifetime probe (lib/tir/llvm_emit.ml: task_await / task_await_unwrap
+; must release the Task reference Perceus transfers into them, and must not
+; allocate an Ok wrapper they discard). Same three-rule shape as above; the
+; double-await leg on stdout is the witness that the release is per-await
+; rather than keyed to the first one.
+(rule
+ (targets native_task_lifetime_leak_probe)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/task_lifetime_leak_probe.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile --opt 2 -o native_task_lifetime_leak_probe
+       native/task_lifetime_leak_probe.march)))
+
+(rule
+ (targets native_task_lifetime_leak_probe.out native_task_lifetime_leak_probe.live)
+ (deps native_task_lifetime_leak_probe)
+ (action
+  (with-stdout-to native_task_lifetime_leak_probe.out
+   (with-stderr-to native_task_lifetime_leak_probe.live
+    (run ./native_task_lifetime_leak_probe)))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff native/task_lifetime_leak_probe.expected
+        native_task_lifetime_leak_probe.out)))
+
+(rule
+ (alias runtest)
+ (deps native_task_lifetime_leak_probe.live)
+ (action
+  (run bash -c
+   "live=$(cat native_task_lifetime_leak_probe.live); \
+    test -n \"$live\" || { echo 'could not read live_allocs delta from native_task_lifetime_leak_probe.live' >&2; exit 1; }; \
+    test \"$live\" -lt 100 || { echo \"native_task_lifetime_leak_probe leaked: live_allocs delta ${live} >= 100 objects. A spawn+await must not retain the 48-byte Task or allocate an Ok cell it throws away -- healthy is a small constant (2 on this fixture), and the unfixed tree measured 15,002 over the probe's 10,000 awaits (2 objects per task_await_unwrap, 1 per task_await). Check that task_await_unwrap and task_await in lib/tir/llvm_emit.ml still emit march_decrc on the task pointer, and that task_await_unwrap still calls ONLY march_task_await_value (march_task_await allocates the Ok wrapper).\" >&2; exit 1; }; \
+    echo \"native_task_lifetime_leak_probe live_allocs delta = ${live} objects\"")))
+
 
 
 ; Compiled/interpreted parity witness for explicit 128-bit SIMD vector types

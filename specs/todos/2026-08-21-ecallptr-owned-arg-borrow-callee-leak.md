@@ -5,6 +5,19 @@ Filed 2026-08-21, found while root-causing the Float-box ABI leak
 The Float fix landed there closes the *boxes the emitter itself creates*;
 this item is the underlying, type-independent accounting gap.
 
+**STILL OPEN. Re-confirmed and scoped 2026-08-22** while closing the other two
+items in this family (`specs/progress/2026-08-22-erased-slot-ownership-leaks.md`,
+`specs/progress/2026-08-22-task-handle-and-ok-wrapper-leak.md`). Not attempted:
+the survey below is why. **It does NOT share a root with those two** — they are
+"a value crossing into an erased slot has no named owner", each fixable at one
+site; this is "two sides of one ABI implement different conventions", which
+cannot be fixed on one side alone.
+
+Re-measured on `origin/main` 8897bb1a, Darwin arm64, `--compile --opt 2`:
+200,000 calls with a fresh heap `String` argument → `live_allocs` delta =
+**200,000**, exactly 1 leaked String per call. Unchanged by either fix above,
+as expected.
+
 ## Measured (Darwin arm64, `--compile --opt 2`)
 
 ```march
@@ -55,6 +68,52 @@ seen from the argument side.
 * Either normalisation would also subsume the Float alias guard and the
   self-tail-call exemption
   (`specs/todos/2026-08-21-selfrec-closure-float-tail-call.md`).
+
+## Why there is no narrow fix — established 2026-08-22
+
+Worth writing down, because "just release the dead-after arg at the call site"
+is the obvious move and it is a use-after-free.
+
+The leak needs the callee's mode, and an `ECallPtr` callee is dynamic:
+
+* caller emits `march_decrc(arg)` after the call → correct iff the callee
+  BORROWS; an underflow the moment it consumes;
+* caller emits `march_incrc` before and `march_decrc` after → net zero for a
+  consuming callee, and still leaks for a borrowing one;
+* nothing keyed on the argument's TYPE helps: the mode is a property of the
+  callee's body, not of the value.
+
+So the mode has to be made uniform, and the two ways to do that are exactly the
+two the constraints above rule out one-sidedly. Note also which params actually
+bite: `Rc_types.borrow_eligible` is FALSE for `TVar` and `TFn`, so an apply fn
+with an erased or closure param already infers OWNED and is already balanced.
+The mismatch is confined to params whose type is borrow-eligible AND whose body
+only reads them — `String`, `List`, records, comparators. That is the common
+case, not a corner.
+
+**Pinning apply-fn params owned (mirroring `$clo`) is the coherent design**, and
+it is a bigger change than the one-line pin suggests, because it must land
+together with:
+
+1. `borrow.ml` `infer_module`: extend the `i = 0 && is_apply_fn` pin to every
+   param, so `owned_in`'s fixpoint stops reclassifying them;
+2. the 6 C-runtime closure call sites (the audit in memory /
+   `specs/progress`): each currently passes a value it still owns and releases
+   it itself (`native_float_arr_fold`'s `march_decrc(elem)`). Each needs an
+   `march_incrc` before `call_closure_*` — a smaller edit than removing their
+   releases, and it keeps their own allocation accounting intact;
+3. **#321's caller-side Float releases must be DELETED**
+   (`specs/progress/2026-08-21-float-box-uniform-abi-call-site-release.md`):
+   those boxes are created by the emitter's own `coerce`, are invisible to
+   Perceus, and a consuming callee would release them too — the release plus
+   the callee's consume is a double free. Their alias guard and the
+   self-tail-call exemption go with them, which also closes
+   `specs/todos/2026-08-21-selfrec-closure-float-tail-call.md`.
+
+That is one coordinated change across `perceus.ml`, `borrow.ml`,
+`llvm_emit.ml`, `llvm_toplevel.ml` and `runtime/march_runtime.c`, undoing a
+fix that itself took three attempts. It wants its own branch and its own
+verification cycle, not a ride along with two unrelated leaks.
 
 ## Verification bar
 

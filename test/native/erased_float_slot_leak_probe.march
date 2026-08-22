@@ -1,0 +1,207 @@
+-- Leak guard for FLOAT VALUES SITTING IN AN ERASED (uniform-ptr) SLOT.
+--
+-- A Float never fits an erased slot as itself: the uniform representation is
+-- a march_alloc_float BOX, and every such box needs an owner. Two places in
+-- lib/tir/llvm_case.ml created or inherited one and named no owner:
+--
+--   1. THE CASE MERGE. Each arm coerces its value into the ptr-typed result
+--      slot, so a "double" arm allocates a fresh box on the way in. The merge
+--      unboxes and frees that box only when EVERY arm reaching it was
+--      "double" -- but the match-compilation fallback default
+--      (Lower_state.nonexhaustive_panic, `panic_("non-exhaustive pattern
+--      match")`) is emitted as an ordinary arm whose @march_panic_ext call is
+--      declared to return ptr. That "ptr" spoiled the proof for every
+--      Float-armed match on a boxed ADT, even though the arm diverges and
+--      never reaches the merge at runtime. [arm_diverges] now excludes it.
+--      The niche merge (Repr.Niche) never had the release at all and now
+--      shares the same one.
+--
+--   2. THE DESTRUCTURED FIELD. `Some(x)` where the scrutinee is
+--      `Option(Float)`: the ctor's declared field is generic, so the slot
+--      holds a box. Binding the BOX and letting the body unbox it left the
+--      cell's reference with no successor -- the binder is a Float and
+--      Rc_types.needs_rc TFloat is false, so Perceus emits no drop for it,
+--      and the cell's own free is shallow. The binder is now the raw double
+--      (the same thing Llvm_toplevel.emit_fn's apply-wrapper prologue does
+--      for a Float parameter arriving through this same ABI), and the box is
+--      released on the march_decrc_freed UNIQUE path.
+--
+-- FBIP WHOLE-CELL REUSE IS EXEMPT, on purpose. When the branch body reuses
+-- the scrutinee's own storage (EReuse), the field keeps its old ptr binding:
+-- binding a raw double there would make any reconstruction re-box (coerce
+-- double->ptr allocates) and store a FRESH box into the reused cell,
+-- orphaning the one already in the slot -- a new leak traded for the fixed
+-- one. That path therefore keeps its pre-existing behaviour and is not
+-- asserted here.
+--
+-- WHY THE RELEASE IS ON THE UNIQUE PATH AND NOWHERE ELSE. On the shared path
+-- (cell RC > 1 after the dec) the cell survives and still owns the box, and
+-- the binder holds a COPY of the double, aliasing nothing -- so there is
+-- nothing to release and nothing to dup. The freed path is the proof that no
+-- other holder exists. The two *_shared legs below are the witnesses for that
+-- direction: they destructure a still-live cell twice, so a release that
+-- fired on the shared path would hand the second read freed memory. They are
+-- DOUBLE-FREE witnesses, not leak legs -- their printed sums are the assert.
+--
+-- SIGNAL: live_allocs(), NOT RSS -- see the long rationale in
+-- native_arr_fold_leak_probe.march. Short version: an absolute RSS threshold
+-- is not portable (a healthy Linux process baseline is ~122 MB and went RED
+-- on CI), while live_allocs() counts the defect directly.
+--
+-- Measured on this fixture, Darwin arm64, --compile --opt 2, 20,000
+-- iterations per leg, against a pristine HEAD (8897bb1a) built by file-copy
+-- swap of lib/tir/llvm_case.ml + lib/tir/llvm_emit.ml:
+--
+--   leg                unfixed    fixed
+--   boxed_leg           30,000        0     Option(Float), merge + field
+--   niche_leg           40,000        0     Option(Option(Float)), niche merge
+--   mixed_leg           40,000        0     Cell(String, Float): heap AND Float field
+--   mixed_shared_leg    60,000        0     double-free witness
+--   shared_leg          60,000        0     double-free witness
+--   int_leg                  0        0     control: Option(Int) is niche, no boxes
+--   TOTAL              230,006        6
+--
+-- The healthy figure is a small CONSTANT, not a rate: it is 6 here and does
+-- not move with the iteration counts. Each defect scales linearly with them,
+-- so the `< 1000` bound the dune rule asserts is orders of magnitude away
+-- from both and falsifiable in both directions.
+--
+-- int_leg IS NOT DECORATION. `Option(Int)` is niche-encoded (a tagged
+-- immediate, no cell and no box), so it must stay at 0 through all of this;
+-- it is the control that says the fix targets the erased-Float slot rather
+-- than "boxed ADTs" generally. Do not "simplify" any other leg to Int.
+--
+-- STILL OPEN, deliberately not asserted here: a heap (non-Float) field
+-- extracted from a boxed generic ctor is not dropped by Perceus either --
+-- `Cell(int_to_string(n), 0.5)` still leaks its String at 1/iteration, and
+-- mixed_leg uses a string LITERAL (immortal) precisely so that separate
+-- defect does not contaminate this measurement. See
+-- specs/todos/2026-08-22-boxed-ctor-heap-field-binder-not-dropped.md.
+mod ErasedFloatSlotLeakProbe do
+  needs IO.Console
+
+  type Cell(a, b) = Cell(a, b) | Empty
+
+  pfn sc(f : Float) : String do int_to_string(float_to_int(f *. 100.0)) end
+
+  -- LEG 1. The filed reduction. Option(Float) is niche-UNSAFE (0.0 bitcasts
+  -- to the None niche) so it takes the BOXED representation: Some is a cell
+  -- plus a march_alloc_float for the field, None a bare cell.
+  pfn mk(n : Int) : Option(Float) do
+    if n % 2 == 0 do Some(0.5) else None end
+  end
+
+  pfn boxed_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let a = match mk(n) do
+        Some(x) -> x
+        None -> 1.0
+      end
+      boxed_leg(n - 1, acc +. a)
+    end
+  end
+
+  -- LEG 2. The OUTER Option here is niche-encoded (its payload is a heap
+  -- pointer), so it exercises the Repr.Niche merge; the inner one is boxed.
+  -- Nothing else in the tree covered the niche merge's own arm-type proof.
+  pfn niche_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let v = match Some(Some(0.5)) do
+        Some(inner) ->
+          match inner do
+            Some(x) -> x
+            None -> 8.0
+          end
+        None -> 7.0
+      end
+      niche_leg(n - 1, acc +. v)
+    end
+  end
+
+  -- LEG 3. A ctor with BOTH an ordinary heap field and an erased Float field,
+  -- which is the arm that has to do two different things at once: dup the
+  -- heap field on the shared path, release the Float box on the unique one.
+  -- The String is a literal (immortal) on purpose -- see the header's note on
+  -- the separate, still-open heap-field-binder leak.
+  pfn mixed_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let c = Cell("key", 0.5)
+      let v = match c do
+        Cell(s, f) -> f +. int_to_float(string_length(s))
+        Empty -> 0.0
+      end
+      mixed_leg(n - 1, acc +. v)
+    end
+  end
+
+  -- DOUBLE-FREE WITNESS for LEG 3's shape: `c` is destructured twice, so the
+  -- first match sees RC > 1 and must NOT release the box.
+  pfn mixed_shared_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let c = Cell("key", 0.25)
+      let a = match c do
+        Cell(s, f) -> f +. int_to_float(string_length(s))
+        Empty -> 0.0
+      end
+      let b = match c do
+        Cell(s2, f2) -> f2 +. int_to_float(string_length(s2))
+        Empty -> 0.0
+      end
+      mixed_shared_leg(n - 1, acc +. a +. b)
+    end
+  end
+
+  -- DOUBLE-FREE WITNESS for LEG 1's shape.
+  pfn shared_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let o = Some(0.25)
+      let a = match o do
+        Some(x) -> x
+        None -> 9.0
+      end
+      let b = match o do
+        Some(y) -> y
+        None -> 9.0
+      end
+      shared_leg(n - 1, acc +. a +. b)
+    end
+  end
+
+  -- LEG 6 (CONTROL). Option(Int) is niche-encoded: no cell, no box, nothing
+  -- to own. Must stay flat.
+  pfn int_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let a = match (if n % 2 == 0 do Some(3) else None end) do
+        Some(x) -> x
+        None -> 1
+      end
+      int_leg(n - 1, acc + a)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    -- Warm every leg outside the measurement window so one-time statics
+    -- (string literals, closure globals) do not count as leaks.
+    println("boxed=" ++ sc(boxed_leg(4, 0.0)))
+    println("niche=" ++ sc(niche_leg(4, 0.0)))
+    println("mixed=" ++ sc(mixed_leg(4, 0.0)))
+    println("mixed_shared=" ++ sc(mixed_shared_leg(4, 0.0)))
+    println("shared=" ++ sc(shared_leg(4, 0.0)))
+    println("int=" ++ int_to_string(int_leg(4, 0)))
+    let before = live_allocs()
+    println("boxed20k=" ++ sc(boxed_leg(20000, 0.0)))
+    println("niche20k=" ++ sc(niche_leg(20000, 0.0)))
+    println("mixed20k=" ++ sc(mixed_leg(20000, 0.0)))
+    println("mixed_shared20k=" ++ sc(mixed_shared_leg(20000, 0.0)))
+    println("shared20k=" ++ sc(shared_leg(20000, 0.0)))
+    println("int20k=" ++ int_to_string(int_leg(20000, 0)))
+    let after = live_allocs()
+    IO.warn(int_to_string(after - before))
+  end
+end

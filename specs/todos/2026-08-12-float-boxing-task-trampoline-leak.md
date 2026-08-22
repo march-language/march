@@ -59,9 +59,36 @@ few lines in the task free path.
 
 ## Order of work
 
-1. `2026-08-21-task-object-never-freed.md` (task lifetime).
+1. ~~`2026-08-21-task-object-never-freed.md` (task lifetime).~~ **DONE
+   2026-08-22** — `specs/progress/2026-08-22-task-handle-and-ok-wrapper-leak.md`.
+   Tasks now die: `task_await` / `task_await_unwrap` release the handle
+   Perceus already transferred to them, and the type-independent 2/iter is 0.
+   This item is unblocked and unchanged in size.
 2. Site 1: tag-guarded `task[3]` release in the task free path; probe =
    the await loop above, asserting the Float excess over the Int control
-   goes to ~0 (both legs then assert the absolute 2/iter is gone too).
+   goes to ~0 (the absolute 2/iter is already pinned by
+   `test/native/task_lifetime_leak_probe.march`).
 3. `2026-08-20-task-async-float-thunk-compiled-build-break.md` (the
    `task_await` Result-path crash), then site 2 the same way.
+
+## What "the task free path" now has to look like (2026-08-22)
+
+The step-2 design needs one thing the filing did not anticipate: **there is no
+task-aware free path to hook.** `march_decrc`'s free is generic and shallow,
+and a Task carries tag 0 (`march_alloc` zeroes it), indistinguishable from an
+ordinary ADT cell. So either the Task gets its own tag constant, or the two
+emit sites call a dedicated `march_task_release(void *)` that does the
+`atomic_fetch_sub` itself and, on the `prev == 1` (freeing) branch, releases a
+`MARCH_FLOAT_TAG` payload in `task[3]` — the same tag guard as #313's
+`fold_release_prev_acc`. The dedicated-helper form is narrower but misses the
+fire-and-forget path, where the trampoline's own `march_decrc(task)` is the
+last one.
+
+Also note what changed around this item on 2026-08-22: `task_await` now takes a
+`+1` on a `"double"` payload when it hands it to the fresh `Ok` cell, because
+`mk_ok` stored the pointer without a reference and the `Ok(v)` destructure
+started releasing erased-slot Float boxes. That `+1` is balanced by the
+destructure's release; the reference it does NOT account for is still
+`task[3]`'s own, which is precisely this item. Whoever implements the free-path
+release must check the `Ok` route as well as `task_await_unwrap`'s unbox route
+— `test/native/task_lifetime_leak_probe.march`'s double-await leg covers both.

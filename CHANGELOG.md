@@ -80,6 +80,27 @@ git log is authoritative for exact commits.
   2.41s to 1.23s median); the lock is free single-threaded and costs ~5% under
   four-way contention.
 
+- **A compiled `spawn` + `await` no longer leaks two heap objects per task.**
+  The 48-byte Task handle was never released — `task_spawn` hands back a
+  reference the compiler already treats as consumed by `await`, and neither
+  `task_await` nor `task_await_unwrap` released it — and `task_await_unwrap`
+  additionally allocated an `Ok` wrapper it immediately discarded. Independent
+  of result type, so any loop that awaits tasks (job queue, supervisor,
+  request-per-task server) grew without bound: 10,000 spawn+awaits leaked
+  20,000 objects, now 0. Awaiting one task twice is still correct — the
+  release is per-await, matching the reference the compiler duplicates for
+  every earlier use.
+- **A compiled `Float` held in a generic slot no longer leaks its box.** A
+  `Float` crossing into a type-erased slot is heap-boxed, and two places gave
+  the box no owner: the `match` merge, which allocates one box per evaluation
+  and could only free it when no arm looked like it returned a pointer — a
+  never-reached "non-exhaustive match" arm was enough to defeat that — and the
+  destructure of a boxed field such as `Some(x)` on an `Option(Float)`, which
+  bound the box and then read through it without ever releasing it. A
+  20,000-iteration `Option(Float)` loop leaked 30,000 allocations and now
+  leaks none; the same fix covers `Option(Option(Float))` and any generic
+  constructor with a `Float` field. Reading a shared value is unaffected — the
+  release happens only where the containing cell is actually freed.
 - **`record_get(r, k) == Some(<float>)` is no longer always false when
   compiled.** The two sides disagreed on which type decides a constructor
   field's slot. Construction takes the field types as DECLARED on the ctor —

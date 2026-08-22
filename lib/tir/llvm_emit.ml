@@ -2293,12 +2293,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "call void @march_signal_raise_self(i64 %s)" code_i64);
     ("ptr", "null")
 
-  (* task_await_unwrap(task_ptr) → spin-wait then untag result directly *)
+  (* task_await_unwrap(task_ptr) → spin-wait then untag result directly.
+
+     There is deliberately NO @march_task_await call here.  One used to be
+     emitted, its result never read: march_task_await allocates an Ok wrapper
+     (mk_ok, 24 B) that the unwrap path has no use for, and nothing released
+     it — one leaked Result cell per await, on top of the leaked Task below.
+     @march_task_await_value performs the same task_wait_done and returns
+     task[3] directly, which is the whole point of the _value variant. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
     let (_, task_ptr) = emit_atom ctx a in
-    let res = fresh ctx "tawait_res" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" res task_ptr);
-    (* march_task_await returns Ok(inner); unwrap by loading field 0 of Result. *)
     let inner_ty = match a with
       | Tir.AVar v ->
         (match v.Tir.v_ty with
@@ -2335,6 +2339,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d p);
       d
     end else r_i64 in
+    (* Release the caller's Task handle.  task_await_unwrap is a CONSUMING
+       builtin (it is absent from borrow.ml's extern_borrow_table, whose
+       default is "owned"), so Perceus transfers the caller's reference here
+       and emits an EIncRC at every earlier use — a double-await dups the
+       handle first, so releasing once per await stays balanced.  Nothing else
+       ever dropped it: march_task_spawn_thunk hands back RC=2 (caller +
+       trampoline) and the trampoline drops only its own hold, leaving the
+       48-byte Task immortal.  Atomic march_decrc, not the _local variant: the
+       trampoline's own drop runs on a scheduler thread and can race this one.
+       The read of task[3] above is complete by now, and the free is shallow,
+       so a ptr payload the caller now owns is unaffected.  (A Float payload's
+       box is still aliased from task[3] and still leaks — that is the
+       remaining half of specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md,
+       which needs a tag-guarded release in the task's free path.) *)
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" task_ptr);
     (inner_ty, r)
 
   (* task_await(task_ptr) → delegate to march_task_await C runtime.
@@ -2387,6 +2406,40 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let v2 = fresh ctx "tawv" in
     emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
     emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp);
+    (* A Float payload is a march_float_box smuggled through task[3], and
+       march_task_await's mk_ok stored that SAME pointer into this fresh Ok
+       cell without taking a reference for it.  task[3] keeps aliasing the box
+       for the life of the Task — double-await is legal and hands a second Ok
+       cell the identical pointer — so the Ok cell must own a reference of its
+       own, or whoever releases the field first frees it under the other
+       holder.  That "whoever" is now real: the Ok(v) destructure releases an
+       erased-slot Float box on its unique path (Llvm_case), and without this
+       +1 the second `match task_await(t)` on one Float task read freed memory
+       (measured: r2 printed 0, then SIGTRAP).
+
+       Only the "double" arm takes the +1.  A ptr payload's Ok(v) destructure
+       binds a heap variable and Perceus drops it, which consumes task[3]'s
+       one reference exactly as it does today; adding a +1 there would convert
+       today's balance into a per-await leak, so that arm is left alone.  The
+       residual here is that task[3]'s own reference to the box is still never
+       released — the Task's free is shallow — i.e. the unchanged remainder of
+       specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md, which wants
+       a tag-guarded release in the task free path.  This +1 does not add to
+       that: it is balanced by the destructure's release. *)
+    (match a with
+     | Tir.AVar av when (match av.Tir.v_ty with
+                         | Tir.TCon ("Task", [inner]) -> llvm_ty inner = "double"
+                         | _ -> false) ->
+       let bp = fresh ctx "tawbox" in
+       emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
+       emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" bp)
+     | _ -> ());
+    (* Release the caller's Task handle — same ownership argument as
+       task_await_unwrap above (consuming builtin, Perceus dups for every
+       earlier use, nothing else ever dropped the handle).  Emitted after the
+       Ok payload has been read and normalised; the free is shallow, so the
+       payload the Ok cell now carries is untouched. *)
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" tp);
     ("ptr", r)
 
   (* task_yield() → cooperative yield via march_sched_yield *)

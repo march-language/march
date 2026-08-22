@@ -1,0 +1,120 @@
+-- Leak guard for the TASK HANDLE and the Ok wrapper around it.
+--
+-- Every spawn + `task_await_unwrap` leaked exactly two heap objects, for ANY
+-- result type; spawn + `task_await` leaked the first of them:
+--
+--   1. THE 48-BYTE TASK. march_task_spawn_thunk returns RC=2 (the caller's
+--      handle plus a hold for the trampoline) and the trampoline drops only
+--      its own, so the Task ended life at RC=1 forever. Perceus already
+--      treats task_await / task_await_unwrap as CONSUMING (neither is in
+--      borrow.ml's extern_borrow_table, whose default is "owned"), so it
+--      transfers the caller's reference into the builtin and emits an EIncRC
+--      at every earlier use -- the emitted builtin just never released what
+--      it was handed. Both emit sites in lib/tir/llvm_emit.ml now do.
+--
+--   2. A 24-BYTE Ok CELL NOBODY ASKED FOR. task_await_unwrap's emit called
+--      @march_task_await -- which allocates mk_ok(task[3]) -- and then threw
+--      the result away and called @march_task_await_value instead. Both wait
+--      on the same done flag; only the second is needed.
+--
+-- Any loop that awaits tasks -- a job queue, a supervisor, a request-per-task
+-- server -- grew without bound. This is NOT the Float-box task leak
+-- (specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md), which is
+-- type-specific, still open, and smaller: these two objects appeared for an
+-- Int result, which allocates no box at all.
+--
+-- THE DOUBLE-AWAIT WITNESS IS THE POINT OF THE FIRST PRINT, not decoration.
+-- Awaiting one task twice is legal and works; the release is sound only
+-- because Perceus dups the handle for every use but the last, so exactly one
+-- release happens per await. A release keyed to anything else -- "the first
+-- await", "the unbox site" -- reads freed memory on the second await. The leg
+-- covers Int, Float, String and the Result form, since they take different
+-- paths out of task[3]. The Float Result leg in particular pins the +1 that
+-- task_await now takes on the payload box: march_task_await's mk_ok stores
+-- task[3]'s pointer into the fresh Ok cell without a reference of its own, so
+-- two awaits produced two Ok cells aliasing one box, and the Ok(v)
+-- destructure's erased-slot release (see erased_float_slot_leak_probe.march)
+-- then freed it under the other. Without the +1 this leg printed 0 for the
+-- second await and then SIGTRAPed.
+--
+-- SIGNAL: live_allocs(), NOT RSS -- see the rationale in
+-- native_arr_fold_leak_probe.march.
+--
+-- MARCH_NUM_SCHEDULERS is not pinned here: every await is blocking and each
+-- leg's arithmetic is order-independent, so the output is deterministic at
+-- any scheduler count.
+--
+-- Measured on this fixture, Darwin arm64, --compile --opt 2, against a
+-- pristine HEAD (8897bb1a) built by file-copy swap of lib/tir/llvm_emit.ml:
+--
+--   leg                        unfixed    fixed
+--   unwrap_leg (5,000 awaits)   10,000        -     2/await: Task + Ok
+--   result_leg (5,000 awaits)    5,000        -     1/await: Task
+--   TOTAL                       15,002        2
+--
+-- The healthy figure is a small constant; each defect is exactly one object
+-- per await. The dune rule asserts < 100, far below the leaked figure and far
+-- above the constant.
+mod TaskLifetimeLeakProbe do
+  needs IO.Console
+  needs IO.Spawn
+
+  pfn sc(f : Float) : String do int_to_string(float_to_int(f *. 100.0)) end
+
+  -- LEG 1: spawn + task_await_unwrap (both leaked objects).
+  pfn unwrap_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> 2)
+      unwrap_leg(n - 1, acc + task_await_unwrap(t))
+    end
+  end
+
+  -- LEG 2: spawn + task_await (the Task alone; its Ok wrapper IS consumed).
+  pfn result_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> 3)
+      let v = match task_await(t) do
+        Ok(x) -> x
+        Err(_) -> 0
+      end
+      result_leg(n - 1, acc + v)
+    end
+  end
+
+  -- DOUBLE-AWAIT WITNESS (see header). Not a leak leg: it exists to print a
+  -- wrong number, or crash, if the release is keyed to the wrong event.
+  pfn double_witness() : String do
+    let ti = task_spawn(fn _ -> 42)
+    let i1 = task_await_unwrap(ti)
+    let i2 = task_await_unwrap(ti)
+    let tf = task_spawn(fn _ -> 2.5)
+    let f1 = task_await_unwrap(tf)
+    let f2 = task_await_unwrap(tf)
+    let ts = task_spawn(fn _ -> "he" ++ "llo")
+    let s1 = task_await_unwrap(ts)
+    let s2 = task_await_unwrap(ts)
+    let tr = task_spawn(fn _ -> 3.25)
+    let r1 = match task_await(tr) do
+      Ok(v) -> v
+      Err(_) -> 0.0
+    end
+    let r2 = match task_await(tr) do
+      Ok(v) -> v
+      Err(_) -> 0.0
+    end
+    int_to_string(i1 + i2) ++ "/" ++ sc(f1 +. f2) ++ "/" ++ s1 ++ s2
+      ++ "/" ++ sc(r1 +. r2)
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    println("double=" ++ double_witness())
+    println("warm=" ++ int_to_string(unwrap_leg(50, 0) + result_leg(50, 0)))
+    let before = live_allocs()
+    println("unwrap=" ++ int_to_string(unwrap_leg(5000, 0)))
+    println("result=" ++ int_to_string(result_leg(5000, 0)))
+    let after = live_allocs()
+    IO.warn(int_to_string(after - before))
+  end
+end
