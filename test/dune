@@ -1783,6 +1783,62 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/record_pattern.expected native_record_pattern.out)))
 
+; A compiled `println` must be ONE write, not two.  Two assertions, because the
+; runtime half and the structural half fail differently: `intact` counts how
+; many of the 1200 concurrently-printed lines survived unsplit (the observable
+; symptom), and the IR counts pin the mechanism — prelude's polymorphic
+; `println` wrapper must lower to @march_println and NOT to a pair of
+; @march_print calls.  The IR half is deterministic; the runtime half needs
+; concurrency and was 30/30 torn against the unfixed compiler.
+(rule
+ (targets native_println_line_atomic native_println_line_atomic.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/println_line_atomic.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile --emit-llvm --opt 2
+         -o native_println_line_atomic native/println_line_atomic.march)
+    (with-stdout-to native_println_line_atomic.out
+     (run bash -c
+      "echo \"intact $(MARCH_NUM_SCHEDULERS=8 ./native_println_line_atomic | grep -cxE 'A{32}|B{32}|C{32}|D{32}')\"; echo \"march_println $(grep -c 'call void @march_println' native/println_line_atomic.ll) march_print $(grep -c 'call void @march_print(' native/println_line_atomic.ll)\""))))))
+
+(rule
+ (alias runtest)
+ (deps native_println_line_atomic.out
+       native/println_line_atomic.expected)
+ (action (diff native/println_line_atomic.expected
+               native_println_line_atomic.out)))
+
+; A builtin that typechecks but has no codegen backing fails at LINK time with a
+; bare C symbol name and no March span.  The typecheck builtin table and the
+; llvm_builtins table are hand-maintained and nothing cross-checks them:
+; unix_time_ms, string_to_codepoints and string_from_codepoint were all
+; registered in the first and absent from the second.  This fixture holds the
+; compiled backend to the interpreter, which always worked.
+(rule
+ (targets native_builtin_link_backing native_builtin_link_backing.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/builtin_link_backing.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_builtin_link_backing
+         native/builtin_link_backing.march)
+    (with-stdout-to native_builtin_link_backing.out
+         (system "./native_builtin_link_backing"))))))
+
+(rule
+ (alias runtest)
+ (deps native_builtin_link_backing.out
+       native/builtin_link_backing.expected)
+ (action (diff native/builtin_link_backing.expected
+               native_builtin_link_backing.out)))
+
 ; ── Erased/uniform boundary between the C runtime and compiled code ──────
 ; One family, three fixtures.  march_vault_get / march_record_get / the vault
 ; key builtins all hand a value across a boundary where the runtime has ONE
@@ -1803,6 +1859,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;                                march_string_concat3
 ;   vault_non_string_key         a non-String key: fixed by PR #315 without a
 ;                                fixture, pinned here
+;   record_get_let_bound_eq      an un-annotated `let` LET-GENERALIZED the
+;                                record_get result, so the call site emitted the
+;                                erased kind 'g' while the other operand of `==`
+;                                was a boxed Option(Float) -> silently `false`
 ;
 ; These use stdlib modules (Vault, List) and link the C runtime, so they need
 ; BOTH source trees staged plus MARCH_RUNTIME_DIR — without them the compile
@@ -1848,6 +1908,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        native/record_erased_field_repr.expected)
  (action (diff native/record_erased_field_repr.expected
                native_record_erased_field_repr.out)))
+
+(rule
+ (targets native_record_get_let_bound_eq native_record_get_let_bound_eq.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/record_get_let_bound_eq.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_record_get_let_bound_eq
+         native/record_get_let_bound_eq.march)
+    (with-stdout-to native_record_get_let_bound_eq.out
+         (system "./native_record_get_let_bound_eq"))))))
+
+(rule
+ (alias runtest)
+ (deps native_record_get_let_bound_eq.out
+       native/record_get_let_bound_eq.expected)
+ (action (diff native/record_get_let_bound_eq.expected
+               native_record_get_let_bound_eq.out)))
 
 (rule
  (targets native_vault_non_string_key native_vault_non_string_key.out)

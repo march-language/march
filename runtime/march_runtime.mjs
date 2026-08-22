@@ -131,6 +131,25 @@ export function march_string_byte_at(s, i) {
   return s.charCodeAt(i);
 }
 
+/** List(Int) of Unicode code points (mirrors `string_to_codepoints`).
+ * `[...s]` iterates by code point, not UTF-16 code unit, so an astral
+ * character yields ONE element rather than a surrogate pair. */
+export function march_string_to_codepoints(s) {
+  let list = { $: "Nil" };
+  for (const c of [...s].reverse()) list = { $: "Cons", _0: c.codePointAt(0), _1: list };
+  return list;
+}
+
+/** Option(String) for one code point (mirrors `string_from_codepoint`).
+ * None for out of range or a lone UTF-16 surrogate half — String.fromCodePoint
+ * accepts surrogates, so that case has to be rejected explicitly to match the
+ * native and interpreted backends. */
+export function march_string_from_codepoint(cp) {
+  if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff) return { $: "None" };
+  if (cp >= 0xd800 && cp <= 0xdfff) return { $: "None" };
+  return { $: "Some", _0: String.fromCodePoint(cp) };
+}
+
 export function march_string_split(s, sep) {
   const parts = s.split(sep);
   let list = { $: "Nil" };
@@ -343,6 +362,11 @@ export function march_float_round(f) {
 /** Seconds since the Unix epoch as a Float (mirrors `unix_time`). */
 export function march_unix_time() {
   return Date.now() / 1000;
+}
+
+/** Milliseconds since the Unix epoch as an Int (mirrors `unix_time_ms`). */
+export function march_unix_time_ms() {
+  return Date.now();
 }
 
 /* ── List operations ───────────────────────────────────────────────── */

@@ -191,22 +191,30 @@ end|} in
    editor showed no diagnostic at all for code the compiler now hard-rejects,
    a compiler/LSP disagreement this codebase treats as a real bug class. *)
 let test_analyse_prelude_collision_produces_diagnostic () =
-  (* `print` is in the true "Prelude calls this internally" set: println's
-     own body calls it bare. A same-named user fn hijacks that call
+  (* `print_line` is in the true "Prelude calls this internally" set:
+     println's own body calls it bare. A same-named user fn hijacks that call
      program-wide — see the two original repros in
      specs/progress/2026-08-14-prelude-entry-fn-name-collision.md.
+     This was `print` until 2026-08-22, when println's body became a single
+     `print_line(show(x))` so that a compiled line and its newline reach the
+     kernel in one write (specs/progress/2026-08-21-println-writev-not-atomic-
+     across-threads.md). Nothing in prelude.march calls bare `print` any more,
+     so `print` is now in the SAFE-to-shadow set alongside `head` and `map`,
+     and this checker — which computes the internal call graph rather than
+     hardcoding a list — correctly stopped flagging it. The hazard moved to
+     the new name, and so does the test.
      Filename deliberately NOT "test.march" — that basename collides with
      the real shipped `stdlib/test.march` (the `Test` module) and would
      trip the shipped-stdlib-file exemption meant for exactly that file,
      silently suppressing this check (confirmed live: this test read
      `is_shipped=true` for "test.march" the first time it was written). *)
   let src = {|mod Shadow do
-  fn print(x : Int) : Unit do
+  fn print_line(x : Int) : Unit do
     ()
   end
 end|} in
   let a = An.analyse ~filename:"shadow_repro.march" ~src in
-  Alcotest.(check bool) "collision on `print` is reported" true
+  Alcotest.(check bool) "collision on `print_line` is reported" true
     (count_errors a > 0);
   Alcotest.(check bool) "message names the collision" true
     (List.exists (fun (d : Lsp.Types.Diagnostic.t) ->

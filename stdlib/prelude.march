@@ -241,8 +241,7 @@ mod Prelude do
   and any type with an explicit impl Show.
   """
   fn println(x) do
-    print(show(x))
-    print("\n")
+    print_line(show(x))
   end
 
   doc "Short alias for to_string."
@@ -252,8 +251,7 @@ mod Prelude do
 
   doc "Prints a value using its Show representation, with a trailing newline."
   fn debug(x) do
-    print(to_string(x))
-    print("\n")
+    print_line(to_string(x))
   end
 
   doc "Converts any value to its string representation."

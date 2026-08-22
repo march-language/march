@@ -28,6 +28,50 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An un-annotated `let d = record_get(r, k)` no longer compares false against
+  a concrete `Some(<float>)` when compiled.** `record_get`'s result type decides
+  its runtime representation at the call site — `Option(Float)` asks the runtime
+  for a boxed `Some` cell, an unresolved `Option(_)` asks for the erased niche
+  encoding — but a `let` with no annotation generalized the binding, so every
+  USE instantiated a fresh payload var and the binding's own type, the one
+  codegen reads, stayed unbound. The call site emitted the erased encoding while
+  `Some(0.5)` on the other side of `==` was boxed, and the comparison answered
+  `false` (interpreted said `true`). A `record_get` application is expansive and
+  now carries the same value restriction as `cap_narrow`, `mint_cap` and
+  `from_json`. Consequence, and it is a real one: a single `record_get` result
+  can no longer be used at two different payload types — that only ever
+  typechecked because the erasure hid the contradiction, since one stored field
+  has one representation.
+
+- **`unix_time_ms`, `string_to_codepoints` and `string_from_codepoint` now
+  link when compiled.** All three typechecked and lowered to LLVM and then died
+  at LINK time with a bare C symbol name and no March span — they were
+  registered in the typechecker's builtin table and absent from codegen's.
+  They worked interpreted throughout, which is why nothing caught it. Each now
+  has a `march_*` runtime symbol on both the native and JS backends. An audit
+  of all 531 builtin-table names turned up three more with no backing
+  (`worker`, `dynamic_supervisor`, `from_json_events`); those need design
+  decisions rather than table entries and are filed in `specs/todos/`.
+  `march_unix_time_ms` reads the clock in integer nanoseconds rather than
+  round-tripping through a double, which would lose sub-millisecond resolution
+  as the epoch grows.
+
+- **A compiled `println` is now one write syscall instead of two, so a line no
+  longer tears when threads print concurrently.** `march_println` has emitted
+  the payload and its newline in a single `writev(2)` since 2026-07 — but
+  compiled code never reached it. `println` is the polymorphic prelude wrapper,
+  a module-level `fn` shadows the builtin of the same name, and the wrapper's
+  body was `print(show(x))` followed by `print("\n")`: two `write(2)` calls with
+  an arbitrary gap between them. (`@march_println` is declared in all 130
+  committed `.ll` goldens and called in none of them.) With four green threads
+  on eight scheduler threads printing 1200 lines, every run tore — 444 lines
+  damaged in the recorded case. The wrapper now makes a single call, and
+  `march_println` takes a lock across the `writev` so the guarantee also holds
+  across OS threads rather than only against green threads sharing one. Halving
+  the syscall count also makes output about twice as fast (300k lines to a file:
+  2.41s to 1.23s median); the lock is free single-threaded and costs ~5% under
+  four-way contention.
+
 - **`record_get(r, k) == Some(<float>)` is no longer always false when
   compiled.** The two sides disagreed on which type decides a constructor
   field's slot. Construction takes the field types as DECLARED on the ctor —
@@ -42,9 +86,8 @@ git log is authoritative for exact commits.
   concrete `Float` keeps its inline-double slot, so the ABI pinned by
   `test/native/float_generic_field_abi` is unchanged; Int/Bool are untouched
   because their generic-slot form is the low-bit tag, which is a bijection.
-  An un-annotated `let d = record_get(...)` still mismatches (let-generalization
-  keeps the payload erased, so the call site asks for the niche encoding while
-  the literal is boxed) — tracked in `specs/todos/`.
+  An un-annotated `let d = record_get(...)` was still mismatching for the same
+  family of reason; that is fixed below.
 
 - **Compiled closure calls no longer leak two heap boxes per call when a `Float`
   crosses the closure boundary.** Closure dispatch erases every argument and

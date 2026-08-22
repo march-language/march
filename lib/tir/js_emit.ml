@@ -603,11 +603,17 @@ and emit_val_impl ctx expr =
         emit ctx "march_string_grapheme_count("; emit_atom ctx a; emit ctx ")"
       | "string_is_empty", [a] ->
         emit ctx "("; emit_atom ctx a; emit ctx " === \"\")"
-      | "println", [a] ->
+      | ("println" | "print_line"), [a] ->
         emit ctx "console.log("; emit_atom ctx a; emit ctx ")"
       | "print", [a] ->
         use_runtime ctx "march_print";
         emit ctx "march_print("; emit_atom ctx a; emit ctx ")"
+      | "string_to_codepoints", [a] ->
+        use_runtime ctx "march_string_to_codepoints";
+        emit ctx "march_string_to_codepoints("; emit_atom ctx a; emit ctx ")"
+      | "string_from_codepoint", [a] ->
+        use_runtime ctx "march_string_from_codepoint";
+        emit ctx "march_string_from_codepoint("; emit_atom ctx a; emit ctx ")"
       | "print_stderr", [a] ->
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
@@ -694,6 +700,9 @@ and emit_val_impl ctx expr =
       | "unix_time", _ ->
         use_runtime ctx "march_unix_time";
         emit ctx "march_unix_time()"
+      | "unix_time_ms", _ ->
+        use_runtime ctx "march_unix_time_ms";
+        emit ctx "march_unix_time_ms()"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with
@@ -1427,6 +1436,7 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   List.iter (fun n -> Hashtbl.replace ctx.runtime_uses ("march_" ^ n) ())
     (int_rt_builtins2 @ int_rt_builtins1);
   Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
+  Hashtbl.replace ctx.runtime_uses "march_unix_time_ms" ();
   Hashtbl.replace ctx.runtime_uses "march_float_round" ();
   let runtime_wrappers =
     "const float_to_string    = { _0: ($_, x) => march_float_to_string(x) };\n" ^
@@ -1440,6 +1450,7 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
       int_rt_builtins1) ^
     "const int_abs     = { _0: ($_, a) => Math.abs(a) };\n" ^
     "const unix_time   = { _0: ($_) => march_unix_time() };\n" ^
+    "const unix_time_ms = { _0: ($_) => march_unix_time_ms() };\n" ^
     "const float_round = { _0: ($_, a) => march_float_round(a) };\n"
   in
   let runtime_import =

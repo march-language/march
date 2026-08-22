@@ -1,0 +1,51 @@
+-- A compiled `println` must put a line and its newline into ONE write.
+-- (specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md)
+--
+-- `march_println` has emitted payload + '\n' in a single writev(2) since
+-- e73644aa, with a comment claiming that made a line atomic.  Compiled code
+-- never reached it: `println` is the POLYMORPHIC prelude wrapper, and a
+-- module-level `fn` shadows the builtin of the same name, so
+-- stdlib/prelude.march's
+--
+--     fn println(x) do print(show(x)); print("\n") end
+--
+-- lowered to two `march_print` calls — two write(2) syscalls with an arbitrary
+-- gap between them.  `@march_println` is declared in all 130 committed .ll
+-- goldens and called in none of them.  Fixed by giving the wrapper a
+-- single-call body (`print_line`, the same C symbol under a name the wrapper
+-- does not shadow), and by taking a lock across the writev so the guarantee
+-- also holds across OS threads.
+--
+-- Four green threads on 8 scheduler threads print a fixed 32-byte payload.
+-- The dune rule counts how many of the 1200 output lines are still EXACTLY one
+-- of the four payloads; torn output shows up as two payloads concatenated on
+-- one line plus a stranded empty one, so the count drops.  Against the
+-- unfixed compiler this was 30/30 runs torn, ~140 bad lines each.
+--
+-- The payloads are 32 bytes and identical within a thread on purpose: the tear
+-- is only visible when the two halves of a line can be told apart from a
+-- neighbour's, and a long payload widens the window between the two writes.
+mod Main do
+  needs IO
+
+  fn spew(tag: String, n: Int) do
+    if n <= 0 do
+      0
+    else
+      println(tag)
+      spew(tag, n - 1)
+    end
+  end
+
+  fn main(cap: Cap(IO)) do
+    let t1 = task_spawn(fn _ -> spew("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 300))
+    let t2 = task_spawn(fn _ -> spew("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", 300))
+    let t3 = task_spawn(fn _ -> spew("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", 300))
+    let t4 = task_spawn(fn _ -> spew("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", 300))
+    let _ = task_await(t1)
+    let _ = task_await(t2)
+    let _ = task_await(t3)
+    let _ = task_await(t4)
+    0
+  end
+end

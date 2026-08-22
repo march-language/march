@@ -1,0 +1,58 @@
+-- A `let` with no annotation LET-GENERALIZED the result of `record_get`, so
+-- the payload type stayed an unbound quantified var at the binding while every
+-- USE instantiated a fresh copy.  Compiled-only; the interpreter was correct.
+-- (specs/progress/2026-08-21-option-float-record-get-equality.md)
+--
+-- `march_record_get` picks its Option encoding from the CALL SITE's
+-- expected_kind, which codegen derives from the result's static type:
+--
+--   Option(Float) -> kind 'f' (102) -> a BOXED Some cell
+--   Option('_)    -> kind 'g' (103) -> the erased NICHE encoding (payload
+--                                      verbatim; `rec_some_k`)
+--
+-- A generalized binding is stuck on the second line forever, because the use
+-- site's Float never flows back to it.  The literal `Some(0.5)` on the other
+-- side of `==` is always BOXED, so the comparison ran raw-pointer-vs-heap-cell
+-- through `__march_eq_Option_Any` and answered `false`.  Fixed by the value
+-- restriction that `cap_narrow` / `mint_cap` / `from_json` already carry: a
+-- `record_get` APPLICATION is expansive and must not let-generalize.
+--
+-- The Float cases are the load-bearing ones.  The Int cases are here to pin
+-- the other half: for Int the erased form is the low-bit tag, a bijection, so
+-- both encodings compare equal anyway and an Int-only test passes against the
+-- BROKEN compiler.  Do not "simplify" this file down to the Int rows.
+mod Main do
+  needs IO
+
+  fn main(cap: Cap(IO)) do
+    let r = record_put(record_put(record_from_list([]), "z", 0.5), "n", 7)
+
+    -- ── Float: inline and annotated were already right ───────────────────
+    println(record_get(r, "z") == Some(0.5))
+    let c : Option(Float) = record_get(r, "z")
+    println(c == Some(0.5))
+
+    -- ── Float: the un-annotated `let`, which is what regressed ───────────
+    let d = record_get(r, "z")
+    println(d == Some(0.5))
+    println(d == Some(0.25))
+    println(d == None)
+
+    -- ── the same binding consumed by `match` rather than `==` ────────────
+    let e = record_get(r, "z")
+    match e do
+      Some(x) -> println(x + 1.0)
+      None -> println("let-bound float: NONE")
+    end
+
+    -- ── a let-bound MISSING key still has to read as None ────────────────
+    let m = record_get(r, "absent")
+    println(m == Some(0.5))
+    println(m == None)
+
+    -- ── Int (bijective erasure — passes either way, kept as the control) ─
+    let i = record_get(r, "n")
+    println(i == Some(7))
+    println(i == Some(8))
+  end
+end

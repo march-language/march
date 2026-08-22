@@ -49,6 +49,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_println", [true]);
   ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
   ("println",       [true]);
+  ("print_line",    [true]);
   (* ── Core string operations ─────────────────────────────────────────────── *)
   ("march_string_eq",          [true; true]);
   ("march_string_concat",      [true; true]);
@@ -72,6 +73,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_split_first",   [true; true]);
   ("march_string_index_of",      [true; true]);
   ("march_string_last_index_of", [true; true]);
+  ("march_string_to_codepoints", [true]);
   (* ── 3-arg string × string × string ────────────────────────────────────── *)
   ("march_string_replace",     [true; true; true]);
   ("march_string_replace_all", [true; true; true]);
@@ -110,6 +112,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_index_of",      [true; true]);
   ("string_index_of_from", [true; true; true]);
   ("string_last_index_of", [true; true]);
+  ("string_to_codepoints", [true]);
   ("string_replace",       [true; true; true]);
   ("string_replace_all",   [true; true; true]);
   ("string_slice",         [true; false; false]);

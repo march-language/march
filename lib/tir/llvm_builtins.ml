@@ -124,6 +124,10 @@ let builtins : builtin list = [
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_try_finally(ptr %action, ptr %cleanup)" };
   { march_name = "println"; c_name = Some "march_println"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_println(ptr %s)" };
+  (* Same C symbol as "println" above; no second PDeclare.  The two March names
+     exist because the polymorphic prelude wrapper shadows "println". *)
+  { march_name = "print_line"; c_name = Some "march_println"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = None };
   { march_name = "print_stderr"; c_name = Some "march_print_stderr"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_print_stderr(ptr %s)" };
   { march_name = "io_read_line"; c_name = Some "march_io_read_line"; ret_ty = Some Tir.TString;
@@ -266,6 +270,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare double @march_math_pow(double %b, double %e)" };
   { march_name = "string_chars"; c_name = Some "march_string_chars"; ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_chars(ptr %s)" };
+  { march_name = "string_to_codepoints"; c_name = Some "march_string_to_codepoints";
+    ret_ty = Some (Tir.TCon ("List", [Tir.TInt])); in_is_builtin = true;
+    declare_sig = Some "declare ptr  @march_string_to_codepoints(ptr %s)" };
+  { march_name = "string_from_codepoint"; c_name = Some "march_string_from_codepoint";
+    ret_ty = Some (Tir.TCon ("Option", [Tir.TString])); in_is_builtin = true;
+    declare_sig = Some "declare ptr  @march_string_from_codepoint(i64 %cp)" };
   { march_name = "string_from_chars"; c_name = Some "march_string_from_chars"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_from_chars(ptr %list)" };
   { march_name = "string_contains"; c_name = Some "march_string_contains"; ret_ty = Some Tir.TBool;
@@ -803,6 +813,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @ring_buf_to_list(ptr %rb)" };
   { march_name = "unix_time"; c_name = Some "march_unix_time"; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
+  { march_name = "unix_time_ms"; c_name = Some "march_unix_time_ms"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_unix_time_ms()" };
   (* peak_rss_bytes: process self-inspection, not capability-gated (see
      typecheck.ml — deliberately absent from the capability table). *)
   { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
@@ -1213,6 +1225,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_math_pow";
   PComment "; Extended string builtins";
   PDeclare "march_string_chars";
+  PDeclare "march_string_to_codepoints";
+  PDeclare "march_string_from_codepoint";
   PDeclare "march_string_from_chars";
   PDeclare "march_string_contains";
   PDeclare "march_string_starts_with";
@@ -1529,6 +1543,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "ring_buf_to_list";
   PComment "; Time builtins";
   PDeclare "march_unix_time";
+  PDeclare "march_unix_time_ms";
   PDeclare "march_peak_rss_bytes";
   PDeclare "march_live_allocs";
   PDeclare "march_tcp_connect";
