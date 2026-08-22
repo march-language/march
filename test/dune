@@ -1641,9 +1641,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; ── Phase 7.2: Signal.watch deferred dispatch (compiled) ──────────────
 ; A watched USR2 delivered by a self-raise must run its handler exactly once,
 ; from the scheduler drain, on a normal stack.  Dispatch is deferred, so the
-; handler line prints after main's body; a final drain in march_sched_run makes
-; the raise-then-exit ordering deterministic.  (source_tree ../stdlib) makes the
-; whole stdlib — including signal.march — resolvable inside the sandbox.
+; handler line prints after main's body — that ordering is the only thing
+; separating a deferred drain from a synchronous in-Signal.raise call, which is
+; why this golden pins it exactly rather than order-free.
+; (source_tree ../stdlib) makes the whole stdlib — including signal.march —
+; resolvable inside the sandbox.
+;
+; MARCH_NUM_SCHEDULERS=1 IS LOAD-BEARING, NOT LEFTOVER TUNING.
+; march_signal_drain() runs at the top of EVERY sched_loop iteration on EVERY
+; scheduler thread, so at the default of 4 the three idle workers race main for
+; the self-raise's pending flag and run the handler concurrently with main's
+; own println.  Measured 8/200 mismatches at the default vs 0/200 at 1 on the
+; same binary (load avg ~14-17).  Both failure shapes were seen: `caught usr2`
+; ahead of `after raise`, and the two threads' writes tearing into one line
+; (`after raisecaught usr2`).  Pinning to one scheduler makes the deferral
+; ordering a real guarantee — nothing else can run while main's green thread
+; does, and march_sched_run's final drain is what then runs the handler before
+; exit.  See specs/progress/2026-08-21-signal-watch-output-ordering-flake.md.
 (rule
  (targets native_signal_watch native_signal_watch.out)
  (deps (file %{exe:../bin/main.exe})
@@ -1662,11 +1676,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run %{exe:../bin/main.exe} --compile -o native_signal_watch
         native/signal_watch.march)
    (with-stdout-to native_signal_watch.out
-        (system "./native_signal_watch")))))
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_signal_watch")))))
 
 (rule
  (alias runtest)
  (action (diff native/signal_watch.expected native_signal_watch.out)))
+
+; ── ...and the same binary at the DEFAULT (multi) scheduler count ──────
+; Pinning the golden above to one scheduler would otherwise drop every bit of
+; coverage of the drain firing from a WORKER thread, which is the path the
+; Stage B design actually relies on for a signal arriving while green threads
+; are busy.  This rule keeps that path exercised but asserts only what >1
+; scheduler genuinely promises: the handler ran, and the process exited 0.
+; The greps are deliberately UNANCHORED — with 4 schedulers the handler's
+; println races main's and the two writev(2) calls tear into a shared line
+; often enough that `^caught usr2$` would merely relocate the flake here
+; (the tear falls between writev's two iovecs, so each message's own bytes
+; stay contiguous and a substring match survives it).  Do not "tighten" these
+; to anchored or ordered matches; read the ORDERING HAZARD note at the top of
+; native/signal_watch.march first.
+(rule
+ (targets native_signal_watch_multisched.out)
+ (deps (file native_signal_watch))
+ (action
+  (with-stdout-to native_signal_watch_multisched.out
+       (system "./native_signal_watch"))))
+
+(rule
+ (alias runtest)
+ (deps (file native_signal_watch_multisched.out))
+ (action
+  (system
+   "grep -q 'before raise' native_signal_watch_multisched.out && grep -q 'after raise' native_signal_watch_multisched.out && grep -q 'caught usr2' native_signal_watch_multisched.out")))
 
 ; ── As-patterns (`p as n`) must compile ──────────────────────────────
 ; PatAs existed in the AST/interpreter/typechecker but had no grammar
