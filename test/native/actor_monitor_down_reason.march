@@ -105,6 +105,29 @@ mod ActorMonitorDownReason do
       { seen: state.seen + 1 }
     end
     on PrimeBounded(expected, watcher) do
+      -- ORDERING HAZARD — do not delete this wait.
+      -- main sends PrimeBounded and only THEN calls kill(killed), and it is
+      -- the kill that synchronously enqueues the Down (do_actor_death ->
+      -- deliver_monitor_down in runtime/march_runtime.c).  At
+      -- MARCH_NUM_SCHEDULERS=1 main cannot yield in between, so both messages
+      -- are queued before this handler is ever dispatched.  At >1 another
+      -- scheduler thread can pick this actor up the instant the send lands,
+      -- sample mailbox_size before main has reached the kill, read 0, and
+      -- panic below.  Measured 9 panics / 12000 runs at 4 schedulers
+      -- (~0.075%), which is ~7% odds of reddening test/dune's 100-iteration
+      -- multi-scheduler loop.  Waiting for the Down costs nothing at one
+      -- scheduler (it is already queued, so this returns immediately) and the
+      -- golden's coverage is unchanged.
+      --
+      -- Do NOT "fix" this instead by moving kill(killed) ahead of the send.
+      -- It looks tidier and is strictly weaker: the mailbox bound counts only
+      -- USER messages (mbox_user_count, march_scheduler.c), so a Down enqueued
+      -- first lands while user_count is 0 and never meets the bound at all.
+      -- The point of set_queue_limit(watcher, 1, 1) here is that the Down
+      -- arrives while PrimeBounded already holds the one user slot, so a
+      -- regression making the control-send path consult mbox_count instead of
+      -- mbox_user_count would drop it — and would still pass reordered.
+      wait_for_queued_message(watcher)
       let queued = mailbox_size(watcher)
       match receive() do
         Down.Down(ref, target, DownReason.Killed) ->

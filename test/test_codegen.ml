@@ -10656,14 +10656,44 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let cmd = Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin) in
-    for _ = 1 to 25 do
+    let ok out =
+      ir_contains out "done" && ir_contains out "EXIT:0"
+      && not (ir_contains out "RC underflow")
+    in
+    (* Retry a failing iteration ONCE before failing the suite, and report what
+       was actually captured when it fails twice.
+
+       Why a retry here is not a way of hiding the bug: the regression this
+       test guards is DETERMINISTIC.  Pre-fix the capturing watcher was freed
+       on delivery 1 and EVERY run crashed dispatching delivery 2 (see the
+       comment above this function).  A deterministic crash fails both
+       attempts, so a single retry cannot mask it; what it absorbs is a
+       one-off environmental kill.
+
+       That distinction is the whole point.  This test reddened trmc-suite
+       (ubuntu-24.04) twice on PR #316 — a test-only PR with an empty
+       lib/runtime/bin diff — while passing on main's runs of #315 and #317
+       (specs/progress/2026-08-21-signal-watch-capturing-handler-trmc-suite-flake.md).
+       Locally the only failure reproducible in 6000 runs was EXIT:137: the
+       binary SIGKILLed with otherwise-correct output, i.e. host-level
+       pressure, the same shape as the exit-137 observations recorded in
+       specs/progress/2026-08-21-actor-monitor-bounded-mailbox-race.md.
+
+       The old form asserted a bare bool, so a CI failure printed only
+       "Expected true, Received false" — no captured output, no iteration
+       number, nothing to diagnose from.  That was the todo's core complaint;
+       Alcotest.failf below fixes it. *)
+    for i = 1 to 25 do
       let run_out = read_cmd_output cmd in
-      Alcotest.(check bool)
-        "a capturing Signal.watch handler delivered 3 times must not be \
-         freed after the first delivery (long-lived, unbounded-repeat call site)"
-        true
-        (ir_contains run_out "done" && ir_contains run_out "EXIT:0"
-         && not (ir_contains run_out "RC underflow"))
+      if not (ok run_out) then begin
+        let retry_out = read_cmd_output cmd in
+        if not (ok retry_out) then
+          Alcotest.failf
+            "a capturing Signal.watch handler delivered 3 times must not be \
+             freed after the first delivery (long-lived, unbounded-repeat \
+             call site) - iteration %d failed twice. first attempt: %S retry: %S"
+            i run_out retry_out
+      end
     done
 
 (* ── `--check` diagnostic-display determinism ───────────────────────────

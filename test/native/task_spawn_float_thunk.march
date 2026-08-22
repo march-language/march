@@ -1,0 +1,73 @@
+-- Regression: the raw one-arg `task_spawn` / `task_await` builtin pair on a
+-- Float payload.  This is the MINIMAL form of the "every Float-returning task
+-- segfaults" bug: a one-arg thunk never touches the zero-arg-lambda typing
+-- defect that `Task.async` additionally tripped over (see
+-- test/native/task_await_float.march), so this file isolates the codegen half
+-- on its own.
+--
+-- Pre-fix, `task_await`'s "double" arm unboxed the march_float_box sitting in
+-- the freshly-allocated Ok payload slot and stored the raw double bits back
+-- into the field.  The `Ok(v)` destructure then applied its own
+-- "ptr"->"double" coerce, calling march_unbox_float a SECOND time on what was
+-- now an IEEE-754 bit pattern -- dereferencing 0x4004000000000000 as an
+-- address.  Result: SIGSEGV (rc=139) with no output at every --opt level,
+-- while the interpreter printed the right answer.  The correct normalization
+-- is the same single ashr-1 the i64/ptr payloads get: the box pointer IS the
+-- uniform representation an ADT field holds, and decoding it is the
+-- destructure's job, not this site's.
+--
+-- The Int legs are the CONTROL.  An Int payload took the very same code path
+-- and only ever "worked" by accident -- the trampoline's tag/untag round trip
+-- happens to be lossless for a tagged scalar -- so nothing pinned it.  Keeping
+-- it adjacent to the Float leg means a future change to the shared untag can
+-- not quietly break one while the other still passes.
+--
+-- Both a capture-free thunk (llvm_emit's immortal static closure) and a
+-- capturing thunk (a real heap closure whose apply fn drops its own $clo) are
+-- covered, because those are different RC paths into the same trampoline.
+--
+-- Floats are printed as scaled Ints, not via float_to_string: the point here
+-- is the Float representation crossing the task boundary, not its rendering.
+-- Every constant is exactly representable in binary FP.
+--
+-- Awaits are sequential and each result is printed immediately, so output is
+-- deterministic under MARCH_NUM_SCHEDULERS=1 (see test/dune).
+mod TaskSpawnFloatThunk do
+
+  needs IO.Console
+  needs IO.Spawn
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+    -- Capture-free Float thunk: the primary repro.  2.5 * 2 = 5.
+    let tf = task_spawn(fn _ -> 2.5)
+    match task_await(tf) do
+      Ok(v)  -> println("float=" ++ int_to_string(float_to_int(v *. 2.0)))
+      Err(_) -> println("float_err")
+    end
+
+    -- Capturing Float thunk: heap closure, apply fn releases its own $clo.
+    -- 1.25 * 4 = 5.0 -> 500.
+    let base = 1.25
+    let tfc = task_spawn(fn _ -> base *. 4.0)
+    match task_await(tfc) do
+      Ok(v)  -> println("float_capture=" ++ int_to_string(float_to_int(v *. 100.0)))
+      Err(_) -> println("float_capture_err")
+    end
+
+    -- Int control, capture-free: same path, tagged-scalar payload.
+    let ti = task_spawn(fn _ -> 6 * 7)
+    match task_await(ti) do
+      Ok(n)  -> println("int=" ++ int_to_string(n))
+      Err(_) -> println("int_err")
+    end
+
+    -- Int control, capturing.
+    let k = 21
+    let tic = task_spawn(fn _ -> k * 2)
+    match task_await(tic) do
+      Ok(n)  -> println("int_capture=" ++ int_to_string(n))
+      Err(_) -> println("int_capture_err")
+    end
+  end
+
+end

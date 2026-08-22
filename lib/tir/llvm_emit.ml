@@ -1216,6 +1216,94 @@ let emit_native_map2_inline_loop ctx ~(width : nmap_width) ~unboxed ~arr1_atom ~
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
   ("ptr", new_arr)
 
+(* ── Vault reads: niche → call-site Option encoding ───────────────────── *)
+
+(** [march_vault_get] / [march_vault_ns_get] return the NICHE encoding of
+    [Option] UNCONDITIONALLY — [None] is a raw null, [Some v] is [v] itself (see
+    [make_some]/[make_none] in runtime/march_extras.c).  The C side has no way to
+    do better: a vault handle's element type is a phantom, erased before the
+    runtime sees anything.
+
+    The compiled call site, however, decodes by the STATIC type, and
+    [Repr.repr_of_ty (Option p)] is [Boxed] whenever [p] is niche-UNSAFE.  Three
+    element types hit that in practice and all three were broken compiled-only,
+    with the interpreter correct:
+
+      Vault(Option(_))  the filed bug — `Vault.get` returns Option(Option(b)),
+                        the tag load at [v+8] lands inside the payload's own
+                        march_string header, matches no arm, and falls through
+                        to the match's default arm ("panic: non-exhaustive
+                        pattern match").
+      Vault(Float)      same tag load, same panic.
+      Vault(Unit)       same shape; SIGSEGV instead (the tag load is off a
+                        tagged Unit, not a heap cell).
+
+    So re-encode here, at the one point that knows both halves.  [v] is the
+    runtime's niche word; the result is whatever [Option ret_p] decodes as.
+    Left untouched (returned as-is) when the call site decodes Niche too — the
+    overwhelmingly common case, and the ONLY case before this existed.
+
+    A [TVar] payload is deliberately Niche, not Boxed: [niche_payload_ok] says
+    false for it, but the erased convention elsewhere (EAlloc's niche path,
+    llvm_case's abstract-arg niche path, ensure_adt_eq_fn) all treat
+    [Option(TVar)] as niche, so boxing here would break the agreement in the
+    other direction.  See specs/progress/2026-08-20-nested-option-vault-boxed-
+    niche-mismatch.md. *)
+let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
+  (* A literal mirror of [Llvm_case]'s [effective_repr] for this scrutinee type:
+     [repr_of_ty], plus its abstract-arg override (a niche-shaped type applied to
+     a TVar argument decodes Niche even though [niche_payload_ok] says false for
+     a TVar).  Mirrored rather than re-derived from [niche_payload_ok] alone so
+     the two cannot drift: [repr_of_ty] also forces Boxed for a collision-set
+     type name, and [is_niche_shaped] returns false for one, so a program that
+     declares its own `Option` stays consistent on both sides. *)
+  let boxed_at_call_site = match ret_ty with
+    | Tir.TCon ("Option", ([_] as args)) ->
+      (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs ret_ty with
+       | Repr.Niche _ | Repr.Newtype _ -> false
+       | Repr.Boxed ->
+         not (List.exists (function Tir.TVar _ -> true | _ -> false) args
+              && Repr.is_niche_shaped ~collision_set:ctx.collision_set
+                   ctx.type_defs "Option"))
+    | _ -> false
+  in
+  if not boxed_at_call_site then v
+  else begin
+    let slot   = fresh ctx "vopt_slot" in
+    let l_none = fresh_block ctx "vopt_none" in
+    let l_some = fresh_block ctx "vopt_some" in
+    let l_join = fresh_block ctx "vopt_join" in
+    let isnull = fresh ctx "vopt_isnull" in
+    emit ctx (Printf.sprintf "%s = alloca ptr" slot);
+    emit ctx (Printf.sprintf "%s = icmp eq ptr %s, null" isnull v);
+    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                     isnull l_none l_some);
+    (* Boxed None: a tag-0 heap cell with no fields — the same shape EAlloc's
+       alloc-none-boxed fallthrough emits for a niche-unsafe Option. *)
+    emit_label ctx l_none;
+    let none_entry = ctor_entry ctx "Option.None" 0 in
+    let none_ptr = emit_heap_alloc ctx none_entry.Llvm_ctx.ce_tag 0 in
+    emit ctx (Printf.sprintf "store ptr %s, ptr %s" none_ptr slot);
+    emit_term ctx (Printf.sprintf "br label %%%s" l_join);
+    (* Boxed Some: tag-1 cell, payload in field 0 at the ctor's DECLARED field
+       type (Some(a) → TVar → "ptr"), which is exactly what llvm_case's branch
+       extraction loads.  The payload word from the runtime is already uniform
+       (vault_set coerced it to ptr on the way in: Int tagged, Float boxed via
+       march_alloc_float), so it is stored through unchanged. *)
+    emit_label ctx l_some;
+    let some_entry = ctor_entry ctx "Option.Some" 1 in
+    let some_ptr = emit_heap_alloc ctx some_entry.Llvm_ctx.ce_tag 1 in
+    let field_ty = match List.nth_opt some_entry.Llvm_ctx.ce_fields 0 with
+      | Some t -> llvm_ty t | None -> "ptr" in
+    emit_store_field ctx some_ptr 0 field_ty (coerce ctx "ptr" v field_ty);
+    emit ctx (Printf.sprintf "store ptr %s, ptr %s" some_ptr slot);
+    emit_term ctx (Printf.sprintf "br label %%%s" l_join);
+    emit_label ctx l_join;
+    let r = fresh ctx "vopt" in
+    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r slot);
+    r
+  end
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -2262,50 +2350,43 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          loads a ptr field *raw* (no untag), but task[3] holds (addr<<1)|1, so
          the field would carry a wild ~2*addr pointer → incrc/decrc misfire and
          the payload deref SIGSEGVs / OOMs.
-     In BOTH cases the correct field value is apply_ret == task[3] >> 1, and
+       • double payload (Float) — apply_ret is a march_float_box pointer, NOT
+         the double itself: the closure's apply fn already boxed its result
+         through the generic "double"->"ptr" coerce (march_alloc_float,
+         float-boxing stage 2) before returning it to the trampoline.  So a
+         Float payload is a *heap address* and behaves exactly like the ptr
+         case above — the box, not the value, is the uniform representation
+         the Ok(v) destructure expects.
+     In ALL cases the correct field value is apply_ret == task[3] >> 1, and
      task[3] is always odd (trampoline sets the low bit), so a single
      unconditional ashr-1 of the freshly-allocated Ok payload (field 0, offset
-     16) is the exact inverse.  Keyed on the statically-known Task inner type;
-     "double" (Float) additionally unboxes: the closure's apply fn already
-     boxed its double result via the generic "double"->"ptr" coerce
-     (march_alloc_float, float-boxing stage 2) before returning it to the
-     trampoline, so apply_ret here is a march_float_box pointer, not the
-     value itself (see task_spawn / task_await_unwrap's "double" branch).
-     The i64 half mirrors task_await_unwrap (291f6b5f) and the await i64 fix
-     (f89b8711); the ptr half fixes the heap-payload crash f89b8711's comment
-     wrongly assumed was already correct. *)
+     16) is the exact inverse — for every llvm_ty (i64 / ptr / double are the
+     only three it produces).  The i64 half mirrors task_await_unwrap
+     (291f6b5f) and the await i64 fix (f89b8711); the ptr half fixes the
+     heap-payload crash f89b8711's comment wrongly assumed was already correct.
+
+     Do NOT unbox the double here.  This site normalizes an ADT *field* into
+     the uniform representation; it does not produce the scalar.  The paired
+     decode is the Ok(v) destructure's own "ptr"->"double" coerce, which loads
+     the field raw and calls march_unbox_float — so unboxing here and storing
+     the raw double bits back into the field made the destructure unbox a
+     second time, dereferencing the IEEE-754 bit pattern as an address (2.5 →
+     deref 0x4004000000000000 → SIGSEGV).  That is the whole of the
+     "any Float-returning task segfaults" bug; see
+     specs/progress/2026-08-21-float-returning-task-compiled.md.  Contrast
+     task_await_unwrap's "double" branch, which DOES unbox — correctly, because
+     it yields the scalar as its expression value rather than an ADT field. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
     let (_, tp) = emit_atom ctx a in
     let r = fresh ctx "tawait" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
-    let inner_ty = match a with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
-         | _ -> "ptr")
-      | _ -> "ptr"
-    in
-    if inner_ty = "i64" || inner_ty = "ptr" then begin
-      let fp = fresh ctx "tawf" in
-      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
-      let v  = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
-      let v2 = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
-      emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp)
-    end else if inner_ty = "double" then begin
-      let fp = fresh ctx "tawf" in
-      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
-      let v  = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
-      let v2 = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
-      let bp = fresh ctx "tawbp" in
-      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
-      let d  = fresh ctx "tawd" in
-      emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d bp);
-      emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" d fp)
-    end;
+    let fp = fresh ctx "tawf" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
+    let v  = fresh ctx "tawv" in
+    emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
+    let v2 = fresh ctx "tawv" in
+    emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
+    emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp);
     ("ptr", r)
 
   (* task_yield() → cooperative yield via march_sched_yield *)
@@ -2754,7 +2835,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      classify the uniform representation, the raw i64 was dereferenced as a
      march_string* → SIGSEGV).  Table/namespace/fn args are already ptr;
      trailing scalar args (delta) stay i64.
-     See specs/todos/2026-08-20-vault-non-string-key-native-crash.md. *)
+     See specs/progress/2026-08-20-vault-non-string-key-native-crash.md. *)
   | Tir.EApp (f, [tbl; key])
     when f.Tir.v_name = "vault_get" ->
     let vt = emit_atom_as ctx "ptr" tbl in
@@ -2762,7 +2843,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let r  = fresh ctx "vg" in
     emit ctx (Printf.sprintf
       "%s = call ptr @march_vault_get(ptr %s, ptr %s)" r vt vk);
-    ("ptr", r)
+    ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   | Tir.EApp (f, [tbl; key])
     when f.Tir.v_name = "vault_drop" ->
@@ -2807,7 +2888,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let r  = fresh ctx "vng" in
     emit ctx (Printf.sprintf
       "%s = call ptr @march_vault_ns_get(ptr %s, ptr %s)" r vn vk);
-    ("ptr", r)
+    ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   | Tir.EApp (f, [ns; key])
     when f.Tir.v_name = "vault_ns_drop" ->

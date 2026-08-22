@@ -1,4 +1,4 @@
-# Float-boxing erasure boundary: the two Task-await sites are still open
+# Float-boxing erasure boundary: the `task_await_unwrap` site is still open
 
 Filed 2026-08-12. **Narrowed 2026-08-20**: the apply-wrapper/uniform-ABI half
 moved to its own item and is now **FIXED** — see
@@ -6,7 +6,9 @@ moved to its own item and is now **FIXED** — see
 (call-site releases; the two failed approaches this file used to warn about
 are post-mortemed there). **Re-measured 2026-08-21**: the blocker picture
 below replaces the earlier "both sites unreachable" claim, which was too
-coarse — the two sites differ.
+coarse — the two sites differ. **Updated again 2026-08-21**: site 2 turned
+out not to exist (its unbox was the Float-task crash, now fixed), so what
+remains here is site 1 alone.
 
 Background on the shared root (the Stage 2 float-boxing design never gave
 `march_alloc_float`/`march_unbox_float` an ownership story):
@@ -24,16 +26,20 @@ Background on the shared root (the Stage 2 float-boxing design never gave
    `live_allocs` delta = **300,001** vs an Int-control **200,000** — i.e.
    the type-independent 2/iter task leak (see below) PLUS exactly one
    Float box per await; the Float excess is linear (50k → +50,001).
-2. **`task_await` Result-path Float unbox** — same file, the
-   `inner_ty = "double"` arm of the `task_await` builtin (the in-place
-   Ok-payload rewrite). **STILL BLOCKED**: `match task_await(t)` on a
-   Float task SIGSEGVs compiled (rc=139) while the interpreter returns the
-   right value — reproduced 2026-08-21 on d5576f20. That crash is the
-   separate open item
-   `specs/todos/2026-08-20-task-async-float-thunk-compiled-build-break.md`
-   (the build-break half of it has evidently narrowed to this runtime
-   crash; re-titled evidence lives there). Fix the crash first; a leak fix
-   at an unexecutable site is unverifiable dead code.
+2. **`task_await` Result-path Float unbox — THIS SITE NO LONGER EXISTS.**
+   Superseded 2026-08-21 by the Float-returning-task fix
+   (`specs/progress/2026-08-21-float-returning-task-compiled.md`). The
+   entry above was written while `match task_await(t)` on a Float task
+   still SIGSEGV'd, and reasonably assumed a leak hid behind the crash.
+   It did not: that `march_unbox_float` **was** the crash. The trampoline
+   stores `task[3] = (apply_ret << 1) | 1`, tagging box pointers too, so
+   the emit site owes exactly one `ashr 1` to recover the uniform value —
+   and the `double` arm did that and then *kept going*, unboxing and
+   storing raw double bits back into the `Ok` payload, so the `Ok(v)`
+   destructure unboxed a second time and dereferenced the IEEE-754
+   pattern. Deleting the unbox+store removed both the crash and the site.
+   There is nothing left to leak here; all three `llvm_ty` outputs now
+   share one path.
 
 ## Why site 1 is NOT the "provably sole owner" shape — do not decrc it
 

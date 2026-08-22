@@ -1647,9 +1647,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; ── Phase 7.2: Signal.watch deferred dispatch (compiled) ──────────────
 ; A watched USR2 delivered by a self-raise must run its handler exactly once,
 ; from the scheduler drain, on a normal stack.  Dispatch is deferred, so the
-; handler line prints after main's body; a final drain in march_sched_run makes
-; the raise-then-exit ordering deterministic.  (source_tree ../stdlib) makes the
-; whole stdlib — including signal.march — resolvable inside the sandbox.
+; handler line prints after main's body — that ordering is the only thing
+; separating a deferred drain from a synchronous in-Signal.raise call, which is
+; why this golden pins it exactly rather than order-free.
+; (source_tree ../stdlib) makes the whole stdlib — including signal.march —
+; resolvable inside the sandbox.
+;
+; MARCH_NUM_SCHEDULERS=1 IS LOAD-BEARING, NOT LEFTOVER TUNING.
+; march_signal_drain() runs at the top of EVERY sched_loop iteration on EVERY
+; scheduler thread, so at the default of 4 the three idle workers race main for
+; the self-raise's pending flag and run the handler concurrently with main's
+; own println.  Measured 8/200 mismatches at the default vs 0/200 at 1 on the
+; same binary (load avg ~14-17).  Both failure shapes were seen: `caught usr2`
+; ahead of `after raise`, and the two threads' writes tearing into one line
+; (`after raisecaught usr2`).  Pinning to one scheduler makes the deferral
+; ordering a real guarantee — nothing else can run while main's green thread
+; does, and march_sched_run's final drain is what then runs the handler before
+; exit.  See specs/progress/2026-08-21-signal-watch-output-ordering-flake.md.
 (rule
  (targets native_signal_watch native_signal_watch.out)
  (deps (file %{exe:../bin/main.exe})
@@ -1668,11 +1682,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run %{exe:../bin/main.exe} --compile -o native_signal_watch
         native/signal_watch.march)
    (with-stdout-to native_signal_watch.out
-        (system "./native_signal_watch")))))
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_signal_watch")))))
 
 (rule
  (alias runtest)
  (action (diff native/signal_watch.expected native_signal_watch.out)))
+
+; ── ...and the same binary at the DEFAULT (multi) scheduler count ──────
+; Pinning the golden above to one scheduler would otherwise drop every bit of
+; coverage of the drain firing from a WORKER thread, which is the path the
+; Stage B design actually relies on for a signal arriving while green threads
+; are busy.  This rule keeps that path exercised but asserts only what >1
+; scheduler genuinely promises: the handler ran, and the process exited 0.
+; The greps are deliberately UNANCHORED — with 4 schedulers the handler's
+; println races main's and the two writev(2) calls tear into a shared line
+; often enough that `^caught usr2$` would merely relocate the flake here
+; (the tear falls between writev's two iovecs, so each message's own bytes
+; stay contiguous and a substring match survives it).  Do not "tighten" these
+; to anchored or ordered matches; read the ORDERING HAZARD note at the top of
+; native/signal_watch.march first.
+(rule
+ (targets native_signal_watch_multisched.out)
+ (deps (file native_signal_watch))
+ (action
+  (with-stdout-to native_signal_watch_multisched.out
+       (system "./native_signal_watch"))))
+
+(rule
+ (alias runtest)
+ (deps (file native_signal_watch_multisched.out))
+ (action
+  (system
+   "grep -q 'before raise' native_signal_watch_multisched.out && grep -q 'after raise' native_signal_watch_multisched.out && grep -q 'caught usr2' native_signal_watch_multisched.out")))
 
 ; ── As-patterns (`p as n`) must compile ──────────────────────────────
 ; PatAs existed in the AST/interpreter/typechecker but had no grammar
@@ -1741,6 +1782,92 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/record_pattern.expected native_record_pattern.out)))
+
+; ── Erased/uniform boundary between the C runtime and compiled code ──────
+; One family, three fixtures.  march_vault_get / march_record_get / the vault
+; key builtins all hand a value across a boundary where the runtime has ONE
+; fixed representation and the compiled call site decodes by the STATIC type;
+; every bug below is those two disagreeing.  All were compiled-only, with the
+; interpreter correct, and all three .march files carry their own mechanism
+; write-up plus a note on why the EVEN-Int cases are not redundant.
+;
+;   vault_niche_unsafe_element   runtime returns the NICHE Option encoding
+;                                unconditionally; the call site decodes BOXED
+;                                for a niche-unsafe element (nested Option,
+;                                Float, Unit) -> non-exhaustive panic / SIGSEGV
+;   record_erased_field_repr     a Float field handed back as raw IEEE-754 bits
+;                                where an erased consumer needs a
+;                                march_alloc_float box, plus the boxed
+;                                Option(Float) cell that llvm_case unboxes ->
+;                                SIGSEGV in march_unbox_float /
+;                                march_string_concat3
+;   vault_non_string_key         a non-String key: fixed by PR #315 without a
+;                                fixture, pinned here
+;
+; These use stdlib modules (Vault, List) and link the C runtime, so they need
+; BOTH source trees staged plus MARCH_RUNTIME_DIR — without them the compile
+; silently picks up a stale tree.
+(rule
+ (targets native_vault_niche_unsafe_element native_vault_niche_unsafe_element.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/vault_niche_unsafe_element.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_vault_niche_unsafe_element
+         native/vault_niche_unsafe_element.march)
+    (with-stdout-to native_vault_niche_unsafe_element.out
+         (system "./native_vault_niche_unsafe_element"))))))
+
+(rule
+ (alias runtest)
+ (deps native_vault_niche_unsafe_element.out
+       native/vault_niche_unsafe_element.expected)
+ (action (diff native/vault_niche_unsafe_element.expected
+               native_vault_niche_unsafe_element.out)))
+
+(rule
+ (targets native_record_erased_field_repr native_record_erased_field_repr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/record_erased_field_repr.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_record_erased_field_repr
+         native/record_erased_field_repr.march)
+    (with-stdout-to native_record_erased_field_repr.out
+         (system "./native_record_erased_field_repr"))))))
+
+(rule
+ (alias runtest)
+ (deps native_record_erased_field_repr.out
+       native/record_erased_field_repr.expected)
+ (action (diff native/record_erased_field_repr.expected
+               native_record_erased_field_repr.out)))
+
+(rule
+ (targets native_vault_non_string_key native_vault_non_string_key.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/vault_non_string_key.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_vault_non_string_key
+         native/vault_non_string_key.march)
+    (with-stdout-to native_vault_non_string_key.out
+         (system "./native_vault_non_string_key"))))))
+
+(rule
+ (alias runtest)
+ (deps native_vault_non_string_key.out native/vault_non_string_key.expected)
+ (action (diff native/vault_non_string_key.expected
+               native_vault_non_string_key.out)))
 
 ; ── Partial record patterns must compile ─────────────────────────────
 ; Two arms mentioning DIFFERENT field subsets force expand_record_column to
@@ -3351,6 +3478,72 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/task_await_ptr.expected native_task_await_ptr_multi.out)))
+; ── Regression: a Float-returning Task must work compiled.  Two defects made
+; ── EVERY Float task unusable natively while the interpreter was correct:
+; ── (1) task_await's "double" arm unboxed the march_float_box in the Ok
+; ── payload and stored raw double bits back, so the Ok(v) destructure unboxed
+; ── a SECOND time and dereferenced the IEEE-754 pattern -> SIGSEGV, no output;
+; ── (2) a zero-arg lambda's closure temp was typed from its span (the RETURN
+; ── type, not `() -> ret`), so Task.async's captured thunk emitted `load
+; ── double` for a closure ptr and clang rejected the module outright.
+; ── This leg covers the documented stdlib surface (async / await /
+; ── await_unwrap / await_many / async_stream) and needs BOTH fixes; the
+; ── task_spawn_float_thunk leg below isolates (1).  There was no Float task
+; ── coverage at all before these, which is why both shipped.  Floats print as
+; ── scaled Ints so the golden does not depend on float_to_string.  Run
+; ── single-threaded so the sequential await prints serialise; diff stdout.
+(rule
+ (targets native_task_await_float native_task_await_float.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_await_float.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_await_float
+        native/task_await_float.march)
+   (with-stdout-to native_task_await_float.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_float")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_await_float.expected native_task_await_float.out)))
+
+; ── Regression: the raw one-arg task_spawn/task_await builtin pair on a Float
+; ── payload — the minimal form of the bug above, isolating the task_await
+; ── codegen defect (a one-arg thunk never reaches the zero-arg typing defect).
+; ── Covers capture-free and capturing thunks (different RC paths into the same
+; ── trampoline).  The Int legs are the CONTROL: they took the identical path
+; ── and only ever passed by luck, with nothing pinning them.  Deterministic
+; ── under MARCH_NUM_SCHEDULERS=1; diff stdout.
+(rule
+ (targets native_task_spawn_float_thunk native_task_spawn_float_thunk.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_spawn_float_thunk.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_spawn_float_thunk
+        native/task_spawn_float_thunk.march)
+   (with-stdout-to native_task_spawn_float_thunk.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_spawn_float_thunk")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_spawn_float_thunk.expected native_task_spawn_float_thunk.out)))
 
 ; ── FFI Phase 2: borrowed extern args must be freed caller-side (no leak) ──
 (rule
