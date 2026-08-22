@@ -101,6 +101,11 @@ let builtin_names : StringSet.t =
       "march_compare_int"; "march_compare_float"; "march_compare_string";
       (* Hash builtins used by derived Hash instances *)
       "march_hash_int"; "march_hash_float"; "march_hash_string"; "march_hash_bool";
+      (* Type-erased formatter — Show$String.show's body (lib/tir/lower.ml).
+         Without this entry Defun treats the call as a closure application and
+         emits `march_value_to_string._0(march_value_to_string, x)`, which on the
+         JS backend is a reference to a symbol that does not exist. *)
+      "march_value_to_string";
       (* Bitwise integer builtins *)
       "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount";
       (* IOList builtins *)

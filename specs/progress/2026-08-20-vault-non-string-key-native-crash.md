@@ -91,3 +91,61 @@ either:
 
 Also worth checking: `test/run_stdlib.exe`'s Vault test coverage — a
 non-String-key round-trip test would have caught this before release.
+
+---
+
+## RESOLVED (2026-08-21)
+
+**Both halves were fixed by PR #315** (`ca5c1398`), which landed the FIX but
+left this file open in `specs/todos/`:
+
+1. `vault_key_cstr` now classifies the uniform representation instead of
+   casting straight to `march_string *` — tagged scalar → `"i:<decimal>"`
+   (matching the interpreter's `vault_key_of_value`), `march_string` → its raw
+   bytes unchanged (so `Vault.keys()` keeps returning genuine Strings for every
+   existing `keys() -> get()` round-trip), boxed Float → `"f:<bits>"`, and a
+   Tuple/Ctor key panics with an actionable message rather than folding onto a
+   single bucket. Its own doc comment records the two inherent limits (Bool and
+   Int are indistinguishable once tagged; a String spelled `"i:5"` collides
+   with the Int key 5).
+2. `lib/tir/llvm_emit.ml` gained the missing key-coercion arms for the READ
+   builtins — `vault_get` / `vault_drop` / `vault_update` / `vault_incr` and
+   the `ns_*` trio. Only the writers had been special-cased, so a read passed
+   the key with its NATURAL llvm type while the write had stored it tagged, and
+   the two stringified to different vault keys.
+
+Re-verified on `origin/main` (`3fda8f46`) before this file was moved: the exact
+repro at the top of this file compiles and prints `Some(hello)`, byte-identical
+to the interpreter.
+
+**What was still missing, and is added here: the regression fixture.** The
+answer to this file's own last line was "nothing covered it". PR #315 shipped
+no test, so nothing pinned the fix.
+`test/native/vault_non_string_key.march` (+ `.expected`, wired into
+`test/dune`) now round-trips ODD, EVEN and NEGATIVE Int keys plus String, Bool
+and absent keys through `set`/`get`/`has`/`drop`/`put_new`/`incr`/`update`/
+`size`. The three Int flavours are deliberate and the fixture says so in its
+own header: the two halves of the bug hid on different values — an EVEN Int
+survives a raw store untouched (the erased-i64 untag only shifts odd words),
+while an ODD one round-trips *consistently wrong* and looks fine unless you
+also print `Vault.keys()` — so a single-value test would have passed against
+the broken compiler.
+
+Non-vacuity, by file-copy swap of `runtime/march_extras.c`, `lib/tir/llvm_emit.ml`
+and `lib/tir/lower.ml` back to **`c2f747f7`** — the commit BEFORE #315 — followed
+by `dune build bin/main.exe` + `@warm-cache` (verified restaged):
+
+```
+----- vault_non_string_key -----
+  run_exit=139
+  RESULT: DIFFERS from golden  (non-vacuous)
+1,14d0
+< Some(odd)
+  ... all 14 golden lines missing — SIGSEGV before the first println ...
+```
+
+Against `origin/main` (`3fda8f46`) it MATCHES the golden, which is the correct
+result and the point: #315 already fixed the bug, so this fixture is a guard
+against regression, not a proof of new work. (First attempt at this proof used
+`0defdbfa` as "pre-#315" — that is #316, one commit LATER, and the fixture
+passed there too. The parent-of-#315 commit is the right baseline.)

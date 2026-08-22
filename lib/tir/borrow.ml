@@ -148,6 +148,11 @@ let extern_borrow_table : (string * bool list) list = [
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);
+  (* Show$String.show's body.  march_value_to_string BORROWS: on a genuine
+     String it takes its own +1 (march_incrc) before aliasing the input into the
+     result, and every other representation it builds a fresh string.  It never
+     consumes the argument, so the caller keeps ownership. *)
+  ("march_value_to_string", [true]);
 ]
 
 (** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed

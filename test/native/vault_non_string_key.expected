@@ -1,0 +1,14 @@
+Some(odd)
+Some(even)
+Some(negative)
+Some(string)
+Some(bool)
+None
+5
+true
+false
+true
+Some(put_new)
+3
+7
+Some(42)

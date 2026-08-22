@@ -1777,6 +1777,92 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/record_pattern.expected native_record_pattern.out)))
 
+; ── Erased/uniform boundary between the C runtime and compiled code ──────
+; One family, three fixtures.  march_vault_get / march_record_get / the vault
+; key builtins all hand a value across a boundary where the runtime has ONE
+; fixed representation and the compiled call site decodes by the STATIC type;
+; every bug below is those two disagreeing.  All were compiled-only, with the
+; interpreter correct, and all three .march files carry their own mechanism
+; write-up plus a note on why the EVEN-Int cases are not redundant.
+;
+;   vault_niche_unsafe_element   runtime returns the NICHE Option encoding
+;                                unconditionally; the call site decodes BOXED
+;                                for a niche-unsafe element (nested Option,
+;                                Float, Unit) -> non-exhaustive panic / SIGSEGV
+;   record_erased_field_repr     a Float field handed back as raw IEEE-754 bits
+;                                where an erased consumer needs a
+;                                march_alloc_float box, plus the boxed
+;                                Option(Float) cell that llvm_case unboxes ->
+;                                SIGSEGV in march_unbox_float /
+;                                march_string_concat3
+;   vault_non_string_key         a non-String key: fixed by PR #315 without a
+;                                fixture, pinned here
+;
+; These use stdlib modules (Vault, List) and link the C runtime, so they need
+; BOTH source trees staged plus MARCH_RUNTIME_DIR — without them the compile
+; silently picks up a stale tree.
+(rule
+ (targets native_vault_niche_unsafe_element native_vault_niche_unsafe_element.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/vault_niche_unsafe_element.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_vault_niche_unsafe_element
+         native/vault_niche_unsafe_element.march)
+    (with-stdout-to native_vault_niche_unsafe_element.out
+         (system "./native_vault_niche_unsafe_element"))))))
+
+(rule
+ (alias runtest)
+ (deps native_vault_niche_unsafe_element.out
+       native/vault_niche_unsafe_element.expected)
+ (action (diff native/vault_niche_unsafe_element.expected
+               native_vault_niche_unsafe_element.out)))
+
+(rule
+ (targets native_record_erased_field_repr native_record_erased_field_repr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/record_erased_field_repr.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_record_erased_field_repr
+         native/record_erased_field_repr.march)
+    (with-stdout-to native_record_erased_field_repr.out
+         (system "./native_record_erased_field_repr"))))))
+
+(rule
+ (alias runtest)
+ (deps native_record_erased_field_repr.out
+       native/record_erased_field_repr.expected)
+ (action (diff native/record_erased_field_repr.expected
+               native_record_erased_field_repr.out)))
+
+(rule
+ (targets native_vault_non_string_key native_vault_non_string_key.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/vault_non_string_key.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_vault_non_string_key
+         native/vault_non_string_key.march)
+    (with-stdout-to native_vault_non_string_key.out
+         (system "./native_vault_non_string_key"))))))
+
+(rule
+ (alias runtest)
+ (deps native_vault_non_string_key.out native/vault_non_string_key.expected)
+ (action (diff native/vault_non_string_key.expected
+               native_vault_non_string_key.out)))
+
 ; ── Partial record patterns must compile ─────────────────────────────
 ; Two arms mentioning DIFFERENT field subsets force expand_record_column to
 ; project the union of mentioned fields and wildcard the ones a given row
