@@ -2262,50 +2262,43 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          loads a ptr field *raw* (no untag), but task[3] holds (addr<<1)|1, so
          the field would carry a wild ~2*addr pointer → incrc/decrc misfire and
          the payload deref SIGSEGVs / OOMs.
-     In BOTH cases the correct field value is apply_ret == task[3] >> 1, and
+       • double payload (Float) — apply_ret is a march_float_box pointer, NOT
+         the double itself: the closure's apply fn already boxed its result
+         through the generic "double"->"ptr" coerce (march_alloc_float,
+         float-boxing stage 2) before returning it to the trampoline.  So a
+         Float payload is a *heap address* and behaves exactly like the ptr
+         case above — the box, not the value, is the uniform representation
+         the Ok(v) destructure expects.
+     In ALL cases the correct field value is apply_ret == task[3] >> 1, and
      task[3] is always odd (trampoline sets the low bit), so a single
      unconditional ashr-1 of the freshly-allocated Ok payload (field 0, offset
-     16) is the exact inverse.  Keyed on the statically-known Task inner type;
-     "double" (Float) additionally unboxes: the closure's apply fn already
-     boxed its double result via the generic "double"->"ptr" coerce
-     (march_alloc_float, float-boxing stage 2) before returning it to the
-     trampoline, so apply_ret here is a march_float_box pointer, not the
-     value itself (see task_spawn / task_await_unwrap's "double" branch).
-     The i64 half mirrors task_await_unwrap (291f6b5f) and the await i64 fix
-     (f89b8711); the ptr half fixes the heap-payload crash f89b8711's comment
-     wrongly assumed was already correct. *)
+     16) is the exact inverse — for every llvm_ty (i64 / ptr / double are the
+     only three it produces).  The i64 half mirrors task_await_unwrap
+     (291f6b5f) and the await i64 fix (f89b8711); the ptr half fixes the
+     heap-payload crash f89b8711's comment wrongly assumed was already correct.
+
+     Do NOT unbox the double here.  This site normalizes an ADT *field* into
+     the uniform representation; it does not produce the scalar.  The paired
+     decode is the Ok(v) destructure's own "ptr"->"double" coerce, which loads
+     the field raw and calls march_unbox_float — so unboxing here and storing
+     the raw double bits back into the field made the destructure unbox a
+     second time, dereferencing the IEEE-754 bit pattern as an address (2.5 →
+     deref 0x4004000000000000 → SIGSEGV).  That is the whole of the
+     "any Float-returning task segfaults" bug; see
+     specs/progress/2026-08-21-float-returning-task-compiled.md.  Contrast
+     task_await_unwrap's "double" branch, which DOES unbox — correctly, because
+     it yields the scalar as its expression value rather than an ADT field. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
     let (_, tp) = emit_atom ctx a in
     let r = fresh ctx "tawait" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
-    let inner_ty = match a with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
-         | _ -> "ptr")
-      | _ -> "ptr"
-    in
-    if inner_ty = "i64" || inner_ty = "ptr" then begin
-      let fp = fresh ctx "tawf" in
-      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
-      let v  = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
-      let v2 = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
-      emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp)
-    end else if inner_ty = "double" then begin
-      let fp = fresh ctx "tawf" in
-      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
-      let v  = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
-      let v2 = fresh ctx "tawv" in
-      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
-      let bp = fresh ctx "tawbp" in
-      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
-      let d  = fresh ctx "tawd" in
-      emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d bp);
-      emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" d fp)
-    end;
+    let fp = fresh ctx "tawf" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
+    let v  = fresh ctx "tawv" in
+    emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
+    let v2 = fresh ctx "tawv" in
+    emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
+    emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp);
     ("ptr", r)
 
   (* task_yield() → cooperative yield via march_sched_yield *)
