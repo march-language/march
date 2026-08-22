@@ -437,10 +437,33 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
             let cont_lbls = Array.init nf (fun i ->
               if i = 0 then tl else flbl (Printf.sprintf "f%d" i)
             ) in
+            (* A field's SLOT type comes from the type as DECLARED on the
+               constructor, not from the concrete type this instantiation
+               substitutes in — that is what the construction side uses
+               (the EAlloc boxed arm takes [llvm_ty] of [entry.ce_fields],
+               which are the declared types).  For a GENERIC declared field
+               (e.g. Option's [Some(a)]) the slot is [ptr], so a Float
+               payload was BOXED into a march_alloc_float cell on the way in;
+               loading that slot as a raw [double] compares the two box
+               POINTERS instead of the values, so two equal floats from
+               distinct boxes always compared unequal
+               (record_get(r,k) == Some(0.5) was false compiled, true
+               interpreted — depot's "Float type default in blank").
+               Int/Bool are unaffected: their generic-slot form is the
+               low-bit tag, which is a bijection, so comparing tagged values
+               is still correct.  A field declared CONCRETE Float keeps the
+               inline-double slot it is built with — that path is pinned by
+               test/native/float_generic_field_abi and must not change. *)
+            let raw_arr = Array.of_list raw_flds in
             List.iteri (fun fi fty ->
               if fi > 0 then lbl cont_lbls.(fi);
               let off = 16 + fi * 8 in
-              let llt = field_load_llty fty in
+              let boxed_float =
+                fty = Tir.TFloat
+                && fi < Array.length raw_arr
+                && field_load_llty raw_arr.(fi) = "ptr"
+              in
+              let llt = if boxed_float then "ptr" else field_load_llty fty in
               let fgpa = frsh "fgpa" in let fgpb = frsh "fgpb" in
               let fva  = frsh "fva"  in let fvb  = frsh "fvb"  in
               e (Printf.sprintf "%s = getelementptr i8, ptr %%a, i64 %d" fgpa off);
@@ -452,6 +475,13 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
                | Tir.TInt | Tir.TBool | Tir.TUnit ->
                  let c = frsh "c" in
                  e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
+                 e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+               | Tir.TFloat when boxed_float ->
+                 let da = frsh "da" in let db = frsh "db" in
+                 e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" da fva);
+                 e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" db fvb);
+                 let c = frsh "c" in
+                 e (Printf.sprintf "%s = fcmp oeq double %s, %s" c da db);
                  e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
                | Tir.TFloat ->
                  let c = frsh "c" in

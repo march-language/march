@@ -28,6 +28,24 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`record_get(r, k) == Some(<float>)` is no longer always false when
+  compiled.** The two sides disagreed on which type decides a constructor
+  field's slot. Construction takes the field types as DECLARED on the ctor —
+  `Option(a)`'s `Some(a)` is the type var `a`, so the slot is `ptr` and a Float
+  payload is boxed into a `march_alloc_float` cell on the way in — while the
+  generated equality function substituted the instantiation (`a := Float`)
+  first and so loaded that slot as a raw `double`, comparing the two box
+  *pointers*. Two equal floats in distinct boxes therefore always compared
+  unequal, silently (correct interpreted, no crash). The eq function now picks
+  the slot from the declared type, exactly as construction does, and unboxes
+  before comparing when the declared field is generic. A field declared
+  concrete `Float` keeps its inline-double slot, so the ABI pinned by
+  `test/native/float_generic_field_abi` is unchanged; Int/Bool are untouched
+  because their generic-slot form is the low-bit tag, which is a bijection.
+  An un-annotated `let d = record_get(...)` still mismatches (let-generalization
+  keeps the payload erased, so the call site asks for the niche encoding while
+  the literal is boxed) — tracked in `specs/todos/`.
+
 - **Compiled closure calls no longer leak two heap boxes per call when a `Float`
   crosses the closure boundary.** Closure dispatch erases every argument and
   result to a uniform pointer, so a `Float` argument was boxed at the call site
