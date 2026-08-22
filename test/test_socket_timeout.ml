@@ -77,6 +77,79 @@ let silent_peer () =
   in
   (port, fun () -> try Unix.close s with Unix.Unix_error _ -> ())
 
+
+(** A real TLS peer that completes a handshake and then says nothing.
+
+    The plain [silent_peer] cannot test this: it never speaks TLS, so the
+    client's handshake fails and [Tls.read] is never reached.  Proving that an
+    ESTABLISHED session bounds its reads needs a server that finishes the
+    handshake and then goes quiet, which is exactly what `openssl s_server
+    -quiet` does when the client sends nothing.
+
+    Returns None when openssl, or a cert we can generate with it, is
+    unavailable — the same skip policy the handshake probe uses. *)
+let silent_tls_peer () =
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+              (Printf.sprintf "march-tlsto-%d" (Unix.getpid ())) in
+  (try Unix.mkdir dir 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let cert = Filename.concat dir "cert.pem" and key = Filename.concat dir "key.pem" in
+  let gen =
+    Printf.sprintf
+      "openssl req -x509 -newkey rsa:2048 -nodes -keyout %s -out %s -days 1        -subj /CN=127.0.0.1 >/dev/null 2>&1" (Filename.quote key) (Filename.quote cert)
+  in
+  if Sys.command gen <> 0 then None
+  else begin
+    (* Pick a free port by binding and releasing it: s_server takes a port
+       rather than an inherited descriptor. *)
+    let probe = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    Unix.setsockopt probe Unix.SO_REUSEADDR true;
+    Unix.bind probe (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+    let port = match Unix.getsockname probe with
+      | Unix.ADDR_INET (_, p) -> p
+      | _ -> 0 in
+    Unix.close probe;
+    if port = 0 then None
+    else begin
+      (* -naccept 2, and not 1: the readiness check below consumes one accept,
+         and the probe itself needs the other.  Restarting the server instead
+         raced against the port's TIME_WAIT and the client arrived to a closed
+         listener. *)
+      let cmd = Printf.sprintf
+        "openssl s_server -quiet -naccept 2 -cert %s -key %s -accept %d \
+         >/dev/null 2>&1" (Filename.quote cert) (Filename.quote key) port in
+      (* stdin must stay OPEN and empty.  Redirecting from /dev/null gives
+         s_server an immediate EOF, and it answers that by shutting the TLS
+         session down cleanly — which SSL_read reports as Ok("") rather than as
+         a deadline expiring, so the probe measured a close instead of a
+         silence.  A pipe nobody writes to is the silence we want. *)
+      let stdin_r, stdin_w = Unix.pipe () in
+      let pid = Unix.create_process "/bin/sh" [| "/bin/sh"; "-c"; cmd |]
+                  stdin_r Unix.stdout Unix.stderr in
+      Unix.close stdin_r;
+      let stop () =
+        (try Unix.close stdin_w with Unix.Unix_error _ -> ());
+        (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+        (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
+        List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [cert; key];
+        (try Unix.rmdir dir with Unix.Unix_error _ -> ())
+      in
+      (* Wait for the listener rather than sleeping a guessed amount: a probe
+         that connects before s_server binds fails for the wrong reason, which
+         is exactly how this helper failed when it guessed. *)
+      let rec wait_bound n =
+        if n = 0 then false
+        else
+          let c = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+          match Unix.connect c (Unix.ADDR_INET (Unix.inet_addr_loopback, port)) with
+          | () -> Unix.close c; true
+          | exception Unix.Unix_error _ ->
+            (try Unix.close c with Unix.Unix_error _ -> ());
+            Thread.delay 0.1; wait_bound (n - 1)
+      in
+      if not (wait_bound 50) then (stop (); None) else Some (port, stop)
+    end
+  end
+
 (** A peer that accepts and immediately writes [payload].  This is the
     non-vacuity control: it must still be read successfully. *)
 let talking_peer payload =
@@ -248,6 +321,59 @@ mod TlsTimeoutProbe do
 end
 |}
 
+
+(* A session that HANDSHAKES and then waits.  The handshake probe above proves
+   the fd deadline reaches SSL_connect; this one proves it reaches SSL_read,
+   and — the point of the variant — that an expired deadline is reported as
+   its own fact rather than as a generic read error.  OpenSSL surfaces both an
+   expired SO_RCVTIMEO and a connection reset as SSL_ERROR_SYSCALL, so without
+   the errno check they are the same string. *)
+let tls_read_probe_src =
+  {|
+mod TlsReadTimeoutProbe do
+
+  needs IO.NetConnect
+  needs IO.NetConnect.TLS
+  needs IO.Process
+  needs IO.Console
+
+  pfn port_from_env(name) do
+    match string_to_int(String.trim(Env.get(name, "0"))) do
+    Some(p) -> p
+    None    -> 0
+    end
+  end
+
+  fn main(_c1 : Cap(IO.NetConnect), _c2 : Cap(IO.NetConnect.TLS),
+          _c3 : Cap(IO.Process), _c4 : Cap(IO.Console)) do
+    let port = port_from_env("MARCH_TEST_TLS_PORT")
+    match Socket.connect("127.0.0.1", port) do
+    Err(e) -> println("E FAIL connect " ++ Socket.error_message(e))
+    Ok(fd) ->
+      match Socket.set_recv_timeout(fd, 500) do
+      Err(e) -> println("E FAIL setopt " ++ Socket.error_message(e))
+      Ok(_) ->
+        match Tls.client_ctx(TlsConfig("", "", "", ["http/1.1"], Tls12, false)) do
+        Err(_) -> println("E FAIL ctx")
+        Ok(ctx) ->
+          match Tls.connect(fd, ctx, "127.0.0.1") do
+          Err(e) -> println("E FAIL handshake " ++ Tls.error_to_string(e))
+          Ok(conn) ->
+            match Tls.read(conn, 4096) do
+            Err(TlsReadTimeout) -> println("E OK TlsReadTimeout")
+            Err(e)              -> println("E FAIL " ++ Tls.error_to_string(e))
+            Ok(_)               -> println("E FAIL read-returned-data")
+            end
+          end
+        end
+      end
+      Socket.close(fd)
+    end
+  end
+
+end
+|}
+
 (* ── Harness ───────────────────────────────────────────────────────────── *)
 
 let read_file path =
@@ -394,9 +520,45 @@ let test_tls_read_deadline () =
             true
             (contains out "C OK bounded"))
 
+
+let test_tls_read_timeout_variant () =
+  match silent_tls_peer () with
+  | None ->
+    Printf.printf
+      "  [skip] TLS read-timeout probe: no openssl s_server to hold a session open\n"
+  | Some (port, close_tls) ->
+    Fun.protect
+      ~finally:(fun () -> close_tls ())
+      (fun () ->
+        match
+          compile_and_run ~slug:"tls_read_timeout" ~src:tls_read_probe_src
+            ~timeout_secs:30. ~env:[ Printf.sprintf "MARCH_TEST_TLS_PORT=%d" port ]
+        with
+        | None -> ()
+        | Some (out, elapsed) ->
+          Alcotest.(check bool)
+            (Printf.sprintf
+               "an established TLS session bounds its reads (took %.1fs)" elapsed)
+            true (elapsed < 10.);
+          if contains out "E FAIL ctx" || contains out "E FAIL connect" then
+            Printf.printf
+              "  [skip] TLS read-timeout probe: no usable OpenSSL TLS context (out: %s)\n"
+              (String.trim out)
+          else
+            (* The variant, not merely the bound: TlsReadError would also mean
+               the read stopped, and would say nothing about the peer. *)
+            Alcotest.(check bool)
+              (Printf.sprintf
+                 "a silent peer after a completed handshake yields \
+                  TlsReadTimeout (got: %s)" (String.trim out))
+              true
+              (contains out "E OK TlsReadTimeout"))
+
 let suites =
   [ ( "socket_timeout",
       [ Alcotest.test_case "socket read deadlines (compiled)" `Slow
           test_socket_read_deadlines;
+        Alcotest.test_case "tls read timeout is its own variant (compiled)" `Slow
+          test_tls_read_timeout_variant;
         Alcotest.test_case "TLS read deadline via SO_RCVTIMEO (compiled)" `Slow
           test_tls_read_deadline ] ) ]

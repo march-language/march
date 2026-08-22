@@ -41,6 +41,12 @@ mod Tls do
     | TlsReadError(String)
     | TlsWriteError(String)
     | TlsContextError(String)
+    -- A read deadline expired with the peer still silent.  Distinct from
+    -- TlsReadError because only one of the two says anything about the peer:
+    -- OpenSSL reports both an expired SO_RCVTIMEO and a connection reset as
+    -- SSL_ERROR_SYSCALL, and a caller that cannot tell them apart cannot say
+    -- why a stream ended.
+    | TlsReadTimeout
 
   -- TlsConfig: configuration for creating a TLS context
   --
@@ -222,12 +228,19 @@ mod Tls do
   handshake bounds the handshake too.  A deadline that fires part-way through
   a TLS record leaves the session unusable, so treat an expired read as
   "close the connection", not as something to retry.
+
+  When that deadline expires this returns Err(TlsReadTimeout), which is a
+  different fact from Err(TlsReadError(...)) -- the peer was silent, rather
+  than the connection failing.  Both still mean close it.
   """
   fn read(conn, max_bytes) do
     match conn do
     TlsConn(h) ->
       match tls_read(h, max_bytes) do
-      Err(msg) -> Err(TlsReadError(msg))
+      -- "recv: timed out" is the runtime's one spelling of an expired
+      -- deadline (MARCH_RECV_TIMEOUT_MSG), matched exactly here the way
+      -- Socket.recv_timeout matches it.
+      Err(msg) -> if msg == "recv: timed out" do Err(TlsReadTimeout) else Err(TlsReadError(msg)) end
       Ok(data) -> Ok(data)
       end
     end
@@ -342,6 +355,8 @@ mod Tls do
   "TLS certificate error: invalid CN"
   >>> Tls.error_to_string(TlsReadError("EOF"))
   "TLS read error: EOF"
+  >>> Tls.error_to_string(TlsReadTimeout)
+  "TLS read timed out"
   >>> Tls.error_to_string(TlsWriteError("broken pipe"))
   "TLS write error: broken pipe"
   >>> Tls.error_to_string(TlsContextError("bad cert"))
@@ -352,6 +367,7 @@ mod Tls do
     TlsHandshakeFailed(msg) -> "TLS handshake failed: " ++ msg
     TlsCertError(msg)       -> "TLS certificate error: " ++ msg
     TlsReadError(msg)       -> "TLS read error: " ++ msg
+    TlsReadTimeout          -> "TLS read timed out"
     TlsWriteError(msg)      -> "TLS write error: " ++ msg
     TlsContextError(msg)    -> "TLS context error: " ++ msg
     end
