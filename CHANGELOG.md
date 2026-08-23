@@ -11,6 +11,8 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-22
+
 ### Added
 
 - **`Socket.set_recv_timeout(fd, ms)`** — bounds every subsequent blocking read
