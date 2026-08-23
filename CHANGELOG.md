@@ -11,7 +11,7 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-22
+## [0.3.0] - 2026-08-23
 
 ### Added
 
