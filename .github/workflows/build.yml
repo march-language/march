@@ -65,6 +65,12 @@ jobs:
             -v ${{ github.workspace }}:/work
             -w /work
           run: |
+            # set -e is load-bearing: without it this block's exit status is
+            # that of its LAST command, which is `cp LICENSE ... || true` and
+            # therefore always 0. Every v0.2.0 and v0.3.0 linux-aarch64 archive
+            # shipped with an EMPTY bin/ because the build (or the cp that
+            # follows it) failed here and the job still reported success.
+            set -euo pipefail
             apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19 brotli-dev brotli-libs
             # Build blake3 from source (portable C only — no x86 SIMD on aarch64)
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
@@ -165,6 +171,33 @@ jobs:
           cp LICENSE _dist/ 2>/dev/null || true
 
       # --- Package ---
+
+      # A release archive's whole purpose is to deliver these two binaries, and
+      # until now nothing checked that it did. The linux-aarch64 leg shipped an
+      # empty bin/ in BOTH v0.2.0 (504 KB) and v0.3.0 (692 KB) -- stdlib and
+      # runtime sources present, no compiler -- while the job reported success
+      # and the published checksums verified. A correctly-hashed, correctly-
+      # uploaded, useless artifact is the failure mode this guards.
+      #
+      # Runs BEFORE `strip`, because strip's `|| true` was the second place the
+      # absence was swallowed.
+      - name: Verify the build produced both binaries
+        run: |
+          set -euo pipefail
+          fail=0
+          for b in march forge; do
+            p="_dist/bin/$b"
+            if [ ! -f "$p" ]; then
+              echo "::error::${{ matrix.platform }}: $p is MISSING — the build did not produce it, or the copy into _dist failed. Refusing to publish an archive with no compiler in it." >&2
+              fail=1
+            elif [ ! -s "$p" ]; then
+              echo "::error::${{ matrix.platform }}: $p exists but is EMPTY (0 bytes)." >&2
+              fail=1
+            else
+              echo "  $p: $(wc -c < "$p") bytes"
+            fi
+          done
+          exit $fail
 
       - name: Strip binary
         run: |
