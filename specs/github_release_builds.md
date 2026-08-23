@@ -4,12 +4,20 @@ This spec defines how March compiler binaries are built, packaged, and published
 
 ## Build Matrix
 
+> **Stale-doc note (2026-08-23):** this document described a FOUR-platform
+> matrix including `macos-13` / `darwin-x86_64` long after that leg was removed
+> in `d083eb65` ("drop darwin-x86_64 — macOS-13 runners no longer available").
+> The row is gone below, but the YAML quoted further down this file is still
+> illustrative rather than current — `.github/workflows/build.yml` is the
+> source of truth for what actually builds. Intel macOS has no prebuilt;
+> `install.sh` detects it and points at building from source.
+
+
 All builds target OCaml 5.3.0 and produce native binaries for four platforms:
 
 | OS    | Architecture | Runner              | Platform string  | Linking    |
 |-------|-------------|---------------------|------------------|------------|
 | macOS | Apple Silicon | `macos-14`          | `darwin-arm64`   | dynamic    |
-| macOS | Intel        | `macos-13`          | `darwin-x86_64`  | dynamic    |
 | Linux | x86-64       | `ubuntu-22.04`      | `linux-x86_64`   | static (musl) |
 | Linux | AArch64      | `ubuntu-22.04` + QEMU | `linux-aarch64`  | static (musl) |
 
