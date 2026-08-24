@@ -44,18 +44,19 @@ type t = {
   mutable next_slot : int;
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
   compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
-  (* `$clo_wrap` trampolines already DEFINED by a prior fragment of this
-     session.  Sibling of [compiled_fns], and needed for the same reason: every
-     fragment of one session is materialized into a single symbol namespace, so
-     a symbol emitted twice is a duplicate definition.  Codegen's own
-     [emitted_wraps] table is per-FRAGMENT and cannot see across that boundary,
-     so a second fragment using the same top-level fn as a first-class value
-     re-defined `@<fn>$clo_wrap` — ORC's shared JITDylib rejects that outright
+  (* `$clo_wrap` trampolines DEFINED by a prior fragment of this session that
+     ACTUALLY COMPILED.  Sibling of [compiled_fns] in every respect, including
+     its commit discipline (see [commit_wraps]): every fragment of one session
+     is materialized into a single symbol namespace, so a symbol emitted twice
+     is a duplicate definition.  Codegen's own [emitted_wraps] table is
+     per-FRAGMENT and cannot see across that boundary, so a second fragment
+     using the same top-level fn as a first-class value re-defined
+     `@<fn>$clo_wrap` — ORC's shared JITDylib rejects that outright
      ("duplicate definition of symbol"), while clang's per-.so flat namespace
-     happened to tolerate it.  Handed to the emitters as [~session_wraps]; the
-     first fragment to need a wrapper defines it, later ones emit a `declare`.
-     Lives on [t] (never global) because a NEW session gets a new dylib
-     namespace in which none of these symbols exist. *)
+     happened to tolerate it.  Reached by the emitters through
+     [~session_wraps]: the first fragment to need a wrapper defines it, later
+     ones emit a `declare`.  Lives on [t] (never global) because a NEW session
+     gets a new dylib namespace in which none of these symbols exist. *)
   wrap_defined : (string, unit) Hashtbl.t;
   global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
   global_type_defs : (string, March_tir.Tir.type_def) Hashtbl.t;  (* type name -> TDVariant/TDRecord for display *)
@@ -361,6 +362,27 @@ let mark_compiled_fns ctx (fns : March_tir.Tir.fn_def list) =
     Hashtbl.replace ctx.compiled_fns f.fn_name ()
   ) fns
 
+(** Fresh per-fragment `$clo_wrap` bookkeeping to hand to an emit entry point:
+    the session's committed definitions to read, plus an empty pending set for
+    this fragment's own [`Define] decisions.  Pure — nothing on [ctx] changes
+    until [commit_wraps]. *)
+let fresh_wrap_state ctx : March_tir.Llvm_emit.session_wraps =
+  { sw_defined = ctx.wrap_defined; sw_pending = Hashtbl.create 8 }
+
+(** Promote a fragment's pending `$clo_wrap` definitions into the session.
+
+    EXACTLY the same discipline as [mark_compiled_fns], and it must be called in
+    exactly the same places: AFTER [compile_fragment] + dlopen succeed.  A
+    fragment that emitted a wrapper and then failed to compile materialized
+    NOTHING, and the REPL keeps going (the failure is printed, not fatal) — so
+    recording it at emission time would make the NEXT fragment emit a `declare`
+    against a symbol that does not exist, turning a recoverable compile error
+    into an unresolved-symbol failure, in a spot where the pre-dedupe code
+    recovered by simply redefining the wrapper.  On the failure path the caller
+    drops the state: it is a local value, so there is nothing to roll back. *)
+let commit_wraps ctx (sw : March_tir.Llvm_emit.session_wraps) =
+  Hashtbl.iter (fun k () -> Hashtbl.replace ctx.wrap_defined k ()) sw.sw_pending
+
 (** Build the [repl_slot_info list] passed to LLVM emit functions from
     the current [ctx.var_slots] list. *)
 let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
@@ -638,12 +660,14 @@ let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
       let (new_fns, extern_fns) = partition_fns ctx tir.March_tir.Tir.tm_fns in
       if new_fns <> [] then begin
         ignore (next_id ctx);
+        let sw = fresh_wrap_state ctx in
         let ir = March_tir.Llvm_emit.emit_fns_fragment
           ~types:tir.March_tir.Tir.tm_types ~fns:new_fns ~extern_fns
-          ~session_wraps:ctx.wrap_defined ~repl:true () in
+          ~session_wraps:sw ~repl:true () in
         (try
           ignore (compile_fragment ctx ir);
-          mark_compiled_fns ctx new_fns
+          mark_compiled_fns ctx new_fns;
+          commit_wraps ctx sw
         with Failure msg ->
           Printf.eprintf "jit: module compile failed: %s\n%!" msg)
       end
@@ -683,6 +707,7 @@ let run_expr ctx ~tc_env m =
   in
   (* Advance counter only when we are about to emit — keeps counter in sync with artifacts. *)
   let n = next_id ctx in
+  let sw = fresh_wrap_state ctx in
   let ir = time_phase "emit_ir" (fun () ->
     March_tir.Llvm_emit.emit_repl_expr
       ~n ~ret_ty
@@ -690,12 +715,13 @@ let run_expr ctx ~tc_env m =
       ~fns:new_fns
       ~extern_fns
       ~store_as_slot:(Some v_slot)
-      ~session_wraps:ctx.wrap_defined
+      ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body) in
   let handle = time_phase "clang+dlopen"
     (fun () -> compile_fragment ctx ir) in
   mark_compiled_fns ctx new_fns;
+  commit_wraps ctx sw;
   let sym_name = Printf.sprintf "repl_%d" n in
   let fptr = lookup_sym ctx handle sym_name in
   let result_str = match ret_ty with
@@ -812,26 +838,30 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
        outer lambda's IR referenced the inner lambda before it was declared. *)
     (if helper_fns <> [] then begin
       ignore (next_id ctx);  (* advance counter so compile_fragment uses right id *)
+      let sw = fresh_wrap_state ctx in
       let ir = March_tir.Llvm_emit.emit_fns_fragment
         ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types) ~fns:helper_fns
-        ~extern_fns ~session_wraps:ctx.wrap_defined ~repl:true () in
+        ~extern_fns ~session_wraps:sw ~repl:true () in
       (* Wrap in compile_fragment — uses counter (= hn) for the file name. *)
       (try
         ignore (compile_fragment ctx ir);
-        mark_compiled_fns ctx helper_fns
+        mark_compiled_fns ctx helper_fns;
+        commit_wraps ctx sw
       with exn ->
         raise exn)
     end);
     (* Emit primary function AND store closure in a persistent slot. *)
     let pn = next_id ctx in
     let slot = alloc_slot ctx in
+    let sw = fresh_wrap_state ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
       ~n:pn ~bind_name ~dest_slot:slot ~prev_slots:(prev_slots_of ctx)
-      ~extern_fns:(extern_fns @ helper_fns) ~session_wraps:ctx.wrap_defined
+      ~extern_fns:(extern_fns @ helper_fns) ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       primary_fn in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
+    commit_wraps ctx sw;
     let init_name = Printf.sprintf "repl_%d_init" pn in
     let fptr = lookup_sym ctx handle init_name in
     Jit.call_void_to_void fptr;
@@ -851,6 +881,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let slot = alloc_slot ctx in
     (* Advance counter only when about to emit. *)
     let n = next_id ctx in
+    let sw = fresh_wrap_state ctx in
     let ir = March_tir.Llvm_emit.emit_repl_decl
       ~n ~name:bind_name
       ~val_ty:main_fn.fn_ret_ty
@@ -858,11 +889,12 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       ~prev_slots:(prev_slots_of ctx)
       ~fns:user_fns
       ~extern_fns
-      ~session_wraps:ctx.wrap_defined
+      ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx user_fns;
+    commit_wraps ctx sw;
     let init_name = Printf.sprintf "repl_%d_init" n in
     let fptr = lookup_sym ctx handle init_name in
     Jit.call_void_to_void fptr;
@@ -948,9 +980,10 @@ let precompile_stdlib ctx
           not (Hashtbl.mem ctx.compiled_fns f.fn_name))
         tir.March_tir.Tir.tm_fns in
       if stdlib_fns <> [] then begin
+        let sw = fresh_wrap_state ctx in
         let ir = March_tir.Llvm_emit.emit_fns_fragment
           ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns
-          ~session_wraps:ctx.wrap_defined ~repl:true () in
+          ~session_wraps:sw ~repl:true () in
         let n = next_id ctx in
         let ll_path = Filename.concat ctx.tmp_dir
           (Printf.sprintf "stdlib_prelude_%d.ll" n) in
@@ -1010,7 +1043,8 @@ let precompile_stdlib ctx
              ctx.handles <- handle :: ctx.handles;
              List.iter (fun (f : March_tir.Tir.fn_def) ->
                Hashtbl.replace ctx.compiled_fns f.fn_name ()
-             ) stdlib_fns
+             ) stdlib_fns;
+             commit_wraps ctx sw
            with exn ->
              Printf.eprintf "march JIT: stdlib .so dlopen failed (%s)\n%!"
                (Printexc.to_string exn))

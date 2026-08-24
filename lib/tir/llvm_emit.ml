@@ -117,6 +117,10 @@ let _repr_audit = Llvm_ctx._repr_audit
    here; the ~9-site consolidation below calls them by their bare names. *)
 
 type ctor_entry = Llvm_ctx.ctor_entry = { ce_tag : int; ce_fields : Tir.ty list }
+type session_wraps = Llvm_ctx.session_wraps = {
+  sw_defined : (string, unit) Hashtbl.t;
+  sw_pending : (string, unit) Hashtbl.t;
+}
 type ctx = Llvm_ctx.ctx = {
   buf       : Buffer.t;
   preamble  : Buffer.t;
@@ -141,7 +145,7 @@ type ctx = Llvm_ctx.ctx = {
   var_slot  : (string, string) Hashtbl.t;
   local_names : (string, int) Hashtbl.t;
   emitted_wraps : (string, unit) Hashtbl.t;
-  mutable session_wraps : (string, unit) Hashtbl.t option;
+  mutable session_wraps : Llvm_ctx.session_wraps option;
   static_clos : (string, string) Hashtbl.t;
   extra_fns : Buffer.t;
   emitted_eq_fns : (string, unit) Hashtbl.t;

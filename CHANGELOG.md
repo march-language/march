@@ -13,6 +13,7 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- REPL JIT: referencing the same top-level function as a value across multiple lines no longer fails with "duplicate definition of symbol '<fn>$clo_wrap'" (ORC backend).
 - REPL, experimental ORC JIT backend (`MARCH_JIT_BACKEND=orc`): defining a
   second function in a session crashed the process with SIGSEGV. Each `fn`
   fragment re-emitted its prior-binding slot loaders with external linkage,

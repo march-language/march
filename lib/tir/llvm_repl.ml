@@ -221,7 +221,7 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
     ?(store_as_slot : int option = None)
-    ?(session_wraps : (string, unit) Hashtbl.t option)
+    ?(session_wraps : Llvm_ctx.session_wraps option)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = Llvm_ctx.make_ctx ~fast_math ~repl:true ~type_defs:types () in
@@ -274,7 +274,7 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
     ~(prev_slots : repl_slot_info list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
-    ?(session_wraps : (string, unit) Hashtbl.t option)
+    ?(session_wraps : Llvm_ctx.session_wraps option)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   ignore name;
@@ -352,7 +352,7 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
     ~(dest_slot : int)
     ~(prev_slots : repl_slot_info list)
     ?(extern_fns : Tir.fn_def list = [])
-    ?(session_wraps : (string, unit) Hashtbl.t option)
+    ?(session_wraps : Llvm_ctx.session_wraps option)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   ignore bind_name;
@@ -434,7 +434,7 @@ let emit_fns_fragment
     ~(types : Tir.type_def list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
-    ?(session_wraps : (string, unit) Hashtbl.t option)
+    ?(session_wraps : Llvm_ctx.session_wraps option)
     ~(repl : bool)
     () : string =
   let ctx = Llvm_ctx.make_ctx ~repl ~type_defs:types () in

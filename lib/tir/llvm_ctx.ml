@@ -29,6 +29,35 @@
 (** Constructor info: ctor_name → (tag_index, field_tir_types) *)
 type ctor_entry = { ce_tag : int; ce_fields : Tir.ty list }
 
+(** REPL/JIT cross-FRAGMENT bookkeeping for `$clo_wrap` trampolines.
+
+    [emitted_wraps] on the ctx is scoped to ONE fragment, which is exactly right
+    natively (one module) but wrong under the JIT, where every fragment of a
+    session is materialized into a SINGLE symbol namespace: a second fragment
+    that also uses `double` as a first-class value would re-define
+    `@double$clo_wrap`, which ORC's shared JITDylib rejects outright ("duplicate
+    definition of symbol") and clang's per-.so flat namespace merely tolerated.
+
+    Two tables, for the same reason [Repl_jit.partition_fns] and
+    [Repl_jit.mark_compiled_fns] are two separate steps:
+
+    - [sw_defined] — wrappers a PREVIOUSLY SUCCEEDED fragment actually
+      materialized. Read-only here; a hit means "emit a `declare`".
+    - [sw_pending] — the [`Define] decisions THIS fragment just made. Emission
+      writes only here; [Repl_jit] promotes them into [sw_defined] only after
+      [compile_fragment] + dlopen succeed, and drops them otherwise.
+
+    Committing at emission time instead would be a real bug, not a nicety: a
+    fragment can emit a define and then FAIL to compile (the REPL prints the
+    error and continues). A session table already claiming the wrapper exists
+    would make the next fragment emit a `declare` against a symbol that was
+    never materialized — an unresolved symbol, where the pre-change code
+    recovered by simply redefining it. *)
+type session_wraps = {
+  sw_defined : (string, unit) Hashtbl.t;
+  sw_pending : (string, unit) Hashtbl.t;
+}
+
 type ctx = {
   buf       : Buffer.t;
   preamble  : Buffer.t;
@@ -112,19 +141,10 @@ type ctx = {
   local_names : (string, int) Hashtbl.t;
   (* Tracks which closure wrappers have been generated for top-level fns *)
   emitted_wraps : (string, unit) Hashtbl.t;
-  (* REPL/JIT only: cross-FRAGMENT memory of which `$clo_wrap` trampolines a
-     Repl_jit SESSION has already DEFINED.  [emitted_wraps] above is scoped to
-     one fragment's ctx, which is exactly right natively (one module) but wrong
-     under the JIT, where every fragment of a session lands in ONE symbol
-     namespace: a second fragment that also uses `double` as a first-class
-     value would re-define `@double$clo_wrap`, which ORC's shared JITDylib
-     rejects outright ("duplicate definition of symbol") and clang's per-.so
-     flat namespace merely tolerated.  When present, the first fragment to need
-     a wrapper defines it and later fragments emit a `declare` instead — see
-     [wrap_emit_kind].  Per-SESSION, never global: a new Repl_jit gets a new
-     LLJIT/dylib namespace that cannot see the old session's definitions.
-     [None] on the AOT path ([emit_module]), leaving it exactly as before. *)
-  mutable session_wraps : (string, unit) Hashtbl.t option;
+  (* REPL/JIT cross-fragment `$clo_wrap` bookkeeping — see the [session_wraps]
+     type above and [wrap_emit_kind] below.  [None] on the AOT path
+     ([emit_module]), which therefore behaves exactly as it did before. *)
+  mutable session_wraps : session_wraps option;
   (* Memo: mangled fn name -> emitted static-closure global symbol.
      One immortal closure object per top-level function used as a value,
      replacing a fresh march_alloc(24) at every materialization site. *)
@@ -767,14 +787,23 @@ let intern_static_closure ?(pad = 0) ctx fn_name wrap_name =
                    it, so emit only [Llvm_calls.clo_wrap_declare] and let the
                    linker/JITDylib bind the reference.  Only ever returned when
                    a session table is installed (see [session_wraps]); the AOT
-                   path never sees it. *)
+                   path never sees it.
+
+    A [`Define] is recorded in [sw_pending], NOT [sw_defined]: this fragment has
+    only decided to emit the wrapper, and may still fail to compile.  Promotion
+    to [sw_defined] belongs to [Repl_jit], next to [mark_compiled_fns], once the
+    fragment actually materialized.
+
+    Repeats within ONE fragment are caught by [emitted_wraps] before either
+    session table is consulted, so a fragment can never define the same wrapper
+    twice regardless of what the session tables hold. *)
 let wrap_emit_kind ctx (wrap_name : string) : [ `Skip | `Define | `Declare ] =
   if Hashtbl.mem ctx.emitted_wraps wrap_name then `Skip
   else begin
     Hashtbl.add ctx.emitted_wraps wrap_name ();
     match ctx.session_wraps with
-    | Some t when Hashtbl.mem t wrap_name -> `Declare
-    | Some t -> Hashtbl.add t wrap_name (); `Define
+    | Some sw when Hashtbl.mem sw.sw_defined wrap_name -> `Declare
+    | Some sw -> Hashtbl.replace sw.sw_pending wrap_name (); `Define
     | None -> `Define
   end
 
