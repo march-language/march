@@ -55,24 +55,31 @@ static const char *default_llvm_paths[] = {
     NULL,
 };
 
+/* Try to dlopen libLLVM: MARCH_LLVM_LIB override if set, else the first
+ * working entry in default_llvm_paths. Never raises; returns NULL on
+ * failure. Shared by load_libllvm_once (which raises on NULL) and the
+ * no-raise availability probe below. */
+static void *try_open_libllvm(void) {
+    const char *override = getenv("MARCH_LLVM_LIB");
+    if (override && override[0]) return dlopen(override, RTLD_NOW | RTLD_GLOBAL);
+    for (int i = 0; default_llvm_paths[i]; ++i) {
+        void *h = dlopen(default_llvm_paths[i], RTLD_NOW | RTLD_GLOBAL);
+        if (h) return h;
+    }
+    return NULL;
+}
+
 static void load_libllvm_once(void) {
     if (llvm_loaded) return;
     const char *override = getenv("MARCH_LLVM_LIB");
-    void *h = NULL;
-    if (override && override[0]) {
-        h = dlopen(override, RTLD_NOW | RTLD_GLOBAL);
-        if (!h) {
+    void *h = try_open_libllvm();
+    if (!h) {
+        if (override && override[0]) {
             char buf[512];
             snprintf(buf, sizeof buf, "MARCH_LLVM_LIB=%s dlopen: %s",
                      override, dlerror());
             caml_failwith(buf);
-        }
-    } else {
-        for (int i = 0; default_llvm_paths[i]; ++i) {
-            h = dlopen(default_llvm_paths[i], RTLD_NOW | RTLD_GLOBAL);
-            if (h) break;
-        }
-        if (!h) {
+        } else {
             caml_failwith(
                 "libLLVM not found — on macOS: `brew install llvm`; "
                 "on Linux: `apt-get install llvm-18`; "
@@ -80,6 +87,18 @@ static void load_libllvm_once(void) {
         }
     }
     llvm_loaded = 1;
+}
+
+/* 0 = unknown, 1 = available, -1 = not found. Never raises. */
+static int llvm_probe_state = 0;
+
+CAMLprim value march_orc_available(value v_unit) {
+    CAMLparam1(v_unit);
+    if (llvm_probe_state == 0) {
+        if (llvm_loaded || try_open_libllvm()) { llvm_probe_state = 1; llvm_loaded = 1; }
+        else llvm_probe_state = -1;
+    }
+    CAMLreturn(Val_bool(llvm_probe_state == 1));
 }
 
 /* ── error helper ─────────────────────────────────────────────────────── */
