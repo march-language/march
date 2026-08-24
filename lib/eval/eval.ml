@@ -9511,8 +9511,16 @@ let base_env : env =
 (* Evaluation                                                          *)
 (* ------------------------------------------------------------------ *)
 
+(** Monomorphic assoc over [env]. [List.assoc_opt] goes through polymorphic
+    [compare] (caml_compare → compare_val → memcmp per entry); on a ~650-entry
+    builtin tail that was ~95% of interpreted run time (sampled 2026-08-23). *)
+let rec assoc_str (name : string) (env : env) : value option =
+  match env with
+  | [] -> None
+  | (k, v) :: rest -> if String.equal k name then Some v else assoc_str name rest
+
 let lookup name env =
-  match List.assoc_opt name env with
+  match assoc_str name env with
   | Some v -> v
   | None ->
     (* Qualified module references (dotted names like "Beta.value") are desugared

@@ -4878,8 +4878,26 @@ let test_eval_or_pattern_binding_alternatives () =
   Alcotest.(check int) "non-or arm still reached" 0
     (call (March_eval.Eval.VCon ("C", [])))
 
+let test_lookup_shadowing_innermost_wins () =
+  let env = [("x", March_eval.Eval.VInt 2); ("x", March_eval.Eval.VInt 1)] in
+  Alcotest.(check int) "innermost binding" 2
+    (vint (March_eval.Eval.lookup "x" env))
+
+let test_lookup_missing_raises () =
+  Alcotest.check_raises "unbound" (March_eval.Eval.Eval_error "unbound variable: nope")
+    (fun () -> ignore (March_eval.Eval.lookup "nope" []))
+
+let test_assoc_str_is_exact_match () =
+  let env = [("ab", March_eval.Eval.VInt 1); ("a", March_eval.Eval.VInt 2)] in
+  Alcotest.(check int) "prefix does not match" 2
+    (vint (Option.get (March_eval.Eval.assoc_str "a" env)))
+
 let eval_suites =
   [
+      ( "env_lookup", [
+          Alcotest.test_case "innermost wins" `Quick test_lookup_shadowing_innermost_wins;
+          Alcotest.test_case "missing raises" `Quick test_lookup_missing_raises;
+          Alcotest.test_case "assoc_str exact" `Quick test_assoc_str_is_exact_match ] );
       ( "or_patterns",
         [
           Alcotest.test_case "or-pattern over literals" `Quick
