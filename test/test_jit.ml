@@ -40,15 +40,21 @@ let test_orc_available_never_raises () =
    `apt-get install llvm-*`.  CI's macOS and Linux images do have it, so the
    test really runs there. *)
 
-(* dune points HOME at _build/jit_home so the child's stdlib-prelude .so cache
-   is per-build; dune does not create that directory, and the compiler's
-   `mkdir $HOME/.cache` is non-recursive, so make it here. *)
-let ensure_home () =
-  match Sys.getenv_opt "HOME" with
-  | None -> ()
-  | Some h ->
-    let mk d = try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> () in
-    mk h; mk (Filename.concat h ".cache")
+(* Session HOME for the child REPL processes.  Deliberately NOT the ambient
+   HOME: dune's test rule pins HOME at %{project_root}/_build/jit_home, which
+   expands to a RELATIVE path in CI whose parent does not exist from the test
+   cwd (a non-recursive mkdir there ENOENTs), and an own tmp directory keeps
+   the stdlib-precompile / JIT .so caches out of the developer's real
+   ~/.cache.  Per-pid so concurrent test runners never share a half-written
+   cache; created lazily once and shared by every session in this file, so
+   only the first JIT-backed session pays the stdlib precompile. *)
+let session_home = lazy (
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "march_jit_test_home.%d" (Unix.getpid ())) in
+  List.iter
+    (fun d -> try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ())
+    [dir; Filename.concat dir ".cache"];
+  dir)
 
 let march_bin () =
   match Sys.getenv_opt "MARCH_BIN" with
@@ -64,8 +70,9 @@ let run_jit_repl ~backend bin lines =
   List.iter (fun l -> output_string oc (l ^ "\n")) lines;
   close_out oc;
   let cmd =
-    Printf.sprintf "MARCH_JIT_BACKEND=%s %s < %s > %s 2>&1"
-      backend (Filename.quote bin) (Filename.quote tmp_in) (Filename.quote tmp_out) in
+    Printf.sprintf "HOME=%s MARCH_JIT_BACKEND=%s %s < %s > %s 2>&1"
+      (Filename.quote (Lazy.force session_home)) backend
+      (Filename.quote bin) (Filename.quote tmp_in) (Filename.quote tmp_out) in
   let status = Sys.command cmd in
   let ic = open_in_bin tmp_out in
   let n = in_channel_length ic in
@@ -89,7 +96,6 @@ let check_session ?(backend = "orc") name lines expected =
     match march_bin () with
     | None -> Alcotest.(check pass) (name ^ " (skipped: no main.exe)") () ()
     | Some bin ->
-      ensure_home ();
       let (code, out) = run_jit_repl ~backend bin lines in
       (* 139 = SIGSEGV, the exact failure this pins. *)
       Alcotest.(check int)
@@ -187,16 +193,9 @@ let test_orc_fn_calls_let_lambda () =
 let main_exe =
   Filename.concat (Filename.dirname Sys.executable_name) "../bin/main.exe"
 
-(* Per-process so concurrent test runners (dune runs suites in parallel) do
-   not share a half-written cache — the same per-pid convention repl_jit.ml
-   uses for its own artifact dir. *)
-let session_home = lazy (
-  let dir = Filename.concat (Filename.get_temp_dir_name ())
-      (Printf.sprintf "march_jit_test_home.%d" (Unix.getpid ())) in
-  List.iter
-    (fun d -> try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ())
-    [dir; Filename.concat dir ".cache"];
-  dir)
+(* [session_home] (defined with the check_session harness above) is shared by
+   both harnesses in this file — per-pid, so concurrent test runners never
+   share a half-written cache. *)
 
 let clang_available () =
   Sys.command "clang --version >/dev/null 2>&1" = 0
