@@ -1196,3 +1196,4 @@ to the features it exercises. Quick reference:
 | `lib/tir/trmc.ml` / TRMC / `lib/tir/perceus_fbip.ml` | `list_producers` |
 | JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |
 | actor / mailbox / scheduler / supervision changes | `scripts/actor-load.sh` (all four scenarios: `fanin`, `churn`, `callstorm`, `crashloop`) |
+| interpreter (`lib/eval/eval.ml`) / REPL-JIT (`lib/jit/`) changes | `bench/run_interp_bench.sh` (interp vs. compiled vs. repl-clang vs. repl-orc A-B over `bench/interp/`) |
