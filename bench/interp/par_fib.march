@@ -1,0 +1,49 @@
+-- Parallel Fibonacci benchmark (embarrassingly parallel).
+-- Spawns independent tasks for fib(n-1) and fib(n-2) down to a threshold,
+-- then falls back to sequential naive recursion.
+--
+-- This is the classic embarrassingly parallel workload: every subtask is
+-- completely independent with no shared state or communication.
+--
+-- What this tests:
+--   - task_spawn / task_await_unwrap overhead with many small tasks
+--   - Task creation throughput (thousands of tasks)
+--   - No inter-task communication — pure fork/join
+--
+-- Checksum agrees between interpreted and compiled: 75025 (par_fib(25, 18))
+-- Interpreted par_fib(25,18) takes ~2 min; spawn is eager (no real parallelism yet).
+--
+-- Status: REQUIRES true parallelism (OCaml 5 Domains) for speedup.
+--         Phase 1 executes eagerly — measures task overhead only.
+
+mod ParFib do
+  needs IO.Console
+  needs IO.Spawn
+
+pfn fib(n : Int) : Int do
+  if n < 2 do n
+  else fib(n - 1) + fib(n - 2) end
+end
+
+-- Parallel fib: spawn tasks down to threshold, then sequential.
+-- threshold=18 gives ~100k sequential calls per task (good granularity).
+pfn par_fib(n : Int, threshold : Int) : Int do
+  if n < 2 do n
+  else if n <= threshold do fib(n)
+  else do
+    let t1 = task_spawn(fn x -> par_fib(n - 1, threshold))
+    let t2 = task_spawn(fn x -> par_fib(n - 2, threshold))
+    let r1 = task_await_unwrap(t1)
+    let r2 = task_await_unwrap(t2)
+    r1 + r2 end end
+  end
+end
+
+pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  -- fib(25) with parallel threshold at 18
+  -- Scaled down from fib(40, 20) for interpreter speed.
+  let result = par_fib(25, 18)
+  println("checksum=" ++ int_to_string(result))
+end
+
+end

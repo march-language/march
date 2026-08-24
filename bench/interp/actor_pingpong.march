@@ -1,0 +1,40 @@
+-- 20k casts into one actor, then one call to read the total.
+-- expected: checksum=20000
+mod PingPong do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Total(reply_to) do
+      Actor.reply(reply_to, state.n)
+      state
+    end
+
+    on Ping(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  type TotalReq = TotalReq
+
+  fn pump(pid, i) do
+    if i == 0 do ()
+    else
+      send(pid, Ping(1))
+      pump(pid, i - 1)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let pid = spawn(Counter)
+    pump(pid, 20000)
+    run_until_idle()
+    match Actor.call(pid, TotalReq, 30000) do
+      Ok(n)  -> println("checksum=" ++ int_to_string(n))
+      Err(e) -> println("call failed: " ++ e)
+    end
+  end
+end

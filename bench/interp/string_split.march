@@ -1,0 +1,23 @@
+-- Split a 20k-token comma string and count tokens containing "7".
+-- checksum=6878
+mod StringSplit do
+  needs IO.Console
+
+  fn build(i : Int, acc : String) : String do
+    if i == 0 do acc else build(i - 1, acc ++ int_to_string(i) ++ ",") end
+  end
+
+  fn count7(parts : List(String), acc : Int) : Int do
+    match parts do
+    Nil -> acc
+    Cons(p, rest) ->
+      if String.contains(p, "7") do count7(rest, acc + 1) else count7(rest, acc) end
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let s = build(20000, "")
+    let parts = String.split(s, ",")
+    println("checksum=" ++ int_to_string(count7(parts, 0)))
+  end
+end

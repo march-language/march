@@ -1,0 +1,23 @@
+-- HTTP server benchmark for measuring interpreted performance.
+-- Port 18080. Routes:
+--   GET /          -> "hello"
+--   GET /echo/<x>  -> x (echo the path parameter)
+--   *              -> "Not Found" (404)
+
+mod HttpBench do
+  needs IO.NetListen
+
+  fn router(conn) do
+    match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+    (:get, Nil)                   -> conn |> HttpServer.text(200, "hello")
+    (:get, Cons("echo", Cons(x, Nil))) -> conn |> HttpServer.text(200, x)
+    _                             -> conn |> HttpServer.text(404, "Not Found")
+    end
+  end
+
+  fn main(_cap : Cap(IO.NetListen)) do
+    HttpServer.new(18080)
+    |> HttpServer.plug(router)
+    |> HttpServer.listen()
+  end
+end

@@ -1,0 +1,26 @@
+-- Binary trees, depth 10 x 4 iterations: allocation and match dispatch.
+-- expected: checksum=8188
+mod BinaryTrees do
+  needs IO.Console
+
+  type Tree = Leaf | Node(Tree, Tree)
+
+  fn make(d : Int) : Tree do
+    if d == 0 do Leaf else Node(make(d - 1), make(d - 1)) end
+  end
+
+  fn check(t : Tree) : Int do
+    match t do
+    Leaf       -> 1
+    Node(l, r) -> check(l) + check(r) + 1
+    end
+  end
+
+  fn iter(i : Int, acc : Int) : Int do
+    if i == 0 do acc else iter(i - 1, acc + check(make(10))) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("checksum=" ++ int_to_string(iter(4, 0)))
+  end
+end

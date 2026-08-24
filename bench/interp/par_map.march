@@ -1,0 +1,100 @@
+-- Parallel map benchmark (embarrassingly parallel).
+-- Splits a list into chunks and maps an expensive function over each chunk
+-- in a separate task, then concatenates results.
+--
+-- The mapped function (collatz_steps) is pure and independent per element —
+-- no communication between tasks. This is the "map-reduce without reduce"
+-- pattern: embarrassingly parallel with a trivial gather step.
+--
+-- What this tests:
+--   - task_spawn with closure captures (each task captures a list chunk)
+--   - Independent task execution with no shared state
+--   - Task overhead vs sequential map
+--   - List allocation under task boundaries
+--
+-- Checksum agreed between interpreted and compiled: 1834634 (sum of Collatz step counts for 1..20000)
+-- Interpreted par_map(20000, 1000) takes ~3-4 min; spawn is eager (no real parallelism yet).
+--
+-- Status: REQUIRES true parallelism (OCaml 5 Domains) for speedup.
+--         Phase 1 executes eagerly — measures task overhead only.
+
+mod ParMap do
+  needs IO.Console
+  needs IO.Spawn
+
+-- Collatz conjecture step count: a pure, variable-cost function.
+-- Perfect for embarrassingly parallel workloads because each element
+-- is independent and the work per element varies widely.
+pfn collatz_steps(n : Int, acc : Int) : Int do
+  if n == 1 do acc
+  else if n % 2 == 0 do collatz_steps(n / 2, acc + 1)
+  else collatz_steps(3 * n + 1, acc + 1) end end
+end
+
+-- Build a range as a list (tail-recursive with accumulator).
+pfn range_acc(lo : Int, hi : Int, acc : List(Int)) : List(Int) do
+  if lo > hi do acc
+  else range_acc(lo, hi - 1, Cons(hi, acc)) end
+end
+
+pfn range(lo : Int, hi : Int) : List(Int) do
+  range_acc(lo, hi, Nil)
+end
+
+-- Sum a list of integers.
+pfn sum(xs : List(Int), acc : Int) : Int do
+  match xs do
+  Nil -> acc
+  Cons(x, rest) -> sum(rest, acc + x)
+  end
+end
+
+-- Map collatz_steps over a list, collecting step counts.
+pfn map_collatz(xs : List(Int), acc : List(Int)) : List(Int) do
+  match xs do
+  Nil -> acc
+  Cons(x, rest) -> map_collatz(rest, Cons(collatz_steps(x, 0), acc))
+  end
+end
+
+-- Process a list in chunks, spawning a task per chunk.
+-- chunk_acc accumulates the current chunk's elements.
+-- chunk_left counts remaining elements in the current chunk.
+pfn par_map_inner(xs : List(Int), chunk_size : Int,
+                 chunk_acc : List(Int), chunk_left : Int) : Int do
+  match xs do
+  Nil ->
+    -- Process final partial chunk
+    if chunk_left == chunk_size do 0
+    else do
+      let t = task_spawn(fn x -> sum(map_collatz(chunk_acc, Nil), 0))
+      task_await_unwrap(t) end
+    end
+  Cons(h, tl) ->
+    if chunk_left == 0 do
+      -- Chunk full — spawn task, continue with next chunk
+      let t = task_spawn(fn x -> sum(map_collatz(chunk_acc, Nil), 0))
+      let rest_sum = par_map_inner(tl, chunk_size, Cons(h, Nil), chunk_size - 1)
+      let chunk_sum = task_await_unwrap(t)
+      chunk_sum + rest_sum
+    else par_map_inner(tl, chunk_size, Cons(h, chunk_acc), chunk_left - 1)
+    end
+  end
+end
+
+-- Spawn a task per chunk, await all, sum results.
+pfn par_map_sum(xs : List(Int), chunk_size : Int) : Int do
+  par_map_inner(xs, chunk_size, Nil, chunk_size)
+end
+
+pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  -- 20K elements, 1000 per chunk = 20 tasks
+  -- Scaled up from 10K for more parallelism to measure.
+  let n = 20000
+  let chunk_size = 1000
+  let xs = range(1, n)
+  let total = par_map_sum(xs, chunk_size)
+  println("checksum=" ++ int_to_string(total))
+end
+
+end
