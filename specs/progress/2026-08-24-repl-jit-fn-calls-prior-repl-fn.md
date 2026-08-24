@@ -80,10 +80,13 @@ Non-REPL compilation is untouched: `repl_slot_fns` is only ever populated by
 
 ## Still-open adjacent limitations (pre-existing, unchanged)
 
-- `fn` redefinition at the prompt is silently ignored
-  (`2026-08-24-repl-jit-fn-redefinition-silently-ignored.md`), so slot
-  contents for a `fn` name never actually change today; the slot routing
-  here is what makes rebinding *correct* if/when that lands.
+- `fn` redefinition was fixed separately (PR #339, landed the same day):
+  a redefinition compiles under a fresh slot, so a direct call gets the new
+  body while an earlier fn keeps reading the slot index it was compiled
+  against — which is exactly interpreter mode's lexical semantics (verified:
+  2 / 3 / 101 for the redefine-then-call session on interp, clang, and ORC).
+  Pinned by the `redefine then call through prior fn` tests in
+  `test/test_jit.ml`.
 - Referencing a prior fn as a bare value (`let h = f`) errors ("unbound
   variable: f") — separate path, not addressed here.
 - A later `let x = ...` REBINDING allocates a fresh slot; already-compiled
