@@ -119,7 +119,7 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
   add_from tc_env stdlib_decls
 
 let load_decls_into_env env tc_env decls =
-  List.fold_left (fun (e, tc) decl ->
+  let (env_final, tc_final) = List.fold_left (fun (e, tc) decl ->
     let ctx = March_errors.Errors.create () in
     let tc' = March_typecheck.Typecheck.check_decl { tc with errors = ctx } decl in
     (* Always use tc' even when typecheck produces errors: stdlib modules that
@@ -133,14 +133,18 @@ let load_decls_into_env env tc_env decls =
        still populate the eval environment and remain callable in the REPL. *)
     let e' = (try March_eval.Eval.eval_decl e decl with _ -> e) in
     (e', { tc' with errors = March_errors.Errors.create () })
-  ) (env, tc_env) decls
+  ) (env, tc_env) decls in
+  March_eval.Eval.install_global_tail env_final;
+  (env_final, tc_final)
 
 (** Run only eval_decl for each stdlib module (skip typechecking).
     Used when the typecheck env is loaded from cache. *)
 let eval_decls_only env decls =
-  List.fold_left (fun e decl ->
+  let env_final = List.fold_left (fun e decl ->
     (try March_eval.Eval.eval_decl e decl with _ -> e)
-  ) env decls
+  ) env decls in
+  March_eval.Eval.install_global_tail env_final;
+  env_final
 
 (** Try to load a cached typecheck env.  Returns Some tc_env on hit. *)
 (* The compiler's own identity, part of every marshalled cache key below.
@@ -334,6 +338,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
       if not (March_errors.Errors.has_errors input_ctx) then begin
         (try
           env    := March_eval.Eval.eval_decl !env decl;
+          March_eval.Eval.install_global_tail !env;
           tc_env := { new_tc with errors = March_errors.Errors.create () };
           (* Register DMod functions in the JIT dylib so ORC can resolve
              module-qualified names (Counter.create etc.) in later fragments.
@@ -608,6 +613,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                Printf.printf "\027[2J\027[H%!"
              | ":reset" when not is_debug ->
                env    := e0;
+               March_eval.Eval.install_global_tail !env;
                tc_env := tc0;
                Printf.printf "REPL state reset.\n%!"
              | ":help" ->
@@ -810,6 +816,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                       if not (March_errors.Errors.has_errors ictx) then begin
                         (try
                            env    := March_eval.Eval.eval_decl !env decl;
+                           March_eval.Eval.install_global_tail !env;
                            tc_env := { ntc with errors = March_errors.Errors.create () }
                          with _ -> ())
                       end
@@ -858,6 +865,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                          with Failure _ -> ());
                         (* Always update interpreter env (source of truth for value display) *)
                         env := March_eval.Eval.eval_decl !env d';
+                        March_eval.Eval.install_global_tail !env;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
                         let vstr = match List.assoc_opt bind_name !env with
@@ -867,6 +875,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         if not scroll_mode then Printf.printf "val %s = %s\n%!" bind_name vstr
                       | _ ->
                         env := March_eval.Eval.eval_decl !env d';
+                        March_eval.Eval.install_global_tail !env;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
                         (match d' with
@@ -954,6 +963,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                      Result_vars.push result_h v ty_str;
                      env    := ("v", v)
                               :: (List.remove_assoc "v" !env);
+                     March_eval.Eval.install_global_tail !env;
                      if tc_ok then
                        tc_env := { !tc_env with
                          vars = March_typecheck.Typecheck.StrMap.add "v"
@@ -1003,6 +1013,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                       (match March_eval.Eval.letstar_repl_bind !env p e' with
                        | Ok bs ->
                          env := bs @ !env;
+                         March_eval.Eval.install_global_tail !env;
                          if tc_ok then
                            tc_env := { new_tc with errors = March_errors.Errors.create () };
                          if not scroll_mode then
@@ -1036,6 +1047,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                          (match March_eval.Eval.match_pattern v p with
                           | Some bs ->
                             env := bs @ !env;
+                            March_eval.Eval.install_global_tail !env;
                             if tc_ok then
                               tc_env := { new_tc with errors = March_errors.Errors.create () };
                             if not scroll_mode then
@@ -1214,6 +1226,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       if not (March_errors.Errors.has_errors input_ctx) then begin
         (try
           env := March_eval.Eval.eval_decl !env decl;
+          March_eval.Eval.install_global_tail !env;
           tc_env := { new_tc with errors = March_errors.Errors.create () };
           (match jit_ctx, decl with
            | Some jit, March_ast.Ast.DMod _ ->
@@ -1395,6 +1408,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
            let ntc  = March_typecheck.Typecheck.check_decl itc decl in
            if not (March_errors.Errors.has_errors ictx) then
              (try env    := March_eval.Eval.eval_decl !env decl;
+                  March_eval.Eval.install_global_tail !env;
                   tc_env := { ntc with errors = March_errors.Errors.create () }
               with _ -> ())
          ) extra_decls
@@ -1448,6 +1462,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m
               with Failure _ -> ());
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             March_eval.Eval.install_global_tail !env;
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
              let vstr = match List.assoc_opt bind_name !env with
@@ -1457,6 +1472,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              add_line Notty.A.empty (Printf.sprintf "val %s = %s" bind_name vstr)
            | _ ->
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             March_eval.Eval.install_global_tail !env;
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
              (match d' with
@@ -1561,6 +1577,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str);
              Result_vars.push result_h v ty_str;
              env    := ("v", v) :: (List.remove_assoc "v" !env);
+             March_eval.Eval.install_global_tail !env;
              if tc_ok then
                tc_env := { !tc_env with
                  vars = March_typecheck.Typecheck.StrMap.add "v"
@@ -1598,6 +1615,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          (match March_eval.Eval.letstar_repl_bind !env p e' with
           | Ok bs ->
             env := bs @ !env;
+            March_eval.Eval.install_global_tail !env;
             if tc_ok then
               tc_env := { new_tc with errors = March_errors.Errors.create () };
             List.iter (fun (name, value) ->
@@ -1640,6 +1658,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             (match March_eval.Eval.match_pattern v p with
              | Some bs ->
                env := bs @ !env;
+               March_eval.Eval.install_global_tail !env;
                if tc_ok then
                  tc_env := { new_tc with errors = March_errors.Errors.create () };
                List.iter (fun (name, value) ->
@@ -2008,6 +2027,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                    if not (March_errors.Errors.has_errors input_ctx) then begin
                      (try
                        env := March_eval.Eval.eval_decl !env decl;
+                       March_eval.Eval.install_global_tail !env;
                        tc_env := { new_tc with errors = March_errors.Errors.create () }
                      with _ -> ())
                    end else
