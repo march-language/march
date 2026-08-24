@@ -9511,8 +9511,41 @@ let base_env : env =
 (* Evaluation                                                          *)
 (* ------------------------------------------------------------------ *)
 
+(* ── Global-tail lookup cache ─────────────────────────────────────────
+   [env] is a cons list whose suffix (builtins + loaded module fns) is
+   physically shared by every closure and call frame. Scanning it per
+   variable reference was 95% of interpreted run time. We remember that
+   suffix pointer and hash its contents; [lookup] scans only the local
+   prefix (typically < 20 entries) and then probes the table.
+   Invariants:
+   - a name's value in the table is the FIRST occurrence in the tail
+     (same as the scan), built by inserting from the end;
+   - [global_tail] is compared with physical equality ([==]); an env that
+     does not share the pointer is scanned to the end exactly as before. *)
+let global_tail : env ref = ref []
+let global_tbl : (string, value) Hashtbl.t = Hashtbl.create 1024
+
+let install_global_tail (tail : env) : unit =
+  global_tail := tail;
+  Hashtbl.reset global_tbl;
+  List.iter (fun (k, v) -> Hashtbl.replace global_tbl k v) (List.rev tail)
+
+let clear_global_tail () : unit =
+  global_tail := [];
+  Hashtbl.reset global_tbl
+
+(** Monomorphic assoc over [env]. [List.assoc_opt] goes through polymorphic
+    [compare] (caml_compare → compare_val → memcmp per entry); on a ~650-entry
+    builtin tail that was ~95% of interpreted run time (sampled 2026-08-23). *)
+let rec assoc_str (name : string) (env : env) : value option =
+  if env == !global_tail && env != [] then Hashtbl.find_opt global_tbl name
+  else
+  match env with
+  | [] -> None
+  | (k, v) :: rest -> if String.equal k name then Some v else assoc_str name rest
+
 let lookup name env =
-  match List.assoc_opt name env with
+  match assoc_str name env with
   | Some v -> v
   | None ->
     (* Qualified module references (dotted names like "Beta.value") are desugared
@@ -10260,6 +10293,7 @@ let last_reduction_count : int ref = ref 0
 
 (** Reset all scheduler/task state. Call between test runs. *)
 let reset_scheduler_state () : unit =
+  clear_global_tail ();
   Hashtbl.clear task_registry;
   next_task_id := 0;
   Hashtbl.clear actor_registry;
@@ -11687,6 +11721,7 @@ let eval_module_env (m : module_) : env =
 
   let final_env = make_recursive_env m.mod_decls !env_ref in
   env_ref := final_env;
+  install_global_tail final_env;
   final_env
 
 (** Call an optional hook stored as [Some(fn)] / [None] in a VCon. *)
