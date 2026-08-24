@@ -151,6 +151,11 @@ let emit_slot_loader_fns ctx (prev_slots : repl_slot_info list) =
       let fname  = Llvm_ctx.llvm_name si.rs_bare in
       let ret_ty = Llvm_ctx.llvm_ret_ty ty in
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty si.rs_bare ty;
+      (* Let the EApp/ECallPtr paths route calls to this binding through the
+         loader (closure dispatch) instead of direct-calling an extern @<name>
+         — the direct path's unknown-fn fallback would `declare` the symbol
+         this loader defines, an invalid redefinition within the module. *)
+      Hashtbl.replace ctx.Llvm_ctx.repl_slot_fns si.rs_bare ();
       let (conv_instr, retval) = match ty with
         | Tir.TInt | Tir.TBool -> ("", "%raw")
         | Tir.TFloat -> ("  %fv = bitcast i64 %raw to double\n", "%fv")

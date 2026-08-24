@@ -55,17 +55,17 @@ let march_bin () =
   | Some p when Sys.file_exists p -> Some p
   | _ -> if Sys.file_exists "../bin/main.exe" then Some "../bin/main.exe" else None
 
-(* Feed [lines] to the REPL on stdin with MARCH_JIT_BACKEND=orc; return
+(* Feed [lines] to the REPL on stdin with MARCH_JIT_BACKEND=[backend]; return
    (exit_code, combined_output). *)
-let run_orc_repl bin lines =
-  let tmp_in  = Filename.temp_file "march_orc_repl" ".txt" in
-  let tmp_out = Filename.temp_file "march_orc_repl" ".out" in
+let run_jit_repl ~backend bin lines =
+  let tmp_in  = Filename.temp_file "march_jit_repl" ".txt" in
+  let tmp_out = Filename.temp_file "march_jit_repl" ".out" in
   let oc = open_out tmp_in in
   List.iter (fun l -> output_string oc (l ^ "\n")) lines;
   close_out oc;
   let cmd =
-    Printf.sprintf "MARCH_JIT_BACKEND=orc %s < %s > %s 2>&1"
-      (Filename.quote bin) (Filename.quote tmp_in) (Filename.quote tmp_out) in
+    Printf.sprintf "MARCH_JIT_BACKEND=%s %s < %s > %s 2>&1"
+      backend (Filename.quote bin) (Filename.quote tmp_in) (Filename.quote tmp_out) in
   let status = Sys.command cmd in
   let ic = open_in_bin tmp_out in
   let n = in_channel_length ic in
@@ -80,16 +80,17 @@ let contains hay needle =
   let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
   nl = 0 || go 0
 
-let check_session name lines expected =
-  if not (March_jit.Jit_orc.available ()) then
-    (* libLLVM not installed — nothing to regress against. *)
+let check_session ?(backend = "orc") name lines expected =
+  if backend = "orc" && not (March_jit.Jit_orc.available ()) then
+    (* libLLVM not installed — nothing to regress against.  (The clang
+       backend needs no libLLVM, so only ORC sessions skip here.) *)
     Alcotest.(check pass) (name ^ " (skipped: no libLLVM)") () ()
   else
     match march_bin () with
     | None -> Alcotest.(check pass) (name ^ " (skipped: no main.exe)") () ()
     | Some bin ->
       ensure_home ();
-      let (code, out) = run_orc_repl bin lines in
+      let (code, out) = run_jit_repl ~backend bin lines in
       (* 139 = SIGSEGV, the exact failure this pins. *)
       Alcotest.(check int)
         (Printf.sprintf "%s: exit code (output: %s)" name out) 0 code;
@@ -123,6 +124,52 @@ let test_orc_two_consecutive_fns () =
       ":quit" ]
     [ "val f = <fn>"; "val g = <fn>"; "= 6" ]
 
+(* ── fn calling a previously REPL-defined fn ──────────────────────────────
+
+   Regression for the invalid-IR collision filed as the "Follow-up noticed,
+   NOT fixed here" section of
+   specs/progress/2026-08-24-orc-repl-segfault-fn-def-after-let-lambda.md:
+   a `fn` fragment whose body CALLS a prior REPL binding emitted BOTH the
+   prev-slot loader `define ptr @f()` and (via the unknown-function fallback
+   in llvm_emit's EApp path) a `declare ptr @f(i64)` for the same symbol in
+   one module — "invalid redefinition of function 'f'", after which the REPL
+   reported "I cannot find `g`".  Broken identically under both backends, so
+   pin both.  The call must route through the slot loader + closure dispatch
+   (not a direct extern call) so it follows the slot's current contents. *)
+let fn_calls_fn_session =
+  [ "fn f(x) do x + 1 end";
+    "fn g(x) do f(x) end";
+    "g(41)";
+    ":quit" ]
+let fn_calls_fn_expected =
+  [ "val f = <fn>"; "val g = <fn>"; "= 42" ]
+
+let test_clang_fn_calls_prior_fn () =
+  check_session ~backend:"clang" "clang fn calls prior fn"
+    fn_calls_fn_session fn_calls_fn_expected
+
+let test_orc_fn_calls_prior_fn () =
+  check_session "orc fn calls prior fn"
+    fn_calls_fn_session fn_calls_fn_expected
+
+(* Same collision, let-bound-lambda flavor: the prior binding is a `let`
+   holding a closure rather than a `fn`. *)
+let fn_calls_let_lambda_session =
+  [ "let h = fn x -> x + 5";
+    "fn g2(x) do h(x) end";
+    "g2(1)";
+    ":quit" ]
+let fn_calls_let_lambda_expected =
+  [ "val g2 = <fn>"; "= 6" ]
+
+let test_clang_fn_calls_let_lambda () =
+  check_session ~backend:"clang" "clang fn calls let-bound lambda"
+    fn_calls_let_lambda_session fn_calls_let_lambda_expected
+
+let test_orc_fn_calls_let_lambda () =
+  check_session "orc fn calls let-bound lambda"
+    fn_calls_let_lambda_session fn_calls_let_lambda_expected
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -132,5 +179,13 @@ let () =
         test_orc_two_consecutive_fns;
       Alcotest.test_case "orc_fn_after_let_lambda" `Slow
         test_orc_fn_after_let_lambda;
+      Alcotest.test_case "clang_fn_calls_prior_fn" `Slow
+        test_clang_fn_calls_prior_fn;
+      Alcotest.test_case "orc_fn_calls_prior_fn" `Slow
+        test_orc_fn_calls_prior_fn;
+      Alcotest.test_case "clang_fn_calls_let_lambda" `Slow
+        test_clang_fn_calls_let_lambda;
+      Alcotest.test_case "orc_fn_calls_let_lambda" `Slow
+        test_orc_fn_calls_let_lambda;
     ]
   ]

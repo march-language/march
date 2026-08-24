@@ -137,11 +137,13 @@ So *any* recoverable add-module error under ORC killed the whole REPL.
   `Received: 139` against the un-fixed compiler.
 - `scripts/run-tests.sh -q` and `./_build/default/test/test_jit.exe -e`: pass.
 
-## Follow-up noticed, NOT fixed here
+## Follow-up noticed — since FIXED
 
 A `fn` whose body references a prior REPL `fn` (`fn f(x) do x+1 end` then
-`fn g(x) do f(x)+1 end`) fails typechecking in the REPL — "I cannot find `g`"
-— on **both** backends. Pre-existing and unrelated to this crash, but it is
-also what currently prevents `extern_fns` and the slot loaders from ever
-naming the same symbol inside one fragment; if that limitation is lifted, the
-emitter will need to skip the loader for a name it already `declare`s.
+`fn g(x) do f(x)+1 end`) failed on **both** backends — the fragment emitted
+both the prev-slot loader `define @f()` and an unknown-function-fallback
+`declare @f(...)` for the same symbol ("invalid redefinition"), after which
+the REPL reported "I cannot find `g`". Fixed in
+`2026-08-24-repl-jit-fn-calls-prior-repl-fn.md`: calls to slot-loader names
+now route through the loader + closure dispatch (a `repl_slot_fns` ctx
+table), so the declare is never emitted and the call follows the slot.

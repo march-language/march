@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- JIT REPL (both backends): defining a function that calls a previously
+  REPL-defined function (`fn f(x) do x + 1 end` then `fn g(x) do f(x) end`)
+  failed with an invalid-IR "redefinition of function" error and the new
+  function was lost ("I cannot find `g`"). Calls to prior REPL bindings —
+  `fn`s and `let`-bound lambdas alike — now dispatch through the binding's
+  persistent slot, so they also follow the slot's current value rather than
+  pinning the version seen at definition time.
+
 - REPL, experimental ORC JIT backend (`MARCH_JIT_BACKEND=orc`): defining a
   second function in a session crashed the process with SIGSEGV. Each `fn`
   fragment re-emitted its prior-binding slot loaders with external linkage,
