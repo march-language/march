@@ -4910,8 +4910,56 @@ let test_global_tail_internal_shadowing () =
 let test_global_tail_not_physical_falls_back_to_scan () =
   let tail = [("k", March_eval.Eval.VInt 5)] in
   March_eval.Eval.install_global_tail tail;
-  let other = [("k", March_eval.Eval.VInt 6)] in   (* structurally equal, not == *)
+  (* [other] is a distinct list value (different key "k" -> 6, not even structurally equal
+     to [tail]); it just isn't the physically-installed tail, so lookup must scan it directly
+     rather than probe the hashed table built from [tail]. *)
+  let other = [("k", March_eval.Eval.VInt 6)] in
   Alcotest.(check int) "scan still correct" 6 (vint (March_eval.Eval.lookup "k" other));
+  March_eval.Eval.clear_global_tail ()
+
+let test_repl_style_v_update_keeps_fast_path () =
+  March_eval.Eval.clear_global_tail ();
+  let tail = [("h", March_eval.Eval.VInt 10)] in
+  March_eval.Eval.install_global_tail tail;
+  (* Prompt 1: reproduces repl.ml's REPL result-binding expression
+     `env := ("v", v) :: (List.remove_assoc "v" !env)` verbatim. "v" is absent from [tail],
+     so List.remove_assoc rebuilds the ENTIRE spine -- env1's suffix is a fresh copy of
+     [tail], not [tail] itself. *)
+  let env1 = ("v", March_eval.Eval.VInt 1) :: (List.remove_assoc "v" tail) in
+  Alcotest.(check bool) "remove_assoc on an absent key breaks physical sharing" false
+    (List.tl env1 == tail);
+  (* FAIL-FIRST: without repl.ml's fix (a re-install right after every env := mutation),
+     [global_tail] is still the ORIGINAL [tail], not [env1] -- this is exactly the bug IMPORTANT-1
+     describes: the fast path dies on the very first REPL prompt. *)
+  March_eval.Eval.install_global_tail env1;
+  Alcotest.(check bool) "re-install re-anchors the fast path to env1" true
+    (env1 == !March_eval.Eval.global_tail);
+  (* Prompt 2: "v" is now present, so remove_assoc finds it at the head this time -- the case
+     that can look deceptively fine, but only stays fast because repl.ml re-installs on every
+     mutation, not because remove_assoc happens to preserve sharing here. *)
+  let env2 = ("v", March_eval.Eval.VInt 2) :: (List.remove_assoc "v" env1) in
+  March_eval.Eval.install_global_tail env2;
+  Alcotest.(check bool) "second re-install re-anchors the fast path to env2" true
+    (env2 == !March_eval.Eval.global_tail);
+  Alcotest.(check int) "v visible after two updates" 2 (vint (March_eval.Eval.lookup "v" env2));
+  Alcotest.(check int) "h still visible after two updates" 10 (vint (March_eval.Eval.lookup "h" env2));
+  March_eval.Eval.clear_global_tail ()
+
+let test_cross_install_safety_falls_back_to_scan () =
+  let t1 = [("x", March_eval.Eval.VInt 1)] in
+  March_eval.Eval.install_global_tail t1;
+  let env1 = ("local", March_eval.Eval.VInt 99) :: t1 in
+  let t2 = [("x", March_eval.Eval.VInt 2)] in
+  March_eval.Eval.install_global_tail t2;
+  (* Prove the hazard is real: a lookup that trusted the hashed table WITHOUT first checking
+     physical identity against the currently-installed tail would silently return T2's value
+     here -- stale/wrong for [env1], whose suffix is still physically T1. *)
+  Alcotest.(check int) "raw table now holds T2's value for the same key (the hazard)" 2
+    (vint (Option.get (Hashtbl.find_opt March_eval.Eval.global_tbl "x")));
+  (* The real lookup path must not take that shortcut: env1's suffix ([t1]) is not [!global_tail]
+     ([t2]), so assoc_str falls back to a full scan and returns T1's value, never T2's. *)
+  Alcotest.(check int) "old env still sees its own tail's value, not the new install's" 1
+    (vint (March_eval.Eval.lookup "x" env1));
   March_eval.Eval.clear_global_tail ()
 
 let test_fib_end_to_end_unchanged () =
@@ -4932,6 +4980,8 @@ let eval_suites =
           Alcotest.test_case "global tail shadowed by locals" `Quick test_global_tail_shadowed_by_locals;
           Alcotest.test_case "global tail internal shadowing" `Quick test_global_tail_internal_shadowing;
           Alcotest.test_case "global tail not physical falls back to scan" `Quick test_global_tail_not_physical_falls_back_to_scan;
+          Alcotest.test_case "repl-style v update keeps fast path" `Quick test_repl_style_v_update_keeps_fast_path;
+          Alcotest.test_case "cross-install safety falls back to scan" `Quick test_cross_install_safety_falls_back_to_scan;
           Alcotest.test_case "fib end to end unchanged" `Quick test_fib_end_to_end_unchanged ] );
       ( "or_patterns",
         [
