@@ -4971,6 +4971,29 @@ end|} in
   Alcotest.(check int) "fib 15" 610
     (vint (March_eval.Eval.apply (List.assoc "main" env) []))
 
+let test_apply_debug_depth_restored_on_exception () =
+  (* Pin the depth-tracking invariant that `apply`'s debug-ctx fast-path
+     rewrite must preserve: with a debug ctx installed, an exception raised
+     through `apply` still restores dc_depth to its pre-call value (via the
+     exception path), not just on normal return. *)
+  let ctx = March_debug.Debug.make_debug_ctx ~on_dbg:(fun _ -> ()) in
+  March_debug.Debug.install ctx;
+  Fun.protect
+    ~finally:(fun () -> March_debug.Debug.uninstall ())
+    (fun () ->
+      let env = eval_with_stdlib [] {|
+mod M do
+  fn boom() do nope end
+  fn main() do () end
+end|} in
+      let boom_fn = List.assoc "boom" env in
+      let depth_before = ctx.March_eval.Eval.dc_depth in
+      Alcotest.check_raises "boom raises through apply"
+        (March_eval.Eval.Eval_error "unbound variable: nope")
+        (fun () -> ignore (March_eval.Eval.apply boom_fn []));
+      Alcotest.(check int) "depth restored after exception" depth_before
+        ctx.March_eval.Eval.dc_depth)
+
 let eval_suites =
   [
       ( "env_lookup", [
@@ -4982,7 +5005,8 @@ let eval_suites =
           Alcotest.test_case "global tail not physical falls back to scan" `Quick test_global_tail_not_physical_falls_back_to_scan;
           Alcotest.test_case "repl-style v update keeps fast path" `Quick test_repl_style_v_update_keeps_fast_path;
           Alcotest.test_case "cross-install safety falls back to scan" `Quick test_cross_install_safety_falls_back_to_scan;
-          Alcotest.test_case "fib end to end unchanged" `Quick test_fib_end_to_end_unchanged ] );
+          Alcotest.test_case "fib end to end unchanged" `Quick test_fib_end_to_end_unchanged;
+          Alcotest.test_case "apply debug depth restored on exception" `Quick test_apply_debug_depth_restored_on_exception ] );
       ( "or_patterns",
         [
           Alcotest.test_case "or-pattern over literals" `Quick

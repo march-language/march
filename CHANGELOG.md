@@ -11,6 +11,10 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- Interpreter: variable lookup no longer scans the builtin environment per reference (monomorphic comparison + hashed global scope). Interpreted programs run ~11x faster (fib(25): 16.6 s -> 1.5 s); REPL interpreter-mode lookups stay fast across prompts.
+
 ## [0.3.0] - 2026-08-23
 
 ### Added
