@@ -5632,6 +5632,33 @@ let test_parity_bitwise_builtins () =
       ("int_or(int_shl(1, 3), int_shl(1, 1))",  "10");
     ]
 
+(* Shapes that exercise the Perceus/FBIP-affected data paths (tuples,
+   records, lists, nested match) — the interp and JIT lowerings diverge most
+   easily around ownership/RC insertion, so pin their outputs here
+   independent of the backend running the JIT half. *)
+let test_parity_opt_shapes () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    List.iter (fun src ->
+      check_parity ~ctx:"opt_shapes" ~runtime_so src
+    ) [
+      "(1, 2, 3)";
+      "[1, 2, 3]";
+      "match (1, 2) do (a, b) -> a + b end";
+      "match Some(5) do Some(x) -> x * 2 | None -> 0 end";
+      "match Cons(1, Cons(2, Nil)) do Cons(h, _) -> h | Nil -> 0 end";
+    ]
+
+(** Register [name]/[f] to run once under each JIT backend. The clang case
+    always runs; the orc case runs only when libLLVM is present, else it
+    records a counted skip (never a silent pass) via [record_jit_skip]. *)
+let both_backends name f =
+  [ Alcotest.test_case (name ^ " [clang]") `Slow (fun () -> with_jit_backend `Clang f);
+    Alcotest.test_case (name ^ " [orc]")   `Slow (fun () ->
+      if March_jit.Jit_orc.available () then with_jit_backend `Orc f
+      else record_jit_skip "libLLVM not found: orc parity skipped") ]
+
 (** Compiled List.pmap/pfilter must produce the same result as sequential
     List.map/filter. The 2000-element list exceeds the default pmap_threshold
     (1024), so the chunked parallel path (real multi-core scheduler) runs.
@@ -13834,14 +13861,15 @@ let stdlib_suites =
           Alcotest.test_case "actor context"   `Quick (with_reset test_tap_in_actor_context);
         ] );
       ( "repl_compiler_parity",
-        [
-          Alcotest.test_case "basic arithmetic"  `Slow test_parity_basic_arith;
-          Alcotest.test_case "bool ops"          `Slow test_parity_bool_ops;
-          Alcotest.test_case "string interp"     `Slow test_parity_string_interp;
-          Alcotest.test_case "atom show"         `Slow test_parity_atom_show;
-          Alcotest.test_case "closures"          `Slow test_parity_closures;
-          Alcotest.test_case "if/else"           `Slow test_parity_if_else;
-          Alcotest.test_case "bitwise builtins"  `Slow test_parity_bitwise_builtins;
+        List.concat [
+          both_backends "basic arithmetic"  test_parity_basic_arith;
+          both_backends "bool ops"          test_parity_bool_ops;
+          both_backends "string interp"     test_parity_string_interp;
+          both_backends "atom show"         test_parity_atom_show;
+          both_backends "closures"          test_parity_closures;
+          both_backends "if/else"           test_parity_if_else;
+          both_backends "bitwise builtins"  test_parity_bitwise_builtins;
+          both_backends "opt shapes"        test_parity_opt_shapes;
         ] );
       ( "tail_recursion",
         [

@@ -802,11 +802,20 @@
  (modules test_supervision)
  (libraries march_lexer march_parser march_ast march_desugar march_eval alcotest unix))
 
+; test_jit drives a real REPL session as a SUBPROCESS (see the ORC-backend
+; regression test in test_jit.ml): the bug it pins was a SIGSEGV, which
+; in-process would take the whole runner down instead of reporting a failure,
+; and the crash only reproduces through the full REPL path (prelude
+; precompile + run_decl sequencing).  Hence the main.exe / stdlib / runtime
+; deps.  HOME is redirected so the stdlib-prelude .so cache is per-build,
+; not shared with the developer's interactive sessions.
 (test
  (name test_jit)
  (modules test_jit)
- (libraries march_jit alcotest)
- (action (setenv HOME %{project_root}/_build/jit_home (run %{test}))))
+ (libraries march_jit alcotest unix)
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
+ (action (setenv HOME %{project_root}/_build/jit_home
+          (setenv MARCH_BIN %{exe:../bin/main.exe} (run %{test})))))
 
 (test
  (name test_cas)

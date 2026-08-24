@@ -604,6 +604,8 @@ let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
 | `MARCH_HISTORY_FILE` | Path to persistent history | `~/.march_history` |
 | `MARCH_HISTORY_SIZE` | Max history entries | 1000 |
 | `MARCH_REPL_INTERP` | Force interpreter (disable JIT) | (unset) |
+| `MARCH_JIT_BACKEND` | REPL JIT backend: `orc` (in-process LLVM ORC) or `clang` (subprocess clang + dlopen). Unset auto-detects: ORC when libLLVM is found, else clang. | (auto) |
+| `MARCH_LLVM_LIB` | Explicit path to `libLLVM.{dylib,so}` for the ORC backend, overriding the built-in search paths | (unset) |
 | `MARCH_DEBUG_TRACE_SIZE` | Trace buffer capacity (debug mode) | 100,000 |
 
 ## Prompt Format

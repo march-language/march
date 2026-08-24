@@ -11,9 +11,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- REPL, experimental ORC JIT backend (`MARCH_JIT_BACKEND=orc`): defining a
+  second function in a session crashed the process with SIGSEGV. Each `fn`
+  fragment re-emitted its prior-binding slot loaders with external linkage,
+  colliding in ORC's single shared JITDylib with the real definition of the
+  same name; and the ORC binding double-freed the module on the add-module
+  error path, turning that recoverable error into a hard crash. The default
+  clang backend was unaffected.
+
 ### Changed
 
 - Interpreter: variable lookup no longer scans the builtin environment per reference (monomorphic comparison + hashed global scope). Interpreted programs run ~11x faster (fib(25): 16.6 s -> 1.5 s); REPL interpreter-mode lookups stay fast across prompts.
+- REPL: expressions now compile in-process through LLVM ORC when libLLVM is installed (~200x lower per-line compile latency, whole-session ~3x); set MARCH_JIT_BACKEND=clang to restore the previous clang-subprocess backend. Unrecognized MARCH_JIT_BACKEND values fall back to clang as before.
 
 ### Fixed
 
