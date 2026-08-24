@@ -50,6 +50,52 @@ type t = {
   mutable loaded_tir_types : March_tir.Tir.type_def list;  (* TIR type_defs from :load-ed modules, for ctor_info in expression fragments *)
 }
 
+(* Backend selector — see the plan file for the motivation.
+   Resolution order: MARCH_JIT_BACKEND=clang|orc wins; otherwise ORC if
+   libLLVM is present (measured 2026-08-23: 0.4-1 ms/fragment vs 210-290 ms
+   for clang + dlopen), else clang.
+
+   Resolution is LAZY (computed on first use, not at module init) so that
+   non-JIT entry points (e.g. `march --compile`) never call [Jit_orc.available]
+   and never dlopen libLLVM. Cached after the first call; tests can override
+   via [set_backend_for_tests].
+
+   Defined ABOVE [create] (moved from its original position further down this
+   file) so that [create] can pre-warm the LLJIT at the end of construction —
+   see the call to [get_orc ()] there. *)
+type backend = [ `Clang | `Orc ]
+
+let backend : backend option ref = ref None
+
+let resolve_backend () =
+  match !backend with
+  | Some b -> b
+  | None ->
+    let b =
+      match Sys.getenv_opt "MARCH_JIT_BACKEND" with
+      | Some "orc" -> `Orc
+      | Some "clang" -> `Clang
+      | Some _ -> `Clang (* unrecognized value: fall back to clang, as before *)
+      | None -> if Jit_orc.available () then `Orc else `Clang
+    in
+    backend := Some b;
+    b
+
+let current_backend () = resolve_backend ()
+let set_backend_for_tests b = backend := Some b
+let backend_is_orc () = resolve_backend () = `Orc
+
+(* Lazy-initialised LLJIT.  Only touched when backend_is_orc () is true;
+   libLLVM.dylib is loaded on first create(), so non-ORC builds pay no
+   startup cost. *)
+let orc_instance : Jit_orc.t option ref = ref None
+let get_orc () =
+  match !orc_instance with
+  | Some j -> j
+  | None ->
+    let j = Jit_orc.create () in
+    orc_instance := Some j; j
+
 let create ~runtime_so ?(clang="clang") () =
   (* Per-process artifact dir.  A single shared "march_jit" dir raced when
      several JIT sessions ran concurrently (dune executes the test runners in
@@ -104,14 +150,24 @@ let create ~runtime_so ?(clang="clang") () =
   (* Only macOS needs the explicit two-level runtime binding; Linux resolves
      RTLD_GLOBAL symbols correctly, so keep its link line unchanged. *)
   let rt_link = if is_macos () then " " ^ Filename.quote runtime_so else "" in
-  { runtime_so; clang; tmp_dir; undef_flag; rt_link;
+  let t = { runtime_so; clang; tmp_dir; undef_flag; rt_link;
     counter = 0; var_slots = []; next_slot = 0;
     handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
     global_tir_tys = Hashtbl.create 16;
     global_type_defs = Hashtbl.create 16;
     stdlib_decls = [];
-    loaded_tir_types = [] }
+    loaded_tir_types = [] } in
+  (* Pre-warm the shared LLJIT so its one-time libLLVM-load + JIT-target-machine
+     setup cost (~80-90 ms, previously paid on the FIRST REPL fragment) happens
+     here at startup instead, overlapping with the rest of [create]'s work.
+     Only touches [backend_is_orc ()] — defined below, referencing this
+     module's [resolve_backend] — which is safe here because [create] is only
+     reached from REPL/JIT entry points (bin/main.ml's `repl`/`warm-cache`/
+     no-args-REPL branches and test helpers), never from `march --compile`,
+     so lazily dlopen-ing libLLVM at this point never affects the compile path. *)
+  if backend_is_orc () then ignore (get_orc ());
+  t
 
 let alloc_slot ctx =
   let n = ctx.next_slot in
@@ -132,48 +188,6 @@ let time_phase name f =
     Printf.eprintf "[jit-prof] %-20s %6.1fms\n%!" name (dt *. 1000.);
     r
   end else f ()
-
-(* Backend selector — see the plan file for the motivation.
-   Resolution order: MARCH_JIT_BACKEND=clang|orc wins; otherwise ORC if
-   libLLVM is present (measured 2026-08-23: 0.4-1 ms/fragment vs 210-290 ms
-   for clang + dlopen), else clang.
-
-   Resolution is LAZY (computed on first use, not at module init) so that
-   non-JIT entry points (e.g. `march --compile`) never call [Jit_orc.available]
-   and never dlopen libLLVM. Cached after the first call; tests can override
-   via [set_backend_for_tests]. *)
-type backend = [ `Clang | `Orc ]
-
-let backend : backend option ref = ref None
-
-let resolve_backend () =
-  match !backend with
-  | Some b -> b
-  | None ->
-    let b =
-      match Sys.getenv_opt "MARCH_JIT_BACKEND" with
-      | Some "orc" -> `Orc
-      | Some "clang" -> `Clang
-      | Some _ -> `Clang (* unrecognized value: fall back to clang, as before *)
-      | None -> if Jit_orc.available () then `Orc else `Clang
-    in
-    backend := Some b;
-    b
-
-let current_backend () = resolve_backend ()
-let set_backend_for_tests b = backend := Some b
-let backend_is_orc () = resolve_backend () = `Orc
-
-(* Lazy-initialised LLJIT.  Only touched when backend_is_orc () is true;
-   libLLVM.dylib is loaded on first create(), so non-ORC builds pay no
-   startup cost. *)
-let orc_instance : Jit_orc.t option ref = ref None
-let get_orc () =
-  match !orc_instance with
-  | Some j -> j
-  | None ->
-    let j = Jit_orc.create () in
-    orc_instance := Some j; j
 
 (* Opaque per-fragment handle used by run_expr / run_decl to look up the
    fragment's exported init / main symbol.  Carries the clang dl_handle
