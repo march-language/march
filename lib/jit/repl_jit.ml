@@ -152,9 +152,10 @@ let resolve_backend () =
   | None ->
     let b =
       match Sys.getenv_opt "MARCH_JIT_BACKEND" with
-      | Some "clang" -> `Clang
       | Some "orc" -> `Orc
-      | _ -> if Jit_orc.available () then `Orc else `Clang
+      | Some "clang" -> `Clang
+      | Some _ -> `Clang (* unrecognized value: fall back to clang, as before *)
+      | None -> if Jit_orc.available () then `Orc else `Clang
     in
     backend := Some b;
     b

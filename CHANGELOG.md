@@ -24,6 +24,7 @@ git log is authoritative for exact commits.
 ### Changed
 
 - Interpreter: variable lookup no longer scans the builtin environment per reference (monomorphic comparison + hashed global scope). Interpreted programs run ~11x faster (fib(25): 16.6 s -> 1.5 s); REPL interpreter-mode lookups stay fast across prompts.
+- REPL: expressions now compile in-process through LLVM ORC when libLLVM is installed (~200x lower per-line compile latency, whole-session ~3x); set MARCH_JIT_BACKEND=clang to restore the previous clang-subprocess backend. Unrecognized MARCH_JIT_BACKEND values fall back to clang as before.
 
 ## [0.3.0] - 2026-08-23
 
