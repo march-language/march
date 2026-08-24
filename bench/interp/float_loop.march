@@ -1,0 +1,15 @@
+-- Float accumulation loop: exercises VFloat arithmetic and comparisons.
+-- expected: checksum=133333
+mod FloatLoop do
+  needs IO.Console
+
+  fn step(i : Int, x : Float) : Float do
+    if i == 0 do x
+    else step(i - 1, x + 1.0 / 1.5) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let r = step(200000, 0.0)
+    println("checksum=" ++ int_to_string(float_to_int(r)))
+  end
+end

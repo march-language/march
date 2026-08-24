@@ -1,0 +1,13 @@
+-- Naive recursive fib(25): pure call/arith overhead.
+-- expected: checksum=75025
+mod Fib do
+  needs IO.Console
+
+  fn fib(n : Int) : Int do
+    if n < 2 do n else fib(n - 1) + fib(n - 2) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("checksum=" ++ int_to_string(fib(25)))
+  end
+end
