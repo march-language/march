@@ -11,6 +11,18 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The REPL now actually caches its stdlib typecheck env.** Saving it had been
+  failing on every start since the cache was introduced — the env holds an
+  import-tracker closure that `Marshal` refuses to write, and the failure was
+  swallowed — so each REPL launch re-typechecked the whole stdlib and left a
+  zero-byte `stdlib_tcenv_*.tmp` file behind in `~/.cache/march` (1,132 of them
+  had accumulated on one machine). Start-up now hits the cache on the second and
+  later launches, a save that fails says so on stderr instead of degrading
+  silently, and both the REPL and the CLI sweep stale staging files left by
+  processes that died mid-write.
+
 ## [0.3.0] - 2026-08-23
 
 ### Added
