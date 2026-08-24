@@ -1841,6 +1841,74 @@ let test_repl_jit_selfref_fn_no_duplicate_wrapper () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Regression: redefining a REPL `fn` must take effect (Elixir-style
+    rebinding, matching interpreter mode).  run_decl's is_fn_decl path used
+    to early-return whenever [bind_name] was already in [compiled_fns] — a
+    guard meant only for :reset scroll-replay (which resends identical
+    cells) — so a genuine redefinition never recompiled or rebound the
+    closure slot and `f(1)` kept answering with the FIRST body.  The fix
+    fingerprints the declaration AST: an identical resend still takes the
+    replay fast path (asserted below via [fragment_count]), while a changed
+    body recompiles under a fresh unique symbol and rebinds the slot. *)
+let test_repl_jit_fn_redefinition () =
+  match setup_jit_runtime () with
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+       let run_fn_decl src =
+         match parse_repl src with
+         | March_ast.Ast.ReplDecl d ->
+           let d' = March_desugar.Desugar.desugar_decl d in
+           let bind_name = match d' with
+             | March_ast.Ast.DFn (def, _) -> def.March_ast.Ast.fn_name.txt
+             | _ -> failwith ("expected DFn for: " ^ src)
+           in
+           let s = March_ast.Ast.dummy_span in
+           let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                     mod_decls = [d'] } in
+           March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
+           let new_env = March_typecheck.Typecheck.check_decl
+             { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+           tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () };
+           (bind_name, m)
+         | _ -> failwith ("expected ReplDecl for: " ^ src)
+       in
+       let eval_expr src expected label =
+         match parse_repl src with
+         | March_ast.Ast.ReplExpr e ->
+           let e' = March_desugar.Desugar.desugar_expr e in
+           let m = make_jit_test_module e' in
+           let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+           Alcotest.(check string) label expected result
+         | _ -> failwith ("expected ReplExpr for: " ^ src)
+       in
+       ignore (run_fn_decl "fn f(x) do x + 1 end");
+       eval_expr "f(1)" "2" "original f(1) = 2";
+       (* Genuine redefinition: different body, same name. *)
+       let (bind_name, m2) = run_fn_decl "fn f(x) do x + 100 end" in
+       eval_expr "f(1)" "101" "redefined f(1) = 101 (not silently ignored)";
+       (* :reset scroll-replay resends the identical cell: must stay a
+          fast-path skip (no new fragment compiled) and keep the binding. *)
+       let frags_before = March_jit.Repl_jit.fragment_count jit in
+       March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m2;
+       Alcotest.(check int) "identical replay compiles no new fragment"
+         frags_before (March_jit.Repl_jit.fragment_count jit);
+       eval_expr "f(1)" "101" "f(1) = 101 after identical replay";
+       (* Self-recursive redefinition: the recursive call must reach the NEW
+          body (the renamed fragment-local symbol), not the old one. *)
+       ignore (run_fn_decl
+         "fn f(n) do if n < 1 do 0 else 10 + f(n - 1) end end");
+       eval_expr "f(3)" "30" "self-recursive redefined f(3) = 30";
+       (* Arity-changing redefinition through the same closure slot. *)
+       ignore (run_fn_decl "fn f(a, b) do a + b end");
+       eval_expr "f(3, 4)" "7" "arity-changed f(3, 4) = 7";
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (** Regression: a top-level function referenced as a first-class VALUE (not
     called) from a plain REPL expression or `let` RHS.  emit_atom wraps such a
     reference in a @<fn>$clo_wrap trampoline whose definition is appended to
@@ -14165,6 +14233,7 @@ let codegen_suites =
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
         Alcotest.test_case "B11: stored closure returns untagged Int" `Quick test_repl_jit_stored_closure_returns_untagged_int;
         Alcotest.test_case "B11: self-referencing fn no duplicate clo_wrap" `Quick test_repl_jit_selfref_fn_no_duplicate_wrapper;
+        Alcotest.test_case "fn redefinition rebinds (replay still skips)" `Quick test_repl_jit_fn_redefinition;
         Alcotest.test_case "top-level fn as first-class value" `Quick test_repl_jit_topfn_first_class_value;
         Alcotest.test_case "capture-free closure materialization does not leak" `Quick test_repl_jit_capture_free_closure_no_leak;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;

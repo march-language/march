@@ -8,6 +8,12 @@ type t
     [clang] is the clang binary path (default "clang"). *)
 val create : runtime_so:string -> ?clang:string -> unit -> t
 
+(** Number of IR fragments compiled so far in this session.  Exposed for
+    tests: it lets them assert that an identical :reset-style replay of a
+    declaration takes the skip fast path (count unchanged) rather than
+    recompiling. *)
+val fragment_count : t -> int
+
 (** Compile and execute a REPL expression.
     Returns the LLVM IR return type and a string representation of the result.
     Raises [Failure] on compile or link error. *)

@@ -805,7 +805,11 @@
 (test
  (name test_jit)
  (modules test_jit)
- (libraries march_jit alcotest)
+ (libraries march_jit alcotest unix)
+ ; The repl_session tests spawn the real compiler binary and need the staged
+ ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
+ (deps (source_tree ../stdlib) (source_tree ../runtime)
+       (file %{exe:../bin/main.exe}))
  (action (setenv HOME %{project_root}/_build/jit_home (run %{test}))))
 
 (test
