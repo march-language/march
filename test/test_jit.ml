@@ -13,11 +13,27 @@ let test_dlopen_libc () =
    a backend crash (SIGSEGV) fails the one test instead of taking down the
    whole runner, and MARCH_JIT_BACKEND / MARCH_REPL_INTERP are read once at
    module init, so they can only differ per-PROCESS, not per-test.
-   HOME is pinned to _build/jit_home by the dune action, so the stdlib
-   precompile cache is warm after the first JIT-backed session test. *)
+   The session HOME is a directory this file creates itself rather than the
+   ambient one: the REPL fatals on startup if $HOME/.cache cannot be created
+   (so it cannot inherit a HOME that does not exist — dune's action pins one
+   under _build that nothing creates), and an own directory keeps the stdlib
+   precompile / JIT .so caches out of the developer's real ~/.cache. It is
+   created once and shared by every session here, so only the first
+   JIT-backed session pays the stdlib precompile. *)
 
 let main_exe =
   Filename.concat (Filename.dirname Sys.executable_name) "../bin/main.exe"
+
+(* Per-process so concurrent test runners (dune runs suites in parallel) do
+   not share a half-written cache — the same per-pid convention repl_jit.ml
+   uses for its own artifact dir. *)
+let session_home = lazy (
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "march_jit_test_home.%d" (Unix.getpid ())) in
+  List.iter
+    (fun d -> try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ())
+    [dir; Filename.concat dir ".cache"];
+  dir)
 
 let clang_available () =
   Sys.command "clang --version >/dev/null 2>&1" = 0
@@ -34,7 +50,8 @@ let run_repl_session ~env_prefix (lines : string list) : string * int =
   let oc = open_out input in
   List.iter (fun l -> output_string oc l; output_char oc '\n') lines;
   close_out oc;
-  let cmd = Printf.sprintf "%s %s < %s 2>&1"
+  let cmd = Printf.sprintf "HOME=%s %s %s < %s 2>&1"
+      (Filename.quote (Lazy.force session_home))
       env_prefix (Filename.quote main_exe) (Filename.quote input) in
   let ic = Unix.open_process_in cmd in
   let buf = Buffer.create 1024 in
