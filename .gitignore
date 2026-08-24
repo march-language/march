@@ -79,6 +79,9 @@ __pycache__/
 !/bench/tfb/
 !/bench/actors/
 !/bench/actors/*.march
+!/bench/interp/
+!/bench/interp/*.march
+!/bench/interp/*.py
 # Raw benchmark output, committed on purpose: published numbers should be
 # traceable to the run that produced them, and a chart should be generated from
 # data in the repo rather than transcribed from a terminal by hand. Each file

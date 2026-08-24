@@ -1,0 +1,23 @@
+-- int_to_string / string_to_int / string_join over 10k elements.
+-- checksum=54448
+mod StringPipeline do
+  needs IO.Console
+
+  fn build(lo : Int, hi : Int, acc : List(String)) : List(String) do
+    if lo > hi do acc else build(lo + 1, hi, Cons(int_to_string(lo), acc)) end
+  end
+
+  fn double_str(s : String) : String do
+    match string_to_int(s) do
+    Some(n) -> int_to_string(n * 2)
+    None    -> s
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let xs = build(1, 10000, Nil)
+    let ys = List.map(xs, double_str)
+    let joined = string_join(ys, ",")
+    println("checksum=" ++ int_to_string(string_byte_length(joined)))
+  end
+end
