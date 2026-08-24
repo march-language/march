@@ -613,6 +613,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                Printf.printf "\027[2J\027[H%!"
              | ":reset" when not is_debug ->
                env    := e0;
+               March_eval.Eval.install_global_tail !env;
                tc_env := tc0;
                Printf.printf "REPL state reset.\n%!"
              | ":help" ->
