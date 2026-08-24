@@ -165,8 +165,19 @@ let create ~runtime_so ?(clang="clang") () =
      module's [resolve_backend] — which is safe here because [create] is only
      reached from REPL/JIT entry points (bin/main.ml's `repl`/`warm-cache`/
      no-args-REPL branches and test helpers), never from `march --compile`,
-     so lazily dlopen-ing libLLVM at this point never affects the compile path. *)
-  if backend_is_orc () then ignore (get_orc ());
+     so lazily dlopen-ing libLLVM at this point never affects the compile path.
+
+     Best-effort: [Jit_orc.create] can still raise even when [available ()]
+     returned true (e.g. an ABI-mismatched or partially-broken libLLVM whose
+     dlopen succeeds but whose LLJIT construction fails). Before pre-warm
+     existed, that failure surfaced lazily on the FIRST fragment, inside
+     repl.ml's per-expression `try ... with _ -> eval_via_interp ()`
+     fallback — a graceful degrade to the interpreter, not a crash. Swallow
+     the exception here so [create] can't kill REPL startup; on failure
+     [orc_instance] stays [None] and the first fragment's own [get_orc ()]
+     call retries construction and hits that same pre-existing fallback,
+     preserving the pre-change failure surface exactly. *)
+  if backend_is_orc () then (try ignore (get_orc ()) with _ -> ());
   t
 
 let alloc_slot ctx =
