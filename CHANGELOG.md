@@ -17,6 +17,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **REPL: a constructor of a type declared at the prompt evaluated as the
+  type's FIRST variant.** With `type Color = Red | Green | Blue`, both `Green`
+  and `Blue` answered `Red` — and, because the same wrong constructor tag
+  reached pattern matching, `match Blue do Red -> 1 Green -> 2 Blue -> 3 end`
+  answered `1`. A type declared at the prompt was registered with the REPL's
+  JIT for pretty-printing only, never as an input to code generation, so every
+  constructor of it was compiled with tag 0. `MARCH_REPL_INTERP=1` was
+  unaffected.
+- **REPL: values of Option-shaped and single-constructor types printed as raw
+  words.** `Some(1)` displayed as `3`, `None` as `null`, and `Some("hi")` took
+  the REPL down; a user `type T = X(Int) | Y` showed `X(7)` as `15` and `Y` as
+  `null`. These representations are not heap cells — the value IS the payload
+  word — and the REPL's printer was reading them as though they were.
+  Constructor payloads of ordinary types now also print at their declared type
+  rather than assuming every field is a tagged scalar (`P1(7)` was showing as
+  `P1(3)`).
 - **The REPL now actually caches its stdlib typecheck env.** Saving it had been
   failing on every start since the cache was introduced — the env holds an
   import-tracker closure that `Marshal` refuses to write, and the failure was
