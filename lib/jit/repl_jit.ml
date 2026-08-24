@@ -389,14 +389,96 @@ let rec subst_ty (bindings : (string * March_tir.Tir.ty) list) (t : March_tir.Ti
   | TRecord fs -> TRecord (List.map (fun (n, t) -> (n, subst_ty bindings t)) fs)
   | TInt | TFloat | TBool | TString | TUnit as t -> t
 
+(** Representation of the variant type [name] as codegen sees it.
+
+    The pretty-printer MUST agree with [Repr] here: an expression fragment is
+    emitted with the same type_defs, so a niche/newtype value never reaches
+    the printer as a heap cell at all — it arrives as the raw payload word
+    (e.g. `X(7)` of `type T = X(Int) | Y` is the tagged integer 15, with no
+    cell to read a tag from).  Reading such a word as a pointer prints
+    nonsense at best and faults at worst.
+
+    [repr_of_ty] reads a generic type's payload out of the TCon's type args, so
+    a NON-generic Option-shaped type (no args) comes back [Boxed]; that is what
+    [niche_repr_of_concrete] recovers, exactly as codegen's own decode sites do. *)
+let variant_repr ~type_defs (name : string) (args : March_tir.Tir.ty list)
+    : March_tir.Repr.repr =
+  let defs = Hashtbl.fold (fun _ td acc -> td :: acc) type_defs [] in
+  match March_tir.Repr.repr_of_ty defs (March_tir.Tir.TCon (name, args)) with
+  | March_tir.Repr.Boxed when args = [] ->
+    (match March_tir.Repr.niche_repr_of_concrete defs name with
+     | Some r -> r
+     | None -> March_tir.Repr.Boxed)
+  (* Abstract-arg niche path, mirroring [Llvm_case]'s [effective_repr]: a
+     niche-shaped type applied to a still-abstract argument (e.g. a bare
+     `Nothing2` whose element type never got resolved) is Boxed by
+     [repr_of_ty] — [niche_payload_ok] is false for a TVar — but codegen
+     emits Niche anyway, under the erased convention. *)
+  | March_tir.Repr.Boxed
+    when args <> []
+      && List.exists (function March_tir.Tir.TVar _ -> true | _ -> false) args
+      && March_tir.Repr.is_niche_shaped defs name ->
+    March_tir.Repr.Niche { payload = March_tir.Tir.TVar "_"; tagged = false }
+  | r -> r
+
+(** Split an Option-shaped variant's ctors into (nullary name, single name). *)
+let niche_ctor_names (ctors : (string * March_tir.Tir.ty list) list) =
+  match ctors with
+  | [ (n, []); (s, [_]) ] -> Some (n, s)
+  | [ (s, [_]); (n, []) ] -> Some (n, s)
+  | _ -> None
+
+(** A constructor payload slot is low-bit tagged exactly when the DECLARED
+    field type is erased (a TVar): those slots are `ptr`-typed, so a scalar
+    stored there is coerced to (v<<1)|1.  A field declared at a concrete
+    scalar type gets a real i64/double slot and is stored raw.  The decision
+    must be made on the declaration's own type, BEFORE substituting the
+    TCon's type args in — the substituted type is what the value means, not
+    how it is stored. *)
+let field_is_tagged (declared : March_tir.Tir.ty) =
+  match declared with March_tir.Tir.TVar _ -> true | _ -> false
+
 (** Pretty-print a March heap value given its TIR type.
     [type_defs] provides user-declared TDVariant/TDRecord lookups for
     non-builtin TCon names.  Recursion is bounded to depth 64. *)
 let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
   if depth > 64 then "#<...>"
-  else if ptr = Nativeint.zero then "#<null>"
   else
   let open March_tir.Tir in
+  match ty with
+  (* Niche / newtype types are NOT heap cells: [ptr] is the raw payload word
+     (or 0 for a niche's nullary ctor), so these must be decoded before the
+     null guard and before any tag read. *)
+  | TCon (name, args) when (match Hashtbl.find_opt type_defs name with
+                            | Some (TDVariant _) -> true | _ -> false)
+                        && (match variant_repr ~type_defs name args with
+                            | March_tir.Repr.Boxed -> false | _ -> true) ->
+    let ctors = match Hashtbl.find type_defs name with
+      | TDVariant (_, cs) -> cs | _ -> [] in
+    let bindings =
+      try List.combine (collect_tvars (Hashtbl.find type_defs name)) args
+      with Invalid_argument _ -> [] in
+    (match variant_repr ~type_defs name args with
+     | March_tir.Repr.Niche { payload; tagged } ->
+       (match niche_ctor_names ctors with
+        | None -> Printf.sprintf "#<niche:%nd>" ptr
+        | Some (nullary, single) ->
+          if ptr = Nativeint.zero then nullary
+          else Printf.sprintf "%s(%s)" single
+                 (pp_word ~depth ~type_defs ~tagged (subst_ty bindings payload) ptr))
+     | March_tir.Repr.Newtype payload ->
+       (match ctors with
+        | [ (ctor, [ declared ]) ] ->
+          Printf.sprintf "%s(%s)" ctor
+            (pp_word ~depth ~type_defs ~tagged:(field_is_tagged declared)
+               (subst_ty bindings payload) ptr)
+        | _ -> Printf.sprintf "#<newtype:%nd>" ptr)
+     (* Unreachable: the guard above already excluded Boxed.  Rendered rather
+        than asserted — a printer must never take the REPL down. *)
+     | March_tir.Repr.Boxed -> Printf.sprintf "#<%s:%nd>" name ptr)
+  | _ ->
+  if ptr = Nativeint.zero then "#<null>"
+  else
   match ty with
   | TString ->
     (* march_string layout: {rc:i64, tag:i32, pad:i32, len:i64, data:char[]} *)
@@ -431,11 +513,11 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
             try List.combine tvars args
             with Invalid_argument _ -> []
           in
-          let payload_tys = List.map (subst_ty bindings) payload_tys in
           if payload_tys = [] then ctor_name
           else
-            let fields = List.mapi (fun i t ->
-              pp_field ~depth ~type_defs ~tagged:true t ptr i
+            let fields = List.mapi (fun i declared ->
+              pp_field ~depth ~type_defs ~tagged:(field_is_tagged declared)
+                (subst_ty bindings declared) ptr i
             ) payload_tys in
             Printf.sprintf "%s(%s)" ctor_name (String.concat ", " fields))
      | TDRecord (_, fs) ->
@@ -483,22 +565,55 @@ and pp_list ?(depth=0) ~type_defs elem_ty (ptr : nativeint) : string =
 
 and pp_field ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
   let open March_tir.Tir in
-  (* When [tagged] is true the scalar slot holds (value<<1)|1 — shift right by 1.
-     When false (tuple fields) the raw int64 is the value. *)
-  let untag_i64 v = if tagged then Int64.shift_right_logical v 1 else v in
   match ty with
-  | TInt  -> Int64.to_string (untag_i64 (field_i64 ptr i))
-  | TBool -> if untag_i64 (field_i64 ptr i) = 0L then "false" else "true"
-  | TUnit -> "()"
   | TFloat ->
-    (* Floats are stored as raw double bits via bitcast — no tag bit. *)
-    let bits = field_i64 ptr i in
-    Printf.sprintf "%g" (Int64.float_of_bits bits)
+    (* Floats are stored as raw double bits via bitcast — no tag bit, and the
+       bit pattern is not a meaningful nativeint, so read the slot directly. *)
+    Printf.sprintf "%g" (Int64.float_of_bits (field_i64 ptr i))
+  | TInt | TBool | TUnit ->
+    pp_word ~depth ~type_defs ~tagged ty (Int64.to_nativeint (field_i64 ptr i))
+  | _ -> pp_word ~depth ~type_defs ~tagged ty (field_ptr ptr i)
+
+(** Render a value held in a single machine word — a constructor field just
+    read out of a cell, or the whole value of a niche/newtype type.
+    [tagged] says the word holds a low-bit-tagged scalar (value<<1)|1. *)
+and pp_word ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (w : nativeint) : string =
+  let open March_tir.Tir in
+  let scalar () =
+    let v = Int64.of_nativeint w in
+    if tagged then Int64.shift_right_logical v 1 else v
+  in
+  match ty with
+  | TInt  -> Int64.to_string (scalar ())
+  | TBool -> if scalar () = 0L then "false" else "true"
+  | TUnit -> "()"
+  | TFloat -> Printf.sprintf "%g" (Int64.float_of_bits (Int64.of_nativeint w))
+  | TVar _ ->
+    (* Erased slot: a scalar is low-bit tagged, a heap value is an aligned
+       pointer.  Decide from the word itself — dereferencing a tagged scalar
+       as a cell would read unmapped memory. *)
+    if Nativeint.logand w 1n = 1n then
+      Int64.to_string (Int64.shift_right_logical (Int64.of_nativeint w) 1)
+    else if w = Nativeint.zero then "null"
+    else Printf.sprintf "#<tag:%d>" (heap_tag w)
   | _ ->
-    (* Pointer field: read the child pointer, then recurse *)
-    let child = field_ptr ptr i in
-    if child = Nativeint.zero then "null"
-    else pp_heap_value ~depth:(depth + 1) ~type_defs ty child
+    if w = Nativeint.zero then "null"
+    else pp_heap_value ~depth:(depth + 1) ~type_defs ty w
+
+(** True when a value of [ty] is NOT a heap pointer but the raw payload word
+    of a niche/newtype representation — the two cases where the "small word =
+    plain integer" fallback in [run_expr] would print `15` instead of `X(7)`,
+    and where a raw 0 means the nullary constructor rather than a null value. *)
+let is_raw_word_ty ~type_defs (ty : March_tir.Tir.ty) =
+  match ty with
+  | March_tir.Tir.TCon (name, args) ->
+    (match Hashtbl.find_opt type_defs name with
+     | Some (March_tir.Tir.TDVariant _) ->
+       (match variant_repr ~type_defs name args with
+        | March_tir.Repr.Boxed -> false
+        | _ -> true)
+     | _ -> false)
+  | _ -> false
 
 (* ── run_expr ──────────────────────────────────────────────────────── *)
 
@@ -515,16 +630,52 @@ let register_type_defs ctx (types : March_tir.Tir.type_def list) =
     | March_tir.Tir.TDClosure _ -> ()
   ) types
 
+let type_def_name (td : March_tir.Tir.type_def) =
+  match td with
+  | March_tir.Tir.TDVariant (n, _) | March_tir.Tir.TDRecord (n, _)
+  | March_tir.Tir.TDClosure (n, _) -> n
+
 (** Register a user type declaration from the REPL so subsequent expressions
-    can pretty-print values of that type.  DType decls otherwise never reach
-    the JIT — the REPL loop evaluates them in the tree-walking interpreter
-    and sends only DFn/DLet/ReplExpr through run_decl/run_expr. *)
+    can pretty-print values of that type AND construct them with the right
+    constructor tags.  DType decls otherwise never reach the JIT — the REPL
+    loop evaluates them in the tree-walking interpreter and sends only
+    DFn/DLet/ReplExpr through run_decl/run_expr.
+
+    Three registrations, all required:
+    - [register_type_defs] feeds [ctx.global_type_defs], which the heap
+      pretty-printer reads to turn a tag back into a constructor name.
+    - [ctx.loaded_tir_types] is passed as the [~types] of every subsequent
+      expression fragment, and codegen's [build_ctor_info] numbers constructor
+      tags from exactly that list.  Without it the fragment's [ctor_entry]
+      lookup misses and falls back to its `ce_tag = 0` default, so EVERY
+      nullary constructor is allocated with tag 0 and prints as the type's
+      first variant (`Green` and `Blue` both showing as `Red`).
+    - [ctx.stdlib_decls] is the lowering context, so [lower_module] knows
+      which type each bare constructor belongs to and emits the type-qualified
+      "Color.Green" key that [ctor_info] is keyed by.
+
+    Re-declaring a type at the prompt replaces the previous registration
+    rather than appending: [build_ctor_info] is first-wins, so a stale entry
+    would keep handing out the OLD variant numbering. *)
 let register_user_type_decl ctx (d : March_ast.Ast.decl) =
   match d with
   | March_ast.Ast.DType (_, name, params, td, _)
   | March_ast.Ast.DAlwaysLinearType (_, name, params, td, _) ->
     (match March_tir.Lower.lower_type_def name params td with
-     | Some td' -> register_type_defs ctx [td']
+     | Some td' ->
+       register_type_defs ctx [td'];
+       ctx.loaded_tir_types <-
+         List.filter (fun t -> type_def_name t <> type_def_name td')
+           ctx.loaded_tir_types
+         @ [td'];
+       ctx.stdlib_decls <-
+         List.filter (fun (d0 : March_ast.Ast.decl) ->
+           match d0 with
+           | March_ast.Ast.DType (_, n, _, _, _)
+           | March_ast.Ast.DAlwaysLinearType (_, n, _, _, _) ->
+             n.March_ast.Ast.txt <> name.March_ast.Ast.txt
+           | _ -> true) ctx.stdlib_decls
+         @ [d]
      | None -> ())
   | _ -> ()
 
@@ -663,7 +814,9 @@ let run_expr ctx ~tc_env m =
          Int64.to_string (Jit.call_void_to_int fptr)
        | Some ty ->
          let ptr = Jit.call_void_to_ptr fptr in
-         if ptr = Nativeint.zero then "null"
+         if is_raw_word_ty ~type_defs:ctx.global_type_defs ty then
+           pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
+         else if ptr = Nativeint.zero then "null"
          else pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
        | None ->
          (* No type information — call as ptr (safer than int for heap objects).
@@ -675,6 +828,11 @@ let run_expr ctx ~tc_env m =
            Int64.to_string raw
          else
            Printf.sprintf "#<0x%Lx>" raw)
+    | ty when is_raw_word_ty ~type_defs:ctx.global_type_defs ty ->
+      (* Niche/newtype: the returned word IS the value (0 = nullary ctor),
+         so neither the null check nor the small-integer fallback applies. *)
+      pp_heap_value ~type_defs:ctx.global_type_defs ty
+        (Jit.call_void_to_ptr fptr)
     | ty ->
       let ptr = Jit.call_void_to_ptr fptr in
       if ptr = Nativeint.zero then "null"

@@ -1390,6 +1390,68 @@ let test_repl_renders_desugar_parse_error () =
        try ignore (Str.search_forward re out 0); true with Not_found -> false)
   end
 
+(** Regression: nullary constructors of a REPL-declared ADT all printed as
+    the type's FIRST variant (`Green` and `Blue` both displayed as `Red`).
+
+    Root cause: the REPL's JIT compiles each expression fragment as its own
+    LLVM module whose constructor-tag table ([Llvm_toplevel.build_ctor_info])
+    is built ONLY from the type_defs handed to the fragment emitter.  A type
+    declared at the prompt is evaluated by the tree-walking interpreter and
+    was registered with the JIT for pretty-printing only
+    ([Repl_jit.register_user_type_decl] -> [global_type_defs]), never as a
+    lowering/codegen input — so the fragment's [ctor_entry] lookup missed and
+    fell back to its `ce_tag = 0` default, allocating every nullary
+    constructor with tag 0.  The printer then faithfully rendered tag 0, i.e.
+    the first variant.
+
+    Must drive the real `march repl` subprocess: the lightweight
+    [repl_eval_exprs] helper used by the "repl parity" tests never touches the
+    JIT, so it cannot reproduce this.  ([MARCH_REPL_INTERP] likewise takes the
+    interpreter path and always printed these correctly.) *)
+let test_repl_jit_nullary_ctor_tags () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 256 in
+      (try while true do Buffer.add_channel buf ic 1 done
+       with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      Buffer.contents buf
+    in
+    let script = String.concat "\\n" [
+      "type Color = Red | Green | Blue";
+      "Green"; "Blue"; "Red";
+      (* The tag is not cosmetic: a wrong tag also picks the wrong match arm. *)
+      "match Blue do"; "  Red -> 1"; "  Green -> 2"; "  Blue -> 3"; "end";
+      (* A payload constructor past the first: the tag must be right AND the
+         payload must survive (each repr stores its fields differently). *)
+      "type Pay = P0 | P1(Int) | P2";
+      "P1(7)"; "P2";
+      (* Option-shaped: not a heap cell at all — `X(7)` IS the tagged word 15,
+         `Y` IS a raw 0. *)
+      "type Niche = X(Int) | Y";
+      "X(7)"; "Y";
+      ":quit" ] ^ "\\n" in
+    let out = read_cmd (Printf.sprintf
+      "cd %s && printf %s | %s repl 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote script)
+      (Filename.quote main_exe)) in
+    let contains needle =
+      let re = Str.regexp_string needle in
+      try ignore (Str.search_forward re out 0); true with Not_found -> false
+    in
+    List.iter (fun expected ->
+      Alcotest.(check bool)
+        (Printf.sprintf "REPL prints `= %s` (got: %s)" expected (String.trim out))
+        true (contains ("= " ^ expected)))
+      ["Green"; "Blue"; "Red"; "3"; "P1(7)"; "P2"; "X(7)"; "Y"]
+  end
+
 (** Parity: same features work in interpreter mode *)
 let test_repl_parity_closures () =
   match repl_eval_exprs [
@@ -5245,6 +5307,8 @@ let eval_suites =
           Alcotest.test_case ":inspect type+value"     `Quick test_repl_inspect_type_and_value;
           Alcotest.test_case "final-review: renders desugar ParseError, not internal error"
             `Quick test_repl_renders_desugar_parse_error;
+          Alcotest.test_case "JIT: nullary ctor tags of a REPL-declared type"
+            `Quick test_repl_jit_nullary_ctor_tags;
         ] );
       ( "repl parity",
         [
