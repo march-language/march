@@ -44,6 +44,15 @@ type t = {
   mutable next_slot : int;
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
   compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
+  (* bind_name -> Digest of the declaration's marshaled AST, recorded when a
+     REPL-typed `fn` compiles successfully (run_decl ~is_fn_decl:true only —
+     stdlib-prelude and :load fns are compiled elsewhere and have no entry).
+     Distinguishes a :reset scroll-replay of the identical cell (same digest
+     → skip, closure slot still valid) from a genuine REDEFINITION (digest
+     differs → recompile and rebind the slot).  Each REPL input is parsed
+     from its own fresh [Lexing.from_string], so identical source text
+     yields a byte-identical marshaled AST. *)
+  fn_fingerprints : (string, string) Hashtbl.t;
   global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
   global_type_defs : (string, March_tir.Tir.type_def) Hashtbl.t;  (* type name -> TDVariant/TDRecord for display *)
   mutable stdlib_decls : March_ast.Ast.decl list;  (* cached for incremental lowering context *)
@@ -108,6 +117,7 @@ let create ~runtime_so ?(clang="clang") () =
     counter = 0; var_slots = []; next_slot = 0;
     handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
+    fn_fingerprints = Hashtbl.create 64;
     global_tir_tys = Hashtbl.create 16;
     global_type_defs = Hashtbl.create 16;
     stdlib_decls = [];
@@ -122,6 +132,9 @@ let next_id ctx =
   let n = ctx.counter in
   ctx.counter <- n + 1;
   n
+
+(* See the .mli — test-only observability for the replay skip fast path. *)
+let fragment_count ctx = ctx.counter
 
 let profile_enabled = Sys.getenv_opt "MARCH_JIT_PROFILE" <> None
 let time_phase name f =
@@ -282,6 +295,78 @@ let mark_compiled_fns ctx (fns : March_tir.Tir.fn_def list) =
   List.iter (fun (f : March_tir.Tir.fn_def) ->
     Hashtbl.replace ctx.compiled_fns f.fn_name ()
   ) fns
+
+module SS = Set.Make (String)
+
+(** Rename every reference to the top-level fn [old_name] to [new_name]
+    across a fragment's fn_defs (used when REDEFINING a REPL fn: the new
+    version must be emitted under a session-unique symbol so it can't
+    collide with the earlier fragment's definition — a hard duplicate-
+    definition error in the ORC backend's single JITDylib, and a latent
+    flat-namespace shadowing hazard under clang+dlopen).
+
+    Capture-avoiding: a locally bound [old_name] (param, let, case binder,
+    letrec) shadows the top-level fn, so references under such a binder are
+    left alone.  Both [EApp] heads (direct calls, incl. self-recursion) and
+    [AVar] atoms (the fn taken as a first-class value — emit_atom's top-fns
+    wrap path) are renamed; [ADefRef]/literals are untouched.  Runs post-
+    defun, so helper lambdas are separate fn_defs in the same list and get
+    the same treatment. *)
+let rename_top_fn_refs ~old_name ~new_name
+    (fns : March_tir.Tir.fn_def list) : March_tir.Tir.fn_def list =
+  let open March_tir.Tir in
+  let rename_var bound (v : var) =
+    if v.v_name = old_name && not (SS.mem old_name bound)
+    then { v with v_name = new_name } else v
+  in
+  let rename_atom bound = function
+    | AVar v -> AVar (rename_var bound v)
+    | (ADefRef _ | ALit _) as a -> a
+  in
+  let bind bound (v : var) = SS.add v.v_name bound in
+  let rec go bound e =
+    let ra = rename_atom bound in
+    match e with
+    | EAtom a -> EAtom (ra a)
+    | EApp (v, args) -> EApp (rename_var bound v, List.map ra args)
+    | ECallPtr (f, args) -> ECallPtr (ra f, List.map ra args)
+    | ELet (v, e1, e2) -> ELet (v, go bound e1, go (bind bound v) e2)
+    | ELetRec (lfns, e2) ->
+      (* The letrec's own names shadow throughout (bodies and continuation). *)
+      let bound' = List.fold_left (fun b (f : fn_def) ->
+        SS.add f.fn_name b) bound lfns in
+      let lfns' = List.map (fun (f : fn_def) ->
+        let fb = List.fold_left bind bound' f.fn_params in
+        { f with fn_body = go fb f.fn_body }) lfns in
+      ELetRec (lfns', go bound' e2)
+    | ECase (scrut, branches, dflt) ->
+      let branches' = List.map (fun (b : branch) ->
+        let bb = List.fold_left bind bound b.br_vars in
+        { b with br_body = go bb b.br_body }) branches in
+      ECase (ra scrut, branches', Option.map (go bound) dflt)
+    | ETuple atoms -> ETuple (List.map ra atoms)
+    | ERecord fields -> ERecord (List.map (fun (n, a) -> (n, ra a)) fields)
+    | EField (a, n) -> EField (ra a, n)
+    | EUpdate (a, fields) ->
+      EUpdate (ra a, List.map (fun (n, x) -> (n, ra x)) fields)
+    | EAlloc (ty, atoms) -> EAlloc (ty, List.map ra atoms)
+    | EStackAlloc (ty, atoms) -> EStackAlloc (ty, List.map ra atoms)
+    | EFree a -> EFree (ra a)
+    | EIncRC a -> EIncRC (ra a)
+    | EDecRC a -> EDecRC (ra a)
+    | EAtomicIncRC a -> EAtomicIncRC (ra a)
+    | EAtomicDecRC a -> EAtomicDecRC (ra a)
+    | EReuse (a, ty, atoms) -> EReuse (ra a, ty, List.map ra atoms)
+    | ESeq (e1, e2) -> ESeq (go bound e1, go bound e2)
+    | EAllocHole (tok, ty, atoms, hole) ->
+      EAllocHole (Option.map ra tok, ty, List.map ra atoms, hole)
+    | ESetField (obj, i, v) -> ESetField (ra obj, i, ra v)
+  in
+  List.map (fun (f : fn_def) ->
+    let bound = List.fold_left bind SS.empty f.fn_params in
+    { f with
+      fn_name = (if f.fn_name = old_name then new_name else f.fn_name);
+      fn_body = go bound f.fn_body }) fns
 
 (** Build the [repl_slot_info list] passed to LLVM emit functions from
     the current [ctx.var_slots] list. *)
@@ -711,15 +796,70 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   let (user_fns, extern_fns) = partition_fns ctx all_support_fns in
   if is_fn_decl then begin
-    (* JIT context persists across :reset.  When the scroll system resends prior
-       cells, the function is already compiled and its closure slot is still valid.
-       Skip recompilation entirely — helper lambdas may have new defun UIDs but
-       the compiled closure is unchanged. *)
-    if Hashtbl.mem ctx.compiled_fns bind_name then ()
+    (* JIT context persists across :reset.  When the scroll system resends
+       prior cells, the function is already compiled and its closure slot is
+       still valid — skip recompilation entirely (helper lambdas may have new
+       defun UIDs but the compiled closure is unchanged).  A REPLAY is
+       recognized by its AST fingerprint matching the recorded one; a genuine
+       REDEFINITION (same name, different body) has a different fingerprint
+       and must recompile and rebind the closure slot, matching interpreter-
+       mode's Elixir-style rebinding.  A compiled name with NO fingerprint on
+       record was compiled outside run_decl (stdlib prelude, :load): calls to
+       those resolve as direct extern calls, not through a slot, so a
+       redefinition could never take effect — keep the historical skip. *)
+    let fingerprint = Digest.to_hex (Digest.string (Marshal.to_string m [])) in
+    let already_compiled = Hashtbl.mem ctx.compiled_fns bind_name in
+    let is_replay =
+      already_compiled &&
+      (match Hashtbl.find_opt ctx.fn_fingerprints bind_name with
+       | Some fp -> fp = fingerprint
+       | None -> true)
+    in
+    if is_replay then ()
     else begin
+    let is_redefinition = already_compiled in
+    (* partition_fns classified the freshly lowered [bind_name] as extern
+       (its OLD version is in compiled_fns); pull it back so the new body is
+       defined in this fragment rather than declared. *)
+    let (user_fns, extern_fns) =
+      if is_redefinition then
+        let (redef, ext) = List.partition
+          (fun (f : March_tir.Tir.fn_def) -> f.fn_name = bind_name)
+          extern_fns in
+        (user_fns @ redef, ext)
+      else (user_fns, extern_fns)
+    in
+    (* Emit a redefinition under a session-unique symbol: the earlier
+       fragment already defined [bind_name], and the ORC backend's single
+       JITDylib hard-errors on a duplicate definition (clang+dlopen would
+       merely shadow ambiguously in the flat namespace).  Calls resolve
+       through the closure SLOT, not the symbol, so only the slot binding
+       below needs the bare name.  [ctx.counter] is monotonic and the
+       primary emit below advances it, so successive redefinitions get
+       distinct names. *)
+    let emit_name =
+      if is_redefinition then
+        Printf.sprintf "%s$redef$%d" bind_name ctx.counter
+      else bind_name
+    in
+    let user_fns =
+      if is_redefinition then
+        rename_top_fn_refs ~old_name:bind_name ~new_name:emit_name user_fns
+      else user_fns
+    in
+    (* On redefinition, drop the OLD binding's slot from prev_slots: the
+       emitter would otherwise emit a slot-loader `define @<bind_name>()`
+       that collides with the original fragment's definition under ORC, and
+       the new body must not silently resolve its own name to the old
+       closure anyway (self-recursion was renamed to [emit_name] above). *)
+    let prev_slots =
+      List.filter (fun (si : March_tir.Llvm_emit.repl_slot_info) ->
+        not (is_redefinition && si.rs_bare = bind_name))
+        (prev_slots_of ctx)
+    in
     let primary_fn =
       match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
-        f.fn_name = bind_name) user_fns with
+        f.fn_name = emit_name) user_fns with
       | Some f -> f
       | None -> List.hd user_fns
     in
@@ -745,20 +885,29 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let pn = next_id ctx in
     let slot = alloc_slot ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
-      ~n:pn ~bind_name ~dest_slot:slot ~prev_slots:(prev_slots_of ctx)
+      ~n:pn ~bind_name ~dest_slot:slot ~prev_slots
       ~extern_fns:(extern_fns @ helper_fns) ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       primary_fn in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
+    (* Record the declaration's fingerprint only after the fragment compiled
+       and loaded — a failed compile must leave the previous state (and its
+       fingerprint) intact so the user's retry recompiles cleanly, mirroring
+       the mark_compiled_fns discipline. *)
+    Hashtbl.replace ctx.fn_fingerprints bind_name fingerprint;
     let init_name = Printf.sprintf "repl_%d_init" pn in
     let fptr = lookup_sym handle init_name in
     Jit.call_void_to_void fptr;
     (* Register the slot so future fragments can load the closure as a value.
        The type is TFn (closures are heap pointers), which causes emit_prev_slot_bridges
-       to emit inttoptr when loading the closure from the slot. *)
+       to emit inttoptr when loading the closure from the slot.  On a
+       redefinition this REBINDS the bare name to the fresh slot holding the
+       new closure — later fragments resolve calls through this binding, so
+       they pick up the new body.  (The old slot keeps the old closure alive;
+       one abandoned closure per redefinition, same shape as `let` rebinding.) *)
     ctx.var_slots <- (bind_name, slot, March_tir.Tir.TFn ([], March_tir.Tir.TUnit)) ::
       List.filter (fun (b, _, _) -> b <> bind_name) ctx.var_slots
-    end (* if user_fns <> [] *)
+    end (* not is_replay *)
   end else begin
     (* Let binding: compute value and store in a fresh slot. *)
     let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->

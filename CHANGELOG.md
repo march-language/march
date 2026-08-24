@@ -11,6 +11,14 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- REPL: redefining a `fn` at the prompt now takes effect under both JIT
+  backends (clang and ORC), matching interpreter mode's rebinding — the new
+  body was previously silently ignored and calls kept answering with the
+  first definition. `:reset` scroll-replay of unchanged cells still skips
+  recompilation.
+
 ### Changed
 
 - Interpreter: variable lookup no longer scans the builtin environment per reference (monomorphic comparison + hashed global scope). Interpreted programs run ~11x faster (fib(25): 16.6 s -> 1.5 s); REPL interpreter-mode lookups stay fast across prompts.
