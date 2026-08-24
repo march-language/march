@@ -19,7 +19,8 @@ git log is authoritative for exact commits.
   colliding in ORC's single shared JITDylib with the real definition of the
   same name; and the ORC binding double-freed the module on the add-module
   error path, turning that recoverable error into a hard crash. The default
-  clang backend was unaffected.
+  clang backend was unaffected; each REPL/JIT session owns its own LLJIT
+  instance (multiple sessions per process no longer collide).
 
 ### Changed
 

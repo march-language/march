@@ -48,6 +48,16 @@ type t = {
   global_type_defs : (string, March_tir.Tir.type_def) Hashtbl.t;  (* type name -> TDVariant/TDRecord for display *)
   mutable stdlib_decls : March_ast.Ast.decl list;  (* cached for incremental lowering context *)
   mutable loaded_tir_types : March_tir.Tir.type_def list;  (* TIR type_defs from :load-ed modules, for ctor_info in expression fragments *)
+  (* Per-session LLJIT (ORC backend only; [None] under clang, or before the
+     first fragment if pre-warm failed).  This is deliberately NOT a
+     module-level global: a process that creates several sessions (the test
+     suites do; an embedder would) would otherwise share one JITDylib, and the
+     second session's stdlib fragment would collide with the first's
+     ("duplicate definition of symbol '_Eq$Int.eq'"), or — worse — silently
+     resolve a stale definition left behind by a torn-down session.  One LLJIT
+     per session mirrors the clang backend's natural per-session semantics
+     (per-fragment .so + per-session dl handles closed by [cleanup]). *)
+  mutable orc : Jit_orc.t option;
 }
 
 (* Backend selector — see the plan file for the motivation.
@@ -62,7 +72,7 @@ type t = {
 
    Defined ABOVE [create] (moved from its original position further down this
    file) so that [create] can pre-warm the LLJIT at the end of construction —
-   see the call to [get_orc ()] there. *)
+   see the call to [get_orc t] there. *)
 type backend = [ `Clang | `Orc ]
 
 let backend : backend option ref = ref None
@@ -85,16 +95,17 @@ let current_backend () = resolve_backend ()
 let set_backend_for_tests b = backend := Some b
 let backend_is_orc () = resolve_backend () = `Orc
 
-(* Lazy-initialised LLJIT.  Only touched when backend_is_orc () is true;
-   libLLVM.dylib is loaded on first create(), so non-ORC builds pay no
-   startup cost. *)
-let orc_instance : Jit_orc.t option ref = ref None
-let get_orc () =
-  match !orc_instance with
+(* Lazy-initialised, PER-SESSION LLJIT.  Only touched when backend_is_orc ()
+   is true; libLLVM.dylib is loaded (process-wide, RTLD_GLOBAL) on the first
+   Jit_orc.create in the process, so non-ORC builds pay no startup cost.
+   Cached on the session record so each [t] owns exactly one LLJIT, disposed
+   by [cleanup]. *)
+let get_orc ctx =
+  match ctx.orc with
   | Some j -> j
   | None ->
     let j = Jit_orc.create () in
-    orc_instance := Some j; j
+    ctx.orc <- Some j; j
 
 let create ~runtime_so ?(clang="clang") () =
   (* Per-process artifact dir.  A single shared "march_jit" dir raced when
@@ -157,8 +168,9 @@ let create ~runtime_so ?(clang="clang") () =
     global_tir_tys = Hashtbl.create 16;
     global_type_defs = Hashtbl.create 16;
     stdlib_decls = [];
-    loaded_tir_types = [] } in
-  (* Pre-warm the shared LLJIT so its one-time libLLVM-load + JIT-target-machine
+    loaded_tir_types = [];
+    orc = None } in
+  (* Pre-warm this session's LLJIT so its one-time libLLVM-load + JIT-target-machine
      setup cost (~80-90 ms, previously paid on the FIRST REPL fragment) happens
      here at startup instead, overlapping with the rest of [create]'s work.
      Only touches [backend_is_orc ()] — defined below, referencing this
@@ -174,10 +186,10 @@ let create ~runtime_so ?(clang="clang") () =
      repl.ml's per-expression `try ... with _ -> eval_via_interp ()`
      fallback — a graceful degrade to the interpreter, not a crash. Swallow
      the exception here so [create] can't kill REPL startup; on failure
-     [orc_instance] stays [None] and the first fragment's own [get_orc ()]
+     [t.orc] stays [None] and the first fragment's own [get_orc ctx]
      call retries construction and hits that same pre-existing fallback,
      preserving the pre-change failure surface exactly. *)
-  if backend_is_orc () then (try ignore (get_orc ()) with _ -> ());
+  if backend_is_orc () then (try ignore (get_orc t) with _ -> ());
   t
 
 let alloc_slot ctx =
@@ -208,10 +220,12 @@ type fragment_handle =
   | HClang of Jit.dl_handle
   | HOrc
 
-let lookup_sym (fh : fragment_handle) (sym : string) : nativeint =
+(* Takes [ctx] because the ORC branch resolves against THIS session's LLJIT
+   (see the [orc] field on [t]) — there is no process-wide instance. *)
+let lookup_sym ctx (fh : fragment_handle) (sym : string) : nativeint =
   match fh with
   | HClang h -> Jit.dlsym h sym
-  | HOrc     -> Jit_orc.lookup (get_orc ()) sym
+  | HOrc     -> Jit_orc.lookup (get_orc ctx) sym
 
 let compile_fragment_clang ctx (ir : string) : Jit.dl_handle =
   let n = ctx.counter - 1 in
@@ -277,7 +291,7 @@ let compile_fragment_clang ctx (ir : string) : Jit.dl_handle =
   ctx.handles <- handle :: ctx.handles;
   handle
 
-(* Backend dispatcher. In ORC mode we parse the IR straight into the shared
+(* Backend dispatcher. In ORC mode we parse the IR straight into the session's
    LLJIT — no shared object, no dlopen, no per-fragment handle. The counter
    is assumed to already have been advanced (next_id called) by the caller,
    matching the clang path's invariant. *)
@@ -286,7 +300,7 @@ let compile_fragment ctx (ir : string) : fragment_handle =
     let n = ctx.counter - 1 in
     let name = Printf.sprintf "repl_%d" n in
     let t0 = if profile_enabled then Unix.gettimeofday () else 0. in
-    Jit_orc.add_ir (get_orc ()) ~ir ~name;
+    Jit_orc.add_ir (get_orc ctx) ~ir ~name;
     if profile_enabled then
       Printf.eprintf "[jit-prof]   orc_add_ir         %6.1fms\n%!"
         ((Unix.gettimeofday () -. t0) *. 1000.);
@@ -667,7 +681,7 @@ let run_expr ctx ~tc_env m =
     (fun () -> compile_fragment ctx ir) in
   mark_compiled_fns ctx new_fns;
   let sym_name = Printf.sprintf "repl_%d" n in
-  let fptr = lookup_sym handle sym_name in
+  let fptr = lookup_sym ctx handle sym_name in
   let result_str = match ret_ty with
     | March_tir.Tir.TInt ->
       let v = Jit.call_void_to_int fptr in
@@ -801,7 +815,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
     let init_name = Printf.sprintf "repl_%d_init" pn in
-    let fptr = lookup_sym handle init_name in
+    let fptr = lookup_sym ctx handle init_name in
     Jit.call_void_to_void fptr;
     (* Register the slot so future fragments can load the closure as a value.
        The type is TFn (closures are heap pointers), which causes emit_prev_slot_bridges
@@ -831,7 +845,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx user_fns;
     let init_name = Printf.sprintf "repl_%d_init" n in
-    let fptr = lookup_sym handle init_name in
+    let fptr = lookup_sym ctx handle init_name in
     Jit.call_void_to_void fptr;
     (* Register slot for future references to bind_name. *)
     ctx.var_slots <- (bind_name, slot, main_fn.fn_ret_ty) ::
@@ -991,6 +1005,20 @@ let precompile_stdlib ctx
   end
 
 let cleanup ctx =
+  (* Dispose this session's LLJIT (if it ever created one — clang mode and
+     JIT-less tests leave it [None]) BEFORE closing the dl handles, so JIT'd
+     code is torn down while the runtime/prelude .sos it references are still
+     mapped.  LLVMOrcDisposeLLJIT frees all code produced by [add_ir]; that is
+     exactly the right lifetime here, since a session's fragments must die with
+     the session — the same contract dlclose gives the clang path.  [cleanup]
+     is terminal for a ctx (all callers drop it immediately: bin/main.ml's
+     Fun.protect finallys, test/test_codegen.ml's protect-and-reraise pairs,
+     test/test_helpers.ml), so the disposed handle can never be reused; clear
+     it anyway to make a double [cleanup] a no-op rather than a double free. *)
+  (match ctx.orc with
+   | Some j -> (try Jit_orc.dispose j with _ -> ())
+   | None -> ());
+  ctx.orc <- None;
   List.iter (fun h -> try Jit.dlclose h with _ -> ()) ctx.handles;
   if Sys.getenv_opt "MARCH_KEEP_LL" <> None then ()
   else begin
