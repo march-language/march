@@ -12,7 +12,7 @@
 --   - Task overhead vs sequential map
 --   - List allocation under task boundaries
 --
--- Checksum agreed between interpreted and compiled: 1699332 (sum of Collatz step counts for 1..20000)
+-- Checksum agreed between interpreted and compiled: 1834634 (sum of Collatz step counts for 1..20000)
 -- Interpreted par_map(20000, 1000) takes ~3-4 min; spawn is eager (no real parallelism yet).
 --
 -- Status: REQUIRES true parallelism (OCaml 5 Domains) for speedup.
