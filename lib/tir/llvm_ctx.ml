@@ -112,6 +112,19 @@ type ctx = {
   local_names : (string, int) Hashtbl.t;
   (* Tracks which closure wrappers have been generated for top-level fns *)
   emitted_wraps : (string, unit) Hashtbl.t;
+  (* REPL/JIT only: cross-FRAGMENT memory of which `$clo_wrap` trampolines a
+     Repl_jit SESSION has already DEFINED.  [emitted_wraps] above is scoped to
+     one fragment's ctx, which is exactly right natively (one module) but wrong
+     under the JIT, where every fragment of a session lands in ONE symbol
+     namespace: a second fragment that also uses `double` as a first-class
+     value would re-define `@double$clo_wrap`, which ORC's shared JITDylib
+     rejects outright ("duplicate definition of symbol") and clang's per-.so
+     flat namespace merely tolerated.  When present, the first fragment to need
+     a wrapper defines it and later fragments emit a `declare` instead — see
+     [wrap_emit_kind].  Per-SESSION, never global: a new Repl_jit gets a new
+     LLJIT/dylib namespace that cannot see the old session's definitions.
+     [None] on the AOT path ([emit_module]), leaving it exactly as before. *)
+  mutable session_wraps : (string, unit) Hashtbl.t option;
   (* Memo: mangled fn name -> emitted static-closure global symbol.
      One immortal closure object per top-level function used as a value,
      replacing a fresh march_alloc(24) at every materialization site. *)
@@ -268,6 +281,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   poly_ctors  = Hashtbl.create 64;
   type_params = Hashtbl.create 16;
   emitted_wraps = Hashtbl.create 8;
+  session_wraps = None;
   static_clos = Hashtbl.create 16;
   extra_fns = Buffer.create 1024;
   emitted_eq_fns = Hashtbl.create 16;
@@ -741,6 +755,28 @@ let intern_static_closure ?(pad = 0) ctx fn_name wrap_name =
          g pad wrap_name);
     Hashtbl.replace ctx.static_clos fn_name g;
     g
+
+(** Decide how this fragment should provide [wrap_name] (a `$clo_wrap`
+    trampoline), and record the decision.  Replaces the bare
+    check-then-add-[emitted_wraps] guard that every `$clo_wrap` call site used
+    to inline:
+
+    - [`Skip]    — this fragment already emitted it; nothing more to do.
+    - [`Define]  — emit the body ([Llvm_calls.clo_wrap_define]).
+    - [`Declare] — an EARLIER fragment of this REPL/JIT session already defined
+                   it, so emit only [Llvm_calls.clo_wrap_declare] and let the
+                   linker/JITDylib bind the reference.  Only ever returned when
+                   a session table is installed (see [session_wraps]); the AOT
+                   path never sees it. *)
+let wrap_emit_kind ctx (wrap_name : string) : [ `Skip | `Define | `Declare ] =
+  if Hashtbl.mem ctx.emitted_wraps wrap_name then `Skip
+  else begin
+    Hashtbl.add ctx.emitted_wraps wrap_name ();
+    match ctx.session_wraps with
+    | Some t when Hashtbl.mem t wrap_name -> `Declare
+    | Some t -> Hashtbl.add t wrap_name (); `Define
+    | None -> `Define
+  end
 
 (* ── Repr-consistency audit (MARCH_REPR_AUDIT=1) ─────────────────────────
    Every site that COMMITS to a value representation (EAlloc, EReuse,
