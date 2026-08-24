@@ -208,11 +208,16 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
 
     LLVMOrcJITDylibRef MainJD = LLVMOrcLLJITGetMainJITDylib(J);
     LLVMErrorRef err = LLVMOrcLLJITAddLLVMIRModule(J, MainJD, TSM);
-    /* On success TSM is consumed; on failure the caller still owns it. */
-    if (err) {
-        LLVMOrcDisposeThreadSafeModule(TSM);
+    /* TSM is consumed UNCONDITIONALLY — success or failure.  The C API wraps
+       it in a `std::unique_ptr<ThreadSafeModule>` on entry and destroys it on
+       return regardless of the Error it produces (OrcV2CBindings.cpp).  An
+       explicit LLVMOrcDisposeThreadSafeModule(TSM) here is therefore a
+       double-free: it re-runs ~ThreadSafeModule on freed memory, which locks
+       the (already-destroyed) ThreadSafeContext mutex and SIGSEGVs — turning
+       every recoverable add-module error (e.g. "Duplicate definition of
+       symbol") into a hard crash of the whole REPL. Just report the error. */
+    if (err)
         fail_with_llvm_err("LLVMOrcLLJITAddLLVMIRModule", err);
-    }
 
     CAMLreturn(Val_unit);
 }
