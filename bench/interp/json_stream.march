@@ -1,0 +1,51 @@
+-- JsonStream throughput: synthetic NDJSON, fed in 64KB chunks.
+-- Each record `{"id": N, "name": "user-N", "active": true, "tags": [1, 2, 3]}\n`
+-- emits 14 events: EvObjStart, EvKey("id"), EvNum, EvKey("name"), EvStr,
+-- EvKey("active"), EvBool, EvKey("tags"), EvArrStart, EvNum x3, EvArrEnd,
+-- EvObjEnd — measured empirically with 1/2/3-record probes (14, 28, 42),
+-- not derived from prose arithmetic.
+-- checksum=28000 (2000 records x 14)
+
+mod JsonStreamBench do
+  needs IO.Console
+
+pfn build_records(n, acc) do
+  if n <= 0 do acc
+  else
+    build_records(n - 1,
+      Cons("{\"id\": " ++ to_string(n) ++ ", \"name\": \"user-" ++ to_string(n)
+           ++ "\", \"active\": true, \"tags\": [1, 2, 3]}\n", acc))
+  end
+end
+
+fn main(_cap_console : Cap(IO.Console)) do
+  let n = 2000
+  let src = string_join(build_records(n, Nil), "")
+  let total = run_chunked(src, 0, JsonStream.start_ndjson(), 0)
+  println("checksum=" ++ to_string(total))
+end
+
+pfn run_chunked(src, off, st, n) do
+  let sz = string_byte_length(src)
+  if off >= sz do
+    match JsonStream.finish(st) do
+    Err(_) -> 0 - 1
+    Ok(evs) -> n + count_list(evs)
+    end
+  else
+    let take = if sz - off < 65536 do sz - off else 65536 end
+    match JsonStream.feed(st, string_slice(src, off, take)) do
+    Err(_) -> 0 - 1
+    Ok((evs, st2)) -> run_chunked(src, off + take, st2, n + count_list(evs))
+    end
+  end
+end
+
+pfn count_list(evs) do
+  match evs do
+  Nil -> 0
+  Cons(_, t) -> count_list(t) + 1
+  end
+end
+
+end
