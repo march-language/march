@@ -1886,6 +1886,15 @@ let jit_eval_simple_expr ~runtime_so src =
     | r -> r)
   | _ -> None
 
+(** Run [f] with the REPL JIT backend forced to [backend] for the duration.
+    Repl_jit resolves the backend lazily and caches it, so the override must
+    go through [Repl_jit.set_backend_for_tests]; restores the previously
+    resolved backend afterward, even if [f] raises. *)
+let with_jit_backend backend f =
+  let prev = March_jit.Repl_jit.current_backend () in
+  March_jit.Repl_jit.set_backend_for_tests backend;
+  Fun.protect ~finally:(fun () -> March_jit.Repl_jit.set_backend_for_tests prev) f
+
 (** Assert that interpreter and JIT produce identical output for [src].
     Skips when JIT is unavailable. *)
 let check_parity ~ctx ~runtime_so src =
