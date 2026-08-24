@@ -155,9 +155,41 @@ let eval_decls_only env decls =
 let cache_build_id () =
   String.sub (Lazy.force March_cas.Cas.compiler_identity) 0 12
 
+(** Remove `<name>.<pid>.tmp` scratch files in [dir] whose owning pid is gone.
+
+    Every writer in this cache dir stages through a pid-suffixed temp and
+    renames; a writer that dies — or, as [save_cached_tc_env] did on every
+    single REPL start, raises — between the two leaves the temp behind.  Same sweep-by-liveness
+    shape as [March_jit.Repl_jit.create]'s per-pid tmp dirs.  Never raises:
+    cache upkeep must not be able to stop a REPL from starting. *)
+let sweep_stale_cache_tmps cache_dir =
+  let self = Unix.getpid () in
+  try
+    Array.iter (fun entry ->
+      if Filename.check_suffix entry ".tmp" then begin
+        (* "<name>.<pid>.tmp": ".<pid>" is the extension of the chopped name. *)
+        let ext = Filename.extension (Filename.chop_suffix entry ".tmp") in
+        let pid =
+          if ext = "" then None
+          else int_of_string_opt (String.sub ext 1 (String.length ext - 1)) in
+        match pid with
+        | Some pid when pid <> self ->
+          let alive =
+            try Unix.kill pid 0; true
+            with Unix.Unix_error (Unix.ESRCH, _, _) -> false
+               | Unix.Unix_error _ -> true (* EPERM etc: assume alive *)
+          in
+          if not alive then
+            (try Sys.remove (Filename.concat cache_dir entry) with _ -> ())
+        | _ -> ()
+      end
+    ) (Sys.readdir cache_dir)
+  with _ -> ()
+
 let load_cached_tc_env ~content_hash ~type_map =
   let home = (try Sys.getenv "HOME" with Not_found -> ".") in
   let cache_dir = Filename.concat home ".cache/march" in
+  sweep_stale_cache_tmps cache_dir;
   let short_hash = String.sub content_hash 0 16 in
   let cache_path = Filename.concat cache_dir
     ("stdlib_tcenv_" ^ cache_build_id () ^ "_" ^ short_hash ^ ".bin") in
@@ -177,6 +209,25 @@ let load_cached_tc_env ~content_hash ~type_map =
     end else None
   with _ -> None
 
+(** Drop the fields of a typecheck env that [Marshal] cannot represent.
+
+    [import_tracker]'s entries carry an [ie_matches : string -> bool] closure,
+    so marshalling an env that has ANY import entry raises
+    [Invalid_argument "output_value: functional value"] — and after a stdlib
+    fold every env has some.  That is what silently defeated this cache: the
+    save raised on every REPL start, so the REPL re-typechecked the whole
+    stdlib every time and left a zero-byte temp file behind each launch.
+
+    Dropping the tracker (and its parallel index) is sound here for the same
+    reason [Lsp.Typecheck_cache.derive] does it: both fields exist only to
+    report unused-import warnings for the decls that populated them, and
+    nothing reports those for stdlib.  Imports the user types AT the REPL are
+    registered on the live env afterwards either way. *)
+let marshalable_tc_env (tc_env : March_typecheck.Typecheck.env) =
+  { tc_env with
+    March_typecheck.Typecheck.import_tracker = ref [];
+    import_idx = March_typecheck.Typecheck.make_import_index () }
+
 (** Save the typecheck env to cache. *)
 let save_cached_tc_env ~content_hash tc_env =
   let home = (try Sys.getenv "HOME" with Not_found -> ".") in
@@ -188,17 +239,31 @@ let save_cached_tc_env ~content_hash tc_env =
     (try Unix.mkdir cache_dir 0o755
      with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
     (* Write-to-temp + rename: the cache dir is shared across concurrent
-       sessions; a reader must never see a half-written Marshal blob. *)
+       sessions; a reader must never see a half-written Marshal blob.
+       [Fun.protect] unlinks the temp on failure — without it a raising save
+       leaks one orphan per launch, which is how the failure below accumulated
+       1,132 zero-byte files before anyone read the directory. *)
     let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
     let oc = open_out_bin tmp in
-    Marshal.to_channel oc tc_env [];
-    (* Save type_map as association list (Hashtbl isn't stable across runs) *)
-    let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-      tc_env.March_typecheck.Typecheck.type_map [] in
-    Marshal.to_channel oc tm_list [];
-    close_out oc;
-    Sys.rename tmp cache_path
-  with _ -> ())
+    Fun.protect
+      ~finally:(fun () ->
+        (try close_out oc with _ -> ());
+        if Sys.file_exists tmp then (try Sys.remove tmp with _ -> ()))
+      (fun () ->
+        Marshal.to_channel oc (marshalable_tc_env tc_env) [];
+        (* Save type_map as association list (Hashtbl isn't stable across runs) *)
+        let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+          tc_env.March_typecheck.Typecheck.type_map [] in
+        Marshal.to_channel oc tm_list [];
+        close_out oc;
+        Sys.rename tmp cache_path)
+  with e ->
+    (* Loud: a silently failing cache costs a full stdlib typecheck on every
+       single REPL start, and looks like nothing at all. *)
+    Printf.eprintf
+      "[warn] could not save the stdlib typecheck cache (%s); the REPL will \
+       re-typecheck the stdlib on every start\n%!"
+      (Printexc.to_string e))
 
 (** Compute a content hash of stdlib decls using MD5 of their marshalled form.
     Stable within a binary build — changes whenever stdlib source changes. *)

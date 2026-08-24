@@ -652,6 +652,10 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
     (Printf.sprintf "stdlib_tcenv_cli%s_%s_%s.bin" js_suffix build_id short_hash) in
   let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
     Hashtbl.create 4096 in
+  (* Drop staging files left by processes that died mid-write — the REPL
+     sweeps the same shared dir on start, but a user who only ever runs the
+     CLI would otherwise never clear them. *)
+  March_repl.Repl.sweep_stale_cache_tmps cache_dir;
   let load_from_cache () =
     try
       if Sys.file_exists cache_path then begin
@@ -685,13 +689,27 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
        with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
       let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
       let oc = open_out_bin tmp in
-      Marshal.to_channel oc final_env [];
-      let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-        final_env.March_typecheck.Typecheck.type_map [] in
-      Marshal.to_channel oc tm_list [];
-      close_out oc;
-      Sys.rename tmp cache_path
-    with _ -> ());
+      (* Same staging discipline as [March_repl.Repl.save_cached_tc_env], and
+         for the same reasons: the env is stripped of its unmarshalable
+         import-tracker closures before writing, and [Fun.protect] unlinks the
+         temp if anything raises, so a failed save cannot leave a zero-byte
+         orphan in the shared cache dir. *)
+      Fun.protect
+        ~finally:(fun () ->
+          (try close_out oc with _ -> ());
+          if Sys.file_exists tmp then (try Sys.remove tmp with _ -> ()))
+        (fun () ->
+          Marshal.to_channel oc (March_repl.Repl.marshalable_tc_env final_env) [];
+          let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+            final_env.March_typecheck.Typecheck.type_map [] in
+          Marshal.to_channel oc tm_list [];
+          close_out oc;
+          Sys.rename tmp cache_path)
+    with e ->
+      Printf.eprintf
+        "[warn] could not save the stdlib typecheck cache (%s); stdlib will be \
+         re-typechecked on every invocation\n%!"
+        (Printexc.to_string e));
     { final_env with
       March_typecheck.Typecheck.errors = March_errors.Errors.create ();
       type_map = final_env.March_typecheck.Typecheck.type_map }
