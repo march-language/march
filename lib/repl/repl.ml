@@ -119,7 +119,7 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
   add_from tc_env stdlib_decls
 
 let load_decls_into_env env tc_env decls =
-  List.fold_left (fun (e, tc) decl ->
+  let (env_final, tc_final) = List.fold_left (fun (e, tc) decl ->
     let ctx = March_errors.Errors.create () in
     let tc' = March_typecheck.Typecheck.check_decl { tc with errors = ctx } decl in
     (* Always use tc' even when typecheck produces errors: stdlib modules that
@@ -133,14 +133,18 @@ let load_decls_into_env env tc_env decls =
        still populate the eval environment and remain callable in the REPL. *)
     let e' = (try March_eval.Eval.eval_decl e decl with _ -> e) in
     (e', { tc' with errors = March_errors.Errors.create () })
-  ) (env, tc_env) decls
+  ) (env, tc_env) decls in
+  March_eval.Eval.install_global_tail env_final;
+  (env_final, tc_final)
 
 (** Run only eval_decl for each stdlib module (skip typechecking).
     Used when the typecheck env is loaded from cache. *)
 let eval_decls_only env decls =
-  List.fold_left (fun e decl ->
+  let env_final = List.fold_left (fun e decl ->
     (try March_eval.Eval.eval_decl e decl with _ -> e)
-  ) env decls
+  ) env decls in
+  March_eval.Eval.install_global_tail env_final;
+  env_final
 
 (** Try to load a cached typecheck env.  Returns Some tc_env on hit. *)
 (* The compiler's own identity, part of every marshalled cache key below.

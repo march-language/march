@@ -4892,12 +4892,47 @@ let test_assoc_str_is_exact_match () =
   Alcotest.(check int) "prefix does not match" 2
     (vint (Option.get (March_eval.Eval.assoc_str "a" env)))
 
+let test_global_tail_shadowed_by_locals () =
+  let tail = [("g", March_eval.Eval.VInt 1); ("h", March_eval.Eval.VInt 10)] in
+  March_eval.Eval.install_global_tail tail;
+  let env = ("g", March_eval.Eval.VInt 2) :: tail in
+  Alcotest.(check int) "local shadows tail" 2 (vint (March_eval.Eval.lookup "g" env));
+  Alcotest.(check int) "tail hit" 10 (vint (March_eval.Eval.lookup "h" env));
+  March_eval.Eval.clear_global_tail ()
+
+let test_global_tail_internal_shadowing () =
+  (* earlier entry wins inside the tail, exactly like the list scan did *)
+  let tail = [("d", March_eval.Eval.VInt 1); ("d", March_eval.Eval.VInt 99)] in
+  March_eval.Eval.install_global_tail tail;
+  Alcotest.(check int) "first entry wins" 1 (vint (March_eval.Eval.lookup "d" tail));
+  March_eval.Eval.clear_global_tail ()
+
+let test_global_tail_not_physical_falls_back_to_scan () =
+  let tail = [("k", March_eval.Eval.VInt 5)] in
+  March_eval.Eval.install_global_tail tail;
+  let other = [("k", March_eval.Eval.VInt 6)] in   (* structurally equal, not == *)
+  Alcotest.(check int) "scan still correct" 6 (vint (March_eval.Eval.lookup "k" other));
+  March_eval.Eval.clear_global_tail ()
+
+let test_fib_end_to_end_unchanged () =
+  let env = eval_with_stdlib [] {|
+mod M do
+  fn fib(n) do if n < 2 do n else fib(n-1) + fib(n-2) end end
+  fn main() do fib(15) end
+end|} in
+  Alcotest.(check int) "fib 15" 610
+    (vint (March_eval.Eval.apply (List.assoc "main" env) []))
+
 let eval_suites =
   [
       ( "env_lookup", [
           Alcotest.test_case "innermost wins" `Quick test_lookup_shadowing_innermost_wins;
           Alcotest.test_case "missing raises" `Quick test_lookup_missing_raises;
-          Alcotest.test_case "assoc_str exact" `Quick test_assoc_str_is_exact_match ] );
+          Alcotest.test_case "assoc_str exact" `Quick test_assoc_str_is_exact_match;
+          Alcotest.test_case "global tail shadowed by locals" `Quick test_global_tail_shadowed_by_locals;
+          Alcotest.test_case "global tail internal shadowing" `Quick test_global_tail_internal_shadowing;
+          Alcotest.test_case "global tail not physical falls back to scan" `Quick test_global_tail_not_physical_falls_back_to_scan;
+          Alcotest.test_case "fib end to end unchanged" `Quick test_fib_end_to_end_unchanged ] );
       ( "or_patterns",
         [
           Alcotest.test_case "or-pattern over literals" `Quick
