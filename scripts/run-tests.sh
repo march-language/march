@@ -11,13 +11,26 @@
 #   scripts/run-tests.sh compiler eval   # run a subset by name
 #   scripts/run-tests.sh -q stdlib       # quick subset
 #   scripts/run-tests.sh stdlib_march    # the .march stdlib test files
+#   scripts/run-tests.sh test_jit        # the REPL-JIT / --jit alcotest suite
 #
-# Suites: compiler, eval, codegen, stdlib, stdlib_march.  The first four are
-# test/run_<name>.exe; stdlib_march is test/test_stdlib_march.exe, which runs
-# the .march test files under test/stdlib/.
+# Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit.  The first
+# four are test/run_<name>.exe; stdlib_march is test/test_stdlib_march.exe,
+# which runs the .march test files under test/stdlib/; test_jit is
+# test/test_jit.exe, which drives the REPL JIT / `march --jit` as subprocesses
+# of a freshly built bin/main.exe.
 #
 # Slow tests skipped by -q: repl_compiler_parity (JIT parity, ~5s),
-#   compiled adversarial regressions (~5s), pbkdf2 key derivation (~3s).
+#   compiled adversarial regressions (~5s), pbkdf2 key derivation (~3s), and
+#   test_jit's ORC/clang REPL-session and --jit-file cases (~5-10s).
+#
+# test_jit is NOT a plain alcotest exe: `dune runtest` normally runs it with
+# HOME and MARCH_BIN pinned (see the `(test (name test_jit) ...)` stanza in
+# test/dune) because it spawns bin/main.exe as a subprocess for REPL/--jit
+# sessions.  Running the built exe directly (as this script does for every
+# suite) skips that env, and test_jit.ml's fallback path SILENTLY SKIPS
+# (`Alcotest.(check pass)`, reported as a pass) whenever MARCH_BIN/main.exe or
+# libLLVM isn't found — so this script sets MARCH_BIN and HOME itself, below,
+# to keep the jit cases actually executing rather than vacuously skipping.
 #
 # Environment:
 #   MARCH_TEST_TIMEOUT  seconds per suite process  (default: 2400)
@@ -69,7 +82,7 @@ fi
 # never ran under this script no matter which subset argument was passed, and a
 # fully green run said nothing about it.  `dune runtest` did cover it, which is
 # exactly why the gap was easy to miss locally.
-ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march)
+ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march test_jit)
 QUICK_FLAG=""
 
 # Map a suite name to its executable.  Accepts the bare name ("compiler",
@@ -134,8 +147,21 @@ FAILED=0
 for runner in "${RUNNERS[@]}"; do
   echo ""
   echo "==> ${runner}"
-  if ! $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
-    FAILED=1
+  if [[ "$runner" == "test_jit" ]]; then
+    # test_jit spawns bin/main.exe as a subprocess for REPL/--jit sessions
+    # (see test/dune's `(test (name test_jit) ...)` stanza) and silently
+    # SKIPS those cases — reported as passing — if MARCH_BIN doesn't resolve
+    # to a real binary. Mirror dune's env here so the jit cases actually run
+    # instead of vacuously skipping.
+    mkdir -p "$PWD/_build/jit_home"
+    if ! HOME="$PWD/_build/jit_home" MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+        $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
+      FAILED=1
+    fi
+  else
+    if ! $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
+      FAILED=1
+    fi
   fi
 done
 
