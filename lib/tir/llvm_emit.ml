@@ -154,6 +154,7 @@ type ctx = Llvm_ctx.ctx = {
   blocking_externs : (string, unit) Hashtbl.t;
   raises_externs : (string, unit) Hashtbl.t;
   unknown_decls : (string, unit) Hashtbl.t;
+  repl_slot_fns : (string, unit) Hashtbl.t;
   unqualified_fns : (string, string) Hashtbl.t;
   hr_config : Hot_reload.config option;
   hr_names  : Hot_reload.Name_table.t;
@@ -465,6 +466,26 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        A local binding of the same name (in var_slot) shadows the top-level
        function — fall through to the local-load path in that case. *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+  | Tir.AVar v when Hashtbl.mem ctx.repl_slot_fns v.Tir.v_name
+                 && not (Hashtbl.mem ctx.top_fns v.Tir.v_name)
+                 && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
+    (* Prior REPL binding exposed to this fn fragment through a prev-slot
+       loader (see Llvm_repl.emit_slot_loader_fns).  Call the loader to
+       materialise the slot's CURRENT value — for fn/lambda bindings that is
+       the closure ptr, ready for ECallPtr dispatch.  Without this arm, a
+       TFn-typed reference falls into the first-class-function paths below,
+       which wrap the loader symbol itself in a $clo_wrap trampoline as if it
+       were the real n-ary function.  Placed above the runtime-prefix/builtin
+       arms so a REPL binding shadows a same-named builtin, exactly as the
+       var_slot bridge does in expression fragments. *)
+    let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty v.Tir.v_name with
+      | Some t -> t
+      | None   -> v.Tir.v_ty
+    in
+    let ret_ty = llvm_ret_ty ret_tir in
+    let r = fresh ctx "slotld" in
+    emit ctx (Printf.sprintf "%s = call %s @%s()" r ret_ty (llvm_name v.Tir.v_name));
+    (ret_ty, r)
   | Tir.AVar v when Tir_names.has_runtime_prefix v.Tir.v_name
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
     (* C-runtime extern used as a first-class value (e.g. march_compare_int passed
@@ -3042,6 +3063,22 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       && not (Hashtbl.mem ctx.top_fns f.Tir.v_name) ->
     emit_expr ctx (Tir.ECallPtr (Tir.AVar f, args))
 
+  (* ── EApp of a prior REPL binding exposed via a prev-slot loader ─── *)
+  (* Fn-defining REPL fragments have no var_slot bridge for prior bindings;
+     they get module-level slot loaders instead (Llvm_repl.emit_slot_loader_fns).
+     Route the call through ECallPtr dispatch — emit_atom's repl_slot_fns arm
+     turns the callee into `call ptr @<name>()` (the loader) and the generic
+     closure-dispatch arm calls through it.  Without this arm the call falls
+     into the general path's unknown-function fallback, which `declare`s the
+     very symbol the loader defines in this module — an invalid redefinition
+     ("fn f ... end" then "fn g(x) do f(x) end" broke the whole fragment) —
+     and a direct extern call would also pin the callee version compiled at
+     this fn's definition time instead of following the slot. *)
+  | Tir.EApp (f, args)
+    when Hashtbl.mem ctx.repl_slot_fns f.Tir.v_name
+      && not (Hashtbl.mem ctx.top_fns f.Tir.v_name) ->
+    emit_expr ctx (Tir.ECallPtr (Tir.AVar f, args))
+
   (* ── Colliding general-interface runtime dispatch ──────────────────── *)
   (* Mono rewrote a call whose static (bare) argument type is declared by >=2
      modules into a call to this sentinel; generate (once, memoized in
@@ -4178,7 +4215,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      This is a safe catch-all: local closure variables (let-bindings,
      parameters) always have a var_slot entry from alloca_name/emit_fn. *)
   | Tir.ECallPtr (Tir.AVar f, args)
-    when not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
+    when not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name))
+      (* Prior REPL bindings with a prev-slot loader are NOT direct-callable
+         globals — fall through to the generic closure-dispatch arm below,
+         whose emit_atom of the callee calls the loader (see repl_slot_fns). *)
+      && not (Hashtbl.mem ctx.repl_slot_fns f.Tir.v_name
+              && not (Hashtbl.mem ctx.top_fns f.Tir.v_name)) ->
     let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
     let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
     let args_str  = String.concat ", " arg_strs in

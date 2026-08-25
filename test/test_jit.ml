@@ -40,31 +40,38 @@ let test_orc_available_never_raises () =
    `apt-get install llvm-*`.  CI's macOS and Linux images do have it, so the
    test really runs there. *)
 
-(* dune points HOME at _build/jit_home so the child's stdlib-prelude .so cache
-   is per-build; dune does not create that directory, and the compiler's
-   `mkdir $HOME/.cache` is non-recursive, so make it here. *)
-let ensure_home () =
-  match Sys.getenv_opt "HOME" with
-  | None -> ()
-  | Some h ->
-    let mk d = try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> () in
-    mk h; mk (Filename.concat h ".cache")
+(* Session HOME for the child REPL processes.  Deliberately NOT the ambient
+   HOME: dune's test rule pins HOME at %{project_root}/_build/jit_home, which
+   expands to a RELATIVE path in CI whose parent does not exist from the test
+   cwd (a non-recursive mkdir there ENOENTs), and an own tmp directory keeps
+   the stdlib-precompile / JIT .so caches out of the developer's real
+   ~/.cache.  Per-pid so concurrent test runners never share a half-written
+   cache; created lazily once and shared by every session in this file, so
+   only the first JIT-backed session pays the stdlib precompile. *)
+let session_home = lazy (
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "march_jit_test_home.%d" (Unix.getpid ())) in
+  List.iter
+    (fun d -> try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ())
+    [dir; Filename.concat dir ".cache"];
+  dir)
 
 let march_bin () =
   match Sys.getenv_opt "MARCH_BIN" with
   | Some p when Sys.file_exists p -> Some p
   | _ -> if Sys.file_exists "../bin/main.exe" then Some "../bin/main.exe" else None
 
-(* Feed [lines] to the REPL on stdin with MARCH_JIT_BACKEND=orc; return
+(* Feed [lines] to the REPL on stdin with MARCH_JIT_BACKEND=[backend]; return
    (exit_code, combined_output). *)
-let run_orc_repl bin lines =
-  let tmp_in  = Filename.temp_file "march_orc_repl" ".txt" in
-  let tmp_out = Filename.temp_file "march_orc_repl" ".out" in
+let run_jit_repl ~backend bin lines =
+  let tmp_in  = Filename.temp_file "march_jit_repl" ".txt" in
+  let tmp_out = Filename.temp_file "march_jit_repl" ".out" in
   let oc = open_out tmp_in in
   List.iter (fun l -> output_string oc (l ^ "\n")) lines;
   close_out oc;
   let cmd =
-    Printf.sprintf "MARCH_JIT_BACKEND=orc %s < %s > %s 2>&1"
+    Printf.sprintf "HOME=%s MARCH_JIT_BACKEND=%s %s < %s > %s 2>&1"
+      (Filename.quote (Lazy.force session_home)) backend
       (Filename.quote bin) (Filename.quote tmp_in) (Filename.quote tmp_out) in
   let status = Sys.command cmd in
   let ic = open_in_bin tmp_out in
@@ -80,16 +87,16 @@ let contains hay needle =
   let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
   nl = 0 || go 0
 
-let check_session name lines expected =
-  if not (March_jit.Jit_orc.available ()) then
-    (* libLLVM not installed — nothing to regress against. *)
+let check_session ?(backend = "orc") name lines expected =
+  if backend = "orc" && not (March_jit.Jit_orc.available ()) then
+    (* libLLVM not installed — nothing to regress against.  (The clang
+       backend needs no libLLVM, so only ORC sessions skip here.) *)
     Alcotest.(check pass) (name ^ " (skipped: no libLLVM)") () ()
   else
     match march_bin () with
     | None -> Alcotest.(check pass) (name ^ " (skipped: no main.exe)") () ()
     | Some bin ->
-      ensure_home ();
-      let (code, out) = run_orc_repl bin lines in
+      let (code, out) = run_jit_repl ~backend bin lines in
       (* 139 = SIGSEGV, the exact failure this pins. *)
       Alcotest.(check int)
         (Printf.sprintf "%s: exit code (output: %s)" name out) 0 code;
@@ -122,6 +129,53 @@ let test_orc_two_consecutive_fns () =
       "g(3)";
       ":quit" ]
     [ "val f = <fn>"; "val g = <fn>"; "= 6" ]
+
+(* ── fn calling a previously REPL-defined fn ──────────────────────────────
+
+   Regression for the invalid-IR collision filed as the "Follow-up noticed,
+   NOT fixed here" section of
+   specs/progress/2026-08-24-orc-repl-segfault-fn-def-after-let-lambda.md:
+   a `fn` fragment whose body CALLS a prior REPL binding emitted BOTH the
+   prev-slot loader `define ptr @f()` and (via the unknown-function fallback
+   in llvm_emit's EApp path) a `declare ptr @f(i64)` for the same symbol in
+   one module — "invalid redefinition of function 'f'", after which the REPL
+   reported "I cannot find `g`".  Broken identically under both backends, so
+   pin both.  The call must route through the slot loader + closure dispatch
+   (not a direct extern call) so it follows the slot's current contents. *)
+let fn_calls_fn_session =
+  [ "fn f(x) do x + 1 end";
+    "fn g(x) do f(x) end";
+    "g(41)";
+    ":quit" ]
+let fn_calls_fn_expected =
+  [ "val f = <fn>"; "val g = <fn>"; "= 42" ]
+
+let test_clang_fn_calls_prior_fn () =
+  check_session ~backend:"clang" "clang fn calls prior fn"
+    fn_calls_fn_session fn_calls_fn_expected
+
+let test_orc_fn_calls_prior_fn () =
+  check_session "orc fn calls prior fn"
+    fn_calls_fn_session fn_calls_fn_expected
+
+(* Same collision, let-bound-lambda flavor: the prior binding is a `let`
+   holding a closure rather than a `fn`. *)
+let fn_calls_let_lambda_session =
+  [ "let h = fn x -> x + 5";
+    "fn g2(x) do h(x) end";
+    "g2(1)";
+    ":quit" ]
+let fn_calls_let_lambda_expected =
+  [ "val g2 = <fn>"; "= 6" ]
+
+let test_clang_fn_calls_let_lambda () =
+  check_session ~backend:"clang" "clang fn calls let-bound lambda"
+    fn_calls_let_lambda_session fn_calls_let_lambda_expected
+
+let test_orc_fn_calls_let_lambda () =
+  check_session "orc fn calls let-bound lambda"
+    fn_calls_let_lambda_session fn_calls_let_lambda_expected
+
 (* ── REPL session subprocess harness ──────────────────────────────────
    Runs the real `march` binary end-to-end with a scripted stdin session.
    A subprocess (rather than in-process Repl_jit calls) for two reasons:
@@ -139,16 +193,9 @@ let test_orc_two_consecutive_fns () =
 let main_exe =
   Filename.concat (Filename.dirname Sys.executable_name) "../bin/main.exe"
 
-(* Per-process so concurrent test runners (dune runs suites in parallel) do
-   not share a half-written cache — the same per-pid convention repl_jit.ml
-   uses for its own artifact dir. *)
-let session_home = lazy (
-  let dir = Filename.concat (Filename.get_temp_dir_name ())
-      (Printf.sprintf "march_jit_test_home.%d" (Unix.getpid ())) in
-  List.iter
-    (fun d -> try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ())
-    [dir; Filename.concat dir ".cache"];
-  dir)
+(* [session_home] (defined with the check_session harness above) is shared by
+   both harnesses in this file — per-pid, so concurrent test runners never
+   share a half-written cache. *)
 
 let clang_available () =
   Sys.command "clang --version >/dev/null 2>&1" = 0
@@ -219,6 +266,48 @@ let test_repl_session_fn_redefinition_interp () =
   check_redefinition ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" redefinition_session)
 
+(* Redefine-then-call across the two fixes that landed together: the
+   slot-loader call routing (this branch) and fn-redefinition rebinding
+   (#339).  Pins INTERPRETER PARITY, which is lexical: `g` keeps calling the
+   `f` it was defined against (the redefinition gets a fresh slot; g's loader
+   reads the slot index captured at g's compile time), while a direct call to
+   `f` gets the new body.  MARCH_REPL_INTERP=1 answers 2 / 3 / 101 for this
+   session, and both JIT backends must agree.  g(2)=3 (old body x+1, not
+   x+100) is the distinguishing value — "= 2" alone could come from the
+   pre-redefinition g(1). *)
+let redefine_then_call_session =
+  [ "fn f(x) do x + 1 end";
+    "fn g(x) do f(x) end";
+    "g(1)";
+    "fn f(x) do x + 100 end";
+    "g(2)";
+    "f(1)";
+    ":quit" ]
+
+let check_redefine_then_call ~label (out, code) =
+  Alcotest.(check int) (label ^ ": REPL exit code") 0 code;
+  List.iter (fun needle ->
+    if not (contains ~needle out) then
+      Alcotest.failf
+        "%s: expected %S in session output, got:\n%s" label needle out)
+    [ "= 2"; "= 3"; "= 101" ]
+
+let test_repl_session_redefine_then_call_clang () =
+  if not (clang_available ()) then ()  (* skip: no clang on PATH *)
+  else
+    check_redefine_then_call ~label:"clang backend"
+      (run_repl_session ~env_prefix:"" redefine_then_call_session)
+
+let test_repl_session_redefine_then_call_orc () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    let (out, code) =
+      run_repl_session ~env_prefix:"MARCH_JIT_BACKEND=orc"
+        redefine_then_call_session in
+    if contains ~needle:"libLLVM not found" out then ()
+    else check_redefine_then_call ~label:"orc backend" (out, code)
+  end
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -228,6 +317,14 @@ let () =
         test_orc_two_consecutive_fns;
       Alcotest.test_case "orc_fn_after_let_lambda" `Slow
         test_orc_fn_after_let_lambda;
+      Alcotest.test_case "clang_fn_calls_prior_fn" `Slow
+        test_clang_fn_calls_prior_fn;
+      Alcotest.test_case "orc_fn_calls_prior_fn" `Slow
+        test_orc_fn_calls_prior_fn;
+      Alcotest.test_case "clang_fn_calls_let_lambda" `Slow
+        test_clang_fn_calls_let_lambda;
+      Alcotest.test_case "orc_fn_calls_let_lambda" `Slow
+        test_orc_fn_calls_let_lambda;
     ];
     "repl_session", [
       Alcotest.test_case "fn redefinition (clang JIT)" `Slow
@@ -236,5 +333,9 @@ let () =
         test_repl_session_fn_redefinition_orc;
       Alcotest.test_case "fn redefinition (interpreter)" `Quick
         test_repl_session_fn_redefinition_interp;
+      Alcotest.test_case "redefine then call through prior fn (clang JIT)" `Slow
+        test_repl_session_redefine_then_call_clang;
+      Alcotest.test_case "redefine then call through prior fn (ORC JIT)" `Slow
+        test_repl_session_redefine_then_call_orc;
     ];
   ]

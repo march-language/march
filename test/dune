@@ -5,7 +5,7 @@
  (modules test_helpers)
  (ocamlopt_flags (:standard -w -32-26-27))
  (ocamlc_flags   (:standard -w -32-26-27))
- (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_refactor alcotest str unix threads.posix))
+ (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_jit march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_refactor alcotest str unix threads.posix))
 
 ; ── Per-suite test libraries ──────────────────────────────────────────────
 (library
@@ -813,9 +813,9 @@
  (name test_jit)
  (modules test_jit)
  (libraries march_jit alcotest unix)
- ; The repl_session tests spawn the real compiler binary and need the staged
+ ; The session tests spawn the real compiler binary and need the staged
  ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
- ; MARCH_BIN points the redefinition tests (merged from #339) at that binary.
+ ; MARCH_BIN serves the check_session and redefinition harnesses.
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (setenv HOME %{project_root}/_build/jit_home
           (setenv MARCH_BIN %{exe:../bin/main.exe} (run %{test})))))
