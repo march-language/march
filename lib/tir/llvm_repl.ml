@@ -466,7 +466,37 @@ let emit_fns_fragment
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) fns;
-  List.iter (Llvm_toplevel.emit_fn ~emit_expr ctx) fns;
+  (* Mutual-TCO groups, exactly as [Llvm_toplevel.emit_module] handles them.
+     A group of mutually TAIL-recursive functions is emitted as one combined
+     dispatch function plus thin wrappers, which turns the cycle into a loop;
+     its members must therefore NOT also be emitted individually by [emit_fn].
+
+     Omitting this is a CORRECTNESS bug on the fragment path, not a lost
+     optimization: without the combined function every mutual tail call
+     becomes a real native call, so a source-level loop consumes one stack
+     frame per iteration.  Fragments run on a green thread whose stack is
+     capped at MARCH_STACK_MAX (1 MiB — runtime/march_scheduler.h), so a few
+     thousand iterations walk off the reservation, miss
+     [march_sigsegv_handler]'s growable-range check, and the process dies
+     through that handler's `_exit(128 + sig)` — a bare exit 138/139 with no
+     output and no usable backtrace.
+
+     Measured on bench/interp/json_stream.march, whose `JsonStream.go` /
+     `free_byte` / `str_byte` / `num_byte` / … cluster scans its input one
+     byte per mutual tail call: under `--jit` it died once a single
+     `JsonStream.feed` chunk exceeded roughly 6 KiB (~6.5k frames), while the
+     same program at the same chunk size was green when compiled, because
+     [emit_module] emitted the group.  Feeding the identical total input in
+     4 KiB chunks also survived — the tell that the depth tracked frames per
+     `feed` call rather than anything about the data. *)
+  let mutual_groups = Llvm_tco.find_mutual_tco_groups fns in
+  let mutual_fn_names =
+    List.concat_map (fun g -> List.map (fun fn -> fn.Tir.fn_name) g)
+      mutual_groups in
+  List.iter (Llvm_tco.emit_mutual_tco_group ~emit_expr ctx) mutual_groups;
+  List.iter (fun fn ->
+      if not (List.mem fn.Tir.fn_name mutual_fn_names) then
+        Llvm_toplevel.emit_fn ~emit_expr ctx fn) fns;
   let out = Buffer.create 8192 in
   Llvm_toplevel.emit_preamble ~repl out;
   List.iter (fun f -> Buffer.add_string out (Llvm_toplevel.fn_declare_str f ^ "\n")) extern_fns;
